@@ -16,6 +16,7 @@ Run with:
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
     python -m scraper.main --max-image-downloads 500
+    python -m scraper.main --image-workers 16    # tune concurrency
 """
 
 from __future__ import annotations
@@ -25,11 +26,13 @@ import logging
 import os
 import re
 import sys
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from scraper import db, hashing, image_storage, parser
 from scraper.sreality_client import SrealityClient
+
+DEFAULT_IMAGE_WORKERS = 8
 
 LOG = logging.getLogger("scraper")
 
@@ -53,7 +56,10 @@ def main(argv: list[str] | None = None) -> int:
         and not args.dry_run
         and not args.no_image_downloads
     ):
-        _run_image_downloads(max_downloads=args.max_image_downloads)
+        _run_image_downloads(
+            max_downloads=args.max_image_downloads,
+            workers=args.image_workers,
+        )
 
     return rc
 
@@ -88,6 +94,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=1000,
         help="cap number of images downloaded this run (default: 1000)",
+    )
+    p.add_argument(
+        "--image-workers",
+        type=int,
+        default=DEFAULT_IMAGE_WORKERS,
+        help=f"concurrent download/upload workers (default: {DEFAULT_IMAGE_WORKERS})",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
@@ -255,7 +267,7 @@ def _process_one(
         return "errors"
 
 
-def _run_image_downloads(max_downloads: int) -> None:
+def _run_image_downloads(max_downloads: int, workers: int) -> None:
     if not image_storage.is_configured():
         LOG.info("IMAGES skipped (R2 env vars not set)")
         return
@@ -265,29 +277,61 @@ def _run_image_downloads(max_downloads: int) -> None:
 
     with db.connect() as conn:
         pending = db.pending_image_downloads(conn, limit=max_downloads)
-        LOG.info("IMAGES pending=%d cap=%d", len(pending), max_downloads)
+        total = len(pending)
+        LOG.info(
+            "IMAGES pending=%d cap=%d workers=%d",
+            total, max_downloads, workers,
+        )
 
-        for image_id, sreality_id, sequence, url in pending:
-            counts["attempted"] += 1
-            key = image_storage.image_key(sreality_id, sequence)
-            try:
-                data = image_storage.download_image(url)
-                r2.upload_bytes(key, data)
-                db.mark_image_stored(conn, image_id, key)
-                counts["downloaded"] += 1
-            except Exception as exc:
-                LOG.warning(
-                    "IMAGE id=%d url=%s download error: %s",
-                    image_id, url, exc,
-                )
-                db.mark_image_attempt(conn, image_id)
-                counts["errors"] += 1
-            time.sleep(0.1)
+        # Worker threads do the network I/O (download + upload) in
+        # parallel; the main thread serialises DB writes against the
+        # single psycopg connection (psycopg connections are not
+        # thread-safe). boto3 S3 clients are thread-safe.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_id = {
+                pool.submit(
+                    _fetch_one_image, sid, seq, url, r2
+                ): image_id
+                for image_id, sid, seq, url in pending
+            }
+            for future in as_completed(future_to_id):
+                image_id = future_to_id[future]
+                key, error = future.result()
+                counts["attempted"] += 1
+                if error is None:
+                    db.mark_image_stored(conn, image_id, key)
+                    counts["downloaded"] += 1
+                else:
+                    db.mark_image_attempt(conn, image_id)
+                    counts["errors"] += 1
+                    LOG.warning("IMAGE id=%d error: %s", image_id, error)
+                if counts["attempted"] % 50 == 0:
+                    LOG.info(
+                        "IMAGES progress=%d/%d downloaded=%d errors=%d",
+                        counts["attempted"], total,
+                        counts["downloaded"], counts["errors"],
+                    )
 
     LOG.info(
         "IMAGES done downloaded=%d errors=%d attempted=%d",
         counts["downloaded"], counts["errors"], counts["attempted"],
     )
+
+
+def _fetch_one_image(
+    sreality_id: int,
+    sequence: int | None,
+    url: str,
+    r2: image_storage.R2Client,
+) -> tuple[str, Exception | None]:
+    """Worker: download from sreality, upload to R2. Returns (key, error)."""
+    key = image_storage.image_key(sreality_id, sequence)
+    try:
+        data = image_storage.download_image(url)
+        r2.upload_bytes(key, data)
+        return (key, None)
+    except Exception as exc:
+        return (key, exc)
 
 
 def _extract_id(estate: dict[str, Any]) -> int | None:
