@@ -1,0 +1,117 @@
+{
+  "text": {
+    "name": "Popis",
+    "value": "Pronájem nově dokončené novostavby bytu s terasou."
+  },
+  "seo": {
+    "category_main_cb": 1,
+    "category_sub_cb": 4,
+    "category_type_cb": 2,
+    "locality": "olomouc-slavonin-jizni"
+  },
+  "meta_description": "Byt 2+kk 65 m² k pronájmu Jižní, Olomouc - Slavonín; 16 900 Kč za měsíc.",
+  "name": {
+    "name": "Název",
+    "value": "Pronájem bytu 2+kk 65 m²"
+  },
+  "price_czk": {
+    "unit": "za měsíc",
+    "name": "Celková cena",
+    "value": "16 900",
+    "value_raw": 16900
+  },
+  "locality": {
+    "name": "Adresa",
+    "value": "Jižní, Olomouc - Slavonín",
+    "accuracy": "not_address"
+  },
+  "map": {
+    "lon": 17.2413190872989,
+    "lat": 49.569219632103,
+    "zoom": 15,
+    "type": "geometry"
+  },
+  "_links": {
+    "self": {
+      "profile": "/estates/1/doc",
+      "href": "/cs/v2/estates/2836292428",
+      "title": "Detail inzeratu"
+    }
+  },
+  "recommendations_data": {
+    "category_main_cb": 1,
+    "category_sub_cb": 4,
+    "category_type_cb": 2,
+    "hash_id": 2836292428,
+    "usable_area": 65,
+    "building_type": 2,
+    "building_condition": 6,
+    "energy_efficiency_rating_cb": 2,
+    "elevator": 1,
+    "balcony": 0,
+    "terrace": 1,
+    "loggia": 0,
+    "garage": 0,
+    "parking_lots": 1,
+    "cellar": 1,
+    "price_summary_czk": 16900,
+    "price_summary_unit_cb": 2,
+    "locality_gps_lat": 49.569219632103,
+    "locality_gps_lon": 17.2413190872989,
+    "locality_district_id": 42,
+    "locality_region_id": 8
+  },
+  "_embedded": {
+    "favourite": {"is_favourite": false},
+    "note": {"note": "", "has_note": false},
+    "images": [
+      {
+        "kind": 2,
+        "id": 977967514,
+        "order": 1,
+        "_links": {
+          "view": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example1.jpeg?fl=res,749,562,3"},
+          "self": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example1.jpeg?fl=res,1920,1080,1"},
+          "gallery": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example1.jpeg?fl=res,221,166,3"}
+        }
+      },
+      {
+        "kind": 2,
+        "id": 977967517,
+        "order": 4,
+        "_links": {
+          "view": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example2.jpeg?fl=res,749,562,3"}
+        }
+      },
+      {
+        "kind": 2,
+        "id": 977967523,
+        "order": 5,
+        "_links": {
+          "view": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example3.jpeg?fl=res,749,562,3"}
+        }
+      }
+    ]
+  },
+  "items": [
+    {"negotiation": false, "name": "Celková cena", "value": "16 900", "currency": "Kč", "type": "price_czk", "unit": "za měsíc"},
+    {"type": "string", "name": "ID zakázky", "value": "14/26"},
+    {"type": "edited", "name": "Aktualizace", "value": "Dnes", "topped": true},
+    {"type": "string", "name": "Stavba", "value": "Cihlová"},
+    {"type": "string", "name": "Stav objektu", "value": "Novostavba"},
+    {"type": "string", "name": "Vlastnictví", "value": "Osobní"},
+    {"type": "string", "name": "Podlaží", "value": "5. podlaží z celkem 1"},
+    {"unit": "m2", "type": "area", "name": "Užitná ploch", "value": "65"},
+    {"unit": "m2", "type": "area", "name": "Celková plocha", "value": "65"},
+    {"unit": "m2", "type": "area", "name": "Terasa", "value": "12"},
+    {"type": "boolean", "name": "Sklep", "value": true},
+    {"type": "boolean", "name": "Parkování", "value": true},
+    {"type": "string", "name": "Datum nastěhování", "value": "Ihned"},
+    {"value_type": "B", "type": "energy_efficiency_rating", "name": "Energetická náročnost budovy", "value": "Třída B - Velmi úsporná"},
+    {"type": "boolean", "name": "Bezbariérový", "value": false},
+    {"type": "boolean", "name": "Výtah", "value": true}
+  ],
+  "is_topped": true,
+  "is_topped_today": true,
+  "logged_in": true
+}
