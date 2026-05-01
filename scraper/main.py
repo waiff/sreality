@@ -5,11 +5,17 @@ their current prices, then fetch the detail endpoint only for listings
 that are new or whose price has changed since the last run. Listings we
 already have at the same price get a cheap last_seen_at bump.
 
+After the scrape phase, an optional image-download phase reads pending
+image rows and uploads their bytes to Cloudflare R2 (if R2_* env vars
+are set; otherwise the phase is a no-op).
+
 Run with:
-    python -m scraper.main                 # full run
-    python -m scraper.main --limit 10      # cap to 10 listings
-    python -m scraper.main --dry-run       # log only, no DB writes
-    python -m scraper.main --detail-only 2836292428
+    python -m scraper.main                       # full run
+    python -m scraper.main --limit 10            # cap to 10 listings
+    python -m scraper.main --dry-run             # log only, no DB writes
+    python -m scraper.main --detail-only 28...   # one listing
+    python -m scraper.main --no-image-downloads  # skip image phase
+    python -m scraper.main --max-image-downloads 500
 """
 
 from __future__ import annotations
@@ -19,9 +25,10 @@ import logging
 import os
 import re
 import sys
+import time
 from typing import Any
 
-from scraper import db, hashing, parser
+from scraper import db, hashing, image_storage, parser
 from scraper.sreality_client import SrealityClient
 
 LOG = logging.getLogger("scraper")
@@ -35,8 +42,20 @@ def main(argv: list[str] | None = None) -> int:
     client = _build_client()
 
     if args.detail_only is not None:
-        return _run_detail_only(client, args.detail_only, dry_run=args.dry_run)
-    return _run_full(client, limit=args.limit, dry_run=args.dry_run)
+        rc = _run_detail_only(
+            client, args.detail_only, dry_run=args.dry_run
+        )
+    else:
+        rc = _run_full(client, limit=args.limit, dry_run=args.dry_run)
+
+    if (
+        rc == 0
+        and not args.dry_run
+        and not args.no_image_downloads
+    ):
+        _run_image_downloads(max_downloads=args.max_image_downloads)
+
+    return rc
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -58,6 +77,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         metavar="SREALITY_ID",
         help="fetch and write a single listing by id; skip the index phase",
+    )
+    p.add_argument(
+        "--no-image-downloads",
+        action="store_true",
+        help="skip the image-download phase even if R2 is configured",
+    )
+    p.add_argument(
+        "--max-image-downloads",
+        type=int,
+        default=1000,
+        help="cap number of images downloaded this run (default: 1000)",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
@@ -223,6 +253,41 @@ def _process_one(
     except Exception as exc:
         LOG.exception("DETAIL id=%d db error: %s", sid, exc)
         return "errors"
+
+
+def _run_image_downloads(max_downloads: int) -> None:
+    if not image_storage.is_configured():
+        LOG.info("IMAGES skipped (R2 env vars not set)")
+        return
+
+    r2 = image_storage.R2Client.from_env()
+    counts = {"downloaded": 0, "errors": 0, "attempted": 0}
+
+    with db.connect() as conn:
+        pending = db.pending_image_downloads(conn, limit=max_downloads)
+        LOG.info("IMAGES pending=%d cap=%d", len(pending), max_downloads)
+
+        for image_id, sreality_id, sequence, url in pending:
+            counts["attempted"] += 1
+            key = image_storage.image_key(sreality_id, sequence)
+            try:
+                data = image_storage.download_image(url)
+                r2.upload_bytes(key, data)
+                db.mark_image_stored(conn, image_id, key)
+                counts["downloaded"] += 1
+            except Exception as exc:
+                LOG.warning(
+                    "IMAGE id=%d url=%s download error: %s",
+                    image_id, url, exc,
+                )
+                db.mark_image_attempt(conn, image_id)
+                counts["errors"] += 1
+            time.sleep(0.1)
+
+    LOG.info(
+        "IMAGES done downloaded=%d errors=%d attempted=%d",
+        counts["downloaded"], counts["errors"], counts["attempted"],
+    )
 
 
 def _extract_id(estate: dict[str, Any]) -> int | None:

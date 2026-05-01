@@ -238,3 +238,62 @@ def index_summary(
             sreality_id: {"price_czk": price_czk, "last_seen_at": last_seen_at}
             for sreality_id, price_czk, last_seen_at in cur.fetchall()
         }
+
+
+def pending_image_downloads(
+    conn: psycopg.Connection,
+    max_attempts: int = 5,
+    limit: int = 1000,
+) -> list[tuple[int, int, int | None, str]]:
+    """Return (image_id, sreality_id, sequence, sreality_url) rows that still need download.
+
+    Filters out images already stored (storage_path IS NOT NULL) and ones
+    we have given up on (download_attempts >= max_attempts).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, sreality_id, sequence, sreality_url
+            FROM images
+            WHERE storage_path IS NULL
+              AND download_attempts < %s
+            ORDER BY id
+            LIMIT %s
+            """,
+            (max_attempts, limit),
+        )
+        return list(cur.fetchall())
+
+
+def mark_image_stored(
+    conn: psycopg.Connection,
+    image_id: int,
+    storage_path: str,
+) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE images
+            SET storage_path = %s,
+                last_download_attempt_at = now(),
+                download_attempts = download_attempts + 1
+            WHERE id = %s
+            """,
+            (storage_path, image_id),
+        )
+
+
+def mark_image_attempt(
+    conn: psycopg.Connection,
+    image_id: int,
+) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE images
+            SET last_download_attempt_at = now(),
+                download_attempts = download_attempts + 1
+            WHERE id = %s
+            """,
+            (image_id,),
+        )
