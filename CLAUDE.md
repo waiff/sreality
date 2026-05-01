@@ -41,7 +41,13 @@ local Python, no local Git.
    that fails must not cause us to forget that we saw the listing -
    otherwise repeated detail-fetch failures would falsely flip a still-live
    listing to `is_active=false` on a later run.
-5. **Image URLs only in v1.** No file downloads, no S3, no Supabase Storage.
+5. **Images are downloaded to Cloudflare R2.** v1 only stored URLs; v1.5
+   downloads the bytes to an R2 bucket (S3-compatible) so the data
+   survives sreality's CDN expiring listing photos. The `images` table
+   tracks per-image download state via `storage_path`,
+   `download_attempts`, and `last_download_attempt_at`. Image-download
+   is a separate phase after the scrape phase; it's a no-op if R2 env
+   vars are missing, so a partial deploy never breaks the scrape.
 6. **No new dependencies without justification.** Each entry in
    `pyproject.toml` should have a clear reason. Prefer the stdlib.
 
@@ -61,8 +67,9 @@ Do not introduce `supabase-py` without an explicit reason and a discussion.
 
 ## Auth and secrets
 
-Three env vars (all GitHub Actions secrets in production):
+Seven env vars (all GitHub Actions secrets in production):
 
+Database:
 - `SUPABASE_URL` - public project URL.
 - `SUPABASE_SERVICE_ROLE_KEY` - the new 2025 `sb_secret_...` token.
   **Not** a JWT. The env var name is preserved for forward compatibility;
@@ -71,6 +78,16 @@ Three env vars (all GitHub Actions secrets in production):
 - `SUPABASE_DB_URL` - Postgres connection string from
   Supabase Project Settings -> Database -> Connection string -> Transaction
   pooler (port 6543). Contains the database password embedded in the URL.
+
+Image storage (Cloudflare R2, S3-compatible):
+- `R2_ACCOUNT_ID` - 32-char hex from the Cloudflare dashboard.
+- `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` - generated when creating
+  an R2 API token with Object Read & Write scope on the bucket.
+- `R2_BUCKET_NAME` - usually `sreality-images`.
+
+If any R2_* var is missing the image-download phase logs a skip and
+exits zero. The scrape still records image URLs in the database;
+downloading is decoupled and can be backfilled later.
 
 Never write any of these values into a committed file. `.env` is gitignored.
 Always reference secrets by env-var name in code.
@@ -117,9 +134,11 @@ The scraper emits structured progress lines:
 - `INDEX total=N pages=M` once at end of index walk
 - `PLAN unchanged=N refetch=M` once after deciding what to fetch
 - `DETAIL id=... new|updated|unchanged` per refetched listing
-- `IMAGE id=... inserted=N` per listing with new images
+- `IMAGE id=... inserted=N` per listing with new image rows recorded
 - `INACTIVE marked=N` once after marking unseen listings
-- A final summary: `RUN done pages=... new=... updated=... unchanged=... errors=...`
+- `RUN done pages=... new=... updated=... unchanged=... errors=...`
+- `IMAGES pending=N cap=N` once before the image-download phase
+- `IMAGES done downloaded=... errors=... attempted=...` after image phase
 
 A run ending with `errors > 0` is not necessarily a failure (single-listing
 fetch errors are tolerated). A run that did not emit a `RUN done` line is
@@ -130,7 +149,6 @@ a real failure - check the GitHub Actions log for a stack trace.
 - Frontend (React, HTML, Lovable, anything user-facing).
 - Yield-calculation API.
 - ClickUp integration.
-- Image file downloads.
 - Slack/email notifications.
 - Authentication or user management.
 - Public read API.

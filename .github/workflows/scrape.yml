@@ -2,7 +2,7 @@ name: Daily Sreality scrape
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 22 * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -16,6 +16,15 @@ on:
         default: false
       detail_only:
         description: "Refetch a single listing by id (skips index)"
+        required: false
+        type: string
+      no_image_downloads:
+        description: "Skip image download phase"
+        required: false
+        type: boolean
+        default: false
+      max_image_downloads:
+        description: "Cap images downloaded this run (blank = 1000 default)"
         required: false
         type: string
 
@@ -40,6 +49,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
           ARGS=""
           if [ -n "${{ inputs.limit }}" ]; then
@@ -50,6 +63,12 @@ jobs:
           fi
           if [ -n "${{ inputs.detail_only }}" ]; then
             ARGS="$ARGS --detail-only ${{ inputs.detail_only }}"
+          fi
+          if [ "${{ inputs.no_image_downloads }}" = "true" ]; then
+            ARGS="$ARGS --no-image-downloads"
+          fi
+          if [ -n "${{ inputs.max_image_downloads }}" ]; then
+            ARGS="$ARGS --max-image-downloads ${{ inputs.max_image_downloads }}"
           fi
           echo "Running with: $ARGS"
           python -m scraper.main $ARGS
