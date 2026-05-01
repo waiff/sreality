@@ -141,8 +141,15 @@ def _run_full(
             db.index_summary(conn, seen_ids) if conn is not None else {}
         )
 
-        to_touch: list[int] = []
+        # Bump last_seen_at for every existing listing that appeared in
+        # this index, before any detail fetches. Index appearance is the
+        # source of truth for "still on the market"; if a detail fetch
+        # later fails, the timestamp is already correct.
+        if conn is not None and existing:
+            db.touch_listings(conn, list(existing))
+
         to_refetch: list[int] = []
+        unchanged = 0
         for sid, idx_price in index_entries:
             prev = existing.get(sid)
             if (
@@ -150,17 +157,12 @@ def _run_full(
                 and idx_price is not None
                 and prev["price_czk"] == idx_price
             ):
-                to_touch.append(sid)
+                unchanged += 1
             else:
                 to_refetch.append(sid)
 
-        LOG.info(
-            "PLAN touch=%d refetch=%d", len(to_touch), len(to_refetch)
-        )
-
-        if conn is not None and to_touch:
-            touched = db.touch_listings(conn, to_touch)
-            counts["unchanged"] = touched
+        counts["unchanged"] = unchanged
+        LOG.info("PLAN unchanged=%d refetch=%d", unchanged, len(to_refetch))
 
         for sid in to_refetch:
             outcome = _process_one(client, conn, sid, dry_run=dry_run)

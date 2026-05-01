@@ -35,8 +35,14 @@ local Python, no local Git.
    differs from the most recent snapshot for that listing.
 3. **Never delete listings.** Listings that disappear from sreality get
    `is_active=false`. History is sacred.
-4. **Image URLs only in v1.** No file downloads, no S3, no Supabase Storage.
-5. **No new dependencies without justification.** Each entry in
+4. **`last_seen_at` is driven by the index, not by detail fetches.**
+   Every existing listing whose id appears in the run's index gets its
+   `last_seen_at` bumped before any detail fetches happen. A detail fetch
+   that fails must not cause us to forget that we saw the listing -
+   otherwise repeated detail-fetch failures would falsely flip a still-live
+   listing to `is_active=false` on a later run.
+5. **Image URLs only in v1.** No file downloads, no S3, no Supabase Storage.
+6. **No new dependencies without justification.** Each entry in
    `pyproject.toml` should have a clear reason. Prefer the stdlib.
 
 ## Database access
@@ -108,9 +114,12 @@ GitHub repo -> **Actions** tab -> **Daily Sreality scrape** workflow ->
 The scraper emits structured progress lines:
 
 - `INDEX page=N estates=M` per index page
-- `DETAIL id=... new|updated|unchanged` per listing
-- `IMAGE id=... inserted=N` per listing
-- A final summary line: `RUN done pages=... new=... updated=... unchanged=... errors=...`
+- `INDEX total=N pages=M` once at end of index walk
+- `PLAN unchanged=N refetch=M` once after deciding what to fetch
+- `DETAIL id=... new|updated|unchanged` per refetched listing
+- `IMAGE id=... inserted=N` per listing with new images
+- `INACTIVE marked=N` once after marking unseen listings
+- A final summary: `RUN done pages=... new=... updated=... unchanged=... errors=...`
 
 A run ending with `errors > 0` is not necessarily a failure (single-listing
 fetch errors are tolerated). A run that did not emit a `RUN done` line is
