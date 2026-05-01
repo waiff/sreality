@@ -50,8 +50,18 @@ def database_url() -> str:
 
 
 def connect(url: str | None = None) -> psycopg.Connection:
-    """Open an autocommit connection. Callers manage transactions explicitly."""
-    return psycopg.connect(url or database_url(), autocommit=True)
+    """Open an autocommit connection. Callers manage transactions explicitly.
+
+    prepare_threshold=None disables psycopg3's automatic prepared-statement
+    caching. Required for Supabase's Transaction-mode pooler (PgBouncer),
+    which rebinds connections between queries and trips
+    DuplicatePreparedStatement otherwise.
+    """
+    return psycopg.connect(
+        url or database_url(),
+        autocommit=True,
+        prepare_threshold=None,
+    )
 
 
 def upsert_listing(
