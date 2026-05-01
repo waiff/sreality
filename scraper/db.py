@@ -166,6 +166,32 @@ def record_images(
         return cur.rowcount or 0
 
 
+def touch_listings(
+    conn: psycopg.Connection,
+    sreality_ids: Iterable[int],
+) -> int:
+    """Bump last_seen_at and is_active for listings whose detail we skipped.
+
+    Used when an index entry's price matches what is already stored, so we
+    have evidence the listing is still on the market without paying for
+    another detail fetch.
+    """
+    ids = list(sreality_ids)
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listings
+            SET last_seen_at = now(),
+                is_active = true
+            WHERE sreality_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        return cur.rowcount or 0
+
+
 def mark_inactive(
     conn: psycopg.Connection,
     seen_ids: set[int],

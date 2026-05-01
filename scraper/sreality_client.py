@@ -58,6 +58,7 @@ class SrealityClient:
         self._session = requests.Session()
         self._session.headers.update(DEFAULT_HEADERS)
         self._last_detail_at = 0.0
+        self.pages_fetched = 0
 
     def iter_index(self) -> Iterator[dict[str, Any]]:
         """Yield every estate dict from every index page until exhausted."""
@@ -71,6 +72,7 @@ class SrealityClient:
                 "page": page,
             }
             payload = self._get_json(INDEX_URL, params=params)
+            self.pages_fetched += 1
             estates = payload.get("_embedded", {}).get("estates", [])
             LOG.info("INDEX page=%d estates=%d", page, len(estates))
             if not estates:
