@@ -5,6 +5,7 @@ description = "Daily scraper for Czech rental listings from sreality.cz"
 requires-python = ">=3.12"
 dependencies = [
   "requests>=2.32",
+  "psycopg[binary]>=3.2",
 ]
 
 [project.optional-dependencies]

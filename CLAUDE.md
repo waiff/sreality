@@ -39,16 +39,35 @@ local Python, no local Git.
 5. **No new dependencies without justification.** Each entry in
    `pyproject.toml` should have a clear reason. Prefer the stdlib.
 
+## Database access
+
+We connect directly to Supabase Postgres using `psycopg` v3, not the Supabase
+REST client. This was a deliberate choice for two reasons:
+
+- PostGIS support: inserting `geography(point, 4326)` is one line of SQL with
+  `ST_SetSRID(ST_MakePoint(lon, lat), 4326)`. Doing the equivalent through
+  PostgREST requires a stored procedure or fragile GeoJSON casting.
+- Atomic transactions: writing `listings`, `listing_snapshots`, and `images`
+  for a single listing happens inside one transaction. The REST client cannot
+  span tables atomically.
+
+Do not introduce `supabase-py` without an explicit reason and a discussion.
+
 ## Auth and secrets
 
-- Two env vars: `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
-- The service role key uses Supabase's new 2025 format (`sb_secret_...`).
-  It is **not** a JWT. The env var is still named `SUPABASE_SERVICE_ROLE_KEY`
-  because that is what `supabase-py` reads.
-- Production: these are GitHub Actions secrets at
-  Settings -> Secrets and variables -> Actions.
-- Never write the secret value into a committed file. `.env` is gitignored.
-  Always reference secrets by env-var name.
+Three env vars (all GitHub Actions secrets in production):
+
+- `SUPABASE_URL` - public project URL.
+- `SUPABASE_SERVICE_ROLE_KEY` - the new 2025 `sb_secret_...` token.
+  **Not** a JWT. The env var name is preserved for forward compatibility;
+  the v1 scraper does not actually need it because we connect to Postgres
+  directly.
+- `SUPABASE_DB_URL` - Postgres connection string from
+  Supabase Project Settings -> Database -> Connection string -> Transaction
+  pooler (port 6543). Contains the database password embedded in the URL.
+
+Never write any of these values into a committed file. `.env` is gitignored.
+Always reference secrets by env-var name in code.
 
 ## Coding conventions
 
@@ -56,8 +75,8 @@ local Python, no local Git.
 - Prefer the stdlib. Reach for a dependency only when stdlib is awkward.
 - No comments unless the WHY is non-obvious. Don't narrate WHAT the code does.
 - No multi-paragraph docstrings. One-line docstrings are fine for module heads.
-- `requests` for HTTP (already a dependency). Don't add `httpx` or `aiohttp`
-  without a strong reason.
+- `requests` for HTTP, `psycopg` for DB. Don't add `httpx`, `aiohttp`,
+  `sqlalchemy`, or `supabase-py` without a strong reason.
 - Keep files small and single-purpose: `sreality_client.py` is HTTP only,
   `parser.py` is JSON-to-row mapping only, `db.py` is database I/O only.
 
