@@ -1,0 +1,214 @@
+"""Database I/O for the Sreality tracker.
+
+Reads SUPABASE_DB_URL, upserts into listings, appends a row to
+listing_snapshots only when the content hash changes, inserts new
+image URLs, and at end of run marks unseen listings inactive.
+
+Each listing's writes happen in one transaction so a partial failure
+cannot leave the listings / listing_snapshots / images tables out of
+sync for that listing.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from collections.abc import Iterable
+from typing import Any, Literal
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+LOG = logging.getLogger(__name__)
+
+UpsertResult = Literal["new", "updated", "unchanged"]
+
+LISTING_COLUMNS: tuple[str, ...] = (
+    "category_main",
+    "category_type",
+    "price_czk",
+    "price_unit",
+    "area_m2",
+    "disposition",
+    "locality",
+    "district",
+    "floor",
+    "has_balcony",
+    "has_parking",
+    "has_lift",
+    "building_type",
+    "condition",
+    "energy_rating",
+)
+
+
+def database_url() -> str:
+    url = os.environ.get("SUPABASE_DB_URL")
+    if not url:
+        raise RuntimeError("SUPABASE_DB_URL environment variable is not set")
+    return url
+
+
+def connect(url: str | None = None) -> psycopg.Connection:
+    """Open an autocommit connection. Callers manage transactions explicitly."""
+    return psycopg.connect(url or database_url(), autocommit=True)
+
+
+def upsert_listing(
+    conn: psycopg.Connection,
+    row: dict[str, Any],
+    raw_json: dict[str, Any],
+    content_hash: str,
+) -> UpsertResult:
+    """Upsert listings, append snapshot if content_hash differs from last.
+
+    Returns 'new' for first insert, 'updated' if a snapshot was appended,
+    'unchanged' if the listing already exists with this content_hash.
+    """
+    sreality_id = row["sreality_id"]
+    raw_jsonb = Jsonb(raw_json)
+    column_list = ", ".join(LISTING_COLUMNS)
+    placeholders = ", ".join(f"%({c})s" for c in LISTING_COLUMNS)
+    update_set = ",\n          ".join(
+        f"{c} = EXCLUDED.{c}" for c in LISTING_COLUMNS
+    )
+
+    upsert_sql = f"""
+        INSERT INTO listings (
+            sreality_id, last_seen_at, is_active,
+            {column_list},
+            geom, raw_json
+        )
+        VALUES (
+            %(sreality_id)s, now(), true,
+            {placeholders},
+            CASE
+              WHEN %(lon)s IS NOT NULL AND %(lat)s IS NOT NULL
+              THEN ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography
+              ELSE NULL
+            END,
+            %(raw_json)s
+        )
+        ON CONFLICT (sreality_id) DO UPDATE SET
+          last_seen_at = now(),
+          is_active = true,
+          {update_set},
+          geom = EXCLUDED.geom,
+          raw_json = EXCLUDED.raw_json
+        RETURNING xmax = 0 AS inserted
+    """
+
+    params: dict[str, Any] = {
+        "sreality_id": sreality_id,
+        "raw_json": raw_jsonb,
+        "lon": row.get("lon"),
+        "lat": row.get("lat"),
+    }
+    for col in LISTING_COLUMNS:
+        params[col] = row.get(col)
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(upsert_sql, params)
+        result = cur.fetchone()
+        inserted = bool(result[0]) if result else False
+
+        cur.execute(
+            """
+            SELECT content_hash FROM listing_snapshots
+            WHERE sreality_id = %s
+            ORDER BY scraped_at DESC
+            LIMIT 1
+            """,
+            (sreality_id,),
+        )
+        prev = cur.fetchone()
+        unchanged = prev is not None and prev[0] == content_hash
+
+        if not unchanged:
+            cur.execute(
+                """
+                INSERT INTO listing_snapshots
+                    (sreality_id, price_czk, content_hash, raw_json)
+                VALUES (%s, %s, %s, %s)
+                """,
+                (sreality_id, row.get("price_czk"), content_hash, raw_jsonb),
+            )
+
+    if inserted:
+        return "new"
+    return "unchanged" if unchanged else "updated"
+
+
+def record_images(
+    conn: psycopg.Connection,
+    sreality_id: int,
+    images: Iterable[dict[str, Any]],
+) -> int:
+    """Insert any image rows that don't already exist. Returns newly inserted count."""
+    rows = [
+        (sreality_id, img["url"], img.get("sequence"))
+        for img in images
+        if img.get("url")
+    ]
+    if not rows:
+        return 0
+
+    values_sql = ", ".join("(%s, %s, %s)" for _ in rows)
+    flat: list[Any] = [v for triple in rows for v in triple]
+    sql = f"""
+        INSERT INTO images (sreality_id, sreality_url, sequence)
+        VALUES {values_sql}
+        ON CONFLICT (sreality_id, sequence) DO NOTHING
+        RETURNING id
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(sql, flat)
+        return cur.rowcount or 0
+
+
+def mark_inactive(
+    conn: psycopg.Connection,
+    seen_ids: set[int],
+) -> int:
+    """Mark listings not in seen_ids as is_active=false. Returns affected row count."""
+    if not seen_ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listings
+            SET is_active = false
+            WHERE is_active = true
+              AND sreality_id <> ALL(%s)
+            """,
+            (list(seen_ids),),
+        )
+        return cur.rowcount or 0
+
+
+def index_summary(
+    conn: psycopg.Connection,
+    sreality_ids: Iterable[int],
+) -> dict[int, dict[str, Any]]:
+    """Fetch (price_czk, last_seen_at) for the given ids.
+
+    Used by main.py to decide whether to refetch the detail endpoint
+    based on price changes seen in the index, without burning a detail
+    request when nothing has changed.
+    """
+    ids = list(sreality_ids)
+    if not ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sreality_id, price_czk, last_seen_at
+            FROM listings
+            WHERE sreality_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        return {
+            sreality_id: {"price_czk": price_czk, "last_seen_at": last_seen_at}
+            for sreality_id, price_czk, last_seen_at in cur.fetchall()
+        }
