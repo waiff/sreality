@@ -6,6 +6,11 @@
 --   listing_snapshots  - append-only history, one row per content change
 --   images             - image URLs only (we do not download files in v1)
 --
+-- Row Level Security is enabled on all tables. The scraper authenticates
+-- with the service_role key, which bypasses RLS, so writes work without
+-- any policies. The public anon key cannot read or write until policies
+-- are added (which we will do when there is a frontend).
+--
 -- Run this once in the Supabase SQL editor against an empty database.
 
 create extension if not exists postgis;
@@ -59,3 +64,7 @@ create table images (
   sequence     integer,
   unique (sreality_id, sequence)
 );
+
+alter table listings          enable row level security;
+alter table listing_snapshots enable row level security;
+alter table images            enable row level security;
