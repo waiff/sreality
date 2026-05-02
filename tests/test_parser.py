@@ -68,6 +68,19 @@ def test_floor(sample):
     assert parse_listing(sample)["floor"] == 5
 
 
+def test_total_floors(sample):
+    assert parse_listing(sample)["total_floors"] == 1
+
+
+def test_total_floors_none_when_no_celkem():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {},
+        "items": [{"name": "Podlaží", "value": "3. podlaží", "type": "string"}],
+    }
+    assert parse_listing(raw)["total_floors"] is None
+
+
 def test_amenities(sample):
     row = parse_listing(sample)
     assert row["has_balcony"] is True

@@ -3,6 +3,19 @@
 Pure function over a psycopg connection. Builds parameterised SQL
 dynamically based on which filters are set; never string-interpolates
 user values into the query body.
+
+How to add a new filter
+-----------------------
+1. Add a field to ComparableFilters with a None default and a clear
+   type. None must mean "no filter applied".
+2. Add a branch in build_query() that appends the WHERE clause and
+   binds the value via params[name] = filters.<name>.
+3. Add the field to _filters_used() so the metadata block echoes it.
+4. Add a hermetic test in test_comparables.py asserting both presence
+   when set and absence when None.
+
+That's the entire change. SELECT projection, ORDER BY, LIMIT, and the
+spatial / freshness clauses don't need to be touched.
 """
 
 from __future__ import annotations
@@ -35,11 +48,16 @@ class ComparableFilters:
     floor_band: int | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
+    energy_rating_match: list[str] | None = None
+    has_balcony: bool | None = None
+    has_lift: bool | None = None
+    has_parking: bool | None = None
     min_price_czk: int | None = None
     max_price_czk: int | None = None
     category_main: str | None = "byt"
     category_type: str | None = "pronajem"
     locality_district_id: int | None = None
+    locality_region_id: int | None = None
     include_unreliable: bool = False
 
 
@@ -123,6 +141,19 @@ def build_query(
     if filters.building_type_match:
         where.append("l.building_type = ANY(%(building_type_match)s)")
         params["building_type_match"] = list(filters.building_type_match)
+    if filters.energy_rating_match:
+        where.append("l.energy_rating = ANY(%(energy_rating_match)s)")
+        params["energy_rating_match"] = list(filters.energy_rating_match)
+
+    if filters.has_balcony is not None:
+        where.append("l.has_balcony = %(has_balcony)s")
+        params["has_balcony"] = filters.has_balcony
+    if filters.has_lift is not None:
+        where.append("l.has_lift = %(has_lift)s")
+        params["has_lift"] = filters.has_lift
+    if filters.has_parking is not None:
+        where.append("l.has_parking = %(has_parking)s")
+        params["has_parking"] = filters.has_parking
 
     if filters.min_price_czk is not None:
         where.append("l.price_czk >= %(min_price_czk)s")
@@ -134,6 +165,9 @@ def build_query(
     if filters.locality_district_id is not None:
         where.append("l.locality_district_id = %(locality_district_id)s")
         params["locality_district_id"] = filters.locality_district_id
+    if filters.locality_region_id is not None:
+        where.append("l.locality_region_id = %(locality_region_id)s")
+        params["locality_region_id"] = filters.locality_region_id
 
     if not filters.include_unreliable:
         where.append(
@@ -151,8 +185,11 @@ def build_query(
         "SELECT\n"
         "  l.sreality_id, l.price_czk, l.area_m2,\n"
         "  (l.price_czk::numeric / NULLIF(l.area_m2, 0)) AS price_per_m2,\n"
-        "  l.disposition, l.district, l.locality_district_id,\n"
-        "  l.floor, l.building_type, l.condition,\n"
+        "  l.disposition, l.district,\n"
+        "  l.locality_district_id, l.locality_region_id,\n"
+        "  l.floor, l.total_floors,\n"
+        "  l.building_type, l.condition, l.energy_rating,\n"
+        "  l.has_balcony, l.has_lift, l.has_parking,\n"
         "  ST_Distance(\n"
         "    l.geom,\n"
         "    ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography\n"
@@ -190,11 +227,19 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
             list(filters.building_type_match)
             if filters.building_type_match else None
         ),
+        "energy_rating_match": (
+            list(filters.energy_rating_match)
+            if filters.energy_rating_match else None
+        ),
+        "has_balcony": filters.has_balcony,
+        "has_lift": filters.has_lift,
+        "has_parking": filters.has_parking,
         "min_price_czk": filters.min_price_czk,
         "max_price_czk": filters.max_price_czk,
         "category_main": filters.category_main,
         "category_type": filters.category_type,
         "locality_district_id": filters.locality_district_id,
+        "locality_region_id": filters.locality_region_id,
         "include_unreliable": filters.include_unreliable,
     }
 

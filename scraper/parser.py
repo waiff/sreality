@@ -33,6 +33,7 @@ PRICE_UNIT_BY_CODE: dict[int, str] = {
 
 _DISPOSITION_RE = re.compile(r"\b(\d\+(?:kk|\d))\b", re.IGNORECASE)
 _FLOOR_RE = re.compile(r"\s*(-?\d+)\.\s*podla", re.IGNORECASE)
+_TOTAL_FLOORS_RE = re.compile(r"z\s*celkem\s*(\d+)", re.IGNORECASE)
 _ENERGY_CLASS_RE = re.compile(r"Třída\s+([A-G])", re.IGNORECASE)
 
 _BUILDING_TYPE_TEXT: dict[str, str] = {
@@ -76,6 +77,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "lon": float(lon) if isinstance(lon, (int, float)) else None,
         "lat": float(lat) if isinstance(lat, (int, float)) else None,
         "floor": _floor(items_by_name),
+        "total_floors": _total_floors(items_by_name),
         "has_balcony": _has_balcony(rec, items_by_name),
         "has_parking": _has_parking(rec, items_by_name),
         "has_lift": _has_lift(rec, items_by_name),
@@ -188,6 +190,14 @@ def _floor(items_by_name: dict[str, dict[str, Any]]) -> int | None:
     if item is None:
         return None
     match = _FLOOR_RE.match(str(item.get("value", "")))
+    return int(match.group(1)) if match else None
+
+
+def _total_floors(items_by_name: dict[str, dict[str, Any]]) -> int | None:
+    item = _find_item(items_by_name, "Podlaží")
+    if item is None:
+        return None
+    match = _TOTAL_FLOORS_RE.search(str(item.get("value", "")))
     return int(match.group(1)) if match else None
 
 

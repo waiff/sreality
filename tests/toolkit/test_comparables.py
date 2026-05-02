@@ -181,6 +181,53 @@ def test_locality_district_id_filter():
     assert params["locality_district_id"] == 42
 
 
+def test_locality_region_id_filter():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(locality_region_id=8),
+    )
+    assert "l.locality_region_id = %(locality_region_id)s" in sql
+    assert params["locality_region_id"] == 8
+
+
+def test_amenity_booleans_three_state():
+    where_none = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )[0].split("ORDER BY")[0]
+    assert "has_balcony =" not in where_none
+    assert "has_lift =" not in where_none
+    assert "has_parking =" not in where_none
+
+    sql_true, params_true = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(has_balcony=True, has_lift=True, has_parking=False),
+    )
+    assert "l.has_balcony = %(has_balcony)s" in sql_true
+    assert "l.has_lift = %(has_lift)s" in sql_true
+    assert "l.has_parking = %(has_parking)s" in sql_true
+    assert params_true["has_balcony"] is True
+    assert params_true["has_lift"] is True
+    assert params_true["has_parking"] is False
+
+
+def test_energy_rating_match_uses_any():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(energy_rating_match=["A", "B"]),
+    )
+    assert "l.energy_rating = ANY(%(energy_rating_match)s)" in sql
+    assert params["energy_rating_match"] == ["A", "B"]
+
+
+def test_total_floors_in_select_projection():
+    sql, _ = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    assert "l.total_floors" in sql.split("FROM listings")[0]
+
+
 def test_exclude_ids_uses_array_not_equal():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0, exclude_ids=[1, 2, 3]),
@@ -235,23 +282,31 @@ class _FakeConn:
         return self._cur
 
 
+_RESULT_COLS = [
+    "sreality_id", "price_czk", "area_m2", "price_per_m2",
+    "disposition", "district",
+    "locality_district_id", "locality_region_id",
+    "floor", "total_floors",
+    "building_type", "condition", "energy_rating",
+    "has_balcony", "has_lift", "has_parking",
+    "distance_m", "first_seen_at", "last_seen_at",
+]
+
+
 def test_find_comparables_returns_envelope():
-    cols = [
-        "sreality_id", "price_czk", "area_m2", "price_per_m2",
-        "disposition", "district", "locality_district_id",
-        "floor", "building_type", "condition",
-        "distance_m", "first_seen_at", "last_seen_at",
-    ]
     from datetime import datetime, timezone
     rows = [
         (
-            1, 20000, 50.0, 400.0, "2+kk", "Praha 1", 42, 5,
-            "cihla", "novostavba", 123.4,
+            1, 20000, 50.0, 400.0, "2+kk", "Praha 1",
+            42, 8, 5, 6,
+            "cihla", "novostavba", "B",
+            True, True, False,
+            123.4,
             datetime(2026, 5, 1, tzinfo=timezone.utc),
             datetime(2026, 5, 2, tzinfo=timezone.utc),
         ),
     ]
-    cur = _FakeCursor(rows, cols)
+    cur = _FakeCursor(rows, _RESULT_COLS)
     conn = _FakeConn(cur)
     res = find_comparables(
         conn,  # type: ignore[arg-type]
@@ -262,6 +317,9 @@ def test_find_comparables_returns_envelope():
     assert res["metadata"]["result_count"] == 1
     listing = res["data"]["listings"][0]
     assert listing["sreality_id"] == 1
+    assert listing["total_floors"] == 6
+    assert listing["energy_rating"] == "B"
+    assert listing["has_lift"] is True
     assert listing["distance_m"] == 123.4
     assert listing["first_seen_at"].startswith("2026-05-01")
     assert res["metadata"]["data_freshness"].startswith("2026-05-02")
@@ -269,12 +327,7 @@ def test_find_comparables_returns_envelope():
 
 
 def test_find_comparables_empty_db_returns_empty_listings():
-    cur = _FakeCursor([], [
-        "sreality_id", "price_czk", "area_m2", "price_per_m2",
-        "disposition", "district", "locality_district_id",
-        "floor", "building_type", "condition", "distance_m",
-        "first_seen_at", "last_seen_at",
-    ])
+    cur = _FakeCursor([], _RESULT_COLS)
     conn = _FakeConn(cur)
     res = find_comparables(
         conn,  # type: ignore[arg-type]

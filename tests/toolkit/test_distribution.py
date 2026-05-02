@@ -13,7 +13,6 @@ def test_empty_input():
     res = analyze_distribution([], field="price_per_m2")
     assert res["data"]["n"] == 0
     assert res["data"]["min"] is None
-    assert res["data"]["modality_estimate"] == "unclear"
     assert res["metadata"]["result_count"] == 0
 
 
@@ -25,7 +24,6 @@ def test_single_element():
     assert d["n"] == 1
     assert d["min"] == d["max"] == d["mean"] == d["median"] == 100.0
     assert d["p25"] is None and d["stddev"] is None
-    assert d["modality_estimate"] == "unclear"
 
 
 def test_below_five_returns_partial_stats():
@@ -38,7 +36,6 @@ def test_below_five_returns_partial_stats():
     assert d["min"] == 10.0 and d["max"] == 40.0
     assert d["mean"] == 25.0 and d["median"] == 25.0
     assert d["p10"] is None
-    assert d["modality_estimate"] == "unclear"
 
 
 def test_all_equal_values():
@@ -49,34 +46,17 @@ def test_all_equal_values():
     assert d["min"] == d["max"] == d["mean"] == d["median"] == 500.0
     assert d["iqr"] == 0.0
     assert d["stddev"] == 0.0
-    assert d["modality_estimate"] == "unimodal"
 
 
-def test_unimodal_cluster():
-    import random
-    random.seed(42)
-    listings = [
-        _listing(i, price_per_m2=random.gauss(100.0, 5.0))
-        for i in range(60)
-    ]
-    res = analyze_distribution(listings, field="price_per_m2")
-    d = res["data"]
-    assert d["n"] == 60
-    assert d["modality_estimate"] == "unimodal"
-    assert 90 < d["median"] < 110
-
-
-def test_bimodal_cluster():
-    import random
-    random.seed(7)
-    low = [random.gauss(100.0, 3.0) for _ in range(30)]
-    high = [random.gauss(200.0, 3.0) for _ in range(30)]
-    listings = [
-        _listing(i, price_per_m2=v)
-        for i, v in enumerate(low + high)
-    ]
-    res = analyze_distribution(listings, field="price_per_m2")
-    assert res["data"]["modality_estimate"] == "bimodal"
+def test_known_percentiles_for_arange():
+    listings = [_listing(i, price_per_m2=float(i)) for i in range(101)]
+    d = analyze_distribution(listings, field="price_per_m2")["data"]
+    assert d["n"] == 101
+    assert d["min"] == 0.0 and d["max"] == 100.0
+    assert d["median"] == 50.0
+    assert d["p25"] == 25.0 and d["p75"] == 75.0
+    assert d["p10"] == 10.0 and d["p90"] == 90.0
+    assert d["iqr"] == 50.0
 
 
 def test_outliers_flagged_by_iqr():
