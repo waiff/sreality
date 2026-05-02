@@ -69,12 +69,19 @@ separate dev/staging database. Treat every operation accordingly.
    differs from the most recent snapshot for that listing.
 3. **Never delete listings.** Listings that disappear from sreality get
    `is_active=false`. History is sacred.
-4. **`last_seen_at` is driven by the index, not by detail fetches.**
+4. **`last_seen_at` is driven by index sightings and successful
+   detail fetches; failed fetches never touch it.**
    Every existing listing whose id appears in the run's index gets its
-   `last_seen_at` bumped before any detail fetches happen. A detail fetch
-   that fails must not cause us to forget that we saw the listing -
-   otherwise repeated detail-fetch failures would falsely flip a still-live
-   listing to `is_active=false` on a later run.
+   `last_seen_at` bumped before any detail fetches happen. A successful
+   detail fetch (cron or on-demand via `freshness_check`) also bumps
+   `last_seen_at` as a side effect of `db.upsert_listing` — that's
+   real evidence the listing is alive. A *failed* detail fetch must
+   not affect `last_seen_at`, otherwise repeated failures would falsely
+   flip a still-live listing to `is_active=false`. The `unchanged`
+   path of `freshness_check` deliberately does NOT bump `last_seen_at`
+   either — for that case the "I confirmed it" signal lives in
+   `listing_freshness_checks.checked_at` instead. See architectural
+   rule #9.
 5. **Failed detail fetches are tracked, not silently dropped.**
    When a detail fetch (HTTP, parse, or DB write) fails, we record it in
    `listing_fetch_failures(sreality_id, attempts, last_error, given_up)`.
@@ -93,6 +100,22 @@ separate dev/staging database. Treat every operation accordingly.
    vars are missing, so a partial deploy never breaks the scrape.
 7. **No new dependencies without justification.** Each entry in
    `pyproject.toml` should have a clear reason. Prefer the stdlib.
+8. **Latest-wins data model with snapshot history.** The `listings`
+   table always reflects the most recent state. Every meaningful
+   change appends a row to `listing_snapshots`. Analytical queries
+   default to current state for relevance. Estimates that need
+   retrospective auditability record the `snapshot_id` of each
+   comparable they used — that resolves to the exact JSON the
+   estimate relied on, even if the listing has since been updated or
+   marked inactive. Avoid building "as-of" semantics into live
+   queries; capture snapshot IDs in the estimate response instead.
+9. **`listing_freshness_checks` is append-only and ephemeral.** Rows
+   older than 30 days are safe to delete. No automated pruning is
+   built; manual SQL when the table gets large. The table records
+   every on-demand verification triggered by
+   `verify_listing_freshness` — its primary purpose is observability
+   and per-listing throttling, not history. The primary history
+   table is `listing_snapshots`.
 
 ## Toolkit and API rules
 
@@ -121,9 +144,17 @@ service that exposes it (`api/`). They do not apply to the scraper.
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval
    'X days'` (default 7).** Don't trust `is_active` alone — a listing not
    seen for 30 days is functionally inactive.
-5. **No writes from the toolkit.** Read-only. The API service connects with
-   a read-only role if Postgres permits, but at minimum no toolkit function
-   issues INSERT/UPDATE/DELETE.
+5. **No writes from the toolkit, with one explicit exception.**
+   Read-only by default. The single exception is
+   `verify_listing_freshness` (and `scraper.freshness.freshness_check`
+   that it wraps), which exists so an agent can confirm a comparable
+   is still valid before relying on it. Every call logs to
+   `listing_freshness_checks` for observability and may also write a
+   new `listing_snapshots` row, flip `listings.is_active`, or both.
+   No other toolkit function may write. The API service should still
+   connect with a read-only role if Postgres permits; the freshness
+   check then needs a separately-elevated path. For now we ship with
+   one role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always
    `ST_DWithin(geom, target_geom, radius_m)`. Never compute distance in
    Python.
