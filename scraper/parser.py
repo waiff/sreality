@@ -71,6 +71,8 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "disposition": _disposition(raw),
         "locality": _locality_value(raw),
         "district": _district(raw),
+        "locality_district_id": _int_or_none(rec.get("locality_district_id")),
+        "locality_region_id": _int_or_none(rec.get("locality_region_id")),
         "lon": float(lon) if isinstance(lon, (int, float)) else None,
         "lat": float(lat) if isinstance(lat, (int, float)) else None,
         "floor": _floor(items_by_name),
@@ -281,3 +283,13 @@ def _find_item(
 
 def _strip_diacritics(text: str) -> str:
     return "".join(c for c in normalize("NFD", text) if not combining(c))
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return None

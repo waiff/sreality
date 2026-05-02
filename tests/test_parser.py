@@ -58,6 +58,12 @@ def test_district(sample):
     assert parse_listing(sample)["district"] == "Olomouc - Slavonín"
 
 
+def test_locality_ids(sample):
+    row = parse_listing(sample)
+    assert row["locality_district_id"] == 42
+    assert row["locality_region_id"] == 8
+
+
 def test_floor(sample):
     assert parse_listing(sample)["floor"] == 5
 

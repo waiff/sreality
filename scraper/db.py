@@ -32,6 +32,8 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "disposition",
     "locality",
     "district",
+    "locality_district_id",
+    "locality_region_id",
     "floor",
     "has_balcony",
     "has_parking",
