@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI
 
 from api import dependencies as deps
 from api import schemas as s
+from api.estimate_yield import estimate_yield
 from toolkit import (
     ComparableFilters,
     TargetSpec,
@@ -68,6 +69,30 @@ def post_compare_snapshots(
         else None
     )
     return compare_snapshots(conn, body.sreality_id, since)
+
+
+@app.post("/estimate_yield")
+def post_estimate_yield(
+    body: s.EstimateYieldIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    target = TargetSpec(
+        lat=body.target.lat,
+        lng=body.target.lng,
+        area_m2=body.target.area_m2,
+        disposition=body.target.disposition,
+        floor=body.target.floor,
+        exclude_ids=list(body.target.exclude_ids),
+    )
+    filters = ComparableFilters(
+        radius_m=body.radius_m,
+        area_band_pct=body.area_band_pct,
+        disposition_match=body.disposition_match,
+        max_age_days=body.max_age_days,
+        floor_band=body.floor_band,
+        locality_district_id=body.locality_district_id,
+    )
+    return estimate_yield(conn, target, filters, body.purchase_price_czk)
 
 
 def _build_comparables_inputs(
