@@ -1,15 +1,20 @@
 name: Daily Sreality scrape
 
-# Two run modes:
+# Two run modes (apply to BOTH the listings phase and the image phase):
 #   Conservative (default, always used for cron):
-#     timeout 60 min, 1000 images/run, 8 workers.
-#     Stays well under the 2000 min/month free tier.
+#     timeout 60 min
+#     up to 2 000 detail refetches  (= 50 min at 1.5s/detail)
+#     up to 1 000 image downloads   (= ~2 min at 8 workers)
+#     Stays well under the 2 000 min/month free tier.
 #   Aggressive (opt-in via the workflow_dispatch checkbox):
-#     timeout 350 min (~5.8 h, just under the 6h GitHub job cap),
-#     10 000 images/run, 16 workers. For manual bootstrap runs.
+#     timeout 350 min (~5.8 h, just under the 6h GitHub job cap)
+#     up to 10 000 detail refetches (= 250 min at 1.5s/detail)
+#     up to 10 000 image downloads  (= ~10 min at 16 workers)
+#     For manual bootstrap runs.
 #
 # Cron triggers cannot pass inputs - they always fall back to
-# conservative defaults, by design.
+# conservative defaults, by design. Listings the cap defers in
+# one run get picked up next run via the same INDEX -> PLAN flow.
 
 on:
   schedule:
@@ -39,6 +44,10 @@ on:
         required: false
         type: boolean
         default: false
+      max_detail_refetches:
+        description: "Override listing-refetches-per-run cap (blank = mode default)"
+        required: false
+        type: string
       max_image_downloads:
         description: "Override images-per-run cap (blank = mode default)"
         required: false
@@ -53,6 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: ${{ inputs.aggressive == true && 350 || 60 }}
     env:
+      MODE_MAX_REFETCHES: ${{ inputs.aggressive == true && '10000' || '2000' }}
       MODE_MAX_IMAGES: ${{ inputs.aggressive == true && '10000' || '1000' }}
       MODE_WORKERS: ${{ inputs.aggressive == true && '16' || '8' }}
     steps:
@@ -92,6 +102,10 @@ jobs:
           fi
 
           # Per-input overrides win; otherwise use the mode default.
+          MAX_REFETCH="${{ inputs.max_detail_refetches }}"
+          if [ -z "$MAX_REFETCH" ]; then
+            MAX_REFETCH="$MODE_MAX_REFETCHES"
+          fi
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
             MAX_IMG="$MODE_MAX_IMAGES"
@@ -100,7 +114,9 @@ jobs:
           if [ -z "$WORKERS" ]; then
             WORKERS="$MODE_WORKERS"
           fi
-          ARGS="$ARGS --max-image-downloads $MAX_IMG --image-workers $WORKERS"
+          ARGS="$ARGS --max-detail-refetches $MAX_REFETCH"
+          ARGS="$ARGS --max-image-downloads $MAX_IMG"
+          ARGS="$ARGS --image-workers $WORKERS"
 
           echo "Running with: $ARGS"
           python -m scraper.main $ARGS

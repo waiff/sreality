@@ -11,12 +11,13 @@ are set; otherwise the phase is a no-op).
 
 Run with:
     python -m scraper.main                       # full run
-    python -m scraper.main --limit 10            # cap to 10 listings
+    python -m scraper.main --limit 10            # cap to 10 listings (testing)
     python -m scraper.main --dry-run             # log only, no DB writes
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
-    python -m scraper.main --max-image-downloads 500
-    python -m scraper.main --image-workers 16    # tune concurrency
+    python -m scraper.main --max-detail-refetches 2000   # cap details
+    python -m scraper.main --max-image-downloads 500     # cap images
+    python -m scraper.main --image-workers 16            # tune concurrency
 """
 
 from __future__ import annotations
@@ -49,7 +50,12 @@ def main(argv: list[str] | None = None) -> int:
             client, args.detail_only, dry_run=args.dry_run
         )
     else:
-        rc = _run_full(client, limit=args.limit, dry_run=args.dry_run)
+        rc = _run_full(
+            client,
+            limit=args.limit,
+            dry_run=args.dry_run,
+            max_refetches=args.max_detail_refetches,
+        )
 
     if (
         rc == 0
@@ -88,6 +94,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--no-image-downloads",
         action="store_true",
         help="skip the image-download phase even if R2 is configured",
+    )
+    p.add_argument(
+        "--max-detail-refetches",
+        type=int,
+        default=None,
+        help=(
+            "cap number of listing detail fetches this run "
+            "(default: unlimited; workflow passes mode-specific cap)"
+        ),
     )
     p.add_argument(
         "--max-image-downloads",
@@ -158,6 +173,7 @@ def _run_full(
     client: SrealityClient,
     limit: int | None,
     dry_run: bool,
+    max_refetches: int | None = None,
 ) -> int:
     counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
 
@@ -205,6 +221,14 @@ def _run_full(
 
         counts["unchanged"] = unchanged
         LOG.info("PLAN unchanged=%d refetch=%d", unchanged, len(to_refetch))
+
+        if max_refetches is not None and len(to_refetch) > max_refetches:
+            deferred = len(to_refetch) - max_refetches
+            to_refetch = to_refetch[:max_refetches]
+            LOG.info(
+                "PLAN cap=%d deferred=%d (remaining listings will be picked up next run)",
+                max_refetches, deferred,
+            )
 
         for sid in to_refetch:
             outcome = _process_one(client, conn, sid, dry_run=dry_run)
