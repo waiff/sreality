@@ -1,0 +1,71 @@
+"""Pydantic request bodies for the FastAPI service.
+
+Responses are returned as plain dicts (the toolkit envelope) so we
+don't have to re-encode every field in a Pydantic response model.
+FastAPI's jsonable_encoder handles datetimes and Decimals on the way
+out.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+class TargetIn(BaseModel):
+    lat: float
+    lng: float
+    area_m2: float | None = None
+    disposition: str | None = None
+    floor: int | None = None
+    exclude_ids: list[int] = Field(default_factory=list)
+
+
+class FindComparablesIn(BaseModel):
+    target: TargetIn
+    radius_m: int = 1000
+    area_band_pct: float = 0.20
+    disposition_match: Literal["exact", "loose", "any"] = "exact"
+    max_age_days: int = 7
+    active_only: bool = True
+    floor_band: int | None = None
+    condition_match: list[str] | None = None
+    building_type_match: list[str] | None = None
+    energy_rating_match: list[str] | None = None
+    has_balcony: bool | None = None
+    has_lift: bool | None = None
+    has_parking: bool | None = None
+    min_price_czk: int | None = None
+    max_price_czk: int | None = None
+    category_main: str | None = "byt"
+    category_type: str | None = "pronajem"
+    locality_district_id: int | None = None
+    locality_region_id: int | None = None
+    include_unreliable: bool = False
+
+
+class AnalyzeDistributionIn(BaseModel):
+    listings: list[dict[str, Any]]
+    field: Literal["price_czk", "price_per_m2", "area_m2"] = "price_per_m2"
+
+
+class VerifyFreshnessIn(BaseModel):
+    sreality_id: int
+    max_age_hours: int = 24
+
+
+class CompareSnapshotsIn(BaseModel):
+    sreality_id: int
+    since_days: int | None = None
+
+
+class EstimateYieldIn(BaseModel):
+    target: TargetIn
+    purchase_price_czk: int | None = None
+    radius_m: int = 1000
+    area_band_pct: float = 0.20
+    disposition_match: Literal["exact", "loose", "any"] = "exact"
+    max_age_days: int = 7
+    floor_band: int | None = None
+    locality_district_id: int | None = None
