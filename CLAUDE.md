@@ -41,14 +41,23 @@ local Python, no local Git.
    that fails must not cause us to forget that we saw the listing -
    otherwise repeated detail-fetch failures would falsely flip a still-live
    listing to `is_active=false` on a later run.
-5. **Images are downloaded to Cloudflare R2.** v1 only stored URLs; v1.5
+5. **Failed detail fetches are tracked, not silently dropped.**
+   When a detail fetch (HTTP, parse, or DB write) fails, we record it in
+   `listing_fetch_failures(sreality_id, attempts, last_error, given_up)`.
+   Next run, listings with an active failure row jump to the front of
+   `to_refetch` so the per-run cap can't keep deferring them. After 5
+   attempts a row's `given_up` flips to true and it falls out of the
+   active retry queue (manual SQL un-flip required to retry). On
+   successful fetch the failure row is deleted. Inspect with
+   `SELECT * FROM listing_fetch_failures ORDER BY attempts DESC`.
+6. **Images are downloaded to Cloudflare R2.** v1 only stored URLs; v1.5
    downloads the bytes to an R2 bucket (S3-compatible) so the data
    survives sreality's CDN expiring listing photos. The `images` table
    tracks per-image download state via `storage_path`,
    `download_attempts`, and `last_download_attempt_at`. Image-download
    is a separate phase after the scrape phase; it's a no-op if R2 env
    vars are missing, so a partial deploy never breaks the scrape.
-6. **No new dependencies without justification.** Each entry in
+7. **No new dependencies without justification.** Each entry in
    `pyproject.toml` should have a clear reason. Prefer the stdlib.
 
 ## Database access
@@ -133,11 +142,14 @@ The scraper emits structured progress lines:
 - `INDEX page=N estates=M` per index page
 - `INDEX total=N pages=M` once at end of index walk
 - `PLAN unchanged=N refetch=M` once after deciding what to fetch
+- `PLAN priority_retry=N` once if any listings have prior failure rows
+- `PLAN cap=N deferred=M` once if the per-run refetch cap kicks in
 - `DETAIL id=... new|updated|unchanged` per refetched listing
 - `IMAGE id=... inserted=N` per listing with new image rows recorded
 - `INACTIVE marked=N` once after marking unseen listings
 - `RUN done pages=... new=... updated=... unchanged=... errors=...`
-- `IMAGES pending=N cap=N` once before the image-download phase
+- `IMAGES pending=N cap=N workers=N` once before the image-download phase
+- `IMAGES progress=N/M ...` every 50 images during the phase
 - `IMAGES done downloaded=... errors=... attempted=...` after image phase
 
 A run ending with `errors > 0` is not necessarily a failure (single-listing

@@ -222,6 +222,18 @@ def _run_full(
         counts["unchanged"] = unchanged
         LOG.info("PLAN unchanged=%d refetch=%d", unchanged, len(to_refetch))
 
+        # Bump previously-failed listings to the front so the cap doesn't
+        # keep deferring them. Failed listings have a row in
+        # listing_fetch_failures with given_up=false; they get retried
+        # until either succeeding or hitting attempts >= 5.
+        if conn is not None and to_refetch:
+            failed_ids = db.active_failure_ids(conn, set(to_refetch))
+            if failed_ids:
+                priority = [s for s in to_refetch if s in failed_ids]
+                rest = [s for s in to_refetch if s not in failed_ids]
+                to_refetch = priority + rest
+                LOG.info("PLAN priority_retry=%d", len(priority))
+
         if max_refetches is not None and len(to_refetch) > max_refetches:
             deferred = len(to_refetch) - max_refetches
             to_refetch = to_refetch[:max_refetches]
@@ -262,6 +274,7 @@ def _process_one(
         raw = client.get_detail(sid)
     except Exception as exc:
         LOG.error("DETAIL id=%d fetch error: %s", sid, exc)
+        _record_failure(conn, sid, "fetch", exc)
         return "errors"
 
     try:
@@ -270,6 +283,7 @@ def _process_one(
         h = hashing.content_hash(raw)
     except Exception as exc:
         LOG.error("DETAIL id=%d parse error: %s", sid, exc)
+        _record_failure(conn, sid, "parse", exc)
         return "errors"
 
     if dry_run:
@@ -285,10 +299,32 @@ def _process_one(
         new_imgs = db.record_images(conn, sid, images)
         if new_imgs:
             LOG.info("IMAGE id=%d inserted=%d", sid, new_imgs)
+        _clear_failure(conn, sid)
         return result
     except Exception as exc:
         LOG.exception("DETAIL id=%d db error: %s", sid, exc)
+        _record_failure(conn, sid, "db", exc)
         return "errors"
+
+
+def _record_failure(conn: Any, sid: int, source: str, exc: BaseException) -> None:
+    """Best-effort: record a fetch failure. Never raises."""
+    if conn is None:
+        return
+    try:
+        db.record_fetch_failure(conn, sid, f"{source}: {exc}")
+    except Exception as e:
+        LOG.warning("could not record failure for id=%d: %s", sid, e)
+
+
+def _clear_failure(conn: Any, sid: int) -> None:
+    """Best-effort: clear an existing failure row. Never raises."""
+    if conn is None:
+        return
+    try:
+        db.clear_fetch_failure(conn, sid)
+    except Exception as e:
+        LOG.warning("could not clear failure for id=%d: %s", sid, e)
 
 
 def _run_image_downloads(max_downloads: int, workers: int) -> None:
