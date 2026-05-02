@@ -24,12 +24,46 @@ local Python, no local Git.
   button.
 - Define jargon the first time it appears ("upsert," "JWT," "RLS," etc.).
 
+## Database access and Supabase MCP
+
+Claude Code has direct read/write access to the Supabase project via the MCP
+integration. Use it for: inspecting the live schema, running SELECT queries to
+verify data state, applying migrations, running backfill UPDATEs, and
+confirming changes succeeded.
+
+The `migrations/` folder remains the source of truth for schema. Every schema
+change still goes in a new numbered SQL file. MCP is the *execution*
+mechanism, not a replacement for tracked migrations. Applying a schema change
+without committing the corresponding migration file silently breaks the
+codebase — future sessions or fresh rebuilds will be missing the change.
+
+Correct flow for any schema change:
+
+1. Write the new numbered migration file (`00N_*.sql`) in `migrations/`.
+2. Show the migration to the operator and get explicit approval before running.
+3. Apply via MCP (`apply_migration`), verify with a SELECT.
+4. Commit the migration file in the same change.
+5. Report what was applied and what was verified.
+
+Never apply a SQL change that doesn't correspond to a committed migration
+file.
+
+Never run destructive operations (`DROP TABLE`, `DELETE` without `WHERE`,
+`TRUNCATE`, `ALTER COLUMN` that changes type or drops a column) without
+explicit operator confirmation in chat. "Yes, apply it" is required.
+
+Read-only inspection (counts, sample rows, schema introspection, verifying
+backfills) needs no confirmation — just do it and report findings.
+
+The MCP connection points at the production Supabase project. There is no
+separate dev/staging database. Treat every operation accordingly.
+
 ## Architectural rules (do not violate without asking)
 
-1. **The schema in `migrations/001_initial.sql` is fixed.** Never modify an
-   existing migration. Schema changes go in a new numbered file
-   (`002_*.sql`, `003_*.sql`...) which the operator runs by hand in the
-   Supabase SQL editor.
+1. **The schema in `migrations/` is append-only.** Never modify an existing
+   migration. Schema changes go in a new numbered file (`002_*.sql`,
+   `003_*.sql`...) and are applied via the Supabase MCP after operator
+   approval. See "Database access and Supabase MCP" for the full flow.
 2. **Snapshots on content change only.** Never insert into `listings` without
    computing the content hash and inserting into `listing_snapshots` if it
    differs from the most recent snapshot for that listing.
@@ -59,6 +93,42 @@ local Python, no local Git.
    vars are missing, so a partial deploy never breaks the scrape.
 7. **No new dependencies without justification.** Each entry in
    `pyproject.toml` should have a clear reason. Prefer the stdlib.
+
+## Toolkit and API rules
+
+These rules govern the analytical toolkit (`toolkit/`) and the FastAPI
+service that exposes it (`api/`). They do not apply to the scraper.
+
+1. **Tools return facts, not opinions.** No "recommended price", no "this
+   looks like a good deal." Tools return data + provenance. Reasoning
+   happens at the agent layer.
+2. **Standard envelope on every tool's return value:**
+   ```python
+   {
+     "data": ...,
+     "metadata": {
+       "tool": "tool_name",
+       "filters_used": {...},      # echo of actual params after defaults applied
+       "result_count": int,
+       "queried_at": iso8601,
+       "data_freshness": iso8601,  # max(last_seen_at) of considered listings, or null
+     }
+   }
+   ```
+3. **Every tool excludes `given_up = true` listings** from
+   `listing_fetch_failures` by default. An `include_unreliable: bool = False`
+   parameter overrides.
+4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval
+   'X days'` (default 7).** Don't trust `is_active` alone — a listing not
+   seen for 30 days is functionally inactive.
+5. **No writes from the toolkit.** Read-only. The API service connects with
+   a read-only role if Postgres permits, but at minimum no toolkit function
+   issues INSERT/UPDATE/DELETE.
+6. **Spatial queries use `geography(point, 4326)`.** Always
+   `ST_DWithin(geom, target_geom, radius_m)`. Never compute distance in
+   Python.
+7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
+   `prepare_threshold=None` for pgbouncer-mode pooler.
 
 ## Database access
 
