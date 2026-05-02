@@ -52,6 +52,7 @@ from toolkit.comparables import (  # noqa: E402
     find_comparables,
 )
 from toolkit.distribution import analyze_distribution  # noqa: E402
+from toolkit.freshness import verify_listing_freshness  # noqa: E402
 
 __all__ = [
     "ComparableFilters",
@@ -60,4 +61,5 @@ __all__ = [
     "ToolResult",
     "analyze_distribution",
     "find_comparables",
+    "verify_listing_freshness",
 ]
