@@ -290,23 +290,40 @@ _RESULT_COLS = [
     "building_type", "condition", "energy_rating",
     "has_balcony", "has_lift", "has_parking",
     "distance_m", "first_seen_at", "last_seen_at",
+    "data_age_days", "latest_snapshot_id", "latest_snapshot_at",
+    "last_freshness_check_at",
 ]
+
+
+def _row(
+    sreality_id: int,
+    price_czk: int = 20000,
+    area_m2: float = 50.0,
+    data_age_days: int = 1,
+    latest_snapshot_id: int = 100,
+    last_freshness_check_at: Any = None,
+):
+    from datetime import datetime, timezone
+    return (
+        sreality_id, price_czk, area_m2,
+        float(price_czk) / area_m2,
+        "2+kk", "Praha 1",
+        42, 8, 5, 6,
+        "cihla", "novostavba", "B",
+        True, True, False,
+        123.4,
+        datetime(2026, 5, 1, tzinfo=timezone.utc),
+        datetime(2026, 5, 2, tzinfo=timezone.utc),
+        data_age_days,
+        latest_snapshot_id,
+        datetime(2026, 5, 2, tzinfo=timezone.utc),
+        last_freshness_check_at,
+    )
 
 
 def test_find_comparables_returns_envelope():
     from datetime import datetime, timezone
-    rows = [
-        (
-            1, 20000, 50.0, 400.0, "2+kk", "Praha 1",
-            42, 8, 5, 6,
-            "cihla", "novostavba", "B",
-            True, True, False,
-            123.4,
-            datetime(2026, 5, 1, tzinfo=timezone.utc),
-            datetime(2026, 5, 2, tzinfo=timezone.utc),
-        ),
-    ]
-    cur = _FakeCursor(rows, _RESULT_COLS)
+    cur = _FakeCursor([_row(1)], _RESULT_COLS)
     conn = _FakeConn(cur)
     res = find_comparables(
         conn,  # type: ignore[arg-type]
@@ -326,6 +343,73 @@ def test_find_comparables_returns_envelope():
     assert res["metadata"]["filters_used"]["target"]["lat"] == 50.0
 
 
+def test_find_comparables_exposes_freshness_fields_per_listing():
+    from datetime import datetime, timezone
+    cur = _FakeCursor(
+        [_row(
+            1,
+            data_age_days=3,
+            latest_snapshot_id=42,
+            last_freshness_check_at=datetime(
+                2026, 5, 2, 10, tzinfo=timezone.utc
+            ),
+        )],
+        _RESULT_COLS,
+    )
+    conn = _FakeConn(cur)
+    res = find_comparables(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    listing = res["data"]["listings"][0]
+    assert listing["data_age_days"] == 3
+    assert listing["latest_snapshot_id"] == 42
+    assert listing["latest_snapshot_at"].startswith("2026-05-02")
+    assert listing["last_freshness_check_at"].startswith("2026-05-02")
+
+
+def test_find_comparables_cohort_metadata_aggregates_ages():
+    cur = _FakeCursor(
+        [
+            _row(1, data_age_days=1, last_freshness_check_at=None),
+            _row(2, data_age_days=5, last_freshness_check_at=None),
+            _row(3, data_age_days=20, last_freshness_check_at=None),
+        ],
+        _RESULT_COLS,
+    )
+    conn = _FakeConn(cur)
+    res = find_comparables(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    md = res["metadata"]
+    assert md["oldest_data_age_days"] == 20
+    assert md["newest_data_age_days"] == 1
+    assert md["median_data_age_days"] == 5.0
+    assert md["unverified_count"] == 3
+
+
+def test_find_comparables_cohort_metadata_unverified_count():
+    from datetime import datetime, timezone
+    rows = [
+        _row(1, data_age_days=1, last_freshness_check_at=None),
+        _row(
+            2, data_age_days=2,
+            last_freshness_check_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        ),
+    ]
+    cur = _FakeCursor(rows, _RESULT_COLS)
+    conn = _FakeConn(cur)
+    res = find_comparables(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    assert res["metadata"]["unverified_count"] == 1
+
+
 def test_find_comparables_empty_db_returns_empty_listings():
     cur = _FakeCursor([], _RESULT_COLS)
     conn = _FakeConn(cur)
@@ -337,3 +421,16 @@ def test_find_comparables_empty_db_returns_empty_listings():
     assert res["data"]["listings"] == []
     assert res["metadata"]["result_count"] == 0
     assert res["metadata"]["data_freshness"] is None
+    assert res["metadata"]["oldest_data_age_days"] is None
+    assert res["metadata"]["unverified_count"] == 0
+
+
+def test_find_comparables_sql_includes_lateral_joins():
+    sql, _ = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    assert "LEFT JOIN LATERAL" in sql
+    assert "FROM listing_snapshots" in sql
+    assert "FROM listing_freshness_checks" in sql
+    assert "data_age_days" in sql

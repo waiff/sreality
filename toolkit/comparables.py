@@ -194,8 +194,22 @@ def build_query(
         "    l.geom,\n"
         "    ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography\n"
         "  ) AS distance_m,\n"
-        "  l.first_seen_at, l.last_seen_at\n"
+        "  l.first_seen_at, l.last_seen_at,\n"
+        "  EXTRACT(DAY FROM (now() - l.last_seen_at))::int AS data_age_days,\n"
+        "  latest_snap.id AS latest_snapshot_id,\n"
+        "  latest_snap.scraped_at AS latest_snapshot_at,\n"
+        "  latest_check.checked_at AS last_freshness_check_at\n"
         "FROM listings l\n"
+        "LEFT JOIN LATERAL (\n"
+        "  SELECT id, scraped_at FROM listing_snapshots\n"
+        "  WHERE sreality_id = l.sreality_id\n"
+        "  ORDER BY scraped_at DESC LIMIT 1\n"
+        ") latest_snap ON true\n"
+        "LEFT JOIN LATERAL (\n"
+        "  SELECT checked_at FROM listing_freshness_checks\n"
+        "  WHERE sreality_id = l.sreality_id\n"
+        "  ORDER BY checked_at DESC LIMIT 1\n"
+        ") latest_check ON true\n"
         "WHERE " + "\n  AND ".join(where) + "\n"
         "ORDER BY distance_m\n"
         f"LIMIT {_HARD_LIMIT}"
@@ -266,13 +280,20 @@ def find_comparables(
             "result_count": len(listings),
             "queried_at": _now_iso(),
             "data_freshness": _max_last_seen(listings),
+            **_cohort_freshness_stats(listings),
         },
     }
 
 
+_DATETIME_COLS = (
+    "first_seen_at", "last_seen_at",
+    "latest_snapshot_at", "last_freshness_check_at",
+)
+
+
 def _row_to_dict(cols: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
     out = dict(zip(cols, row))
-    for k in ("first_seen_at", "last_seen_at"):
+    for k in _DATETIME_COLS:
         v = out.get(k)
         if isinstance(v, datetime):
             out[k] = v.isoformat()
@@ -281,3 +302,32 @@ def _row_to_dict(cols: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
         if v is not None:
             out[k] = float(v)
     return out
+
+
+def _cohort_freshness_stats(listings: list[dict[str, Any]]) -> dict[str, Any]:
+    ages = [
+        l["data_age_days"] for l in listings
+        if isinstance(l.get("data_age_days"), int)
+    ]
+    unverified = sum(
+        1 for l in listings if l.get("last_freshness_check_at") is None
+    )
+    if not ages:
+        return {
+            "oldest_data_age_days": None,
+            "newest_data_age_days": None,
+            "median_data_age_days": None,
+            "unverified_count": unverified,
+        }
+    sorted_ages = sorted(ages)
+    n = len(sorted_ages)
+    if n % 2 == 1:
+        median = float(sorted_ages[n // 2])
+    else:
+        median = (sorted_ages[n // 2 - 1] + sorted_ages[n // 2]) / 2.0
+    return {
+        "oldest_data_age_days": max(ages),
+        "newest_data_age_days": min(ages),
+        "median_data_age_days": median,
+        "unverified_count": unverified,
+    }
