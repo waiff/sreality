@@ -144,6 +144,8 @@ The scraper emits structured progress lines:
 - `PLAN unchanged=N refetch=M` once after deciding what to fetch
 - `PLAN priority_retry=N` once if any listings have prior failure rows
 - `PLAN cap=N deferred=M` once if the per-run refetch cap kicks in
+- `DETAIL starting refetch=N` once before the refetch loop
+- `DETAIL progress=N/M new=... updated=... errors=...` every 50 refetches
 - `DETAIL id=... new|updated|unchanged` per refetched listing
 - `IMAGE id=... inserted=N` per listing with new image rows recorded
 - `INACTIVE marked=N` once after marking unseen listings

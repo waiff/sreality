@@ -242,9 +242,18 @@ def _run_full(
                 max_refetches, deferred,
             )
 
-        for sid in to_refetch:
+        total_refetch = len(to_refetch)
+        if total_refetch:
+            LOG.info("DETAIL starting refetch=%d", total_refetch)
+        for i, sid in enumerate(to_refetch, start=1):
             outcome = _process_one(client, conn, sid, dry_run=dry_run)
             counts[outcome] = counts.get(outcome, 0) + 1
+            if i % 50 == 0:
+                LOG.info(
+                    "DETAIL progress=%d/%d new=%d updated=%d errors=%d",
+                    i, total_refetch,
+                    counts["new"], counts["updated"], counts["errors"],
+                )
 
         if conn is not None:
             inactive = db.mark_inactive(conn, seen_ids)
