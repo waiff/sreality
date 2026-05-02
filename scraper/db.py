@@ -307,3 +307,67 @@ def mark_image_attempt(
             """,
             (image_id,),
         )
+
+
+FAILURE_GIVE_UP_THRESHOLD = 5
+
+
+def record_fetch_failure(
+    conn: psycopg.Connection,
+    sreality_id: int,
+    error_message: str,
+    max_attempts: int = FAILURE_GIVE_UP_THRESHOLD,
+) -> None:
+    """Record a failed detail fetch. Marks given_up at max_attempts."""
+    truncated = (error_message or "")[:500]
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO listing_fetch_failures
+                (sreality_id, attempts, first_failure_at, last_failure_at, last_error, given_up)
+            VALUES (%s, 1, now(), now(), %s, false)
+            ON CONFLICT (sreality_id) DO UPDATE SET
+              attempts = listing_fetch_failures.attempts + 1,
+              last_failure_at = now(),
+              last_error = EXCLUDED.last_error,
+              given_up = (listing_fetch_failures.attempts + 1) >= %s
+            """,
+            (sreality_id, truncated, max_attempts),
+        )
+
+
+def clear_fetch_failure(
+    conn: psycopg.Connection,
+    sreality_id: int,
+) -> None:
+    """Remove the failure row after a successful fetch."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM listing_fetch_failures WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+
+
+def active_failure_ids(
+    conn: psycopg.Connection,
+    sreality_ids: Iterable[int],
+) -> set[int]:
+    """Return ids in this set that have an active (not given_up) failure row.
+
+    Used by main.py to prioritise these in to_refetch so the per-run
+    cap doesn't keep deferring listings that are consistently late in
+    the index ordering.
+    """
+    ids = list(sreality_ids)
+    if not ids:
+        return set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT sreality_id FROM listing_fetch_failures
+            WHERE given_up = false
+              AND sreality_id = ANY(%s)
+            """,
+            (ids,),
+        )
+        return {row[0] for row in cur.fetchall()}
