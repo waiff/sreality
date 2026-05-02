@@ -23,11 +23,18 @@ tests/              pytest suite
 - Two-phase scrape: index pages, then per-listing detail.
 - Upsert into `listings`; append a row to `listing_snapshots` only when the
   content hash changes; mark unseen listings `is_active=false`.
-- Image URLs only - no file downloads.
+- Image bytes mirrored to Cloudflare R2 (originally deferred; live since v1.5)
+  so listings retain their photos after sreality's CDN expires them.
+
+The schema is currently at migration 003. See [`migrations/`](./migrations)
+for the full sequence; never modify a numbered file once it's been applied.
 
 ## Status
 
-- [x] Schema applied (`migrations/001_initial.sql`)
-- [ ] Scraper code
-- [ ] CI workflows
-- [ ] First successful manual run
+- [x] Schema applied (`migrations/001_initial.sql` through `003_listing_fetch_failures.sql`)
+- [x] Scraper code (index walk, detail fetch, parse, upsert, snapshot-on-change)
+- [x] CI workflows (`test.yml` per push, `scrape.yml` daily at 22:00 UTC)
+- [x] Image mirroring to Cloudflare R2 with parallel uploads
+- [x] Failure tracking (`listing_fetch_failures`) with priority retry
+- [x] Conservative/aggressive run modes
+- [x] First successful manual run (production)
