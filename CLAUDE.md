@@ -68,7 +68,11 @@ separate dev/staging database. Treat every operation accordingly.
    computing the content hash and inserting into `listing_snapshots` if it
    differs from the most recent snapshot for that listing.
 3. **Never delete listings.** Listings that disappear from sreality get
-   `is_active=false`. History is sacred.
+   `is_active=false`. History is sacred. The `is_active=false` inference
+   is only valid after a **complete index walk** — a partial walk
+   (`--limit N`, `--detail-only`) cannot determine which listings are
+   gone. The scraper enforces this: `mark_inactive` is skipped when
+   `--limit` is set, and `--detail-only` never reaches the index phase.
 4. **`last_seen_at` is driven by index sightings and successful
    detail fetches; failed fetches never touch it.**
    Every existing listing whose id appears in the run's index gets its

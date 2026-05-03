@@ -11,13 +11,17 @@ are set; otherwise the phase is a no-op).
 
 Run with:
     python -m scraper.main                       # full run
-    python -m scraper.main --limit 10            # cap to 10 listings (testing)
+    python -m scraper.main --limit 10            # cap to 10 listings; mark-inactive skipped
     python -m scraper.main --dry-run             # log only, no DB writes
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
     python -m scraper.main --max-detail-refetches 2000   # cap details
     python -m scraper.main --max-image-downloads 500     # cap images
     python -m scraper.main --image-workers 16            # tune concurrency
+
+`--limit` is production-safe: the limited scrape upserts what it sees,
+but it does NOT mark unseen listings inactive — that inference is only
+valid when the entire sreality index has been walked.
 """
 
 from __future__ import annotations
@@ -76,7 +80,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--limit",
         type=int,
         default=None,
-        help="cap number of index entries processed (testing)",
+        help=(
+            "cap number of index entries processed. With this flag the "
+            "scrape skips mark-inactive: a partial index view cannot "
+            "determine which listings have left sreality."
+        ),
     )
     p.add_argument(
         "--dry-run",
@@ -256,8 +264,15 @@ def _run_full(
                 )
 
         if conn is not None:
-            inactive = db.mark_inactive(conn, seen_ids)
-            LOG.info("INACTIVE marked=%d", inactive)
+            if limit is None:
+                inactive = db.mark_inactive(conn, seen_ids)
+                LOG.info("INACTIVE marked=%d", inactive)
+            else:
+                LOG.info(
+                    "INACTIVE skipped: --limit %d gives a partial index view "
+                    "(is_active=false inference requires a full walk)",
+                    limit,
+                )
     finally:
         if conn is not None:
             conn.close()
