@@ -60,6 +60,22 @@ class CompareSnapshotsIn(BaseModel):
     since_days: int | None = None
 
 
+class DescribeNeighborhoodIn(BaseModel):
+    lat: float
+    lng: float
+    radius_m: int = 1000
+    max_age_days: int = 30
+    category_main: str | None = "byt"
+    category_type: str | None = "pronajem"
+
+
+class FindDistributionOutliersIn(BaseModel):
+    listings: list[dict[str, Any]]
+    field: Literal["price_per_m2", "price_czk"] = "price_per_m2"
+    iqr_multiplier: float = 1.5
+    investigate_history: bool = True
+
+
 class EstimateYieldIn(BaseModel):
     target: TargetIn
     purchase_price_czk: int | None = None

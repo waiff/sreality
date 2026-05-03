@@ -38,11 +38,19 @@ def client(monkeypatch):
     def fake_estimate(conn, target, filters, purchase_price_czk=None):
         return {"data": {"sample_size": 0}, "metadata": {"tool": "estimate_yield"}}
 
+    def fake_neighborhood(conn, **_kw):
+        return {"data": {}, "metadata": {"tool": "describe_neighborhood"}}
+
+    def fake_outliers(conn, listings, **_kw):
+        return {"data": {"outliers": []}, "metadata": {"tool": "find_distribution_outliers"}}
+
     monkeypatch.setattr(api_main, "find_comparables", fake_find)
     monkeypatch.setattr(api_main, "analyze_distribution", fake_dist)
     monkeypatch.setattr(api_main, "verify_listing_freshness", fake_verify)
     monkeypatch.setattr(api_main, "compare_snapshots", fake_compare)
     monkeypatch.setattr(api_main, "estimate_yield", fake_estimate)
+    monkeypatch.setattr(api_main, "describe_neighborhood", fake_neighborhood)
+    monkeypatch.setattr(api_main, "find_distribution_outliers", fake_outliers)
 
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
@@ -53,6 +61,8 @@ _DIST_BODY = {"listings": [], "field": "price_per_m2"}
 _VERIFY_BODY = {"sreality_id": 1, "max_age_hours": 24}
 _COMPARE_BODY = {"sreality_id": 1}
 _ESTIMATE_BODY = {"target": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}}
+_NEIGHBORHOOD_BODY = {"lat": 50.0, "lng": 14.0}
+_OUTLIERS_BODY = {"listings": []}
 
 
 def _gated_calls(client) -> list:
@@ -61,6 +71,8 @@ def _gated_calls(client) -> list:
         ("/tools/analyze_distribution", _DIST_BODY),
         ("/tools/verify_listing_freshness", _VERIFY_BODY),
         ("/tools/compare_snapshots", _COMPARE_BODY),
+        ("/tools/describe_neighborhood", _NEIGHBORHOOD_BODY),
+        ("/tools/find_distribution_outliers", _OUTLIERS_BODY),
         ("/estimate_yield", _ESTIMATE_BODY),
     ]
 

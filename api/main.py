@@ -19,7 +19,9 @@ from toolkit import (
     TargetSpec,
     analyze_distribution,
     compare_snapshots,
+    describe_neighborhood,
     find_comparables,
+    find_distribution_outliers,
     verify_listing_freshness,
 )
 
@@ -73,6 +75,38 @@ def post_compare_snapshots(
         else None
     )
     return compare_snapshots(conn, body.sreality_id, since)
+
+
+@app.post("/tools/describe_neighborhood")
+def post_describe_neighborhood(
+    body: s.DescribeNeighborhoodIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return describe_neighborhood(
+        conn,
+        lat=body.lat,
+        lng=body.lng,
+        radius_m=body.radius_m,
+        max_age_days=body.max_age_days,
+        category_main=body.category_main,
+        category_type=body.category_type,
+    )
+
+
+@app.post("/tools/find_distribution_outliers")
+def post_find_distribution_outliers(
+    body: s.FindDistributionOutliersIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return find_distribution_outliers(
+        conn,
+        body.listings,
+        field=body.field,
+        iqr_multiplier=body.iqr_multiplier,
+        investigate_history=body.investigate_history,
+    )
 
 
 @app.post("/estimate_yield")
