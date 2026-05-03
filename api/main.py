@@ -19,7 +19,9 @@ from toolkit import (
     TargetSpec,
     analyze_distribution,
     compare_snapshots,
+    describe_neighborhood,
     find_comparables,
+    find_distribution_outliers,
     verify_listing_freshness,
 )
 
@@ -35,6 +37,7 @@ def health() -> dict[str, str]:
 def post_find_comparables(
     body: s.FindComparablesIn,
     conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     target, filters = _build_comparables_inputs(body)
     return find_comparables(conn, target, filters)
@@ -43,6 +46,7 @@ def post_find_comparables(
 @app.post("/tools/analyze_distribution")
 def post_analyze_distribution(
     body: s.AnalyzeDistributionIn,
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return analyze_distribution(body.listings, field=body.field)
 
@@ -52,6 +56,7 @@ def post_verify_listing_freshness(
     body: s.VerifyFreshnessIn,
     conn: Any = Depends(deps.get_db_conn),
     client: Any = Depends(deps.get_sreality_client),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return verify_listing_freshness(
         conn, client, body.sreality_id, body.max_age_hours,
@@ -62,6 +67,7 @@ def post_verify_listing_freshness(
 def post_compare_snapshots(
     body: s.CompareSnapshotsIn,
     conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     since = (
         timedelta(days=body.since_days)
@@ -71,10 +77,43 @@ def post_compare_snapshots(
     return compare_snapshots(conn, body.sreality_id, since)
 
 
+@app.post("/tools/describe_neighborhood")
+def post_describe_neighborhood(
+    body: s.DescribeNeighborhoodIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return describe_neighborhood(
+        conn,
+        lat=body.lat,
+        lng=body.lng,
+        radius_m=body.radius_m,
+        max_age_days=body.max_age_days,
+        category_main=body.category_main,
+        category_type=body.category_type,
+    )
+
+
+@app.post("/tools/find_distribution_outliers")
+def post_find_distribution_outliers(
+    body: s.FindDistributionOutliersIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return find_distribution_outliers(
+        conn,
+        body.listings,
+        field=body.field,
+        iqr_multiplier=body.iqr_multiplier,
+        investigate_history=body.investigate_history,
+    )
+
+
 @app.post("/estimate_yield")
 def post_estimate_yield(
     body: s.EstimateYieldIn,
     conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     target = TargetSpec(
         lat=body.target.lat,

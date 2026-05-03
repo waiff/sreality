@@ -74,9 +74,13 @@ def test_pattern_volatile_mixed():
 
 def test_pattern_handles_none_prices():
     assert _classify_pattern(_trajectory([None, 20000, 20000])) == "stable"
-    # Non-adjacent comparison is intentionally skipped — the None pair
-    # interrupts the run, so this counts as zero changes (stable).
-    assert _classify_pattern(_trajectory([20000, None, 18000])) == "stable"
+    # When a None gap is bridged by a real difference and there are no
+    # adjacent diffs to classify, fall back to first vs. last non-None.
+    # Otherwise pattern would say "stable" while price_change_total_czk
+    # reports a non-zero delta — the two would contradict each other.
+    assert _classify_pattern(_trajectory([20000, None, 18000])) == "single_drop"
+    assert _classify_pattern(_trajectory([18000, None, 20000])) == "rising"
+    assert _classify_pattern(_trajectory([20000, None, 20000])) == "stable"
 
 
 # price change stats
