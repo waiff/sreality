@@ -35,6 +35,7 @@ def health() -> dict[str, str]:
 def post_find_comparables(
     body: s.FindComparablesIn,
     conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     target, filters = _build_comparables_inputs(body)
     return find_comparables(conn, target, filters)
@@ -43,6 +44,7 @@ def post_find_comparables(
 @app.post("/tools/analyze_distribution")
 def post_analyze_distribution(
     body: s.AnalyzeDistributionIn,
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return analyze_distribution(body.listings, field=body.field)
 
@@ -52,6 +54,7 @@ def post_verify_listing_freshness(
     body: s.VerifyFreshnessIn,
     conn: Any = Depends(deps.get_db_conn),
     client: Any = Depends(deps.get_sreality_client),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return verify_listing_freshness(
         conn, client, body.sreality_id, body.max_age_hours,
@@ -62,6 +65,7 @@ def post_verify_listing_freshness(
 def post_compare_snapshots(
     body: s.CompareSnapshotsIn,
     conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     since = (
         timedelta(days=body.since_days)
@@ -75,6 +79,7 @@ def post_compare_snapshots(
 def post_estimate_yield(
     body: s.EstimateYieldIn,
     conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     target = TargetSpec(
         lat=body.target.lat,
