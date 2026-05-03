@@ -214,6 +214,47 @@ def test_comparables_used_carries_snapshot_ids(monkeypatch):
     assert used[1]["sreality_id"] == 2
     assert used[1]["snapshot_id"] == 99
     assert used[1]["verified_during_estimate"] is False
+    # any verified_during_estimate=true triggers an informational warning
+    assert any(
+        "1 comparables have been verified" in w
+        for w in res["data"]["warnings"]
+    )
+
+
+def test_no_verified_comparables_means_no_verified_warning(monkeypatch):
+    listings = [_listing(i) for i in range(20)]  # all unverified
+    _patch(monkeypatch, listings)
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+        filters=ComparableFilters(),
+    )
+    assert all(
+        "verified during this estimate" not in w
+        for w in res["data"]["warnings"]
+    )
+
+
+def test_verified_warning_counts_correctly(monkeypatch):
+    listings = [
+        _listing(
+            i,
+            last_freshness_check_at=(
+                "2026-05-02T10:00:00+00:00" if i < 3 else None
+            ),
+        )
+        for i in range(20)
+    ]
+    _patch(monkeypatch, listings)
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+        filters=ComparableFilters(),
+    )
+    assert any(
+        "3 comparables have been verified" in w
+        for w in res["data"]["warnings"]
+    )
 
 
 def test_no_purchase_price_means_no_yield(monkeypatch):

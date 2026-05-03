@@ -50,7 +50,12 @@ def estimate_yield(
     gross_yield_pct = _gross_yield(estimated, purchase_price_czk)
     freshness = _freshness_block(listings)
     comparables_used = [_used_entry(l) for l in listings]
-    confidence, warnings = _classify(sample_size, d, freshness)
+    verified_count = sum(
+        1 for c in comparables_used if c["verified_during_estimate"]
+    )
+    confidence, warnings = _classify(
+        sample_size, d, freshness, verified_count
+    )
 
     return {
         "data": {
@@ -146,6 +151,7 @@ def _classify(
     n: int,
     dist_data: dict[str, Any],
     freshness: dict[str, Any],
+    verified_count: int = 0,
 ) -> tuple[str, list[str]]:
     """Confidence rules — rederivable from inputs.
 
@@ -188,6 +194,11 @@ def _classify(
     if oldest is not None and oldest > 30:
         warnings.append(
             f"oldest comparable was last seen {oldest} days ago"
+        )
+
+    if verified_count > 0:
+        warnings.append(
+            f"only {verified_count} comparables have been verified during this estimate"
         )
 
     return confidence, warnings
