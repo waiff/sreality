@@ -33,6 +33,7 @@ PRICE_UNIT_BY_CODE: dict[int, str] = {
 
 _DISPOSITION_RE = re.compile(r"\b(\d\+(?:kk|\d))\b", re.IGNORECASE)
 _FLOOR_RE = re.compile(r"\s*(-?\d+)\.\s*podla", re.IGNORECASE)
+_TOTAL_FLOORS_RE = re.compile(r"z\s*celkem\s*(\d+)", re.IGNORECASE)
 _ENERGY_CLASS_RE = re.compile(r"Třída\s+([A-G])", re.IGNORECASE)
 
 _BUILDING_TYPE_TEXT: dict[str, str] = {
@@ -71,9 +72,12 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "disposition": _disposition(raw),
         "locality": _locality_value(raw),
         "district": _district(raw),
+        "locality_district_id": _int_or_none(rec.get("locality_district_id")),
+        "locality_region_id": _int_or_none(rec.get("locality_region_id")),
         "lon": float(lon) if isinstance(lon, (int, float)) else None,
         "lat": float(lat) if isinstance(lat, (int, float)) else None,
         "floor": _floor(items_by_name),
+        "total_floors": _total_floors(items_by_name),
         "has_balcony": _has_balcony(rec, items_by_name),
         "has_parking": _has_parking(rec, items_by_name),
         "has_lift": _has_lift(rec, items_by_name),
@@ -189,6 +193,14 @@ def _floor(items_by_name: dict[str, dict[str, Any]]) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _total_floors(items_by_name: dict[str, dict[str, Any]]) -> int | None:
+    item = _find_item(items_by_name, "Podlaží")
+    if item is None:
+        return None
+    match = _TOTAL_FLOORS_RE.search(str(item.get("value", "")))
+    return int(match.group(1)) if match else None
+
+
 def _has_balcony(
     rec: dict[str, Any], items_by_name: dict[str, dict[str, Any]]
 ) -> bool | None:
@@ -281,3 +293,13 @@ def _find_item(
 
 def _strip_diacritics(text: str) -> str:
     return "".join(c for c in normalize("NFD", text) if not combining(c))
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.lstrip("-").isdigit():
+        return int(value)
+    return None

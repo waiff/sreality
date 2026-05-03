@@ -11,7 +11,7 @@ operational notes.
 ## Layout
 
 ```
-migrations/         numbered SQL migrations (run by hand in Supabase SQL editor)
+migrations/         numbered SQL migrations (applied via Supabase MCP after approval; tracked in this folder as the source of truth)
 scraper/            Python package: HTTP client, parser, DB writer, entrypoint
 tests/              pytest suite
 .github/workflows/  test.yml (per-push) and scrape.yml (daily cron)

@@ -32,7 +32,10 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "disposition",
     "locality",
     "district",
+    "locality_district_id",
+    "locality_region_id",
     "floor",
+    "total_floors",
     "has_balcony",
     "has_parking",
     "has_lift",
@@ -176,6 +179,9 @@ def record_images(
         return cur.rowcount or 0
 
 
+TOUCH_CHUNK_SIZE = 1000
+
+
 def touch_listings(
     conn: psycopg.Connection,
     sreality_ids: Iterable[int],
@@ -185,21 +191,29 @@ def touch_listings(
     Used when an index entry's price matches what is already stored, so we
     have evidence the listing is still on the market without paying for
     another detail fetch.
+
+    Chunked because Supabase's transaction pooler enforces a statement
+    timeout (~2 min) and a single UPDATE over the full ~13k-id list
+    blows past it.
     """
     ids = list(sreality_ids)
     if not ids:
         return 0
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE listings
-            SET last_seen_at = now(),
-                is_active = true
-            WHERE sreality_id = ANY(%s)
-            """,
-            (ids,),
-        )
-        return cur.rowcount or 0
+    total = 0
+    with conn.cursor() as cur:
+        for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
+            chunk = ids[start : start + TOUCH_CHUNK_SIZE]
+            cur.execute(
+                """
+                UPDATE listings
+                SET last_seen_at = now(),
+                    is_active = true
+                WHERE sreality_id = ANY(%s)
+                """,
+                (chunk,),
+            )
+            total += cur.rowcount or 0
+    return total
 
 
 def mark_inactive(
