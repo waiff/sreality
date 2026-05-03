@@ -160,6 +160,11 @@ service that exposes it (`api/`). They do not apply to the scraper.
    Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
+8. **API auth gated by `API_TOKEN`.** When the env var is set, every
+   endpoint except `/health` requires `Authorization: Bearer <token>`.
+   When unset (local development) the gate is a no-op. `/health` stays
+   open so Railway healthchecks keep working. The token is shared with
+   every caller; no per-user identity layer.
 
 ## Database access
 
