@@ -89,8 +89,21 @@ def post_estimate_yield(
         area_band_pct=body.area_band_pct,
         disposition_match=body.disposition_match,
         max_age_days=body.max_age_days,
+        active_only=body.active_only,
         floor_band=body.floor_band,
+        condition_match=body.condition_match,
+        building_type_match=body.building_type_match,
+        energy_rating_match=body.energy_rating_match,
+        has_balcony=body.has_balcony,
+        has_lift=body.has_lift,
+        has_parking=body.has_parking,
+        min_price_czk=body.min_price_czk,
+        max_price_czk=body.max_price_czk,
+        category_main=body.category_main,
+        category_type=body.category_type,
         locality_district_id=body.locality_district_id,
+        locality_region_id=body.locality_region_id,
+        include_unreliable=body.include_unreliable,
     )
     return estimate_yield(conn, target, filters, body.purchase_price_czk)
 
