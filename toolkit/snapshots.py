@@ -174,7 +174,17 @@ def _classify_pattern(
         if d != 0:
             diffs.append(d)
     if not diffs:
-        return "stable"
+        first = next(
+            (e["price_czk"] for e in trajectory if e["price_czk"] is not None),
+            None,
+        )
+        last = next(
+            (e["price_czk"] for e in reversed(trajectory) if e["price_czk"] is not None),
+            None,
+        )
+        if first is None or last is None or first == last:
+            return "stable"
+        return "rising" if first < last else "single_drop"
     all_down = all(d < 0 for d in diffs)
     all_up = all(d > 0 for d in diffs)
     if all_down:
