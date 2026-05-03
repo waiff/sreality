@@ -56,6 +56,10 @@ from toolkit.freshness import verify_listing_freshness  # noqa: E402
 from toolkit.neighborhoods import describe_neighborhood  # noqa: E402
 from toolkit.outliers import find_distribution_outliers  # noqa: E402
 from toolkit.snapshots import compare_snapshots  # noqa: E402
+from toolkit.velocity import (  # noqa: E402
+    compute_listing_velocity,
+    compute_market_velocity,
+)
 
 __all__ = [
     "ComparableFilters",
@@ -64,6 +68,8 @@ __all__ = [
     "ToolResult",
     "analyze_distribution",
     "compare_snapshots",
+    "compute_listing_velocity",
+    "compute_market_velocity",
     "describe_neighborhood",
     "find_comparables",
     "find_distribution_outliers",
