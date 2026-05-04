@@ -1,4 +1,9 @@
--- 013_browse_stats_inactive_only.sql
+-- 014_browse_stats_inactive_only.sql
+--
+-- (Originally drafted as 013; renumbered after a parallel U1a session
+-- took the 013 slot for health_summary.sql in the same window. The DDL
+-- below was applied to the live DB on 2026-05-04 via the Supabase MCP
+-- before this rename.)
 --
 -- Add `inactive_only_filter` to browse_stats so the Browse Stats tab can
 -- mirror the new tri-state status pill in the UI (active / inactive / any).

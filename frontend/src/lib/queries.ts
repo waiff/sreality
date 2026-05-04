@@ -182,6 +182,7 @@ export const fetchBrowseStats = async (
     area_min_filter:         f.areaMin,
     area_max_filter:         f.areaMax,
     active_only_filter:      f.status === 'active',
+    inactive_only_filter:    f.status === 'inactive',
     seen_within_days_filter: seenDays,
     has_balcony_filter:      triToBool(f.hasBalcony),
     has_lift_filter:         triToBool(f.hasLift),
