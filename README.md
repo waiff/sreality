@@ -34,8 +34,10 @@ tests/              pytest suite
   gated via `API_TOKEN`.
 - Browser UI (`frontend/`) reads directly from the `*_public` views with
   the Supabase anon key. Four pages: Browse (filters + map / table /
-  stats), Listing detail (with snapshot timeline), Region (district or
-  radius aggregates), Health (scraper-health dashboard).
+  stats), Listing detail (with snapshot timeline), Region (Mapy.cz-powered
+  location search at multiple scales — from kraj to street address — with
+  per-disposition price-per-m² box plots), Health (scraper-health
+  dashboard).
 
 ## Status
 
@@ -56,6 +58,7 @@ tests/              pytest suite
 - [x] Estimation runs persisted to `estimation_runs` table; surfaced via `/estimations` endpoints (POST/GET-by-id/list)
 - [x] UI foundation: `*_public` read views with `anon`-role grants
 - [x] **U1a database browser**: Browse / Listing / Region / Health pages; migrations 011–014 (`browse_stats`, `region_stats`, `health_summary`); deployed to Railway as a second service
+- [x] **browse-2 region search + box plots**: Mapy.cz suggest / resolve proxy, single search box at multiple scales (kraj → street), per-disposition price-per-m² box plots replacing the summary table (migration 021)
 
 See [`ROADMAP.md`](./ROADMAP.md) for the long-term plan.
 
