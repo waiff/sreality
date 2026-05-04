@@ -101,11 +101,11 @@ as $$
     'total_active',          (select count(*)::int from active_only),
     'total_ever',            (select count(*)::int from filtered),
     'last_new_first_seen',   (select max(first_seen_at) from filtered),
-    'price',                 (select case when count(*) > 0
+    'price',                 (select case when p50 is not null
                                           then jsonb_build_object('p25', p25, 'p50', p50, 'p75', p75)
                                           else null end
                               from price_pct),
-    'ppm2',                  (select case when count(*) > 0
+    'ppm2',                  (select case when p50 is not null
                                           then jsonb_build_object('p25', p25, 'p50', p50, 'p75', p75)
                                           else null end
                               from ppm2_pct),
