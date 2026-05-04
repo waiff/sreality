@@ -4,37 +4,45 @@ Used by the source-kind dispatcher when a non-sreality listing's HTML
 gives a locality string but no coordinates. Uses Mapy.cz over Google /
 OSM for first-party Czech address coverage.
 
-# Assumed schema (NEEDS LIVE CONFIRMATION)
-
-The api.mapy.com developer portal blocks server-side fetches from this
-sandbox, so the response shape below is reconstructed from public
-references. The first call to `geocode()` against a real key will
-either match this shape or raise GeocodingError("malformed response").
-Run `python -m scraper.geocoding "Václavské náměstí 1, Praha 1"` to
-verify; the helper prints the parsed result and the raw response.
+# Schema (confirmed against a live api.mapy.com response)
 
 Endpoint  : GET https://api.mapy.com/v1/geocode
 Auth      : apikey query param
 Params    : query (str, required), apikey, lang ("cs" default), limit (int, default 5)
+
 Response  : {
               "items": [
                 {
-                  "name":    "Václavské náměstí",
-                  "label":   "Václavské náměstí, 110 00 Praha 1",
-                  "position": {"lon": 14.4283, "lat": 50.0810},
+                  "name":     "Václavské náměstí 846/1",
+                  "label":    "Adresa "                       <- result-CLASS, not the address
+                  "location": "Václavské náměstí 846/1, ...", <- the actual human address
+                  "position": {"lon": 14.42403, "lat": 50.08418},
+                  "bbox":     [west, south, east, north],
                   "type":     "regional.address" |
                               "regional.street" |
                               "regional.municipality_part" |
                               "regional.municipality" |
                               "regional.region" |
-                              "poi",
+                              "regional.country",
                   "regionalStructure": [...],
-                  "zip":      "110 00"
+                  "zip":      "110 00"  (only on address-type)
                 },
                 ...
               ],
-              "locality": "..."
+              "locality": []
             }
+
+Two important behaviours from real responses:
+
+  1. `label` is the result-category tag (e.g. "Adresa ", "Náměstí "),
+     NOT the human-readable address. Use `location` for the address.
+
+  2. Items are ranked by Mapy.cz's relevance algorithm, not by
+     specificity. A query for "Václavské náměstí 1" returns the whole
+     street first and the exact building second. For an estimation we
+     want the most-specific coordinates available, so we scan the
+     items and pick the highest-specificity type rather than blindly
+     taking items[0].
 
 If Mapy.cz returns any other shape we degrade gracefully — every field
 read goes through `.get(...)` and missing fields produce confidence
@@ -64,12 +72,22 @@ RETRYABLE_STATUS: frozenset[int] = frozenset(
     {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 )
 
-_HIGH_TYPES = frozenset({"regional.address"})
-_MEDIUM_TYPES = frozenset({
-    "regional.street",
-    "regional.municipality_part",
-    "regional.municipality",
-})
+# Specificity ordering — higher score = more precise coordinates.
+# regional.address is the only "high" tier because everything else
+# returns a centroid that may be ~100m (street) to ~1km+ (city) off
+# the actual building. For an estimation that's used to find spatial
+# comparables, low-specificity geocodes are basically useless and
+# should surface as low-confidence so the caller can decide.
+_TYPE_SPECIFICITY: dict[str, int] = {
+    "regional.address": 100,
+    "regional.street": 60,
+    "regional.municipality_part": 30,
+    "regional.municipality": 20,
+    "regional.region": 10,
+    "regional.country": 0,
+}
+_HIGH_MIN_SPECIFICITY = 100
+_MEDIUM_MIN_SPECIFICITY = 60
 
 
 class GeocodingError(RuntimeError):
@@ -81,8 +99,9 @@ class GeocodeResult:
     lat: float
     lng: float
     confidence: GeocodeConfidence
-    matched_label: str
-    matched_type: str
+    matched_address: str   # human-readable address (Mapy's `location`)
+    matched_type: str      # the Mapy `type` enum value
+    bbox: tuple[float, float, float, float] | None  # (west, south, east, north)
     raw: dict[str, Any]
 
 
@@ -163,9 +182,9 @@ def _payload_to_result(payload: dict[str, Any]) -> GeocodeResult:
     items = payload.get("items") if isinstance(payload, dict) else None
     if not isinstance(items, list) or not items:
         raise GeocodingError("Mapy.cz returned no items")
-    item = items[0]
-    if not isinstance(item, dict):
-        raise GeocodingError("Mapy.cz returned malformed item")
+    item = _pick_most_specific_item(items)
+    if item is None:
+        raise GeocodingError("Mapy.cz returned no usable items")
     position = item.get("position") or {}
     lat = position.get("lat")
     lng = position.get("lon")
@@ -173,23 +192,59 @@ def _payload_to_result(payload: dict[str, Any]) -> GeocodeResult:
         raise GeocodingError("Mapy.cz item missing lat/lon")
     matched_type = str(item.get("type") or "")
     confidence = _confidence_for_type(matched_type)
-    label = str(item.get("label") or item.get("name") or "")
+    address = str(item.get("location") or item.get("name") or "")
+    bbox = _parse_bbox(item.get("bbox"))
     return GeocodeResult(
         lat=float(lat),
         lng=float(lng),
         confidence=confidence,
-        matched_label=label,
+        matched_address=address,
         matched_type=matched_type,
+        bbox=bbox,
         raw=item,
     )
 
 
+def _pick_most_specific_item(
+    items: list[Any],
+) -> dict[str, Any] | None:
+    """Pick the item with the highest type-specificity, breaking ties by API order.
+
+    Mapy.cz ranks by relevance, not specificity — a query for
+    "Václavské náměstí 1" returns the whole street first and the exact
+    building second. For an estimation we want the building.
+    """
+    best: tuple[int, int, dict[str, Any]] | None = None
+    for idx, raw in enumerate(items):
+        if not isinstance(raw, dict):
+            continue
+        if not isinstance(raw.get("position"), dict):
+            continue
+        score = _TYPE_SPECIFICITY.get(str(raw.get("type") or ""), 0)
+        # Tie-break: lower idx wins (Mapy's own ranking).
+        candidate = (score, -idx, raw)
+        if best is None or candidate > best:
+            best = candidate
+    return best[2] if best is not None else None
+
+
 def _confidence_for_type(matched_type: str) -> GeocodeConfidence:
-    if matched_type in _HIGH_TYPES:
+    score = _TYPE_SPECIFICITY.get(matched_type, 0)
+    if score >= _HIGH_MIN_SPECIFICITY:
         return "high"
-    if matched_type in _MEDIUM_TYPES:
+    if score >= _MEDIUM_MIN_SPECIFICITY:
         return "medium"
     return "low"
+
+
+def _parse_bbox(
+    raw: Any,
+) -> tuple[float, float, float, float] | None:
+    if not isinstance(raw, list) or len(raw) != 4:
+        return None
+    if not all(isinstance(x, (int, float)) for x in raw):
+        return None
+    return (float(raw[0]), float(raw[1]), float(raw[2]), float(raw[3]))
 
 
 # --- live verification helper ---------------------------------------------
@@ -214,7 +269,8 @@ def _cli(argv: list[str] | None = None) -> int:
         "lng": result.lng,
         "confidence": result.confidence,
         "matched_type": result.matched_type,
-        "matched_label": result.matched_label,
+        "matched_address": result.matched_address,
+        "bbox": list(result.bbox) if result.bbox else None,
         "raw_item_keys": sorted(result.raw.keys()),
     }, ensure_ascii=False, indent=2))
     return 0

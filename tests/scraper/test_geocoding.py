@@ -45,57 +45,131 @@ class _FakeSession:
         return nxt
 
 
+# Realistic Mapy.cz payload modelled on a confirmed live response for
+# "Václavské náměstí 1, Praha 1": Mapy returns the street centroid first
+# (regional.street, less specific) and the exact building second
+# (regional.address, more specific). Our picker should choose the latter.
+_LIVE_LIKE_PAYLOAD = {
+    "items": [
+        {
+            "name": "Václavské náměstí",
+            "label": "Náměstí ",
+            "location": "Václavské náměstí, Praha, Česko",
+            "position": {"lon": 14.42667, "lat": 50.08149},
+            "bbox": [14.4234, 50.0792, 14.4308, 50.0841],
+            "type": "regional.street",
+            "regionalStructure": [],
+        },
+        {
+            "name": "Václavské náměstí 846/1",
+            "label": "Adresa ",
+            "location": "Václavské náměstí 846/1, Praha 1 - Nové Město, Česko",
+            "position": {"lon": 14.42403, "lat": 50.08418},
+            "bbox": [14.4212, 50.0831, 14.4268, 50.0853],
+            "type": "regional.address",
+            "regionalStructure": [],
+            "zip": "110 00",
+        },
+    ],
+    "locality": [],
+}
+
+
 # ----------------------------------------------------------------------
-# Happy path: address-quality match -> high
+# Picker selects the most-specific item, not items[0]
 # ----------------------------------------------------------------------
 
-def test_geocode_high_confidence_address(monkeypatch):
+def test_geocode_picks_address_over_street(monkeypatch):
     monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
-    sess = _FakeSession([_FakeResponse(body={
-        "items": [
-            {
-                "name": "Václavské náměstí 1",
-                "label": "Václavské náměstí 1, 110 00 Praha 1",
-                "position": {"lon": 14.4283, "lat": 50.0810},
-                "type": "regional.address",
-                "regionalStructure": [],
-                "zip": "110 00",
-            },
-        ],
-    })])
+    sess = _FakeSession([_FakeResponse(body=_LIVE_LIKE_PAYLOAD)])
     result = geocoding.geocode("Václavské náměstí 1, Praha 1", session=sess)
-    assert result.lat == pytest.approx(50.0810)
-    assert result.lng == pytest.approx(14.4283)
+    # Picked item 1 (regional.address), not item 0 (regional.street).
+    assert result.lat == pytest.approx(50.08418)
+    assert result.lng == pytest.approx(14.42403)
     assert result.confidence == "high"
     assert result.matched_type == "regional.address"
-    assert "Praha" in result.matched_label
-    # apikey passed as query param.
+    assert "846/1" in result.matched_address
+    assert result.bbox == (14.4212, 50.0831, 14.4268, 50.0853)
+    # apikey carried as query param.
     assert sess.calls[0]["params"]["apikey"] == "test"
     assert sess.calls[0]["params"]["query"] == "Václavské náměstí 1, Praha 1"
 
 
-def test_geocode_street_match_is_medium(monkeypatch):
+def test_only_street_match_is_medium(monkeypatch):
     monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
     sess = _FakeSession([_FakeResponse(body={
         "items": [{
-            "label": "Krátká, Praha 5",
+            "location": "Krátká, Praha 5, Česko",
             "position": {"lon": 14.0, "lat": 50.0},
             "type": "regional.street",
         }],
     })])
-    assert geocoding.geocode("Krátká, Praha 5", session=sess).confidence == "medium"
+    result = geocoding.geocode("Krátká, Praha 5", session=sess)
+    assert result.confidence == "medium"
+    assert result.matched_address.startswith("Krátká")
 
 
-def test_geocode_unknown_type_is_low(monkeypatch):
+def test_municipality_match_is_low(monkeypatch):
+    """A whole-city centroid is too imprecise for an estimation; mark low."""
     monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
     sess = _FakeSession([_FakeResponse(body={
         "items": [{
-            "label": "X",
-            "position": {"lon": 14.0, "lat": 50.0},
-            "type": "poi",
+            "location": "Praha, Česko",
+            "position": {"lon": 14.43, "lat": 50.08},
+            "type": "regional.municipality",
         }],
     })])
-    assert geocoding.geocode("X", session=sess).confidence == "low"
+    assert geocoding.geocode("Praha", session=sess).confidence == "low"
+
+
+def test_municipality_part_match_is_low(monkeypatch):
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
+    sess = _FakeSession([_FakeResponse(body={
+        "items": [{
+            "location": "Nové Město, Praha, Česko",
+            "position": {"lon": 14.43, "lat": 50.08},
+            "type": "regional.municipality_part",
+        }],
+    })])
+    assert geocoding.geocode("Nové Město", session=sess).confidence == "low"
+
+
+def test_picker_skips_items_missing_position(monkeypatch):
+    """A higher-specificity type is ignored if it has no position."""
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
+    sess = _FakeSession([_FakeResponse(body={
+        "items": [
+            {"type": "regional.address", "name": "broken"},
+            {
+                "location": "Praha 5, Česko",
+                "position": {"lon": 14.0, "lat": 50.0},
+                "type": "regional.street",
+            },
+        ],
+    })])
+    result = geocoding.geocode("X", session=sess)
+    assert result.matched_type == "regional.street"
+    assert result.confidence == "medium"
+
+
+def test_picker_breaks_ties_by_api_order(monkeypatch):
+    """Two items of the same type → take the first (Mapy's own ranking)."""
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
+    sess = _FakeSession([_FakeResponse(body={
+        "items": [
+            {
+                "location": "First",
+                "position": {"lon": 14.0, "lat": 50.0},
+                "type": "regional.street",
+            },
+            {
+                "location": "Second",
+                "position": {"lon": 15.0, "lat": 51.0},
+                "type": "regional.street",
+            },
+        ],
+    })])
+    assert geocoding.geocode("X", session=sess).matched_address == "First"
 
 
 # ----------------------------------------------------------------------
@@ -120,12 +194,15 @@ def test_no_items_in_response(monkeypatch):
         geocoding.geocode("nowhere", session=sess)
 
 
-def test_missing_position_raises(monkeypatch):
+def test_all_items_missing_position(monkeypatch):
     monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
     sess = _FakeSession([_FakeResponse(body={
-        "items": [{"label": "X", "type": "regional.address"}],
+        "items": [
+            {"type": "regional.address", "name": "a"},
+            {"type": "regional.street", "name": "b"},
+        ],
     })])
-    with pytest.raises(geocoding.GeocodingError, match="lat/lon"):
+    with pytest.raises(geocoding.GeocodingError, match="no usable"):
         geocoding.geocode("X", session=sess)
 
 
@@ -136,14 +213,14 @@ def test_retries_on_5xx_then_succeeds(monkeypatch):
         _FakeResponse(status_code=503),
         _FakeResponse(body={
             "items": [{
-                "label": "Praha",
+                "location": "Praha, Česko",
                 "position": {"lat": 50.08, "lon": 14.43},
                 "type": "regional.municipality",
             }],
         }),
     ])
     result = geocoding.geocode("Praha", session=sess)
-    assert result.confidence == "medium"
+    assert result.confidence == "low"
     assert len(sess.calls) == 2
 
 
@@ -177,3 +254,15 @@ def test_malformed_json_raises_geocoding_error(monkeypatch):
     ])
     with pytest.raises(geocoding.GeocodingError):
         geocoding.geocode("X", session=sess, max_retries=2)
+
+
+def test_bbox_optional_when_absent(monkeypatch):
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "test")
+    sess = _FakeSession([_FakeResponse(body={
+        "items": [{
+            "location": "X",
+            "position": {"lon": 14.0, "lat": 50.0},
+            "type": "regional.address",
+        }],
+    })])
+    assert geocoding.geocode("X", session=sess).bbox is None
