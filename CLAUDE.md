@@ -10,6 +10,43 @@ Postgres database (Supabase, Frankfurt region, PostGIS enabled) with full
 listing history. Downstream goals (out of scope until explicitly opened):
 rental-yield calculations, ClickUp integration, frontend.
 
+## Territories
+
+The repo is split into two top-level territories with deliberately
+different rules. Identify which one a task belongs to before you start.
+
+**Backend territory** (`scraper/`, `toolkit/`, `api/`, `migrations/`,
+`tests/`, `.github/workflows/`):
+- Python 3.12, stdlib-first, `psycopg` direct to Postgres.
+- Service-role database access. Reads and writes anything.
+- Runs in GitHub Actions (scraper) or Railway (FastAPI).
+- All rules below apply: append-only migrations, snapshot-on-change,
+  no deletes, no `supabase-py`, etc.
+
+**Frontend territory** (`frontend/`):
+- Browser code. Will most likely be Vite + React + TypeScript with the
+  `supabase-js` client. The folder is a placeholder; **no UI ships
+  until a future session explicitly opens that work.**
+- Connects with the **publishable (`anon`) key only**. Never embed the
+  service-role key, the `SUPABASE_DB_URL`, or any other secret in
+  browser-shipped code.
+- Reads exclusively from the `*_public` views created in
+  `migrations/008_ui_read_policies.sql`
+  (`listings_public`, `listing_snapshots_public`,
+  `listing_freshness_checks_public`, `listing_fetch_failures_public`).
+  Base tables are RLS-blocked to `anon`; do not grant `anon` direct
+  access to them.
+- **No write path from the browser.** Any UI action that needs a
+  write goes through the bearer-token-gated FastAPI service, not
+  direct Postgres.
+- Backend rules below (psycopg, no `supabase-py`, stdlib-first, etc.)
+  do not apply inside `frontend/`. The frontend will get its own
+  conventions when work starts.
+
+When in doubt about which territory a task belongs to, ask the
+operator. Don't import frontend deps into the Python tree or vice
+versa.
+
 ## Operator profile
 
 The owner of this repo is non-technical and works **only** through Claude Code

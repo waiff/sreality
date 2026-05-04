@@ -15,6 +15,7 @@ migrations/         numbered SQL migrations (applied via Supabase MCP after appr
 scraper/            Python package: HTTP client, parser, DB writer, entrypoint
 toolkit/            pure-function analytical tools over the schema
 api/                FastAPI service exposing the toolkit (deployed to Railway)
+frontend/           reserved for the future browser UI (placeholder; see frontend/README.md)
 tests/              pytest suite
 .github/workflows/  test.yml (per-push) and scrape.yml (daily cron)
 ```
@@ -33,7 +34,7 @@ tests/              pytest suite
 
 ## Status
 
-- [x] Schema applied (migrations 001–006)
+- [x] Schema applied (migrations 001–008)
 - [x] Scraper code
 - [x] CI workflows (test on push, daily cron)
 - [x] Image mirroring to R2 live
@@ -47,5 +48,6 @@ tests/              pytest suite
 - [x] `find_distribution_outliers` (outlier detection with cross-referenced reasons)
 - [x] `compute_market_velocity` (TOM stats and trend for a filtered cohort)
 - [x] `compute_listing_velocity` (per-listing TOM percentile and fast/typical/slow/stuck classification)
+- [x] UI foundation: `*_public` read views with `anon`-role grants; `frontend/` territory placeholder (no UI ships yet)
 
 See [`ROADMAP.md`](./ROADMAP.md) for the long-term plan.
