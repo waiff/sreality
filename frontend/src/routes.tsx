@@ -4,6 +4,7 @@ import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
 import Region from './pages/Region';
 import Health from './pages/Health';
+import Estimate from './pages/Estimate';
 
 export const routes: RouteObject[] = [
   {
@@ -16,6 +17,7 @@ export const routes: RouteObject[] = [
       { path: 'listing/:sreality_id', element: <ListingDetail /> },
       { path: 'region', element: <Region /> },
       { path: 'health', element: <Health /> },
+      { path: 'estimate', element: <Estimate /> },
       { path: '*', element: <NotFound /> },
     ],
   },

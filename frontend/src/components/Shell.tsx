@@ -2,10 +2,11 @@ import { NavLink, Outlet } from 'react-router-dom';
 import type { ReactNode } from 'react';
 
 const navLinks: ReadonlyArray<{ to: string; label: string }> = [
-  { to: '/browse',  label: 'Browse' },
-  { to: '/listing', label: 'Listing' },
-  { to: '/region',  label: 'Region' },
-  { to: '/health',  label: 'Health' },
+  { to: '/browse',   label: 'Browse' },
+  { to: '/listing',  label: 'Listing' },
+  { to: '/region',   label: 'Region' },
+  { to: '/health',   label: 'Health' },
+  { to: '/estimate', label: 'Estimate' },
 ];
 
 export default function Shell() {

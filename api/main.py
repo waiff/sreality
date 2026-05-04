@@ -199,6 +199,67 @@ def post_estimations(
     return create_estimation_run(conn, client, body)
 
 
+@app.get("/estimations/preview")
+def get_estimation_preview(
+    url: str = Query(..., description="A sreality.cz detail URL"),
+    conn: Any = Depends(deps.get_db_conn),
+    client: Any = Depends(deps.get_sreality_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Scrape a sreality URL and return its parsed spec without persisting.
+
+    Read-only. Lets the UI present the scraped fields for review/edit
+    before the user commits to POST /estimations.
+    """
+    import requests
+
+    from scraper.url_parser import parse_sreality_url
+
+    try:
+        parsed = parse_sreality_url(url, client=client, conn=conn)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except requests.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not fetch listing from sreality.cz: {exc}",
+        ) from exc
+
+    spec = parsed["spec"]
+    return {
+        "url":         parsed["source_url"],
+        "sreality_id": int(parsed["sreality_id"]),
+        "in_database": bool(parsed["in_database"]),
+        "fetched_at":  parsed["fetched_at"],
+        "spec": {
+            "lat":         spec.get("lat"),
+            "lng":         spec.get("lon"),
+            "area_m2":     spec.get("area_m2"),
+            "disposition": spec.get("disposition"),
+            "floor":       spec.get("floor"),
+            "exclude_ids": [],
+        },
+        "listing": {
+            "price_czk":            spec.get("price_czk"),
+            "price_unit":           spec.get("price_unit"),
+            "category_main":        spec.get("category_main"),
+            "category_type":        spec.get("category_type"),
+            "locality":             spec.get("locality"),
+            "district":             spec.get("district"),
+            "locality_district_id": spec.get("locality_district_id"),
+            "locality_region_id":   spec.get("locality_region_id"),
+            "total_floors":         spec.get("total_floors"),
+            "has_balcony":          spec.get("has_balcony"),
+            "has_lift":             spec.get("has_lift"),
+            "has_parking":          spec.get("has_parking"),
+            "building_type":        spec.get("building_type"),
+            "condition":            spec.get("condition"),
+            "energy_rating":        spec.get("energy_rating"),
+            "image_count":          len(parsed.get("images") or []),
+        },
+    }
+
+
 @app.get("/estimations/{run_id}")
 def get_estimation(
     run_id: int,
