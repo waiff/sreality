@@ -1,19 +1,27 @@
-import { useEffect, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import UrlScrapeStep, {
   type ResolvedInput,
   listingToResolved,
 } from '@/components/UrlScrapeStep';
+import EstimateForm, {
+  type EstimateFormState,
+  buildInitialFormState,
+} from '@/components/EstimateForm';
 import { fetchListingById } from '@/lib/queries';
 import {
   fmtArea,
   fmtCzk,
+  fmtPricePerM2,
 } from '@/lib/format';
+import type { PreviewListing } from '@/lib/types';
+
+const RegionMap = lazy(() => import('@/components/region/RegionMap'));
 
 type Stage =
   | { kind: 'input' }
-  | { kind: 'editing'; resolved: ResolvedInput };
+  | { kind: 'editing'; resolved: ResolvedInput; form: EstimateFormState };
 
 export default function Estimate() {
   const [params, setParams] = useSearchParams();
@@ -39,11 +47,19 @@ export default function Estimate() {
     if (!listing) return;
     const resolved = listingToResolved(listing);
     if (resolved == null) return;
-    setStage({ kind: 'editing', resolved });
+    enterEditing(resolved);
     const next = new URLSearchParams(params);
     next.delete('from_listing');
     setParams(next, { replace: true });
   }, [fromListingId, fromListingQuery.data, stage.kind, params, setParams]);
+
+  const enterEditing = (resolved: ResolvedInput) => {
+    setStage({
+      kind: 'editing',
+      resolved,
+      form: buildInitialFormState(resolved.spec, resolved.listing),
+    });
+  };
 
   if (stage.kind === 'input') {
     if (fromListingId != null && fromListingQuery.isLoading) {
@@ -69,45 +85,36 @@ export default function Estimate() {
         />
       );
     }
-    return (
-      <UrlScrapeStep
-        onResolved={(resolved) => setStage({ kind: 'editing', resolved })}
-      />
-    );
+    return <UrlScrapeStep onResolved={enterEditing} />;
   }
 
   return (
-    <Step2Placeholder
+    <EditingStage
       resolved={stage.resolved}
+      form={stage.form}
+      onForm={(form) => setStage({ ...stage, form })}
       onBack={() => setStage({ kind: 'input' })}
     />
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/* Step 2 placeholder — the real editable form lands in the next checkpoint.  */
-/* For now this lets the user click through and verify scraping works.        */
+/* Editing stage — two-column layout: form (left) + live target preview.      */
 /* -------------------------------------------------------------------------- */
 
-function Step2Placeholder({
+function EditingStage({
   resolved,
+  form,
+  onForm,
   onBack,
 }: {
   resolved: ResolvedInput;
+  form: EstimateFormState;
+  onForm: (next: EstimateFormState) => void;
   onBack: () => void;
 }) {
-  const { spec, listing, origin } = resolved;
-  const summary =
-    [
-      spec.disposition,
-      spec.area_m2 != null ? fmtArea(spec.area_m2) : null,
-      listing.district,
-    ]
-      .filter(Boolean)
-      .join(' · ') || '—';
-
   return (
-    <div className="px-6 py-12 max-w-3xl mx-auto">
+    <div className="px-6 py-8 max-w-6xl mx-auto">
       <button
         type="button"
         onClick={onBack}
@@ -127,36 +134,28 @@ function Step2Placeholder({
         >
           Review specs
         </h1>
-        <p className="mt-2 text-sm text-[var(--color-ink-2)]">
-          {summary}
-          {listing.price_czk != null && (
-            <>
-              <span className="mx-2 text-[var(--color-ink-4)]">·</span>
-              <span className="font-mono tabular-nums">{fmtCzk(listing.price_czk)}</span>
-            </>
-          )}
-        </p>
+        <SourceLine origin={resolved.origin} />
       </header>
 
-      <div className="my-7 h-px bg-[var(--color-rule)]" />
+      <div className="my-6 h-px bg-[var(--color-rule)]" />
 
-      <SourceLine origin={origin} />
-
-      <div className="my-7 h-px bg-[var(--color-rule)]" />
-
-      <div>
-        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-          Parsed spec (preview)
-        </p>
-        <pre className="mt-3 px-3 py-3 text-[0.75rem] font-mono leading-relaxed bg-[var(--color-inset)] border border-[var(--color-rule)] rounded-[var(--radius-md)] overflow-x-auto text-[var(--color-ink-2)]">
-{JSON.stringify({ spec, listing }, null, 2)}
-        </pre>
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,_1fr)_360px] gap-10">
+        <EstimateForm
+          state={form}
+          onChange={onForm}
+          onSubmit={() => {
+            // Wired up in the next step (Part B submit + redirect).
+            // eslint-disable-next-line no-console
+            console.log('CreateEstimationIn payload (preview):', form);
+          }}
+          submitting={false}
+        />
+        <TargetPreview
+          form={form}
+          listing={resolved.listing}
+          onMapChange={({ lat, lng }) => onForm({ ...form, lat, lng })}
+        />
       </div>
-
-      <p className="mt-6 text-[0.78rem] text-[var(--color-ink-3)]">
-        The editable specs form and the Estimate button arrive in the next
-        step. For now: confirm step 1 captured the right data.
-      </p>
     </div>
   );
 }
@@ -164,15 +163,13 @@ function Step2Placeholder({
 function SourceLine({ origin }: { origin: ResolvedInput['origin'] }) {
   if (origin.kind === 'url') {
     return (
-      <div className="flex items-baseline gap-3 flex-wrap">
-        <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-          Source
-        </span>
+      <p className="mt-2 text-sm text-[var(--color-ink-2)] flex items-baseline gap-2 flex-wrap">
+        <span>From</span>
         <a
           href={origin.url}
           target="_blank"
           rel="noopener noreferrer"
-          className="text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] underline-offset-2 hover:underline truncate max-w-full"
+          className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)] underline-offset-2 hover:underline truncate max-w-[60ch]"
         >
           {origin.url}
         </a>
@@ -184,18 +181,120 @@ function SourceLine({ origin }: { origin: ResolvedInput['origin'] }) {
             already scraped
           </span>
         )}
-      </div>
+      </p>
     );
   }
   return (
-    <div className="flex items-baseline gap-3">
-      <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-        Source
-      </span>
-      <span className="text-sm text-[var(--color-ink-2)]">
-        Picked from database — id{' '}
-        <span className="font-mono tabular-nums">{origin.sreality_id}</span>
-      </span>
+    <p className="mt-2 text-sm text-[var(--color-ink-2)]">
+      Picked from database — id{' '}
+      <span className="font-mono tabular-nums">{origin.sreality_id}</span>
+    </p>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Right column: live preview (map + key facts)                               */
+/* -------------------------------------------------------------------------- */
+
+function TargetPreview({
+  form,
+  listing,
+  onMapChange,
+}: {
+  form: EstimateFormState;
+  listing: PreviewListing;
+  onMapChange: (next: { lat: number; lng: number }) => void;
+}) {
+  const center = useMemo(() => {
+    if (form.lat == null || form.lng == null) return null;
+    return { lat: form.lat, lng: form.lng };
+  }, [form.lat, form.lng]);
+
+  return (
+    <aside className="space-y-5 lg:sticky lg:top-20 self-start">
+      <div>
+        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          Target
+        </p>
+        <div className="mt-2">
+          {center ? (
+            <Suspense
+              fallback={
+                <div className="h-[280px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+              }
+            >
+              <RegionMap
+                center={center}
+                radiusM={form.radius_m}
+                onCenterChange={onMapChange}
+              />
+            </Suspense>
+          ) : (
+            <div className="h-[280px] rounded-[var(--radius-md)] border border-dashed border-[var(--color-rule)] flex items-center justify-center text-sm text-[var(--color-ink-3)]">
+              No coordinates set
+            </div>
+          )}
+        </div>
+        <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+          Copper circle = comparables search radius
+          ({form.radius_m.toLocaleString('cs-CZ')} m).
+        </p>
+      </div>
+
+      <div>
+        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          Listing facts
+        </p>
+        <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3">
+          <KV label="Asking">
+            <span className="font-mono tabular-nums">
+              {fmtCzk(listing.price_czk)}
+            </span>
+          </KV>
+          <KV label="Per m²">
+            <span className="font-mono tabular-nums">
+              {fmtPricePerM2(listing.price_czk, form.area_m2)}
+            </span>
+          </KV>
+          <KV label="Disposition">
+            <span className="font-mono tabular-nums">
+              {form.disposition ?? '—'}
+            </span>
+          </KV>
+          <KV label="Area">
+            <span className="font-mono tabular-nums">
+              {fmtArea(form.area_m2)}
+            </span>
+          </KV>
+          <KV label="District" colSpan={2}>
+            {listing.district ?? '—'}
+          </KV>
+          {listing.locality && listing.locality !== listing.district && (
+            <KV label="Locality" colSpan={2}>
+              <span className="text-[var(--color-ink-2)] text-[0.85rem]">
+                {listing.locality}
+              </span>
+            </KV>
+          )}
+        </dl>
+      </div>
+    </aside>
+  );
+}
+
+function KV({
+  label, children, colSpan = 1,
+}: {
+  label: string;
+  children: React.ReactNode;
+  colSpan?: 1 | 2;
+}) {
+  return (
+    <div className={colSpan === 2 ? 'col-span-2' : undefined}>
+      <dt className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        {label}
+      </dt>
+      <dd className="mt-0.5 text-sm text-[var(--color-ink)]">{children}</dd>
     </div>
   );
 }
