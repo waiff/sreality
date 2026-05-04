@@ -10,6 +10,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchDistrictFacets } from '@/lib/queries';
 import {
   type ListingFilters,
+  type ListingStatus,
   type SeenWithin,
   type TriState,
   PRICE_BOUNDS,
@@ -78,9 +79,9 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
         />
 
         <ActiveBlock
-          activeOnly={filters.activeOnly}
+          status={filters.status}
           seenWithin={filters.seenWithin}
-          onActive={(v) => set('activeOnly', v)}
+          onStatus={(v) => set('status', v)}
           onSeen={(v) => set('seenWithin', v)}
         />
 
@@ -390,28 +391,46 @@ const SEEN_OPTS: ReadonlyArray<{ value: SeenWithin; label: string }> = [
   { value: 'any', label: 'any'   },
 ];
 
+const STATUS_OPTS: ReadonlyArray<{ value: ListingStatus; label: string }> = [
+  { value: 'active',   label: 'Active'   },
+  { value: 'inactive', label: 'Inactive' },
+  { value: 'any',      label: 'Any'      },
+];
+
 function ActiveBlock({
-  activeOnly,
+  status,
   seenWithin,
-  onActive,
+  onStatus,
   onSeen,
 }: {
-  activeOnly: boolean;
+  status: ListingStatus;
   seenWithin: SeenWithin;
-  onActive: (v: boolean) => void;
+  onStatus: (v: ListingStatus) => void;
   onSeen: (v: SeenWithin) => void;
 }) {
   return (
     <Section label="Status">
-      <label className="flex items-center gap-2.5 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={activeOnly}
-          onChange={(e) => onActive(e.target.checked)}
-          className="w-3.5 h-3.5 accent-[var(--color-copper)] cursor-pointer"
-        />
-        <span className="text-sm text-[var(--color-ink-2)]">Active only</span>
-      </label>
+      <div className="grid grid-cols-3 gap-1">
+        {STATUS_OPTS.map((opt) => {
+          const on = status === opt.value;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => onStatus(opt.value)}
+              className={[
+                'px-2 py-1.5 text-xs rounded-[var(--radius-sm)] border transition-colors',
+                on
+                  ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]'
+                  : 'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)]',
+              ].join(' ')}
+              aria-pressed={on}
+            >
+              {opt.label}
+            </button>
+          );
+        })}
+      </div>
       <p className="mt-3 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
         Last seen within
       </p>

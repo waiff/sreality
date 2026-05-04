@@ -2,6 +2,7 @@ import type { Disposition } from './types';
 
 export type TriState = 'any' | 'yes' | 'no';
 export type SeenWithin = '1d' | '7d' | '30d' | 'any';
+export type ListingStatus = 'active' | 'inactive' | 'any';
 
 export interface ListingFilters {
   districts: string[];
@@ -10,7 +11,7 @@ export interface ListingFilters {
   priceMax: number | null;
   areaMin: number | null;
   areaMax: number | null;
-  activeOnly: boolean;
+  status: ListingStatus;
   seenWithin: SeenWithin;
   hasBalcony: TriState;
   hasLift: TriState;
@@ -24,7 +25,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   priceMax: null,
   areaMin: null,
   areaMax: null,
-  activeOnly: true,
+  status: 'active',
   seenWithin: '7d',
   hasBalcony: 'any',
   hasLift: 'any',
@@ -42,6 +43,7 @@ const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
 
 const SEEN_VALUES: ReadonlyArray<SeenWithin> = ['1d', '7d', '30d', 'any'];
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
+const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
 
 const splitCsv = (s: string | null): string[] =>
   s == null || s === '' ? [] : s.split(',').map(decodeURIComponent);
@@ -73,6 +75,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   );
   const [priceMin, priceMax] = parseRange(sp.get('price'));
   const [areaMin, areaMax] = parseRange(sp.get('area'));
+  const legacyAny: ListingStatus = sp.get('active') === '0' ? 'any' : 'active';
   return {
     districts: splitCsv(sp.get('districts')),
     dispositions,
@@ -80,7 +83,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     priceMax,
     areaMin,
     areaMax,
-    activeOnly: sp.get('active') !== '0',
+    status: enumOr(sp.get('status'), STATUS_VALUES, legacyAny),
     seenWithin: enumOr(sp.get('since'), SEEN_VALUES, '7d'),
     hasBalcony: enumOr(sp.get('balcony'), TRI_VALUES, 'any'),
     hasLift: enumOr(sp.get('lift'), TRI_VALUES, 'any'),
@@ -98,7 +101,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.areaMin != null || f.areaMax != null) {
     sp.set('area', `${f.areaMin ?? ''}-${f.areaMax ?? ''}`);
   }
-  if (!f.activeOnly) sp.set('active', '0');
+  if (f.status !== 'active') sp.set('status', f.status);
   if (f.seenWithin !== '7d') sp.set('since', f.seenWithin);
   if (f.hasBalcony !== 'any') sp.set('balcony', f.hasBalcony);
   if (f.hasLift !== 'any') sp.set('lift', f.hasLift);
@@ -114,7 +117,7 @@ export const seenWithinToIso = (s: SeenWithin): string | null => {
 
 export const summarise = (f: ListingFilters, count: number | null): string => {
   const bits: string[] = [];
-  bits.push(f.activeOnly ? 'active' : 'all');
+  bits.push(f.status === 'active' ? 'active' : f.status === 'inactive' ? 'inactive' : 'all');
   bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} listings`);
   if (f.districts.length) {
     const shown = f.districts.slice(0, 3).join(', ');
@@ -138,7 +141,7 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.priceMax == null &&
   f.areaMin == null &&
   f.areaMax == null &&
-  f.activeOnly === true &&
+  f.status === 'active' &&
   f.seenWithin === '7d' &&
   f.hasBalcony === 'any' &&
   f.hasLift === 'any' &&

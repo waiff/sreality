@@ -60,7 +60,8 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     lte: (c: string, v: unknown) => typeof r;
     in:  (c: string, v: readonly unknown[]) => typeof r;
   };
-  if (f.activeOnly) r = r.eq('is_active', true);
+  if (f.status === 'active') r = r.eq('is_active', true);
+  else if (f.status === 'inactive') r = r.eq('is_active', false);
   const since = seenWithinToIso(f.seenWithin);
   if (since) r = r.gte('last_seen_at', since);
   if (f.districts.length) r = r.in('district', f.districts);
@@ -179,7 +180,7 @@ export const fetchBrowseStats = async (
     price_max_filter:        f.priceMax,
     area_min_filter:         f.areaMin,
     area_max_filter:         f.areaMax,
-    active_only_filter:      f.activeOnly,
+    active_only_filter:      f.status === 'active',
     seen_within_days_filter: seenDays,
     has_balcony_filter:      triToBool(f.hasBalcony),
     has_lift_filter:         triToBool(f.hasLift),
