@@ -3,6 +3,13 @@
 Read-only web UI over the Supabase database produced by the daily scraper.
 Vite + React + TypeScript + Tailwind v4.  Static SPA — no SSR, no backend.
 
+The estimation flow (`/estimate` → `/estimation/:id` → `/estimations`) is
+end-to-end: paste a URL, edit the spec, submit, and the run is persisted by
+the FastAPI service and rendered with a full trace timeline + comparables
+table.  The Timeline component dispatches on `step.kind` so it renders
+today's deterministic 4-step traces and the future U4 agent's longer
+traces without rework.
+
 > Audience for this README: a developer setting the project up locally or
 > debugging the deploy.  The operator does not run any of these commands;
 > the live site is built by Railway on push.

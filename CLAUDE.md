@@ -33,7 +33,16 @@ different rules. Identify which one a task belongs to before you start.
   (filters → Map / Table / Stats), **Listing Detail** (with snapshot
   timeline strip — the product's signature visual element), **Region**
   (district or radius aggregates), **Health** (operator dashboard).
-  Future U2 / U3 / U4 work extends this UI; do not fork into a
+  The U2 estimation flow extends the same SPA: **Estimate**
+  (`/estimate`, two-step form: paste URL → review specs → submit
+  goes through the FastAPI service), **Estimations** (`/estimations`,
+  list of past runs filterable by source/status), **Estimation
+  Detail** (`/estimation/:id`, rent range + warnings + input recap
+  + trace timeline + comparables + re-run button). The Timeline
+  component dispatches on `step.kind` so it renders today's
+  deterministic 4-step traces and the future U4 agent's longer
+  traces without rework.
+  Future U3 / U4 work extends this UI; do not fork into a
   separate frontend tree.
 - Connects with the **publishable (`anon`) key only**. Never embed the
   service-role key, the `SUPABASE_DB_URL`, or any other secret in

@@ -59,7 +59,10 @@
     "locality_gps_lat": 49.569219632103,
     "locality_gps_lon": 17.2413190872989,
     "locality_district_id": 42,
-    "locality_region_id": 8
+    "locality_region_id": 8,
+    "locality_municipality_id": 500496,
+    "locality_quarter_id": -1,
+    "locality_ward_id": 750140
   },
   "_embedded": {
     "favourite": {"is_favourite": false},

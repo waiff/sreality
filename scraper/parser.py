@@ -74,6 +74,9 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "district": _district(raw),
         "locality_district_id": _int_or_none(rec.get("locality_district_id")),
         "locality_region_id": _int_or_none(rec.get("locality_region_id")),
+        "locality_municipality_id": _id_or_none(rec.get("locality_municipality_id")),
+        "locality_quarter_id": _id_or_none(rec.get("locality_quarter_id")),
+        "locality_ward_id": _id_or_none(rec.get("locality_ward_id")),
         "lon": float(lon) if isinstance(lon, (int, float)) else None,
         "lat": float(lat) if isinstance(lat, (int, float)) else None,
         "floor": _floor(items_by_name),
@@ -303,3 +306,9 @@ def _int_or_none(value: Any) -> int | None:
     if isinstance(value, str) and value.lstrip("-").isdigit():
         return int(value)
     return None
+
+
+def _id_or_none(value: Any) -> int | None:
+    """Like _int_or_none but maps sreality's -1 sentinel ("unknown") to None."""
+    out = _int_or_none(value)
+    return None if out is None or out < 0 else out
