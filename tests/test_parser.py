@@ -64,6 +64,39 @@ def test_locality_ids(sample):
     assert row["locality_region_id"] == 8
 
 
+def test_locality_ids_extended(sample):
+    row = parse_listing(sample)
+    assert row["locality_municipality_id"] == 500496
+    assert row["locality_ward_id"] == 750140
+    assert row["locality_quarter_id"] is None  # -1 sentinel maps to None
+
+
+def test_locality_ids_minus_one_sentinel_maps_to_none():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {
+            "locality_municipality_id": -1,
+            "locality_quarter_id": -1,
+            "locality_ward_id": -1,
+        },
+    }
+    row = parse_listing(raw)
+    assert row["locality_municipality_id"] is None
+    assert row["locality_quarter_id"] is None
+    assert row["locality_ward_id"] is None
+
+
+def test_locality_ids_extended_missing_keys_are_none():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {},
+    }
+    row = parse_listing(raw)
+    assert row["locality_municipality_id"] is None
+    assert row["locality_quarter_id"] is None
+    assert row["locality_ward_id"] is None
+
+
 def test_floor(sample):
     assert parse_listing(sample)["floor"] == 5
 
