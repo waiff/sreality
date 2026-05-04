@@ -3,7 +3,7 @@
 # VITE_* env vars are read by Vite at BUILD time and inlined into the JS
 # bundle as string constants. Railway passes service variables down as
 # Docker build args automatically when a matching ARG is declared, so
-# rotating any of these requires a redeploy (not just a variable update).
+# rotating either of these requires a redeploy (not just a variable update).
 
 FROM node:20-alpine AS build
 WORKDIR /app
@@ -15,10 +15,8 @@ COPY . .
 
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_ANON_KEY
-ARG VITE_PASSWORD_HASH
 ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
 ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
-ENV VITE_PASSWORD_HASH=$VITE_PASSWORD_HASH
 
 RUN npm run build
 

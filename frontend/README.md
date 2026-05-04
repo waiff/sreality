@@ -5,7 +5,7 @@ Vite + React + TypeScript + Tailwind v4.  Static SPA — no SSR, no backend.
 
 > Audience for this README: a developer setting the project up locally or
 > debugging the deploy.  The operator does not run any of these commands;
-> the live site is built by Cloudflare Pages on push to `main`.
+> the live site is built by Railway on push.
 
 ## Stack
 
@@ -25,7 +25,7 @@ Vite + React + TypeScript + Tailwind v4.  Static SPA — no SSR, no backend.
 ```sh
 cd frontend
 cp .env.example .env
-# fill in VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_PASSWORD_HASH
+# fill in VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY
 npm install
 npm run dev      # http://localhost:5173
 npm run build    # type-check + production bundle to dist/
@@ -36,38 +36,22 @@ Node 20+ required.
 ### Where to find each env var
 
 - `VITE_SUPABASE_URL` — Supabase dashboard → Project Settings → API → Project URL.
-- `VITE_SUPABASE_ANON_KEY` — same page → "anon public" key.  This ships to
-  the browser; reads are fenced by the `*_public` views in migration 008.
-- `VITE_PASSWORD_HASH` — SHA-256 hex digest of your chosen unlock password.
-  Compute it with either:
-
-  ```sh
-  echo -n "yourpassword" | shasum -a 256 | awk '{print $1}'
-  ```
-
-  or, in Node:
-
-  ```sh
-  node -e 'crypto.subtle.digest("SHA-256", new TextEncoder().encode(process.argv[1])).then(b => console.log(Buffer.from(b).toString("hex")))' "yourpassword"
-  ```
-
-  Paste the resulting 64-char hex string into `.env` (and into the
-  Cloudflare Pages dashboard for production).
+- `VITE_SUPABASE_ANON_KEY` — same page → "anon public" / "publishable" key.
+  Safe to ship to the browser; reads are fenced by the `*_public` views in
+  migration 008.
 
 ## Project layout
 
 ```
 src/
   main.tsx           react root + react-query provider + router
-  App.tsx            password gate wraps the routed shell
+  App.tsx            mounts the routed shell
   routes.tsx         route table
   lib/
     supabase.ts      single shared client
-    auth.ts          SHA-256 password gate (sessionStorage)
     types.ts         shapes mirroring listings_public et al.
     queries.ts       supabase query helpers (grows with parts B–E)
   components/
-    PasswordGate.tsx
     Shell.tsx        top bar + nav + footer
   pages/
     Browse.tsx       part B
@@ -111,6 +95,6 @@ before Railway sees them.
 
 Vite inlines `import.meta.env.VITE_*` into the JS bundle at **build
 time** as string constants — the deployed bundle never reads env at
-runtime.  Practical consequence: rotating any of `VITE_PASSWORD_HASH`,
-`VITE_SUPABASE_URL`, or `VITE_SUPABASE_ANON_KEY` requires a redeploy
-(push or click "Redeploy" in Railway), not just a variable update.
+runtime.  Practical consequence: rotating either of `VITE_SUPABASE_URL`
+or `VITE_SUPABASE_ANON_KEY` requires a redeploy (push or click
+"Redeploy" in Railway), not just a variable update.

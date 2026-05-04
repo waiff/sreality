@@ -30,7 +30,6 @@ jobs:
         env:
           VITE_SUPABASE_URL: https://example.supabase.co
           VITE_SUPABASE_ANON_KEY: ci-build-only
-          VITE_PASSWORD_HASH: 0000000000000000000000000000000000000000000000000000000000000000
       - name: Bundle size budget
         run: |
           du -sh dist
