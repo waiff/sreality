@@ -9,28 +9,28 @@
 	encode gzip zstd
 
 	# Liveness endpoint Railway hits per railway.json healthcheckPath.
-	@healthz path /healthz
-	handle @healthz {
+	# Exclusive handle block — no fall-through to try_files/file_server.
+	handle /healthz {
 		respond "ok" 200
 	}
 
-	# Vite emits hashed bundles into /assets/, so they are immutable.
-	@assets path /assets/*
-	header @assets Cache-Control "public, max-age=31536000, immutable"
+	# Hashed bundles in /assets/ are immutable; long-cache them and
+	# serve directly without SPA fallback.
+	handle_path /assets/* {
+		root * /srv/assets
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
 
-	# Everything else (index.html, manifest, favicons) revalidates so a
-	# redeploy is visible immediately.
-	@notassets not path /assets/*
-	header @notassets Cache-Control "public, max-age=0, must-revalidate"
+	# Everything else: SPA fallback to /index.html, no aggressive cache.
+	handle {
+		header Cache-Control "public, max-age=0, must-revalidate"
+		header X-Content-Type-Options "nosniff"
+		header Referrer-Policy "strict-origin-when-cross-origin"
+		header X-Frame-Options "DENY"
+		header -Server
 
-	# Baseline security headers.
-	header X-Content-Type-Options "nosniff"
-	header Referrer-Policy "strict-origin-when-cross-origin"
-	header X-Frame-Options "DENY"
-	header -Server
-
-	# SPA fallback so client-side routes (/listing/:id, /region, etc.)
-	# resolve to the bundled index.
-	try_files {path} /index.html
-	file_server
+		try_files {path} /index.html
+		file_server
+	}
 }
