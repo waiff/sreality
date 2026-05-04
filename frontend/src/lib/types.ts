@@ -155,8 +155,19 @@ export interface HealthSummary {
 export type EstimationStatus = 'pending' | 'running' | 'success' | 'failed';
 export type EstimationSource = 'ui' | 'api' | 'clickup';
 export type EstimationMode = 'deterministic' | 'agent';
-export type Confidence = 'low' | 'medium' | 'high';
+/* Result confidence (estimate_yield) only ever returns the first three;
+ * parse confidence (URL parser) can additionally be 'best_effort'. The
+ * widened union covers both call sites. */
+export type Confidence = 'low' | 'medium' | 'high' | 'best_effort';
 export type DispositionMatch = 'exact' | 'loose' | 'any';
+
+/* Mirrors the CHECK constraint on estimation_runs.source_kind (migration 020). */
+export type SourceKind =
+  | 'sreality'
+  | 'bezrealitky'
+  | 'idnes_reality'
+  | 'remax'
+  | 'unsupported';
 
 export interface TargetSpecIn {
   lat: number;
@@ -233,6 +244,21 @@ export interface EstimationRun {
   error_message: string | null;
   parent_run_id: number | null;
   rerun_reason: string | null;
+  /* Estimation-4 audit fields (added in migration 020). All null for
+   * runs created before estimation-4 shipped, all null for spec-mode
+   * runs (no URL parse happened), and parse_confidence_per_field is
+   * also null for sreality runs (the deterministic parser doesn't
+   * track per-field confidences). source_html is the raw page bytes
+   * (LLM path only) and is large — only fetched on the detail page. */
+  source_kind: SourceKind | null;
+  parse_confidence: Confidence | null;
+  parse_confidence_per_field: Record<string, Confidence> | null;
+  source_html: string | null;
+  /* Sum of llm_calls.cost_usd rows linked to this run via
+   * estimation_run_id. The backend uses COALESCE(..., 0) so the
+   * value is never null in practice, but the type tolerates it for
+   * forward compatibility. */
+  cost_usd_total: number | null;
 }
 
 /* Filter half of the POST /estimations body — mirrors ComparableFilters
@@ -274,6 +300,7 @@ export interface EstimationListParams {
   source?: EstimationSource;
   status?: EstimationStatus;
   sreality_id?: number;
+  source_kind?: SourceKind;
   limit?: number;
   offset?: number;
 }
@@ -314,4 +341,47 @@ export interface PreviewResponse {
   fetched_at: string;
   spec: TargetSpecIn;
   listing: PreviewListing;
+}
+
+/* POST /estimations/preview response (estimation-4). Routes any URL
+ * through the source-kind dispatcher: sreality fast-path or LLM-driven
+ * per-source parser. The `spec` block is the same TargetSpecIn shape
+ * that gets POSTed back to /estimations. The `listing` block is the
+ * informational sidecar (same shape as PreviewListing minus image_count
+ * which is sreality-specific). Provenance fields document where the
+ * data came from and how confident the parser was. */
+export interface ParseListing {
+  price_czk: number | null;
+  price_unit: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  locality: string | null;
+  district: string | null;
+  locality_district_id: number | null;
+  locality_region_id: number | null;
+  total_floors: number | null;
+  has_balcony: boolean | null;
+  has_lift: boolean | null;
+  has_parking: boolean | null;
+  building_type: string | null;
+  condition: string | null;
+  energy_rating: string | null;
+}
+
+export interface ParseResult {
+  spec: TargetSpecIn;
+  listing: ParseListing;
+  source_kind: SourceKind;
+  source_url: string;
+  /* ISO-8601 timestamp. For sreality, this is when the API was queried;
+   * for LLM-parsed sources, this is the cache row's parsed_at on a hit
+   * or "now" on a fresh parse. May be null for sreality if the upstream
+   * scraper didn't record a fetched_at. */
+  fetched_at: string | null;
+  parse_confidence: Confidence;
+  parse_confidence_per_field: Record<string, Confidence> | null;
+  warnings: string[];
+  from_cache: boolean;
+  cost_usd: number | null;
+  sreality_id: number | null;
 }

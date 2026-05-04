@@ -338,15 +338,19 @@ export const ping = async (): Promise<{ ok: boolean; count: number | null }> => 
 /* convention used by Supabase fetchers above.                                */
 /* -------------------------------------------------------------------------- */
 
+import { useMutation, type UseMutationResult } from '@tanstack/react-query';
 import {
+  ApiError,
   createEstimation,
   getEstimation,
   listEstimations,
   previewListing,
+  previewListingUrl,
 } from './api';
 import type {
   CreateEstimationIn,
   EstimationListParams,
+  ParseResult,
 } from './types';
 
 export const estimationKeys = {
@@ -365,3 +369,22 @@ export const fetchEstimationsList = (params: EstimationListParams) =>
   listEstimations(params);
 export const submitEstimation = (input: CreateEstimationIn) =>
   createEstimation(input);
+
+export interface UrlPreviewVars {
+  url: string;
+  force_refresh?: boolean;
+}
+
+/* Mutation wrapper around POST /estimations/preview. Pages call
+ * `mutate({ url })` for a normal preview and `mutate({ url, force_refresh: true })`
+ * for the bypass-cache path. The mutation isn't keyed (TanStack
+ * Query mutations aren't), so re-running the same URL never reads
+ * a stale React-Query cache — the cache decision lives entirely on
+ * the backend's parsed_url_cache table. */
+export const useUrlPreview = (): UseMutationResult<
+  ParseResult, ApiError, UrlPreviewVars
+> =>
+  useMutation<ParseResult, ApiError, UrlPreviewVars>({
+    mutationFn: ({ url, force_refresh }) =>
+      previewListingUrl(url, { force_refresh }),
+  });
