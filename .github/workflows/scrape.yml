@@ -27,7 +27,7 @@ on:
         type: boolean
         default: false
       limit:
-        description: "Cap number of index entries (blank = all)"
+        description: "Cap number of listings scraped (blank = all). Only caps the scrape phase; also tick 'Skip image download phase' for isolated tests."
         required: false
         type: string
       dry_run:
