@@ -326,6 +326,9 @@ def list_estimations(
     source: str | None = None,
     status: Literal["pending", "running", "success", "failed"] | None = None,
     sreality_id: int | None = None,
+    source_kind: Literal[
+        "sreality", "bezrealitky", "idnes_reality", "remax", "unsupported"
+    ] | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
@@ -336,6 +339,7 @@ def list_estimations(
         source=source,
         status=status,
         sreality_id=sreality_id,
+        source_kind=source_kind,
         limit=limit,
         offset=offset,
     )

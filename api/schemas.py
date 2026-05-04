@@ -124,6 +124,7 @@ class PreviewEstimationIn(BaseModel):
     """
     url: str
     spec_overrides: dict[str, Any] | None = None
+    force_refresh: bool = False
 
 
 class CreateEstimationIn(BaseModel):
