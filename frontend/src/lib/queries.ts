@@ -331,3 +331,37 @@ export const ping = async (): Promise<{ ok: boolean; count: number | null }> => 
     .select('*', { count: 'exact', head: true });
   return { ok: !error, count: count ?? null };
 };
+
+/* -------------------------------------------------------------------------- */
+/* Estimations (U2). Hits the Railway FastAPI service via lib/api.ts; pages   */
+/* combine these helpers with useQuery / useMutation directly, matching the   */
+/* convention used by Supabase fetchers above.                                */
+/* -------------------------------------------------------------------------- */
+
+import {
+  createEstimation,
+  getEstimation,
+  listEstimations,
+  previewListing,
+} from './api';
+import type {
+  CreateEstimationIn,
+  EstimationListParams,
+} from './types';
+
+export const estimationKeys = {
+  all: ['estimations'] as const,
+  list: (params: EstimationListParams) =>
+    ['estimations', 'list', params] as const,
+  detail: (id: number) =>
+    ['estimations', 'detail', id] as const,
+  preview: (url: string) =>
+    ['estimations', 'preview', url] as const,
+};
+
+export const fetchEstimationPreview = (url: string) => previewListing(url);
+export const fetchEstimation = (id: number) => getEstimation(id);
+export const fetchEstimationsList = (params: EstimationListParams) =>
+  listEstimations(params);
+export const submitEstimation = (input: CreateEstimationIn) =>
+  createEstimation(input);
