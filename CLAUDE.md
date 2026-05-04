@@ -393,6 +393,33 @@ when `llm_calls.cost_usd` sum first crosses
 - For testing a single listing: `--detail-only <sreality_id>`.
 - For a small live run: `--limit 10` (caps at 10 listings).
 
+## Refreshing per-source HTML fixtures
+
+The LLM-driven parsers (`scraper/source_parsers/`) are tested against
+saved listing HTML in `tests/fixtures/source_html/`. Real listings
+get taken down or change layout, so every few months the fixtures
+need a refresh. Don't fetch live in tests — that would burn LLM
+credit and break offline runs.
+
+Refresh procedure (operator):
+1. GitHub repo → **Actions** tab → **Fetch + anonymize source HTML
+   fixtures** workflow → **Run workflow**.
+2. Pick the branch you want the fixtures on.
+3. Optionally edit the URLs (defaults are baked in for the three
+   allowlisted sources). Leave a field blank to skip that source.
+4. **Run workflow**. It fetches each URL, runs the anonymization in
+   `scripts/fetch_and_anonymize_fixtures.py`, and commits the
+   resulting `*_sample.html` files back to the same branch.
+5. The skipif tests in
+   `tests/scraper/test_source_parsers/test_real_fixtures.py` light up
+   automatically once the files exist.
+
+Anonymization scope: phones → `+420 XXX XXX XXX`, emails →
+`agent@example.cz`, street numbers (`123/45`) → `XXX/YY`. Listing
+prices and the surrounding HTML structure are preserved — they're
+public data and the parsers need them. Agent names are too varied
+to scrub by regex; if a fixture leaks one, hand-edit the file.
+
 ## How to manually trigger the scraper
 
 GitHub repo -> **Actions** tab -> **Daily Sreality scrape** workflow ->
