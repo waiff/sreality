@@ -167,6 +167,23 @@ class CreateEstimationIn(BaseModel):
         return self
 
 
+class ResolveLocationIn(BaseModel):
+    """A Mapy.cz suggestion item picked by the user.
+
+    Field names mirror Mapy.cz's `/v1/suggest` item shape so the frontend
+    can pass through the relevant subset without re-mapping. `position`
+    is collapsed into `lat`/`lng`. `regional_structure` is the
+    `regionalStructure` array used to match admin polygons. `raw` is
+    optional and round-tripped to the response for debugging.
+    """
+    label: str
+    lat: float | None = None
+    lng: float | None = None
+    type: str | None = None
+    regional_structure: list[dict[str, Any]] | None = None
+    raw: dict[str, Any] | None = None
+
+
 class EstimateYieldIn(BaseModel):
     target: TargetIn
     purchase_price_czk: int | None = None

@@ -52,6 +52,23 @@ def get_maps_suggest(
     return maps.suggest(query, limit=limit, lang=lang)
 
 
+@app.post("/maps/resolve")
+def post_maps_resolve(
+    body: s.ResolveLocationIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return maps.resolve(
+        conn,
+        label=body.label,
+        lat=body.lat,
+        lng=body.lng,
+        type_=body.type,
+        regional_structure=body.regional_structure,
+        raw=body.raw,
+    )
+
+
 @app.post("/tools/find_comparables")
 def post_find_comparables(
     body: s.FindComparablesIn,
