@@ -19,6 +19,8 @@ from toolkit import (
     TargetSpec,
     analyze_distribution,
     compare_snapshots,
+    compute_listing_velocity,
+    compute_market_velocity,
     describe_neighborhood,
     find_comparables,
     find_distribution_outliers,
@@ -106,6 +108,62 @@ def post_find_distribution_outliers(
         field=body.field,
         iqr_multiplier=body.iqr_multiplier,
         investigate_history=body.investigate_history,
+    )
+
+
+@app.post("/tools/compute_market_velocity")
+def post_compute_market_velocity(
+    body: s.ComputeMarketVelocityIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    target = TargetSpec(
+        lat=body.target.lat,
+        lng=body.target.lng,
+        area_m2=body.target.area_m2,
+        disposition=body.target.disposition,
+        floor=body.target.floor,
+        exclude_ids=list(body.target.exclude_ids),
+    )
+    filters = ComparableFilters(
+        radius_m=body.radius_m,
+        area_band_pct=body.area_band_pct,
+        disposition_match=body.disposition_match,
+        active_only=False,
+        floor_band=body.floor_band,
+        condition_match=body.condition_match,
+        building_type_match=body.building_type_match,
+        energy_rating_match=body.energy_rating_match,
+        has_balcony=body.has_balcony,
+        has_lift=body.has_lift,
+        has_parking=body.has_parking,
+        min_price_czk=body.min_price_czk,
+        max_price_czk=body.max_price_czk,
+        category_main=body.category_main,
+        category_type=body.category_type,
+        locality_district_id=body.locality_district_id,
+        locality_region_id=body.locality_region_id,
+        include_unreliable=body.include_unreliable,
+    )
+    return compute_market_velocity(
+        conn, target, filters,
+        population=body.population,
+        trend_split_days=body.trend_split_days,
+    )
+
+
+@app.post("/tools/compute_listing_velocity")
+def post_compute_listing_velocity(
+    body: s.ComputeListingVelocityIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return compute_listing_velocity(
+        conn,
+        body.sreality_id,
+        radius_m=body.radius_m,
+        disposition_match=body.disposition_match,
+        population=body.population,
     )
 
 

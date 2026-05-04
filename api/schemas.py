@@ -76,6 +76,36 @@ class FindDistributionOutliersIn(BaseModel):
     investigate_history: bool = True
 
 
+class ComputeMarketVelocityIn(BaseModel):
+    target: TargetIn
+    radius_m: int = 1000
+    area_band_pct: float = 0.20
+    disposition_match: Literal["exact", "loose", "any"] = "exact"
+    floor_band: int | None = None
+    condition_match: list[str] | None = None
+    building_type_match: list[str] | None = None
+    energy_rating_match: list[str] | None = None
+    has_balcony: bool | None = None
+    has_lift: bool | None = None
+    has_parking: bool | None = None
+    min_price_czk: int | None = None
+    max_price_czk: int | None = None
+    category_main: str | None = "byt"
+    category_type: str | None = "pronajem"
+    locality_district_id: int | None = None
+    locality_region_id: int | None = None
+    include_unreliable: bool = False
+    population: Literal["active", "delisted", "all"] = "all"
+    trend_split_days: int = 7
+
+
+class ComputeListingVelocityIn(BaseModel):
+    sreality_id: int
+    radius_m: int = 1000
+    disposition_match: Literal["exact", "loose", "any"] = "exact"
+    population: Literal["active", "delisted", "all"] = "all"
+
+
 class EstimateYieldIn(BaseModel):
     target: TargetIn
     purchase_price_czk: int | None = None

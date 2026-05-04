@@ -77,12 +77,19 @@ _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
 _HARD_LIMIT = 500
 
 
-def build_query(
+def _shared_filter_where(
     target: TargetSpec, filters: ComparableFilters
-) -> tuple[str, dict[str, Any]]:
-    """Render the SQL and parameter dict for the given target+filters.
+) -> tuple[list[str], dict[str, Any]]:
+    """Build WHERE clauses + bound params shared across all spatial tools.
 
-    Exposed so tests can assert on shape without a DB connection.
+    Includes: spatial radius, category, disposition, area band, floor band,
+    condition/building/energy filters, amenity booleans, price bounds,
+    locality IDs, exclude_ids, and the failure-row exclusion.
+
+    Does NOT include the active_only / max_age_days clauses — those are
+    operational rather than attribute filters, and different consumers
+    (find_comparables vs compute_market_velocity) want different
+    semantics. Each caller appends its own.
     """
     params: dict[str, Any] = {
         "lat": target.lat,
@@ -98,13 +105,6 @@ def build_query(
             "%(radius_m)s)"
         ),
     ]
-
-    if filters.active_only:
-        where.append("l.is_active = true")
-        where.append(
-            "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
-        )
-        params["max_age_days"] = filters.max_age_days
 
     if filters.category_main is not None:
         where.append("l.category_main = %(category_main)s")
@@ -180,6 +180,25 @@ def build_query(
     if target.exclude_ids:
         where.append("l.sreality_id <> ALL(%(exclude_ids)s)")
         params["exclude_ids"] = list(target.exclude_ids)
+
+    return where, params
+
+
+def build_query(
+    target: TargetSpec, filters: ComparableFilters
+) -> tuple[str, dict[str, Any]]:
+    """Render the SQL and parameter dict for the given target+filters.
+
+    Exposed so tests can assert on shape without a DB connection.
+    """
+    where, params = _shared_filter_where(target, filters)
+
+    if filters.active_only:
+        where.append("l.is_active = true")
+        where.append(
+            "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
+        )
+        params["max_age_days"] = filters.max_age_days
 
     sql = (
         "SELECT\n"

@@ -31,14 +31,15 @@ Audit trail and on-demand verification.
   reasons.
 - API auth via `API_TOKEN`.
 
-## Next
-
 ### Phase 3b: Velocity
-For the agent to reason about "stuck and overpriced" vs "moving fast at
-this price."
-- `compute_market_velocity`: TOM stats and trend for a filtered cohort.
-- `compute_listing_velocity`: percentile of an individual listing within
-  its cohort, with classification.
+- `compute_market_velocity`: TOM stats and trend for a filtered cohort,
+  with active/delisted/all population control.
+- `compute_listing_velocity`: percentile and classification
+  (fast/typical/slow/stuck) of a single listing within its peer cohort.
+- Shared `_shared_filter_where` helper extracted from `find_comparables`
+  so spatial+attribute filter semantics live in one place.
+
+## Next
 
 ### Phase 4: Spatial context (external data)
 Tenant-perspective overlays beyond what's in the listings table.
