@@ -99,25 +99,32 @@ class OverpassClient:
                 response = self._session.post(
                     self.url, data={"data": body}, timeout=self.timeout_s,
                 )
-                if (
-                    response.status_code >= 400
-                    and response.status_code not in RETRYABLE_STATUS
-                ):
-                    response.raise_for_status()
-                if response.status_code in RETRYABLE_STATUS:
-                    raise requests.HTTPError(
-                        f"{response.status_code} from {self.url}",
-                        response=response,
-                    )
-                return response.json()
-            except (requests.RequestException, ValueError) as exc:
+            except (requests.ConnectionError, requests.Timeout) as exc:
                 error = exc
                 LOG.warning(
                     "POST %s attempt %d/%d failed: %s",
-                    self.url,
-                    attempt + 1,
-                    self.max_retries + 1,
-                    exc,
+                    self.url, attempt + 1, self.max_retries + 1, exc,
+                )
+                continue
+            if response.status_code in RETRYABLE_STATUS:
+                error = requests.HTTPError(
+                    f"{response.status_code} from {self.url}",
+                    response=response,
+                )
+                LOG.warning(
+                    "POST %s attempt %d/%d failed: %s",
+                    self.url, attempt + 1, self.max_retries + 1, error,
+                )
+                continue
+            if response.status_code >= 400:
+                response.raise_for_status()
+            try:
+                return response.json()
+            except ValueError as exc:
+                error = exc
+                LOG.warning(
+                    "POST %s attempt %d/%d JSON decode failed: %s",
+                    self.url, attempt + 1, self.max_retries + 1, exc,
                 )
         assert error is not None
         raise error
