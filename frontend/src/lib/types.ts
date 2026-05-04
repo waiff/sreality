@@ -136,3 +136,172 @@ export interface HealthSummary {
   failures_total: number;
   failures_top10: HealthFailureRow[];
 }
+
+/* -------------------------------------------------------------------------- */
+/* Estimations (U2). Wire shapes mirror api/schemas.py and api/estimation_runs */
+/* — backend is authoritative.                                                */
+/* -------------------------------------------------------------------------- */
+
+export type EstimationStatus = 'pending' | 'running' | 'success' | 'failed';
+export type EstimationSource = 'ui' | 'api' | 'clickup';
+export type EstimationMode = 'deterministic' | 'agent';
+export type Confidence = 'low' | 'medium' | 'high';
+export type DispositionMatch = 'exact' | 'loose' | 'any';
+
+export interface TargetSpecIn {
+  lat: number;
+  lng: number;
+  area_m2: number | null;
+  disposition: Disposition | null;
+  floor: number | null;
+  exclude_ids: number[];
+}
+
+export interface ComparableUsed {
+  sreality_id: number;
+  snapshot_id: number | null;
+  snapshot_date: string | null;
+  data_age_days: number | null;
+  verified_during_estimate: boolean;
+}
+
+export type TraceStepKind = 'tool_call' | 'computation' | 'reasoning';
+
+interface TraceStepBase {
+  n: number;
+  kind: TraceStepKind;
+  started_at: string;
+  duration_ms: number;
+  output_summary: Record<string, unknown>;
+}
+
+export interface TraceStepToolCall extends TraceStepBase {
+  kind: 'tool_call';
+  tool: string;
+  input: Record<string, unknown>;
+}
+
+export interface TraceStepComputation extends TraceStepBase {
+  kind: 'computation';
+  label: string;
+}
+
+/* Reserved for U4 — shape locked at the agent layer, treated opaquely here. */
+export interface TraceStepReasoning extends TraceStepBase {
+  kind: 'reasoning';
+}
+
+export type TraceStep =
+  | TraceStepToolCall
+  | TraceStepComputation
+  | TraceStepReasoning;
+
+export interface Trace {
+  version: number;
+  summary: string;
+  steps: TraceStep[];
+}
+
+export interface EstimationRun {
+  id: number;
+  created_at: string;
+  source: EstimationSource;
+  mode: EstimationMode;
+  status: EstimationStatus;
+  input_url: string | null;
+  input_sreality_id: number | null;
+  input_spec: TargetSpecIn | null;
+  input_purchase_price_czk: number | null;
+  estimated_monthly_rent_czk: number | null;
+  rent_p25_czk: number | null;
+  rent_p75_czk: number | null;
+  gross_yield_pct: number | null;
+  confidence: Confidence | null;
+  comparables_used: ComparableUsed[] | null;
+  trace: Trace | null;
+  warnings: string[] | null;
+  error_message: string | null;
+  parent_run_id: number | null;
+  rerun_reason: string | null;
+}
+
+/* Filter half of the POST /estimations body — mirrors ComparableFilters
+ * via api/schemas.CreateEstimationIn. Only fields the UI actually exposes. */
+export interface EstimationFilters {
+  radius_m: number;
+  area_band_pct: number;
+  disposition_match: DispositionMatch;
+  max_age_days: number;
+  active_only: boolean;
+  floor_band: number | null;
+  condition_match: string[] | null;
+  building_type_match: string[] | null;
+  energy_rating_match: string[] | null;
+  has_balcony: boolean | null;
+  has_lift: boolean | null;
+  has_parking: boolean | null;
+  min_price_czk: number | null;
+  max_price_czk: number | null;
+  category_main: string | null;
+  category_type: string | null;
+  locality_district_id: number | null;
+  locality_region_id: number | null;
+  include_unreliable: boolean;
+}
+
+export interface CreateEstimationIn extends Partial<EstimationFilters> {
+  source?: EstimationSource;
+  mode?: EstimationMode;
+  url?: string;
+  spec?: TargetSpecIn;
+  spec_overrides?: Partial<TargetSpecIn>;
+  purchase_price_czk?: number | null;
+  parent_run_id?: number | null;
+  rerun_reason?: string | null;
+}
+
+export interface EstimationListParams {
+  source?: EstimationSource;
+  status?: EstimationStatus;
+  sreality_id?: number;
+  limit?: number;
+  offset?: number;
+}
+
+export interface EstimationListResponse {
+  data: EstimationRun[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/* GET /estimations/preview response. The `spec` field is shaped so it
+ * can be POSTed back to /estimations as `spec` verbatim. The `listing`
+ * block is informational + drives filter pre-fill. */
+export interface PreviewListing {
+  price_czk: number | null;
+  price_unit: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  locality: string | null;
+  district: string | null;
+  locality_district_id: number | null;
+  locality_region_id: number | null;
+  total_floors: number | null;
+  has_balcony: boolean | null;
+  has_lift: boolean | null;
+  has_parking: boolean | null;
+  building_type: string | null;
+  condition: string | null;
+  energy_rating: string | null;
+  image_count: number;
+}
+
+export interface PreviewResponse {
+  url: string;
+  sreality_id: number;
+  in_database: boolean;
+  fetched_at: string;
+  spec: TargetSpecIn;
+  listing: PreviewListing;
+}

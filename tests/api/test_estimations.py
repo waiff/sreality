@@ -19,6 +19,7 @@ from api import estimate_yield as ey
 from api import estimation_runs as er
 from api import main as api_main
 from scraper import source_dispatcher as sd
+from scraper import url_parser as scraper_url_parser
 
 
 @pytest.fixture()
@@ -277,6 +278,112 @@ def test_post_invalid_source_returns_422(client):
         },
     )
     assert res.status_code == 422
+
+
+# ----------------------------------------------------------------------
+# GET /estimations/preview
+# ----------------------------------------------------------------------
+
+def test_preview_returns_normalised_spec(client, monkeypatch):
+    state = _patch_persistence(monkeypatch)
+    _patch_url_parser(monkeypatch, sreality_id=2836292428)
+
+    res = client.get(
+        "/estimations/preview"
+        "?url=https://www.sreality.cz/detail/x/2836292428"
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["sreality_id"] == 2836292428
+    assert body["in_database"] is False
+    assert body["url"].endswith("2836292428")
+    assert body["spec"]["lat"] == 50.087
+    assert body["spec"]["lng"] == 14.42  # normalised from parser's 'lon'
+    assert "lon" not in body["spec"]
+    assert body["spec"]["area_m2"] == 50.0
+    assert body["spec"]["disposition"] == "2+kk"
+    assert body["spec"]["floor"] == 3
+    assert body["spec"]["exclude_ids"] == []
+    # Preview must not persist anything.
+    assert len(state.inserts) == 0
+
+
+def test_preview_invalid_url_returns_400(client, monkeypatch):
+    state = _patch_persistence(monkeypatch)
+
+    res = client.get(
+        "/estimations/preview?url=https://example.com/not-a-listing"
+    )
+    assert res.status_code == 400
+    assert "sreality_id" in res.json()["detail"].lower()
+    assert len(state.inserts) == 0
+
+
+def test_preview_upstream_error_returns_502(client, monkeypatch):
+    import requests
+    state = _patch_persistence(monkeypatch)
+
+    def fake(url: str, *, client, conn) -> dict[str, Any]:
+        raise requests.HTTPError("502 Bad Gateway from sreality")
+
+    monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake)
+
+    res = client.get(
+        "/estimations/preview"
+        "?url=https://www.sreality.cz/detail/x/2836292428"
+    )
+    assert res.status_code == 502
+    assert "sreality" in res.json()["detail"].lower()
+    assert len(state.inserts) == 0
+
+
+def test_preview_exposes_listing_block(client, monkeypatch):
+    def fake(url: str, *, client, conn) -> dict[str, Any]:
+        return {
+            "sreality_id": 2836292428,
+            "spec": {
+                "sreality_id": 2836292428,
+                "lat": 50.087, "lon": 14.42,
+                "area_m2": 50.0, "disposition": "2+kk", "floor": 3,
+                "price_czk": 18500, "price_unit": "měsíc",
+                "category_main": "byt", "category_type": "pronajem",
+                "locality": "Praha 1, Nové Město",
+                "district": "Praha 1",
+                "locality_district_id": 5001,
+                "locality_region_id": 10,
+                "total_floors": 6,
+                "has_balcony": True, "has_lift": True, "has_parking": False,
+                "building_type": "cihlová",
+                "condition": "po rekonstrukci",
+                "energy_rating": "C",
+            },
+            "images": [
+                {"url": "x", "sequence": 1},
+                {"url": "y", "sequence": 2},
+                {"url": "z", "sequence": 3},
+            ],
+            "fetched_at": "2026-05-04T10:00:00+00:00",
+            "source_url": url,
+            "in_database": True,
+        }
+    monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake)
+
+    res = client.get(
+        "/estimations/preview"
+        "?url=https://www.sreality.cz/detail/x/2836292428"
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["in_database"] is True
+    listing = body["listing"]
+    assert listing["price_czk"] == 18500
+    assert listing["district"] == "Praha 1"
+    assert listing["total_floors"] == 6
+    assert listing["has_balcony"] is True
+    assert listing["has_parking"] is False
+    assert listing["building_type"] == "cihlová"
+    assert listing["energy_rating"] == "C"
+    assert listing["image_count"] == 3
 
 
 # ----------------------------------------------------------------------

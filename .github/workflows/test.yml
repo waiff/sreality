@@ -19,7 +19,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Install
-        run: pip install -e ".[dev,api]"
+        run: pip install -e ".[dev,api,geo]"
 
       - name: Run pytest
         run: pytest -q

@@ -16,6 +16,7 @@ TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 from api import dependencies as deps
 from api import main as api_main
+from scraper import url_parser as scraper_url_parser
 
 
 @pytest.fixture()
@@ -65,6 +66,16 @@ def client(monkeypatch):
     def fake_list_runs(conn, **_kw):
         return {"data": [], "total": 0, "limit": 50, "offset": 0}
 
+    def fake_parse_url(url, *, client, conn):
+        return {
+            "sreality_id": 2836292428,
+            "spec": {"sreality_id": 2836292428, "lat": 50.0, "lon": 14.0},
+            "images": [],
+            "fetched_at": "2026-05-04T10:00:00+00:00",
+            "source_url": url,
+            "in_database": False,
+        }
+
     monkeypatch.setattr(api_main, "find_comparables", fake_find)
     monkeypatch.setattr(api_main, "analyze_distribution", fake_dist)
     monkeypatch.setattr(api_main, "verify_listing_freshness", fake_verify)
@@ -78,6 +89,7 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "create_estimation_run", fake_create_run)
     monkeypatch.setattr(api_main, "get_estimation_run", fake_get_run)
     monkeypatch.setattr(api_main, "list_estimation_runs", fake_list_runs)
+    monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake_parse_url)
 
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
@@ -111,6 +123,7 @@ def _gated_calls(client) -> list:
         ("POST", "/estimations", _CREATE_ESTIMATION_BODY),
         ("GET", "/estimations/1", None),
         ("GET", "/estimations", None),
+        ("GET", "/estimations/preview?url=https://www.sreality.cz/detail/x/2836292428", None),
     ]
 
 
