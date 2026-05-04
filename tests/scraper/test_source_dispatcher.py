@@ -339,6 +339,59 @@ def test_cache_hit_skips_llm_and_geocoder():
     assert llm.calls == []  # not invoked
 
 
+def test_force_refresh_skips_cache_lookup_even_when_fresh():
+    conn = _FakeConn()
+    url = "https://www.bezrealitky.cz/listing/123"
+    # Pre-seed a cache row that would otherwise be returned.
+    conn.cache_rows[sd.url_hash(url)] = {
+        "source_url": url,
+        "source_kind": "bezrealitky",
+        "parse_result": {
+            "spec": {
+                "lat": 50.0, "lng": 14.4,
+                "area_m2": 99.0, "disposition": "5+1", "floor": 9,
+                "exclude_ids": [],
+            },
+            "extraction": dict(_FAKE_LLM_EXTRACTION),
+            "parse_confidence": "high",
+            "parse_confidence_per_field": {
+                "area_m2": "high", "disposition": "high", "lat": "high",
+            },
+            "warnings": [],
+        },
+        "source_html": "<html/>",
+        "cost_usd": 0.02,
+        "parsed_at": datetime.now(timezone.utc),
+        "expires_at": datetime.now(timezone.utc) + timedelta(days=3),
+    }
+    llm = _FakeLLM()
+
+    result = sd.parse_listing_url(
+        url, sreality_client=object(), llm_client=llm, conn=conn,
+        force_refresh=True,
+        fetch_html=_fetch_html_returns("<html>spec</html>"),
+        geocode=_fake_geocoder,
+    )
+    # Got a fresh parse rather than the seeded "5+1, 99 m²" cache row.
+    assert result.from_cache is False
+    assert result.spec["disposition"] == "2+kk"
+    assert result.spec["area_m2"] == 65.0
+    assert len(llm.calls) == 1
+
+
+def test_fresh_parse_sets_fetched_at():
+    conn = _FakeConn()
+    url = "https://www.bezrealitky.cz/listing/freshie"
+    result = sd.parse_listing_url(
+        url, sreality_client=object(), llm_client=_FakeLLM(), conn=conn,
+        fetch_html=_fetch_html_returns("<html>spec</html>"),
+        geocode=_fake_geocoder,
+    )
+    assert result.fetched_at is not None
+    # ISO-8601 with timezone — datetime.fromisoformat round-trips it.
+    assert datetime.fromisoformat(result.fetched_at).tzinfo is not None
+
+
 def test_expired_cache_row_treated_as_miss():
     conn = _FakeConn()
     url = "https://www.bezrealitky.cz/listing/expired"

@@ -86,6 +86,8 @@ class ParseResult:
     sreality_id: int | None
     source_url: str
     full_extraction: dict[str, Any] | None = field(default=None)
+    fetched_at: str | None = field(default=None)
+    wide_spec: dict[str, Any] | None = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,7 @@ def parse_listing_url(
     llm_client: "LLMClient",
     conn: "psycopg.Connection",
     estimation_run_id: int | None = None,
+    force_refresh: bool = False,
     fetch_html: Any = common.fetch_html,
     geocode: Any = geocoding.geocode,
 ) -> ParseResult:
@@ -148,9 +151,10 @@ def parse_listing_url(
     if kind == "sreality":
         return _sreality_branch(url, sreality_client, conn)
 
-    cached = _cache_lookup(conn, url)
-    if cached is not None:
-        return _result_from_cache(cached, kind=kind, source_url=url)
+    if not force_refresh:
+        cached = _cache_lookup(conn, url)
+        if cached is not None:
+            return _result_from_cache(cached, kind=kind, source_url=url)
 
     parser_module = _load_parser(kind)
     try:
@@ -197,6 +201,7 @@ def parse_listing_url(
         sreality_id=None,
         source_url=url,
         full_extraction=extraction,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
     )
 
 
@@ -231,6 +236,8 @@ def _sreality_branch(
         sreality_id=int(parsed["sreality_id"]),
         source_url=url,
         full_extraction=None,
+        fetched_at=parsed.get("fetched_at"),
+        wide_spec=dict(parser_spec),
     )
 
 
@@ -417,6 +424,7 @@ def _result_from_cache(
     spec = payload.get("spec") or {}
     extraction = payload.get("extraction")
     confidence_per_field = payload.get("parse_confidence_per_field")
+    parsed_at = cached.get("parsed_at")
     return ParseResult(
         spec=dict(spec),
         source_kind=kind,
@@ -435,6 +443,7 @@ def _result_from_cache(
         full_extraction=(
             dict(extraction) if isinstance(extraction, dict) else None
         ),
+        fetched_at=parsed_at.isoformat() if hasattr(parsed_at, "isoformat") else parsed_at,
     )
 
 

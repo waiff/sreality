@@ -192,6 +192,16 @@ _INSERT_COLUMNS: tuple[str, ...] = tuple(
     c for c in _RUN_COLUMNS if c not in ("id", "created_at")
 )
 
+_COST_TOTAL_SUBSELECT = (
+    "coalesce("
+    "(SELECT sum(cost_usd) FROM llm_calls WHERE estimation_run_id = er.id), "
+    "0)::float AS cost_usd_total"
+)
+_RUN_PROJECTION = (
+    ", ".join(f"er.{c}" for c in _RUN_COLUMNS) + ", " + _COST_TOTAL_SUBSELECT
+)
+_RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + ("cost_usd_total",)
+
 
 @dataclass
 class _Resolution:
@@ -309,28 +319,31 @@ def list_estimation_runs(
     source: str | None = None,
     status: str | None = None,
     sreality_id: int | None = None,
+    source_kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> dict[str, Any]:
     where: list[str] = []
     params: dict[str, Any] = {}
     if source is not None:
-        where.append("source = %(source)s")
+        where.append("er.source = %(source)s")
         params["source"] = source
     if status is not None:
-        where.append("status = %(status)s")
+        where.append("er.status = %(status)s")
         params["status"] = status
     if sreality_id is not None:
-        where.append("input_sreality_id = %(sreality_id)s")
+        where.append("er.input_sreality_id = %(sreality_id)s")
         params["sreality_id"] = sreality_id
+    if source_kind is not None:
+        where.append("er.source_kind = %(source_kind)s")
+        params["source_kind"] = source_kind
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
-    cols_sql = ", ".join(_RUN_COLUMNS)
     list_sql = (
-        f"SELECT {cols_sql} FROM estimation_runs {where_sql} "
-        f"ORDER BY created_at DESC LIMIT %(limit)s OFFSET %(offset)s"
+        f"SELECT {_RUN_PROJECTION} FROM estimation_runs er {where_sql} "
+        f"ORDER BY er.created_at DESC LIMIT %(limit)s OFFSET %(offset)s"
     )
-    count_sql = f"SELECT count(*) FROM estimation_runs {where_sql}"
+    count_sql = f"SELECT count(*) FROM estimation_runs er {where_sql}"
     list_params = {**params, "limit": limit, "offset": offset}
 
     with conn.cursor() as cur:
@@ -340,11 +353,34 @@ def list_estimation_runs(
         total_row = cur.fetchone()
     total = int(total_row[0]) if total_row else 0
     return {
-        "data": [_row_to_dict(_RUN_COLUMNS, r) for r in rows],
+        "data": [_row_to_dict(_RUN_COLUMNS_OUT, r) for r in rows],
         "total": total,
         "limit": limit,
         "offset": offset,
     }
+
+
+_LISTING_FIELDS: tuple[str, ...] = (
+    "price_czk", "price_unit", "category_main", "category_type",
+    "locality", "district", "locality_district_id", "locality_region_id",
+    "total_floors", "has_balcony", "has_lift", "has_parking",
+    "building_type", "condition", "energy_rating",
+)
+
+
+def _listing_from_result(
+    result: "source_dispatcher.ParseResult",
+) -> dict[str, Any]:
+    if result.wide_spec is not None:
+        return {f: result.wide_spec.get(f) for f in _LISTING_FIELDS}
+    fx = result.full_extraction
+    if fx is not None:
+        out: dict[str, Any] = {}
+        for f in _LISTING_FIELDS:
+            env = fx.get(f)
+            out[f] = env["value"] if isinstance(env, dict) and "value" in env else None
+        return out
+    return {f: None for f in _LISTING_FIELDS}
 
 
 def preview_estimation(
@@ -356,15 +392,16 @@ def preview_estimation(
     """POST /estimations/preview: resolve URL, return parsed spec + provenance.
 
     Does NOT write to estimation_runs. Provenance fields (source_kind,
-    parse_confidence, parse_confidence_per_field, from_cache, cost_usd,
-    warnings) are returned to the caller so the UI can show what was
-    extracted before the user commits to running the estimate.
+    parse_confidence, parse_confidence_per_field, from_cache, fetched_at,
+    cost_usd, warnings) are returned to the caller so the UI can show what
+    was extracted before the user commits to running the estimate.
     """
     result = source_dispatcher.parse_listing_url(
         body.url,
         sreality_client=sreality_client,
         llm_client=llm_client,
         conn=conn,
+        force_refresh=body.force_refresh,
     )
     spec = dict(result.spec)
     if body.spec_overrides:
@@ -374,7 +411,9 @@ def preview_estimation(
         "parse_confidence": result.parse_confidence,
         "parse_confidence_per_field": result.parse_confidence_per_field,
         "spec": spec,
+        "listing": _listing_from_result(result),
         "from_cache": result.from_cache,
+        "fetched_at": result.fetched_at,
         "cost_usd": result.cost_usd,
         "warnings": list(result.warnings),
         "sreality_id": result.sreality_id,
@@ -563,16 +602,15 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
 def _fetch_run(
     conn: "psycopg.Connection", run_id: int
 ) -> dict[str, Any] | None:
-    cols_sql = ", ".join(_RUN_COLUMNS)
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT {cols_sql} FROM estimation_runs WHERE id = %s",
+            f"SELECT {_RUN_PROJECTION} FROM estimation_runs er WHERE er.id = %s",
             (run_id,),
         )
         row = cur.fetchone()
     if row is None:
         return None
-    return _row_to_dict(_RUN_COLUMNS, row)
+    return _row_to_dict(_RUN_COLUMNS_OUT, row)
 
 
 def _row_to_dict(

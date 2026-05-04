@@ -505,11 +505,19 @@ def test_list_no_filters_builds_naked_sql():
     assert res == {"data": [], "total": 0, "limit": 20, "offset": 5}
     list_sql, list_params = conn.executions[0]
     count_sql, count_params = conn.executions[1]
-    assert "WHERE" not in list_sql
-    assert "ORDER BY created_at DESC" in list_sql
+    # No outer WHERE clause — every filter predicate is gated behind
+    # an "er.<col> = " prefix, none of which should appear here.
+    for predicate in (
+        "er.source =", "er.status =",
+        "er.input_sreality_id =", "er.source_kind =",
+    ):
+        assert predicate not in list_sql
+        assert predicate not in count_sql
+    assert "ORDER BY er.created_at DESC" in list_sql
     assert "LIMIT %(limit)s OFFSET %(offset)s" in list_sql
+    assert "cost_usd_total" in list_sql
+    assert "FROM llm_calls WHERE estimation_run_id = er.id" in list_sql
     assert list_params == {"limit": 20, "offset": 5}
-    assert "WHERE" not in count_sql
     assert count_params == {}
 
 
@@ -520,19 +528,28 @@ def test_list_with_filters_builds_where_clause():
         sreality_id=12345, limit=50, offset=0,
     )
     list_sql, list_params = conn.executions[0]
-    assert "source = %(source)s" in list_sql
-    assert "status = %(status)s" in list_sql
-    assert "input_sreality_id = %(sreality_id)s" in list_sql
+    assert "er.source = %(source)s" in list_sql
+    assert "er.status = %(status)s" in list_sql
+    assert "er.input_sreality_id = %(sreality_id)s" in list_sql
     assert list_params["source"] == "ui"
     assert list_params["status"] == "success"
     assert list_params["sreality_id"] == 12345
+
+
+def test_list_filters_by_source_kind():
+    conn = _FakeConn(results=[[], (0,)])
+    er.list_estimation_runs(conn, source_kind="bezrealitky")
+    list_sql, list_params = conn.executions[0]
+    assert "er.source_kind = %(source_kind)s" in list_sql
+    assert list_params["source_kind"] == "bezrealitky"
 
 
 def test_get_estimation_run_returns_none_when_missing():
     conn = _FakeConn(results=[None])
     res = er.get_estimation_run(conn, run_id=999)
     assert res is None
-    assert "WHERE id = %s" in conn.executions[0][0]
+    assert "WHERE er.id = %s" in conn.executions[0][0]
+    assert "cost_usd_total" in conn.executions[0][0]
 
 
 # ----------------------------------------------------------------------
@@ -544,8 +561,10 @@ def _patch_dispatcher_returns(
 ) -> dict[str, Any]:
     captured: dict[str, Any] = {}
 
-    def fake(url, *, sreality_client, llm_client, conn):
+    def fake(url, *, sreality_client, llm_client, conn,
+             force_refresh: bool = False, **_kw):
         captured["url"] = url
+        captured["force_refresh"] = force_refresh
         return parse_result
 
     monkeypatch.setattr(sd, "parse_listing_url", fake)
@@ -658,6 +677,110 @@ def test_preview_returns_502_on_upstream_fetch_failure(client, monkeypatch):
         json={"url": "https://www.bezrealitky.cz/listing/abc"},
     )
     assert res.status_code == 502
+
+
+def test_preview_sreality_returns_listing_block(client, monkeypatch):
+    _patch_dispatcher_returns(monkeypatch, _result(
+        wide_spec={
+            "price_czk": 18500, "price_unit": "měsíc",
+            "category_main": "byt", "category_type": "pronajem",
+            "locality": "Praha 1, Nové Město", "district": "Praha 1",
+            "locality_district_id": 5001, "locality_region_id": 10,
+            "total_floors": 6,
+            "has_balcony": True, "has_lift": True, "has_parking": False,
+            "building_type": "cihlová", "condition": "po rekonstrukci",
+            "energy_rating": "C",
+        },
+        fetched_at="2026-05-04T10:00:00+00:00",
+    ))
+    res = client.post(
+        "/estimations/preview",
+        json={"url": "https://www.sreality.cz/detail/x/2836292428"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["fetched_at"] == "2026-05-04T10:00:00+00:00"
+    listing = body["listing"]
+    assert listing["price_czk"] == 18500
+    assert listing["district"] == "Praha 1"
+    assert listing["total_floors"] == 6
+    assert listing["has_balcony"] is True
+    assert listing["building_type"] == "cihlová"
+
+
+def test_preview_llm_listing_block_extracts_values_from_full_extraction(
+    client, monkeypatch,
+):
+    _patch_dispatcher_returns(monkeypatch, _result(
+        source_kind="bezrealitky",
+        parse_confidence="medium",
+        full_extraction={
+            "price_czk":     {"value": 24000, "confidence": "high"},
+            "total_floors":  {"value": 4,     "confidence": "medium"},
+            "has_balcony":   {"value": True,  "confidence": "high"},
+            "building_type": {"value": "panel", "confidence": "low"},
+            "energy_rating": {"value": None,  "confidence": "low"},
+        },
+        source_html="<html>...</html>",
+        cost_usd=0.012,
+        sreality_id=None,
+        source_url="https://www.bezrealitky.cz/listing/abc",
+    ))
+    res = client.post(
+        "/estimations/preview",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    body = res.json()
+    listing = body["listing"]
+    assert listing["price_czk"] == 24000
+    assert listing["total_floors"] == 4
+    assert listing["has_balcony"] is True
+    assert listing["building_type"] == "panel"
+    assert listing["energy_rating"] is None
+    assert listing["condition"] is None
+
+
+def test_preview_force_refresh_threads_through_to_dispatcher(
+    client, monkeypatch,
+):
+    captured: dict[str, Any] = {}
+
+    def fake(url, *, sreality_client, llm_client, conn, force_refresh=False):
+        captured["force_refresh"] = force_refresh
+        return _result(source_kind="bezrealitky", parse_confidence="medium",
+                       sreality_id=None,
+                       source_url="https://www.bezrealitky.cz/listing/abc")
+
+    monkeypatch.setattr(sd, "parse_listing_url", fake)
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", fake)
+
+    res = client.post(
+        "/estimations/preview",
+        json={
+            "url": "https://www.bezrealitky.cz/listing/abc",
+            "force_refresh": True,
+        },
+    )
+    assert res.status_code == 200
+    assert captured["force_refresh"] is True
+
+
+def test_preview_force_refresh_default_is_false(client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(url, *, sreality_client, llm_client, conn, force_refresh=False):
+        captured["force_refresh"] = force_refresh
+        return _result()
+
+    monkeypatch.setattr(sd, "parse_listing_url", fake)
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", fake)
+
+    res = client.post(
+        "/estimations/preview",
+        json={"url": "https://www.sreality.cz/detail/x/2836292428"},
+    )
+    assert res.status_code == 200
+    assert captured["force_refresh"] is False
 
 
 # ----------------------------------------------------------------------
