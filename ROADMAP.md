@@ -130,6 +130,37 @@ numerals, Czech locale formatting).
 - Trace format v1: tool calls + computations recorded with
   `output_summary` only (full data in dedicated columns).
 
+### Phase estimation-4: Generic URL parser (done)
+- Migration 020: `parsed_url_cache`, `llm_calls`, `app_settings` +
+  `app_settings_history`, plus `source_kind` /
+  `parse_confidence` / `parse_confidence_per_field` / `source_html`
+  columns on `estimation_runs`.
+- `api.llm_client.LLMClient`: wraps the Anthropic SDK, audits every
+  call to `llm_calls`, computes USD cost from a per-model price
+  table, and emits a one-time daily-cost soft warning at
+  `LLM_DAILY_COST_WARN_USD` (default $5).
+- `scraper.geocoding.geocode`: Mapy.cz forward geocoding with
+  type-based confidence (regional.address → high; street → medium;
+  city centroid → low) and a CLI verification helper.
+- `scraper.source_dispatcher`: classifies a URL by domain and routes
+  to either the deterministic sreality flow or the LLM-driven
+  per-source parsers (bezrealitky, idnes_reality, remax,
+  best-effort generic). Cache lookup on canonicalised URL hash with
+  7-day TTL.
+- `POST /estimations/preview`: parse any allowlisted URL through the
+  LLM-driven dispatcher and return spec + provenance without
+  persisting a run. Coexists with the U2-frontend's existing
+  `GET /estimations/preview` (sreality-only, read-only); the POST
+  version is the path forward for non-sreality sources.
+- `POST /estimations`: now routes through the dispatcher and
+  populates the four new audit columns; parse failures persist a
+  `failed` row with the error message.
+
+The U2 estimation flow (below) wires up automatically for sreality
+URLs. Migrating the frontend's preview call from `GET` to `POST` so
+non-sreality URLs become parseable from the UI is the
+`estimation-5` follow-up.
+
 ### Phase U2: Estimation flow (done)
 End-to-end browser flow over the U1b backend.
 - `/estimate`: two-step form (paste URL or pick listing → review and

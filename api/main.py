@@ -18,7 +18,9 @@ from api.estimation_runs import (
     create_estimation_run,
     get_estimation_run,
     list_estimation_runs,
+    preview_estimation,
 )
+from scraper.source_dispatcher import ParseError
 from toolkit import (
     ComparableFilters,
     TargetSpec,
@@ -189,14 +191,33 @@ def post_compute_listing_velocity(
     )
 
 
+@app.post("/estimations/preview")
+def post_estimations_preview(
+    body: s.PreviewEstimationIn,
+    conn: Any = Depends(deps.get_db_conn),
+    client: Any = Depends(deps.get_sreality_client),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    try:
+        return preview_estimation(conn, client, llm_client, body)
+    except ParseError as exc:
+        raise HTTPException(status_code=502, detail=f"parse failed: {exc}")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"upstream error: {type(exc).__name__}: {exc}",
+        )
+
+
 @app.post("/estimations")
 def post_estimations(
     body: s.CreateEstimationIn,
     conn: Any = Depends(deps.get_db_conn),
     client: Any = Depends(deps.get_sreality_client),
+    llm_client: Any = Depends(deps.get_llm_client),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return create_estimation_run(conn, client, body)
+    return create_estimation_run(conn, client, llm_client, body)
 
 
 @app.get("/estimations/preview")

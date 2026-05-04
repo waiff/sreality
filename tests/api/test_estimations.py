@@ -1,8 +1,8 @@
-"""Tests for /estimations endpoints (POST, GET-by-id, list).
+"""Tests for /estimations endpoints (POST, GET-by-id, list, preview).
 
-Hermetic — overrides the DB-conn and SrealityClient dependencies, and
-mocks the persistence helpers + url_parser + estimate_yield so no real
-DB or HTTP is hit.
+Hermetic — overrides the DB-conn, SrealityClient, and LLMClient
+dependencies, and mocks the persistence helpers + dispatcher +
+estimate_yield so no real DB / HTTP / LLM is hit.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from api import dependencies as deps
 from api import estimate_yield as ey
 from api import estimation_runs as er
 from api import main as api_main
+from scraper import source_dispatcher as sd
 from scraper import url_parser as scraper_url_parser
 
 
@@ -25,6 +26,9 @@ from scraper import url_parser as scraper_url_parser
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.get_sreality_client] = (
+        lambda: object()
+    )
+    api_main.app.dependency_overrides[deps.get_llm_client] = (
         lambda: object()
     )
     yield TestClient(api_main.app)
@@ -68,6 +72,8 @@ def _patch_persistence(monkeypatch) -> _State:
                     "rent_p75_czk", "gross_yield_pct", "confidence",
                     "comparables_used", "trace", "warnings",
                     "error_message", "parent_run_id", "rerun_reason",
+                    "source_kind", "parse_confidence",
+                    "parse_confidence_per_field", "source_html",
                 )
             },
         }
@@ -107,6 +113,9 @@ def _patch_estimate(monkeypatch, exc: Exception | None = None,
 
 
 def _patch_url_parser(monkeypatch, sreality_id: int = 2836292428) -> None:
+    """Patch the dispatcher's view of parse_sreality_url so a sreality URL
+    flows through the new dispatcher with the same shape as before.
+    """
     def fake(url: str, *, client, conn) -> dict[str, Any]:
         return {
             "sreality_id": sreality_id,
@@ -123,9 +132,7 @@ def _patch_url_parser(monkeypatch, sreality_id: int = 2836292428) -> None:
             "source_url": url,
             "in_database": False,
         }
-    monkeypatch.setattr(
-        scraper_url_parser, "parse_sreality_url", fake
-    )
+    monkeypatch.setattr(sd.url_parser, "parse_sreality_url", fake)
 
 
 # ----------------------------------------------------------------------
@@ -526,3 +533,211 @@ def test_get_estimation_run_returns_none_when_missing():
     res = er.get_estimation_run(conn, run_id=999)
     assert res is None
     assert "WHERE id = %s" in conn.executions[0][0]
+
+
+# ----------------------------------------------------------------------
+# POST /estimations/preview
+# ----------------------------------------------------------------------
+
+def _patch_dispatcher_returns(
+    monkeypatch, parse_result: sd.ParseResult,
+) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def fake(url, *, sreality_client, llm_client, conn):
+        captured["url"] = url
+        return parse_result
+
+    monkeypatch.setattr(sd, "parse_listing_url", fake)
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", fake)
+    return captured
+
+
+def _result(**overrides: Any) -> sd.ParseResult:
+    base = dict(
+        spec={
+            "lat": 50.087, "lng": 14.42, "area_m2": 50.0,
+            "disposition": "2+kk", "floor": 3, "exclude_ids": [],
+        },
+        source_kind="sreality",
+        parse_confidence="high",
+        parse_confidence_per_field=None,
+        source_html=None,
+        from_cache=False,
+        cost_usd=None,
+        warnings=[],
+        sreality_id=2836292428,
+        source_url="https://www.sreality.cz/detail/x/2836292428",
+        full_extraction=None,
+    )
+    base.update(overrides)
+    return sd.ParseResult(**base)
+
+
+def test_preview_sreality_returns_parsed_spec(client, monkeypatch):
+    captured = _patch_dispatcher_returns(monkeypatch, _result())
+    res = client.post(
+        "/estimations/preview",
+        json={"url": "https://www.sreality.cz/detail/x/2836292428"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["source_kind"] == "sreality"
+    assert body["parse_confidence"] == "high"
+    assert body["from_cache"] is False
+    assert body["cost_usd"] is None
+    assert body["sreality_id"] == 2836292428
+    assert body["spec"]["lat"] == 50.087
+    assert body["spec"]["lng"] == 14.42
+    assert captured["url"].endswith("2836292428")
+
+
+def test_preview_bezrealitky_returns_source_kind_and_confidence(client, monkeypatch):
+    _patch_dispatcher_returns(monkeypatch, _result(
+        source_kind="bezrealitky",
+        parse_confidence="medium",
+        parse_confidence_per_field={
+            "area_m2": "high", "disposition": "high", "lat": "medium",
+        },
+        source_html="<html>...</html>",
+        from_cache=False,
+        cost_usd=0.018,
+        sreality_id=None,
+        source_url="https://www.bezrealitky.cz/listing/abc",
+    ))
+    res = client.post(
+        "/estimations/preview",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["source_kind"] == "bezrealitky"
+    assert body["parse_confidence"] == "medium"
+    assert body["parse_confidence_per_field"]["lat"] == "medium"
+    assert body["cost_usd"] == 0.018
+
+
+def test_preview_applies_spec_overrides(client, monkeypatch):
+    _patch_dispatcher_returns(monkeypatch, _result())
+    res = client.post(
+        "/estimations/preview",
+        json={
+            "url": "https://www.sreality.cz/detail/x/2836292428",
+            "spec_overrides": {"area_m2": 65.0, "floor": 5},
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["spec"]["area_m2"] == 65.0
+    assert body["spec"]["floor"] == 5
+    assert body["spec"]["lat"] == 50.087  # unchanged
+
+
+def test_preview_returns_502_on_parse_error(client, monkeypatch):
+    def boom(url, **_kw):
+        raise sd.ParseError("LLM did not invoke record_listing")
+
+    monkeypatch.setattr(sd, "parse_listing_url", boom)
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", boom)
+    res = client.post(
+        "/estimations/preview",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    assert res.status_code == 502
+    assert "parse failed" in res.json()["detail"]
+
+
+def test_preview_returns_502_on_upstream_fetch_failure(client, monkeypatch):
+    def boom(url, **_kw):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(sd, "parse_listing_url", boom)
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", boom)
+    res = client.post(
+        "/estimations/preview",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    assert res.status_code == 502
+
+
+# ----------------------------------------------------------------------
+# POST /estimations now flows through the dispatcher and persists
+# the four new audit columns.
+# ----------------------------------------------------------------------
+
+def test_post_with_non_sreality_url_persists_provenance(client, monkeypatch):
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    _patch_dispatcher_returns(monkeypatch, _result(
+        source_kind="bezrealitky",
+        parse_confidence="medium",
+        parse_confidence_per_field={
+            "area_m2": "high", "disposition": "high", "lat": "medium",
+        },
+        source_html="<html>spec</html>",
+        cost_usd=0.018,
+        warnings=["geocoded with medium confidence"],
+        sreality_id=None,
+        source_url="https://www.bezrealitky.cz/listing/abc",
+    ))
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["source_kind"] == "bezrealitky"
+    assert body["parse_confidence"] == "medium"
+    assert body["parse_confidence_per_field"]["lat"] == "medium"
+    assert body["source_html"] == "<html>spec</html>"
+    assert body["input_sreality_id"] is None
+    assert body["input_url"].endswith("/abc")
+    # Parse-time warnings flow through to the persisted row.
+    assert any("geocoded" in w for w in (body["warnings"] or []))
+    inserted = state.inserts[1]
+    assert inserted["source_kind"] == "bezrealitky"
+    assert inserted["parse_confidence"] == "medium"
+
+
+def test_post_when_dispatch_fails_persists_failed_row(client, monkeypatch):
+    state = _patch_persistence(monkeypatch)
+
+    def boom(url, **_kw):
+        raise sd.ParseError("LLM did not invoke record_listing")
+
+    monkeypatch.setattr(sd, "parse_listing_url", boom)
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", boom)
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "failed"
+    assert "ParseError" in body["error_message"]
+    assert "record_listing" in body["error_message"]
+    assert body["input_url"].endswith("/abc")
+    assert body["input_sreality_id"] is None
+    assert body["estimated_monthly_rent_czk"] is None
+    inserted = state.inserts[1]
+    assert inserted["status"] == "failed"
+    assert "record_listing" in inserted["error_message"]
+
+
+def test_post_with_sreality_url_populates_sreality_source_kind(client, monkeypatch):
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    _patch_dispatcher_returns(monkeypatch, _result())
+
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.sreality.cz/detail/x/2836292428"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["source_kind"] == "sreality"
+    assert body["parse_confidence"] == "high"
+    assert body["parse_confidence_per_field"] is None
+    assert body["source_html"] is None
+    assert body["input_sreality_id"] == 2836292428

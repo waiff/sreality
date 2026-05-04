@@ -290,7 +290,7 @@ Do not introduce `supabase-py` without an explicit reason and a discussion.
 
 ## Auth and secrets
 
-Seven env vars (all GitHub Actions secrets in production):
+Nine env vars (all GitHub Actions secrets in production):
 
 Database:
 - `SUPABASE_URL` - public project URL.
@@ -312,8 +312,66 @@ If any R2_* var is missing the image-download phase logs a skip and
 exits zero. The scrape still records image URLs in the database;
 downloading is decoupled and can be backfilled later.
 
+LLM-backed parsing (FastAPI service only):
+- `ANTHROPIC_API_KEY` - Anthropic API key. Required for parsing
+  non-sreality listing URLs through the source-kind dispatcher. Every
+  call is logged to `llm_calls` with token counts and USD cost.
+- `MAPY_CZ_API_KEY` - Mapy.cz REST API key. Used to geocode locality
+  strings from non-sreality listings, which rarely include coordinates
+  on the page.
+- `LLM_DAILY_COST_WARN_USD` (optional, default `5.0`) - soft warning
+  threshold. When today's `llm_calls.cost_usd` sum first crosses this
+  value, the LLMClient logs one WARNING line; subsequent calls today
+  do not re-warn. Anthropic's own console spend cap is the hard guard;
+  this is just an early-warning signal in Railway logs.
+
+Both API keys are backend-only. Never `VITE_*` prefix; never expose
+to the browser. The `frontend/` build does not see them.
+
 Never write any of these values into a committed file. `.env` is gitignored.
 Always reference secrets by env-var name in code.
+
+## LLM-backed parsing
+
+`scraper.source_dispatcher.parse_listing_url` is the single entry
+point for any listing URL (sreality or otherwise). It classifies the
+URL by domain and routes to either the deterministic sreality flow
+(`scraper.url_parser`, unchanged) or an LLM-driven per-source parser
+under `scraper/source_parsers/`. Today's allowlist is bezrealitky,
+reality.idnes, and remax-czech; everything else falls through to a
+best-effort generic parser that always reports
+`parse_confidence='best_effort'`.
+
+The LLM path:
+1. Cache check against `parsed_url_cache`. Key is sha256 of the
+   canonicalised URL (lowercase scheme/host, no query, no trailing
+   slash). Hit → return cached spec, no LLM, no cost.
+2. Fetch HTML, send to Claude with the system prompt from
+   `app_settings.llm_parse_system_prompt` and the per-source user
+   prompt from `scraper.source_parsers.<source>`. The model is
+   `app_settings.llm_parse_model` (default `claude-sonnet-4-5`).
+3. The LLM is required to invoke `record_listing` exactly once with
+   every field in a `{value, confidence}` envelope. Any deviation
+   raises `ParseError` and surfaces as a 502 from /estimations/preview
+   or a `failed` row from POST /estimations.
+4. If the page didn't yield lat/lng, geocode the locality string via
+   Mapy.cz (`scraper.geocoding`). The geocode confidence rolls into
+   `parse_confidence_per_field['lat'/'lng']`.
+5. Store the full extraction + spec + warnings in `parsed_url_cache`
+   with a 7-day TTL.
+
+Operator-tunable parser behaviour lives in `app_settings`. Editing
+the system prompt or model name in that table changes parser
+behaviour for the next preview / estimation that hits a non-sreality
+URL — no deploy needed. Every prior value is preserved in
+`app_settings_history` via the trigger from migration 020.
+
+Cost discipline: every Anthropic call is recorded in `llm_calls`
+with token counts (including cache-read / cache-write splits), USD
+cost, duration, and the optional `estimation_run_id` of the run that
+triggered the call. The `LLMClient` emits a one-time WARNING per day
+when `llm_calls.cost_usd` sum first crosses
+`LLM_DAILY_COST_WARN_USD` (default $5).
 
 ## Coding conventions
 
@@ -343,6 +401,33 @@ Always reference secrets by env-var name in code.
   (logs what would be written, writes nothing).
 - For testing a single listing: `--detail-only <sreality_id>`.
 - For a small live run: `--limit 10` (caps at 10 listings).
+
+## Refreshing per-source HTML fixtures
+
+The LLM-driven parsers (`scraper/source_parsers/`) are tested against
+saved listing HTML in `tests/fixtures/source_html/`. Real listings
+get taken down or change layout, so every few months the fixtures
+need a refresh. Don't fetch live in tests — that would burn LLM
+credit and break offline runs.
+
+Refresh procedure (operator):
+1. GitHub repo → **Actions** tab → **Fetch + anonymize source HTML
+   fixtures** workflow → **Run workflow**.
+2. Pick the branch you want the fixtures on.
+3. Optionally edit the URLs (defaults are baked in for the three
+   allowlisted sources). Leave a field blank to skip that source.
+4. **Run workflow**. It fetches each URL, runs the anonymization in
+   `scripts/fetch_and_anonymize_fixtures.py`, and commits the
+   resulting `*_sample.html` files back to the same branch.
+5. The skipif tests in
+   `tests/scraper/test_source_parsers/test_real_fixtures.py` light up
+   automatically once the files exist.
+
+Anonymization scope: phones → `+420 XXX XXX XXX`, emails →
+`agent@example.cz`, street numbers (`123/45`) → `XXX/YY`. Listing
+prices and the surrounding HTML structure are preserved — they're
+public data and the parsers need them. Agent names are too varied
+to scrub by regex; if a fixture leaks one, hand-edit the file.
 
 ## How to manually trigger the scraper
 

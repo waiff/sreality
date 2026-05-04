@@ -23,6 +23,7 @@ from scraper import url_parser as scraper_url_parser
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.get_sreality_client] = lambda: object()
+    api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
 
     def fake_find(conn, target, filters):
         return {"data": {"listings": []}, "metadata": {"tool": "find_comparables"}}
@@ -56,7 +57,7 @@ def client(monkeypatch):
         return {"data": {"categories": {}, "from_cache": {}},
                 "metadata": {"tool": "find_anchor_amenities"}}
 
-    def fake_create_run(conn, c, body):
+    def fake_create_run(conn, c, llm_client, body):
         return {"id": 1, "status": "success"}
 
     def fake_get_run(conn, run_id):

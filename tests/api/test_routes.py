@@ -21,6 +21,7 @@ from api import main as api_main
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.get_sreality_client] = lambda: object()
+    api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 

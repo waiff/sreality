@@ -34,6 +34,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -41,11 +42,13 @@ from typing import TYPE_CHECKING, Any
 from psycopg.types.json import Jsonb
 
 from api import schemas as s
+from scraper import source_dispatcher
 from toolkit import ComparableFilters, TargetSpec
 
 if TYPE_CHECKING:
     import psycopg
 
+    from api.llm_client import LLMClient
     from scraper.sreality_client import SrealityClient
 
 LOG = logging.getLogger(__name__)
@@ -181,6 +184,8 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "gross_yield_pct", "confidence",
     "comparables_used", "trace", "warnings", "error_message",
     "parent_run_id", "rerun_reason",
+    "source_kind", "parse_confidence", "parse_confidence_per_field",
+    "source_html",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -188,9 +193,38 @@ _INSERT_COLUMNS: tuple[str, ...] = tuple(
 )
 
 
+@dataclass
+class _Resolution:
+    """The result of turning a CreateEstimationIn body into a target spec.
+
+    Carries the dispatcher's audit fields (source_kind, parse_confidence,
+    parse_confidence_per_field, source_html) plus the input-side bookkeeping
+    (input_url, input_sreality_id, target_spec). Built once at the top of
+    create_estimation_run and reused by both the success and failed-row
+    persistence paths.
+    """
+    input_url: str | None
+    input_sreality_id: int | None
+    target_spec: dict[str, Any] | None
+    source_kind: str | None
+    parse_confidence: str | None
+    parse_confidence_per_field: dict[str, str] | None
+    source_html: str | None
+    parse_warnings: list[str] = field(default_factory=list)
+
+
+_EMPTY_RESOLUTION = _Resolution(
+    input_url=None, input_sreality_id=None, target_spec=None,
+    source_kind=None, parse_confidence=None,
+    parse_confidence_per_field=None, source_html=None,
+    parse_warnings=[],
+)
+
+
 def create_estimation_run(
     conn: "psycopg.Connection",
-    client: "SrealityClient",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
     body: s.CreateEstimationIn,
 ) -> dict[str, Any]:
     """POST /estimations: resolve input, run the estimate, persist, return row.
@@ -201,12 +235,19 @@ def create_estimation_run(
     code to UPDATE the row twice.
     """
     from api.estimate_yield import estimate_yield
-    from scraper.url_parser import parse_sreality_url
 
-    input_url, input_sreality_id, target_spec = _resolve_input(
-        conn, client, body, parse_sreality_url
-    )
-    target = _build_target(target_spec)
+    try:
+        resolution = _resolve_input(conn, sreality_client, llm_client, body)
+    except Exception as exc:
+        LOG.warning("URL parse failed: %s", exc)
+        return _persist_failed_run(
+            conn, body=body, resolution=_resolution_for_parse_failure(body),
+            recorder=TraceRecorder(),
+            error_msg=f"parse failed: {type(exc).__name__}: {exc}"[:1000],
+            extra_warnings=[],
+        )
+
+    target = _build_target(resolution.target_spec)
     filters = _build_filters(body)
     recorder = TraceRecorder()
 
@@ -218,41 +259,24 @@ def create_estimation_run(
     except Exception as exc:
         LOG.warning("estimate_yield failed: %s", exc)
         error_msg = f"{type(exc).__name__}: {exc}"[:1000]
-        trace = recorder.to_dict(f"failed: {type(exc).__name__}")
-        run_id = _insert_run(
-            conn,
-            source=body.source,
-            mode=body.mode,
-            status="failed",
-            input_url=input_url,
-            input_sreality_id=input_sreality_id,
-            input_spec=target_spec,
-            input_purchase_price_czk=body.purchase_price_czk,
-            estimated_monthly_rent_czk=None,
-            rent_p25_czk=None,
-            rent_p75_czk=None,
-            gross_yield_pct=None,
-            confidence=None,
-            comparables_used=None,
-            trace=trace,
-            warnings=None,
-            error_message=error_msg,
-            parent_run_id=body.parent_run_id,
-            rerun_reason=body.rerun_reason,
+        return _persist_failed_run(
+            conn, body=body, resolution=resolution, recorder=recorder,
+            error_msg=error_msg, extra_warnings=[],
         )
-        return _fetch_run(conn, run_id) or {}
 
     d = result["data"]
     summary_text = _summary_line(d, filters.radius_m)
     trace = recorder.to_dict(summary_text)
+    merged_warnings = list(resolution.parse_warnings)
+    merged_warnings.extend(d.get("warnings") or [])
     run_id = _insert_run(
         conn,
         source=body.source,
         mode=body.mode,
         status="success",
-        input_url=input_url,
-        input_sreality_id=input_sreality_id,
-        input_spec=target_spec,
+        input_url=resolution.input_url,
+        input_sreality_id=resolution.input_sreality_id,
+        input_spec=resolution.target_spec,
         input_purchase_price_czk=body.purchase_price_czk,
         estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
         rent_p25_czk=d.get("rent_p25_czk"),
@@ -261,10 +285,14 @@ def create_estimation_run(
         confidence=d.get("confidence"),
         comparables_used=d.get("comparables_used"),
         trace=trace,
-        warnings=d.get("warnings"),
+        warnings=merged_warnings or None,
         error_message=None,
         parent_run_id=body.parent_run_id,
         rerun_reason=body.rerun_reason,
+        source_kind=resolution.source_kind,
+        parse_confidence=resolution.parse_confidence,
+        parse_confidence_per_field=resolution.parse_confidence_per_field,
+        source_html=resolution.source_html,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -319,36 +347,152 @@ def list_estimation_runs(
     }
 
 
-def _resolve_input(
+def preview_estimation(
     conn: "psycopg.Connection",
-    client: "SrealityClient",
-    body: s.CreateEstimationIn,
-    parse_sreality_url: Any,
-) -> tuple[str | None, int | None, dict[str, Any]]:
-    """Return (input_url, input_sreality_id, normalised_target_spec)."""
-    if body.url is not None:
-        parsed = parse_sreality_url(body.url, client=client, conn=conn)
-        spec = _spec_from_parser(parsed["spec"])
-        if body.spec_overrides:
-            spec = {**spec, **body.spec_overrides}
-        return body.url, int(parsed["sreality_id"]), spec
-    assert body.spec is not None
-    return None, None, body.spec.model_dump()
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
+    body: s.PreviewEstimationIn,
+) -> dict[str, Any]:
+    """POST /estimations/preview: resolve URL, return parsed spec + provenance.
 
-
-def _spec_from_parser(parser_spec: dict[str, Any]) -> dict[str, Any]:
-    """Map parser.parse_listing output to TargetIn shape (lon → lng)."""
+    Does NOT write to estimation_runs. Provenance fields (source_kind,
+    parse_confidence, parse_confidence_per_field, from_cache, cost_usd,
+    warnings) are returned to the caller so the UI can show what was
+    extracted before the user commits to running the estimate.
+    """
+    result = source_dispatcher.parse_listing_url(
+        body.url,
+        sreality_client=sreality_client,
+        llm_client=llm_client,
+        conn=conn,
+    )
+    spec = dict(result.spec)
+    if body.spec_overrides:
+        spec = {**spec, **body.spec_overrides}
     return {
-        "lat": parser_spec.get("lat"),
-        "lng": parser_spec.get("lon"),
-        "area_m2": parser_spec.get("area_m2"),
-        "disposition": parser_spec.get("disposition"),
-        "floor": parser_spec.get("floor"),
-        "exclude_ids": [],
+        "source_kind": result.source_kind,
+        "parse_confidence": result.parse_confidence,
+        "parse_confidence_per_field": result.parse_confidence_per_field,
+        "spec": spec,
+        "from_cache": result.from_cache,
+        "cost_usd": result.cost_usd,
+        "warnings": list(result.warnings),
+        "sreality_id": result.sreality_id,
+        "source_url": result.source_url,
     }
 
 
-def _build_target(spec: dict[str, Any]) -> TargetSpec:
+# --- _resolve_input + helpers ---------------------------------------------
+
+def _resolve_input(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
+    body: s.CreateEstimationIn,
+) -> _Resolution:
+    """Build a _Resolution from the request body.
+
+    URL path: dispatch through scraper.source_dispatcher (which routes
+    sreality through the existing deterministic flow and any other
+    domain through the LLM-driven per-source parser). Spec path: pass
+    through with all parse-* fields None.
+    """
+    if body.url is not None:
+        result = source_dispatcher.parse_listing_url(
+            body.url,
+            sreality_client=sreality_client,
+            llm_client=llm_client,
+            conn=conn,
+        )
+        spec = dict(result.spec)
+        if body.spec_overrides:
+            spec = {**spec, **body.spec_overrides}
+        return _Resolution(
+            input_url=body.url,
+            input_sreality_id=result.sreality_id,
+            target_spec=spec,
+            source_kind=result.source_kind,
+            parse_confidence=result.parse_confidence,
+            parse_confidence_per_field=result.parse_confidence_per_field,
+            source_html=result.source_html,
+            parse_warnings=list(result.warnings),
+        )
+    assert body.spec is not None
+    return _Resolution(
+        input_url=None,
+        input_sreality_id=None,
+        target_spec=body.spec.model_dump(),
+        source_kind=None,
+        parse_confidence=None,
+        parse_confidence_per_field=None,
+        source_html=None,
+        parse_warnings=[],
+    )
+
+
+def _resolution_for_parse_failure(
+    body: s.CreateEstimationIn,
+) -> _Resolution:
+    """Best-effort _Resolution shape when the dispatcher itself raised.
+
+    We have the URL but no parsed spec, no source_kind (we may have
+    classified before the failure but we don't try to recover that
+    here — failed runs are diagnostic, not a partial-success record).
+    """
+    return _Resolution(
+        input_url=body.url,
+        input_sreality_id=None,
+        target_spec=None,
+        source_kind=None,
+        parse_confidence=None,
+        parse_confidence_per_field=None,
+        source_html=None,
+        parse_warnings=[],
+    )
+
+
+def _persist_failed_run(
+    conn: "psycopg.Connection",
+    *,
+    body: s.CreateEstimationIn,
+    resolution: _Resolution,
+    recorder: TraceRecorder,
+    error_msg: str,
+    extra_warnings: list[str],
+) -> dict[str, Any]:
+    trace = recorder.to_dict(f"failed: {error_msg.split(':', 1)[0]}")
+    merged = list(resolution.parse_warnings) + list(extra_warnings or [])
+    run_id = _insert_run(
+        conn,
+        source=body.source,
+        mode=body.mode,
+        status="failed",
+        input_url=resolution.input_url,
+        input_sreality_id=resolution.input_sreality_id,
+        input_spec=resolution.target_spec,
+        input_purchase_price_czk=body.purchase_price_czk,
+        estimated_monthly_rent_czk=None,
+        rent_p25_czk=None,
+        rent_p75_czk=None,
+        gross_yield_pct=None,
+        confidence=None,
+        comparables_used=None,
+        trace=trace,
+        warnings=merged or None,
+        error_message=error_msg,
+        parent_run_id=body.parent_run_id,
+        rerun_reason=body.rerun_reason,
+        source_kind=resolution.source_kind,
+        parse_confidence=resolution.parse_confidence,
+        parse_confidence_per_field=resolution.parse_confidence_per_field,
+        source_html=resolution.source_html,
+    )
+    return _fetch_run(conn, run_id) or {}
+
+
+def _build_target(spec: dict[str, Any] | None) -> TargetSpec:
+    if spec is None:
+        raise ValueError("target_spec is required to build a TargetSpec")
     return TargetSpec(
         lat=float(spec["lat"]),
         lng=float(spec["lng"]),
@@ -395,7 +539,10 @@ def _summary_line(data: dict[str, Any], radius_m: int) -> str:
 
 
 def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
-    for k in ("input_spec", "comparables_used", "trace", "warnings"):
+    for k in (
+        "input_spec", "comparables_used", "trace", "warnings",
+        "parse_confidence_per_field",
+    ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])
     cols = list(_INSERT_COLUMNS)
