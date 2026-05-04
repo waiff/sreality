@@ -248,6 +248,20 @@
   }
 }
 
+/* Region page (Part D) — copper centre pin for the radius-mode map. */
+@layer components {
+  .rm-pin {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--color-paper-3);
+    border: 2px solid var(--color-copper);
+    box-shadow: 0 0 0 1px var(--color-rule), 0 1px 3px rgba(0, 0, 0, 0.18);
+    cursor: grab;
+  }
+  .rm-pin:active { cursor: grabbing; }
+}
+
 /* Layered dual-handle range slider. Two <input type="range"> stacked on
  * a single track; only the thumbs receive pointer events so the track can
  * be drawn behind. */

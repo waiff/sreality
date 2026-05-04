@@ -4,9 +4,11 @@ import {
   seenWithinToIso,
 } from './filters';
 import type {
+  ActiveByDayRow,
+  ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
-  ListingFreshnessCheckPublic,
+  RegionStats,
 } from './types';
 
 /* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so
@@ -248,6 +250,52 @@ export const fetchFreshnessChecksByListing = async (
     .order('checked_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as unknown as ListingFreshnessCheckPublic[];
+};
+
+/* -------------------------------------------------------------------------- */
+/* Region page (Part D) — calls into migration 012 RPCs                       */
+/* -------------------------------------------------------------------------- */
+
+export type RegionMode =
+  | { kind: 'districts'; districts: string[] }
+  | { kind: 'radius'; lng: number; lat: number; radiusM: number };
+
+const rpcArgs = (mode: RegionMode) => {
+  if (mode.kind === 'districts') {
+    return {
+      districts_filter: mode.districts.length > 0 ? mode.districts : null,
+      center_lng: null,
+      center_lat: null,
+      radius_m: null,
+    };
+  }
+  return {
+    districts_filter: null,
+    center_lng: mode.lng,
+    center_lat: mode.lat,
+    radius_m: mode.radiusM,
+  };
+};
+
+export const isRegionDefined = (mode: RegionMode): boolean =>
+  mode.kind === 'districts' ? mode.districts.length > 0 : true;
+
+export const fetchRegionStats = async (mode: RegionMode): Promise<RegionStats> => {
+  const { data, error } = await supabase.rpc('region_stats', rpcArgs(mode));
+  if (error) throw error;
+  return data as RegionStats;
+};
+
+export const fetchRegionActiveByDay = async (
+  mode: RegionMode,
+  daysBack = 90,
+): Promise<ActiveByDayRow[]> => {
+  const { data, error } = await supabase.rpc('region_active_by_day', {
+    ...rpcArgs(mode),
+    days_back: daysBack,
+  });
+  if (error) throw error;
+  return (data ?? []) as ActiveByDayRow[];
 };
 
 export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {

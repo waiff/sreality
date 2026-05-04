@@ -56,3 +56,36 @@ export interface ListingFetchFailurePublic {
   last_failure_at: string;
   given_up: boolean;
 }
+
+/* Region page payloads — shape mirrors migration 012 RPCs. */
+
+export interface PercentileTriple {
+  p25: number;
+  p50: number;
+  p75: number;
+}
+
+export interface RegionDispositionRow {
+  disposition: string;
+  n: number;
+  median_price: number | null;
+  median_ppm2: number | null;
+  median_area: number | null;
+}
+
+export interface RegionStats {
+  total_active: number;
+  total_ever: number;
+  last_new_first_seen: string | null;
+  price: PercentileTriple | null;
+  ppm2: PercentileTriple | null;
+  dispositions: RegionDispositionRow[];
+  tom_median_days: number | null;
+  tom_n: number;
+}
+
+export interface ActiveByDayRow {
+  day: string;
+  active: number;
+  new: number;
+}
