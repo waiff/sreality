@@ -73,12 +73,22 @@ export interface PercentileTriple {
   p75: number;
 }
 
+export interface Ppm2Box {
+  n: number;
+  min: number;
+  p25: number;
+  median: number;
+  p75: number;
+  max: number;
+}
+
 export interface RegionDispositionRow {
   disposition: string;
   n: number;
   median_price: number | null;
   median_ppm2: number | null;
   median_area: number | null;
+  ppm2_box: Ppm2Box | null;
 }
 
 export interface RegionStats {
