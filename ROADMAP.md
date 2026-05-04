@@ -161,6 +161,29 @@ Surfacing `describe_neighborhood`, `find_distribution_outliers`, and
 the velocity tools through the UI. Auth-gated; specific shape decided
 when U1 + U2 are live.
 
+## Map track (parallel)
+
+Geographic drill-down beyond the existing district facet. Independent
+of the analytical and UI phases; runs alongside them.
+
+### map-1: typed locality IDs (partially shipped)
+- **Part A (done):** inspection of `raw_json.recommendations_data`
+  confirmed 100% coverage on `locality_municipality_id`,
+  `locality_quarter_id`, and `locality_ward_id` across active
+  listings. Cardinality and naming notes captured in commit
+  `d663233`.
+- **Part B (proposed, not applied):** migration 016 promotes those
+  three IDs to typed columns, sanitising sreality's `-1` sentinel
+  to `NULL`. Parser + scraper write-path landed in commit
+  `d663233`; migration is committed in `migrations/016_locality_ids_extended.sql`
+  but **not yet applied to production** — pending operator
+  approval.
+- **Part C (next):** backfill from `raw_json` for existing rows;
+  expose via `listings_public`; map-aware browse filters.
+- **Part D (later):** spatial join to ČÚZK / RÚIAN polygons. The
+  sreality IDs are sreality-internal, not ČÚZK codes — bridge
+  table goes in a future migration (017).
+
 ## Out of scope until explicitly opened
 - ClickUp integration.
 - MCP server wrapping the toolkit (for ad-hoc chat with the data).
