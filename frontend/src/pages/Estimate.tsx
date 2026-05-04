@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useMutation, useQuery } from '@tanstack/react-query';
 import UrlScrapeStep, {
   type ResolvedInput,
   listingToResolved,
@@ -9,13 +9,15 @@ import EstimateForm, {
   type EstimateFormState,
   buildInitialFormState,
 } from '@/components/EstimateForm';
-import { fetchListingById } from '@/lib/queries';
+import { fetchListingById, submitEstimation } from '@/lib/queries';
+import { buildEstimationPayload } from '@/lib/estimation';
+import { ApiError } from '@/lib/api';
 import {
   fmtArea,
   fmtCzk,
   fmtPricePerM2,
 } from '@/lib/format';
-import type { PreviewListing } from '@/lib/types';
+import type { EstimationRun, PreviewListing } from '@/lib/types';
 
 const RegionMap = lazy(() => import('@/components/region/RegionMap'));
 
@@ -113,6 +115,18 @@ function EditingStage({
   onForm: (next: EstimateFormState) => void;
   onBack: () => void;
 }) {
+  const navigate = useNavigate();
+  const submitMut = useMutation<EstimationRun, ApiError, void>({
+    mutationFn: () => submitEstimation(buildEstimationPayload(form, resolved)),
+    onSuccess: (run) => {
+      navigate(`/estimation/${run.id}`);
+    },
+  });
+
+  const serverError = submitMut.error
+    ? { message: submitErrorMessage(submitMut.error) }
+    : null;
+
   return (
     <div className="px-6 py-8 max-w-6xl mx-auto">
       <button
@@ -143,12 +157,9 @@ function EditingStage({
         <EstimateForm
           state={form}
           onChange={onForm}
-          onSubmit={() => {
-            // Wired up in the next step (Part B submit + redirect).
-            // eslint-disable-next-line no-console
-            console.log('CreateEstimationIn payload (preview):', form);
-          }}
-          submitting={false}
+          onSubmit={() => submitMut.mutate()}
+          submitting={submitMut.isPending}
+          serverError={serverError}
         />
         <TargetPreview
           form={form}
@@ -158,6 +169,13 @@ function EditingStage({
       </div>
     </div>
   );
+}
+
+function submitErrorMessage(err: ApiError): string {
+  if (err.status === 401) return 'API authentication failed. Check VITE_API_TOKEN.';
+  if (err.status === 0) return 'Network error — check your connection or the API URL.';
+  if (err.status === 502) return "Couldn't reach sreality.cz to re-fetch the listing.";
+  return err.message || `Request failed (HTTP ${err.status}).`;
 }
 
 function SourceLine({ origin }: { origin: ResolvedInput['origin'] }) {

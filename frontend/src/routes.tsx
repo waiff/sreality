@@ -5,6 +5,8 @@ import ListingDetail from './pages/ListingDetail';
 import Region from './pages/Region';
 import Health from './pages/Health';
 import Estimate from './pages/Estimate';
+import EstimationDetail from './pages/EstimationDetail';
+import EstimationList from './pages/EstimationList';
 
 export const routes: RouteObject[] = [
   {
@@ -18,6 +20,8 @@ export const routes: RouteObject[] = [
       { path: 'region', element: <Region /> },
       { path: 'health', element: <Health /> },
       { path: 'estimate', element: <Estimate /> },
+      { path: 'estimations', element: <EstimationList /> },
+      { path: 'estimation/:id', element: <EstimationDetail /> },
       { path: '*', element: <NotFound /> },
     ],
   },

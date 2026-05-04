@@ -89,6 +89,12 @@ function triFromBool(v: boolean | null): TriValue {
   return 'any';
 }
 
+export function triToBool(v: TriValue): boolean | null {
+  if (v === 'yes') return true;
+  if (v === 'no') return false;
+  return null;
+}
+
 export function isFormValid(s: EstimateFormState): boolean {
   return (
     s.lat != null && Number.isFinite(s.lat) &&
