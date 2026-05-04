@@ -93,7 +93,24 @@ aligns to the rightmost digit.
 
 ## Deploy
 
-Cloudflare Pages, git-watching this repo, building from `main`.  See the
-root `README.md` for the click-by-click setup.  CI is `.github/workflows/frontend-build.yml`
-which runs `npm install && npm run build` on every push so a broken
-build is caught before Pages tries to deploy it.
+Railway, as a second service in the same project as the API.  The
+service builds from this `frontend/` directory using the local
+`Dockerfile` (Node build stage → Caddy serve stage) and exposes a
+public domain that Railway terminates TLS at.  See the root `README.md`
+for the click-by-click setup.
+
+`Caddyfile` handles SPA routing (`try_files {path} /index.html`),
+gzip + zstd compression, immutable caching for hashed `assets/*`
+bundles, and a `/healthz` endpoint that Railway uses for liveness.
+
+CI lives at `.github/workflows/frontend-build.yml` and runs
+`npm install && npm run build` on every push to catch broken builds
+before Railway sees them.
+
+### Build-time vs runtime env vars
+
+Vite inlines `import.meta.env.VITE_*` into the JS bundle at **build
+time** as string constants — the deployed bundle never reads env at
+runtime.  Practical consequence: rotating any of `VITE_PASSWORD_HASH`,
+`VITE_SUPABASE_URL`, or `VITE_SUPABASE_ANON_KEY` requires a redeploy
+(push or click "Redeploy" in Railway), not just a variable update.
