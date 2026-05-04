@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import LocationSearchBox from '@/components/LocationSearchBox';
 import RegionPicker, { type PickerMode } from '@/components/region/RegionPicker';
 import RangeStrip from '@/components/region/RangeStrip';
-import DispositionTable from '@/components/region/DispositionTable';
+import DispositionBoxPlots from '@/components/region/DispositionBoxPlots';
 import {
   fetchRegionStats,
   fetchRegionActiveByDay,
@@ -296,7 +296,10 @@ export default function Region() {
 
       {enabled && statsQuery.error && <ErrorBanner error={statsQuery.error} />}
       {enabled && statsQuery.isLoading && stats == null && <Skeleton />}
-      {enabled && stats != null && (
+      {enabled && stats != null && stats.total_active === 0 && stats.total_ever === 0 && (
+        <NoListingsHint />
+      )}
+      {enabled && stats != null && (stats.total_active > 0 || stats.total_ever > 0) && (
         <Report
           stats={stats}
           series={series}
@@ -544,8 +547,11 @@ function Report({
             </div>
           </Section>
 
-          <Section title="By disposition">
-            <DispositionTable rows={stats.dispositions} />
+          <Section
+            title="Price per m² · by disposition"
+            subtitle="Tukey 1.5×IQR whiskers clipped to min/max. Median in copper. Hover a box for the full numeric breakdown."
+          >
+            <DispositionBoxPlots rows={stats.dispositions} />
           </Section>
 
           <Suspense fallback={<ChartsFallback />}>
@@ -692,7 +698,20 @@ function EmptyHint() {
         No location selected
       </p>
       <p className="mt-2 text-sm text-[var(--color-ink-3)]">
-        Search for a location above, or open Pokročilé to use the legacy district / radius pickers.
+        Search for a location to see statistics. Open Pokročilé for the legacy district / radius pickers.
+      </p>
+    </section>
+  );
+}
+
+function NoListingsHint() {
+  return (
+    <section className="p-10 rounded-[var(--radius-md)] border border-dashed border-[var(--color-rule)] text-center">
+      <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-4)]">
+        Empty cohort
+      </p>
+      <p className="mt-2 text-sm text-[var(--color-ink-3)]">
+        No active listings found in this area.
       </p>
     </section>
   );
