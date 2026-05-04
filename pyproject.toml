@@ -18,13 +18,23 @@ api = [
   "fastapi>=0.115",
   "uvicorn[standard]>=0.30",
 ]
+# Used only by scripts/ingest_boundaries.py; kept out of the default
+# install so the scraper / API images stay slim. Pure-Python combo
+# (pyshp + shapely + pyproj) intentionally avoids geopandas / GDAL —
+# we only need to read shapefiles, reproject EPSG:5514 -> EPSG:4326,
+# and simplify polygons.
+geo = [
+  "pyshp>=2.3",
+  "shapely>=2.0",
+  "pyproj>=3.6",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["scraper*", "toolkit*", "api*"]
+include = ["scraper*", "toolkit*", "api*", "scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

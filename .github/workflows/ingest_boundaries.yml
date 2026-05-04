@@ -1,0 +1,82 @@
+name: Ingest admin boundaries
+
+# Loads ČÚZK RÚIAN administrative-unit polygons (kraj / okres / obec / KÚ)
+# into the admin_boundaries table. Manual-only; boundaries change rarely
+# (a few municipal mergers / cadastral re-alignments per year), so there
+# is no cron. Re-run when ČÚZK publishes a notable update or when the
+# operator wants to bring in newly-created units.
+#
+# How to find the source URL:
+#   1. Open the ČÚZK Geoportál ATOM feed for RÚIAN SHP at:
+#        https://atom.cuzk.gov.cz/...   (Vybraná data RÚIAN pro stát)
+#   2. Pick the latest dated entry under "Stát" / EPSG:5514.
+#   3. Copy the .zip URL into the source_url input below.
+#
+# The script reads SUPABASE_DB_URL via env. It TRUNCATEs admin_boundaries
+# at the start of the load by default so re-runs reproduce live ČÚZK
+# state rather than accumulating retired units. The spatial-join phase
+# afterwards rebuilds admin_boundaries.sreality_id from current listings.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: "RÚIAN SHP zip URL (from ČÚZK ATOM feed)"
+        required: true
+        type: string
+      levels:
+        description: "Levels to load (comma-separated). Default: all four."
+        required: false
+        type: string
+        default: "kraj,okres,obec,ku"
+      dry_run:
+        description: "Parse and validate only; do not write to DB."
+        required: false
+        type: boolean
+        default: false
+      skip_spatial_join:
+        description: "Skip the listings -> sreality_id population step."
+        required: false
+        type: boolean
+        default: false
+      no_truncate:
+        description: "Skip TRUNCATE; upsert into existing rows instead."
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[geo]"
+
+      - name: Run ingest
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          ARGS="--source-url '${{ inputs.source_url }}'"
+          if [ -n "${{ inputs.levels }}" ]; then
+            ARGS="$ARGS --levels '${{ inputs.levels }}'"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.skip_spatial_join }}" = "true" ]; then
+            ARGS="$ARGS --skip-spatial-join"
+          fi
+          if [ "${{ inputs.no_truncate }}" = "true" ]; then
+            ARGS="$ARGS --no-truncate"
+          fi
+          echo "Running with: $ARGS"
+          eval "python -m scripts.ingest_boundaries $ARGS"
