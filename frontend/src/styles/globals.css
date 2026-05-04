@@ -140,3 +140,152 @@
     background: transparent;
   }
 }
+
+/* Map popup — overrides maplibre-gl's default white box so it matches the
+ * paper-3 surface, with the agreed map-overlay shadow carve-out. */
+@layer components {
+  .maplibregl-popup-content {
+    background: var(--color-paper-3) !important;
+    color: var(--color-ink) !important;
+    border: 1px solid var(--color-rule) !important;
+    border-radius: var(--radius-md) !important;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08) !important;
+    padding: 12px 14px !important;
+    font-family: var(--font-sans);
+  }
+  .maplibregl-popup-tip {
+    border-top-color: var(--color-paper-3) !important;
+    border-bottom-color: var(--color-paper-3) !important;
+  }
+  .maplibregl-popup-close-button {
+    color: var(--color-ink-3) !important;
+    font-size: 18px !important;
+    padding: 2px 6px !important;
+  }
+  .maplibregl-popup-close-button:hover {
+    color: var(--color-ink) !important;
+    background: transparent !important;
+  }
+
+  .lp {
+    min-width: 180px;
+    max-width: 240px;
+  }
+  .lp-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .lp-price {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.012em;
+    color: var(--color-ink);
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .lp-inactive {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--color-brick);
+    flex-shrink: 0;
+  }
+  .lp-meta {
+    margin: 4px 0 0;
+    font-size: 0.78rem;
+    color: var(--color-ink-2);
+  }
+  .lp-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .lp-sep {
+    margin: 0 6px;
+    color: var(--color-ink-4);
+  }
+  .lp-district {
+    margin: 6px 0 0;
+    font-size: 0.7rem;
+    letter-spacing: 0.02em;
+    color: var(--color-ink-3);
+  }
+  .lp-seen {
+    margin: 6px 0 0;
+    font-size: 0.65rem;
+    color: var(--color-ink-4);
+    cursor: help;
+  }
+  .lp-link {
+    display: inline-block;
+    margin-top: 10px;
+    font-size: 0.75rem;
+    letter-spacing: 0.02em;
+    color: var(--color-copper);
+    text-decoration: none;
+  }
+  .lp-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+}
+
+/* Layered dual-handle range slider. Two <input type="range"> stacked on
+ * a single track; only the thumbs receive pointer events so the track can
+ * be drawn behind. */
+@layer components {
+  .range-slider {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    appearance: none;
+    pointer-events: none;
+    margin: 0;
+  }
+  .range-slider::-webkit-slider-runnable-track {
+    background: transparent;
+    border: none;
+    height: 100%;
+  }
+  .range-slider::-moz-range-track {
+    background: transparent;
+    border: none;
+    height: 100%;
+  }
+  .range-slider::-webkit-slider-thumb {
+    pointer-events: auto;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: 0;
+    border-radius: 999px;
+    background: var(--color-paper-3);
+    border: 1.5px solid var(--color-copper);
+    box-shadow: 0 0 0 1px var(--color-rule);
+    cursor: grab;
+  }
+  .range-slider::-moz-range-thumb {
+    pointer-events: auto;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--color-paper-3);
+    border: 1.5px solid var(--color-copper);
+    box-shadow: 0 0 0 1px var(--color-rule);
+    cursor: grab;
+  }
+  .range-slider:active::-webkit-slider-thumb { cursor: grabbing; }
+  .range-slider:active::-moz-range-thumb     { cursor: grabbing; }
+  .range-slider:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--color-focus);
+  }
+  .range-slider:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px var(--color-focus);
+  }
+}

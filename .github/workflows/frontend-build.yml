@@ -33,8 +33,14 @@ jobs:
       - name: Bundle size budget
         run: |
           du -sh dist
-          gzipped=$(find dist/assets -name '*.js' -exec gzip -c {} \; | wc -c)
-          echo "Total JS gzipped: $gzipped bytes"
-          if [ "$gzipped" -gt 512000 ]; then
-            echo "::warning::JS bundle exceeds 500kB gzipped budget ($gzipped bytes)"
+          # Initial chunk = what loads before any lazy import. Lazy chunks
+          # (maplibre, recharts) only count when their route is opened.
+          initial=$(gzip -c dist/assets/index-*.js | wc -c)
+          echo "Initial JS chunk gzipped: $initial bytes"
+          for f in dist/assets/*.js; do
+            sz=$(gzip -c "$f" | wc -c)
+            printf '  %-50s %10s bytes gzip\n' "$(basename "$f")" "$sz"
+          done
+          if [ "$initial" -gt 512000 ]; then
+            echo "::warning::Initial JS chunk exceeds 500 kB gzipped budget ($initial bytes)"
           fi
