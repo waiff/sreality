@@ -1,0 +1,99 @@
+# sreality · database browser
+
+Read-only web UI over the Supabase database produced by the daily scraper.
+Vite + React + TypeScript + Tailwind v4.  Static SPA — no SSR, no backend.
+
+> Audience for this README: a developer setting the project up locally or
+> debugging the deploy.  The operator does not run any of these commands;
+> the live site is built by Cloudflare Pages on push to `main`.
+
+## Stack
+
+| Concern        | Choice                                              |
+| -------------- | --------------------------------------------------- |
+| Build          | Vite 5                                              |
+| Framework      | React 18 (StrictMode)                               |
+| Routing        | `react-router-dom` v6                               |
+| Server state   | `@tanstack/react-query` v5                          |
+| Styling        | Tailwind CSS v4 (CSS-only config via `@theme`)      |
+| DB client      | `@supabase/supabase-js` reading `*_public` views    |
+| Map            | `maplibre-gl` + OpenFreeMap (Positron tiles)        |
+| Charts         | `recharts` (lazy-loaded; SVG sparklines elsewhere)  |
+
+## Local development
+
+```sh
+cd frontend
+cp .env.example .env
+# fill in VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_PASSWORD_HASH
+npm install
+npm run dev      # http://localhost:5173
+npm run build    # type-check + production bundle to dist/
+```
+
+Node 20+ required.
+
+### Where to find each env var
+
+- `VITE_SUPABASE_URL` — Supabase dashboard → Project Settings → API → Project URL.
+- `VITE_SUPABASE_ANON_KEY` — same page → "anon public" key.  This ships to
+  the browser; reads are fenced by the `*_public` views in migration 008.
+- `VITE_PASSWORD_HASH` — SHA-256 hex digest of your chosen unlock password.
+  Compute it with either:
+
+  ```sh
+  echo -n "yourpassword" | shasum -a 256 | awk '{print $1}'
+  ```
+
+  or, in Node:
+
+  ```sh
+  node -e 'crypto.subtle.digest("SHA-256", new TextEncoder().encode(process.argv[1])).then(b => console.log(Buffer.from(b).toString("hex")))' "yourpassword"
+  ```
+
+  Paste the resulting 64-char hex string into `.env` (and into the
+  Cloudflare Pages dashboard for production).
+
+## Project layout
+
+```
+src/
+  main.tsx           react root + react-query provider + router
+  App.tsx            password gate wraps the routed shell
+  routes.tsx         route table
+  lib/
+    supabase.ts      single shared client
+    auth.ts          SHA-256 password gate (sessionStorage)
+    types.ts         shapes mirroring listings_public et al.
+    queries.ts       supabase query helpers (grows with parts B–E)
+  components/
+    PasswordGate.tsx
+    Shell.tsx        top bar + nav + footer
+  pages/
+    Browse.tsx       part B
+    ListingDetail.tsx part C
+    Region.tsx       part D
+    Health.tsx       part E
+  styles/
+    globals.css      design tokens (@theme), typography, base reset
+```
+
+## Design system in one place
+
+All visual tokens live in `src/styles/globals.css` under a single `@theme`
+block (light) plus a dark-mode mirror.  Colour names are domain words —
+`--color-paper`, `--color-ink`, `--color-copper`, `--color-brick`, etc. —
+not abstract greys.  Depth strategy is **borders only** (no shadows),
+with one carve-out: map-anchored popovers may use a small shadow because
+borders fail the squint test against arbitrary tile imagery.
+
+Numbers always use tabular figures (`font-variant-numeric: tabular-nums`)
+and Czech locale (`Intl.NumberFormat('cs-CZ')`) so a column of prices
+aligns to the rightmost digit.
+
+## Deploy
+
+Cloudflare Pages, git-watching this repo, building from `main`.  See the
+root `README.md` for the click-by-click setup.  CI is `.github/workflows/frontend-build.yml`
+which runs `npm install && npm run build` on every push so a broken
+build is caught before Pages tries to deploy it.
