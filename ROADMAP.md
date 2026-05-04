@@ -80,24 +80,57 @@ toolkit is what makes the UI worth building, but the UI doesn't gate
 toolkit work.
 
 ### Phase U0: Foundation (done)
-- `frontend/` placeholder folder with README declaring conventions.
+- `frontend/` folder with README declaring conventions.
 - Migration 008 creates `*_public` views and grants `SELECT` to the
   `anon` role; sensitive columns (`raw_json`, `geom`, hashes, error
   messages) are never exposed.
 - CLAUDE.md "Territories" section defines the boundary between the
   Python backend and the future frontend.
 
-### Phase U1: Map MVP
-Read-only map of active listings. Vite + React + TypeScript +
-`supabase-js` against the `anon` key. Marker per listing from
-`listings_public.lat/lng`; click opens a card with current price,
-disposition, area, district. Hosting target TBD (Cloudflare Pages or
-Vercel — picked when the work is opened).
+### Phase U1a: Database browser (done)
+Read-only Vite + React + TS SPA over the `*_public` views with the
+`anon` key. Deployed to Railway as a second service alongside the
+FastAPI backend. Civic-archive visual direction (laid-paper canvas,
+oxidised-copper accent, Fraunces / Inter / JetBrains Mono, tabular
+numerals, Czech locale formatting).
+- **Browse**: filter sidebar (district typeahead, disposition multi-toggle,
+  dual-handle price + area sliders, tri-state status, last-seen-within,
+  has-balcony/lift/parking) → Map / Table / Stats tabs. Filter and
+  sort state in URL params; bookmarkable, refresh-survives.
+- **Listing detail** (`/listing/:sreality_id`): hero, mini-map, key
+  facts, snapshot timeline strip (the product's signature visual
+  vocabulary), per-snapshot diff table, freshness check log,
+  outbound link to sreality.cz.
+- **Region**: district multiselect or radius-from-pin definition; live
+  aggregates (count, p25/median/p75 price + price/m², per-disposition
+  median table), 90-day active-per-day chart, 12-week new-listings bar,
+  median time-on-market for delisted listings.
+- **Health**: operator dashboard. Last-scrape recency (with
+  36-hour stale banner), active count + Δ vs 7 days ago, new-listings
+  14-day chart, snapshot-density buckets, freshness checks 24h by
+  outcome, fetch-failures table.
+- Migrations 011 (`browse_stats`), 012 (`region_stats` +
+  `region_active_by_day`), 013 (`health_summary`), 014 (`browse_stats`
+  inactive-only filter).
+
+### Phase U1b: Estimation backend (done)
+- `estimation_runs` table (migration 010): persistent record of every
+  estimation, regardless of trigger. Schema reserves `mode='agent'`
+  and `status='pending'/'running'` for U4 without forcing today's
+  code to write twice.
+- `scraper.url_parser`: turns a sreality URL into a parsed spec by
+  reusing `scraper.parser`.
+- `/estimations` endpoints: POST creates a run (URL or spec), GET-by-id
+  reads one, GET lists with filters and pagination.
+- Trace format v1: tool calls + computations recorded with
+  `output_summary` only (full data in dedicated columns).
 
 ### Phase U2: History view
 Per-listing price-history sparkline from `listing_snapshots_public`,
 plus a "verify freshness" button that calls the bearer-token-gated
-FastAPI service.
+FastAPI service. (Note: U1a's Listing Detail already ships the
+snapshot timeline, so the remaining work for U2 is the freshness
+write-path through the API.)
 
 ### Phase U3: Toolkit-backed views
 Surfacing `describe_neighborhood`, `find_distribution_outliers`, and

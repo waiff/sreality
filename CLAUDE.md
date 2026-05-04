@@ -7,8 +7,10 @@ Read this before changing anything.
 
 A daily scraper for Czech rental listings from sreality.cz. The output is a
 Postgres database (Supabase, Frankfurt region, PostGIS enabled) with full
-listing history. Downstream goals (out of scope until explicitly opened):
-rental-yield calculations, ClickUp integration, frontend.
+listing history. Downstream surfaces over the same data: an analytical
+toolkit + FastAPI service (Railway) and a read-only browser UI (also
+Railway, separate service). Still out of scope until explicitly opened:
+ClickUp integration, MCP wrapping the toolkit, per-user identity.
 
 ## Territories
 
@@ -24,24 +26,42 @@ different rules. Identify which one a task belongs to before you start.
   no deletes, no `supabase-py`, etc.
 
 **Frontend territory** (`frontend/`):
-- Browser code. Will most likely be Vite + React + TypeScript with the
-  `supabase-js` client. The folder is a placeholder; **no UI ships
-  until a future session explicitly opens that work.**
+- Browser code. Vite + React 18 + TypeScript + Tailwind v4 SPA, served
+  by Caddy from a two-stage Docker build (see `frontend/Dockerfile`).
+  Deployed to Railway as a separate service alongside the API.
+- The U1a deliverable is a four-page database browser: **Browse**
+  (filters → Map / Table / Stats), **Listing Detail** (with snapshot
+  timeline strip — the product's signature visual element), **Region**
+  (district or radius aggregates), **Health** (operator dashboard).
+  Future U2 / U3 / U4 work extends this UI; do not fork into a
+  separate frontend tree.
 - Connects with the **publishable (`anon`) key only**. Never embed the
   service-role key, the `SUPABASE_DB_URL`, or any other secret in
   browser-shipped code.
-- Reads exclusively from the `*_public` views created in
-  `migrations/008_ui_read_policies.sql`
+- Reads exclusively from the `*_public` views — migration 008
   (`listings_public`, `listing_snapshots_public`,
-  `listing_freshness_checks_public`, `listing_fetch_failures_public`).
-  Base tables are RLS-blocked to `anon`; do not grant `anon` direct
-  access to them.
+  `listing_freshness_checks_public`, `listing_fetch_failures_public`)
+  and migration 015 (`images_public`) — and from the page-specific
+  RPCs in migrations 011 / 012 / 013 / 014 (`browse_stats`,
+  `region_stats`, `region_active_by_day`, `health_summary`).
+  All RPCs are `SECURITY INVOKER` and rely on anon's existing SELECT
+  grant on the public views — they don't escalate. New public-data
+  RPCs follow the same pattern; new private RPCs go through the
+  FastAPI service.
 - **No write path from the browser.** Any UI action that needs a
   write goes through the bearer-token-gated FastAPI service, not
-  direct Postgres.
+  direct Postgres. The toolkit's two write-allowed exceptions
+  (`verify_listing_freshness`, `find_anchor_amenities`) are reachable
+  only via the API.
+- Frontend conventions live in `frontend/README.md`. Design tokens are
+  in `frontend/src/styles/globals.css` under a single `@theme` block;
+  **never tweak these tokens without operator approval** — they
+  encode the agreed visual direction (civic-archive feel,
+  oxidised-copper accent, borders-only depth, tabular numerals,
+  Czech locale formatting). Add new tokens only at the bottom of the
+  file with a clear domain-name.
 - Backend rules below (psycopg, no `supabase-py`, stdlib-first, etc.)
-  do not apply inside `frontend/`. The frontend will get its own
-  conventions when work starts.
+  do not apply inside `frontend/`.
 
 When in doubt about which territory a task belongs to, ask the
 operator. Don't import frontend deps into the Python tree or vice
