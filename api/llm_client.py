@@ -53,6 +53,12 @@ DEFAULT_SYSTEM_PROMPT_FALLBACK = (
     "system prompt in app_settings. Refuse to answer until configured."
 )
 
+# Soft warning threshold for daily LLM spend. Override via env var
+# LLM_DAILY_COST_WARN_USD. Anthropic's own spend cap at console.anthropic.com
+# is the hard guard; this is just an early-warning log line that shows up
+# in Railway when the URL parser is being hit harder than expected.
+DEFAULT_DAILY_COST_WARN_USD = 5.0
+
 
 @dataclass
 class LLMResponse:
@@ -128,6 +134,7 @@ class LLMClient:
             duration_ms=duration_ms,
             estimation_run_id=estimation_run_id,
         )
+        self._check_daily_cost(just_recorded=cost)
         return LLMResponse(
             text=text,
             tool_calls=tool_calls,
@@ -177,6 +184,34 @@ class LLMClient:
             self._anthropic = anthropic.Anthropic(api_key=self._api_key)
         return self._anthropic
 
+    def _check_daily_cost(self, *, just_recorded: float) -> None:
+        """Log a WARNING once when today's spend crosses the soft threshold.
+
+        Fires only on the call that pushed us over — re-warning every
+        subsequent call would be log spam. Failures here are non-fatal:
+        any error querying the running total is swallowed, since the
+        guardrail is observability, not correctness.
+        """
+        threshold = _resolve_threshold()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM llm_calls "
+                    "WHERE called_at::date = CURRENT_DATE"
+                )
+                row = cur.fetchone()
+        except Exception as exc:
+            LOG.debug("daily cost check failed: %s", exc)
+            return
+        total = float(row[0]) if row and row[0] is not None else 0.0
+        prior = total - just_recorded
+        if total >= threshold and prior < threshold:
+            LOG.warning(
+                "LLM_COST daily total $%.4f crossed soft threshold "
+                "$%.2f (this call $%.4f)",
+                total, threshold, just_recorded,
+            )
+
     def _record_call(
         self,
         *,
@@ -214,6 +249,20 @@ class LLMClient:
             if row is None:
                 raise RuntimeError("INSERT into llm_calls returned no id")
             return int(row[0])
+
+
+def _resolve_threshold() -> float:
+    raw = os.environ.get("LLM_DAILY_COST_WARN_USD")
+    if not raw:
+        return DEFAULT_DAILY_COST_WARN_USD
+    try:
+        return float(raw)
+    except ValueError:
+        LOG.warning(
+            "invalid LLM_DAILY_COST_WARN_USD=%r; using default $%.2f",
+            raw, DEFAULT_DAILY_COST_WARN_USD,
+        )
+        return DEFAULT_DAILY_COST_WARN_USD
 
 
 def compute_cost_usd(

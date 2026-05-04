@@ -114,6 +114,18 @@ class FindAnchorAmenitiesIn(BaseModel):
     cache_ttl_days: int = 30
 
 
+class PreviewEstimationIn(BaseModel):
+    """POST /estimations/preview body.
+
+    Resolves the URL through the source-kind dispatcher and returns the
+    parsed spec + provenance fields without creating an estimation_runs
+    row. Used by the UI to show "what we extracted" before the user
+    commits to running the full estimate.
+    """
+    url: str
+    spec_overrides: dict[str, Any] | None = None
+
+
 class CreateEstimationIn(BaseModel):
     """POST /estimations request body.
 

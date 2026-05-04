@@ -229,7 +229,7 @@ def test_sreality_branch_uses_existing_parser(monkeypatch):
             "in_database": False,
         }
 
-    monkeypatch.setattr(sd, "parse_sreality_url", fake_parse_sreality_url)
+    monkeypatch.setattr(sd.url_parser, "parse_sreality_url", fake_parse_sreality_url)
     conn = _FakeConn()
 
     result = sd.parse_listing_url(

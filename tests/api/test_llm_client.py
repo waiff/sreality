@@ -36,6 +36,11 @@ class _FakeCursor:
             self._conn.next_id += 1
             self._conn.llm_calls_rows.append({"id": row_id, "params": params})
             self._last = [row_id]
+        elif "sum(cost_usd)" in sql_norm:
+            total = sum(
+                row["params"][6] for row in self._conn.llm_calls_rows
+            )
+            self._last = [total]
         else:
             self._last = None
 
@@ -287,6 +292,103 @@ def test_call_raises_without_api_key(monkeypatch):
             called_for="parse_url",
             messages=[{"role": "user", "content": "x"}],
         )
+
+
+# ----------------------------------------------------------------------
+# Daily-cost soft guardrail
+# ----------------------------------------------------------------------
+
+def _heavy_call(monkeypatch, conn, cost_input_tokens: int, cost_output_tokens: int):
+    """Helper: run a call with a usage that produces a known cost.
+
+    Sonnet 4.5 = $3 input / $15 output per MTok. Pass big-enough token
+    counts to push cost over the threshold in one shot.
+    """
+    fake = _FakeAnthropic(_FakeRaw(
+        text="ok",
+        usage={
+            "input_tokens": cost_input_tokens,
+            "output_tokens": cost_output_tokens,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
+    ))
+    _patch_anthropic(monkeypatch, fake)
+    client = lc.LLMClient(conn)
+    return client.call(
+        called_for="parse_url",
+        messages=[{"role": "user", "content": "x"}],
+    )
+
+
+def test_cost_guard_does_not_warn_under_threshold(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_DAILY_COST_WARN_USD", "5.0")
+    conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
+    with caplog.at_level("WARNING"):
+        # 1M input + 100K output = $3 + $1.5 = $4.50, under $5.
+        _heavy_call(monkeypatch, conn, 1_000_000, 100_000)
+    assert not any("crossed soft threshold" in m for m in caplog.messages)
+
+
+def test_cost_guard_warns_on_threshold_crossing(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_DAILY_COST_WARN_USD", "5.0")
+    conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
+    with caplog.at_level("WARNING"):
+        # 2M input + 1M output = $6 + $15 = $21, over $5.
+        _heavy_call(monkeypatch, conn, 2_000_000, 1_000_000)
+    assert any("crossed soft threshold" in m for m in caplog.messages)
+
+
+def test_cost_guard_does_not_re_warn_after_first_crossing(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_DAILY_COST_WARN_USD", "5.0")
+    conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
+    # First call crosses threshold and warns.
+    with caplog.at_level("WARNING"):
+        _heavy_call(monkeypatch, conn, 2_000_000, 1_000_000)
+    first_warnings = [m for m in caplog.messages if "crossed" in m]
+    assert len(first_warnings) == 1
+    # Second call adds more cost but should NOT warn again — we already did.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        _heavy_call(monkeypatch, conn, 100_000, 10_000)
+    assert not any("crossed" in m for m in caplog.messages)
+
+
+def test_cost_guard_uses_default_when_env_unset(monkeypatch):
+    monkeypatch.delenv("LLM_DAILY_COST_WARN_USD", raising=False)
+    assert lc._resolve_threshold() == lc.DEFAULT_DAILY_COST_WARN_USD
+
+
+def test_cost_guard_falls_back_on_invalid_env(monkeypatch, caplog):
+    monkeypatch.setenv("LLM_DAILY_COST_WARN_USD", "not a number")
+    with caplog.at_level("WARNING"):
+        assert lc._resolve_threshold() == lc.DEFAULT_DAILY_COST_WARN_USD
+    assert any("invalid" in m for m in caplog.messages)
+
+
+def test_cost_guard_swallows_db_errors_silently(monkeypatch, caplog):
+    """If the SUM query fails, we must not break the call's return path."""
+    monkeypatch.setenv("LLM_DAILY_COST_WARN_USD", "5.0")
+    conn = _FakeConn(app_settings={"llm_parse_model": "claude-sonnet-4-5"})
+
+    real_cursor = conn.cursor
+
+    def broken_cursor():
+        cur = real_cursor()
+        original_execute = cur.execute
+
+        def execute(sql: str, params: Any = ()) -> None:
+            if "sum(cost_usd)" in sql.lower():
+                raise RuntimeError("boom")
+            return original_execute(sql, params)
+
+        cur.execute = execute
+        return cur
+
+    conn.cursor = broken_cursor
+    # Should still return a valid response.
+    resp = _heavy_call(monkeypatch, conn, 100, 50)
+    assert resp.text == "ok"
 
 
 def test_parse_tool_input_json_handles_dict_and_string():

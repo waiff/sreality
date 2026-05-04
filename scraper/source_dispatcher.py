@@ -26,9 +26,8 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlparse
 
-from scraper import geocoding
+from scraper import geocoding, url_parser
 from scraper.source_parsers import common
-from scraper.url_parser import parse_sreality_url
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -210,7 +209,7 @@ def _sreality_branch(
     sreality_client: "SrealityClient",
     conn: "psycopg.Connection",
 ) -> ParseResult:
-    parsed = parse_sreality_url(url, client=sreality_client, conn=conn)
+    parsed = url_parser.parse_sreality_url(url, client=sreality_client, conn=conn)
     parser_spec = parsed["spec"]
     spec = {
         "lat": parser_spec.get("lat"),

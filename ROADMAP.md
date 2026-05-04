@@ -125,6 +125,32 @@ numerals, Czech locale formatting).
 - Trace format v1: tool calls + computations recorded with
   `output_summary` only (full data in dedicated columns).
 
+### Phase estimation-4: Generic URL parser (done)
+- Migration 020: `parsed_url_cache`, `llm_calls`, `app_settings` +
+  `app_settings_history`, plus `source_kind` /
+  `parse_confidence` / `parse_confidence_per_field` / `source_html`
+  columns on `estimation_runs`.
+- `api.llm_client.LLMClient`: wraps the Anthropic SDK, audits every
+  call to `llm_calls`, computes USD cost from a per-model price
+  table, and emits a one-time daily-cost soft warning at
+  `LLM_DAILY_COST_WARN_USD` (default $5).
+- `scraper.geocoding.geocode`: Mapy.cz forward geocoding with
+  type-based confidence (regional.address → high; street → medium;
+  city centroid → low) and a CLI verification helper.
+- `scraper.source_dispatcher`: classifies a URL by domain and routes
+  to either the deterministic sreality flow or the LLM-driven
+  per-source parsers (bezrealitky, idnes_reality, remax,
+  best-effort generic). Cache lookup on canonicalised URL hash with
+  7-day TTL.
+- `/estimations/preview`: parse a URL and return spec + provenance
+  without persisting a run.
+- `POST /estimations`: now routes through the dispatcher and
+  populates the four new audit columns; parse failures persist a
+  `failed` row with the error message.
+
+`estimation-5` (frontend surfacing of source_kind, confidence, and
+the preview flow) is now unblocked.
+
 ### Phase U2: History view
 Per-listing price-history sparkline from `listing_snapshots_public`,
 plus a "verify freshness" button that calls the bearer-token-gated

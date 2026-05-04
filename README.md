@@ -56,6 +56,7 @@ tests/              pytest suite
 - [x] Estimation runs persisted to `estimation_runs` table; surfaced via `/estimations` endpoints (POST/GET-by-id/list)
 - [x] UI foundation: `*_public` read views with `anon`-role grants
 - [x] **U1a database browser**: Browse / Listing / Region / Health pages; migrations 011–014 (`browse_stats`, `region_stats`, `health_summary`); deployed to Railway as a second service
+- [x] **estimation-4 generic URL parser**: source-kind dispatcher routes any listing URL through either the deterministic sreality flow or LLM-driven per-source parsers (bezrealitky, reality.idnes, remax, best-effort generic). 7-day URL→spec cache, Mapy.cz geocoding, per-call cost audit in `llm_calls`, daily soft-warn at $5. New `/estimations/preview` endpoint returns the parsed spec without creating a run; `POST /estimations` populates `source_kind` / `parse_confidence` / `parse_confidence_per_field` / `source_html`.
 
 See [`ROADMAP.md`](./ROADMAP.md) for the long-term plan.
 
