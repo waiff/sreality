@@ -189,7 +189,7 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
               : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
           {capped && (
             <span className="ml-2 text-[var(--color-ochre)]">
-              · capped at 5 000
+              · capped at 50 000 — refine filters
             </span>
           )}
         </Pill>

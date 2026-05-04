@@ -3,13 +3,26 @@ import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import { FilterSidebar } from '@/components/Filters';
+import ListingTable from '@/components/ListingTable';
 import {
   fromSearchParams,
   toSearchParams,
   summarise,
+  isDefault,
+  DEFAULT_FILTERS,
   type ListingFilters,
 } from '@/lib/filters';
-import { fetchListingsForMap, type MapResult } from '@/lib/queries';
+import {
+  fetchListingsForMap,
+  fetchListingsForTable,
+  parseSort,
+  sortToParam,
+  DEFAULT_SORT,
+  type MapResult,
+  type SortField,
+  type SortSpec,
+  type TableResult,
+} from '@/lib/queries';
 
 const ListingMap = lazy(() => import('@/components/ListingMap'));
 
@@ -18,18 +31,26 @@ type TabKey = 'map' | 'table' | 'stats';
 export default function Browse() {
   const [searchParams, setSearchParams] = useSearchParams();
   const filters = useMemo(() => fromSearchParams(searchParams), [searchParams]);
+  const sort: SortSpec = useMemo(
+    () => parseSort(searchParams.get('sort')),
+    [searchParams],
+  );
+  const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10) || 1);
+  const tabFromUrl = (searchParams.get('tab') ?? 'map') as TabKey;
 
   const setFilters = useCallback(
     (next: ListingFilters) => {
       const sp = toSearchParams(next);
       const tab = searchParams.get('tab');
+      const sortRaw = searchParams.get('sort');
       if (tab) sp.set('tab', tab);
+      if (sortRaw) sp.set('sort', sortRaw);
+      // page is intentionally dropped — new filter set, reset to first page.
       setSearchParams(sp, { replace: false });
     },
     [searchParams, setSearchParams],
   );
 
-  const tabFromUrl = (searchParams.get('tab') ?? 'map') as TabKey;
   const setTab = (next: TabKey) => {
     const sp = new URLSearchParams(searchParams);
     if (next === 'map') sp.delete('tab');
@@ -37,25 +58,58 @@ export default function Browse() {
     setSearchParams(sp, { replace: true });
   };
 
+  const setSort = (field: SortField) => {
+    const next: SortSpec =
+      sort.field === field
+        ? { field, direction: sort.direction === 'asc' ? 'desc' : 'asc' }
+        : { field, direction: defaultDirectionFor(field) };
+    const sp = new URLSearchParams(searchParams);
+    sp.delete('page');
+    if (sortToParam(next) === sortToParam(DEFAULT_SORT)) sp.delete('sort');
+    else sp.set('sort', sortToParam(next));
+    setSearchParams(sp, { replace: false });
+  };
+
+  const setPage = (next: number) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next <= 1) sp.delete('page');
+    else sp.set('page', String(next));
+    setSearchParams(sp, { replace: false });
+  };
+
   const mapQuery = useQuery<MapResult, Error>({
     queryKey: ['map', filters],
     queryFn: () => fetchListingsForMap(filters),
     placeholderData: (prev) => prev,
+    enabled: tabFromUrl === 'map',
   });
 
-  const total = mapQuery.data?.total ?? null;
+  const tableQuery = useQuery<TableResult, Error>({
+    queryKey: ['table', filters, sort, page],
+    queryFn: () => fetchListingsForTable(filters, sort, page),
+    placeholderData: (prev) => prev,
+    enabled: tabFromUrl === 'table',
+  });
+
+  const totalForBadge =
+    tabFromUrl === 'table'
+      ? tableQuery.data?.total ?? null
+      : mapQuery.data?.total ?? null;
+
   const tabs: ReadonlyArray<Tab<TabKey>> = [
-    { key: 'map',   label: 'Map',   badge: total != null ? total.toLocaleString('cs-CZ') : undefined },
+    { key: 'map',   label: 'Map',   badge: totalForBadge != null ? totalForBadge.toLocaleString('cs-CZ') : undefined },
     { key: 'table', label: 'Table' },
     { key: 'stats', label: 'Stats' },
   ];
+
+  const activeError = tabFromUrl === 'map' ? mapQuery.error : tabFromUrl === 'table' ? tableQuery.error : null;
 
   return (
     <div className="flex">
       <FilterSidebar filters={filters} onChange={setFilters} />
 
       <div className="flex-1 min-w-0 px-6 pt-5 pb-8">
-        <FilterSummary filters={filters} count={total} loading={mapQuery.isLoading} />
+        <FilterSummary filters={filters} count={totalForBadge} loading={tabFromUrl === 'map' ? mapQuery.isLoading : tableQuery.isLoading} />
 
         <div className="mt-4">
           <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
@@ -72,14 +126,31 @@ export default function Browse() {
               />
             </Suspense>
           )}
-          {tabFromUrl === 'table' && <NotYet kind="Table" />}
+          {tabFromUrl === 'table' && (
+            <ListingTable
+              rows={tableQuery.data?.rows ?? null}
+              total={tableQuery.data?.total ?? null}
+              page={page}
+              sort={sort}
+              isLoading={tableQuery.isLoading}
+              hasFilters={!isDefault(filters)}
+              onSort={setSort}
+              onPage={setPage}
+              onClearFilters={() => setFilters(DEFAULT_FILTERS)}
+            />
+          )}
           {tabFromUrl === 'stats' && <NotYet kind="Stats" />}
         </div>
 
-        {mapQuery.error && <ErrorBanner error={mapQuery.error} />}
+        {activeError && <ErrorBanner error={activeError} />}
       </div>
     </div>
   );
+}
+
+function defaultDirectionFor(field: SortField): 'asc' | 'desc' {
+  if (field === 'price_czk' || field === 'area_m2' || field === 'last_seen_at') return 'desc';
+  return 'asc';
 }
 
 function FilterSummary({
@@ -103,7 +174,7 @@ function FilterSummary({
 
 function MapSkeleton() {
   return (
-    <div className="h-[calc(100dvh-14rem)] min-h-[480px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] flex items-center justify-center">
+    <div className="h-[calc(100dvh-16rem)] min-h-[480px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] flex items-center justify-center">
       <p className="text-sm text-[var(--color-ink-3)] tracking-wide">Loading map…</p>
     </div>
   );
