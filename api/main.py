@@ -22,6 +22,7 @@ from toolkit import (
     compute_listing_velocity,
     compute_market_velocity,
     describe_neighborhood,
+    find_anchor_amenities,
     find_comparables,
     find_distribution_outliers,
     verify_listing_freshness,
@@ -149,6 +150,22 @@ def post_compute_market_velocity(
         conn, target, filters,
         population=body.population,
         trend_split_days=body.trend_split_days,
+    )
+
+
+@app.post("/tools/find_anchor_amenities")
+def post_find_anchor_amenities(
+    body: s.FindAnchorAmenitiesIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return find_anchor_amenities(
+        conn,
+        lat=body.lat,
+        lng=body.lng,
+        radius_m=body.radius_m,
+        categories=body.categories,
+        cache_ttl_days=body.cache_ttl_days,
     )
 
 

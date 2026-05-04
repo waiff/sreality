@@ -51,6 +51,10 @@ def client(monkeypatch):
         return {"data": {"sreality_id": sreality_id, "found": False},
                 "metadata": {"tool": "compute_listing_velocity"}}
 
+    def fake_anchors(conn, **_kw):
+        return {"data": {"categories": {}, "from_cache": {}},
+                "metadata": {"tool": "find_anchor_amenities"}}
+
     monkeypatch.setattr(api_main, "find_comparables", fake_find)
     monkeypatch.setattr(api_main, "analyze_distribution", fake_dist)
     monkeypatch.setattr(api_main, "verify_listing_freshness", fake_verify)
@@ -60,6 +64,7 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "find_distribution_outliers", fake_outliers)
     monkeypatch.setattr(api_main, "compute_market_velocity", fake_market_vel)
     monkeypatch.setattr(api_main, "compute_listing_velocity", fake_listing_vel)
+    monkeypatch.setattr(api_main, "find_anchor_amenities", fake_anchors)
 
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
@@ -74,6 +79,7 @@ _NEIGHBORHOOD_BODY = {"lat": 50.0, "lng": 14.0}
 _OUTLIERS_BODY = {"listings": []}
 _MARKET_VEL_BODY = {"target": {"lat": 50.0, "lng": 14.0}}
 _LISTING_VEL_BODY = {"sreality_id": 1}
+_ANCHORS_BODY = {"lat": 50.0, "lng": 14.0}
 
 
 def _gated_calls(client) -> list:
@@ -86,6 +92,7 @@ def _gated_calls(client) -> list:
         ("/tools/find_distribution_outliers", _OUTLIERS_BODY),
         ("/tools/compute_market_velocity", _MARKET_VEL_BODY),
         ("/tools/compute_listing_velocity", _LISTING_VEL_BODY),
+        ("/tools/find_anchor_amenities", _ANCHORS_BODY),
         ("/estimate_yield", _ESTIMATE_BODY),
     ]
 

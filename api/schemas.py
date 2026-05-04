@@ -106,6 +106,14 @@ class ComputeListingVelocityIn(BaseModel):
     population: Literal["active", "delisted", "all"] = "all"
 
 
+class FindAnchorAmenitiesIn(BaseModel):
+    lat: float
+    lng: float
+    radius_m: int = 1000
+    categories: list[str] | None = None
+    cache_ttl_days: int = 30
+
+
 class EstimateYieldIn(BaseModel):
     target: TargetIn
     purchase_price_czk: int | None = None

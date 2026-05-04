@@ -325,6 +325,59 @@ def test_compute_listing_velocity_uses_defaults(client, monkeypatch):
     assert captured["population"] == "all"
 
 
+def test_find_anchor_amenities_passes_args(client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {
+            "data": {"categories": {"tram_stop": {"count": 0,
+                                                  "nearest_distance_m": None,
+                                                  "items": []}},
+                     "from_cache": {"tram_stop": True}},
+            "metadata": {"tool": "find_anchor_amenities"},
+        }
+
+    monkeypatch.setattr(api_main, "find_anchor_amenities", fake)
+
+    res = client.post(
+        "/tools/find_anchor_amenities",
+        json={
+            "lat": 50.075, "lng": 14.43, "radius_m": 750,
+            "categories": ["tram_stop"], "cache_ttl_days": 14,
+        },
+    )
+
+    assert res.status_code == 200
+    assert captured["lat"] == 50.075
+    assert captured["lng"] == 14.43
+    assert captured["radius_m"] == 750
+    assert captured["categories"] == ["tram_stop"]
+    assert captured["cache_ttl_days"] == 14
+    assert res.json()["metadata"]["tool"] == "find_anchor_amenities"
+
+
+def test_find_anchor_amenities_defaults_categories_to_none(client, monkeypatch):
+    """categories=None means all-of-them inside the toolkit; the API just passes through."""
+    captured: dict[str, Any] = {}
+
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {"data": {"categories": {}, "from_cache": {}},
+                "metadata": {"tool": "find_anchor_amenities"}}
+
+    monkeypatch.setattr(api_main, "find_anchor_amenities", fake)
+
+    res = client.post(
+        "/tools/find_anchor_amenities",
+        json={"lat": 50.0, "lng": 14.0},
+    )
+    assert res.status_code == 200
+    assert captured["categories"] is None
+    assert captured["radius_m"] == 1000
+    assert captured["cache_ttl_days"] == 30
+
+
 def test_invalid_body_returns_422(client):
     res = client.post(
         "/tools/find_comparables",
