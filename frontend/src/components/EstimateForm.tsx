@@ -98,6 +98,41 @@ export function isFormValid(s: EstimateFormState): boolean {
   );
 }
 
+/* Assemble a CreateEstimationIn payload. Caller MUST gate on isFormValid;
+ * required fields are typed as non-null at submit time, not in form state.
+ *
+ * NOTE: We always send `spec` here (never `url`) because the user edited
+ * the form after the preview. The CreateEstimationIn schema enforces
+ * url XOR spec, so the persisted row's input_url is null even when the
+ * operator started from a URL. Audit-trail gap tracked in FOLLOWUPS.md. */
+export function buildCreatePayload(
+  s: EstimateFormState,
+): import('@/lib/types').CreateEstimationIn {
+  if (!isFormValid(s)) throw new Error('Form is not valid');
+  const triToBool = (t: TriValue): boolean | null =>
+    t === 'any' ? null : t === 'yes';
+  return {
+    source: 'ui',
+    spec: {
+      lat: s.lat as number,
+      lng: s.lng as number,
+      area_m2: s.area_m2,
+      disposition: s.disposition,
+      floor: s.floor,
+      exclude_ids: s.exclude_ids,
+    },
+    purchase_price_czk: s.purchase_price_czk,
+    radius_m: s.radius_m,
+    area_band_pct: s.area_band_pct,
+    disposition_match: s.disposition_match,
+    max_age_days: s.max_age_days,
+    active_only: s.active_only,
+    has_balcony: triToBool(s.has_balcony),
+    has_lift: triToBool(s.has_lift),
+    has_parking: triToBool(s.has_parking),
+  };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Form layout                                                                */
 /* -------------------------------------------------------------------------- */
