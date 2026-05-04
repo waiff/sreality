@@ -60,11 +60,44 @@ Tenant-perspective overlays beyond what's in the listings table.
 Composes the validated toolkit. Built only after the toolkit has been
 used and refined for ~1 month against real data.
 
+## UI track (parallel, independent of analytical phases)
+
+A browser UI is now a recognized territory rather than a future "maybe."
+This track runs in parallel with the analytical phases above; the
+toolkit is what makes the UI worth building, but the UI doesn't gate
+toolkit work.
+
+### Phase U0: Foundation (done)
+- `frontend/` placeholder folder with README declaring conventions.
+- Migration 008 creates `*_public` views and grants `SELECT` to the
+  `anon` role; sensitive columns (`raw_json`, `geom`, hashes, error
+  messages) are never exposed.
+- CLAUDE.md "Territories" section defines the boundary between the
+  Python backend and the future frontend.
+
+### Phase U1: Map MVP
+Read-only map of active listings. Vite + React + TypeScript +
+`supabase-js` against the `anon` key. Marker per listing from
+`listings_public.lat/lng`; click opens a card with current price,
+disposition, area, district. Hosting target TBD (Cloudflare Pages or
+Vercel — picked when the work is opened).
+
+### Phase U2: History view
+Per-listing price-history sparkline from `listing_snapshots_public`,
+plus a "verify freshness" button that calls the bearer-token-gated
+FastAPI service.
+
+### Phase U3: Toolkit-backed views
+Surfacing `describe_neighborhood`, `find_distribution_outliers`, and
+the velocity tools through the UI. Auth-gated; specific shape decided
+when U1 + U2 are live.
+
 ## Out of scope until explicitly opened
-- Frontend (Lovable map UI).
 - ClickUp integration.
 - MCP server wrapping the toolkit (for ad-hoc chat with the data).
 - Public read API beyond the bearer-token gate.
+- Per-user identity / accounts in the UI (the `anon` key is shared and
+  read-only; the FastAPI token is shared and gated).
 
 ## Data preconditions
 - Velocity tools (Phase 3b) work today (1 snapshot per listing is enough
