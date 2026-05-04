@@ -6,6 +6,7 @@ import {
 import type {
   ActiveByDayRow,
   HealthSummary,
+  ImagePublic,
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
@@ -253,6 +254,19 @@ export const fetchFreshnessChecksByListing = async (
     .order('checked_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as unknown as ListingFreshnessCheckPublic[];
+};
+
+export const fetchImagesByListing = async (
+  sreality_id: number,
+): Promise<ImagePublic[]> => {
+  const { data, error } = await supabase
+    .from('images_public')
+    .select('id,sreality_id,sequence,sreality_url,storage_path')
+    .eq('sreality_id', sreality_id)
+    .order('sequence', { ascending: true, nullsFirst: false })
+    .order('id', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as ImagePublic[];
 };
 
 /* -------------------------------------------------------------------------- */

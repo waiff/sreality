@@ -57,6 +57,14 @@ export interface ListingFetchFailurePublic {
   given_up: boolean;
 }
 
+export interface ImagePublic {
+  id: number;
+  sreality_id: number;
+  sequence: number | null;
+  sreality_url: string;
+  storage_path: string | null;
+}
+
 /* Region page payloads — shape mirrors migration 012 RPCs. */
 
 export interface PercentileTriple {

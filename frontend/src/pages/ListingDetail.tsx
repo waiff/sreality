@@ -5,6 +5,7 @@ import {
   fetchListingById,
   fetchSnapshotsByListing,
   fetchFreshnessChecksByListing,
+  fetchImagesByListing,
 } from '@/lib/queries';
 import {
   fmtCzk,
@@ -14,6 +15,7 @@ import {
   fmtAbsolute,
 } from '@/lib/format';
 import type {
+  ImagePublic,
   ListingPublic,
   ListingSnapshotPublic,
   ListingFreshnessCheckPublic,
@@ -21,6 +23,7 @@ import type {
 import SnapshotTimeline from '@/components/SnapshotTimeline';
 
 const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
+const Gallery = lazy(() => import('@/components/listing-detail/Gallery'));
 
 const DAY_MS = 86_400_000;
 
@@ -47,6 +50,13 @@ export default function ListingDetail() {
     queryFn: () => fetchFreshnessChecksByListing(sid as number),
     enabled: sid != null && !!listingQ.data,
     staleTime: 60_000,
+  });
+
+  const imagesQ = useQuery<ImagePublic[], Error>({
+    queryKey: ['images', sid],
+    queryFn: () => fetchImagesByListing(sid as number),
+    enabled: sid != null && !!listingQ.data,
+    staleTime: 5 * 60_000,
   });
 
   if (sid == null) {
@@ -80,6 +90,7 @@ export default function ListingDetail() {
 
   const snapshots = snapshotsQ.data ?? [];
   const checks = checksQ.data ?? [];
+  const images = imagesQ.data ?? [];
 
   return (
     <Page>
@@ -87,6 +98,8 @@ export default function ListingDetail() {
       <Header listing={listing} />
       <Hairline />
       <MapBlock listing={listing} />
+      <Hairline />
+      <GalleryBlock images={images} isActive={listing.is_active} loading={imagesQ.isLoading} />
       <Hairline />
       <KeyFactsBlock listing={listing} />
       <Hairline />
@@ -230,6 +243,59 @@ function MapBlock({ listing }: { listing: ListingPublic }) {
           }
         >
           <DetailMap lat={listing.lat} lng={listing.lng} isActive={listing.is_active} />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Gallery                                                                    */
+/* -------------------------------------------------------------------------- */
+
+function GalleryBlock({
+  images,
+  isActive,
+  loading,
+}: {
+  images: ImagePublic[];
+  isActive: boolean;
+  loading: boolean;
+}) {
+  if (loading && images.length === 0) {
+    return (
+      <div>
+        <SectionLabel>Photos</SectionLabel>
+        <div className="mt-2 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1.5">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div
+              key={i}
+              className="aspect-[4/3] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]"
+            />
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (images.length === 0) {
+    return (
+      <div>
+        <SectionLabel>Photos</SectionLabel>
+        <p className="mt-2 text-sm text-[var(--color-ink-3)]">No photos recorded.</p>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="flex items-baseline justify-between">
+        <SectionLabel>Photos</SectionLabel>
+        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
+          {images.length}
+        </p>
+      </div>
+      <div className="mt-3">
+        <Suspense fallback={null}>
+          <Gallery images={images} isActive={isActive} />
         </Suspense>
       </div>
     </div>
