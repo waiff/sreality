@@ -1,6 +1,7 @@
-import { Suspense, lazy, useCallback, useMemo } from 'react';
+import { Suspense, lazy, useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import LocationSearchBox from '@/components/LocationSearchBox';
 import RegionPicker, { type PickerMode } from '@/components/region/RegionPicker';
 import RangeStrip from '@/components/region/RangeStrip';
 import DispositionTable from '@/components/region/DispositionTable';
@@ -15,6 +16,7 @@ import {
   fmtCzk,
   fmtAbsolute,
 } from '@/lib/format';
+import type { LocationResolution } from '@/lib/maps';
 import type { ActiveByDayRow, RegionStats } from '@/lib/types';
 
 const RegionCharts = lazy(() =>
@@ -46,79 +48,214 @@ const fmtPpm2 = (n: number): string =>
 
 const SMALL_SAMPLE_THRESHOLD = 10;
 
-interface UrlState {
-  mode: PickerMode;
-  districts: string[];
-  center: { lng: number; lat: number };
-  radiusM: number;
-}
+/* -------------------------------------------------------------------------- */
+/* State machine                                                              */
+/* -------------------------------------------------------------------------- */
 
-const parseUrlState = (sp: URLSearchParams): UrlState => {
-  const districts = sp.get('districts');
-  const lat = sp.get('lat');
-  const lng = sp.get('lng');
-  const r = sp.get('r');
-  const explicit = sp.get('mode');
-  const mode: PickerMode =
-    explicit === 'radius' || explicit === 'districts'
-      ? explicit
-      : lat != null && lng != null
-        ? 'radius'
-        : 'districts';
-  const parsedDistricts = districts
-    ? districts.split(',').map(decodeURIComponent).filter(Boolean)
-    : [];
-  const parsedLat = lat != null ? Number(lat) : NaN;
-  const parsedLng = lng != null ? Number(lng) : NaN;
-  const parsedR = r != null ? Number(r) : NaN;
-  return {
-    mode,
-    districts: parsedDistricts,
-    center: {
-      lng: Number.isFinite(parsedLng) ? parsedLng : PRAGUE.lng,
-      lat: Number.isFinite(parsedLat) ? parsedLat : PRAGUE.lat,
-    },
-    radiusM: Number.isFinite(parsedR) ? parsedR : DEFAULT_RADIUS_M,
-  };
+type PolygonLevel = 'obec' | 'okres' | 'kraj' | 'ku';
+
+export type RegionState =
+  | { mode: 'none' }
+  | {
+      mode: 'polygon';
+      level: PolygonLevel;
+      polygonId: number;
+      label: string;
+      lat: number;
+      lng: number;
+      defaultRadiusM: number;
+    }
+  | { mode: 'radius'; lat: number; lng: number; radiusM: number; label: string }
+  | { mode: 'legacy_districts'; districts: string[] }
+  | { mode: 'legacy_radius'; lat: number; lng: number; radiusM: number };
+
+const POLYGON_LEVELS: ReadonlyArray<PolygonLevel> = ['obec', 'okres', 'kraj', 'ku'];
+
+const num = (raw: string | null): number | null => {
+  if (raw == null) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : null;
 };
 
-const writeUrlState = (state: UrlState): URLSearchParams => {
-  const sp = new URLSearchParams();
-  sp.set('mode', state.mode);
-  if (state.mode === 'districts' && state.districts.length > 0) {
-    sp.set('districts', state.districts.map(encodeURIComponent).join(','));
+const parseUrlState = (sp: URLSearchParams): RegionState => {
+  const mode = sp.get('mode');
+  const lat = num(sp.get('lat'));
+  const lng = num(sp.get('lng'));
+  const r = num(sp.get('r'));
+  const q = sp.get('q') ?? '';
+  const districtsRaw = sp.get('districts');
+  const districts = districtsRaw
+    ? districtsRaw.split(',').map(decodeURIComponent).filter(Boolean)
+    : [];
+
+  if (mode === 'polygon') {
+    const level = sp.get('polygon_level');
+    const id = num(sp.get('polygon_id'));
+    if (
+      level &&
+      (POLYGON_LEVELS as ReadonlyArray<string>).includes(level) &&
+      id != null &&
+      lat != null &&
+      lng != null &&
+      r != null
+    ) {
+      return {
+        mode: 'polygon',
+        level: level as PolygonLevel,
+        polygonId: id,
+        label: q,
+        lat,
+        lng,
+        defaultRadiusM: r,
+      };
+    }
+    return { mode: 'none' };
   }
-  if (state.mode === 'radius') {
-    sp.set('lat', state.center.lat.toFixed(5));
-    sp.set('lng', state.center.lng.toFixed(5));
+
+  if (mode === 'radius' && lat != null && lng != null && r != null) {
+    return { mode: 'radius', lat, lng, radiusM: r, label: q };
+  }
+
+  if (mode === 'legacy_districts' && districts.length > 0) {
+    return { mode: 'legacy_districts', districts };
+  }
+
+  if (mode === 'legacy_radius' && lat != null && lng != null && r != null) {
+    return { mode: 'legacy_radius', lat, lng, radiusM: r };
+  }
+
+  /* Backwards-compat for browse-1 URLs that didn't encode an explicit mode. */
+  if (mode == null) {
+    if (districts.length > 0) return { mode: 'legacy_districts', districts };
+    if (lat != null && lng != null && r != null) {
+      return { mode: 'legacy_radius', lat, lng, radiusM: r };
+    }
+  }
+
+  return { mode: 'none' };
+};
+
+const writeUrlState = (state: RegionState): URLSearchParams => {
+  const sp = new URLSearchParams();
+  if (state.mode === 'none') return sp;
+  sp.set('mode', state.mode);
+
+  if (state.mode === 'polygon') {
+    sp.set('polygon_level', state.level);
+    sp.set('polygon_id', String(state.polygonId));
+    sp.set('lat', state.lat.toFixed(5));
+    sp.set('lng', state.lng.toFixed(5));
+    sp.set('r', String(Math.round(state.defaultRadiusM)));
+    if (state.label) sp.set('q', state.label);
+  } else if (state.mode === 'radius') {
+    sp.set('lat', state.lat.toFixed(5));
+    sp.set('lng', state.lng.toFixed(5));
+    sp.set('r', String(Math.round(state.radiusM)));
+    if (state.label) sp.set('q', state.label);
+  } else if (state.mode === 'legacy_districts') {
+    sp.set('districts', state.districts.map(encodeURIComponent).join(','));
+  } else if (state.mode === 'legacy_radius') {
+    sp.set('lat', state.lat.toFixed(5));
+    sp.set('lng', state.lng.toFixed(5));
     sp.set('r', String(Math.round(state.radiusM)));
   }
   return sp;
 };
 
+/* Until map-1 ships, polygon mode degrades to a centred radius query
+ * using the resolution's default_radius_m. The polygon id is preserved
+ * in the URL/state so this becomes a one-line swap once the
+ * polygon-aware RPC lands. */
+const stateToRegionMode = (state: RegionState): RegionMode | null => {
+  switch (state.mode) {
+    case 'none':
+      return null;
+    case 'polygon':
+      return { kind: 'radius', lat: state.lat, lng: state.lng, radiusM: state.defaultRadiusM };
+    case 'radius':
+      return { kind: 'radius', lat: state.lat, lng: state.lng, radiusM: state.radiusM };
+    case 'legacy_districts':
+      return { kind: 'districts', districts: state.districts };
+    case 'legacy_radius':
+      return { kind: 'radius', lat: state.lat, lng: state.lng, radiusM: state.radiusM };
+  }
+};
+
+const stateLabel = (state: RegionState): string => {
+  switch (state.mode) {
+    case 'none':
+      return '';
+    case 'polygon':
+      return state.label || 'Polygon';
+    case 'radius':
+      return state.label || 'Radius';
+    case 'legacy_districts':
+      return describeDistricts(state.districts);
+    case 'legacy_radius':
+      return `${(state.radiusM / 1000).toFixed(state.radiusM % 1000 === 0 ? 0 : 2)} km around ${state.lat.toFixed(4)}, ${state.lng.toFixed(4)}`;
+  }
+};
+
+/* Levels in CLAUDE.md / map-1 terms: obec=municipality, okres=district,
+ * kraj=region, ku=cadastral unit. */
+const polygonLevelLabel = (level: PolygonLevel): string => {
+  if (level === 'obec') return 'Obec';
+  if (level === 'okres') return 'Okres';
+  if (level === 'kraj') return 'Kraj';
+  return 'Katastrální území';
+};
+
+/* -------------------------------------------------------------------------- */
+/* Page                                                                       */
+/* -------------------------------------------------------------------------- */
+
 export default function Region() {
   const [searchParams, setSearchParams] = useSearchParams();
   const state = useMemo(() => parseUrlState(searchParams), [searchParams]);
+  const [advancedOpen, setAdvancedOpen] = useState(
+    () => state.mode === 'legacy_districts' || state.mode === 'legacy_radius',
+  );
+  const [unconfigured, setUnconfigured] = useState(false);
 
   const update = useCallback(
-    (next: UrlState) => setSearchParams(writeUrlState(next), { replace: false }),
+    (next: RegionState) => setSearchParams(writeUrlState(next), { replace: false }),
     [setSearchParams],
   );
 
-  const regionMode: RegionMode | null = useMemo(() => {
-    if (state.mode === 'districts') {
-      return state.districts.length > 0
-        ? { kind: 'districts', districts: state.districts }
-        : null;
-    }
-    return {
-      kind: 'radius',
-      lng: state.center.lng,
-      lat: state.center.lat,
-      radiusM: state.radiusM,
-    };
-  }, [state]);
+  const onResolve = useCallback(
+    (res: LocationResolution) => {
+      if (res.kind === 'admin_polygon') {
+        update({
+          mode: 'polygon',
+          level: res.level,
+          polygonId: res.id,
+          label: res.label,
+          lat: res.lat,
+          lng: res.lng,
+          defaultRadiusM: res.default_radius_m,
+        });
+      } else if (res.kind === 'point_with_radius') {
+        update({
+          mode: 'radius',
+          lat: res.lat,
+          lng: res.lng,
+          radiusM: res.radius_m,
+          label: res.label,
+        });
+      }
+      /* unresolved: leave state untouched; the search box surfaces the error. */
+    },
+    [update],
+  );
 
+  const onUnconfigured = useCallback(() => {
+    setUnconfigured(true);
+    setAdvancedOpen(true);
+  }, []);
+
+  const clear = useCallback(() => update({ mode: 'none' }), [update]);
+
+  const regionMode = useMemo(() => stateToRegionMode(state), [state]);
   const enabled = regionMode != null && isRegionDefined(regionMode);
 
   const statsQuery = useQuery<RegionStats, Error>({
@@ -139,50 +276,40 @@ export default function Region() {
   const series = seriesQuery.data ?? null;
 
   return (
-    <div className="px-6 py-6 max-w-screen-2xl mx-auto">
-      <div className="lg:grid lg:grid-cols-[360px_minmax(0,1fr)] lg:gap-10 space-y-6 lg:space-y-0">
-        <RegionPicker
-          mode={state.mode}
-          districts={state.districts}
-          center={state.center}
-          radiusM={state.radiusM}
-          onModeChange={(mode) => update({ ...state, mode })}
-          onDistrictsChange={(districts) => update({ ...state, districts })}
-          onCenterChange={(center) => update({ ...state, center })}
-          onRadiusChange={(radiusM) => update({ ...state, radiusM })}
+    <div className="px-6 py-6 max-w-screen-lg mx-auto space-y-7">
+      <Header state={state} stats={stats} loading={statsQuery.isLoading} />
+
+      <LocationSearchBox onResolve={onResolve} onUnconfigured={onUnconfigured} />
+
+      {state.mode !== 'none' && state.mode !== 'legacy_districts' && state.mode !== 'legacy_radius' && (
+        <SelectedLocationCard state={state} onClear={clear} />
+      )}
+
+      <Advanced
+        open={advancedOpen || unconfigured}
+        onToggle={() => setAdvancedOpen((v) => !v)}
+        state={state}
+        onChange={update}
+      />
+
+      {!enabled && <EmptyHint />}
+
+      {enabled && statsQuery.error && <ErrorBanner error={statsQuery.error} />}
+      {enabled && statsQuery.isLoading && stats == null && <Skeleton />}
+      {enabled && stats != null && (
+        <Report
+          stats={stats}
+          series={series}
+          seriesLoading={seriesQuery.isLoading}
+          seriesError={seriesQuery.error}
         />
-
-        <div className="min-w-0 space-y-8">
-          <Header state={state} stats={stats} loading={statsQuery.isLoading} />
-
-          {!enabled && (
-            <EmptyHint mode={state.mode} />
-          )}
-
-          {enabled && statsQuery.error && (
-            <ErrorBanner error={statsQuery.error} />
-          )}
-
-          {enabled && statsQuery.isLoading && stats == null && (
-            <Skeleton />
-          )}
-
-          {enabled && stats != null && (
-            <Report
-              stats={stats}
-              series={series}
-              seriesLoading={seriesQuery.isLoading}
-              seriesError={seriesQuery.error}
-            />
-          )}
-        </div>
-      </div>
+      )}
     </div>
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/* Header — page title + the definition line                                  */
+/* Header                                                                     */
 /* -------------------------------------------------------------------------- */
 
 function Header({
@@ -190,28 +317,31 @@ function Header({
   stats,
   loading,
 }: {
-  state: UrlState;
+  state: RegionState;
   stats: RegionStats | null;
   loading: boolean;
 }) {
-  const definition =
-    state.mode === 'districts'
-      ? state.districts.length === 0
-        ? 'Pick one or more districts.'
-        : describeDistricts(state.districts)
-      : `${(state.radiusM / 1000).toFixed(state.radiusM % 1000 === 0 ? 0 : 2)} km around ${state.center.lat.toFixed(4)}, ${state.center.lng.toFixed(4)}`;
+  const label = stateLabel(state);
   const tail = stats == null
-    ? loading
+    ? loading && state.mode !== 'none'
       ? '· loading…'
       : ''
     : ` · ${fmtCount(stats.total_ever)} listings ever seen`;
   return (
     <div>
-      <h1 className="text-2xl leading-tight">Region</h1>
-      <p className="mt-1 text-sm text-[var(--color-ink-2)]">
-        <span className="text-[var(--color-ink)]">{definition}</span>
-        <span className="text-[var(--color-ink-3)]">{tail}</span>
-      </p>
+      <h1 className="text-2xl leading-tight">
+        {label ? (
+          <>
+            <span className="text-[var(--color-ink-3)] font-normal">Region · </span>
+            <span>{label}</span>
+          </>
+        ) : (
+          'Region'
+        )}
+      </h1>
+      {state.mode !== 'none' && (
+        <p className="mt-1 text-sm text-[var(--color-ink-3)]">{tail.replace(/^· /, '')}</p>
+      )}
     </div>
   );
 }
@@ -224,7 +354,154 @@ const describeDistricts = (ds: string[]): string => {
 };
 
 /* -------------------------------------------------------------------------- */
-/* Report body                                                                */
+/* Selected-location card                                                     */
+/* -------------------------------------------------------------------------- */
+
+function SelectedLocationCard({
+  state,
+  onClear,
+}: {
+  state: Extract<RegionState, { mode: 'polygon' | 'radius' }>;
+  onClear: () => void;
+}) {
+  let badge: string;
+  let detail: string;
+  if (state.mode === 'polygon') {
+    badge = polygonLevelLabel(state.level);
+    detail = `Polygon · ${state.lat.toFixed(4)}, ${state.lng.toFixed(4)}`;
+  } else {
+    badge = 'Radius';
+    detail = `${(state.radiusM / 1000).toFixed(state.radiusM % 1000 === 0 ? 0 : 2)} km · ${state.lat.toFixed(4)}, ${state.lng.toFixed(4)}`;
+  }
+  return (
+    <div className="border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3 flex items-center gap-3">
+      <span className="text-[0.65rem] tracking-[0.08em] uppercase text-[var(--color-ink-3)] border border-[var(--color-rule)] rounded-[var(--radius-xs)] px-1.5 py-0.5">
+        {badge}
+      </span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm text-[var(--color-ink)] truncate">{state.label || '—'}</p>
+        <p className="text-[0.7rem] text-[var(--color-ink-3)] tabular-nums">{detail}</p>
+      </div>
+      <button
+        type="button"
+        onClick={onClear}
+        className="text-[0.7rem] tracking-wide uppercase text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+      >
+        Clear
+      </button>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Advanced disclosure — wraps the legacy district + radius pickers           */
+/* -------------------------------------------------------------------------- */
+
+function Advanced({
+  open,
+  onToggle,
+  state,
+  onChange,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  state: RegionState;
+  onChange: (next: RegionState) => void;
+}) {
+  /* Map the (possibly non-legacy) state into legacy picker props so toggling
+   * the picker tabs always has a sensible starting point. */
+  const legacy = legacyView(state);
+
+  const onPickerModeChange = (next: PickerMode) => {
+    if (next === 'districts') {
+      onChange({ mode: 'legacy_districts', districts: legacy.districts });
+    } else {
+      onChange({ mode: 'legacy_radius', lat: legacy.center.lat, lng: legacy.center.lng, radiusM: legacy.radiusM });
+    }
+  };
+
+  const onDistrictsChange = (next: string[]) => {
+    if (next.length === 0) {
+      onChange({ mode: 'none' });
+    } else {
+      onChange({ mode: 'legacy_districts', districts: next });
+    }
+  };
+
+  const onCenterChange = (next: { lng: number; lat: number }) =>
+    onChange({ mode: 'legacy_radius', lat: next.lat, lng: next.lng, radiusM: legacy.radiusM });
+
+  const onRadiusChange = (next: number) =>
+    onChange({ mode: 'legacy_radius', lat: legacy.center.lat, lng: legacy.center.lng, radiusM: next });
+
+  return (
+    <section className="border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)]">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="w-full flex items-center justify-between px-4 py-3 text-left"
+      >
+        <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Pokročilé · district & radius picker
+        </span>
+        <span className="text-[var(--color-ink-3)]" aria-hidden>
+          {open ? '−' : '+'}
+        </span>
+      </button>
+      {open && (
+        <div className="border-t border-[var(--color-rule-soft)] p-4">
+          <RegionPicker
+            mode={legacy.mode}
+            districts={legacy.districts}
+            center={legacy.center}
+            radiusM={legacy.radiusM}
+            onModeChange={onPickerModeChange}
+            onDistrictsChange={onDistrictsChange}
+            onCenterChange={onCenterChange}
+            onRadiusChange={onRadiusChange}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+interface LegacyView {
+  mode: PickerMode;
+  districts: string[];
+  center: { lng: number; lat: number };
+  radiusM: number;
+}
+
+const legacyView = (state: RegionState): LegacyView => {
+  if (state.mode === 'legacy_districts') {
+    return { mode: 'districts', districts: state.districts, center: PRAGUE, radiusM: DEFAULT_RADIUS_M };
+  }
+  if (state.mode === 'legacy_radius') {
+    return {
+      mode: 'radius',
+      districts: [],
+      center: { lat: state.lat, lng: state.lng },
+      radiusM: state.radiusM,
+    };
+  }
+  if (state.mode === 'radius' || state.mode === 'polygon') {
+    /* Inherit the search-resolved point as a starting centre for the legacy
+     * radius picker — gives the user a sensible default if they switch into
+     * the picker after a search. */
+    return {
+      mode: 'radius',
+      districts: [],
+      center: { lat: state.lat, lng: state.lng },
+      radiusM: state.mode === 'radius' ? state.radiusM : state.defaultRadiusM,
+    };
+  }
+  return { mode: 'districts', districts: [], center: PRAGUE, radiusM: DEFAULT_RADIUS_M };
+};
+
+/* -------------------------------------------------------------------------- */
+/* Report body — unchanged from browse-1                                      */
 /* -------------------------------------------------------------------------- */
 
 function Report({
@@ -293,14 +570,8 @@ function Report({
 function Census({ stats }: { stats: RegionStats }) {
   return (
     <div className="grid grid-cols-3 gap-6">
-      <Stat
-        label="Active"
-        value={fmtCount(stats.total_active)}
-      />
-      <Stat
-        label="Ever seen"
-        value={fmtCount(stats.total_ever)}
-      />
+      <Stat label="Active" value={fmtCount(stats.total_active)} />
+      <Stat label="Ever seen" value={fmtCount(stats.total_ever)} />
       <Stat
         label="Last new"
         value={
@@ -414,16 +685,14 @@ function NotEnough({ label }: { label: string }) {
   );
 }
 
-function EmptyHint({ mode }: { mode: PickerMode }) {
+function EmptyHint() {
   return (
     <section className="p-12 rounded-[var(--radius-md)] border border-dashed border-[var(--color-rule)] text-center">
       <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-4)]">
-        Region undefined
+        No location selected
       </p>
       <p className="mt-2 text-sm text-[var(--color-ink-3)]">
-        {mode === 'districts'
-          ? 'Pick one or more districts in the panel to summarise.'
-          : 'Click the map or drag the pin to set a centre.'}
+        Search for a location above, or open Pokročilé to use the legacy district / radius pickers.
       </p>
     </section>
   );
@@ -452,3 +721,4 @@ function ErrorBanner({ error }: { error: Error }) {
     </div>
   );
 }
+
