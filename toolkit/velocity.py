@@ -179,6 +179,26 @@ def compute_listing_velocity(
         listing["is_active"], now=now,
     )
 
+    if listing["lat"] is None or listing["lng"] is None:
+        return _listing_envelope(
+            sreality_id=sreality_id,
+            radius_m=radius_m,
+            disposition_match=disposition_match,
+            population=population,
+            data={
+                "sreality_id": sreality_id,
+                "found": True,
+                "is_active": listing["is_active"],
+                "tom_days": target_tom,
+                "cohort_size": 0,
+                "tom_percentile": None,
+                "classification": None,
+                "thresholds": dict(VELOCITY_BANDS),
+            },
+            queried_at=_now_iso(),
+            notes=["listing has no geom; cannot build peer cohort"],
+        )
+
     target = TargetSpec(
         lat=listing["lat"],
         lng=listing["lng"],
@@ -304,12 +324,17 @@ def _median_or_none(values: list[int]) -> float | None:
 
 
 def _percentile_rank(value: int, peers: list[int]) -> float:
-    """Percentile of `value` within `peers` (0..100, inclusive of equal peers)."""
+    """Mid-rank percentile of `value` within `peers` (0..100).
+
+    Ties are split: a value equal to all peers gets 50, not 100. Avoids
+    classifying an exactly-average TOM as 'stuck'.
+    """
     n = len(peers)
     if n == 0:
         return 0.0
-    le = sum(1 for p in peers if p <= value)
-    return round(100.0 * le / n, 2)
+    lt = sum(1 for p in peers if p < value)
+    eq = sum(1 for p in peers if p == value)
+    return round(100.0 * (lt + 0.5 * eq) / n, 2)
 
 
 def _classify_velocity(percentile: float | None) -> str | None:

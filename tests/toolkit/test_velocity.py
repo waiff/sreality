@@ -328,6 +328,71 @@ def test_listing_velocity_thresholds_in_data():
     assert res["data"]["thresholds"] == VELOCITY_BANDS
 
 
+def test_listing_velocity_all_tied_with_peers_is_typical():
+    """Target TOM equals all peers' TOM → mid-rank percentile = 50 → typical.
+
+    Pre-fix this was 100 (sum(p<=v)/n) and classified as 'stuck'.
+    """
+    n = _now()
+    listing_cur = _FakeCursor()
+    listing_cur._fetchone_row = (
+        n - timedelta(days=15), n, True, "2+kk", 50.0, 14.0,
+    )
+    peer_rows = [_row(i + 1, 15, 0, True) for i in range(20)]
+    peer_cur = _FakeCursor(peer_rows)
+    conn = _FakeConn(listing_cur, peer_cur)
+
+    res = compute_listing_velocity(conn, sreality_id=999)  # type: ignore[arg-type]
+    d = res["data"]
+    assert d["tom_days"] == 15
+    assert d["cohort_size"] == 20
+    assert d["tom_percentile"] == 50.0
+    assert d["classification"] == "typical"
+
+
+def test_listing_velocity_median_among_mixed_peers_is_about_50():
+    """Target TOM at the median of a mixed cohort lands near percentile 50."""
+    n = _now()
+    listing_cur = _FakeCursor()
+    listing_cur._fetchone_row = (
+        n - timedelta(days=15), n, True, "2+kk", 50.0, 14.0,
+    )
+    # 10 peers with TOM<15, 10 peers with TOM>15 -> mid-rank = 50
+    peer_rows = (
+        [_row(i + 1, 5 + i, 0, True) for i in range(10)]
+        + [_row(i + 11, 25 + i, 0, True) for i in range(10)]
+    )
+    peer_cur = _FakeCursor(peer_rows)
+    conn = _FakeConn(listing_cur, peer_cur)
+
+    res = compute_listing_velocity(conn, sreality_id=999)  # type: ignore[arg-type]
+    p = res["data"]["tom_percentile"]
+    assert p is not None and 45.0 <= p <= 55.0
+    assert res["data"]["classification"] == "typical"
+
+
+def test_listing_velocity_null_geom_returns_envelope_with_zero_cohort():
+    """Listing with no geom can't build a peer cohort — return graceful envelope."""
+    n = _now()
+    listing_cur = _FakeCursor()
+    listing_cur._fetchone_row = (
+        n - timedelta(days=12), n, True, "2+kk", None, None,
+    )
+    conn = _FakeConn(listing_cur)
+    res = compute_listing_velocity(conn, sreality_id=42)  # type: ignore[arg-type]
+    d = res["data"]
+    assert d["found"] is True
+    assert d["sreality_id"] == 42
+    assert d["is_active"] is True
+    assert d["tom_days"] == 12
+    assert d["cohort_size"] == 0
+    assert d["tom_percentile"] is None
+    assert d["classification"] is None
+    assert d["thresholds"] == VELOCITY_BANDS
+    notes = res["metadata"].get("notes", [])
+    assert any("no geom" in note for note in notes)
+
+
 def test_listing_velocity_small_peer_cohort_emits_note():
     n = _now()
     listing_cur = _FakeCursor()
