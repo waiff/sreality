@@ -43,5 +43,9 @@ tests/              pytest suite
 - [x] Freshness layer (`verify_listing_freshness`, `compare_snapshots`,
       `listing_freshness_checks` audit table)
 - [x] API auth (`API_TOKEN` bearer-token gate)
+- [x] `describe_neighborhood` (dispositional/price/condition profile with trend)
+- [x] `find_distribution_outliers` (outlier detection with cross-referenced reasons)
+- [x] `compute_market_velocity` (TOM stats and trend for a filtered cohort)
+- [x] `compute_listing_velocity` (per-listing TOM percentile and fast/typical/slow/stuck classification)
 
 See [`ROADMAP.md`](./ROADMAP.md) for the long-term plan.
