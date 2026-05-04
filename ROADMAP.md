@@ -51,11 +51,16 @@ Audit trail and on-demand verification.
 - Trace format v1: tool calls + computations recorded with
   `output_summary` only (full data in dedicated columns).
 
+### Phase 4a: Spatial context — anchor amenities (done)
+- `find_anchor_amenities`: OSM POI lookup with local cache mirror in
+  the `amenities` + `amenity_fetches` tables (cache-key = category +
+  radius + center + TTL). Live behind the API; one of the two
+  toolkit write-allowed exceptions per CLAUDE.md.
+
 ## Next
 
-### Phase 4: Spatial context (external data)
-Tenant-perspective overlays beyond what's in the listings table.
-- `find_anchor_amenities`: OSM/Mapy.cz POI lookup.
+### Phase 4b: Spatial context (remaining)
+Tenant-perspective overlays beyond anchor amenities.
 - `compute_walkability`: scored composite of POI distances.
 - `find_comparables_along_axis`: transit-line-aware comparable search.
 
@@ -125,12 +130,31 @@ numerals, Czech locale formatting).
 - Trace format v1: tool calls + computations recorded with
   `output_summary` only (full data in dedicated columns).
 
-### Phase U2: History view
-Per-listing price-history sparkline from `listing_snapshots_public`,
-plus a "verify freshness" button that calls the bearer-token-gated
-FastAPI service. (Note: U1a's Listing Detail already ships the
-snapshot timeline, so the remaining work for U2 is the freshness
-write-path through the API.)
+### Phase U2: Estimation flow (done)
+End-to-end browser flow over the U1b backend.
+- `/estimate`: two-step form (paste URL or pick listing → review and
+  edit spec → submit). Pre-fills from `/estimations/preview`; on
+  submit POSTs `CreateEstimationIn` to the FastAPI service. URL-origin
+  runs send `url` + a minimal `spec_overrides` diff so the server
+  records the original `input_url` for traceability.
+- `/estimations`: list view of past runs with source/status filters,
+  URL-state-driven pagination, links to detail.
+- `/estimation/:id`: complete display — rent range strip,
+  confidence/source pills, warnings block (failed runs render
+  `error_message` and a truncated trace, no range), input recap,
+  trace timeline, comparables table sorted by data age, re-run
+  button (POSTs new run with `parent_run_id` set).
+- `Timeline` component: dispatches on `step.kind` via a renderer
+  map (`tool_call` / `computation` / `reasoning`). Today renders
+  the deterministic 4-step trace; the same component will render
+  the U4 agent's longer traces without rework. Smart default
+  expansion (last step + steps over 500 ms).
+
+### Phase U2.5: Freshness write-path (next)
+"Verify freshness" button on Listing Detail that calls the
+bearer-token-gated FastAPI service to refresh a listing on demand.
+The audit log table (`listing_freshness_checks`) already exists from
+Phase 2.5; the remaining work is the UI button + API call.
 
 ### Phase U3: Toolkit-backed views
 Surfacing `describe_neighborhood`, `find_distribution_outliers`, and
