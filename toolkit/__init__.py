@@ -46,6 +46,7 @@ def _max_last_seen(listings: list[dict[str, Any]]) -> str | None:
     return max(parsed).isoformat()
 
 
+from toolkit.amenities import find_anchor_amenities  # noqa: E402
 from toolkit.comparables import (  # noqa: E402
     ComparableFilters,
     TargetSpec,
@@ -71,6 +72,7 @@ __all__ = [
     "compute_listing_velocity",
     "compute_market_velocity",
     "describe_neighborhood",
+    "find_anchor_amenities",
     "find_comparables",
     "find_distribution_outliers",
     "verify_listing_freshness",

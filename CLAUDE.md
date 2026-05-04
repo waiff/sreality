@@ -120,6 +120,17 @@ separate dev/staging database. Treat every operation accordingly.
    `verify_listing_freshness` — its primary purpose is observability
    and per-listing throttling, not history. The primary history
    table is `listing_snapshots`.
+10. **`amenities` + `amenity_fetches` are a local OSM mirror, not a
+    history table.** Populated by `find_anchor_amenities` on cache
+    miss via Overpass. Cache key is `(category, radius_m, exact
+    center, fetched_at within TTL)`. POIs accumulate; no automated
+    deletion of POIs that have disappeared from OSM (out of scope).
+    Manual SQL pruning when the audit table gets large. Categories
+    are determined by the *query* that fetched a POI, not the OSM
+    tags themselves — `ON CONFLICT (source, source_id)` overwrites
+    on subsequent fetches under different categories. The
+    canonical category taxonomy lives in
+    `toolkit/amenities.CATEGORY_TAGS`; add new categories there.
 
 ## Toolkit and API rules
 
@@ -148,17 +159,22 @@ service that exposes it (`api/`). They do not apply to the scraper.
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval
    'X days'` (default 7).** Don't trust `is_active` alone — a listing not
    seen for 30 days is functionally inactive.
-5. **No writes from the toolkit, with one explicit exception.**
-   Read-only by default. The single exception is
-   `verify_listing_freshness` (and `scraper.freshness.freshness_check`
-   that it wraps), which exists so an agent can confirm a comparable
-   is still valid before relying on it. Every call logs to
-   `listing_freshness_checks` for observability and may also write a
-   new `listing_snapshots` row, flip `listings.is_active`, or both.
+5. **No writes from the toolkit, with two explicit exceptions.**
+   Read-only by default. The exceptions are:
+   - `verify_listing_freshness` (and `scraper.freshness.freshness_check`
+     that it wraps), which exists so an agent can confirm a comparable
+     is still valid before relying on it. Every call logs to
+     `listing_freshness_checks` for observability and may also write a
+     new `listing_snapshots` row, flip `listings.is_active`, or both.
+   - `find_anchor_amenities`, which writes to the OSM-mirror tables
+     `amenities` and `amenity_fetches` on a cache miss. POI facts live
+     in OpenStreetMap, not our scrape, so we cache them locally to
+     keep repeated lookups fast and Overpass-friendly. The cache is a
+     pure mirror — no derived analytical state lives in those tables.
    No other toolkit function may write. The API service should still
-   connect with a read-only role if Postgres permits; the freshness
-   check then needs a separately-elevated path. For now we ship with
-   one role and discipline.
+   connect with a read-only role if Postgres permits; these two paths
+   then need a separately-elevated route. For now we ship with one
+   role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always
    `ST_DWithin(geom, target_geom, radius_m)`. Never compute distance in
    Python.
