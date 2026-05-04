@@ -16,6 +16,7 @@ TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
 from api import dependencies as deps
 from api import main as api_main
+from api import maps as api_maps
 from scraper import url_parser as scraper_url_parser
 
 
@@ -91,6 +92,21 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "list_estimation_runs", fake_list_runs)
     monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake_parse_url)
 
+    monkeypatch.setattr(api_maps, "suggest", lambda *a, **kw: {"items": []})
+    monkeypatch.setattr(
+        api_maps,
+        "resolve",
+        lambda *a, **kw: {
+            "kind": "unresolved",
+            "label": "x",
+            "lat": None,
+            "lng": None,
+            "polygon": None,
+            "default_radius_m": 1500,
+            "raw": {},
+        },
+    )
+
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -106,6 +122,7 @@ _MARKET_VEL_BODY = {"target": {"lat": 50.0, "lng": 14.0}}
 _LISTING_VEL_BODY = {"sreality_id": 1}
 _ANCHORS_BODY = {"lat": 50.0, "lng": 14.0}
 _CREATE_ESTIMATION_BODY = {"spec": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}}
+_RESOLVE_BODY = {"label": "x", "lat": 50.0, "lng": 14.0}
 
 
 def _gated_calls(client) -> list:
@@ -123,6 +140,8 @@ def _gated_calls(client) -> list:
         ("POST", "/estimations", _CREATE_ESTIMATION_BODY),
         ("GET", "/estimations/1", None),
         ("GET", "/estimations", None),
+        ("GET", "/maps/suggest?query=foo", None),
+        ("POST", "/maps/resolve", _RESOLVE_BODY),
         ("GET", "/estimations/preview?url=https://www.sreality.cz/detail/x/2836292428", None),
     ]
 

@@ -102,6 +102,21 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   return body as T;
 }
 
+/* Generic verbs used by lib/maps.ts (and any other future module that
+ * needs raw GET/POST without going through a feature-specific wrapper). */
+export const apiGet = <T>(
+  path: string,
+  params?: Record<string, string | number | undefined>,
+  signal?: AbortSignal,
+): Promise<T> =>
+  request<T>(path, { query: params as Record<string, QueryValue> | undefined, signal });
+
+export const apiPost = <T>(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<T> => request<T>(path, { method: 'POST', json: body, signal });
+
 /* ----- estimations ------------------------------------------------------- */
 
 export const previewListing = (url: string): Promise<PreviewResponse> =>
