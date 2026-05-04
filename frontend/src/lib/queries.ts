@@ -5,6 +5,7 @@ import {
 } from './filters';
 import type {
   ActiveByDayRow,
+  HealthSummary,
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
@@ -297,6 +298,16 @@ export const fetchRegionActiveByDay = async (
   });
   if (error) throw error;
   return (data ?? []) as ActiveByDayRow[];
+};
+
+/* -------------------------------------------------------------------------- */
+/* Health dashboard (Part E) — calls migration 013 health_summary RPC         */
+/* -------------------------------------------------------------------------- */
+
+export const fetchHealthSummary = async (): Promise<HealthSummary> => {
+  const { data, error } = await supabase.rpc('health_summary');
+  if (error) throw error;
+  return data as HealthSummary;
 };
 
 export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {

@@ -89,3 +89,42 @@ export interface ActiveByDayRow {
   active: number;
   new: number;
 }
+
+/* Health dashboard payload — shape mirrors migration 013 health_summary RPC. */
+
+export interface HealthDayCount {
+  day: string;
+  n: number;
+}
+
+export interface HealthSnapBucket {
+  bucket: '1' | '2' | '3' | '4+' | string;
+  n: number;
+}
+
+export interface HealthFreshnessRow {
+  outcome: string;
+  n: number;
+}
+
+export interface HealthFailureRow {
+  sreality_id: number;
+  attempts: number;
+  first_failure_at: string;
+  last_failure_at: string | null;
+  given_up: boolean;
+}
+
+export interface HealthSummary {
+  last_scrape_at: string | null;
+  active_now: number;
+  active_7d_ago: number;
+  flipped_inactive_7d: number;
+  new_per_day_14d: HealthDayCount[];
+  flipped_per_day_7d: HealthDayCount[];
+  snapshot_density: HealthSnapBucket[];
+  freshness_24h: HealthFreshnessRow[];
+  failures_given_up: number;
+  failures_total: number;
+  failures_top10: HealthFailureRow[];
+}
