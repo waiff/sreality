@@ -281,7 +281,7 @@ Do not introduce `supabase-py` without an explicit reason and a discussion.
 
 ## Auth and secrets
 
-Seven env vars (all GitHub Actions secrets in production):
+Nine env vars (all GitHub Actions secrets in production):
 
 Database:
 - `SUPABASE_URL` - public project URL.
@@ -302,6 +302,17 @@ Image storage (Cloudflare R2, S3-compatible):
 If any R2_* var is missing the image-download phase logs a skip and
 exits zero. The scrape still records image URLs in the database;
 downloading is decoupled and can be backfilled later.
+
+LLM-backed parsing (FastAPI service only):
+- `ANTHROPIC_API_KEY` - Anthropic API key. Required for parsing
+  non-sreality listing URLs through the source-kind dispatcher. Every
+  call is logged to `llm_calls` with token counts and USD cost.
+- `MAPY_CZ_API_KEY` - Mapy.cz REST API key. Used to geocode locality
+  strings from non-sreality listings, which rarely include coordinates
+  on the page.
+
+Both are backend-only. Never `VITE_*` prefix; never expose to the
+browser. The `frontend/` build does not see them.
 
 Never write any of these values into a committed file. `.env` is gitignored.
 Always reference secrets by env-var name in code.
