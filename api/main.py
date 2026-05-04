@@ -12,6 +12,7 @@ from typing import Any, Literal
 from fastapi import Depends, FastAPI, HTTPException, Query
 
 from api import dependencies as deps
+from api import maps
 from api import schemas as s
 from api.estimate_yield import estimate_yield
 from api.estimation_runs import (
@@ -39,6 +40,16 @@ app = FastAPI(title="sreality toolkit API", version="0.2.5")
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/maps/suggest")
+def get_maps_suggest(
+    query: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(default=10, ge=1, le=20),
+    lang: str = Query(default="cs", min_length=2, max_length=8),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return maps.suggest(query, limit=limit, lang=lang)
 
 
 @app.post("/tools/find_comparables")
