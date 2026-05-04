@@ -1,28 +1,662 @@
-import { useParams } from 'react-router-dom';
+import { Suspense, lazy, useMemo } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
+import {
+  fetchListingById,
+  fetchSnapshotsByListing,
+  fetchFreshnessChecksByListing,
+} from '@/lib/queries';
+import {
+  fmtCzk,
+  fmtArea,
+  fmtPricePerM2,
+  fmtRelative,
+  fmtAbsolute,
+} from '@/lib/format';
+import type {
+  ListingPublic,
+  ListingSnapshotPublic,
+  ListingFreshnessCheckPublic,
+} from '@/lib/types';
+import SnapshotTimeline from '@/components/SnapshotTimeline';
+
+const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
+
+const DAY_MS = 86_400_000;
 
 export default function ListingDetail() {
-  const { sreality_id } = useParams();
+  const { sreality_id: idParam } = useParams();
+  const sid = idParam && /^\d+$/.test(idParam) ? Number(idParam) : null;
+
+  const listingQ = useQuery<ListingPublic | null, Error>({
+    queryKey: ['listing', sid],
+    queryFn: () => fetchListingById(sid as number),
+    enabled: sid != null,
+    staleTime: 60_000,
+  });
+
+  const snapshotsQ = useQuery<ListingSnapshotPublic[], Error>({
+    queryKey: ['snapshots', sid],
+    queryFn: () => fetchSnapshotsByListing(sid as number),
+    enabled: sid != null && !!listingQ.data,
+    staleTime: 60_000,
+  });
+
+  const checksQ = useQuery<ListingFreshnessCheckPublic[], Error>({
+    queryKey: ['freshness', sid],
+    queryFn: () => fetchFreshnessChecksByListing(sid as number),
+    enabled: sid != null && !!listingQ.data,
+    staleTime: 60_000,
+  });
+
+  if (sid == null) {
+    return <NoListingState id={idParam ?? null} reason="invalid" />;
+  }
+
+  if (listingQ.isLoading) {
+    return (
+      <Page>
+        <Crumb />
+        <div className="mt-8 text-sm text-[var(--color-ink-3)]">Loading…</div>
+      </Page>
+    );
+  }
+
+  if (listingQ.error) {
+    return (
+      <Page>
+        <Crumb />
+        <div className="mt-8 text-sm text-[var(--color-brick)]">
+          Failed to load: {listingQ.error.message}
+        </div>
+      </Page>
+    );
+  }
+
+  const listing = listingQ.data;
+  if (!listing) {
+    return <NoListingState id={idParam ?? null} reason="missing" />;
+  }
+
+  const snapshots = snapshotsQ.data ?? [];
+  const checks = checksQ.data ?? [];
+
   return (
-    <div className="px-6 py-8 max-w-screen-2xl mx-auto">
-      <div className="space-y-1.5">
-        <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-          Listing
+    <Page>
+      <Crumb />
+      <Header listing={listing} />
+      <Hairline />
+      <MapBlock listing={listing} />
+      <Hairline />
+      <KeyFactsBlock listing={listing} />
+      <Hairline />
+      <TimestampsBlock listing={listing} />
+      <Hairline />
+      <HistoryBlock listing={listing} snapshots={snapshots} checks={checks} />
+      <Hairline />
+      <FreshnessBlock checks={checks} />
+      <Hairline />
+      <OutboundBlock sreality_id={listing.sreality_id} />
+    </Page>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Layout primitives                                                          */
+/* -------------------------------------------------------------------------- */
+
+function Page({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="px-6 py-8 max-w-3xl mx-auto">{children}</div>
+  );
+}
+
+function Crumb() {
+  return (
+    <Link
+      to="/browse"
+      className="inline-flex items-center gap-1.5 text-[0.75rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+    >
+      <BackArrow />
+      <span>Back to browse</span>
+    </Link>
+  );
+}
+
+function Hairline() {
+  return <div className="my-7 h-px bg-[var(--color-rule)]" />;
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+      {children}
+    </p>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Header                                                                     */
+/* -------------------------------------------------------------------------- */
+
+function Header({ listing }: { listing: ListingPublic }) {
+  const disposition = listing.disposition ?? '—';
+  const area = fmtArea(listing.area_m2);
+  const price = fmtCzk(listing.price_czk);
+  const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
+  const unit = listing.price_unit ? ` / ${listing.price_unit}` : '';
+
+  return (
+    <div className="mt-5 flex items-start justify-between gap-6">
+      <div className="min-w-0">
+        <p className="font-mono tabular-nums text-[var(--color-ink-2)] text-sm">
+          <span>{disposition}</span>
+          <span className="mx-2 text-[var(--color-ink-4)]">·</span>
+          <span>{area}</span>
         </p>
-        <h1 className="text-3xl leading-tight font-mono">
-          {sreality_id ?? '—'}
+        <h1
+          className="mt-1.5 text-[2.6rem] leading-[1.05] tabular-nums"
+          style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+        >
+          {price}
+          <span className="text-base font-sans font-normal text-[var(--color-ink-3)] tracking-wide">
+            {unit}
+          </span>
         </h1>
-        <p className="text-sm text-[var(--color-ink-3)]">
-          Detail page with snapshot timeline strip — Part C
+        <p className="mt-2 text-sm text-[var(--color-ink-2)]">
+          {listing.locality ?? listing.district ?? '—'}
+        </p>
+        <p className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mt-2">
+          ID <span className="font-mono tabular-nums text-[var(--color-ink-3)] normal-case tracking-normal">{listing.sreality_id}</span>
+          {ppm !== '—' && (
+            <>
+              <span className="mx-2">·</span>
+              <span className="font-mono tabular-nums text-[var(--color-ink-3)] normal-case tracking-normal">
+                {ppm}
+              </span>
+            </>
+          )}
         </p>
       </div>
-      <section className="mt-6 p-12 rounded-[var(--radius-md)] border border-dashed border-[var(--color-rule)] text-center">
-        <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-4)]">
-          TODO
-        </p>
-        <p className="mt-2 text-sm text-[var(--color-ink-3)]">
-          Detail view, snapshot history, freshness log land in Part C.
-        </p>
-      </section>
+      <StatusPill isActive={listing.is_active} lastSeenAt={listing.last_seen_at} />
     </div>
+  );
+}
+
+function StatusPill({ isActive, lastSeenAt }: { isActive: boolean; lastSeenAt: string }) {
+  if (isActive) {
+    return (
+      <span
+        className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] border border-[var(--color-copper)]/20"
+        title={`Last seen ${fmtAbsolute(lastSeenAt)}`}
+      >
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]" aria-hidden />
+        Active
+      </span>
+    );
+  }
+  return (
+    <span
+      className="shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-brick-soft)] text-[var(--color-brick)] border border-[var(--color-brick)]/20"
+      title={`Last seen ${fmtAbsolute(lastSeenAt)}`}
+    >
+      Inactive
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Map block                                                                  */
+/* -------------------------------------------------------------------------- */
+
+function MapBlock({ listing }: { listing: ListingPublic }) {
+  if (listing.lat == null || listing.lng == null) {
+    return (
+      <div>
+        <SectionLabel>Location</SectionLabel>
+        <div className="mt-2 h-32 flex items-center justify-center text-sm text-[var(--color-ink-3)] border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)]">
+          No coordinates recorded
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <SectionLabel>Location</SectionLabel>
+      <div className="mt-2">
+        <Suspense
+          fallback={
+            <div className="h-60 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+          }
+        >
+          <DetailMap lat={listing.lat} lng={listing.lng} isActive={listing.is_active} />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Key facts                                                                  */
+/* -------------------------------------------------------------------------- */
+
+function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
+  const floor = listing.floor != null
+    ? listing.total_floors != null
+      ? `${listing.floor} / ${listing.total_floors}`
+      : String(listing.floor)
+    : null;
+
+  const facts: Array<{ label: string; value: string | null; mono?: boolean }> = [
+    { label: 'Floor', value: floor, mono: true },
+    { label: 'Building', value: capitalise(listing.building_type) },
+    { label: 'Condition', value: capitalise(listing.condition) },
+    { label: 'Energy class', value: listing.energy_rating, mono: true },
+    { label: 'Balcony', value: yesNo(listing.has_balcony) },
+    { label: 'Lift', value: yesNo(listing.has_lift) },
+    { label: 'Parking', value: yesNo(listing.has_parking) },
+    { label: 'District', value: listing.district },
+  ];
+
+  return (
+    <div>
+      <SectionLabel>Key facts</SectionLabel>
+      <dl className="mt-3 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
+        {facts.map((f) => (
+          <div key={f.label}>
+            <dt className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+              {f.label}
+            </dt>
+            <dd
+              className={[
+                'mt-1 text-sm',
+                f.value == null ? 'text-[var(--color-ink-4)]' : 'text-[var(--color-ink)]',
+                f.mono ? 'font-mono tabular-nums' : '',
+              ].join(' ')}
+            >
+              {f.value ?? '—'}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Timestamps                                                                 */
+/* -------------------------------------------------------------------------- */
+
+function TimestampsBlock({ listing }: { listing: ListingPublic }) {
+  const firstT = new Date(listing.first_seen_at).getTime();
+  const lastT = new Date(listing.last_seen_at).getTime();
+  const endT = listing.is_active ? Date.now() : lastT;
+  const days = Math.max(0, Math.floor((endT - firstT) / DAY_MS));
+
+  return (
+    <div>
+      <SectionLabel>History</SectionLabel>
+      <div className="mt-3 grid grid-cols-3 gap-6">
+        <TsCell label="First seen" iso={listing.first_seen_at} />
+        <TsCell label="Last seen" iso={listing.last_seen_at} />
+        <div>
+          <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            {listing.is_active ? 'Days on market' : 'Lifetime'}
+          </p>
+          <p className="mt-1 text-sm font-mono tabular-nums text-[var(--color-ink)]">
+            {days} {days === 1 ? 'day' : 'days'}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TsCell({ label, iso }: { label: string; iso: string }) {
+  return (
+    <div>
+      <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        {label}
+      </p>
+      <p
+        className="mt-1 text-sm text-[var(--color-ink)] cursor-help"
+        title={fmtAbsolute(iso)}
+      >
+        {fmtRelative(iso)}
+      </p>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Snapshot history (the hero block)                                          */
+/* -------------------------------------------------------------------------- */
+
+function HistoryBlock({
+  listing,
+  snapshots,
+  checks,
+}: {
+  listing: ListingPublic;
+  snapshots: ListingSnapshotPublic[];
+  checks: ListingFreshnessCheckPublic[];
+}) {
+  const sorted = useMemo(
+    () => [...snapshots].sort((a, b) => new Date(a.scraped_at).getTime() - new Date(b.scraped_at).getTime()),
+    [snapshots],
+  );
+  return (
+    <div>
+      <div className="flex items-baseline justify-between">
+        <SectionLabel>Price history</SectionLabel>
+        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
+          {sorted.length} {sorted.length === 1 ? 'snapshot' : 'snapshots'}
+        </p>
+      </div>
+
+      <div className="mt-4">
+        <SnapshotTimeline
+          firstSeenAt={listing.first_seen_at}
+          lastSeenAt={listing.last_seen_at}
+          isActive={listing.is_active}
+          snapshots={sorted}
+          freshnessChecks={checks}
+        />
+      </div>
+
+      {sorted.length === 1 && (
+        <p className="mt-3 text-sm text-[var(--color-ink-2)]">
+          No price changes recorded — only seen once at{' '}
+          <span className="font-mono tabular-nums">{fmtCzk(sorted[0].price_czk)}</span>
+          {' '}on{' '}
+          <span title={fmtAbsolute(sorted[0].scraped_at)}>{shortDate(sorted[0].scraped_at)}</span>.
+        </p>
+      )}
+
+      {sorted.length >= 2 && <SnapshotTable snapshots={sorted} />}
+    </div>
+  );
+}
+
+function SnapshotTable({ snapshots }: { snapshots: ListingSnapshotPublic[] }) {
+  return (
+    <div className="mt-5 border border-[var(--color-rule)] rounded-[var(--radius-md)] overflow-hidden">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="text-left text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] bg-[var(--color-paper-2)]">
+            <th className="px-3 py-2 font-medium">ID</th>
+            <th className="px-3 py-2 font-medium">Scraped</th>
+            <th className="px-3 py-2 font-medium text-right">Price</th>
+            <th className="px-3 py-2 font-medium text-right">Δ</th>
+          </tr>
+        </thead>
+        <tbody>
+          {snapshots.map((s, i) => {
+            const prev = i > 0 ? snapshots[i - 1].price_czk : null;
+            const delta = s.price_czk != null && prev != null ? s.price_czk - prev : null;
+            return (
+              <tr
+                key={s.id}
+                className="border-t border-[var(--color-rule-soft)]"
+              >
+                <td className="px-3 py-2 font-mono tabular-nums text-[var(--color-ink-3)] text-[0.78rem]">
+                  {s.id}
+                </td>
+                <td className="px-3 py-2 text-[var(--color-ink-2)] cursor-help" title={fmtAbsolute(s.scraped_at)}>
+                  {fmtRelative(s.scraped_at)}
+                </td>
+                <td className="px-3 py-2 font-mono tabular-nums text-right text-[var(--color-ink)]">
+                  {fmtCzk(s.price_czk)}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  <DeltaCell delta={delta} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function DeltaCell({ delta }: { delta: number | null }) {
+  if (delta == null) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  if (delta === 0) {
+    return <span className="font-mono tabular-nums text-[var(--color-ink-3)]">±0</span>;
+  }
+  const up = delta > 0;
+  const colour = up ? 'var(--color-brick)' : 'var(--color-sage)';
+  return (
+    <span
+      className="inline-flex items-center gap-1 font-mono tabular-nums"
+      style={{ color: colour }}
+    >
+      <Triangle up={up} />
+      {fmtCzk(Math.abs(delta))}
+    </span>
+  );
+}
+
+function Triangle({ up }: { up: boolean }) {
+  return (
+    <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
+      {up ? (
+        <polygon points="4,0.5 7.5,7 0.5,7" fill="currentColor" />
+      ) : (
+        <polygon points="0.5,1 7.5,1 4,7.5" fill="currentColor" />
+      )}
+    </svg>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Freshness checks                                                           */
+/* -------------------------------------------------------------------------- */
+
+function FreshnessBlock({ checks }: { checks: ListingFreshnessCheckPublic[] }) {
+  const count = checks.length;
+  return (
+    <details className="group">
+      <summary className="cursor-pointer list-none flex items-center justify-between gap-4">
+        <SectionLabel>
+          <span>Freshness checks</span>
+          <span className="ml-2 font-mono tabular-nums text-[var(--color-ink-4)] tracking-normal">
+            ({count})
+          </span>
+        </SectionLabel>
+        <span className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] group-open:hidden">
+          Show
+        </span>
+        <span className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hidden group-open:inline">
+          Hide
+        </span>
+      </summary>
+      {count === 0 ? (
+        <p className="mt-3 text-sm text-[var(--color-ink-3)]">
+          No on-demand freshness checks recorded.
+        </p>
+      ) : (
+        <div className="mt-3 border border-[var(--color-rule)] rounded-[var(--radius-md)] overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] bg-[var(--color-paper-2)]">
+                <th className="px-3 py-2 font-medium">Checked</th>
+                <th className="px-3 py-2 font-medium">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...checks]
+                .sort((a, b) => new Date(b.checked_at).getTime() - new Date(a.checked_at).getTime())
+                .map((c) => (
+                  <tr key={c.id} className="border-t border-[var(--color-rule-soft)]">
+                    <td className="px-3 py-2 text-[var(--color-ink-2)] cursor-help" title={fmtAbsolute(c.checked_at)}>
+                      {fmtRelative(c.checked_at)}
+                    </td>
+                    <td className="px-3 py-2">
+                      <OutcomeChip outcome={c.outcome} />
+                    </td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </details>
+  );
+}
+
+function OutcomeChip({ outcome }: { outcome: string }) {
+  const lower = outcome.toLowerCase();
+  let bg = 'var(--color-rule-soft)';
+  let fg = 'var(--color-ink-2)';
+  if (lower === 'unchanged') {
+    bg = 'var(--color-sage-soft)';
+    fg = 'var(--color-sage)';
+  } else if (lower === 'updated' || lower === 'changed') {
+    bg = 'var(--color-copper-soft)';
+    fg = 'var(--color-copper)';
+  } else if (lower === 'gone' || lower === 'inactive' || lower === 'error') {
+    bg = 'var(--color-brick-soft)';
+    fg = 'var(--color-brick)';
+  }
+  return (
+    <span
+      className="inline-block px-2 py-0.5 text-[0.65rem] tracking-[0.14em] uppercase rounded-[var(--radius-xs)]"
+      style={{ background: bg, color: fg }}
+    >
+      {outcome}
+    </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Outbound link                                                              */
+/* -------------------------------------------------------------------------- */
+
+function OutboundBlock({ sreality_id }: { sreality_id: number }) {
+  const href = `https://www.sreality.cz/detail/pronajem/byt/x/x/${sreality_id}`;
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="inline-flex items-center gap-1.5 text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors"
+    >
+      Open on sreality.cz
+      <OutArrow />
+    </a>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Empty / 404 state                                                          */
+/* -------------------------------------------------------------------------- */
+
+function NoListingState({ id, reason }: { id: string | null; reason: 'invalid' | 'missing' }) {
+  return (
+    <Page>
+      <Crumb />
+      <div className="mt-12">
+        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Not found
+        </p>
+        <h1
+          className="mt-2 text-2xl"
+          style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+        >
+          {reason === 'invalid'
+            ? 'No listing requested'
+            : (
+              <>
+                No listing with id{' '}
+                <span className="font-mono tabular-nums text-[var(--color-ink-2)]">{id}</span>
+              </>
+            )}
+        </h1>
+        <p className="mt-3 text-sm text-[var(--color-ink-3)]">
+          The id may be wrong, or the record was never imported.
+          <Link to="/browse" className="ml-1 text-[var(--color-copper)] hover:underline">
+            Browse all listings
+          </Link>
+          .
+        </p>
+      </div>
+    </Page>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Helpers + glyphs                                                           */
+/* -------------------------------------------------------------------------- */
+
+function yesNo(v: boolean | null): string | null {
+  if (v == null) return null;
+  return v ? 'Yes' : 'No';
+}
+
+function capitalise(s: string | null): string | null {
+  if (!s) return null;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function shortDate(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('cs-CZ', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+}
+
+function BackArrow() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+      <polyline
+        points="5.5,1.5 1.5,5 5.5,8.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <line
+        x1="1.5"
+        y1="5"
+        x2="9"
+        y2="5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function OutArrow() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden>
+      <line
+        x1="1"
+        y1="9"
+        x2="8.5"
+        y2="1.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+      />
+      <polyline
+        points="3.5,1.5 8.5,1.5 8.5,6.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }

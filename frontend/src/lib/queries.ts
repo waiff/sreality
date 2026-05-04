@@ -3,6 +3,11 @@ import {
   type ListingFilters,
   seenWithinToIso,
 } from './filters';
+import type {
+  ListingPublic,
+  ListingSnapshotPublic,
+  ListingFreshnessCheckPublic,
+} from './types';
 
 /* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so
  * the bottleneck is wire-bytes, not DOM. 50k features ≈ 0.3 MB gzipped. */
@@ -200,6 +205,49 @@ export const fetchDistrictFacets = async (): Promise<DistrictFacet[]> => {
     .map(([district, count]) => ({ district, count }))
     .sort((a, b) => b.count - a.count || a.district.localeCompare(b.district));
   return districtCache;
+};
+
+const DETAIL_COLS =
+  'sreality_id,first_seen_at,last_seen_at,is_active,' +
+  'category_main,category_type,price_czk,price_unit,' +
+  'area_m2,disposition,locality,district,locality_district_id,locality_region_id,' +
+  'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
+  'building_type,condition,energy_rating';
+
+export const fetchListingById = async (
+  sreality_id: number,
+): Promise<ListingPublic | null> => {
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select(DETAIL_COLS)
+    .eq('sreality_id', sreality_id)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as unknown as ListingPublic | null) ?? null;
+};
+
+export const fetchSnapshotsByListing = async (
+  sreality_id: number,
+): Promise<ListingSnapshotPublic[]> => {
+  const { data, error } = await supabase
+    .from('listing_snapshots_public')
+    .select('id,sreality_id,scraped_at,price_czk')
+    .eq('sreality_id', sreality_id)
+    .order('scraped_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as ListingSnapshotPublic[];
+};
+
+export const fetchFreshnessChecksByListing = async (
+  sreality_id: number,
+): Promise<ListingFreshnessCheckPublic[]> => {
+  const { data, error } = await supabase
+    .from('listing_freshness_checks_public')
+    .select('id,sreality_id,checked_at,outcome')
+    .eq('sreality_id', sreality_id)
+    .order('checked_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as ListingFreshnessCheckPublic[];
 };
 
 export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {
