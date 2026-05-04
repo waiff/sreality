@@ -76,12 +76,19 @@ as $$
     group by disposition
     order by n desc, disposition asc
   )
+  -- price_pct / ppm2_pct each return exactly one row (an aggregate without
+  -- GROUP BY), so we test the median value: NULL means "no qualifying rows
+  -- to compute percentiles from", anything else means we got numbers.
   select jsonb_build_object(
     'total',        (select count(*)::int from filtered),
     'new_7d',       (select count(*)::int from filtered where first_seen_at >= now() - interval '7 days'),
     'new_30d',      (select count(*)::int from filtered where first_seen_at >= now() - interval '30 days'),
-    'price',        (select case when count(*) > 0 then jsonb_build_object('p25', p25, 'p50', p50, 'p75', p75) else null end from price_pct),
-    'ppm2',         (select case when count(*) > 0 then jsonb_build_object('p25', p25, 'p50', p50, 'p75', p75) else null end from ppm2_pct),
+    'price',        (select case when p50 is null then null
+                                  else jsonb_build_object('p25', p25, 'p50', p50, 'p75', p75) end
+                     from price_pct),
+    'ppm2',         (select case when p50 is null then null
+                                  else jsonb_build_object('p25', p25, 'p50', p50, 'p75', p75) end
+                     from ppm2_pct),
     'dispositions', coalesce(
                       (select jsonb_agg(jsonb_build_object('disposition', disposition, 'n', n)) from disposition_dist),
                       '[]'::jsonb

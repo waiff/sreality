@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
+import BrowseStatsView from '@/components/BrowseStats';
 import {
   fromSearchParams,
   toSearchParams,
@@ -15,9 +16,11 @@ import {
 import {
   fetchListingsForMap,
   fetchListingsForTable,
+  fetchBrowseStats,
   parseSort,
   sortToParam,
   DEFAULT_SORT,
+  type BrowseStats,
   type MapResult,
   type SortField,
   type SortSpec,
@@ -91,10 +94,19 @@ export default function Browse() {
     enabled: tabFromUrl === 'table',
   });
 
+  const statsQuery = useQuery<BrowseStats, Error>({
+    queryKey: ['stats', filters],
+    queryFn: () => fetchBrowseStats(filters),
+    placeholderData: (prev) => prev,
+    enabled: tabFromUrl === 'stats',
+  });
+
   const totalForBadge =
     tabFromUrl === 'table'
       ? tableQuery.data?.total ?? null
-      : mapQuery.data?.total ?? null;
+      : tabFromUrl === 'stats'
+        ? statsQuery.data?.total ?? null
+        : mapQuery.data?.total ?? null;
 
   const tabs: ReadonlyArray<Tab<TabKey>> = [
     { key: 'map',   label: 'Map',   badge: totalForBadge != null ? totalForBadge.toLocaleString('cs-CZ') : undefined },
@@ -102,14 +114,27 @@ export default function Browse() {
     { key: 'stats', label: 'Stats' },
   ];
 
-  const activeError = tabFromUrl === 'map' ? mapQuery.error : tabFromUrl === 'table' ? tableQuery.error : null;
+  const activeError =
+    tabFromUrl === 'map'   ? mapQuery.error   :
+    tabFromUrl === 'table' ? tableQuery.error :
+    tabFromUrl === 'stats' ? statsQuery.error :
+    null;
 
   return (
     <div className="flex">
       <FilterSidebar filters={filters} onChange={setFilters} />
 
       <div className="flex-1 min-w-0 px-6 pt-5 pb-8">
-        <FilterSummary filters={filters} count={totalForBadge} loading={tabFromUrl === 'map' ? mapQuery.isLoading : tableQuery.isLoading} />
+        <FilterSummary
+          filters={filters}
+          count={totalForBadge}
+          loading={
+            tabFromUrl === 'map'   ? mapQuery.isLoading   :
+            tabFromUrl === 'table' ? tableQuery.isLoading :
+            tabFromUrl === 'stats' ? statsQuery.isLoading :
+            false
+          }
+        />
 
         <div className="mt-4">
           <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
@@ -139,7 +164,13 @@ export default function Browse() {
               onClearFilters={() => setFilters(DEFAULT_FILTERS)}
             />
           )}
-          {tabFromUrl === 'stats' && <NotYet kind="Stats" />}
+          {tabFromUrl === 'stats' && (
+            <BrowseStatsView
+              stats={statsQuery.data ?? null}
+              isLoading={statsQuery.isLoading}
+              isEmpty={!statsQuery.isLoading && (statsQuery.data?.total ?? 0) === 0}
+            />
+          )}
         </div>
 
         {activeError && <ErrorBanner error={activeError} />}
@@ -177,20 +208,6 @@ function MapSkeleton() {
     <div className="h-[calc(100dvh-16rem)] min-h-[480px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] flex items-center justify-center">
       <p className="text-sm text-[var(--color-ink-3)] tracking-wide">Loading map…</p>
     </div>
-  );
-}
-
-function NotYet({ kind }: { kind: string }) {
-  return (
-    <section className="p-12 rounded-[var(--radius-md)] border border-dashed border-[var(--color-rule)] text-center">
-      <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-4)]">
-        Up next
-      </p>
-      <p className="mt-2 text-sm text-[var(--color-ink-3)]">
-        {kind} tab lands in the next checkpoint. Filters above already apply
-        globally — switching tabs preserves them.
-      </p>
-    </section>
   );
 }
 

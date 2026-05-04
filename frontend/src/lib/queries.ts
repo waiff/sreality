@@ -148,6 +148,40 @@ export interface DistrictFacet {
   count: number;
 }
 
+export interface BrowseStats {
+  total: number;
+  new_7d: number;
+  new_30d: number;
+  price: { p25: number; p50: number; p75: number } | null;
+  ppm2:  { p25: number; p50: number; p75: number } | null;
+  dispositions: ReadonlyArray<{ disposition: string; n: number }>;
+}
+
+export const fetchBrowseStats = async (
+  f: ListingFilters,
+): Promise<BrowseStats> => {
+  const seenDays =
+    f.seenWithin === 'any' ? null : parseInt(f.seenWithin, 10);
+  const triToBool = (t: typeof f.hasBalcony): boolean | null =>
+    t === 'any' ? null : t === 'yes';
+
+  const { data, error } = await supabase.rpc('browse_stats', {
+    districts_filter:        f.districts.length ? f.districts : null,
+    dispositions_filter:     f.dispositions.length ? f.dispositions : null,
+    price_min_filter:        f.priceMin,
+    price_max_filter:        f.priceMax,
+    area_min_filter:         f.areaMin,
+    area_max_filter:         f.areaMax,
+    active_only_filter:      f.activeOnly,
+    seen_within_days_filter: seenDays,
+    has_balcony_filter:      triToBool(f.hasBalcony),
+    has_lift_filter:         triToBool(f.hasLift),
+    has_parking_filter:      triToBool(f.hasParking),
+  });
+  if (error) throw error;
+  return data as BrowseStats;
+};
+
 let districtCache: DistrictFacet[] | null = null;
 
 export const fetchDistrictFacets = async (): Promise<DistrictFacet[]> => {
