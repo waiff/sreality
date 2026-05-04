@@ -39,6 +39,18 @@ Audit trail and on-demand verification.
 - Shared `_shared_filter_where` helper extracted from `find_comparables`
   so spatial+attribute filter semantics live in one place.
 
+### Phase U1b: Estimation backend
+- `estimation_runs` table (migration 010): persistent record of every
+  estimation, regardless of trigger. Schema reserves `mode='agent'`
+  and `status='pending'/'running'` for U4 without forcing today's
+  code to write twice.
+- `scraper.url_parser`: turns a sreality URL into a parsed spec by
+  reusing `scraper.parser`.
+- `/estimations` endpoints: POST creates a run (URL or spec), GET-by-id
+  reads one, GET lists with filters and pagination.
+- Trace format v1: tool calls + computations recorded with
+  `output_summary` only (full data in dedicated columns).
+
 ## Next
 
 ### Phase 4: Spatial context (external data)

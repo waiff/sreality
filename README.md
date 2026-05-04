@@ -47,5 +47,6 @@ tests/              pytest suite
 - [x] `find_distribution_outliers` (outlier detection with cross-referenced reasons)
 - [x] `compute_market_velocity` (TOM stats and trend for a filtered cohort)
 - [x] `compute_listing_velocity` (per-listing TOM percentile and fast/typical/slow/stuck classification)
+- [x] Estimation runs persisted to `estimation_runs` table; surfaced via `/estimations` endpoints (POST/GET-by-id/list)
 
 See [`ROADMAP.md`](./ROADMAP.md) for the long-term plan.

@@ -131,6 +131,17 @@ separate dev/staging database. Treat every operation accordingly.
     on subsequent fetches under different categories. The
     canonical category taxonomy lives in
     `toolkit/amenities.CATEGORY_TAGS`; add new categories there.
+11. **`estimation_runs` is the single source of truth for every
+    estimation.** Every UI/API/ClickUp/agent invocation lands here.
+    Synchronous deterministic mode INSERTs once with a terminal
+    `status` (`'success'` or `'failed'`); the schema reserves
+    `'pending'`/`'running'` for U4's async agent without forcing
+    today's code to write twice. Failed runs still persist a row —
+    the row IS the audit trail; the endpoint returns HTTP 200 with
+    `status='failed'` and `error_message` set. Re-runs INSERT a new
+    row with `parent_run_id` set; the original is immutable. Legal
+    `source` values today: `'ui'`, `'api'`, `'clickup'` (CHECK
+    constraint, not enum — adding more is a single ALTER).
 
 ## Toolkit and API rules
 
@@ -185,6 +196,17 @@ service that exposes it (`api/`). They do not apply to the scraper.
    When unset (local development) the gate is a no-op. `/health` stays
    open so Railway healthchecks keep working. The token is shared with
    every caller; no per-user identity layer.
+9. **Trace format on `estimation_runs.trace` is versioned.**
+   `TRACE_SCHEMA_VERSION` lives in `api/estimation_runs.py`; every
+   row's `trace.version` matches that constant at write time. Shape:
+   `{version, summary, steps: [{n, kind, started_at, duration_ms,
+   output_summary, ...}]}`. Step `kind` ∈ `'tool_call' | 'computation'
+   | 'reasoning'` (last reserved for U4). Steps NEVER store full tool
+   outputs — only `output_summary`; the full data lives in dedicated
+   columns (`comparables_used` for the cohort, etc.). This caps row
+   size at single-digit kilobytes regardless of cohort size. Bumping
+   the version is a deliberate change; future readers must handle
+   older versions.
 
 ## Database access
 
