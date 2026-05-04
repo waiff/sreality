@@ -162,10 +162,11 @@ export const apiPost = <T>(
 
 /* ----- estimations ------------------------------------------------------- */
 
-/* Legacy GET /estimations/preview — sreality-only. Preserved so the
- * existing two-step Estimate flow keeps working until UrlScrapeStep
- * is migrated to previewListingUrl in Part B. New callers should use
- * previewListingUrl below. */
+// TODO(estimation-5 Part B): delete `previewListing` + the
+// `fetchEstimationPreview` re-export in lib/queries.ts once
+// UrlScrapeStep.tsx is migrated to previewListingUrl + useUrlPreview.
+// The new POST /estimations/preview routes sreality through the same
+// dispatcher, so the legacy GET endpoint becomes dead code at that point.
 export const previewListing = (url: string): Promise<PreviewResponse> =>
   request<PreviewResponse>('/estimations/preview', { query: { url } });
 

@@ -7,6 +7,9 @@ import Health from './pages/Health';
 import Estimate from './pages/Estimate';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
+// TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
+// once design is approved and the indicator is in real use in EstimateForm.
+import DevConfidencePreview from './pages/DevConfidencePreview';
 
 export const routes: RouteObject[] = [
   {
@@ -22,6 +25,7 @@ export const routes: RouteObject[] = [
       { path: 'estimate', element: <Estimate /> },
       { path: 'estimations', element: <EstimationList /> },
       { path: 'estimation/:id', element: <EstimationDetail /> },
+      { path: 'dev/confidence-indicator', element: <DevConfidencePreview /> },
       { path: '*', element: <NotFound /> },
     ],
   },
