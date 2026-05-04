@@ -26,7 +26,7 @@ const TABS: ReadonlyArray<Tab<PickerMode>> = [
 
 export default function RegionPicker(props: Props) {
   return (
-    <aside className="lg:w-[360px] lg:shrink-0 lg:sticky lg:top-14 lg:self-start max-h-[calc(100dvh-3.5rem)] overflow-y-auto border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)]">
+    <aside className="lg:w-[360px] lg:shrink-0 lg:sticky lg:top-14 lg:self-start border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)]">
       <div className="px-4 pt-4 pb-1">
         <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
           Region
