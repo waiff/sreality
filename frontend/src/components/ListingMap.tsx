@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
-import 'maplibre-gl/dist/maplibre-gl.css';
 import type { MapRow } from '@/lib/queries';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 
@@ -175,8 +174,12 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
   }, [rows, ready]);
 
   return (
-    <div className="relative h-[calc(100dvh-14rem)] min-h-[480px] rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
-      <div ref={containerRef} className="absolute inset-0" />
+    <div className="relative h-[calc(100dvh-16rem)] min-h-[480px] rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
+      <div
+        ref={containerRef}
+        className="absolute inset-0"
+        style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, width: '100%', height: '100%' }}
+      />
       <div className="pointer-events-none absolute top-3 left-3 right-3 flex items-start justify-between gap-3">
         <Pill>
           {isLoading
