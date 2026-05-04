@@ -55,6 +55,15 @@ def client(monkeypatch):
         return {"data": {"categories": {}, "from_cache": {}},
                 "metadata": {"tool": "find_anchor_amenities"}}
 
+    def fake_create_run(conn, c, body):
+        return {"id": 1, "status": "success"}
+
+    def fake_get_run(conn, run_id):
+        return {"id": run_id, "status": "success"}
+
+    def fake_list_runs(conn, **_kw):
+        return {"data": [], "total": 0, "limit": 50, "offset": 0}
+
     monkeypatch.setattr(api_main, "find_comparables", fake_find)
     monkeypatch.setattr(api_main, "analyze_distribution", fake_dist)
     monkeypatch.setattr(api_main, "verify_listing_freshness", fake_verify)
@@ -65,6 +74,9 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "compute_market_velocity", fake_market_vel)
     monkeypatch.setattr(api_main, "compute_listing_velocity", fake_listing_vel)
     monkeypatch.setattr(api_main, "find_anchor_amenities", fake_anchors)
+    monkeypatch.setattr(api_main, "create_estimation_run", fake_create_run)
+    monkeypatch.setattr(api_main, "get_estimation_run", fake_get_run)
+    monkeypatch.setattr(api_main, "list_estimation_runs", fake_list_runs)
 
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
@@ -80,21 +92,31 @@ _OUTLIERS_BODY = {"listings": []}
 _MARKET_VEL_BODY = {"target": {"lat": 50.0, "lng": 14.0}}
 _LISTING_VEL_BODY = {"sreality_id": 1}
 _ANCHORS_BODY = {"lat": 50.0, "lng": 14.0}
+_CREATE_ESTIMATION_BODY = {"spec": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}}
 
 
 def _gated_calls(client) -> list:
     return [
-        ("/tools/find_comparables", _FIND_BODY),
-        ("/tools/analyze_distribution", _DIST_BODY),
-        ("/tools/verify_listing_freshness", _VERIFY_BODY),
-        ("/tools/compare_snapshots", _COMPARE_BODY),
-        ("/tools/describe_neighborhood", _NEIGHBORHOOD_BODY),
-        ("/tools/find_distribution_outliers", _OUTLIERS_BODY),
-        ("/tools/compute_market_velocity", _MARKET_VEL_BODY),
-        ("/tools/compute_listing_velocity", _LISTING_VEL_BODY),
-        ("/tools/find_anchor_amenities", _ANCHORS_BODY),
-        ("/estimate_yield", _ESTIMATE_BODY),
+        ("POST", "/tools/find_comparables", _FIND_BODY),
+        ("POST", "/tools/analyze_distribution", _DIST_BODY),
+        ("POST", "/tools/verify_listing_freshness", _VERIFY_BODY),
+        ("POST", "/tools/compare_snapshots", _COMPARE_BODY),
+        ("POST", "/tools/describe_neighborhood", _NEIGHBORHOOD_BODY),
+        ("POST", "/tools/find_distribution_outliers", _OUTLIERS_BODY),
+        ("POST", "/tools/compute_market_velocity", _MARKET_VEL_BODY),
+        ("POST", "/tools/compute_listing_velocity", _LISTING_VEL_BODY),
+        ("POST", "/tools/find_anchor_amenities", _ANCHORS_BODY),
+        ("POST", "/estimate_yield", _ESTIMATE_BODY),
+        ("POST", "/estimations", _CREATE_ESTIMATION_BODY),
+        ("GET", "/estimations/1", None),
+        ("GET", "/estimations", None),
     ]
+
+
+def _call(client, method: str, path: str, body, headers=None):
+    if method == "POST":
+        return client.post(path, json=body, headers=headers or {})
+    return client.get(path, headers=headers or {})
 
 
 def test_token_unset_all_endpoints_open(client, monkeypatch):
@@ -103,16 +125,16 @@ def test_token_unset_all_endpoints_open(client, monkeypatch):
     res = client.get("/health")
     assert res.status_code == 200
 
-    for path, body in _gated_calls(client):
-        res = client.post(path, json=body)
+    for method, path, body in _gated_calls(client):
+        res = _call(client, method, path, body)
         assert res.status_code == 200, f"{path} should be open without token"
 
 
 def test_token_set_missing_header_rejects(client, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
 
-    for path, body in _gated_calls(client):
-        res = client.post(path, json=body)
+    for method, path, body in _gated_calls(client):
+        res = _call(client, method, path, body)
         assert res.status_code == 401, f"{path} should reject missing token"
 
 
@@ -120,8 +142,8 @@ def test_token_set_wrong_header_rejects(client, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
     headers = {"Authorization": "Bearer wrong-token"}
 
-    for path, body in _gated_calls(client):
-        res = client.post(path, json=body, headers=headers)
+    for method, path, body in _gated_calls(client):
+        res = _call(client, method, path, body, headers=headers)
         assert res.status_code == 401, f"{path} should reject wrong token"
 
 
@@ -129,8 +151,8 @@ def test_token_set_correct_header_passes(client, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-token-xyz")
     headers = {"Authorization": "Bearer secret-token-xyz"}
 
-    for path, body in _gated_calls(client):
-        res = client.post(path, json=body, headers=headers)
+    for method, path, body in _gated_calls(client):
+        res = _call(client, method, path, body, headers=headers)
         assert res.status_code == 200, f"{path} should pass with correct token"
 
 

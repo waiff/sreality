@@ -6,14 +6,20 @@ this module synthesises an estimate + confidence + warnings on top.
 The endpoint does NOT call verify_listing_freshness on every comparable
 (that would multiply load). It surfaces freshness statistics for the
 cohort instead, so the agent can decide which comparables to verify.
+
+Optionally accepts a TraceRecorder to capture each step's input,
+output_summary, and duration. Off by default; existing callers get
+identical behaviour.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timezone
 from statistics import mean, median
 from typing import TYPE_CHECKING, Any
 
+from api.estimation_runs import NULL_RECORDER, TraceRecorder
 from toolkit import (
     ComparableFilters,
     TargetSpec,
@@ -30,21 +36,56 @@ def estimate_yield(
     target: TargetSpec,
     filters: ComparableFilters,
     purchase_price_czk: int | None = None,
+    *,
+    trace_recorder: TraceRecorder | None = None,
 ) -> dict[str, Any]:
-    cohort_res = find_comparables(conn, target, filters)
+    rec: Any = trace_recorder if trace_recorder is not None else NULL_RECORDER
+
+    with rec.tool_call(
+        "find_comparables",
+        input={
+            "target": dataclasses.asdict(target),
+            "filters": dataclasses.asdict(filters),
+        },
+    ) as step:
+        cohort_res = find_comparables(conn, target, filters)
+        step.set_summary({
+            "result_count": cohort_res["metadata"]["result_count"],
+            "data_freshness": cohort_res["metadata"].get("data_freshness"),
+        })
     listings = cohort_res["data"]["listings"]
     cohort_md = cohort_res["metadata"]
 
+    field = "price_per_m2" if target.area_m2 is not None else "price_czk"
+    with rec.tool_call(
+        "analyze_distribution", input={"field": field}
+    ) as step:
+        dist = analyze_distribution(listings, field=field)
+        d = dist["data"]
+        step.set_summary({
+            k: d.get(k) for k in ("n", "median", "p25", "p75", "iqr")
+        })
+
     if target.area_m2 is not None:
-        dist = analyze_distribution(listings, field="price_per_m2")
-        d = dist["data"]
-        estimated, r25, r75 = _scale(d, target.area_m2)
+        with rec.computation("scale per-m² by target area") as step:
+            estimated, r25, r75 = _scale(d, target.area_m2)
+            step.set_summary({
+                "estimated_monthly_rent_czk": estimated,
+                "rent_p25_czk": r25,
+                "rent_p75_czk": r75,
+            })
     else:
-        dist = analyze_distribution(listings, field="price_czk")
-        d = dist["data"]
-        estimated = _to_int(d.get("median"))
-        r25 = _to_int(d.get("p25"))
-        r75 = _to_int(d.get("p75"))
+        with rec.computation(
+            "use price_czk percentiles directly"
+        ) as step:
+            estimated = _to_int(d.get("median"))
+            r25 = _to_int(d.get("p25"))
+            r75 = _to_int(d.get("p75"))
+            step.set_summary({
+                "estimated_monthly_rent_czk": estimated,
+                "rent_p25_czk": r25,
+                "rent_p75_czk": r75,
+            })
 
     sample_size = d["n"]
     gross_yield_pct = _gross_yield(estimated, purchase_price_czk)
@@ -53,9 +94,11 @@ def estimate_yield(
     verified_count = sum(
         1 for c in comparables_used if c["verified_during_estimate"]
     )
-    confidence, warnings = _classify(
-        sample_size, d, freshness, verified_count
-    )
+    with rec.computation("classify confidence") as step:
+        confidence, warnings = _classify(
+            sample_size, d, freshness, verified_count
+        )
+        step.set_summary({"confidence": confidence, "warnings": warnings})
 
     return {
         "data": {
