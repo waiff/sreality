@@ -221,9 +221,16 @@ def touch_listings(
 
 def mark_inactive(
     conn: psycopg.Connection,
+    category_main: str,
+    category_type: str,
     seen_ids: set[int],
 ) -> int:
-    """Mark listings not in seen_ids as is_active=false. Returns affected row count."""
+    """Mark listings of this category not in seen_ids as is_active=false.
+
+    Scoped to (category_main, category_type) so a per-category index walk
+    only flips its own slice. Without scoping, scraping rentals would
+    clobber sales `is_active`, and vice versa.
+    """
     if not seen_ids:
         return 0
     with conn.transaction(), conn.cursor() as cur:
@@ -232,9 +239,11 @@ def mark_inactive(
             UPDATE listings
             SET is_active = false
             WHERE is_active = true
+              AND category_main = %s
+              AND category_type = %s
               AND sreality_id <> ALL(%s)
             """,
-            (list(seen_ids),),
+            (category_main, category_type, list(seen_ids)),
         )
         return cur.rowcount or 0
 

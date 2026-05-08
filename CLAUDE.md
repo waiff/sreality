@@ -5,12 +5,16 @@ Read this before changing anything.
 
 ## What this project is
 
-A daily scraper for Czech rental listings from sreality.cz. The output is a
-Postgres database (Supabase, Frankfurt region, PostGIS enabled) with full
-listing history. Downstream surfaces over the same data: an analytical
-toolkit + FastAPI service (Railway) and a read-only browser UI (also
-Railway, separate service). Still out of scope until explicitly opened:
-ClickUp integration, MCP wrapping the toolkit, per-user identity.
+A daily scraper for Czech real estate listings from sreality.cz. Each
+nightly run walks all six meaningful category pairs in sequence —
+apartments, houses, and commercial properties, each in both rental
+and sale variants (defined as `CATEGORIES` in `scraper/main.py`). The
+output is a Postgres database (Supabase, Frankfurt region, PostGIS
+enabled) with full listing history. Downstream surfaces over the
+same data: an analytical toolkit + FastAPI service (Railway) and a
+read-only browser UI (also Railway, separate service). Still out of
+scope until explicitly opened: ClickUp integration, MCP wrapping the
+toolkit, per-user identity.
 
 ## Territories
 
@@ -467,3 +471,20 @@ a real failure - check the GitHub Actions log for a stack trace.
 - Public read API.
 
 Do not start any of these without explicit user direction in a new session.
+
+## Follow-ups (deferred)
+
+- **Toolkit / API / frontend defaults still target apartment rentals.**
+  The scraper was expanded to collect all six category pairs (byt /
+  dum / komercni × pronajem / prodej), but the analytical and
+  estimation surfaces still hardcode `category_main="byt"` /
+  `category_type="pronajem"` as defaults. Specifically:
+  `toolkit/comparables.py` (the `category_main` / `category_type`
+  defaults around lines 57-58); `api/schemas.py` (the same defaults
+  on `FindComparablesIn`, `DescribeNeighborhoodIn`,
+  `ComputeMarketVelocityIn`, `CreateEstimationIn`, `EstimateYieldIn`);
+  the frontend's "Apartment" labelling in `EstimateForm.tsx` and the
+  rental-URL placeholder in `UrlScrapeStep.tsx`. Resolve when a
+  downstream surface (UI page, agent flow, ClickUp integration) needs
+  to operate over sales / houses / commercial. Until then the data
+  exists in the DB but the apps still default to apartment rentals.
