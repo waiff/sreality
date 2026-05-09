@@ -34,6 +34,14 @@ export function buildEstimationPayload(
     has_balcony: triToBool(form.has_balcony),
     has_lift: triToBool(form.has_lift),
     has_parking: triToBool(form.has_parking),
+    /* Migration 022 — granular target attributes thread through to
+     * ComparableFilters so the comparable cohort respects them. */
+    terrace: triToBool(form.terrace),
+    cellar: triToBool(form.cellar),
+    garage: triToBool(form.garage),
+    furnished: form.furnished,
+    ownership: form.ownership,
+    category_sub_cb: form.category_sub_cb,
   };
 
   const purchase_price_czk = form.purchase_price_czk;
