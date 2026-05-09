@@ -15,7 +15,8 @@ Run with:
     python -m scraper.main --dry-run             # log only, no DB writes
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
-    python -m scraper.main --max-detail-refetches 2000   # cap details
+    python -m scraper.main --max-detail-refetches 2000   # global cap
+    python -m scraper.main --max-detail-refetches-per-category 500  # per-cat cap
     python -m scraper.main --max-image-downloads 500     # cap images
     python -m scraper.main --image-workers 16            # tune concurrency
 
@@ -73,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             dry_run=args.dry_run,
             max_refetches=args.max_detail_refetches,
+            max_refetches_per_category=args.max_detail_refetches_per_category,
         )
 
     if (
@@ -122,8 +124,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "cap number of listing detail fetches this run "
-            "(default: unlimited; workflow passes mode-specific cap)"
+            "global cap on listing detail fetches this run, shared "
+            "across all categories in CATEGORIES order "
+            "(default: unlimited; workflow passes 10000)"
+        ),
+    )
+    p.add_argument(
+        "--max-detail-refetches-per-category",
+        type=int,
+        default=None,
+        help=(
+            "cap on listing detail fetches per category. Combines with "
+            "--max-detail-refetches: the effective cap for any single "
+            "category is min(per-category, remaining-global). Without "
+            "this flag, an early high-volume category (e.g. byt/prodej) "
+            "can starve later categories of the shared global budget."
         ),
     )
     p.add_argument(
@@ -195,14 +210,18 @@ def _run_full(
     limit: int | None,
     dry_run: bool,
     max_refetches: int | None = None,
+    max_refetches_per_category: int | None = None,
 ) -> int:
     """Walk every category in CATEGORIES sequentially.
 
     Sharing one DB connection and one mutable refetch-budget across
-    categories so the per-run cap behaves the same as before — listings
-    deferred under the cap drain via the existing failure-priority path
-    on subsequent runs. `--limit` is interpreted as a global cap on
-    index entries collected across the whole run, not per category.
+    categories so the global per-run cap behaves the same as before —
+    listings deferred under the cap drain via the existing
+    failure-priority path on subsequent runs. The per-category cap is
+    layered on top: each category sees `min(remaining-global,
+    per-category)` as its effective cap. `--limit` is interpreted as
+    a global cap on index entries collected across the whole run, not
+    per category.
     """
     counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
     total_pages = 0
@@ -232,6 +251,7 @@ def _run_full(
                 cat_limit=remaining_for_limit,
                 dry_run=dry_run,
                 refetch_budget=refetch_budget,
+                cat_refetch_cap=max_refetches_per_category,
             )
             global_collected += len(seen_ids)
             total_pages += client.pages_fetched
@@ -294,11 +314,13 @@ def _walk_category(
     cat_limit: int | None,
     dry_run: bool,
     refetch_budget: list[int | None],
+    cat_refetch_cap: int | None = None,
 ) -> tuple[set[int], dict[str, int]]:
     """Walk one category's index + refetch loop.
 
-    `refetch_budget` is a single-element mutable list so the shared
-    cap decrements as each category consumes refetches.
+    `refetch_budget` is a single-element mutable list so the global
+    cap decrements as each category consumes refetches. `cat_refetch_cap`
+    is the per-category ceiling (None = no per-category limit).
     """
     counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
     index_entries: list[tuple[int, int | None]] = []
@@ -343,14 +365,16 @@ def _walk_category(
             to_refetch = priority + rest
             LOG.info("PLAN priority_retry=%d", len(priority))
 
-    cap = refetch_budget[0]
-    if cap is not None and len(to_refetch) > cap:
-        deferred = len(to_refetch) - cap
-        to_refetch = to_refetch[:cap]
-        LOG.info(
-            "PLAN cap=%d deferred=%d (remaining listings will be picked up next run)",
-            cap, deferred,
-        )
+    caps = [c for c in (refetch_budget[0], cat_refetch_cap) if c is not None]
+    if caps:
+        cap = min(caps)
+        if len(to_refetch) > cap:
+            deferred = len(to_refetch) - cap
+            to_refetch = to_refetch[:cap]
+            LOG.info(
+                "PLAN cap=%d deferred=%d (remaining listings will be picked up next run)",
+                cap, deferred,
+            )
 
     total_refetch = len(to_refetch)
     if total_refetch:

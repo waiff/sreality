@@ -6,9 +6,11 @@ name: Daily Sreality scrape
 # Always aggressive (the conservative profile was retired when scope
 # expanded from one category to six):
 #   timeout 350 min (~5.8 h, just under the 6h GitHub job cap)
-#   up to 10 000 detail refetches (= 250 min at 1.5s/detail, shared
-#       budget across all categories — listings the cap defers in one
-#       run get picked up next run via the priority-retry queue)
+#   up to 10 000 detail refetches global cap, 2 000 per category
+#       (= 250 min at 1.5s/detail; per-category cap stops one
+#       high-volume category like byt/prodej from starving the rest
+#       of the categories of the shared global budget — listings the
+#       cap defers drain on subsequent runs)
 #   up to 10 000 image downloads  (= ~10 min at 16 workers)
 #
 # Cron triggers cannot pass inputs - they always fall back to the
@@ -39,7 +41,11 @@ on:
         type: boolean
         default: false
       max_detail_refetches:
-        description: "Override listing-refetches-per-run cap (blank = 10000)"
+        description: "Override global detail-refetches-per-run cap (blank = 10000)"
+        required: false
+        type: string
+      max_detail_refetches_per_category:
+        description: "Override per-category detail-refetches cap (blank = 2000)"
         required: false
         type: string
       max_image_downloads:
@@ -95,6 +101,10 @@ jobs:
           if [ -z "$MAX_REFETCH" ]; then
             MAX_REFETCH="10000"
           fi
+          MAX_REFETCH_PER_CAT="${{ inputs.max_detail_refetches_per_category }}"
+          if [ -z "$MAX_REFETCH_PER_CAT" ]; then
+            MAX_REFETCH_PER_CAT="2000"
+          fi
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
             MAX_IMG="10000"
@@ -104,6 +114,7 @@ jobs:
             WORKERS="16"
           fi
           ARGS="$ARGS --max-detail-refetches $MAX_REFETCH"
+          ARGS="$ARGS --max-detail-refetches-per-category $MAX_REFETCH_PER_CAT"
           ARGS="$ARGS --max-image-downloads $MAX_IMG"
           ARGS="$ARGS --image-workers $WORKERS"
 
