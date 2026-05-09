@@ -133,6 +133,49 @@ def test_energy_rating(sample):
     assert parse_listing(sample)["energy_rating"] == "B"
 
 
+def test_category_fields(sample):
+    row = parse_listing(sample)
+    assert row["category_sub_cb"] == 4
+    assert row["estate_area"] == 240.0
+    assert row["usable_area"] == 65.0
+    assert row["garden_area"] == 60.0
+    assert row["parking_lots"] == 1
+    assert row["terrace"] is True
+    assert row["cellar"] is True
+    assert row["garage"] is False
+    assert row["furnished"] == "castecne"
+    assert row["ownership"] == "osobni"
+
+
+def test_furnished_unknown_code_returns_none():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {"furnished": 99, "category_main_cb": 1},
+    }
+    assert parse_listing(raw)["furnished"] is None
+
+
+def test_ownership_unknown_code_returns_none():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {"ownership": 99, "category_main_cb": 1},
+    }
+    assert parse_listing(raw)["ownership"] is None
+
+
+def test_amenities_missing_returns_none():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {"category_main_cb": 1},
+    }
+    row = parse_listing(raw)
+    assert row["terrace"] is None
+    assert row["cellar"] is None
+    assert row["garage"] is None
+    assert row["estate_area"] is None
+    assert row["parking_lots"] is None
+
+
 def test_parse_images(sample):
     images = parse_images(sample)
     assert len(images) == 3

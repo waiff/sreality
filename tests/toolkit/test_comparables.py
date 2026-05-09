@@ -228,6 +228,92 @@ def test_total_floors_in_select_projection():
     assert "l.total_floors" in sql.split("FROM listings")[0]
 
 
+def test_new_category_columns_in_select_projection():
+    sql, _ = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    select = sql.split("FROM listings")[0]
+    for col in (
+        "l.estate_area", "l.usable_area", "l.garden_area",
+        "l.category_sub_cb",
+        "l.furnished", "l.terrace", "l.cellar", "l.garage",
+        "l.parking_lots", "l.ownership",
+    ):
+        assert col in select
+
+
+def test_category_sub_cb_filter():
+    sql_none, _ = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    where_none = sql_none.split("ORDER BY")[0]
+    assert "category_sub_cb =" not in where_none
+
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_sub_cb=37),
+    )
+    assert "l.category_sub_cb = %(category_sub_cb)s" in sql
+    assert params["category_sub_cb"] == 37
+
+
+def test_furnished_and_ownership_text_filters():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(furnished="ano", ownership="osobni"),
+    )
+    assert "l.furnished = %(furnished)s" in sql
+    assert "l.ownership = %(ownership)s" in sql
+    assert params["furnished"] == "ano"
+    assert params["ownership"] == "osobni"
+
+
+def test_terrace_cellar_garage_three_state():
+    where_none = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )[0].split("ORDER BY")[0]
+    assert "l.terrace =" not in where_none
+    assert "l.cellar =" not in where_none
+    assert "l.garage =" not in where_none
+
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(terrace=True, cellar=False, garage=True),
+    )
+    assert "l.terrace = %(terrace)s" in sql
+    assert "l.cellar = %(cellar)s" in sql
+    assert "l.garage = %(garage)s" in sql
+    assert params["terrace"] is True
+    assert params["cellar"] is False
+    assert params["garage"] is True
+
+
+def test_estate_and_usable_area_bands_and_min_parking_lots():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(
+            min_estate_area=200,
+            max_estate_area=500,
+            min_usable_area=80,
+            max_usable_area=120,
+            min_parking_lots=2,
+        ),
+    )
+    assert "l.estate_area >= %(min_estate_area)s" in sql
+    assert "l.estate_area <= %(max_estate_area)s" in sql
+    assert "l.usable_area >= %(min_usable_area)s" in sql
+    assert "l.usable_area <= %(max_usable_area)s" in sql
+    assert "l.parking_lots >= %(min_parking_lots)s" in sql
+    assert params["min_estate_area"] == 200
+    assert params["max_estate_area"] == 500
+    assert params["min_usable_area"] == 80
+    assert params["max_usable_area"] == 120
+    assert params["min_parking_lots"] == 2
+
+
 def test_exclude_ids_uses_array_not_equal():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0, exclude_ids=[1, 2, 3]),

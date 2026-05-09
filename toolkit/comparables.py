@@ -56,9 +56,20 @@ class ComparableFilters:
     max_price_czk: int | None = None
     category_main: str | None = "byt"
     category_type: str | None = "pronajem"
+    category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
+    furnished: str | None = None
+    terrace: bool | None = None
+    cellar: bool | None = None
+    garage: bool | None = None
+    ownership: str | None = None
+    min_estate_area: float | None = None
+    max_estate_area: float | None = None
+    min_usable_area: float | None = None
+    max_usable_area: float | None = None
+    min_parking_lots: int | None = None
 
 
 _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
@@ -169,6 +180,43 @@ def _shared_filter_where(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = filters.locality_region_id
 
+    if filters.category_sub_cb is not None:
+        where.append("l.category_sub_cb = %(category_sub_cb)s")
+        params["category_sub_cb"] = filters.category_sub_cb
+
+    if filters.furnished is not None:
+        where.append("l.furnished = %(furnished)s")
+        params["furnished"] = filters.furnished
+    if filters.ownership is not None:
+        where.append("l.ownership = %(ownership)s")
+        params["ownership"] = filters.ownership
+
+    if filters.terrace is not None:
+        where.append("l.terrace = %(terrace)s")
+        params["terrace"] = filters.terrace
+    if filters.cellar is not None:
+        where.append("l.cellar = %(cellar)s")
+        params["cellar"] = filters.cellar
+    if filters.garage is not None:
+        where.append("l.garage = %(garage)s")
+        params["garage"] = filters.garage
+
+    if filters.min_estate_area is not None:
+        where.append("l.estate_area >= %(min_estate_area)s")
+        params["min_estate_area"] = filters.min_estate_area
+    if filters.max_estate_area is not None:
+        where.append("l.estate_area <= %(max_estate_area)s")
+        params["max_estate_area"] = filters.max_estate_area
+    if filters.min_usable_area is not None:
+        where.append("l.usable_area >= %(min_usable_area)s")
+        params["min_usable_area"] = filters.min_usable_area
+    if filters.max_usable_area is not None:
+        where.append("l.usable_area <= %(max_usable_area)s")
+        params["max_usable_area"] = filters.max_usable_area
+    if filters.min_parking_lots is not None:
+        where.append("l.parking_lots >= %(min_parking_lots)s")
+        params["min_parking_lots"] = filters.min_parking_lots
+
     if not filters.include_unreliable:
         where.append(
             "NOT EXISTS ("
@@ -209,6 +257,10 @@ def build_query(
         "  l.floor, l.total_floors,\n"
         "  l.building_type, l.condition, l.energy_rating,\n"
         "  l.has_balcony, l.has_lift, l.has_parking,\n"
+        "  l.estate_area, l.usable_area, l.garden_area,\n"
+        "  l.category_sub_cb,\n"
+        "  l.furnished, l.terrace, l.cellar, l.garage,\n"
+        "  l.parking_lots, l.ownership,\n"
         "  ST_Distance(\n"
         "    l.geom,\n"
         "    ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography\n"
@@ -271,9 +323,20 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "max_price_czk": filters.max_price_czk,
         "category_main": filters.category_main,
         "category_type": filters.category_type,
+        "category_sub_cb": filters.category_sub_cb,
         "locality_district_id": filters.locality_district_id,
         "locality_region_id": filters.locality_region_id,
         "include_unreliable": filters.include_unreliable,
+        "furnished": filters.furnished,
+        "ownership": filters.ownership,
+        "terrace": filters.terrace,
+        "cellar": filters.cellar,
+        "garage": filters.garage,
+        "min_estate_area": filters.min_estate_area,
+        "max_estate_area": filters.max_estate_area,
+        "min_usable_area": filters.min_usable_area,
+        "max_usable_area": filters.max_usable_area,
+        "min_parking_lots": filters.min_parking_lots,
     }
 
 

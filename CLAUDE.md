@@ -476,15 +476,37 @@ Do not start any of these without explicit user direction in a new session.
 
 - **Toolkit / API / frontend defaults still target apartment rentals.**
   The scraper was expanded to collect all six category pairs (byt /
-  dum / komercni × pronajem / prodej), but the analytical and
-  estimation surfaces still hardcode `category_main="byt"` /
-  `category_type="pronajem"` as defaults. Specifically:
+  dum / komercni × pronajem / prodej), and migration 022 added the
+  ten category-relevant columns the schema was missing
+  (`estate_area`, `usable_area`, `garden_area`, `category_sub_cb`,
+  `furnished`, `terrace`, `cellar`, `garage`, `parking_lots`,
+  `ownership`). Toolkit / API / frontend now accept all of those as
+  filters, but the **defaults** still hardcode `category_main="byt"`
+  / `category_type="pronajem"`. Specifically:
   `toolkit/comparables.py` (the `category_main` / `category_type`
-  defaults around lines 57-58); `api/schemas.py` (the same defaults
-  on `FindComparablesIn`, `DescribeNeighborhoodIn`,
+  defaults on `ComparableFilters`); `api/schemas.py` (the same
+  defaults on `FindComparablesIn`, `DescribeNeighborhoodIn`,
   `ComputeMarketVelocityIn`, `CreateEstimationIn`, `EstimateYieldIn`);
   the frontend's "Apartment" labelling in `EstimateForm.tsx` and the
   rental-URL placeholder in `UrlScrapeStep.tsx`. Resolve when a
   downstream surface (UI page, agent flow, ClickUp integration) needs
-  to operate over sales / houses / commercial. Until then the data
-  exists in the DB but the apps still default to apartment rentals.
+  to operate over sales / houses / commercial without the caller
+  having to override the default each time.
+
+## Schema conventions
+
+- Sreality enum codes that we promote to typed columns are stored as
+  Czech text labels without diacritics, mirroring the existing
+  treatment of `category_main` / `category_type`. Source maps live
+  next to the parser: `parser.CATEGORY_MAIN`, `parser.CATEGORY_TYPE`,
+  `parser.FURNISHED`, `parser.OWNERSHIP`. Unknown source codes
+  (including sreality's `0` "not specified") return `None`, never
+  raise — same forgiving pattern that lets the parser tolerate
+  sreality adding a new code (as it did for `category_type_cb=4` /
+  `'podil'`).
+- `has_balcony` / `has_parking` are LEGACY combined booleans. They
+  conflate balcony+terrace+loggia and parking+garage respectively.
+  The granular columns added in migration 022 (`terrace`, `garage`,
+  `parking_lots`) are the correct fields for new analytical work.
+  The legacy columns stay populated for backward compatibility with
+  existing queries / RPCs.

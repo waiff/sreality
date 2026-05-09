@@ -45,6 +45,16 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "building_type",
     "condition",
     "energy_rating",
+    "estate_area",
+    "usable_area",
+    "garden_area",
+    "category_sub_cb",
+    "furnished",
+    "terrace",
+    "cellar",
+    "garage",
+    "parking_lots",
+    "ownership",
 )
 
 
