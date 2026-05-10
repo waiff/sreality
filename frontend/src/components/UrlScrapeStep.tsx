@@ -354,6 +354,16 @@ export function listingToResolved(listing: ListingPublic): ResolvedInput | null 
     building_type: listing.building_type,
     condition: listing.condition,
     energy_rating: listing.energy_rating,
+    estate_area: listing.estate_area,
+    usable_area: listing.usable_area,
+    garden_area: listing.garden_area,
+    category_sub_cb: listing.category_sub_cb,
+    furnished: listing.furnished,
+    terrace: listing.terrace,
+    cellar: listing.cellar,
+    garage: listing.garage,
+    parking_lots: listing.parking_lots,
+    ownership: listing.ownership,
     image_count: 0,
   };
   return {

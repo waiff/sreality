@@ -19,12 +19,15 @@ export const MAP_CAP = 50_000;
 export const TABLE_PAGE_SIZE = 50;
 
 const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,area_m2,district,last_seen_at,is_active';
-const TABLE_COLS = 'sreality_id,district,disposition,area_m2,price_czk,last_seen_at,is_active';
+const TABLE_COLS =
+  'sreality_id,district,disposition,area_m2,price_czk,last_seen_at,is_active,' +
+  'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
   | 'area_m2' | 'price_czk'
-  | 'last_seen_at' | 'is_active';
+  | 'last_seen_at' | 'is_active'
+  | 'estate_area' | 'usable_area' | 'parking_lots';
 
 export type SortDirection = 'asc' | 'desc';
 
@@ -39,6 +42,7 @@ const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
   'sreality_id', 'district', 'disposition',
   'area_m2', 'price_czk',
   'last_seen_at', 'is_active',
+  'estate_area', 'usable_area', 'parking_lots',
 ];
 
 export const parseSort = (raw: string | null): SortSpec => {
@@ -75,6 +79,17 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.hasBalcony !== 'any') r = r.eq('has_balcony', f.hasBalcony === 'yes');
   if (f.hasLift    !== 'any') r = r.eq('has_lift',    f.hasLift    === 'yes');
   if (f.hasParking !== 'any') r = r.eq('has_parking', f.hasParking === 'yes');
+  if (f.terrace    !== 'any') r = r.eq('terrace',     f.terrace    === 'yes');
+  if (f.cellar     !== 'any') r = r.eq('cellar',      f.cellar     === 'yes');
+  if (f.garage     !== 'any') r = r.eq('garage',      f.garage     === 'yes');
+  if (f.furnished       != null) r = r.eq('furnished',      f.furnished);
+  if (f.ownership       != null) r = r.eq('ownership',      f.ownership);
+  if (f.categorySubCb   != null) r = r.eq('category_sub_cb', f.categorySubCb);
+  if (f.estateAreaMin   != null) r = r.gte('estate_area',   f.estateAreaMin);
+  if (f.estateAreaMax   != null) r = r.lte('estate_area',   f.estateAreaMax);
+  if (f.usableAreaMin   != null) r = r.gte('usable_area',   f.usableAreaMin);
+  if (f.usableAreaMax   != null) r = r.lte('usable_area',   f.usableAreaMax);
+  if (f.parkingLotsMin  != null) r = r.gte('parking_lots',  f.parkingLotsMin);
   return r as unknown as T;
 };
 
@@ -123,6 +138,12 @@ export interface TableRow {
   price_czk: number | null;
   last_seen_at: string;
   is_active: boolean;
+  estate_area: number | null;
+  usable_area: number | null;
+  parking_lots: number | null;
+  furnished: string | null;
+  ownership: string | null;
+  category_sub_cb: number | null;
 }
 
 export interface TableResult {
@@ -188,6 +209,11 @@ export const fetchBrowseStats = async (
     has_balcony_filter:      triToBool(f.hasBalcony),
     has_lift_filter:         triToBool(f.hasLift),
     has_parking_filter:      triToBool(f.hasParking),
+    furnished_filter:        f.furnished,
+    terrace_filter:          triToBool(f.terrace),
+    cellar_filter:           triToBool(f.cellar),
+    garage_filter:           triToBool(f.garage),
+    category_sub_cb_filter:  f.categorySubCb,
   });
   if (error) throw error;
   return data as BrowseStats;
@@ -218,7 +244,9 @@ const DETAIL_COLS =
   'category_main,category_type,price_czk,price_unit,' +
   'area_m2,disposition,locality,district,locality_district_id,locality_region_id,' +
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
-  'building_type,condition,energy_rating';
+  'building_type,condition,energy_rating,' +
+  'estate_area,usable_area,garden_area,category_sub_cb,' +
+  'furnished,terrace,cellar,garage,parking_lots,ownership';
 
 export const fetchListingById = async (
   sreality_id: number,

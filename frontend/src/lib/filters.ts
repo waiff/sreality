@@ -1,4 +1,4 @@
-import type { Disposition } from './types';
+import type { Disposition, Furnished, Ownership } from './types';
 
 export type TriState = 'any' | 'yes' | 'no';
 export type SeenWithin = '1d' | '7d' | '30d' | 'any';
@@ -16,6 +16,18 @@ export interface ListingFilters {
   hasBalcony: TriState;
   hasLift: TriState;
   hasParking: TriState;
+  /* Migration 022 — granular amenities and category-relevant fields. */
+  terrace: TriState;
+  cellar: TriState;
+  garage: TriState;
+  furnished: Furnished | null;
+  ownership: Ownership | null;
+  categorySubCb: number | null;
+  estateAreaMin: number | null;
+  estateAreaMax: number | null;
+  usableAreaMin: number | null;
+  usableAreaMax: number | null;
+  parkingLotsMin: number | null;
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -30,7 +42,21 @@ export const DEFAULT_FILTERS: ListingFilters = {
   hasBalcony: 'any',
   hasLift: 'any',
   hasParking: 'any',
+  terrace: 'any',
+  cellar: 'any',
+  garage: 'any',
+  furnished: null,
+  ownership: null,
+  categorySubCb: null,
+  estateAreaMin: null,
+  estateAreaMax: null,
+  usableAreaMin: null,
+  usableAreaMax: null,
+  parkingLotsMin: null,
 };
+
+export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
+export const USABLE_AREA_BOUNDS = { min: 0, max: 500, step: 5 };
 
 export const PRICE_BOUNDS = { min: 0, max: 100_000, step: 500 };
 export const AREA_BOUNDS = { min: 0, max: 300, step: 5 };
@@ -44,6 +70,8 @@ const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
 const SEEN_VALUES: ReadonlyArray<SeenWithin> = ['1d', '7d', '30d', 'any'];
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
+const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
+const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
 
 const splitCsv = (s: string | null): string[] =>
   s == null || s === '' ? [] : s.split(',').map(decodeURIComponent);
@@ -68,6 +96,18 @@ const enumOr = <T extends string>(
   fallback: T,
 ): T => (v != null && (values as ReadonlyArray<string>).includes(v) ? (v as T) : fallback);
 
+const enumOrNull = <T extends string>(
+  v: string | null,
+  values: ReadonlyArray<T>,
+): T | null =>
+  v != null && (values as ReadonlyArray<string>).includes(v) ? (v as T) : null;
+
+const parseIntOrNull = (s: string | null): number | null => {
+  if (s == null || s === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+};
+
 export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const dispRaw = splitCsv(sp.get('disposition'));
   const dispositions = dispRaw.filter((d): d is Disposition =>
@@ -75,6 +115,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   );
   const [priceMin, priceMax] = parseRange(sp.get('price'));
   const [areaMin, areaMax] = parseRange(sp.get('area'));
+  const [estateMin, estateMax] = parseRange(sp.get('estate'));
+  const [usableMin, usableMax] = parseRange(sp.get('usable'));
   const legacyAny: ListingStatus = sp.get('active') === '0' ? 'any' : 'active';
   return {
     districts: splitCsv(sp.get('districts')),
@@ -88,6 +130,17 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     hasBalcony: enumOr(sp.get('balcony'), TRI_VALUES, 'any'),
     hasLift: enumOr(sp.get('lift'), TRI_VALUES, 'any'),
     hasParking: enumOr(sp.get('parking'), TRI_VALUES, 'any'),
+    terrace: enumOr(sp.get('terrace'), TRI_VALUES, 'any'),
+    cellar: enumOr(sp.get('cellar'), TRI_VALUES, 'any'),
+    garage: enumOr(sp.get('garage'), TRI_VALUES, 'any'),
+    furnished: enumOrNull(sp.get('furnished'), FURNISHED_VALUES),
+    ownership: enumOrNull(sp.get('ownership'), OWNERSHIP_VALUES),
+    categorySubCb: parseIntOrNull(sp.get('subcat')),
+    estateAreaMin: estateMin,
+    estateAreaMax: estateMax,
+    usableAreaMin: usableMin,
+    usableAreaMax: usableMax,
+    parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
   };
 };
 
@@ -106,6 +159,19 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.hasBalcony !== 'any') sp.set('balcony', f.hasBalcony);
   if (f.hasLift !== 'any') sp.set('lift', f.hasLift);
   if (f.hasParking !== 'any') sp.set('parking', f.hasParking);
+  if (f.terrace !== 'any') sp.set('terrace', f.terrace);
+  if (f.cellar !== 'any') sp.set('cellar', f.cellar);
+  if (f.garage !== 'any') sp.set('garage', f.garage);
+  if (f.furnished) sp.set('furnished', f.furnished);
+  if (f.ownership) sp.set('ownership', f.ownership);
+  if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
+  if (f.estateAreaMin != null || f.estateAreaMax != null) {
+    sp.set('estate', `${f.estateAreaMin ?? ''}-${f.estateAreaMax ?? ''}`);
+  }
+  if (f.usableAreaMin != null || f.usableAreaMax != null) {
+    sp.set('usable', `${f.usableAreaMin ?? ''}-${f.usableAreaMax ?? ''}`);
+  }
+  if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
   return sp;
 };
 
@@ -145,4 +211,15 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.seenWithin === '7d' &&
   f.hasBalcony === 'any' &&
   f.hasLift === 'any' &&
-  f.hasParking === 'any';
+  f.hasParking === 'any' &&
+  f.terrace === 'any' &&
+  f.cellar === 'any' &&
+  f.garage === 'any' &&
+  f.furnished == null &&
+  f.ownership == null &&
+  f.categorySubCb == null &&
+  f.estateAreaMin == null &&
+  f.estateAreaMax == null &&
+  f.usableAreaMin == null &&
+  f.usableAreaMax == null &&
+  f.parkingLotsMin == null;
