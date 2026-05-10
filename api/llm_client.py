@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 
-CalledFor = Literal["parse_url", "summarize_listing"]
+CalledFor = Literal["parse_url", "summarize_listing", "compare_listing_images"]
 
 
 @dataclass(frozen=True)
@@ -149,11 +149,11 @@ class LLMClient:
             raw=raw,
         )
 
-    def resolve_model(self) -> str:
+    def resolve_model(self, key: str = "llm_parse_model") -> str:
         with self._conn.cursor() as cur:
             cur.execute(
                 "SELECT value FROM app_settings WHERE key = %s",
-                ("llm_parse_model",),
+                (key,),
             )
             row = cur.fetchone()
         if row is None:

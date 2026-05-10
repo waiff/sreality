@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-10 18:49 UTC_
+_Last refreshed: 2026-05-10 19:27 UTC_
 
 **Branch:** `claude/plan-phase-6-t5ikU`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-10 18:49 UTC_
 **Last 10 commits:**
 
 ```
+e111edb roadmap: refresh auto-status block
 7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
 9e99ce5 roadmap: refresh, add scraper + operator-workflow tracks, auto-maintain
 e5dbf1e Merge pull request #34 from waiff/claude/listing-collections-feature-p07zI
@@ -25,7 +26,6 @@ e5e812f Add operator curation: collections, notes, and tags
 6c25736 Merge pull request #30 from waiff/claude/expand-scraper-coverage-2aQNn
 c0720cf Expand scraper to all six sreality category pairs
 585f4c9 Merge pull request #29 from waiff/claude/url-parser-frontend-qP12B
-e9da41f estimation-5 Part C1: ConfidenceIndicator + temporary review surface
 ```
 
 <!-- END AUTO-STATUS -->
@@ -93,6 +93,33 @@ best-effort `generic`), 7-day URL cache, daily cost soft-warning.
 block + `force_refresh` + `cost_usd_total` surfacing on `/estimate`.
 Commits `e9da41f`, `65b9967`, `d66da7e`.
 
+### Phase 6: Visual layer
+Two LLM-backed analytical toolkit functions for the Phase 7 agent:
+- `summarize_listing` (`toolkit/summaries.py`): structured Claude
+  summary of a single listing snapshot — `headline`,
+  `key_highlights`, `concerns`, `condition_assessment`,
+  `target_audience`. Cached in `listing_summaries` keyed on
+  `(sreality_id, snapshot_id)`; auto-invalidates when content
+  changes (new snapshot → new key).
+- `compare_listing_images` (`toolkit/image_similarity.py`):
+  pairwise visual similarity via Claude vision, scored across six
+  fixed tenant-relevant dimensions (`exterior`, `kitchen`,
+  `windows_and_light`, `floor_finish`, `lighting`, `styling`) plus
+  an `overall_similarity` rollup. Image bytes pulled from R2
+  server-side via boto3 GetObject, base64-encoded into the vision
+  payload. Cached in `listing_image_comparisons` keyed on the
+  canonical-ordered pair.
+- Migration 026 adds the two cache tables, extends
+  `llm_calls.called_for` with `'compare_listing_images'`, and seeds
+  `app_settings` with the operator-tunable system prompts and model
+  IDs (`llm_summary_*`, `llm_image_compare_*`).
+- New POST endpoints `/tools/summarize_listing` and
+  `/tools/compare_listing_images`, bearer-token-gated.
+- CLAUDE.md toolkit rule #5 grows from two to four write-allowed
+  exceptions (same rationale as `find_anchor_amenities`'s OSM
+  mirror: the LLM is the source of truth, we cache locally to keep
+  repeat lookups fast and Anthropic-friendly).
+
 ## Next
 
 ### Phase 4b: Spatial context (remaining)
@@ -104,10 +131,6 @@ Tenant-perspective overlays beyond anchor amenities.
 - `cluster_comparables`: k-means on cohorts to surface sub-markets.
 - `find_comparables_relaxed`: auto-widening with provenance when strict
   filters return too few results.
-
-### Phase 6: Visual layer
-- `summarize_listing`: structured Claude API summary of a raw listing.
-- `compare_listing_images`: pairwise visual similarity via Claude vision.
 
 ### Phase 7: The reasoning agent (target)
 The end-state. An Anthropic tool-use loop that takes a listing URL and

@@ -114,6 +114,19 @@ class FindAnchorAmenitiesIn(BaseModel):
     cache_ttl_days: int = 30
 
 
+class SummarizeListingIn(BaseModel):
+    sreality_id: int
+    snapshot_id: int | None = None
+    force_refresh: bool = False
+
+
+class CompareListingImagesIn(BaseModel):
+    sreality_id_a: int
+    sreality_id_b: int
+    n_images: int = Field(default=6, ge=1, le=20)
+    force_refresh: bool = False
+
+
 class PreviewEstimationIn(BaseModel):
     """POST /estimations/preview body.
 
