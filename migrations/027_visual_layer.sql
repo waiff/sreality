@@ -1,4 +1,4 @@
--- 026_visual_layer.sql
+-- 027_visual_layer.sql
 --
 -- Phase 6: visual layer. Two LLM-backed analytical tools land here so
 -- the Phase 7 reasoning agent can filter and rank cohorts by plain-

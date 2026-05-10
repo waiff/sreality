@@ -411,7 +411,7 @@ when `llm_calls.cost_usd` sum first crosses
 ## LLM-backed analysis (visual layer)
 
 Two analytical toolkit functions also reach for Claude (Phase 6,
-migration 026):
+migration 027):
 
 - `summarize_listing` produces a structured Czech-real-estate Claude
   summary of one listing snapshot. Fields: `headline`, `key_highlights`,

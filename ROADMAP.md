@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-10 19:27 UTC_
+_Last refreshed: 2026-05-10 20:40 UTC_
 
 **Branch:** `claude/plan-phase-6-t5ikU`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 22 files, latest `025_curation_public_views.sql`.
+**Migrations on disk:** 23 files, latest `027_visual_layer.sql`.
 
 **Last 10 commits:**
 
 ```
+4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
 e111edb roadmap: refresh auto-status block
 7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
 9e99ce5 roadmap: refresh, add scraper + operator-workflow tracks, auto-maintain
@@ -25,7 +26,6 @@ e5e812f Add operator curation: collections, notes, and tags
 882add3 Map category_type_cb=4 to 'podil'; add per-category refetch cap
 6c25736 Merge pull request #30 from waiff/claude/expand-scraper-coverage-2aQNn
 c0720cf Expand scraper to all six sreality category pairs
-585f4c9 Merge pull request #29 from waiff/claude/url-parser-frontend-qP12B
 ```
 
 <!-- END AUTO-STATUS -->
@@ -109,7 +109,7 @@ Two LLM-backed analytical toolkit functions for the Phase 7 agent:
   server-side via boto3 GetObject, base64-encoded into the vision
   payload. Cached in `listing_image_comparisons` keyed on the
   canonical-ordered pair.
-- Migration 026 adds the two cache tables, extends
+- Migration 027 adds the two cache tables, extends
   `llm_calls.called_for` with `'compare_listing_images'`, and seeds
   `app_settings` with the operator-tunable system prompts and model
   IDs (`llm_summary_*`, `llm_image_compare_*`).
