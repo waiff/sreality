@@ -219,3 +219,42 @@ class EstimateYieldIn(BaseModel):
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
+
+
+# --- curation -------------------------------------------------------------
+# Collections (named lists of listings), free-text journal notes, and
+# free-form coloured tags. The colour palette is mirrored in the
+# 024_listing_tags.sql CHECK constraint and in the frontend's
+# tag-palette tokens.
+
+TagColor = Literal[
+    "copper", "sage", "brick", "ochre",
+    "slate",  "plum", "teal",  "sand",
+]
+
+
+class CreateCollectionIn(BaseModel):
+    name:        str = Field(min_length=1, max_length=200)
+    description: str | None = None
+
+
+class UpdateCollectionIn(BaseModel):
+    name:        str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = None
+
+
+class AddListingsToCollectionIn(BaseModel):
+    sreality_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class CreateNoteIn(BaseModel):
+    body: str = Field(min_length=1, max_length=4000)
+
+
+class CreateTagIn(BaseModel):
+    name:  str = Field(min_length=1, max_length=50)
+    color: TagColor
+
+
+class AttachTagIn(BaseModel):
+    tag_id: int

@@ -14,6 +14,7 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
 
+from api import curation as api_curation
 from api import dependencies as deps
 from api import main as api_main
 from api import maps as api_maps
@@ -92,6 +93,67 @@ def client(monkeypatch):
     monkeypatch.setattr(api_main, "list_estimation_runs", fake_list_runs)
     monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake_parse_url)
 
+    # Curation endpoints — gated coverage only; functional tests live in
+    # test_curation.py. Stub each handler to a constant successful dict.
+    monkeypatch.setattr(
+        api_curation, "create_collection",
+        lambda conn, body: {"id": 1, "name": body.name, "listing_count": 0},
+    )
+    monkeypatch.setattr(
+        api_curation, "list_collections",
+        lambda conn: {"data": [], "total": 0},
+    )
+    monkeypatch.setattr(
+        api_curation, "get_collection",
+        lambda conn, cid: {"collection": {"id": cid}, "listings": []},
+    )
+    monkeypatch.setattr(
+        api_curation, "update_collection",
+        lambda conn, cid, body: {"id": cid},
+    )
+    monkeypatch.setattr(
+        api_curation, "delete_collection",
+        lambda conn, cid: {"deleted": True},
+    )
+    monkeypatch.setattr(
+        api_curation, "add_listings_to_collection",
+        lambda conn, cid, body: {"added": len(body.sreality_ids), "skipped": 0},
+    )
+    monkeypatch.setattr(
+        api_curation, "remove_listing_from_collection",
+        lambda conn, cid, sid: {"removed": True},
+    )
+    monkeypatch.setattr(
+        api_curation, "list_notes",
+        lambda conn, sid: {"data": []},
+    )
+    monkeypatch.setattr(
+        api_curation, "create_note",
+        lambda conn, sid, body: {"id": 1, "sreality_id": sid, "body": body.body},
+    )
+    monkeypatch.setattr(
+        api_curation, "list_tags",
+        lambda conn: {"data": []},
+    )
+    monkeypatch.setattr(
+        api_curation, "create_tag",
+        lambda conn, body: {
+            "id": 1, "name": body.name, "color": body.color, "listing_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        api_curation, "delete_tag",
+        lambda conn, tid: {"deleted": True},
+    )
+    monkeypatch.setattr(
+        api_curation, "attach_tag",
+        lambda conn, sid, body: {"attached": True},
+    )
+    monkeypatch.setattr(
+        api_curation, "detach_tag",
+        lambda conn, sid, tid: {"detached": True},
+    )
+
     monkeypatch.setattr(api_maps, "suggest", lambda *a, **kw: {"items": []})
     monkeypatch.setattr(
         api_maps,
@@ -123,6 +185,12 @@ _LISTING_VEL_BODY = {"sreality_id": 1}
 _ANCHORS_BODY = {"lat": 50.0, "lng": 14.0}
 _CREATE_ESTIMATION_BODY = {"spec": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}}
 _RESOLVE_BODY = {"label": "x", "lat": 50.0, "lng": 14.0}
+_CREATE_COLLECTION_BODY = {"name": "test"}
+_PATCH_COLLECTION_BODY = {"name": "renamed"}
+_ADD_LISTINGS_BODY = {"sreality_ids": [1]}
+_CREATE_NOTE_BODY = {"body": "smoke"}
+_CREATE_TAG_BODY = {"name": "hot", "color": "brick"}
+_ATTACH_TAG_BODY = {"tag_id": 1}
 
 
 def _gated_calls(client) -> list:
@@ -143,12 +211,30 @@ def _gated_calls(client) -> list:
         ("GET", "/maps/suggest?query=foo", None),
         ("POST", "/maps/resolve", _RESOLVE_BODY),
         ("GET", "/estimations/preview?url=https://www.sreality.cz/detail/x/2836292428", None),
+        ("POST",   "/collections", _CREATE_COLLECTION_BODY),
+        ("GET",    "/collections", None),
+        ("GET",    "/collections/1", None),
+        ("PATCH",  "/collections/1", _PATCH_COLLECTION_BODY),
+        ("DELETE", "/collections/1", None),
+        ("POST",   "/collections/1/listings", _ADD_LISTINGS_BODY),
+        ("DELETE", "/collections/1/listings/2", None),
+        ("GET",    "/listings/1/notes", None),
+        ("POST",   "/listings/1/notes", _CREATE_NOTE_BODY),
+        ("GET",    "/tags", None),
+        ("POST",   "/tags", _CREATE_TAG_BODY),
+        ("DELETE", "/tags/1", None),
+        ("POST",   "/listings/1/tags", _ATTACH_TAG_BODY),
+        ("DELETE", "/listings/1/tags/1", None),
     ]
 
 
 def _call(client, method: str, path: str, body, headers=None):
     if method == "POST":
         return client.post(path, json=body, headers=headers or {})
+    if method == "PATCH":
+        return client.patch(path, json=body, headers=headers or {})
+    if method == "DELETE":
+        return client.delete(path, headers=headers or {})
     return client.get(path, headers=headers or {})
 
 
