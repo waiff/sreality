@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-10 18:02 UTC_
+_Last refreshed: 2026-05-10 18:48 UTC_
 
 **Branch:** `claude/review-u2.6-progress-d8st9`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-10 18:02 UTC_
 **Last 10 commits:**
 
 ```
+ebba60d roadmap: refresh auto-status block for review session
 7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
 9e99ce5 roadmap: refresh, add scraper + operator-workflow tracks, auto-maintain
 e5dbf1e Merge pull request #34 from waiff/claude/listing-collections-feature-p07zI
@@ -25,7 +26,6 @@ e5e812f Add operator curation: collections, notes, and tags
 6c25736 Merge pull request #30 from waiff/claude/expand-scraper-coverage-2aQNn
 c0720cf Expand scraper to all six sreality category pairs
 585f4c9 Merge pull request #29 from waiff/claude/url-parser-frontend-qP12B
-e9da41f estimation-5 Part C1: ConfidenceIndicator + temporary review surface
 ```
 
 <!-- END AUTO-STATUS -->
