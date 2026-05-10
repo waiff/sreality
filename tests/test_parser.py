@@ -229,3 +229,78 @@ def test_panel_building_type():
         "items": [{"name": "Stavba", "value": "Panelová", "type": "string"}],
     }
     assert parse_listing(raw)["building_type"] == "panel"
+
+
+def test_broker_fields(sample):
+    row = parse_listing(sample)
+    assert row["broker_name"] == "Jana Nováková"
+    assert row["broker_email"] == "jana@example.cz"
+    assert row["broker_phone"] == "+420777123456"
+
+
+def test_broker_phone_prefers_mob_over_tel_regardless_of_array_order():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {},
+        "_embedded": {
+            "seller": {
+                "user_name": "X",
+                "phones": [
+                    {"code": "420", "type": "TEL", "number": "111"},
+                    {"code": "420", "type": "MOB", "number": "222"},
+                ],
+            }
+        },
+    }
+    assert parse_listing(raw)["broker_phone"] == "+420222"
+
+
+def test_broker_phone_empty_country_code_drops_plus_prefix():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {},
+        "_embedded": {
+            "seller": {
+                "phones": [{"code": "", "type": "TEL", "number": "222701030"}]
+            }
+        },
+    }
+    assert parse_listing(raw)["broker_phone"] == "222701030"
+
+
+def test_broker_phone_only_tel_falls_back_to_first_tel():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {},
+        "_embedded": {
+            "seller": {
+                "phones": [
+                    {"code": "420", "type": "TEL", "number": "111"},
+                    {"code": "420", "type": "TEL", "number": "222"},
+                ]
+            }
+        },
+    }
+    assert parse_listing(raw)["broker_phone"] == "+420111"
+
+
+def test_broker_fields_missing_seller_block_yields_nones():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {},
+    }
+    row = parse_listing(raw)
+    assert row["broker_name"] is None
+    assert row["broker_email"] is None
+    assert row["broker_phone"] is None
+
+
+def test_broker_email_invalid_returns_none():
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {},
+        "_embedded": {"seller": {"email": ""}},
+    }
+    assert parse_listing(raw)["broker_email"] is None
+    raw["_embedded"]["seller"]["email"] = "not-an-email"
+    assert parse_listing(raw)["broker_email"] is None

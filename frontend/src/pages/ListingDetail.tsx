@@ -365,11 +365,18 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
     },
   ]);
 
+  const broker: Fact[] = pruneNulls([
+    { label: 'Broker', value: listing.broker_name },
+    { label: 'Email', value: listing.broker_email },
+    { label: 'Phone', value: listing.broker_phone, mono: true },
+  ]);
+
   return (
     <div className="space-y-7">
       <FactsGrid title="Property" facts={property} />
       {building.length > 0 && <FactsGrid title="Building" facts={building} />}
       {amenities.length > 0 && <FactsGrid title="Amenities" facts={amenities} />}
+      {broker.length > 0 && <FactsGrid title="Listing agent" facts={broker} />}
     </div>
   );
 }

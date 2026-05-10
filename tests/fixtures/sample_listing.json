@@ -71,6 +71,14 @@
   "_embedded": {
     "favourite": {"is_favourite": false},
     "note": {"note": "", "has_note": false},
+    "seller": {
+      "user_name": "Jana Nováková",
+      "email": "Jana@example.cz",
+      "phones": [
+        {"code": "420", "type": "TEL", "number": "222111000"},
+        {"code": "420", "type": "MOB", "number": "777123456"}
+      ]
+    },
     "images": [
       {
         "kind": 2,

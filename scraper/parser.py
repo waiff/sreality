@@ -118,6 +118,9 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "garage": _bool_or_none(rec.get("garage")),
         "parking_lots": _int_or_none(rec.get("parking_lots")),
         "ownership": OWNERSHIP.get(_int_or_none(rec.get("ownership"))),
+        "broker_name": _broker_name(raw),
+        "broker_email": _broker_email(raw),
+        "broker_phone": _broker_phone(raw),
     }
 
 
@@ -366,4 +369,52 @@ def _bool_or_none(value: Any) -> bool | None:
         return value
     if isinstance(value, (int, float)):
         return bool(value)
+    return None
+
+
+def _seller(raw: dict[str, Any]) -> dict[str, Any]:
+    embedded = raw.get("_embedded") or {}
+    seller = embedded.get("seller")
+    return seller if isinstance(seller, dict) else {}
+
+
+def _broker_name(raw: dict[str, Any]) -> str | None:
+    name = _seller(raw).get("user_name")
+    if isinstance(name, str):
+        stripped = name.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _broker_email(raw: dict[str, Any]) -> str | None:
+    email = _seller(raw).get("email")
+    if isinstance(email, str):
+        cleaned = email.strip().lower()
+        if cleaned and "@" in cleaned:
+            return cleaned
+    return None
+
+
+def _broker_phone(raw: dict[str, Any]) -> str | None:
+    phones = _seller(raw).get("phones")
+    if not isinstance(phones, list) or not phones:
+        return None
+    indexed = list(enumerate(phones))
+    indexed.sort(
+        key=lambda pair: (
+            0 if (pair[1] or {}).get("type") == "MOB" else 1,
+            pair[0],
+        )
+    )
+    for _, entry in indexed:
+        if not isinstance(entry, dict):
+            continue
+        number = entry.get("number")
+        if not isinstance(number, str) or not number:
+            continue
+        code = entry.get("code")
+        if isinstance(code, str) and code:
+            return f"+{code}{number}"
+        return number
     return None

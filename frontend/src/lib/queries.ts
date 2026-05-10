@@ -246,7 +246,8 @@ const DETAIL_COLS =
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
   'building_type,condition,energy_rating,' +
   'estate_area,usable_area,garden_area,category_sub_cb,' +
-  'furnished,terrace,cellar,garage,parking_lots,ownership';
+  'furnished,terrace,cellar,garage,parking_lots,ownership,' +
+  'broker_name,broker_email,broker_phone';
 
 export const fetchListingById = async (
   sreality_id: number,

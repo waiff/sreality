@@ -55,6 +55,9 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "garage",
     "parking_lots",
     "ownership",
+    "broker_name",
+    "broker_email",
+    "broker_phone",
 )
 
 

@@ -52,6 +52,12 @@ export interface ListingPublic {
   garage: boolean | null;
   parking_lots: number | null;
   ownership: Ownership | null;
+  /* Migration 025 — broker contact card. NULL on private-seller
+   * listings (~3.9% of catalog) and on rows not re-fetched since
+   * apply. broker_phone is pre-formatted by scraper/parser.py. */
+  broker_name: string | null;
+  broker_email: string | null;
+  broker_phone: string | null;
 }
 
 export interface ListingSnapshotPublic {
