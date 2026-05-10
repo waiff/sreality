@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 
+from api import curation
 from api import dependencies as deps
 from api import maps
 from api import schemas as s
@@ -36,7 +37,7 @@ from toolkit import (
     verify_listing_freshness,
 )
 
-app = FastAPI(title="sreality toolkit API", version="0.2.5")
+app = FastAPI(title="sreality toolkit API", version="0.3.0")
 
 
 @app.get("/health")
@@ -381,6 +382,145 @@ def post_estimate_yield(
         include_unreliable=body.include_unreliable,
     )
     return estimate_yield(conn, target, filters, body.purchase_price_czk)
+
+
+# --- curation -------------------------------------------------------------
+# Operator-curated lists of listings, append-only notes, and free-form
+# coloured tags. Reads also flow through the *_public views in
+# migration 025 (used by the SPA via the anon key); writes always
+# come through these endpoints.
+
+
+@app.post("/collections")
+def post_create_collection(
+    body: s.CreateCollectionIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.create_collection(conn, body)
+
+
+@app.get("/collections")
+def get_list_collections(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.list_collections(conn)
+
+
+@app.get("/collections/{collection_id}")
+def get_collection(
+    collection_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.get_collection(conn, collection_id)
+
+
+@app.patch("/collections/{collection_id}")
+def patch_collection(
+    collection_id: int,
+    body: s.UpdateCollectionIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.update_collection(conn, collection_id, body)
+
+
+@app.delete("/collections/{collection_id}")
+def delete_collection(
+    collection_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.delete_collection(conn, collection_id)
+
+
+@app.post("/collections/{collection_id}/listings")
+def post_collection_listings(
+    collection_id: int,
+    body: s.AddListingsToCollectionIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.add_listings_to_collection(conn, collection_id, body)
+
+
+@app.delete("/collections/{collection_id}/listings/{sreality_id}")
+def delete_collection_listing(
+    collection_id: int,
+    sreality_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.remove_listing_from_collection(
+        conn, collection_id, sreality_id,
+    )
+
+
+@app.get("/listings/{sreality_id}/notes")
+def get_listing_notes(
+    sreality_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.list_notes(conn, sreality_id)
+
+
+@app.post("/listings/{sreality_id}/notes")
+def post_listing_note(
+    sreality_id: int,
+    body: s.CreateNoteIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.create_note(conn, sreality_id, body)
+
+
+@app.get("/tags")
+def get_tags(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.list_tags(conn)
+
+
+@app.post("/tags")
+def post_tag(
+    body: s.CreateTagIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.create_tag(conn, body)
+
+
+@app.delete("/tags/{tag_id}")
+def delete_tag(
+    tag_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.delete_tag(conn, tag_id)
+
+
+@app.post("/listings/{sreality_id}/tags")
+def post_attach_tag(
+    sreality_id: int,
+    body: s.AttachTagIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.attach_tag(conn, sreality_id, body)
+
+
+@app.delete("/listings/{sreality_id}/tags/{tag_id}")
+def delete_listing_tag(
+    sreality_id: int,
+    tag_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.detach_tag(conn, sreality_id, tag_id)
 
 
 def _build_comparables_inputs(
