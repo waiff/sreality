@@ -128,6 +128,26 @@ backfills) needs no confirmation — just do it and report findings.
 The MCP connection points at the production Supabase project. There is no
 separate dev/staging database. Treat every operation accordingly.
 
+## Roadmap maintenance
+
+`ROADMAP.md` is the sequencing source of truth. It has two parts:
+
+1. **Auto-status block** (between `<!-- BEGIN AUTO-STATUS -->` and
+   `<!-- END AUTO-STATUS -->`) — regenerated at session start by
+   `scripts/regenerate_roadmap_status.py`, wired through
+   `.claude/settings.json` as a `SessionStart` hook. Counts, last-scrape
+   recency, recent commits, migration tally. Never hand-edit; changes
+   will be overwritten next session. If `SUPABASE_DB_URL` is not in env
+   the block degrades gracefully to "Database unavailable this
+   session" — the hook never blocks startup.
+2. **Narrative phase entries** (everything else) — manual. After
+   shipping meaningful work (a merged PR that completes a phase
+   bullet, a new migration, a new toolkit function, a new UI page),
+   update the relevant phase entry in the same commit as the work:
+   move bullets from `## Next` to `## Done`, add new "next" items if
+   scope changed, update the map / scraper / operator-workflow tracks.
+   Don't defer roadmap updates to a follow-up commit.
+
 ## Architectural rules (do not violate without asking)
 
 1. **The schema in `migrations/` is append-only.** Never modify an existing
