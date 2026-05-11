@@ -1,4 +1,4 @@
--- 029_sales_estimate.sql
+-- 030_sales_estimate.sql
 --
 -- Adds sale-estimate support to estimation_runs alongside the existing
 -- rental-estimate columns. The architecture is a single discriminator

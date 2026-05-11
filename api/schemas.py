@@ -40,9 +40,20 @@ class FindComparablesIn(BaseModel):
     max_price_czk: int | None = None
     category_main: str | None = "byt"
     category_type: str | None = "pronajem"
+    category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
+    furnished: str | None = None
+    terrace: bool | None = None
+    cellar: bool | None = None
+    garage: bool | None = None
+    ownership: str | None = None
+    min_estate_area: float | None = None
+    max_estate_area: float | None = None
+    min_usable_area: float | None = None
+    max_usable_area: float | None = None
+    min_parking_lots: int | None = None
 
 
 class AnalyzeDistributionIn(BaseModel):
@@ -114,9 +125,20 @@ class ComputeMarketVelocityIn(BaseModel):
     max_price_czk: int | None = None
     category_main: str | None = "byt"
     category_type: str | None = "pronajem"
+    category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
+    furnished: str | None = None
+    terrace: bool | None = None
+    cellar: bool | None = None
+    garage: bool | None = None
+    ownership: str | None = None
+    min_estate_area: float | None = None
+    max_estate_area: float | None = None
+    min_usable_area: float | None = None
+    max_usable_area: float | None = None
+    min_parking_lots: int | None = None
     population: Literal["active", "delisted", "all"] = "all"
     trend_split_days: int = 7
 
@@ -199,7 +221,11 @@ class CreateEstimationIn(BaseModel):
     one-to-one, mirroring EstimateYieldIn.
     """
     source: Literal["ui", "api", "clickup"] = "api"
-    mode: Literal["deterministic"] = "deterministic"
+    mode: Literal["deterministic", "agent"] = "deterministic"
+
+    # Agent-mode only; ignored when mode == 'deterministic'.
+    provider: Literal["anthropic", "gemini"] = "anthropic"
+    skill: str = "rental_estimator_v1"
 
     estimate_kind: Literal["rent", "sale"] = "rent"
 
@@ -226,9 +252,20 @@ class CreateEstimationIn(BaseModel):
     max_price_czk: int | None = None
     category_main: str | None = "byt"
     category_type: str | None = None
+    category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
+    furnished: str | None = None
+    terrace: bool | None = None
+    cellar: bool | None = None
+    garage: bool | None = None
+    ownership: str | None = None
+    min_estate_area: float | None = None
+    max_estate_area: float | None = None
+    min_usable_area: float | None = None
+    max_usable_area: float | None = None
+    min_parking_lots: int | None = None
 
     parent_run_id: int | None = None
     rerun_reason: str | None = None
@@ -286,9 +323,20 @@ class EstimateYieldIn(BaseModel):
     max_price_czk: int | None = None
     category_main: str | None = "byt"
     category_type: str | None = None
+    category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
+    furnished: str | None = None
+    terrace: bool | None = None
+    cellar: bool | None = None
+    garage: bool | None = None
+    ownership: str | None = None
+    min_estate_area: float | None = None
+    max_estate_area: float | None = None
+    min_usable_area: float | None = None
+    max_usable_area: float | None = None
+    min_parking_lots: int | None = None
 
     @model_validator(mode="after")
     def _apply_kind_defaults(self) -> "EstimateYieldIn":

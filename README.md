@@ -27,23 +27,27 @@ tests/              pytest suite
 - Two-phase scrape: index pages, then per-listing detail.
 - Upsert into `listings`; append a row to `listing_snapshots` only when the
   content hash changes; mark unseen listings `is_active=false`.
-- Image bytes mirrored to Cloudflare R2.
+- Image bytes mirrored to Cloudflare R2 (originally deferred; live since v1.5)
+  so listings retain their photos after sreality's CDN expires them.
 - Analytical toolkit (`find_comparables`, `analyze_distribution`,
   `verify_listing_freshness`, `compare_snapshots`) exposed as a FastAPI
   service with a composite `/estimate_yield` endpoint. Bearer-token
   gated via `API_TOKEN`.
 - Browser UI (`frontend/`) reads directly from the `*_public` views with
   the Supabase anon key. Four pages: Browse (filters + map / table /
-  stats), Listing detail (with snapshot timeline), Region (district or
-  radius aggregates), Health (scraper-health dashboard).
+  stats), Listing detail (with snapshot timeline), Region (Mapy.cz-powered
+  location search at multiple scales — from kraj to street address — with
+  per-disposition price-per-m² box plots), Health (scraper-health
+  dashboard).
 
 ## Status
 
 - [x] Schema applied (migrations 001–014)
-- [x] Scraper code
-- [x] CI workflows (test on push, daily cron, frontend build)
-- [x] Image mirroring to R2 live
-- [x] Failed-fetch tracking with give-up threshold
+- [x] Scraper code (index walk, detail fetch, parse, upsert, snapshot-on-change)
+- [x] CI workflows (`test.yml` per push, `scrape.yml` daily at 22:00 UTC, frontend build)
+- [x] Image mirroring to Cloudflare R2 with parallel uploads
+- [x] Failure tracking (`listing_fetch_failures`) with priority retry and give-up threshold
+- [x] Conservative/aggressive run modes
 - [x] Locality IDs promoted to typed columns
 - [x] Toolkit + FastAPI service deployed to Railway
 - [x] Freshness layer (`verify_listing_freshness`, `compare_snapshots`,
@@ -56,6 +60,7 @@ tests/              pytest suite
 - [x] Estimation runs persisted to `estimation_runs` table; surfaced via `/estimations` endpoints (POST/GET-by-id/list)
 - [x] UI foundation: `*_public` read views with `anon`-role grants
 - [x] **U1a database browser**: Browse / Listing / Region / Health pages; migrations 011–014 (`browse_stats`, `region_stats`, `health_summary`); deployed to Railway as a second service
+- [x] **browse-2 region search + box plots**: Mapy.cz suggest / resolve proxy, single search box at multiple scales (kraj → street), per-disposition price-per-m² box plots replacing the summary table (migration 021)
 - [x] **estimation-4 generic URL parser**: source-kind dispatcher routes any listing URL through either the deterministic sreality flow or LLM-driven per-source parsers (bezrealitky, reality.idnes, remax, best-effort generic). 7-day URL→spec cache, Mapy.cz geocoding, per-call cost audit in `llm_calls`, daily soft-warn at $5. New `/estimations/preview` endpoint returns the parsed spec without creating a run; `POST /estimations` populates `source_kind` / `parse_confidence` / `parse_confidence_per_field` / `source_html`.
 
 See [`ROADMAP.md`](./ROADMAP.md) for the long-term plan.

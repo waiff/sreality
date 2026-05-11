@@ -5,10 +5,14 @@ import {
   type SortSpec,
   type SortField,
 } from '@/lib/queries';
-import { fmtCount, fmtArea, fmtCzk, fmtPricePerM2, fmtRelative, fmtAbsolute } from '@/lib/format';
+import {
+  fmtCount, fmtArea, fmtCzk, fmtPricePerM2, fmtRelative, fmtAbsolute,
+  fmtFurnished, fmtOwnership, fmtParkingLots,
+} from '@/lib/format';
+import type { Furnished, Ownership } from '@/lib/types';
 
 interface Column {
-  field: SortField | 'price_per_m2';
+  field: SortField | 'price_per_m2' | 'furnished' | 'ownership';
   label: string;
   align?: 'left' | 'right';
   sortable: boolean;
@@ -19,8 +23,12 @@ const COLUMNS: ReadonlyArray<Column> = [
   { field: 'district',      label: 'District',    align: 'left',  sortable: true  },
   { field: 'disposition',   label: 'Type',        align: 'left',  sortable: true  },
   { field: 'area_m2',       label: 'Area',        align: 'right', sortable: true  },
+  { field: 'estate_area',   label: 'Lot',         align: 'right', sortable: true  },
   { field: 'price_czk',     label: 'Price',       align: 'right', sortable: true  },
   { field: 'price_per_m2',  label: 'Price / m²',  align: 'right', sortable: false },
+  { field: 'parking_lots',  label: 'Parking',     align: 'right', sortable: true  },
+  { field: 'furnished',     label: 'Furnished',   align: 'left',  sortable: false },
+  { field: 'ownership',     label: 'Ownership',   align: 'left',  sortable: false },
   { field: 'last_seen_at',  label: 'Last seen',   align: 'left',  sortable: true  },
   { field: 'is_active',     label: 'Status',      align: 'left',  sortable: true  },
 ];
@@ -171,11 +179,31 @@ function Row({ row }: { row: TableRow }) {
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
         {fmtArea(row.area_m2)}
       </td>
+      <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {row.estate_area == null
+          ? <span className="text-[var(--color-ink-4)]">—</span>
+          : fmtArea(row.estate_area)}
+      </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
         {fmtCzk(row.price_czk)}
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {fmtPricePerM2(row.price_czk, row.area_m2)}
+      </td>
+      <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {row.parking_lots == null
+          ? <span className="text-[var(--color-ink-4)]">—</span>
+          : fmtParkingLots(row.parking_lots)}
+      </td>
+      <td className="px-4 py-2.5 align-middle text-[var(--color-ink-2)]">
+        {row.furnished == null
+          ? <span className="text-[var(--color-ink-4)]">—</span>
+          : fmtFurnished(row.furnished as Furnished)}
+      </td>
+      <td className="px-4 py-2.5 align-middle text-[var(--color-ink-2)]">
+        {row.ownership == null
+          ? <span className="text-[var(--color-ink-4)]">—</span>
+          : fmtOwnership(row.ownership as Ownership)}
       </td>
       <td
         className="px-4 py-2.5 align-middle text-[var(--color-ink-2)] tabular-nums"

@@ -15,6 +15,8 @@ from api import curation
 from api import dependencies as deps
 from api import maps
 from api import schemas as s
+from api import skills as skills_module
+from api.agent import AGENT_TOOLS
 from api.estimate_yield import estimate_yield
 from api.estimation_runs import (
     create_estimation_run,
@@ -22,6 +24,7 @@ from api.estimation_runs import (
     list_estimation_runs,
     preview_estimation,
 )
+from api.routes.admin import router as admin_router
 from scraper.source_dispatcher import ParseError
 from toolkit import (
     ComparableFilters,
@@ -47,6 +50,17 @@ from toolkit.image_similarity import ImageCompareError
 from toolkit.summaries import SummarizeError
 
 app = FastAPI(title="sreality toolkit API", version="0.3.0")
+
+# Skill validation needs to know the registered agent tools and the
+# registered provider names. Populate at import time so PUT /admin/skills/*
+# rejects bogus tool / provider names with a clear 400.
+skills_module.AGENT_TOOL_NAMES = set(AGENT_TOOLS.keys())
+skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
+
+# /admin/* is exempted from the API_TOKEN bearer gate per the slice-1
+# Settings-page design (CLAUDE.md "Auth and secrets" + rule #8). The
+# private Railway URL is the security perimeter for these routes.
+app.include_router(admin_router)
 
 
 @app.get("/health")
@@ -234,6 +248,17 @@ def post_compute_market_velocity(
         locality_district_id=body.locality_district_id,
         locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
+        category_sub_cb=body.category_sub_cb,
+        furnished=body.furnished,
+        terrace=body.terrace,
+        cellar=body.cellar,
+        garage=body.garage,
+        ownership=body.ownership,
+        min_estate_area=body.min_estate_area,
+        max_estate_area=body.max_estate_area,
+        min_usable_area=body.min_usable_area,
+        max_usable_area=body.max_usable_area,
+        min_parking_lots=body.min_parking_lots,
     )
     return compute_market_velocity(
         conn, target, filters,
@@ -504,6 +529,17 @@ def post_estimate_yield(
         locality_district_id=body.locality_district_id,
         locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
+        category_sub_cb=body.category_sub_cb,
+        furnished=body.furnished,
+        terrace=body.terrace,
+        cellar=body.cellar,
+        garage=body.garage,
+        ownership=body.ownership,
+        min_estate_area=body.min_estate_area,
+        max_estate_area=body.max_estate_area,
+        min_usable_area=body.min_usable_area,
+        max_usable_area=body.max_usable_area,
+        min_parking_lots=body.min_parking_lots,
     )
     return estimate_yield(
         conn, target, filters, body.purchase_price_czk,
@@ -682,5 +718,16 @@ def _build_comparables_inputs(
         locality_district_id=body.locality_district_id,
         locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
+        category_sub_cb=body.category_sub_cb,
+        furnished=body.furnished,
+        terrace=body.terrace,
+        cellar=body.cellar,
+        garage=body.garage,
+        ownership=body.ownership,
+        min_estate_area=body.min_estate_area,
+        max_estate_area=body.max_estate_area,
+        min_usable_area=body.min_usable_area,
+        max_usable_area=body.max_usable_area,
+        min_parking_lots=body.min_parking_lots,
     )
     return target, filters

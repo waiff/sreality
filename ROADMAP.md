@@ -11,7 +11,7 @@ _Last refreshed: 2026-05-11 08:22 UTC_
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 24 files, latest `028_transit_lines.sql`.
+**Migrations on disk:** 25 files, latest `029_agent_runs.sql`.
 
 **Last 10 commits:**
 
@@ -185,34 +185,58 @@ caches.
   `/tools/compute_amenity_supply`,
   `/tools/find_comparables_along_axis`), bearer-token-gated.
 
+### Phase 7 slice 1: The reasoning agent (provider-agnostic)
+Synchronous tool-use loop that takes a target spec + filters and
+returns a defensible rental estimate by iterating over a curated
+toolkit subset. Writes to `estimation_runs` with `mode='agent'`,
+early-INSERTs `status='running'`, finalises to `success`/`failed`.
+Trace records `kind='reasoning'` per LLM turn.
+- **Provider-agnostic.** `api/providers/` defines a `CompletionProvider`
+  Protocol with neutral message / tool / completion types; two
+  implementations ship: `AnthropicProvider` (SDK = `anthropic`) and
+  `GeminiProvider` (SDK = `google-genai`). `LLMClient` is now a
+  provider-agnostic audit orchestrator. Adding a third provider is
+  one new file implementing the same Protocol.
+- **`skills` table + history trigger.** Each skill = a bundle of
+  (system prompt + allowed tools + per-provider preferred model +
+  loop limits). DB-backed at runtime; on-disk
+  `skills/<name>/SKILL.md` is the canonical seed (committed in git
+  as documentation). Operator edits live values via the Settings
+  page; every change preserved in `skills_history`.
+- **Curated tool subset for slice 1:**
+  `find_comparables_relaxed`, `analyze_distribution`,
+  `find_distribution_outliers`, `describe_neighborhood`,
+  `verify_listing_freshness` + `record_estimate` terminator.
+- **Settings page** (`/settings`) edits skills and `app_settings`.
+  `/admin/*` routes are exempted from the `API_TOKEN` bearer gate
+  per operator decision (private Railway URL is the security
+  perimeter; same exemption category as `/health`).
+- **Loop guards:** `max_iterations`, `max_cost_usd`,
+  `wall_clock_timeout_s` — all sourced from the skill row, all
+  short-circuit to `status='failed'` with `error_message`.
+- **Migration 029** adds the `skills` + `skills_history` tables and
+  trigger, the `'agent_estimation'` `called_for` enum, the
+  `llm_calls.provider` column, and seeds `rental_estimator_v1`.
+- Apartment rentals only (`byt` / `pronajem`). Multi-category
+  defaults stay deferred to Phase 1.5b.
+
 ## Next
 
-### Phase 7: The reasoning agent (target)
-The end-state. An Anthropic tool-use loop that takes a listing URL and
-returns a rental estimate by iterating over the toolkit: parse → seed
-comparables → critique → expand or relax → revisit visual similarity →
-produce a defensible range. Writes to `estimation_runs` with
-`mode='agent'`, `status` transitions through `'pending'` → `'running'` →
-terminal, `trace.steps` include `kind='reasoning'`. Schema is already
-agent-ready (migration 010 + trace v1). Built only after the toolkit has
-been used and refined for ~1 month against real data.
+## Next
 
-Hard prerequisites:
-- Phase 6 visual layer (`summarize_listing` + `compare_listing_images`)
-  — agent must be able to filter and rank cohorts by appearance.
-- Phase 5 statistical refinement (`cluster_comparables` +
-  `find_comparables_relaxed`) — agent needs auto-widening when strict
-  filters return < 3 hits.
-- Scraper Phase 1.5b multi-category UI defaults — so non-apartment-rental
-  URLs work end to end.
-
-Soft prerequisites:
-- Phase 4b walkability + transit-axis comparables — useful but not
-  blocking.
-- Scraper Phase 2 multi-portal ingestion — broadens cohort but agent
-  works without it.
-- Operator-workflow Phase U2.6 collections — gives operator a way to
-  seed and audit agent runs but agent works without it.
+### Phase 7 slice 2: Async + full toolkit + UI mode toggle
+Builds on slice 1.
+- Async execution: real `status='pending'/'running'` lifecycle with
+  a background worker and a polling endpoint. Removes the
+  synchronous HTTP wall-clock cap.
+- Expose the rest of the toolkit (`cluster_comparables`, the two
+  velocity tools, the visual layer) by adding skills that whitelist
+  them.
+- Frontend `/estimate` gets a mode toggle (`deterministic` /
+  `agent`), a provider picker (anthropic / gemini), and a skill
+  picker.
+- Third provider (OpenAI or Vertex AI service-account auth).
+- Per-skill A/B comparison view on `/estimations`.
 
 ## UI track (parallel, independent of analytical phases)
 
@@ -315,6 +339,26 @@ End-to-end browser flow over the U1b backend.
   the deterministic 4-step trace; the same component will render
   the U4 agent's longer traces without rework. Smart default
   expansion (last step + steps over 500 ms).
+
+### browse-2: Region search + box plots (done)
+- Mapy.cz suggest / resolve proxy endpoints (`api/maps.py`) — bearer-
+  gated, 5-min in-process TTL cache on suggest, admin_boundaries-aware
+  polygon resolution that auto-degrades to point + radius when the
+  table is missing or empty.
+- Region page rebuilt around a single `LocationSearchBox`: typing a
+  street address, neighbourhood, or kraj returns ranked Mapy.cz
+  suggestions and resolves to either a polygon (when admin_boundaries
+  ships) or a point + radius. Browse-1's district / radius pickers
+  remain reachable under an "Advanced" disclosure for legacy
+  bookmarks and direct radius drag-and-drop.
+- Per-disposition price-per-m² box plots (custom SVG) replace
+  browse-1's median-only summary table. Tukey 1.5×IQR whiskers
+  clipped to min/max, copper median line, no outlier dots, no
+  per-disposition colour-coding. A numeric table beneath the SVG
+  preserves precise readouts.
+- Migration 021 (`021_region_stats_box.sql`) extends `region_stats`
+  with a per-disposition `ppm2_box` field; existing fields preserved
+  for backwards compatibility.
 
 ### Phase estimation-5: URL-parser frontend (done)
 - `ConfidenceIndicator` component + per-field confidence surface on
@@ -448,6 +492,26 @@ Operator watchlists over listings, with freeform tags.
 - Future hook (out of scope for this phase but the schema supports
   it): the agent reads collections as seed examples — "estimate
   this listing using only comparables from collection X."
+
+## Summarize track (parallel)
+
+LLM-derived natural-language summaries over the data the user is
+already viewing. Distinct from the `browse-*` track (UI primitives
+and navigation) and from the future `agent-*` track (multi-tool
+reasoning). Powered by the Claude API via the FastAPI service —
+the browser never holds an Anthropic key.
+
+### summarize-1: Annotated distribution charts (next, proposed)
+- One- to two-sentence natural-language annotation per box plot in
+  browse-2's Region page (e.g. "2+kk listings in this area cluster
+  tightly around 480 Kč/m²; the long upper whisker reflects six
+  premium-finish flats above 800 Kč/m²"). Generated server-side from
+  the same `ppm2_box` payload that drives the chart, plus a small
+  cohort sample for context.
+- Cached per-region per-day so identical browser sessions don't
+  re-bill the API.
+- Track entry-point for Phase 6's `summarize_listing` and
+  `compare_listing_images` — both fit naturally in the same family.
 
 ## Out of scope until explicitly opened
 - ClickUp integration.

@@ -8,6 +8,12 @@ export type Disposition =
   | '4+kk' | '4+1'
   | '5+kk' | '5+1';
 
+/* Promoted from raw_json via migration 022. See parser.FURNISHED /
+ * parser.OWNERSHIP for the int→text mapping. NULL when sreality didn't
+ * report a value. */
+export type Furnished = 'ano' | 'ne' | 'castecne';
+export type Ownership = 'osobni' | 'druzstevni' | 'statni';
+
 export interface ListingPublic {
   sreality_id: number;
   first_seen_at: string;
@@ -33,6 +39,19 @@ export interface ListingPublic {
   building_type: string | null;
   condition: string | null;
   energy_rating: string | null;
+  /* Migration 022 — category-relevant fields. Older rows that haven't
+   * been re-fetched since the migration may have null for any of
+   * these even when the legacy columns are populated. */
+  estate_area: number | null;
+  usable_area: number | null;
+  garden_area: number | null;
+  category_sub_cb: number | null;
+  furnished: Furnished | null;
+  terrace: boolean | null;
+  cellar: boolean | null;
+  garage: boolean | null;
+  parking_lots: number | null;
+  ownership: Ownership | null;
 }
 
 export interface ListingSnapshotPublic {
@@ -286,9 +305,20 @@ export interface EstimationFilters {
   max_price_czk: number | null;
   category_main: string | null;
   category_type: string | null;
+  category_sub_cb: number | null;
   locality_district_id: number | null;
   locality_region_id: number | null;
   include_unreliable: boolean;
+  furnished: Furnished | null;
+  terrace: boolean | null;
+  cellar: boolean | null;
+  garage: boolean | null;
+  ownership: Ownership | null;
+  min_estate_area: number | null;
+  max_estate_area: number | null;
+  min_usable_area: number | null;
+  max_usable_area: number | null;
+  min_parking_lots: number | null;
 }
 
 export interface CreateEstimationIn extends Partial<EstimationFilters> {
@@ -339,6 +369,18 @@ export interface PreviewListing {
   building_type: string | null;
   condition: string | null;
   energy_rating: string | null;
+  /* Migration 022 — see ListingPublic. Set on the preview shape so
+   * the spec-review step can pre-fill the new editable rows. */
+  estate_area: number | null;
+  usable_area: number | null;
+  garden_area: number | null;
+  category_sub_cb: number | null;
+  furnished: Furnished | null;
+  terrace: boolean | null;
+  cellar: boolean | null;
+  garage: boolean | null;
+  parking_lots: number | null;
+  ownership: Ownership | null;
   image_count: number;
 }
 
@@ -374,6 +416,19 @@ export interface ParseListing {
   building_type: string | null;
   condition: string | null;
   energy_rating: string | null;
+  /* Migration 022 — same fields as PreviewListing. The LLM-driven
+   * per-source parsers don't yet extract these, so they're null for
+   * non-sreality URLs until the per-source prompts learn them. */
+  estate_area: number | null;
+  usable_area: number | null;
+  garden_area: number | null;
+  category_sub_cb: number | null;
+  furnished: Furnished | null;
+  terrace: boolean | null;
+  cellar: boolean | null;
+  garage: boolean | null;
+  parking_lots: number | null;
+  ownership: Ownership | null;
 }
 
 export interface ParseResult {

@@ -1,0 +1,72 @@
+name: Agent smoke test
+
+# Manual invocation only. Runs scripts/smoke_agent.py against the real
+# Supabase DB and a real LLM provider. Picks a recent Prague 2+kk
+# rental by default; --sreality-id overrides. Real LLM credits are
+# spent — typically under $0.10 per run.
+#
+# Required GitHub secrets:
+#   SUPABASE_DB_URL      — same one used by scrape.yml
+#   ANTHROPIC_API_KEY    — needed when provider=anthropic
+#   GEMINI_API_KEY       — needed when provider=gemini
+#
+# The workflow does not commit anything. The estimation_run row IS
+# the persistent record of each smoke run; check the /estimations
+# page or estimation_runs table afterwards.
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: LLM provider (anthropic or gemini)
+        required: true
+        default: anthropic
+        type: choice
+        options:
+          - anthropic
+          - gemini
+      sreality_id:
+        description: Specific listing id to estimate (leave blank to pick a recent Prague 2+kk)
+        required: false
+        default: ""
+        type: string
+      skill:
+        description: Skill row name
+        required: false
+        default: rental_estimator_v1
+        type: string
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "psycopg[binary]>=3.2" \
+            "requests>=2.32" \
+            "boto3>=1.35" \
+            "anthropic>=0.40" \
+            "google-genai>=0.3"
+
+      - name: Run smoke
+        run: |
+          ARGS="--provider ${{ inputs.provider }} --skill ${{ inputs.skill }}"
+          if [ -n "${{ inputs.sreality_id }}" ]; then
+            ARGS="$ARGS --sreality-id ${{ inputs.sreality_id }}"
+          fi
+          python scripts/smoke_agent.py $ARGS
