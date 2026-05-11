@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-10 20:40 UTC_
+_Last refreshed: 2026-05-11 03:20 UTC_
 
 **Branch:** `claude/plan-phase-6-t5ikU`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-10 20:40 UTC_
 **Last 10 commits:**
 
 ```
+2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
+6f7e6f7 Renumber visual-layer migration 026 -> 027
 4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
 e111edb roadmap: refresh auto-status block
+0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
+ebba60d roadmap: refresh auto-status block for review session
 7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
 9e99ce5 roadmap: refresh, add scraper + operator-workflow tracks, auto-maintain
 e5dbf1e Merge pull request #34 from waiff/claude/listing-collections-feature-p07zI
 e5e812f Add operator curation: collections, notes, and tags
-0195e2a Merge pull request #31 from waiff/claude/parser-podil-and-percat-cap-vKx9w
-882add3 Map category_type_cb=4 to 'podil'; add per-category refetch cap
-6c25736 Merge pull request #30 from waiff/claude/expand-scraper-coverage-2aQNn
-c0720cf Expand scraper to all six sreality category pairs
 ```
 
 <!-- END AUTO-STATUS -->
