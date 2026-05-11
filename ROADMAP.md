@@ -5,31 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 08:22 UTC_
+_Last refreshed: 2026-05-11 11:19 UTC_
 
-**Branch:** `claude/add-sales-estimate-Uzsdi`
+**Branch:** `claude/debug-fix-errors-yOVNP`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 25 files, latest `029_agent_runs.sql`.
+**Migrations on disk:** 29 files, latest `029_agent_runs.sql`.
 
 **Last 10 commits:**
 
 ```
-9e2f9a3 roadmap: refresh auto-status block
-d59a4b3 Merge pull request #39 from waiff/claude/add-walkability-comps-tools-MQOCx
-cdf89cc roadmap: refresh auto-status block
-1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
-2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
-6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
-3a0c701 Merge pull request #37 from waiff/claude/plan-phase-6-t5ikU
-2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
-6f7e6f7 Renumber visual-layer migration 026 -> 027
-4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
-e111edb roadmap: refresh auto-status block
-0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
-ebba60d roadmap: refresh auto-status block for review session
-7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
+023b34c roadmap: refresh auto-status block
+e6ba736 roadmap: refresh auto-status block
+8c1f259 api: add CORS middleware gated by CORS_ALLOW_ORIGINS env var
+238719a Merge main into claude/debug-fix-errors-yOVNP
+c95fbf6 Merge pull request #41 from waiff/claude/health-page-categories-GE14s
+8b13ab3 roadmap: refresh auto-status block
+042768d frontend: pipe VITE_API_BASE_URL and VITE_API_TOKEN through Docker build
+ee2652d Merge main into health-page-categories, resolve ROADMAP auto-status conflict
+cfbfec4 Merge pull request #10 from waiff/claude/locality-ids-cleanup
+ccd54d6 Merge pull request #28 from waiff/claude/region-search-boxplots-dEa1K
 ```
 
 <!-- END AUTO-STATUS -->
