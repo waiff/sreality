@@ -260,7 +260,7 @@ service that exposes it (`api/`). They do not apply to the scraper.
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval
    'X days'` (default 7).** Don't trust `is_active` alone — a listing not
    seen for 30 days is functionally inactive.
-5. **No writes from the toolkit, with two explicit exceptions.**
+5. **No writes from the toolkit, with four explicit exceptions.**
    Read-only by default. The exceptions are:
    - `verify_listing_freshness` (and `scraper.freshness.freshness_check`
      that it wraps), which exists so an agent can confirm a comparable
@@ -272,8 +272,19 @@ service that exposes it (`api/`). They do not apply to the scraper.
      in OpenStreetMap, not our scrape, so we cache them locally to
      keep repeated lookups fast and Overpass-friendly. The cache is a
      pure mirror — no derived analytical state lives in those tables.
+   - `summarize_listing`, which writes a structured Claude summary of
+     a listing snapshot to `listing_summaries` (keyed on
+     `(sreality_id, snapshot_id)`) on cache miss. Same rationale as
+     the OSM mirror: the LLM is the source of truth for the summary;
+     we cache locally to keep repeat lookups fast and Anthropic-
+     friendly. Auto-invalidates when a new snapshot is recorded.
+   - `compare_listing_images`, which writes the structured pairwise
+     visual comparison to `listing_image_comparisons` (keyed on the
+     canonical-ordered pair) on cache miss. Vision is materially more
+     expensive than text, so caching matters more here than anywhere
+     else in the toolkit.
    No other toolkit function may write. The API service should still
-   connect with a read-only role if Postgres permits; these two paths
+   connect with a read-only role if Postgres permits; these four paths
    then need a separately-elevated route. For now we ship with one
    role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always
@@ -396,6 +407,35 @@ cost, duration, and the optional `estimation_run_id` of the run that
 triggered the call. The `LLMClient` emits a one-time WARNING per day
 when `llm_calls.cost_usd` sum first crosses
 `LLM_DAILY_COST_WARN_USD` (default $5).
+
+## LLM-backed analysis (visual layer)
+
+Two analytical toolkit functions also reach for Claude (Phase 6,
+migration 027):
+
+- `summarize_listing` produces a structured Czech-real-estate Claude
+  summary of one listing snapshot. Fields: `headline`, `key_highlights`,
+  `concerns`, `condition_assessment`, `target_audience`. Cached in
+  `listing_summaries` keyed on `(sreality_id, snapshot_id)`; a new
+  snapshot gets a fresh summary on next call. System prompt and model
+  ID are operator-tunable via `app_settings.llm_summary_system_prompt`
+  and `llm_summary_model`. Calls log to `llm_calls` with
+  `called_for='summarize_listing'`.
+- `compare_listing_images` scores two listings across six fixed
+  tenant-relevant dimensions (`exterior`, `kitchen`, `windows_and_light`,
+  `floor_finish`, `lighting`, `styling`) using Claude vision. Image
+  bytes are pulled from R2 server-side via boto3 GetObject and base64-
+  encoded into the messages payload (more robust than depending on
+  bucket public access). Cached in `listing_image_comparisons` keyed
+  on the canonical-ordered pair. Operator-tunable settings live in
+  `app_settings.llm_image_compare_system_prompt` and
+  `llm_image_compare_model`. Calls log to `llm_calls` with
+  `called_for='compare_listing_images'`. Vision is materially more
+  expensive than text — typical pair runs at ~$0.05 — so the cache
+  matters more here than anywhere else in the toolkit.
+
+Both functions are write-allowed exceptions per toolkit rule #5
+(see "Architectural rules" above).
 
 ## Coding conventions
 

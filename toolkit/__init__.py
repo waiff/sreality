@@ -54,9 +54,11 @@ from toolkit.comparables import (  # noqa: E402
 )
 from toolkit.distribution import analyze_distribution  # noqa: E402
 from toolkit.freshness import verify_listing_freshness  # noqa: E402
+from toolkit.image_similarity import compare_listing_images  # noqa: E402
 from toolkit.neighborhoods import describe_neighborhood  # noqa: E402
 from toolkit.outliers import find_distribution_outliers  # noqa: E402
 from toolkit.snapshots import compare_snapshots  # noqa: E402
+from toolkit.summaries import summarize_listing  # noqa: E402
 from toolkit.velocity import (  # noqa: E402
     compute_listing_velocity,
     compute_market_velocity,
@@ -68,6 +70,7 @@ __all__ = [
     "ToolMetadata",
     "ToolResult",
     "analyze_distribution",
+    "compare_listing_images",
     "compare_snapshots",
     "compute_listing_velocity",
     "compute_market_velocity",
@@ -75,5 +78,6 @@ __all__ = [
     "find_anchor_amenities",
     "find_comparables",
     "find_distribution_outliers",
+    "summarize_listing",
     "verify_listing_freshness",
 ]

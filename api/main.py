@@ -27,6 +27,7 @@ from toolkit import (
     ComparableFilters,
     TargetSpec,
     analyze_distribution,
+    compare_listing_images,
     compare_snapshots,
     compute_listing_velocity,
     compute_market_velocity,
@@ -34,8 +35,11 @@ from toolkit import (
     find_anchor_amenities,
     find_comparables,
     find_distribution_outliers,
+    summarize_listing,
     verify_listing_freshness,
 )
+from toolkit.image_similarity import ImageCompareError
+from toolkit.summaries import SummarizeError
 
 app = FastAPI(title="sreality toolkit API", version="0.3.0")
 
@@ -203,6 +207,43 @@ def post_find_anchor_amenities(
         categories=body.categories,
         cache_ttl_days=body.cache_ttl_days,
     )
+
+
+@app.post("/tools/summarize_listing")
+def post_summarize_listing(
+    body: s.SummarizeListingIn,
+    conn: Any = Depends(deps.get_db_conn),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    try:
+        return summarize_listing(
+            conn, llm_client,
+            sreality_id=body.sreality_id,
+            snapshot_id=body.snapshot_id,
+            force_refresh=body.force_refresh,
+        )
+    except SummarizeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/tools/compare_listing_images")
+def post_compare_listing_images(
+    body: s.CompareListingImagesIn,
+    conn: Any = Depends(deps.get_db_conn),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    try:
+        return compare_listing_images(
+            conn, llm_client,
+            sreality_id_a=body.sreality_id_a,
+            sreality_id_b=body.sreality_id_b,
+            n_images=body.n_images,
+            force_refresh=body.force_refresh,
+        )
+    except ImageCompareError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/tools/compute_listing_velocity")
