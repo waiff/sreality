@@ -59,28 +59,9 @@ export interface EstimateFormState {
   // sale price.
   purchase_price_czk: number | null;
   expected_monthly_rent_czk: number | null;
-
-  // Filter parameters (Advanced).
-  radius_m: number;
-  area_band_pct: number;
-  disposition_match: 'exact' | 'loose' | 'any';
-  max_age_days: number;
-  active_only: boolean;
 }
 
 export type TriValue = 'any' | 'yes' | 'no';
-
-export const FORM_DEFAULTS = {
-  radius_m: 1000,
-  area_band_pct: 0.20,
-  disposition_match: 'exact' as const,
-  max_age_days: 7,
-  active_only: true,
-};
-
-export function defaultMaxAgeDays(kind: EstimateKind): number {
-  return kind === 'rent' ? 7 : 30;
-}
 
 export const DISPOSITIONS: ReadonlyArray<Disposition> = [
   '1+kk', '1+1',
@@ -122,8 +103,6 @@ export function buildInitialFormState(
     parking_lots: listing.parking_lots,
     purchase_price_czk: null,
     expected_monthly_rent_czk: null,
-    ...FORM_DEFAULTS,
-    max_age_days: defaultMaxAgeDays(kind),
   };
 }
 
@@ -178,12 +157,7 @@ export default function EstimateForm({
 
   const setKind = (kind: EstimateKind) => {
     if (kind === state.estimate_kind) return;
-    const userTouchedAge = state.max_age_days !== defaultMaxAgeDays(state.estimate_kind);
-    onChange({
-      ...state,
-      estimate_kind: kind,
-      max_age_days: userTouchedAge ? state.max_age_days : defaultMaxAgeDays(kind),
-    });
+    onChange({ ...state, estimate_kind: kind });
   };
 
   return (
@@ -368,65 +342,13 @@ export default function EstimateForm({
         )}
       </Section>
 
-      {/* ---------------- Advanced ---------------- */}
-      <details className="group rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]">
-        <summary className="cursor-pointer list-none flex items-center justify-between gap-4 px-4 py-3">
-          <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-            Advanced search parameters
-          </span>
-          <span className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] group-open:hidden">Show</span>
-          <span className="text-[0.7rem] tracking-wide text-[var(--color-ink-3)] hidden group-open:inline">Hide</span>
-        </summary>
-        <div className="px-4 pb-5 pt-2 space-y-5">
-          <SingleSlider
-            label="Search radius"
-            unit="m"
-            min={250} max={5000} step={50}
-            value={state.radius_m}
-            onChange={(v) => set('radius_m', v)}
-          />
-          <SingleSlider
-            label="Area band"
-            unit="±%"
-            min={5} max={50} step={1}
-            value={Math.round(state.area_band_pct * 100)}
-            onChange={(v) => set('area_band_pct', v / 100)}
-          />
-          <div>
-            <FieldHeader>Disposition match</FieldHeader>
-            <ButtonRow
-              options={[
-                { value: 'exact', label: 'Exact' },
-                { value: 'loose', label: 'Loose' },
-                { value: 'any',   label: 'Any'   },
-              ]}
-              value={state.disposition_match}
-              onChange={(v) => set('disposition_match', v)}
-            />
-          </div>
-          <Row>
-            <Field label="Max age" htmlFor="f-maxage">
-              <NumberInput
-                id="f-maxage"
-                value={state.max_age_days}
-                onChange={(v) => set('max_age_days', Math.max(1, Math.round(v ?? 7)))}
-                step="1"
-                suffix="days"
-              />
-            </Field>
-            <Field label="Active only">
-              <ButtonRow
-                options={[
-                  { value: true,  label: 'Active' },
-                  { value: false, label: 'Any'    },
-                ]}
-                value={state.active_only}
-                onChange={(v) => set('active_only', v)}
-              />
-            </Field>
-          </Row>
-        </div>
-      </details>
+      {/* ---------------- Agent note ---------------- */}
+      <p className="text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+        The agent chooses the comparable-cohort filters (radius, area
+        band, disposition match, age window) on its own, widening or
+        tightening them across iterations. The trace on the result
+        page shows every round it tried.
+      </p>
 
       {/* ---------------- Submit ---------------- */}
       {serverError && (
@@ -698,52 +620,6 @@ function ButtonRow<T extends string | boolean>({
           </button>
         );
       })}
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Single-handle slider (track styled to match the dual-handle one)           */
-/* -------------------------------------------------------------------------- */
-
-function SingleSlider({
-  label, unit, min, max, step, value, onChange,
-}: {
-  label: string;
-  unit: string;
-  min: number;
-  max: number;
-  step: number;
-  value: number;
-  onChange: (n: number) => void;
-}) {
-  const pct = ((value - min) / (max - min)) * 100;
-  return (
-    <div>
-      <div className="flex items-baseline justify-between">
-        <FieldHeader>{label}</FieldHeader>
-        <span className="font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-2)]">
-          {value}
-          <span className="ml-1 text-[var(--color-ink-3)]">{unit}</span>
-        </span>
-      </div>
-      <div className="relative h-6 mt-1">
-        <div className="absolute inset-x-0 top-1/2 h-0.5 -translate-y-1/2 bg-[var(--color-rule-strong)] rounded-full" />
-        <div
-          className="absolute top-1/2 h-0.5 -translate-y-1/2 bg-[var(--color-copper)] rounded-full left-0"
-          style={{ width: `${pct}%` }}
-        />
-        <input
-          type="range"
-          min={min}
-          max={max}
-          step={step}
-          value={value}
-          onChange={(e) => onChange(Number(e.target.value))}
-          className="range-slider"
-          aria-label={label}
-        />
-      </div>
     </div>
   );
 }

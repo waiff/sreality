@@ -6,6 +6,11 @@
  * `input_url` for traceability) plus a minimal `spec_overrides` diff
  * containing only the fields the user changed after the scrape.
  * When the origin is "from a listing" we send `spec` directly.
+ *
+ * The five cohort-search knobs (radius, area band, disposition
+ * match, age window, active-only) are NOT included here: the agent
+ * chooses them per-iteration. UI submissions always set
+ * `mode: 'agent'`.
  */
 
 import { triToBool, type EstimateFormState } from '@/components/EstimateForm';
@@ -26,11 +31,6 @@ export function buildEstimationPayload(
   };
 
   const filters = {
-    radius_m: form.radius_m,
-    area_band_pct: form.area_band_pct,
-    disposition_match: form.disposition_match,
-    max_age_days: form.max_age_days,
-    active_only: form.active_only,
     has_balcony: triToBool(form.has_balcony),
     has_lift: triToBool(form.has_lift),
     has_parking: triToBool(form.has_parking),
@@ -53,6 +53,7 @@ export function buildEstimationPayload(
     const overrides = computeSpecOverrides(resolved.spec, editedSpec);
     return {
       source: 'ui',
+      mode: 'agent',
       estimate_kind: form.estimate_kind,
       url: resolved.origin.url,
       ...(overrides ? { spec_overrides: overrides } : {}),
@@ -63,6 +64,7 @@ export function buildEstimationPayload(
 
   return {
     source: 'ui',
+    mode: 'agent',
     estimate_kind: form.estimate_kind,
     spec: editedSpec,
     ...yieldFields,

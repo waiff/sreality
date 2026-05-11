@@ -197,7 +197,7 @@ def test_post_with_spec_creates_success_row(client, monkeypatch):
     assert inserted["status"] == "success"
     assert inserted["source"] == "api"
     assert inserted["mode"] == "deterministic"
-    assert inserted["trace"]["version"] == 1
+    assert inserted["trace"]["version"] == 2
     assert inserted["trace"]["steps"][0]["tool"] == "find_comparables"
 
 
