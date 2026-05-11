@@ -293,21 +293,46 @@ service that exposes it (`api/`). They do not apply to the scraper.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
 8. **API auth gated by `API_TOKEN`.** When the env var is set, every
-   endpoint except `/health` requires `Authorization: Bearer <token>`.
-   When unset (local development) the gate is a no-op. `/health` stays
-   open so Railway healthchecks keep working. The token is shared with
-   every caller; no per-user identity layer.
+   endpoint except `/health` and `/admin/*` requires
+   `Authorization: Bearer <token>`. When unset (local development) the
+   gate is a no-op. `/health` stays open so Railway healthchecks keep
+   working. `/admin/*` (Settings-page surface: skills, `app_settings`,
+   agent tool inventory) is also exempt: per Phase 7 slice 1 the
+   operator chose to skip per-page auth, so the private Railway URL
+   is the security perimeter for that prefix. Every other route still
+   requires the token; *no* write path bypasses the FastAPI service.
+   The token is shared with every caller; no per-user identity layer.
 9. **Trace format on `estimation_runs.trace` is versioned.**
    `TRACE_SCHEMA_VERSION` lives in `api/estimation_runs.py`; every
    row's `trace.version` matches that constant at write time. Shape:
    `{version, summary, steps: [{n, kind, started_at, duration_ms,
    output_summary, ...}]}`. Step `kind` ∈ `'tool_call' | 'computation'
-   | 'reasoning'` (last reserved for U4). Steps NEVER store full tool
-   outputs — only `output_summary`; the full data lives in dedicated
-   columns (`comparables_used` for the cohort, etc.). This caps row
-   size at single-digit kilobytes regardless of cohort size. Bumping
-   the version is a deliberate change; future readers must handle
-   older versions.
+   | 'reasoning'`. The reasoning kind is emitted per LLM turn by the
+   Phase 7 agent loop. Steps NEVER store full tool outputs — only
+   `output_summary`; the full data lives in dedicated columns
+   (`comparables_used` for the cohort, etc.). This caps row size at
+   single-digit kilobytes regardless of cohort size. Bumping the
+   version is a deliberate change; future readers must handle older
+   versions.
+10. **Agent skills live in the `skills` table; the on-disk
+    `skills/<name>/SKILL.md` file is the canonical seed.**
+    Each skill is a bundle of (system prompt + allowed tool whitelist
+    + per-provider preferred model + loop limits). Migration 028's
+    seed `INSERT` is the importer of the markdown file's content; at
+    runtime the DB row is the source of truth. Operators edit via
+    `/settings` (UI) or `PUT /admin/skills/{name}` (API). Every
+    update writes a `skills_history` row via trigger — same pattern
+    as `app_settings_history` (migration 020). When adding a new
+    skill: commit a new `skills/<name>/SKILL.md`, write the
+    corresponding seed `INSERT` in a new migration, apply.
+11. **LLM provider is pluggable; `llm_calls.provider` records which
+    backend served each call.** `api/providers/` defines a
+    `CompletionProvider` Protocol with neutral message / tool /
+    completion types; today `anthropic` and `gemini` are wired up.
+    Adding a third provider is a new file implementing the same
+    Protocol, registered in `api/dependencies.py:_build_providers`.
+    `LLMClient` is the audit orchestrator — every call writes one
+    row to `llm_calls` with provider, model, tokens, USD cost.
 
 ## Database access
 
@@ -347,20 +372,27 @@ If any R2_* var is missing the image-download phase logs a skip and
 exits zero. The scrape still records image URLs in the database;
 downloading is decoupled and can be backfilled later.
 
-LLM-backed parsing (FastAPI service only):
-- `ANTHROPIC_API_KEY` - Anthropic API key. Required for parsing
-  non-sreality listing URLs through the source-kind dispatcher. Every
-  call is logged to `llm_calls` with token counts and USD cost.
+LLM-backed parsing + agent (FastAPI service only):
+- `ANTHROPIC_API_KEY` - Anthropic API key. Required for the URL
+  parser, the summarize / vision tools, and the Phase 7 agent when
+  it runs under `provider='anthropic'`. Every call is logged to
+  `llm_calls` with token counts and USD cost.
+- `GEMINI_API_KEY` - Google AI Studio API key
+  (https://aistudio.google.com/apikey). Required for the Phase 7
+  agent when it runs under `provider='gemini'`. A request that
+  selects an unconfigured provider returns a 502 with a clear
+  ProviderError message; missing the key at boot is not fatal.
 - `MAPY_CZ_API_KEY` - Mapy.cz REST API key. Used to geocode locality
   strings from non-sreality listings, which rarely include coordinates
   on the page.
 - `LLM_DAILY_COST_WARN_USD` (optional, default `5.0`) - soft warning
-  threshold. When today's `llm_calls.cost_usd` sum first crosses this
-  value, the LLMClient logs one WARNING line; subsequent calls today
-  do not re-warn. Anthropic's own console spend cap is the hard guard;
-  this is just an early-warning signal in Railway logs.
+  threshold across ALL providers. When today's `llm_calls.cost_usd`
+  sum first crosses this value, the LLMClient logs one WARNING line;
+  subsequent calls today do not re-warn. Each provider's own console
+  spend cap (Anthropic, Google Cloud billing) is the hard guard; this
+  is just an early-warning signal in Railway logs.
 
-Both API keys are backend-only. Never `VITE_*` prefix; never expose
+All API keys are backend-only. Never `VITE_*` prefix; never expose
 to the browser. The `frontend/` build does not see them.
 
 Never write any of these values into a committed file. `.env` is gitignored.

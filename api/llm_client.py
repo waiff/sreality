@@ -1,19 +1,25 @@
-"""Anthropic API wrapper that audits every call to llm_calls.
+"""Provider-agnostic orchestrator that audits every LLM call.
 
-Single responsibility: call Anthropic, compute the USD cost from token
-counts, INSERT a row into llm_calls, return a typed result. Used today
-by the URL-parsing dispatcher; reused later by summarize_listing.
+Two responsibilities:
 
-Pricing source: docs.anthropic.com (Sonnet 4.5 today is $3 / $15 /
-$0.30 / $3.75 per MTok for input / output / cache-read / 5-min cache-
-write). Update PRICES when Anthropic changes them or when callers add
-a new model. If a model is missing from PRICES, the call still runs —
-cost_usd is recorded as 0 and a warning logged. We do NOT silently
-estimate, because a wrong cost is worse than a missing one.
+1. Dispatch a `Completion` request through the named
+   `CompletionProvider` (Anthropic, Gemini, …). Provider-specific
+   SDK code lives in `api/providers/<name>.py`; this module never
+   imports those SDKs directly.
 
-The DB-backed system prompt and model lookups read from app_settings
-(seeded by migration 020). If the row is missing, we fall back to the
-constants here so a partial DB never breaks a request.
+2. Record one `llm_calls` row per call — usage, cost, duration,
+   provider, optional `estimation_run_id`. Same audit table all
+   callers used before the provider abstraction; the new `provider`
+   column distinguishes who served the request.
+
+The DB-backed system prompt / model lookups (`app_settings`) are
+still here for backwards compatibility with the URL parser and the
+summarize / image-compare callers. Agent-mode callers go through
+the `skills` table instead.
+
+If a model is missing from a provider's PRICES dict, the call still
+runs — cost_usd is recorded as 0 and a warning logged. Wrong cost
+is worse than a missing one.
 """
 
 from __future__ import annotations
@@ -25,27 +31,34 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
+from api.providers import (
+    Block,
+    Completion,
+    CompletionProvider,
+    Message,
+    ProviderError,
+    TextBlock,
+    ToolCall,
+    ToolResultBlock,
+    ToolSchema,
+    ToolUseBlock,
+    Usage,
+    compute_cost_usd,
+)
+
 if TYPE_CHECKING:
     import psycopg
 
 LOG = logging.getLogger(__name__)
 
 
-CalledFor = Literal["parse_url", "summarize_listing", "compare_listing_images"]
+CalledFor = Literal[
+    "parse_url",
+    "summarize_listing",
+    "compare_listing_images",
+    "agent_estimation",
+]
 
-
-@dataclass(frozen=True)
-class ModelPrice:
-    input_per_mtok: float
-    output_per_mtok: float
-    cache_read_per_mtok: float
-    cache_write_per_mtok: float
-
-
-PRICES: dict[str, ModelPrice] = {
-    "claude-sonnet-4-5": ModelPrice(3.0, 15.0, 0.30, 3.75),
-    "claude-sonnet-4-6": ModelPrice(3.0, 15.0, 0.30, 3.75),
-}
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_SYSTEM_PROMPT_FALLBACK = (
@@ -54,17 +67,23 @@ DEFAULT_SYSTEM_PROMPT_FALLBACK = (
 )
 
 # Soft warning threshold for daily LLM spend. Override via env var
-# LLM_DAILY_COST_WARN_USD. Anthropic's own spend cap at console.anthropic.com
-# is the hard guard; this is just an early-warning log line that shows up
-# in Railway when the URL parser is being hit harder than expected.
+# LLM_DAILY_COST_WARN_USD. Anthropic's / Google's own spend caps are
+# the hard guards; this is just an early-warning log line.
 DEFAULT_DAILY_COST_WARN_USD = 5.0
 
 
 @dataclass
 class LLMResponse:
+    """Backwards-compatible response for the URL-parser + summary callers.
+
+    Today's non-agent callers expect a plain `text` string and a list
+    of `{id, name, input}` tool-call dicts. Keep that shape so this
+    refactor doesn't ripple into every caller.
+    """
     text: str
     tool_calls: list[dict[str, Any]]
     model: str
+    provider: str
     input_tokens: int
     output_tokens: int
     cache_read_tokens: int
@@ -72,81 +91,99 @@ class LLMResponse:
     cost_usd: float
     duration_ms: int
     llm_call_id: int
-    raw: Any = field(repr=False, default=None)
+    completion: Completion = field(repr=False)
 
 
 class LLMClient:
     def __init__(
         self,
         conn: "psycopg.Connection",
-        api_key: str | None = None,
+        providers: dict[str, CompletionProvider] | None = None,
     ) -> None:
         self._conn = conn
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        self._anthropic: Any | None = None
+        self._providers: dict[str, CompletionProvider] = providers or {}
+
+    def register_providers(
+        self, providers: dict[str, CompletionProvider]
+    ) -> None:
+        """Late-binding registration. Used by api/main.py at startup."""
+        self._providers.update(providers)
+
+    def provider(self, name: str) -> CompletionProvider:
+        try:
+            return self._providers[name]
+        except KeyError as exc:
+            raise ProviderError(
+                f"provider {name!r} is not configured; "
+                f"available: {sorted(self._providers)}"
+            ) from exc
 
     def call(
         self,
         *,
         called_for: CalledFor,
-        messages: list[dict[str, Any]],
+        messages: list[dict[str, Any]] | list[Message],
         system: str | None = None,
-        tools: list[dict[str, Any]] | None = None,
+        tools: list[dict[str, Any]] | list[ToolSchema] | None = None,
         model: str | None = None,
         max_tokens: int = 4096,
         estimation_run_id: int | None = None,
+        provider: str = "anthropic",
     ) -> LLMResponse:
-        if not self._api_key:
-            raise RuntimeError(
-                "ANTHROPIC_API_KEY is not set; cannot call the LLM"
-            )
-        resolved_model = model or self.resolve_model()
-        client = self._client()
+        """Single API used by every LLM caller in the codebase.
 
-        kwargs: dict[str, Any] = {
-            "model": resolved_model,
-            "max_tokens": max_tokens,
-            "messages": messages,
-        }
-        if system is not None:
-            kwargs["system"] = system
-        if tools:
-            kwargs["tools"] = tools
+        Accepts either the legacy dict shapes (used by the URL parser
+        and the summary/vision tools) or the neutral Message /
+        ToolSchema types (used by the agent loop). Translates dicts
+        to neutral types before dispatch.
+        """
+        resolved_model = model or self.resolve_model()
+        prov = self.provider(provider)
+        neutral_messages = [_to_neutral_message(m) for m in messages]
+        neutral_tools = [_to_neutral_tool(t) for t in (tools or [])]
 
         mono_start = time.monotonic()
-        raw = client.messages.create(**kwargs)
+        completion = prov.complete(
+            system=system or "",
+            messages=neutral_messages,
+            tools=neutral_tools,
+            model=resolved_model,
+            max_tokens=max_tokens,
+        )
         duration_ms = int((time.monotonic() - mono_start) * 1000)
 
-        text, tool_calls = _split_content(raw)
-        usage = _extract_usage(raw)
         cost = compute_cost_usd(
+            price=prov.price_for(resolved_model),
             model=resolved_model,
-            input_tokens=usage["input_tokens"],
-            output_tokens=usage["output_tokens"],
-            cache_read_tokens=usage["cache_read_tokens"],
-            cache_write_tokens=usage["cache_write_tokens"],
+            usage=completion.usage,
         )
         llm_call_id = self._record_call(
             called_for=called_for,
+            provider=provider,
             model=resolved_model,
-            usage=usage,
+            usage=completion.usage,
             cost_usd=cost,
             duration_ms=duration_ms,
             estimation_run_id=estimation_run_id,
         )
         self._check_daily_cost(just_recorded=cost)
+
         return LLMResponse(
-            text=text,
-            tool_calls=tool_calls,
-            model=resolved_model,
-            input_tokens=usage["input_tokens"],
-            output_tokens=usage["output_tokens"],
-            cache_read_tokens=usage["cache_read_tokens"],
-            cache_write_tokens=usage["cache_write_tokens"],
+            text="".join(completion.text_blocks),
+            tool_calls=[
+                {"id": tc.id, "name": tc.name, "input": tc.input}
+                for tc in completion.tool_calls
+            ],
+            model=completion.model,
+            provider=provider,
+            input_tokens=completion.usage.input_tokens,
+            output_tokens=completion.usage.output_tokens,
+            cache_read_tokens=completion.usage.cache_read_tokens,
+            cache_write_tokens=completion.usage.cache_write_tokens,
             cost_usd=cost,
             duration_ms=duration_ms,
             llm_call_id=llm_call_id,
-            raw=raw,
+            completion=completion,
         )
 
     def resolve_model(self, key: str = "llm_parse_model") -> str:
@@ -178,20 +215,7 @@ class LLMClient:
             return value
         return DEFAULT_SYSTEM_PROMPT_FALLBACK
 
-    def _client(self) -> Any:
-        if self._anthropic is None:
-            import anthropic
-            self._anthropic = anthropic.Anthropic(api_key=self._api_key)
-        return self._anthropic
-
     def _check_daily_cost(self, *, just_recorded: float) -> None:
-        """Log a WARNING once when today's spend crosses the soft threshold.
-
-        Fires only on the call that pushed us over — re-warning every
-        subsequent call would be log spam. Failures here are non-fatal:
-        any error querying the running total is swallowed, since the
-        guardrail is observability, not correctness.
-        """
         threshold = _resolve_threshold()
         try:
             with self._conn.cursor() as cur:
@@ -216,18 +240,19 @@ class LLMClient:
         self,
         *,
         called_for: CalledFor,
+        provider: str,
         model: str,
-        usage: dict[str, int],
+        usage: Usage,
         cost_usd: float,
         duration_ms: int,
         estimation_run_id: int | None,
     ) -> int:
         sql = (
             "INSERT INTO llm_calls "
-            "(called_for, model, input_tokens, output_tokens, "
+            "(called_for, provider, model, input_tokens, output_tokens, "
             "cache_read_tokens, cache_write_tokens, cost_usd, "
             "duration_ms, estimation_run_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "RETURNING id"
         )
         with self._conn.transaction(), self._conn.cursor() as cur:
@@ -235,11 +260,12 @@ class LLMClient:
                 sql,
                 (
                     called_for,
+                    provider,
                     model,
-                    usage["input_tokens"],
-                    usage["output_tokens"],
-                    usage["cache_read_tokens"],
-                    usage["cache_write_tokens"],
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_write_tokens,
                     cost_usd,
                     duration_ms,
                     estimation_run_id,
@@ -265,80 +291,57 @@ def _resolve_threshold() -> float:
         return DEFAULT_DAILY_COST_WARN_USD
 
 
-def compute_cost_usd(
-    *,
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cache_read_tokens: int = 0,
-    cache_write_tokens: int = 0,
-) -> float:
-    price = PRICES.get(model)
-    if price is None:
-        LOG.warning(
-            "no price configured for model %r; recording cost_usd=0", model
+# --- legacy shape -> neutral conversion -----------------------------------
+
+def _to_neutral_message(msg: Any) -> Message:
+    if isinstance(msg, Message):
+        return msg
+    role = msg.get("role", "user")
+    content = msg.get("content")
+    blocks: list[Block] = []
+    if isinstance(content, str):
+        blocks.append(TextBlock(text=content))
+    elif isinstance(content, list):
+        for entry in content:
+            blocks.append(_to_neutral_block(entry))
+    return Message(role=role, content=blocks)
+
+
+def _to_neutral_block(entry: Any) -> Block:
+    if isinstance(entry, (TextBlock, ToolUseBlock, ToolResultBlock)):
+        return entry
+    if isinstance(entry, str):
+        return TextBlock(text=entry)
+    kind = entry.get("type")
+    if kind == "text":
+        return TextBlock(text=entry.get("text") or "")
+    if kind == "tool_use":
+        return ToolUseBlock(
+            id=str(entry.get("id") or ""),
+            name=str(entry.get("name") or ""),
+            input=entry.get("input") or {},
         )
-        return 0.0
-    cost = (
-        input_tokens * price.input_per_mtok
-        + output_tokens * price.output_per_mtok
-        + cache_read_tokens * price.cache_read_per_mtok
-        + cache_write_tokens * price.cache_write_per_mtok
-    ) / 1_000_000
-    return round(cost, 6)
+    if kind == "tool_result":
+        return ToolResultBlock(
+            tool_use_id=str(entry.get("tool_use_id") or ""),
+            content=str(entry.get("content") or ""),
+            is_error=bool(entry.get("is_error", False)),
+        )
+    return TextBlock(text=str(entry))
 
 
-def _extract_usage(raw: Any) -> dict[str, int]:
-    usage = getattr(raw, "usage", None) or {}
-    if not isinstance(usage, dict):
-        usage = {
-            "input_tokens": getattr(usage, "input_tokens", 0),
-            "output_tokens": getattr(usage, "output_tokens", 0),
-            "cache_read_input_tokens": getattr(
-                usage, "cache_read_input_tokens", 0
-            ),
-            "cache_creation_input_tokens": getattr(
-                usage, "cache_creation_input_tokens", 0
-            ),
-        }
-    return {
-        "input_tokens": int(usage.get("input_tokens", 0) or 0),
-        "output_tokens": int(usage.get("output_tokens", 0) or 0),
-        "cache_read_tokens": int(
-            usage.get("cache_read_input_tokens", 0) or 0
-        ),
-        "cache_write_tokens": int(
-            usage.get("cache_creation_input_tokens", 0) or 0
-        ),
-    }
-
-
-def _split_content(raw: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Separate Anthropic's content blocks into plain text and tool-use calls."""
-    blocks = getattr(raw, "content", None) or []
-    texts: list[str] = []
-    tool_calls: list[dict[str, Any]] = []
-    for block in blocks:
-        kind = _attr(block, "type")
-        if kind == "text":
-            texts.append(_attr(block, "text") or "")
-        elif kind == "tool_use":
-            tool_calls.append({
-                "id": _attr(block, "id"),
-                "name": _attr(block, "name"),
-                "input": _attr(block, "input") or {},
-            })
-    return "".join(texts), tool_calls
-
-
-def _attr(obj: Any, name: str) -> Any:
-    if isinstance(obj, dict):
-        return obj.get(name)
-    return getattr(obj, name, None)
+def _to_neutral_tool(tool: Any) -> ToolSchema:
+    if isinstance(tool, ToolSchema):
+        return tool
+    return ToolSchema(
+        name=tool["name"],
+        description=tool.get("description", ""),
+        input_schema=tool.get("input_schema") or {},
+    )
 
 
 def parse_tool_input_json(tool_input: Any) -> dict[str, Any]:
-    """Anthropic returns tool inputs as dicts; tolerate stringified JSON too."""
+    """Tool inputs may arrive as dicts or stringified JSON; tolerate both."""
     if isinstance(tool_input, dict):
         return tool_input
     if isinstance(tool_input, str):
