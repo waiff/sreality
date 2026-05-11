@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 11:19 UTC_
+_Last refreshed: 2026-05-11 11:35 UTC_
 
-**Branch:** `claude/debug-fix-errors-yOVNP`
+**Branch:** `claude/fix-estimate-search-params-mv978`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 29 files, latest `029_agent_runs.sql`.
+**Migrations on disk:** 30 files, latest `030_sales_estimate.sql`.
 
 **Last 10 commits:**
 
 ```
+583cf38 Merge pull request #44 from waiff/claude/debug-fix-errors-yOVNP
+79f162f Merge remote-tracking branch 'origin/main' into claude/debug-fix-errors-yOVNP
+9a8db57 roadmap: refresh auto-status block
 023b34c roadmap: refresh auto-status block
 e6ba736 roadmap: refresh auto-status block
 8c1f259 api: add CORS middleware gated by CORS_ALLOW_ORIGINS env var
-238719a Merge main into claude/debug-fix-errors-yOVNP
-c95fbf6 Merge pull request #41 from waiff/claude/health-page-categories-GE14s
-8b13ab3 roadmap: refresh auto-status block
-042768d frontend: pipe VITE_API_BASE_URL and VITE_API_TOKEN through Docker build
-ee2652d Merge main into health-page-categories, resolve ROADMAP auto-status conflict
-cfbfec4 Merge pull request #10 from waiff/claude/locality-ids-cleanup
-ccd54d6 Merge pull request #28 from waiff/claude/region-search-boxplots-dEa1K
+0929982 Merge pull request #42 from waiff/claude/add-sales-estimate-Uzsdi
+9fa0d86 test: accept new estimate_yield kwargs in auth-test fake
+f453a0f Merge pull request #43 from waiff/claude/debug-fix-errors-yOVNP
+a161a02 Merge main into add-sales-estimate (after PR #41 merge), resolve ROADMAP conflict
 ```
 
 <!-- END AUTO-STATUS -->
