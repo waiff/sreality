@@ -44,23 +44,28 @@ export function buildEstimationPayload(
     category_sub_cb: form.category_sub_cb,
   };
 
-  const purchase_price_czk = form.purchase_price_czk;
+  const yieldFields = {
+    purchase_price_czk: form.purchase_price_czk,
+    expected_monthly_rent_czk: form.expected_monthly_rent_czk,
+  };
 
   if (resolved.origin.kind === 'url') {
     const overrides = computeSpecOverrides(resolved.spec, editedSpec);
     return {
       source: 'ui',
+      estimate_kind: form.estimate_kind,
       url: resolved.origin.url,
       ...(overrides ? { spec_overrides: overrides } : {}),
-      purchase_price_czk,
+      ...yieldFields,
       ...filters,
     };
   }
 
   return {
     source: 'ui',
+    estimate_kind: form.estimate_kind,
     spec: editedSpec,
-    purchase_price_czk,
+    ...yieldFields,
     ...filters,
   };
 }

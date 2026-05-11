@@ -207,9 +207,11 @@ def _ms_since(mono_start: float) -> int:
 
 _RUN_COLUMNS: tuple[str, ...] = (
     "id", "created_at", "source", "mode", "status",
+    "estimate_kind",
     "input_url", "input_sreality_id", "input_spec",
     "input_purchase_price_czk",
     "estimated_monthly_rent_czk", "rent_p25_czk", "rent_p75_czk",
+    "estimated_sale_price_czk", "sale_p25_czk", "sale_p75_czk",
     "gross_yield_pct", "confidence",
     "comparables_used", "trace", "warnings", "error_message",
     "parent_run_id", "rerun_reason",
@@ -301,6 +303,8 @@ def create_estimation_run(
     try:
         result = estimate_yield(
             conn, target, filters, body.purchase_price_czk,
+            estimate_kind=body.estimate_kind,
+            expected_monthly_rent_czk=body.expected_monthly_rent_czk,
             trace_recorder=recorder,
         )
     except Exception as exc:
@@ -321,6 +325,7 @@ def create_estimation_run(
         source=body.source,
         mode=body.mode,
         status="success",
+        estimate_kind=body.estimate_kind,
         input_url=resolution.input_url,
         input_sreality_id=resolution.input_sreality_id,
         input_spec=resolution.target_spec,
@@ -328,6 +333,9 @@ def create_estimation_run(
         estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
         rent_p25_czk=d.get("rent_p25_czk"),
         rent_p75_czk=d.get("rent_p75_czk"),
+        estimated_sale_price_czk=d.get("estimated_sale_price_czk"),
+        sale_p25_czk=d.get("sale_p25_czk"),
+        sale_p75_czk=d.get("sale_p75_czk"),
         gross_yield_pct=d.get("gross_yield_pct"),
         confidence=d.get("confidence"),
         comparables_used=d.get("comparables_used"),
@@ -543,6 +551,7 @@ def _persist_failed_run(
         source=body.source,
         mode=body.mode,
         status="failed",
+        estimate_kind=body.estimate_kind,
         input_url=resolution.input_url,
         input_sreality_id=resolution.input_sreality_id,
         input_spec=resolution.target_spec,
@@ -550,6 +559,9 @@ def _persist_failed_run(
         estimated_monthly_rent_czk=None,
         rent_p25_czk=None,
         rent_p75_czk=None,
+        estimated_sale_price_czk=None,
+        sale_p25_czk=None,
+        sale_p75_czk=None,
         gross_yield_pct=None,
         confidence=None,
         comparables_used=None,
@@ -617,11 +629,20 @@ def _build_filters(body: s.CreateEstimationIn) -> ComparableFilters:
 def _summary_line(data: dict[str, Any], radius_m: int) -> str:
     n = data.get("sample_size") or 0
     confidence = data.get("confidence") or "unknown"
-    rent = data.get("estimated_monthly_rent_czk")
-    rent_part = f" estimated rent {rent} CZK/mo." if rent is not None else ""
+    kind = data.get("estimate_kind") or "rent"
+    if kind == "sale":
+        point = data.get("estimated_sale_price_czk")
+        point_part = (
+            f" estimated sale price {point} CZK." if point is not None else ""
+        )
+    else:
+        point = data.get("estimated_monthly_rent_czk")
+        point_part = (
+            f" estimated rent {point} CZK/mo." if point is not None else ""
+        )
     return (
         f"Found {n} comparables in {radius_m}m radius, "
-        f"{confidence} confidence.{rent_part}"
+        f"{confidence} confidence.{point_part}"
     )
 
 

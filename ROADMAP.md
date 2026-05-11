@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 08:26 UTC_
+_Last refreshed: 2026-05-11 08:22 UTC_
 
-**Branch:** `claude/health-page-categories-GE14s`
+**Branch:** `claude/add-sales-estimate-Uzsdi`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,10 +16,9 @@ _Last refreshed: 2026-05-11 08:26 UTC_
 **Last 10 commits:**
 
 ```
-0463ac4 Add agent smoke test (script + GH Actions workflow)
-da036c9 roadmap: refresh auto-status block
-24169ee Phase 7 slice 1: provider-agnostic agent + Settings page
-09c9ccf Phase 7 slice 1: add migration 028 for the reasoning agent
+9e2f9a3 roadmap: refresh auto-status block
+d59a4b3 Merge pull request #39 from waiff/claude/add-walkability-comps-tools-MQOCx
+cdf89cc roadmap: refresh auto-status block
 1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
 2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
 6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
