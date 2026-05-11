@@ -14,9 +14,11 @@
  * URL is the security perimeter. We do NOT pass a bearer token.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
+  exportSkill,
+  importSkill,
   listSkills,
   updateSkill,
   listAppSettings,
@@ -230,7 +232,7 @@ function SkillEditor({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
         </div>
       </Field>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 flex-wrap">
         <button
           type="button"
           disabled={mutation.isPending}
@@ -246,6 +248,7 @@ function SkillEditor({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
         >
           {mutation.isPending ? 'Saving…' : 'Save'}
         </button>
+        <SkillFileActions skillName={skill.name} setToast={setToast} />
         {toast && (
           <span
             className={
@@ -259,6 +262,89 @@ function SkillEditor({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
         )}
       </div>
     </div>
+  );
+}
+
+function SkillFileActions({
+  skillName,
+  setToast,
+}: {
+  skillName: string;
+  setToast: (t: { kind: 'ok' | 'err'; message: string } | null) => void;
+}) {
+  const queryClient = useQueryClient();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState<'export' | 'import' | null>(null);
+
+  const handleExport = async () => {
+    setBusy('export');
+    try {
+      const blob = await exportSkill(skillName);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${skillName}__SKILL.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setToast({ kind: 'ok', message: 'Downloaded.' });
+    } catch (err) {
+      setToast({
+        kind: 'err',
+        message: err instanceof Error ? err.message : 'Download failed.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleImport = async (file: File) => {
+    setBusy('import');
+    try {
+      await importSkill(file);
+      queryClient.invalidateQueries({ queryKey: ['admin', 'skills'] });
+      setToast({ kind: 'ok', message: `Imported ${file.name}.` });
+    } catch (err) {
+      setToast({
+        kind: 'err',
+        message: err instanceof Error ? err.message : 'Import failed.',
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        disabled={busy !== null}
+        onClick={handleExport}
+        className="px-3 py-1.5 text-sm rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] hover:border-[var(--color-rule-strong)] disabled:opacity-60"
+      >
+        {busy === 'export' ? 'Downloading…' : 'Download SKILL.md'}
+      </button>
+      <button
+        type="button"
+        disabled={busy !== null}
+        onClick={() => fileInputRef.current?.click()}
+        className="px-3 py-1.5 text-sm rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] hover:border-[var(--color-rule-strong)] disabled:opacity-60"
+      >
+        {busy === 'import' ? 'Uploading…' : 'Upload SKILL.md / zip'}
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".md,.zip"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void handleImport(f);
+          e.target.value = '';
+        }}
+      />
+    </>
   );
 }
 

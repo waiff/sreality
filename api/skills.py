@@ -85,6 +85,62 @@ def list_skills(conn: "psycopg.Connection") -> list[Skill]:
     return [_row_to_skill(r) for r in rows]
 
 
+def insert_skill(
+    conn: "psycopg.Connection",
+    fields: dict[str, Any],
+    *,
+    updated_by: str | None = None,
+) -> Skill:
+    """Insert a new skill row. Used by the import endpoint when the
+    SKILL.md's `name` doesn't already exist. Runs the same validation
+    pipeline as `update_skill` so an imported skill can't bypass the
+    agent tool / provider allowlists.
+
+    Deviates from CLAUDE.md architectural rule 10 (new skills require
+    a numbered migration). The trade-off is intentional: friendlier
+    operator UX at the cost of a fresh rebuild from migrations not
+    seeing imported skills.
+    """
+    required = ("name", "description", "system_prompt", "allowed_tools",
+                "preferred_model", "limits")
+    missing = [k for k in required if k not in fields]
+    if missing:
+        raise SkillValidationError(f"insert missing required fields: {missing}")
+    name = _validate_str(fields["name"], "name")
+    description = _validate_str(fields["description"], "description")
+    system_prompt = _validate_str(fields["system_prompt"], "system_prompt")
+    allowed_tools = _validate_allowed_tools(fields["allowed_tools"])
+    preferred_model = _validate_preferred_model(fields["preferred_model"])
+    limits = _validate_limits(fields["limits"])
+
+    sql = (
+        "INSERT INTO skills "
+        "(name, description, system_prompt, allowed_tools, preferred_model, "
+        " limits, updated_by) "
+        "VALUES (%(name)s, %(description)s, %(system_prompt)s, "
+        "%(allowed_tools)s::jsonb, %(preferred_model)s::jsonb, "
+        "%(limits)s::jsonb, %(updated_by)s)"
+    )
+    params = {
+        "name": name,
+        "description": description,
+        "system_prompt": system_prompt,
+        "allowed_tools": _jsonb_dumps(allowed_tools),
+        "preferred_model": _jsonb_dumps(preferred_model),
+        "limits": _jsonb_dumps(limits),
+        "updated_by": updated_by,
+    }
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(sql, params)
+    return load_skill(conn, name)
+
+
+def skill_exists(conn: "psycopg.Connection", name: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM skills WHERE name = %s", (name,))
+        return cur.fetchone() is not None
+
+
 def update_skill(
     conn: "psycopg.Connection",
     name: str,
