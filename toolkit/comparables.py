@@ -45,6 +45,7 @@ class ComparableFilters:
     disposition_match: Literal["exact", "loose", "any"] = "exact"
     max_age_days: int = 7
     active_only: bool = True
+    population: Literal["active", "delisted", "all"] | None = None
     floor_band: int | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
@@ -241,7 +242,17 @@ def build_query(
     """
     where, params = _shared_filter_where(target, filters)
 
-    if filters.active_only:
+    if filters.population == "delisted":
+        where.append("l.is_active = false")
+    elif filters.population == "all":
+        pass
+    elif filters.population == "active":
+        where.append("l.is_active = true")
+        where.append(
+            "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
+        )
+        params["max_age_days"] = filters.max_age_days
+    elif filters.active_only:
         where.append("l.is_active = true")
         where.append(
             "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
@@ -303,6 +314,7 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "disposition_match": filters.disposition_match,
         "max_age_days": filters.max_age_days,
         "active_only": filters.active_only,
+        "population": filters.population,
         "floor_band": filters.floor_band,
         "condition_match": (
             list(filters.condition_match)

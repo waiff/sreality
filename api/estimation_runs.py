@@ -652,6 +652,7 @@ def _build_filters(body: s.CreateEstimationIn) -> ComparableFilters:
         disposition_match=_DEFAULT_DISPOSITION_MATCH,
         max_age_days=_default_max_age_days(body.estimate_kind),
         active_only=_DEFAULT_ACTIVE_ONLY,
+        population=body.population,
         floor_band=body.floor_band,
         condition_match=body.condition_match,
         building_type_match=body.building_type_match,

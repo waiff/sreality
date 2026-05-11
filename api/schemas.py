@@ -250,6 +250,11 @@ class CreateEstimationIn(BaseModel):
 
     estimate_kind: Literal["rent", "sale"] = "rent"
 
+    # Cohort population. None (default) preserves the legacy
+    # "active and recently-seen" filter; "delisted" restricts to
+    # is_active=false (likely closed deals); "all" applies no filter.
+    population: Literal["active", "delisted", "all"] | None = None
+
     url: str | None = None
     spec: TargetIn | None = None
     spec_overrides: dict[str, Any] | None = None

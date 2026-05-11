@@ -2,8 +2,10 @@ import { useMemo } from 'react';
 import type {
   Confidence,
   Disposition,
+  EstimationProvider,
   Furnished,
   Ownership,
+  Population,
   PreviewListing,
   TargetSpecIn,
 } from '@/lib/types';
@@ -20,6 +22,14 @@ export interface EstimateFormState {
   // What we're estimating. Drives output shape, default category_type,
   // and which "yield" input field is shown.
   estimate_kind: EstimateKind;
+
+  // LLM backend for agent-mode runs. Routed via CreateEstimationIn.provider.
+  provider: EstimationProvider;
+
+  // Comparable population — active listings, delisted only (likely
+  // closed at the asking price), or both. Routes via
+  // CreateEstimationIn.population into ComparableFilters.population.
+  population: Population;
 
   // Spec — TargetIn fields.
   lat: number | null;
@@ -78,6 +88,8 @@ export function buildInitialFormState(
 ): EstimateFormState {
   return {
     estimate_kind: kind,
+    provider: 'anthropic',
+    population: 'active',
     lat: spec.lat,
     lng: spec.lng,
     area_m2: spec.area_m2,
@@ -180,10 +192,56 @@ export default function EstimateForm({
         />
         <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
           {state.estimate_kind === 'rent'
-            ? 'Comparables drawn from active rental listings (pronájem). Result is a monthly rent in CZK.'
+            ? 'Comparables drawn from rental listings (pronájem). Result is a monthly rent in CZK.'
             : 'Comparables drawn from sale listings (prodej). Result is a sale price in CZK.'}
         </p>
       </Section>
+
+      {/* ---------------- Agent settings ---------------- */}
+      {state.estimate_kind === 'rent' && (
+        <Section label="Agent settings">
+          <div className="space-y-4">
+            <div>
+              <FieldHeader>Model provider</FieldHeader>
+              <div className="mt-1.5">
+                <ButtonRow
+                  options={[
+                    { value: 'anthropic', label: 'Claude (Anthropic)' },
+                    { value: 'gemini', label: 'Gemini (Google)' },
+                  ]}
+                  value={state.provider}
+                  onChange={(v) => set('provider', v)}
+                />
+              </div>
+              <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+                Which LLM drives the agent. Uses the preferred model
+                configured for this provider in the skill's settings.
+              </p>
+            </div>
+
+            <div>
+              <FieldHeader>Comparable population</FieldHeader>
+              <div className="mt-1.5">
+                <ButtonRow
+                  options={[
+                    { value: 'active', label: 'Active only' },
+                    { value: 'delisted', label: 'Delisted only' },
+                    { value: 'all', label: 'Both' },
+                  ]}
+                  value={state.population}
+                  onChange={(v) => set('population', v)}
+                />
+              </div>
+              <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+                "Delisted only" restricts the cohort to listings that
+                disappeared from sreality — those typically rented out
+                at the asking price, so the resulting estimate reflects
+                deals that actually closed.
+              </p>
+            </div>
+          </div>
+        </Section>
+      )}
 
       {/* ---------------- Apartment ---------------- */}
       <Section label="Apartment">

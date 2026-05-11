@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 14:19 UTC_
+_Last refreshed: 2026-05-11 15:57 UTC_
 
-**Branch:** `claude/map-comparables-popup-jVns6`
+**Branch:** `claude/agent-tools-configuration-hcQQe`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-11 14:19 UTC_
 **Last 10 commits:**
 
 ```
+6a5ad8d Merge pull request #49 from waiff/claude/map-comparables-popup-jVns6
+37e47cb roadmap: refresh auto-status block
 1bdeffd estimate: subject summary + comparables map popup
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
 ab6c923 roadmap: refresh auto-status block
@@ -24,8 +26,6 @@ b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv97
 7476a00 Merge main into claude/fix-estimate-search-params-mv978
 3e59110 estimate: hand cohort filters to the agent, surface its strategy in the trace
 3d32614 Merge pull request #45 from waiff/claude/review-unmerged-commits-HCsoE
-672902b Merge remote-tracking branch 'origin/main' into claude/review-unmerged-commits-HCsoE
-dfaea3e roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->

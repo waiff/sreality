@@ -31,6 +31,7 @@ export function buildEstimationPayload(
   };
 
   const filters = {
+    population: form.population,
     has_balcony: triToBool(form.has_balcony),
     has_lift: triToBool(form.has_lift),
     has_parking: triToBool(form.has_parking),
@@ -60,6 +61,7 @@ export function buildEstimationPayload(
     return {
       source: 'ui',
       mode,
+      provider: form.provider,
       estimate_kind: form.estimate_kind,
       url: resolved.origin.url,
       ...(overrides ? { spec_overrides: overrides } : {}),
@@ -71,6 +73,7 @@ export function buildEstimationPayload(
   return {
     source: 'ui',
     mode,
+    provider: form.provider,
     estimate_kind: form.estimate_kind,
     spec: editedSpec,
     ...yieldFields,
