@@ -8,10 +8,28 @@ import type {
   HealthSnapBucket,
   HealthFreshnessRow,
   HealthFailureRow,
+  HealthCategoryBlock,
 } from '@/lib/types';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
 
 const STALE_HOURS_WARN = 36;
+
+const CATEGORY_LABELS: Record<string, string> = {
+  byt: 'Byty',
+  dum: 'Domy',
+  komercni: 'Komerční',
+};
+
+const TYPE_LABELS: Record<string, string> = {
+  pronajem: 'pronájem',
+  prodej: 'prodej',
+};
+
+function categoryLabel(c: HealthCategoryBlock): string {
+  const main = CATEGORY_LABELS[c.category_main] ?? c.category_main;
+  const type = TYPE_LABELS[c.category_type] ?? c.category_type;
+  return `${main} · ${type}`;
+}
 
 export default function Health() {
   const { data, isLoading, error, dataUpdatedAt } = useQuery<HealthSummary, Error>({
@@ -27,7 +45,7 @@ export default function Health() {
         <div>
           <h1 className="text-2xl leading-tight">Health</h1>
           <p className="mt-1 text-sm text-[var(--color-ink-2)]">
-            Scraper status, snapshot density, fetch failures.{' '}
+            Scraper status by category, snapshot density, fetch failures.{' '}
             {dataUpdatedAt > 0 && (
               <span className="text-[var(--color-ink-3)]">
                 · refreshed {fmtRelative(new Date(dataUpdatedAt).toISOString())}
@@ -59,44 +77,29 @@ export default function Health() {
 function Body({ data }: { data: HealthSummary }) {
   return (
     <div className="mt-5 space-y-5">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <HeroTile
-          label="Last scrape run"
-          value={data.last_scrape_at ? fmtRelative(data.last_scrape_at) : '—'}
-          hint={data.last_scrape_at ? fmtAbsolute(data.last_scrape_at) : undefined}
-          mono={false}
-        />
-        <ActiveTile
-          activeNow={data.active_now}
-          active7dAgo={data.active_7d_ago}
-        />
-        <FlippedTile
-          flipped={data.flipped_inactive_7d}
-          spark={data.flipped_per_day_7d}
-        />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Card label="New listings per day · last 14 days" wide>
-          <DayBars rows={data.new_per_day_14d} colour="copper" />
-        </Card>
-        <Card label="Snapshot density">
-          <SnapshotBars rows={data.snapshot_density} totalListings={data.active_now} />
-        </Card>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <LastScrapeTile lastScrapeAt={data.last_scrape_at} />
+        {data.by_category.map((c) => (
+          <CategoryTile key={`${c.category_main}-${c.category_type}`} block={c} />
+        ))}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card label="Snapshot density">
+          <SnapshotBars rows={data.snapshot_density} totalListings={data.active_now} />
+        </Card>
         <Card label="Freshness checks · last 24 h">
           <FreshnessRows rows={data.freshness_24h} />
         </Card>
-        <Card label="Fetch failures">
-          <FailuresPanel
-            given_up={data.failures_given_up}
-            total={data.failures_total}
-            top10={data.failures_top10}
-          />
-        </Card>
       </div>
+
+      <Card label="Fetch failures · top 10 by attempts">
+        <FailuresPanel
+          given_up={data.failures_given_up}
+          total={data.failures_total}
+          top10={data.failures_top10}
+        />
+      </Card>
     </div>
   );
 }
@@ -121,96 +124,122 @@ function StaleScrapeBanner({ lastScrapeAt }: { lastScrapeAt: string | null }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Hero tiles                                                                  */
+/* Last-scrape global tile (keeps a single global anchor in the grid)         */
 /* -------------------------------------------------------------------------- */
 
-function HeroTile({
-  label,
-  value,
-  hint,
-  mono = true,
-}: {
-  label: string;
-  value: ReactNode;
-  hint?: string;
-  mono?: boolean;
-}) {
+function LastScrapeTile({ lastScrapeAt }: { lastScrapeAt: string | null }) {
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
       <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        {label}
+        Last scrape run
       </p>
       <p
-        className={[
-          'mt-2 leading-none tracking-tight text-[var(--color-ink)]',
-          mono
-            ? 'font-mono tabular-nums text-[2.4rem]'
-            : 'font-display text-[2rem]',
-        ].join(' ')}
-        title={hint}
+        className="mt-2 font-display text-[2rem] leading-none tracking-tight text-[var(--color-ink)]"
+        title={lastScrapeAt ? fmtAbsolute(lastScrapeAt) : undefined}
       >
-        {value}
+        {lastScrapeAt ? fmtRelative(lastScrapeAt) : '—'}
       </p>
-      {hint && (
-        <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)]">{hint}</p>
+      {lastScrapeAt && (
+        <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)]">{fmtAbsolute(lastScrapeAt)}</p>
       )}
     </div>
   );
 }
 
-function ActiveTile({
-  activeNow,
-  active7dAgo,
-}: {
-  activeNow: number;
-  active7dAgo: number;
-}) {
-  const delta = activeNow - active7dAgo;
-  const pct = active7dAgo > 0 ? Math.round((delta / active7dAgo) * 100) : null;
-  const sign = delta > 0 ? '+' : delta < 0 ? '' : '±';
-  const colour =
-    delta > 0
-      ? 'var(--color-sage)'
-      : delta < 0
-        ? 'var(--color-brick)'
-        : 'var(--color-ink-3)';
+/* -------------------------------------------------------------------------- */
+/* Per-category tile                                                          */
+/* -------------------------------------------------------------------------- */
+
+function CategoryTile({ block }: { block: HealthCategoryBlock }) {
+  const newTotal = block.new_per_day_14d.reduce((s, r) => s + r.n, 0);
+  const failuresActive = block.failures_total - block.failures_given_up;
   return (
-    <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
-      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        Active listings
+    <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 flex flex-col gap-3">
+      <header>
+        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          {categoryLabel(block)}
+        </p>
+        <p className="mt-2 font-mono tabular-nums text-[2rem] leading-none tracking-tight text-[var(--color-ink)]">
+          {fmtCount(block.active_now)}
+        </p>
+        <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)] tracking-wide">active listings</p>
+      </header>
+
+      <div className="grid grid-cols-3 gap-3 pt-2 border-t border-[var(--color-rule-soft)]">
+        <MiniStat
+          label="new 14&thinsp;d"
+          value={fmtCount(newTotal)}
+          spark={block.new_per_day_14d}
+          colour="copper"
+        />
+        <MiniStat
+          label="flipped 7&thinsp;d"
+          value={fmtCount(block.flipped_inactive_7d)}
+          spark={block.flipped_per_day_7d}
+          colour="brick"
+        />
+        <FailuresMini
+          active={failuresActive}
+          given_up={block.failures_given_up}
+        />
+      </div>
+    </section>
+  );
+}
+
+function MiniStat({
+  label,
+  value,
+  spark,
+  colour,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  spark: HealthDayCount[];
+  colour: 'copper' | 'brick';
+}) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        {label}
       </p>
-      <p className="mt-2 font-mono tabular-nums text-[2.4rem] leading-none tracking-tight text-[var(--color-ink)]">
-        {fmtCount(activeNow)}
+      <p className="mt-0.5 font-mono tabular-nums text-base text-[var(--color-ink)] leading-tight">
+        {value}
       </p>
-      <p className="mt-1 text-[0.7rem] text-[var(--color-ink-3)]">
-        <span className="font-mono tabular-nums" style={{ color: colour }}>
-          {sign}{fmtCount(Math.abs(delta))}
-          {pct != null && ` (${sign}${Math.abs(pct)}%)`}
-        </span>{' '}
-        vs 7&thinsp;days ago
-      </p>
+      <div className="mt-1">
+        <Sparkline rows={spark} width={90} height={20} colour={colour} />
+      </div>
     </div>
   );
 }
 
-function FlippedTile({
-  flipped,
-  spark,
+function FailuresMini({
+  active,
+  given_up,
 }: {
-  flipped: number;
-  spark: HealthDayCount[];
+  active: number;
+  given_up: number;
 }) {
   return (
-    <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
-      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        Flipped inactive · last 7&thinsp;d
+    <div className="min-w-0">
+      <p className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        failed
       </p>
-      <div className="mt-2 flex items-end justify-between gap-3">
-        <p className="font-mono tabular-nums text-[2.4rem] leading-none tracking-tight text-[var(--color-ink)]">
-          {fmtCount(flipped)}
-        </p>
-        <Sparkline rows={spark} width={120} height={36} />
-      </div>
+      <p
+        className="mt-0.5 font-mono tabular-nums text-base leading-tight"
+        style={{ color: active > 0 ? 'var(--color-ochre)' : 'var(--color-ink)' }}
+      >
+        {fmtCount(active)}
+      </p>
+      <p className="mt-1 text-[0.6rem] text-[var(--color-ink-4)] tabular-nums leading-none">
+        {given_up > 0 ? (
+          <span style={{ color: 'var(--color-brick)' }}>
+            {fmtCount(given_up)}&thinsp;given&nbsp;up
+          </span>
+        ) : (
+          <span>0 given up</span>
+        )}
+      </p>
     </div>
   );
 }
@@ -222,81 +251,17 @@ function FlippedTile({
 function Card({
   label,
   children,
-  wide,
 }: {
   label: string;
   children: ReactNode;
-  wide?: boolean;
 }) {
   return (
-    <section
-      className={[
-        'rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4',
-        wide ? 'lg:col-span-2' : '',
-      ].join(' ')}
-    >
+    <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
       <h3 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
         {label}
       </h3>
       <div className="mt-3">{children}</div>
     </section>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Day-bars chart for "new listings per day, last 14 days"                    */
-/* -------------------------------------------------------------------------- */
-
-function DayBars({
-  rows,
-  colour = 'copper',
-}: {
-  rows: HealthDayCount[];
-  colour?: 'copper' | 'brick';
-}) {
-  if (rows.length === 0) {
-    return <p className="text-sm text-[var(--color-ink-4)]">No data.</p>;
-  }
-  const max = Math.max(...rows.map((r) => r.n), 1);
-  const fill = colour === 'copper' ? 'var(--color-copper)' : 'var(--color-brick)';
-  return (
-    <div>
-      <div className="flex items-end gap-1.5 h-28" role="img" aria-label="Bar chart">
-        {rows.map((r) => {
-          const h = (r.n / max) * 100;
-          return (
-            <div
-              key={r.day}
-              className="flex-1 flex flex-col items-center gap-1 group"
-              title={`${r.day} · ${r.n}`}
-            >
-              <div className="flex-1 w-full flex items-end">
-                <div
-                  className="w-full rounded-t-[2px] transition-[height] duration-300 group-hover:opacity-80"
-                  style={{ height: `${h}%`, backgroundColor: fill, minHeight: r.n > 0 ? '2px' : '0' }}
-                />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <div className="mt-1.5 flex gap-1.5 text-[0.6rem] text-[var(--color-ink-4)] font-mono tabular-nums">
-        {rows.map((r, i) => (
-          <div key={r.day} className="flex-1 text-center">
-            {i === 0 || i === rows.length - 1 || i === Math.floor(rows.length / 2)
-              ? r.day.slice(5).replace('-', '/')
-              : ' '}
-          </div>
-        ))}
-      </div>
-      <p className="mt-2 text-[0.65rem] text-[var(--color-ink-4)] tracking-wide">
-        peak <span className="font-mono tabular-nums text-[var(--color-ink-3)]">{fmtCount(max)}</span>
-        {' · total '}
-        <span className="font-mono tabular-nums text-[var(--color-ink-3)]">
-          {fmtCount(rows.reduce((s, r) => s + r.n, 0))}
-        </span>
-      </p>
-    </div>
   );
 }
 
@@ -448,9 +413,6 @@ function FailuresPanel({
 
       {top10.length > 0 ? (
         <div className="mt-4">
-          <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)] mb-1.5">
-            top 10 by attempts
-          </p>
           <div className="overflow-x-auto -mx-1">
             <table className="w-full text-xs">
               <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
@@ -513,10 +475,12 @@ function Sparkline({
   rows,
   width = 100,
   height = 30,
+  colour = 'copper',
 }: {
   rows: HealthDayCount[];
   width?: number;
   height?: number;
+  colour?: 'copper' | 'brick';
 }) {
   if (rows.length === 0) {
     return <span className="text-[0.65rem] text-[var(--color-ink-4)]">no data</span>;
@@ -531,12 +495,13 @@ function Sparkline({
     })
     .join(' ');
   const allZero = rows.every((r) => r.n === 0);
+  const stroke = colour === 'brick' ? 'var(--color-brick)' : 'var(--color-copper)';
   return (
-    <svg width={width} height={height} className="flex-shrink-0" aria-hidden>
+    <svg width={width} height={height} className="flex-shrink-0 block" aria-hidden>
       {!allZero && (
         <polyline
           fill="none"
-          stroke="var(--color-copper)"
+          stroke={stroke}
           strokeWidth="1.5"
           strokeLinecap="round"
           strokeLinejoin="round"
@@ -562,30 +527,28 @@ function Sparkline({
 function Skeleton() {
   return (
     <div className="mt-5 space-y-5 animate-pulse">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <SkelCard h="6.5rem" />
-        <SkelCard h="6.5rem" />
-        <SkelCard h="6.5rem" />
-      </div>
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <SkelCard h="14rem" wide />
-        <SkelCard h="14rem" />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <SkelCard h="11rem" />
+        <SkelCard h="11rem" />
+        <SkelCard h="11rem" />
+        <SkelCard h="11rem" />
+        <SkelCard h="11rem" />
+        <SkelCard h="11rem" />
+        <SkelCard h="11rem" />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <SkelCard h="10rem" />
-        <SkelCard h="14rem" />
+        <SkelCard h="10rem" />
       </div>
+      <SkelCard h="16rem" />
     </div>
   );
 }
 
-function SkelCard({ h, wide }: { h: string; wide?: boolean }) {
+function SkelCard({ h }: { h: string }) {
   return (
     <div
-      className={[
-        'rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]',
-        wide ? 'lg:col-span-2' : '',
-      ].join(' ')}
+      className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]"
       style={{ height: h }}
     />
   );
