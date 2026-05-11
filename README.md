@@ -27,7 +27,8 @@ tests/              pytest suite
 - Two-phase scrape: index pages, then per-listing detail.
 - Upsert into `listings`; append a row to `listing_snapshots` only when the
   content hash changes; mark unseen listings `is_active=false`.
-- Image bytes mirrored to Cloudflare R2.
+- Image bytes mirrored to Cloudflare R2 (originally deferred; live since v1.5)
+  so listings retain their photos after sreality's CDN expires them.
 - Analytical toolkit (`find_comparables`, `analyze_distribution`,
   `verify_listing_freshness`, `compare_snapshots`) exposed as a FastAPI
   service with a composite `/estimate_yield` endpoint. Bearer-token
@@ -42,10 +43,11 @@ tests/              pytest suite
 ## Status
 
 - [x] Schema applied (migrations 001–014)
-- [x] Scraper code
-- [x] CI workflows (test on push, daily cron, frontend build)
-- [x] Image mirroring to R2 live
-- [x] Failed-fetch tracking with give-up threshold
+- [x] Scraper code (index walk, detail fetch, parse, upsert, snapshot-on-change)
+- [x] CI workflows (`test.yml` per push, `scrape.yml` daily at 22:00 UTC, frontend build)
+- [x] Image mirroring to Cloudflare R2 with parallel uploads
+- [x] Failure tracking (`listing_fetch_failures`) with priority retry and give-up threshold
+- [x] Conservative/aggressive run modes
 - [x] Locality IDs promoted to typed columns
 - [x] Toolkit + FastAPI service deployed to Railway
 - [x] Freshness layer (`verify_listing_freshness`, `compare_snapshots`,
