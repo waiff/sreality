@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 09:15 UTC_
+_Last refreshed: 2026-05-11 10:34 UTC_
 
 **Branch:** `claude/debug-fix-errors-yOVNP`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-11 09:15 UTC_
 **Last 10 commits:**
 
 ```
+e6ba736 roadmap: refresh auto-status block
 8c1f259 api: add CORS middleware gated by CORS_ALLOW_ORIGINS env var
 238719a Merge main into claude/debug-fix-errors-yOVNP
 c95fbf6 Merge pull request #41 from waiff/claude/health-page-categories-GE14s
@@ -25,7 +26,6 @@ ee2652d Merge main into health-page-categories, resolve ROADMAP auto-status conf
 cfbfec4 Merge pull request #10 from waiff/claude/locality-ids-cleanup
 ccd54d6 Merge pull request #28 from waiff/claude/region-search-boxplots-dEa1K
 922668c Merge pull request #32 from waiff/claude/listings-schema-expansion-pX2nQ
-18b1eb0 Merge pull request #40 from waiff/claude/plan-rental-estimator-xQgTx
 ```
 
 <!-- END AUTO-STATUS -->
