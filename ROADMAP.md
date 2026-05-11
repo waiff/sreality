@@ -344,6 +344,26 @@ End-to-end browser flow over the U1b backend.
   the U4 agent's longer traces without rework. Smart default
   expansion (last step + steps over 500 ms).
 
+### browse-2: Region search + box plots (done)
+- Mapy.cz suggest / resolve proxy endpoints (`api/maps.py`) — bearer-
+  gated, 5-min in-process TTL cache on suggest, admin_boundaries-aware
+  polygon resolution that auto-degrades to point + radius when the
+  table is missing or empty.
+- Region page rebuilt around a single `LocationSearchBox`: typing a
+  street address, neighbourhood, or kraj returns ranked Mapy.cz
+  suggestions and resolves to either a polygon (when admin_boundaries
+  ships) or a point + radius. Browse-1's district / radius pickers
+  remain reachable under an "Advanced" disclosure for legacy
+  bookmarks and direct radius drag-and-drop.
+- Per-disposition price-per-m² box plots (custom SVG) replace
+  browse-1's median-only summary table. Tukey 1.5×IQR whiskers
+  clipped to min/max, copper median line, no outlier dots, no
+  per-disposition colour-coding. A numeric table beneath the SVG
+  preserves precise readouts.
+- Migration 021 (`021_region_stats_box.sql`) extends `region_stats`
+  with a per-disposition `ppm2_box` field; existing fields preserved
+  for backwards compatibility.
+
 ### Phase estimation-5: URL-parser frontend (done)
 - `ConfidenceIndicator` component + per-field confidence surface on
   the review step.
@@ -476,6 +496,26 @@ Operator watchlists over listings, with freeform tags.
 - Future hook (out of scope for this phase but the schema supports
   it): the agent reads collections as seed examples — "estimate
   this listing using only comparables from collection X."
+
+## Summarize track (parallel)
+
+LLM-derived natural-language summaries over the data the user is
+already viewing. Distinct from the `browse-*` track (UI primitives
+and navigation) and from the future `agent-*` track (multi-tool
+reasoning). Powered by the Claude API via the FastAPI service —
+the browser never holds an Anthropic key.
+
+### summarize-1: Annotated distribution charts (next, proposed)
+- One- to two-sentence natural-language annotation per box plot in
+  browse-2's Region page (e.g. "2+kk listings in this area cluster
+  tightly around 480 Kč/m²; the long upper whisker reflects six
+  premium-finish flats above 800 Kč/m²"). Generated server-side from
+  the same `ppm2_box` payload that drives the chart, plus a small
+  cohort sample for context.
+- Cached per-region per-day so identical browser sessions don't
+  re-bill the API.
+- Track entry-point for Phase 6's `summarize_listing` and
+  `compare_listing_images` — both fit naturally in the same family.
 
 ## Out of scope until explicitly opened
 - ClickUp integration.

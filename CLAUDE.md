@@ -66,6 +66,13 @@ different rules. Identify which one a task belongs to before you start.
   direct Postgres. The toolkit's two write-allowed exceptions
   (`verify_listing_freshness`, `find_anchor_amenities`) are reachable
   only via the API.
+- **`Mapy.cz`-powered location search.** The Region page calls
+  `GET /maps/suggest` and `POST /maps/resolve` on the FastAPI
+  service for autocomplete + admin-unit resolution. The
+  `MAPY_CZ_API_KEY` is server-side only — never inlined into the
+  browser bundle. When the API returns 503 (key unset), the search
+  box renders a graceful fallback hint and auto-opens the Advanced
+  disclosure with the legacy district / radius pickers.
 - Frontend conventions live in `frontend/README.md`. Design tokens are
   in `frontend/src/styles/globals.css` under a single `@theme` block;
   **never tweak these tokens without operator approval** — they
