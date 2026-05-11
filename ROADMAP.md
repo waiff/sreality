@@ -11,11 +11,12 @@ _Last refreshed: 2026-05-11 08:26 UTC_
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 23 files, latest `027_visual_layer.sql`.
+**Migrations on disk:** 24 files, latest `028_transit_lines.sql`.
 
 **Last 10 commits:**
 
 ```
+1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
 2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
 6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
 3a0c701 Merge pull request #37 from waiff/claude/plan-phase-6-t5ikU
@@ -154,12 +155,38 @@ Two LLM-backed analytical toolkit functions for the Phase 7 agent:
   mirror: the LLM is the source of truth, we cache locally to keep
   repeat lookups fast and Anthropic-friendly).
 
-## Next
+### Phase 4b: Spatial context (tenant-perspective overlays)
+Two narrow toolkit functions on top of the OSM amenity + transit
+caches.
+- `compute_walkability` + `compute_amenity_supply`
+  (`toolkit/walkability.py`): both project the POI cohort returned
+  by `find_anchor_amenities` onto a different signal. Walkability is
+  a single 0-100 score driven by weighted nearest-POI distance.
+  Supply is the per-category count expressed as a ratio against a
+  target count, bucketed `scarce|adequate|abundant`. Two facts, two
+  tools, the agent picks. Hermetic tests mock the amenity delegate
+  so the math is exercised without an OSM round-trip.
+- `find_comparables_along_axis` (`toolkit/transit_axis.py`):
+  comparables in a corridor along a tram / subway / bus route. Two-
+  stage spatial filter — first find route relations passing within
+  `anchor_radius_m` of the target, then return listings within
+  `corridor_m` of any of those routes. Reuses the shared comparables
+  attribute filters; replaces the anchor-circle ST_DWithin with the
+  corridor join. Per-listing output names the nearest line and
+  distance to it.
+- Migration 028 adds the `transit_lines` + `transit_line_fetches`
+  cache tables (one row per relation/way pair, sha256
+  bbox+transport_types cache key). The Overpass client gets a
+  `fetch_routes` method that parses route relations into clean
+  polylines.
+- CLAUDE.md toolkit rule #5 grows from four to five write-allowed
+  exceptions; architectural rule #11 is added documenting the
+  transit-line mirror.
+- Three new POST endpoints (`/tools/compute_walkability`,
+  `/tools/compute_amenity_supply`,
+  `/tools/find_comparables_along_axis`), bearer-token-gated.
 
-### Phase 4b: Spatial context (remaining)
-Tenant-perspective overlays beyond anchor amenities.
-- `compute_walkability`: scored composite of POI distances.
-- `find_comparables_along_axis`: transit-line-aware comparable search.
+## Next
 
 ### Phase 7: The reasoning agent (target)
 The end-state. An Anthropic tool-use loop that takes a listing URL and

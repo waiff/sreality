@@ -221,7 +221,20 @@ separate dev/staging database. Treat every operation accordingly.
     on subsequent fetches under different categories. The
     canonical category taxonomy lives in
     `toolkit/amenities.CATEGORY_TAGS`; add new categories there.
-11. **`estimation_runs` is the single source of truth for every
+11. **`transit_lines` + `transit_line_fetches` are a parallel OSM
+    mirror for route geometry (migration 028).** Populated by
+    `find_comparables_along_axis` on cache miss via Overpass. One
+    row per (relation, member way) pair — `source_id` is
+    `"relation/R/way/W"` — so a single relation produces N rows of
+    clean polylines and a way shared by two relations occupies two
+    rows. Avoids the merge ambiguity that bites when a route has
+    branches or loops. Cache key is sha256 of the canonicalised
+    `(bbox, transport_types)` pair; bbox values are rounded inside
+    `_bbox_around` so identical anchor + radius callers share the
+    same cache row. TTL default 30 days, matching the amenity TTL.
+    Same accumulate-and-prune discipline as amenities; allowed
+    transport types are tram / subway / bus.
+12. **`estimation_runs` is the single source of truth for every
     estimation.** Every UI/API/ClickUp/agent invocation lands here.
     Synchronous deterministic mode INSERTs once with a terminal
     `status` (`'success'` or `'failed'`); the schema reserves
@@ -260,7 +273,7 @@ service that exposes it (`api/`). They do not apply to the scraper.
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval
    'X days'` (default 7).** Don't trust `is_active` alone — a listing not
    seen for 30 days is functionally inactive.
-5. **No writes from the toolkit, with four explicit exceptions.**
+5. **No writes from the toolkit, with five explicit exceptions.**
    Read-only by default. The exceptions are:
    - `verify_listing_freshness` (and `scraper.freshness.freshness_check`
      that it wraps), which exists so an agent can confirm a comparable
@@ -272,6 +285,12 @@ service that exposes it (`api/`). They do not apply to the scraper.
      in OpenStreetMap, not our scrape, so we cache them locally to
      keep repeated lookups fast and Overpass-friendly. The cache is a
      pure mirror — no derived analytical state lives in those tables.
+   - `find_comparables_along_axis`, which writes to the OSM-mirror
+     tables `transit_lines` and `transit_line_fetches` (migration 028)
+     on a cache miss. Same rationale as `find_anchor_amenities`:
+     transit-route geometry lives in OSM, not our scrape. The cache
+     key is `(bbox, transport_types)`, hashed canonically so two
+     callers using identical params share the same cache row.
    - `summarize_listing`, which writes a structured Claude summary of
      a listing snapshot to `listing_summaries` (keyed on
      `(sreality_id, snapshot_id)`) on cache miss. Same rationale as
@@ -284,7 +303,7 @@ service that exposes it (`api/`). They do not apply to the scraper.
      expensive than text, so caching matters more here than anywhere
      else in the toolkit.
    No other toolkit function may write. The API service should still
-   connect with a read-only role if Postgres permits; these four paths
+   connect with a read-only role if Postgres permits; these five paths
    then need a separately-elevated route. For now we ship with one
    role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always
