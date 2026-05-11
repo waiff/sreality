@@ -186,6 +186,8 @@ export interface HealthSummary {
 export type EstimationStatus = 'pending' | 'running' | 'success' | 'failed';
 export type EstimationSource = 'ui' | 'api' | 'clickup';
 export type EstimationMode = 'deterministic' | 'agent';
+export type EstimationProvider = 'anthropic' | 'gemini';
+export type Population = 'active' | 'delisted' | 'all';
 /* Result confidence (estimate_yield) only ever returns the first three;
  * parse confidence (URL parser) can additionally be 'best_effort'. The
  * widened union covers both call sites. */
@@ -376,6 +378,9 @@ export interface EstimationFilters {
 export interface CreateEstimationIn extends Partial<EstimationFilters> {
   source?: EstimationSource;
   mode?: EstimationMode;
+  provider?: EstimationProvider;
+  skill?: string;
+  population?: Population;
   estimate_kind?: 'rent' | 'sale';
   url?: string;
   spec?: TargetSpecIn;
