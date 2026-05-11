@@ -152,6 +152,17 @@ export interface HealthFailureRow {
   given_up: boolean;
 }
 
+export interface HealthCategoryBlock {
+  category_main: 'byt' | 'dum' | 'komercni' | string;
+  category_type: 'pronajem' | 'prodej' | string;
+  active_now: number;
+  flipped_inactive_7d: number;
+  new_per_day_14d: HealthDayCount[];
+  flipped_per_day_7d: HealthDayCount[];
+  failures_total: number;
+  failures_given_up: number;
+}
+
 export interface HealthSummary {
   last_scrape_at: string | null;
   active_now: number;
@@ -164,6 +175,7 @@ export interface HealthSummary {
   failures_given_up: number;
   failures_total: number;
   failures_top10: HealthFailureRow[];
+  by_category: HealthCategoryBlock[];
 }
 
 /* -------------------------------------------------------------------------- */

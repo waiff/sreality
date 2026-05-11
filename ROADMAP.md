@@ -26,6 +26,10 @@ cdf89cc roadmap: refresh auto-status block
 2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
 6f7e6f7 Renumber visual-layer migration 026 -> 027
 4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
+e111edb roadmap: refresh auto-status block
+0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
+ebba60d roadmap: refresh auto-status block for review session
+7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
 ```
 
 <!-- END AUTO-STATUS -->
