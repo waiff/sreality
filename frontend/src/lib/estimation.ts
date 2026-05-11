@@ -49,11 +49,17 @@ export function buildEstimationPayload(
     expected_monthly_rent_czk: form.expected_monthly_rent_czk,
   };
 
+  // Rentals route through the agent (Phase 7 deliverable). Sales stay
+  // on the deterministic path until a sales_estimator_v1 skill ships
+  // — `api/agent.py` is rental-only today (initial prompt, terminator
+  // tool schema, and _finalise all assume rent fields).
+  const mode = form.estimate_kind === 'rent' ? 'agent' : 'deterministic';
+
   if (resolved.origin.kind === 'url') {
     const overrides = computeSpecOverrides(resolved.spec, editedSpec);
     return {
       source: 'ui',
-      mode: 'agent',
+      mode,
       estimate_kind: form.estimate_kind,
       url: resolved.origin.url,
       ...(overrides ? { spec_overrides: overrides } : {}),
@@ -64,7 +70,7 @@ export function buildEstimationPayload(
 
   return {
     source: 'ui',
-    mode: 'agent',
+    mode,
     estimate_kind: form.estimate_kind,
     spec: editedSpec,
     ...yieldFields,
