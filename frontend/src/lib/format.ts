@@ -47,6 +47,34 @@ export const fmtRelative = (iso: string | null | undefined): string => {
   return `${Math.round(days / 365)}${THIN_SPACE}yr ago`;
 };
 
+/* Migration 022 fields. The slug→Czech-label mapping lives in
+ * lib/enums.ts; these formatters are the friendly wrappers that fall
+ * back to '—' for nulls. */
+
+import {
+  CATEGORY_SUB_LABELS,
+  FURNISHED_LABELS,
+  OWNERSHIP_LABELS,
+  categorySubLabel,
+} from './enums';
+import type { Furnished, Ownership } from './types';
+
+export const fmtFurnished = (f: Furnished | null | undefined): string =>
+  f == null ? '—' : FURNISHED_LABELS[f];
+
+export const fmtOwnership = (o: Ownership | null | undefined): string =>
+  o == null ? '—' : OWNERSHIP_LABELS[o];
+
+export const fmtParkingLots = (n: number | null | undefined): string =>
+  n == null ? '—' : `${czNumber.format(n)}${NBSP}${n === 1 ? 'místo' : 'místa'}`;
+
+export const fmtCategorySub = (cb: number | null | undefined): string =>
+  cb == null ? '—' : (categorySubLabel(cb) ?? '—');
+
+/* Re-export the label dict so dropdowns can iterate values without
+ * a second import. */
+export { CATEGORY_SUB_LABELS, FURNISHED_LABELS, OWNERSHIP_LABELS };
+
 export const fmtAbsolute = (iso: string | null | undefined): string => {
   if (!iso) return '—';
   const d = new Date(iso);

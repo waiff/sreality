@@ -2,6 +2,8 @@ import { useMemo } from 'react';
 import type {
   Confidence,
   Disposition,
+  Furnished,
+  Ownership,
   PreviewListing,
   TargetSpecIn,
 } from '@/lib/types';
@@ -30,6 +32,20 @@ export interface EstimateFormState {
   has_balcony: TriValue;
   has_lift: TriValue;
   has_parking: TriValue;
+  /* Migration 022 — granular target attributes pre-filled from
+   * PreviewListing. These are display-only on the spec-review step
+   * for now; they reach the backend through ComparableFilters once
+   * the form's "Advanced filters" surface adopts them. */
+  estate_area: number | null;
+  usable_area: number | null;
+  garden_area: number | null;
+  category_sub_cb: number | null;
+  furnished: Furnished | null;
+  ownership: Ownership | null;
+  terrace: TriValue;
+  cellar: TriValue;
+  garage: TriValue;
+  parking_lots: number | null;
 
   // Yield.
   purchase_price_czk: number | null;
@@ -78,6 +94,16 @@ export function buildInitialFormState(
     has_balcony: triFromBool(listing.has_balcony),
     has_lift: triFromBool(listing.has_lift),
     has_parking: triFromBool(listing.has_parking),
+    estate_area: listing.estate_area,
+    usable_area: listing.usable_area,
+    garden_area: listing.garden_area,
+    category_sub_cb: listing.category_sub_cb,
+    furnished: listing.furnished,
+    ownership: listing.ownership,
+    terrace: triFromBool(listing.terrace),
+    cellar: triFromBool(listing.cellar),
+    garage: triFromBool(listing.garage),
+    parking_lots: listing.parking_lots,
     purchase_price_czk: null,
     ...FORM_DEFAULTS,
   };

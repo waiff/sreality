@@ -15,11 +15,13 @@ import {
   type TriState,
   PRICE_BOUNDS,
   AREA_BOUNDS,
+  ESTATE_AREA_BOUNDS,
+  USABLE_AREA_BOUNDS,
   DEFAULT_FILTERS,
   isDefault,
 } from '@/lib/filters';
-import { fmtCount } from '@/lib/format';
-import type { Disposition } from '@/lib/types';
+import { fmtCount, FURNISHED_LABELS, OWNERSHIP_LABELS, CATEGORY_SUB_LABELS } from '@/lib/format';
+import type { Disposition, Furnished, Ownership } from '@/lib/types';
 
 interface SidebarProps {
   filters: ListingFilters;
@@ -90,10 +92,183 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
             <TriRow label="Balcony"  value={filters.hasBalcony} onChange={(v) => set('hasBalcony', v)} />
             <TriRow label="Lift"     value={filters.hasLift}    onChange={(v) => set('hasLift', v)} />
             <TriRow label="Parking"  value={filters.hasParking} onChange={(v) => set('hasParking', v)} />
+            <TriRow label="Terrace"  value={filters.terrace}    onChange={(v) => set('terrace', v)} />
+            <TriRow label="Cellar"   value={filters.cellar}     onChange={(v) => set('cellar', v)} />
+            <TriRow label="Garage"   value={filters.garage}     onChange={(v) => set('garage', v)} />
           </div>
         </Section>
+
+        <RangeFilter
+          label="Lot area"
+          unit="m²"
+          bounds={ESTATE_AREA_BOUNDS}
+          value={[filters.estateAreaMin, filters.estateAreaMax]}
+          onChange={([min, max]) =>
+            onChange({ ...filters, estateAreaMin: min, estateAreaMax: max })
+          }
+        />
+
+        <RangeFilter
+          label="Usable area"
+          unit="m²"
+          bounds={USABLE_AREA_BOUNDS}
+          value={[filters.usableAreaMin, filters.usableAreaMax]}
+          onChange={([min, max]) =>
+            onChange({ ...filters, usableAreaMin: min, usableAreaMax: max })
+          }
+        />
+
+        <Section label="Min parking spaces">
+          <NumberCell
+            value={filters.parkingLotsMin}
+            placeholder="0"
+            onChange={(e) => {
+              const raw = e.target.value.replace(/\s/g, '');
+              if (raw === '') {
+                set('parkingLotsMin', null);
+                return;
+              }
+              const n = Number(raw);
+              if (Number.isFinite(n) && n >= 0) set('parkingLotsMin', Math.trunc(n));
+            }}
+          />
+        </Section>
+
+        <EnumPicker<Furnished>
+          label="Furnished"
+          value={filters.furnished}
+          options={FURNISHED_OPTIONS}
+          onChange={(v) => set('furnished', v)}
+        />
+
+        <EnumPicker<Ownership>
+          label="Ownership"
+          value={filters.ownership}
+          options={OWNERSHIP_OPTIONS}
+          onChange={(v) => set('ownership', v)}
+        />
+
+        <SubcategoryPicker
+          value={filters.categorySubCb}
+          onChange={(v) => set('categorySubCb', v)}
+        />
       </div>
     </aside>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Generic enum-button picker (any | each option). Used for Furnished /        */
+/* Ownership where the value space is small and discrete.                     */
+/* -------------------------------------------------------------------------- */
+
+interface EnumOption<T extends string> {
+  value: T;
+  label: string;
+}
+
+const FURNISHED_OPTIONS: ReadonlyArray<EnumOption<Furnished>> =
+  (Object.keys(FURNISHED_LABELS) as Furnished[]).map((v) => ({
+    value: v,
+    label: FURNISHED_LABELS[v],
+  }));
+
+const OWNERSHIP_OPTIONS: ReadonlyArray<EnumOption<Ownership>> =
+  (Object.keys(OWNERSHIP_LABELS) as Ownership[]).map((v) => ({
+    value: v,
+    label: OWNERSHIP_LABELS[v],
+  }));
+
+function EnumPicker<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T | null;
+  options: ReadonlyArray<EnumOption<T>>;
+  onChange: (v: T | null) => void;
+}) {
+  return (
+    <Section label={label}>
+      <div className="grid grid-cols-2 gap-1">
+        <PickButton on={value == null} onClick={() => onChange(null)}>
+          any
+        </PickButton>
+        {options.map((opt) => (
+          <PickButton
+            key={opt.value}
+            on={value === opt.value}
+            onClick={() => onChange(opt.value)}
+          >
+            {opt.label}
+          </PickButton>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+function PickButton({
+  on,
+  onClick,
+  children,
+}: {
+  on: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        'px-2 py-1.5 text-xs rounded-[var(--radius-sm)] border transition-colors',
+        on
+          ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]'
+          : 'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)]',
+      ].join(' ')}
+      aria-pressed={on}
+    >
+      {children}
+    </button>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Subcategory dropdown (sreality category_sub_cb). The full taxonomy is       */
+/* large (~30 codes) so a <select> is the right shape rather than a button     */
+/* grid; same UX pattern lib/format.fmtCategorySub already settled on.         */
+/* -------------------------------------------------------------------------- */
+
+function SubcategoryPicker({
+  value,
+  onChange,
+}: {
+  value: number | null;
+  onChange: (v: number | null) => void;
+}) {
+  const codes = (Object.keys(CATEGORY_SUB_LABELS) as string[])
+    .map(Number)
+    .sort((a, b) => a - b);
+  return (
+    <Section label="Subtype">
+      <select
+        value={value ?? ''}
+        onChange={(e) =>
+          onChange(e.target.value === '' ? null : Number(e.target.value))
+        }
+        className="w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+      >
+        <option value="">any</option>
+        {codes.map((cb) => (
+          <option key={cb} value={cb}>
+            {CATEGORY_SUB_LABELS[cb]}
+          </option>
+        ))}
+      </select>
+    </Section>
   );
 }
 

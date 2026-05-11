@@ -198,3 +198,76 @@ export const listEstimations = (
   request<EstimationListResponse>('/estimations', {
     query: params as Record<string, QueryValue>,
   });
+
+/* ----- admin / Settings page --------------------------------------------
+ *
+ * The /admin/* prefix is exempted from the API_TOKEN bearer gate per
+ * CLAUDE.md rule #8 (same exemption category as /health). The private
+ * Railway URL is the security perimeter for these routes.
+ */
+
+export interface AgentTool {
+  name: string;
+  description: string;
+}
+
+export interface SkillLimits {
+  max_iterations: number;
+  max_cost_usd: number;
+  wall_clock_timeout_s: number;
+}
+
+export interface Skill {
+  name: string;
+  description: string;
+  system_prompt: string;
+  allowed_tools: string[];
+  preferred_model: Record<string, string>;
+  limits: SkillLimits;
+  updated_at: string | null;
+}
+
+export interface SkillUpdate {
+  description?: string;
+  system_prompt?: string;
+  allowed_tools?: string[];
+  preferred_model?: Record<string, string>;
+  limits?: SkillLimits;
+}
+
+export interface AppSetting {
+  key: string;
+  value: unknown;
+  description: string | null;
+  updated_at: string | null;
+}
+
+export const listSkills = (): Promise<{ data: Skill[] }> =>
+  request<{ data: Skill[] }>('/admin/skills');
+
+export const getSkill = (name: string): Promise<Skill> =>
+  request<Skill>(`/admin/skills/${encodeURIComponent(name)}`);
+
+export const updateSkill = (
+  name: string,
+  patch: SkillUpdate,
+): Promise<Skill> =>
+  request<Skill>(`/admin/skills/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    json: patch,
+  });
+
+export const listAppSettings = (): Promise<{ data: AppSetting[] }> =>
+  request<{ data: AppSetting[] }>('/admin/app_settings');
+
+export const updateAppSetting = (
+  key: string,
+  value: unknown,
+): Promise<AppSetting> =>
+  request<AppSetting>(`/admin/app_settings/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    json: { value },
+  });
+
+export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
+  request<{ data: AgentTool[] }>('/admin/tools');

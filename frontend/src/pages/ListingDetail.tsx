@@ -13,6 +13,10 @@ import {
   fmtPricePerM2,
   fmtRelative,
   fmtAbsolute,
+  fmtFurnished,
+  fmtOwnership,
+  fmtParkingLots,
+  fmtCategorySub,
 } from '@/lib/format';
 import type {
   ImagePublic,
@@ -313,20 +317,87 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
       : String(listing.floor)
     : null;
 
-  const facts: Array<{ label: string; value: string | null; mono?: boolean }> = [
+  /* Three sub-sections to keep cells from wrapping awkwardly under the
+   * 18 facts surface (was 8 before migration 022). Each row uses the
+   * same 2/3/4-col responsive grid, so the visual rhythm matches the
+   * earlier single-block layout. Fields that are universally NULL for a
+   * given category (estate_area / garden_area on apartments, furnished
+   * on for-sale listings) drop out automatically — Detail() filters
+   * each list before rendering. */
+
+  const property: Fact[] = pruneNulls([
+    { label: 'Disposition', value: listing.disposition, mono: true },
+    { label: 'Subtype', value: fmtCategorySubOrNull(listing.category_sub_cb) },
+    { label: 'Usable area', value: fmtAreaOrNull(listing.usable_area), mono: true },
+    { label: 'Lot area', value: fmtAreaOrNull(listing.estate_area), mono: true },
+    { label: 'Garden area', value: fmtAreaOrNull(listing.garden_area), mono: true },
     { label: 'Floor', value: floor, mono: true },
+    { label: 'District', value: listing.district },
+  ]);
+
+  const building: Fact[] = pruneNulls([
     { label: 'Building', value: capitalise(listing.building_type) },
     { label: 'Condition', value: capitalise(listing.condition) },
     { label: 'Energy class', value: listing.energy_rating, mono: true },
+    {
+      label: 'Ownership',
+      value: listing.ownership ? fmtOwnership(listing.ownership) : null,
+    },
+    {
+      label: 'Furnished',
+      value: listing.furnished ? fmtFurnished(listing.furnished) : null,
+    },
+  ]);
+
+  const amenities: Fact[] = pruneNulls([
     { label: 'Balcony', value: yesNo(listing.has_balcony) },
+    { label: 'Terrace', value: yesNo(listing.terrace) },
     { label: 'Lift', value: yesNo(listing.has_lift) },
+    { label: 'Cellar', value: yesNo(listing.cellar) },
+    { label: 'Garage', value: yesNo(listing.garage) },
     { label: 'Parking', value: yesNo(listing.has_parking) },
-    { label: 'District', value: listing.district },
-  ];
+    {
+      label: 'Parking spaces',
+      value: listing.parking_lots != null && listing.parking_lots > 0
+        ? fmtParkingLots(listing.parking_lots)
+        : null,
+      mono: true,
+    },
+  ]);
 
   return (
+    <div className="space-y-7">
+      <FactsGrid title="Property" facts={property} />
+      {building.length > 0 && <FactsGrid title="Building" facts={building} />}
+      {amenities.length > 0 && <FactsGrid title="Amenities" facts={amenities} />}
+    </div>
+  );
+}
+
+interface Fact {
+  label: string;
+  value: string | null;
+  mono?: boolean;
+}
+
+function pruneNulls(facts: Fact[]): Fact[] {
+  return facts.filter((f) => f.value != null);
+}
+
+function fmtAreaOrNull(n: number | null): string | null {
+  return n == null ? null : fmtArea(n);
+}
+
+function fmtCategorySubOrNull(cb: number | null): string | null {
+  if (cb == null) return null;
+  const out = fmtCategorySub(cb);
+  return out === '—' ? null : out;
+}
+
+function FactsGrid({ title, facts }: { title: string; facts: Fact[] }) {
+  return (
     <div>
-      <SectionLabel>Key facts</SectionLabel>
+      <SectionLabel>{title}</SectionLabel>
       <dl className="mt-3 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
         {facts.map((f) => (
           <div key={f.label}>
@@ -335,12 +406,11 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
             </dt>
             <dd
               className={[
-                'mt-1 text-sm',
-                f.value == null ? 'text-[var(--color-ink-4)]' : 'text-[var(--color-ink)]',
+                'mt-1 text-sm text-[var(--color-ink)]',
                 f.mono ? 'font-mono tabular-nums' : '',
               ].join(' ')}
             >
-              {f.value ?? '—'}
+              {f.value}
             </dd>
           </div>
         ))}

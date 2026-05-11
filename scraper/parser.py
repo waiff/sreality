@@ -34,6 +34,24 @@ PRICE_UNIT_BY_CODE: dict[int, str] = {
     2: "měsíc",
 }
 
+# Sreality enum codes for the structured fields we promote to typed
+# columns in migration 022. Same forgiving pattern as CATEGORY_TYPE:
+# unknown codes (including 0, which sreality uses for "not specified")
+# return None instead of raising. Czech labels are stored without
+# diacritics to match the existing convention for category_main /
+# category_type values.
+FURNISHED: dict[int, str] = {
+    1: "ano",       # vybaveno
+    2: "ne",        # nevybaveno
+    3: "castecne",  # částečně vybaveno
+}
+
+OWNERSHIP: dict[int, str] = {
+    1: "osobni",      # osobní
+    2: "druzstevni",  # družstevní
+    3: "statni",      # státní/obecní
+}
+
 _DISPOSITION_RE = re.compile(r"\b(\d\+(?:kk|\d))\b", re.IGNORECASE)
 _FLOOR_RE = re.compile(r"\s*(-?\d+)\.\s*podla", re.IGNORECASE)
 _TOTAL_FLOORS_RE = re.compile(r"z\s*celkem\s*(\d+)", re.IGNORECASE)
@@ -90,6 +108,16 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "building_type": _building_type(items_by_name),
         "condition": _condition(items_by_name),
         "energy_rating": _energy_rating(items_by_name),
+        "estate_area": _numeric_or_none(rec.get("estate_area")),
+        "usable_area": _numeric_or_none(rec.get("usable_area")),
+        "garden_area": _numeric_or_none(rec.get("garden_area")),
+        "category_sub_cb": _int_or_none(rec.get("category_sub_cb")),
+        "furnished": FURNISHED.get(_int_or_none(rec.get("furnished"))),
+        "terrace": _bool_or_none(rec.get("terrace")),
+        "cellar": _bool_or_none(rec.get("cellar")),
+        "garage": _bool_or_none(rec.get("garage")),
+        "parking_lots": _int_or_none(rec.get("parking_lots")),
+        "ownership": OWNERSHIP.get(_int_or_none(rec.get("ownership"))),
     }
 
 
@@ -315,3 +343,27 @@ def _id_or_none(value: Any) -> int | None:
     """Like _int_or_none but maps sreality's -1 sentinel ("unknown") to None."""
     out = _int_or_none(value)
     return None if out is None or out < 0 else out
+
+
+def _numeric_or_none(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.replace(",", "."))
+        except ValueError:
+            return None
+    return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    """Sreality returns 0/1 for amenity flags; missing key → None."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return None
