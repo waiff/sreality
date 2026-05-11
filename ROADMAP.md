@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 13:04 UTC_
+_Last refreshed: 2026-05-11 14:12 UTC_
 
-**Branch:** `claude/fix-estimate-search-params-mv978`
+**Branch:** `claude/map-comparables-popup-jVns6`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 30 files, latest `030_sales_estimate.sql`.
+**Migrations on disk:** 31 files, latest `031_estimation_subject_summary.sql`.
 
 **Last 10 commits:**
 
 ```
+7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
+ab6c923 roadmap: refresh auto-status block
 869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
+b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv978
 7476a00 Merge main into claude/fix-estimate-search-params-mv978
 3e59110 estimate: hand cohort filters to the agent, surface its strategy in the trace
 3d32614 Merge pull request #45 from waiff/claude/review-unmerged-commits-HCsoE
 672902b Merge remote-tracking branch 'origin/main' into claude/review-unmerged-commits-HCsoE
 dfaea3e roadmap: refresh auto-status block
 0368c61 roadmap: refresh auto-status block
-583cf38 Merge pull request #44 from waiff/claude/debug-fix-errors-yOVNP
-1692c13 roadmap: refresh auto-status block
-79f162f Merge remote-tracking branch 'origin/main' into claude/debug-fix-errors-yOVNP
 ```
 
 <!-- END AUTO-STATUS -->

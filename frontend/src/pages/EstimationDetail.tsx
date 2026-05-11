@@ -1,17 +1,21 @@
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchEstimation,
+  fetchImagesByListingIds,
+  fetchListingsByIds,
   submitEstimation,
 } from '@/lib/queries';
 import {
   fmtAbsolute,
   fmtArea,
   fmtCzk,
+  fmtPricePerM2,
   fmtRelative,
 } from '@/lib/format';
-import { ApiError } from '@/lib/api';
+import { ApiError, fetchListingSummaries } from '@/lib/api';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
 import type {
@@ -20,8 +24,19 @@ import type {
   CreateEstimationIn,
   EstimationRun,
   EstimationSource,
+  ImagePublic,
+  ListingPublic,
+  ListingSummaryBatchRow,
+  SubjectSummary,
   TargetSpecIn,
 } from '@/lib/types';
+
+const ComparablesMap = lazy(
+  () => import('@/components/estimation/ComparablesMap'),
+);
+const ComparableModal = lazy(
+  () => import('@/components/estimation/ComparableModal'),
+);
 
 export default function EstimationDetail() {
   const { id: idParam } = useParams();
@@ -75,6 +90,14 @@ export default function EstimationDetail() {
     <Page>
       <Crumb />
       <Header run={run} />
+
+      {!isFailed && run.subject_summary && (
+        <>
+          <Hairline />
+          <SubjectSummaryBlock summary={run.subject_summary} />
+        </>
+      )}
+
       <Hairline />
 
       {isFailed ? (
@@ -104,7 +127,7 @@ export default function EstimationDetail() {
       {!isFailed && (
         <>
           <Hairline />
-          <ComparablesBlock comps={run.comparables_used ?? []} />
+          <ComparablesSection run={run} />
         </>
       )}
 
@@ -425,10 +448,92 @@ function Fact({ label, value }: { label: string; value: string | null }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Comparables table                                                          */
+/* Subject summary (top of page when sreality_id is set)                      */
 /* -------------------------------------------------------------------------- */
 
-function ComparablesBlock({ comps }: { comps: ComparableUsed[] }) {
+function SubjectSummaryBlock({ summary }: { summary: SubjectSummary }) {
+  const body = summary.summary;
+  const empty =
+    !body.location_summary &&
+    !body.building_summary &&
+    !body.apartment_summary;
+  if (empty) return null;
+  return (
+    <div>
+      <SectionLabel>Subject summary</SectionLabel>
+      {body.headline && (
+        <p className="mt-3 text-[1.05rem] text-[var(--color-ink)] leading-snug">
+          {body.headline}
+        </p>
+      )}
+      <div className="mt-4 grid gap-4 md:grid-cols-3">
+        <SummaryCell label="Location" text={body.location_summary} />
+        <SummaryCell label="Building" text={body.building_summary} />
+        <SummaryCell label="Apartment" text={body.apartment_summary} />
+      </div>
+    </div>
+  );
+}
+
+function SummaryCell({ label, text }: { label: string; text?: string | null }) {
+  return (
+    <div>
+      <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        {label}
+      </p>
+      <p className="mt-1.5 text-sm text-[var(--color-ink)] leading-relaxed">
+        {text || <span className="text-[var(--color-ink-4)]">—</span>}
+      </p>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Comparables — map + table + popup                                          */
+/* -------------------------------------------------------------------------- */
+
+function ComparablesSection({ run }: { run: EstimationRun }) {
+  const comps = useMemo(
+    () => sortedComparables(run.comparables_used ?? []),
+    [run.comparables_used],
+  );
+  const ids = useMemo(() => comps.map((c) => c.sreality_id), [comps]);
+  const [activeId, setActiveId] = useState<number | null>(null);
+
+  const listingsQ = useQuery<Map<number, ListingPublic>, Error>({
+    queryKey: ['estimation-comparables', 'listings', ids.join(',')],
+    queryFn: () => fetchListingsByIds(ids),
+    enabled: ids.length > 0,
+    staleTime: 60_000,
+  });
+
+  const imagesQ = useQuery<Map<number, ImagePublic[]>, Error>({
+    queryKey: ['estimation-comparables', 'images', ids.join(',')],
+    queryFn: () => fetchImagesByListingIds(ids, 6),
+    enabled: ids.length > 0,
+    staleTime: 5 * 60_000,
+  });
+
+  const summariesQ = useQuery<Map<number, ListingSummaryBatchRow>, Error>({
+    queryKey: [
+      'estimation-comparables',
+      'summaries',
+      comps.map((c) => `${c.sreality_id}:${c.snapshot_id ?? ''}`).join(','),
+    ],
+    queryFn: async () => {
+      const items = comps.map((c) => ({
+        sreality_id: c.sreality_id,
+        snapshot_id: c.snapshot_id,
+      }));
+      const res = await fetchListingSummaries(items);
+      const map = new Map<number, ListingSummaryBatchRow>();
+      for (const row of res.data) map.set(row.sreality_id, row);
+      return map;
+    },
+    enabled: ids.length > 0,
+    staleTime: 10 * 60_000,
+  });
+
   if (comps.length === 0) {
     return (
       <div>
@@ -439,9 +544,33 @@ function ComparablesBlock({ comps }: { comps: ComparableUsed[] }) {
       </div>
     );
   }
-  const sorted = [...comps].sort(
-    (a, b) => (a.data_age_days ?? Infinity) - (b.data_age_days ?? Infinity),
-  );
+
+  const subjectLat = run.input_spec?.lat ?? null;
+  const subjectLng = run.input_spec?.lng ?? null;
+  const listings = listingsQ.data ?? new Map<number, ListingPublic>();
+  const images = imagesQ.data ?? new Map<number, ImagePublic[]>();
+  const summaries = summariesQ.data ?? new Map<number, ListingSummaryBatchRow>();
+
+  const mapPoints = comps
+    .map((c) => {
+      const l = listings.get(c.sreality_id);
+      if (!l || l.lat == null || l.lng == null) return null;
+      return {
+        sreality_id: l.sreality_id,
+        lat: l.lat,
+        lng: l.lng,
+        price_czk: l.price_czk,
+        area_m2: l.area_m2,
+        disposition: l.disposition,
+        district: l.district,
+      };
+    })
+    .filter((p): p is NonNullable<typeof p> => p !== null);
+
+  const activeListing = activeId != null ? listings.get(activeId) ?? null : null;
+  const activeSummary = activeId != null ? summaries.get(activeId) ?? null : null;
+  const activeImages = activeId != null ? images.get(activeId) ?? [] : [];
+
   return (
     <div>
       <div className="flex items-baseline justify-between">
@@ -450,49 +579,141 @@ function ComparablesBlock({ comps }: { comps: ComparableUsed[] }) {
           {comps.length}
         </p>
       </div>
-      <div className="mt-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] overflow-hidden">
+
+      {subjectLat != null && subjectLng != null && mapPoints.length > 0 && (
+        <div className="mt-4">
+          <Suspense
+            fallback={
+              <div className="h-80 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+            }
+          >
+            <ComparablesMap
+              subject={{ lat: subjectLat, lng: subjectLng }}
+              comparables={mapPoints}
+              onPick={(id) => setActiveId(id)}
+            />
+          </Suspense>
+        </div>
+      )}
+
+      <div className="mt-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] overflow-hidden">
         <table className="w-full text-sm">
           <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
             <tr>
               <Th align="left">ID</Th>
-              <Th align="left">Snapshot</Th>
+              <Th align="right">Price</Th>
+              <Th align="right">Area</Th>
+              <Th align="left">Disp.</Th>
+              <Th align="left">Summary</Th>
               <Th align="right">Age</Th>
-              <Th align="left">Verified</Th>
             </tr>
           </thead>
           <tbody>
-            {sorted.map((c) => (
-              <tr
+            {comps.map((c) => (
+              <ComparableRow
                 key={`${c.sreality_id}:${c.snapshot_id ?? 'none'}`}
-                className="border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors"
-              >
-                <td className="px-3 py-2 align-middle">
-                  <Link
-                    to={`/listing/${c.sreality_id}`}
-                    className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
-                  >
-                    {c.sreality_id}
-                  </Link>
-                </td>
-                <td className="px-3 py-2 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
-                  {c.snapshot_date ? c.snapshot_date.slice(0, 10) : '—'}
-                </td>
-                <td className="px-3 py-2 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
-                  {c.data_age_days != null ? `${c.data_age_days} d` : '—'}
-                </td>
-                <td className="px-3 py-2 align-middle text-[0.78rem]">
-                  {c.verified_during_estimate ? (
-                    <span className="text-[var(--color-sage)]">verified</span>
-                  ) : (
-                    <span className="text-[var(--color-ink-4)]">—</span>
-                  )}
-                </td>
-              </tr>
+                comp={c}
+                listing={listings.get(c.sreality_id) ?? null}
+                summary={summaries.get(c.sreality_id) ?? null}
+                onOpen={() => setActiveId(c.sreality_id)}
+                listingsLoading={listingsQ.isLoading}
+                summariesLoading={summariesQ.isLoading}
+              />
             ))}
           </tbody>
         </table>
       </div>
+
+      {activeId != null && activeListing && (
+        <Suspense fallback={null}>
+          <ComparableModal
+            listing={activeListing}
+            images={activeImages}
+            summary={activeSummary?.summary ?? null}
+            summaryError={activeSummary?.error ?? null}
+            summaryLoading={summariesQ.isLoading}
+            onClose={() => setActiveId(null)}
+          />
+        </Suspense>
+      )}
     </div>
+  );
+}
+
+function ComparableRow({
+  comp,
+  listing,
+  summary,
+  onOpen,
+  listingsLoading,
+  summariesLoading,
+}: {
+  comp: ComparableUsed;
+  listing: ListingPublic | null;
+  summary: ListingSummaryBatchRow | null;
+  onOpen: () => void;
+  listingsLoading: boolean;
+  summariesLoading: boolean;
+}) {
+  const ppm = listing
+    ? fmtPricePerM2(listing.price_czk, listing.area_m2)
+    : null;
+  const locText =
+    summary?.summary?.location_summary ??
+    (summariesLoading
+      ? 'Generating…'
+      : summary?.error
+        ? `Summary unavailable (${summary.error})`
+        : '—');
+  return (
+    <tr
+      onClick={onOpen}
+      className="cursor-pointer border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors"
+    >
+      <td className="px-3 py-2 align-middle">
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen();
+          }}
+          className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          {comp.sreality_id}
+        </button>
+      </td>
+      <td className="px-3 py-2 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
+        {listingsLoading && !listing
+          ? <span className="text-[var(--color-ink-4)]">…</span>
+          : listing ? fmtCzk(listing.price_czk) : '—'}
+        {ppm && ppm !== '—' && (
+          <span className="block text-[0.7rem] text-[var(--color-ink-4)] font-normal">
+            {ppm}
+          </span>
+        )}
+      </td>
+      <td className="px-3 py-2 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {listing ? fmtArea(listing.area_m2) : '—'}
+      </td>
+      <td className="px-3 py-2 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
+        {listing?.disposition ?? '—'}
+      </td>
+      <td className="px-3 py-2 align-middle text-[0.82rem] text-[var(--color-ink-2)]">
+        <span className="line-clamp-2 leading-snug">{locText}</span>
+      </td>
+      <td className="px-3 py-2 align-middle text-right font-mono tabular-nums text-[var(--color-ink-3)] text-[0.78rem]">
+        {comp.data_age_days != null ? `${comp.data_age_days} d` : '—'}
+        {comp.verified_during_estimate && (
+          <span className="block text-[var(--color-sage)]">verified</span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function sortedComparables(comps: ComparableUsed[]): ComparableUsed[] {
+  return [...comps].sort(
+    (a, b) => (a.data_age_days ?? Infinity) - (b.data_age_days ?? Infinity),
   );
 }
 

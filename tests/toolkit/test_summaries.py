@@ -28,6 +28,7 @@ def test_tool_schema_has_all_required_fields():
     assert required == {
         "headline", "key_highlights", "concerns",
         "condition_assessment", "target_audience",
+        "location_summary", "building_summary", "apartment_summary",
     }
 
 
@@ -62,6 +63,42 @@ def test_cache_hit_does_not_call_llm():
     assert res["data"]["summary"] == summary
     assert res["data"]["sreality_id"] == 123
     assert res["data"]["snapshot_id"] == 42
+
+
+# ---- Cache invalidation on schema upgrade ---------------------------------
+
+
+def test_cached_row_missing_new_fields_is_treated_as_cache_miss():
+    """Rows cached before migration 031 lack location/building/apartment.
+
+    The new code must treat those as a cache miss and regenerate, so
+    the legacy 5-field cache rolls forward as listings get re-summarised.
+    """
+    legacy = {
+        "headline": "h",
+        "key_highlights": [],
+        "concerns": [],
+        "condition_assessment": "good",
+        "target_audience": "couple",
+    }
+    fresh = _example_summary()
+    plan = [
+        ("fetchone", (42, _NOW, {"text": "..."})),  # snapshot
+        # cache lookup returns the legacy row — code treats as miss
+        ("fetchone", (legacy, "claude-sonnet-4-5", 0.0042)),
+        ("fetchone", _listing_row()),               # _fetch_listing
+        ("execute_write", None),                    # _cache_store
+    ]
+    conn = _make_conn(plan)
+    llm = _FakeLLM([_llm_response(fresh)])
+
+    res = summaries.summarize_listing(
+        conn, llm, sreality_id=123,  # type: ignore[arg-type]
+    )
+
+    assert len(llm.calls) == 1
+    assert res["data"]["cache_hit"] is False
+    assert res["data"]["summary"] == fresh
 
 
 # ---- Cache miss path ------------------------------------------------------
@@ -168,7 +205,7 @@ def test_tool_call_missing_field_raises():
         ("fetchone", _listing_row()),
     ]
     conn = _make_conn(plan)
-    bad = {"headline": "h", "key_highlights": [], "concerns": []}  # missing 2 fields
+    bad = {"headline": "h", "key_highlights": [], "concerns": []}  # missing fields
     llm = _FakeLLM([_LLMResp(
         text="",
         tool_calls=[{"name": "record_listing_summary", "input": bad}],
@@ -212,6 +249,9 @@ def _example_summary() -> dict[str, Any]:
         "concerns": ["ground floor"],
         "condition_assessment": "good",
         "target_audience": "couple",
+        "location_summary": "Quiet inner-city street in Vinohrady.",
+        "building_summary": "Brick interwar building with lift, energy class C.",
+        "apartment_summary": "Compact 2+kk, 45 m², south-facing balcony.",
     }
 
 

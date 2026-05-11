@@ -284,6 +284,54 @@ export const fetchFreshnessChecksByListing = async (
   return (data ?? []) as unknown as ListingFreshnessCheckPublic[];
 };
 
+/* Batch fetch of the listings_public rows behind a set of comparables.
+ * Pulls the same field set as the detail page so the Estimate page's
+ * comparable modal can render rich info without an extra round-trip
+ * per listing. Returns a map keyed on sreality_id for O(1) lookup in
+ * the renderer. */
+export const fetchListingsByIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ListingPublic>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select(DETAIL_COLS)
+    .in('sreality_id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ListingPublic>();
+  for (const row of (data ?? []) as unknown as ListingPublic[]) {
+    out.set(row.sreality_id, row);
+  }
+  return out;
+};
+
+/* Batch image fetch for the comparables modal — first three per id is
+ * enough for the modal's thumbnail strip; the Listing Detail page
+ * still pulls the full set independently. */
+export const fetchImagesByListingIds = async (
+  ids: ReadonlyArray<number>,
+  perId = 3,
+): Promise<Map<number, ImagePublic[]>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('images_public')
+    .select('id,sreality_id,sequence,sreality_url,storage_path')
+    .in('sreality_id', ids as number[])
+    .order('sequence', { ascending: true, nullsFirst: false })
+    .order('id', { ascending: true });
+  if (error) throw error;
+  const out = new Map<number, ImagePublic[]>();
+  for (const row of (data ?? []) as unknown as ImagePublic[]) {
+    const arr = out.get(row.sreality_id);
+    if (arr) {
+      if (arr.length < perId) arr.push(row);
+    } else {
+      out.set(row.sreality_id, [row]);
+    }
+  }
+  return out;
+};
+
 export const fetchImagesByListing = async (
   sreality_id: number,
 ): Promise<ImagePublic[]> => {
