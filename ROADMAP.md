@@ -5,31 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 08:29 UTC_
+_Last refreshed: 2026-05-11 08:44 UTC_
 
-**Branch:** `claude/plan-rental-estimator-xQgTx`
+**Branch:** `claude/debug-fix-errors-yOVNP`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 25 files, latest `029_agent_runs.sql`.
+**Migrations on disk:** 28 files, latest `029_agent_runs.sql`.
 
 **Last 10 commits:**
 
 ```
+cfbfec4 Merge pull request #10 from waiff/claude/locality-ids-cleanup
+ccd54d6 Merge pull request #28 from waiff/claude/region-search-boxplots-dEa1K
+922668c Merge pull request #32 from waiff/claude/listings-schema-expansion-pX2nQ
+18b1eb0 Merge pull request #40 from waiff/claude/plan-rental-estimator-xQgTx
+6f3f727 Merge main into plan-rental-estimator, rename migration 028->029
+4937901 Merge main into listings-schema-expansion, resolve schemas.py conflict
+a16488a Merge main into region-search-boxplots, resolve README+ROADMAP conflicts
+34158c4 Resolve conflict: keep main's updated status section, preserve PR #10's R2 wording
+0299c64 roadmap: refresh auto-status block
 0463ac4 Add agent smoke test (script + GH Actions workflow)
-da036c9 roadmap: refresh auto-status block
-24169ee Phase 7 slice 1: provider-agnostic agent + Settings page
-09c9ccf Phase 7 slice 1: add migration 028 for the reasoning agent
-1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
-2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
-6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
-3a0c701 Merge pull request #37 from waiff/claude/plan-phase-6-t5ikU
-2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
-6f7e6f7 Renumber visual-layer migration 026 -> 027
-4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
-e111edb roadmap: refresh auto-status block
-0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
-ebba60d roadmap: refresh auto-status block for review session
 ```
 
 <!-- END AUTO-STATUS -->
