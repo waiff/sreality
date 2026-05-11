@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 03:40 UTC_
+_Last refreshed: 2026-05-11 06:22 UTC_
 
-**Branch:** `claude/plan-phase-5-DmD0C`
+**Branch:** `claude/plan-rental-estimator-xQgTx`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-11 03:40 UTC_
 **Last 10 commits:**
 
 ```
+2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
+6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
 3a0c701 Merge pull request #37 from waiff/claude/plan-phase-6-t5ikU
 2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
 6f7e6f7 Renumber visual-layer migration 026 -> 027
@@ -24,8 +26,6 @@ e111edb roadmap: refresh auto-status block
 0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
 ebba60d roadmap: refresh auto-status block for review session
 7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
-9e99ce5 roadmap: refresh, add scraper + operator-workflow tracks, auto-maintain
-e5dbf1e Merge pull request #34 from waiff/claude/listing-collections-feature-p07zI
 ```
 
 <!-- END AUTO-STATUS -->
