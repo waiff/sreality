@@ -242,6 +242,14 @@ class _LoopState:
     iterations: int = 0
     total_cost_usd: float = 0.0
     final_call: dict[str, Any] | None = None
+    # Audit trail: one record per find_comparables_relaxed call (each
+    # is a "round" of cohort selection). Surfaces in the trace as the
+    # comparable_selection_summary computation step at end-of-run.
+    selection_rounds: list[dict[str, Any]] = field(default_factory=list)
+    # Most recent reasoning text emitted by the LLM. Captured so each
+    # selection round can attribute "why the agent chose these
+    # filters this round" to the immediately preceding reasoning turn.
+    last_reasoning: str = ""
 
 
 # --- entrypoint -----------------------------------------------------------
@@ -328,6 +336,7 @@ def run_agent_estimation(
                     "tool_calls_queued": tool_names,
                     "provider": provider,
                 })
+            state.last_reasoning = _truncate(text, _REASONING_MAX_CHARS)
 
         if not completion.tool_calls:
             # Provider stopped without invoking a tool. Done — but not
@@ -387,7 +396,7 @@ def run_agent_estimation(
 
         messages.append(Message(role="user", content=list(results)))
 
-    return _finalise(
+    result = _finalise(
         state,
         skill=skill,
         provider=provider,
@@ -395,6 +404,36 @@ def run_agent_estimation(
         purchase_price_czk=purchase_price_czk,
         used_entry=_used_entry,
     )
+
+    _record_selection_summary(recorder, state, result, stop_reason)
+    return result
+
+
+def _record_selection_summary(
+    recorder: "TraceRecorder",
+    state: _LoopState,
+    result: AgentResult,
+    stop_reason: str,
+) -> None:
+    """Emit the v2-trace `comparable_selection_summary` computation step.
+
+    Captures the agent's per-round filter ladder, cohort diffs, and the
+    set of comparables it ultimately committed to. The frontend reads
+    this step to render the top-of-page strategy panel and the
+    per-iteration cohort-diff sub-panels.
+    """
+    final_ids = sorted(
+        int(c["sreality_id"]) for c in (result.data.get("comparables_used") or [])
+    )
+    final_filters = state.selection_rounds[-1]["filters"] if state.selection_rounds else None
+    with recorder.computation("comparable_selection_summary") as h:
+        h.set_summary({
+            "n_rounds": len(state.selection_rounds),
+            "rounds": state.selection_rounds,
+            "final_filters": final_filters,
+            "final_comparable_ids": final_ids,
+            "stop_reason": stop_reason,
+        })
 
 
 # --- tool dispatchers -----------------------------------------------------
@@ -421,11 +460,31 @@ def _handle_find_comparables_relaxed(
     if "max_age_days" in args:
         filters = replace(filters, max_age_days=int(args["max_age_days"]))
 
+    min_results = int(args.get("min_results", 5))
     result = find_comparables_relaxed(
-        state.conn, state.target, filters,
-        min_results=int(args.get("min_results", 5)),
+        state.conn, state.target, filters, min_results=min_results,
     )
     listings = result.get("data", {}).get("listings") or []
+
+    prev_ids = {int(l["sreality_id"]) for l in state.last_cohort}
+    new_ids = {int(l["sreality_id"]) for l in listings}
+    state.selection_rounds.append({
+        "n": len(state.selection_rounds) + 1,
+        "filters": {
+            "radius_m": filters.radius_m,
+            "area_band_pct": filters.area_band_pct,
+            "disposition_match": filters.disposition_match,
+            "max_age_days": filters.max_age_days,
+            "min_results": min_results,
+        },
+        "cohort_size": len(listings),
+        "cohort_ids": sorted(new_ids),
+        "added_ids": sorted(new_ids - prev_ids),
+        "removed_ids": sorted(prev_ids - new_ids),
+        "n_relaxations": len(result.get("data", {}).get("relaxation_trace") or []),
+        "reasoning": state.last_reasoning,
+    })
+
     state.last_cohort = listings
     return result
 

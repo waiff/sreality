@@ -22,6 +22,8 @@ import type { EstimationRun, PreviewListing } from '@/lib/types';
 
 const RegionMap = lazy(() => import('@/components/region/RegionMap'));
 
+const MAP_REFERENCE_RADIUS_M = 1000;
+
 type Stage =
   | { kind: 'input' }
   | { kind: 'editing'; resolved: ResolvedInput; form: EstimateFormState };
@@ -254,7 +256,7 @@ function TargetPreview({
             >
               <RegionMap
                 center={center}
-                radiusM={form.radius_m}
+                radiusM={MAP_REFERENCE_RADIUS_M}
                 onCenterChange={onMapChange}
               />
             </Suspense>
@@ -265,8 +267,8 @@ function TargetPreview({
           )}
         </div>
         <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
-          Copper circle = comparables search radius
-          ({form.radius_m.toLocaleString('cs-CZ')} m).
+          Copper circle is a 1 km neighbourhood reference. The agent
+          picks its own comparable-search radius per round.
         </p>
       </div>
 

@@ -218,12 +218,20 @@ def test_happy_path_records_estimate(monkeypatch, provider_name):
     trace = recorder.to_dict("ok")
     kinds = [s["kind"] for s in trace["steps"]]
     # reasoning + tool_call per turn × 3 turns, but the terminator
-    # has its own tool_call step so kinds is: r, t, r, t, r, t
+    # has its own tool_call step so the loop kinds are: r, t, r, t,
+    # r, t. The final `computation` step is the v2-trace
+    # comparable_selection_summary emitted after the loop.
     assert kinds == [
         "reasoning", "tool_call",
         "reasoning", "tool_call",
         "reasoning", "tool_call",
+        "computation",
     ]
+    summary_step = trace["steps"][-1]
+    assert summary_step["label"] == "comparable_selection_summary"
+    assert summary_step["output_summary"]["n_rounds"] == 1
+    assert summary_step["output_summary"]["final_comparable_ids"] == [100, 101, 102]
+    assert summary_step["output_summary"]["rounds"][0]["filters"]["radius_m"] == 1000
     # provider attribution on every llm_calls row
     assert all(
         row["params"][1] == provider_name for row in conn.llm_calls_rows

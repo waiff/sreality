@@ -190,7 +190,6 @@ export type EstimationMode = 'deterministic' | 'agent';
  * parse confidence (URL parser) can additionally be 'best_effort'. The
  * widened union covers both call sites. */
 export type Confidence = 'low' | 'medium' | 'high' | 'best_effort';
-export type DispositionMatch = 'exact' | 'loose' | 'any';
 
 /* Mirrors the CHECK constraint on estimation_runs.source_kind (migration 020). */
 export type SourceKind =
@@ -299,13 +298,13 @@ export interface EstimationRun {
 }
 
 /* Filter half of the POST /estimations body — mirrors ComparableFilters
- * via api/schemas.CreateEstimationIn. Only fields the UI actually exposes. */
+ * via api/schemas.CreateEstimationIn. Only fields the UI actually exposes.
+ *
+ * The five cohort-search knobs (radius_m, area_band_pct,
+ * disposition_match, max_age_days, active_only) intentionally do NOT
+ * appear here: the agent decides them per-iteration and deterministic
+ * runs use the backend's built-in defaults. */
 export interface EstimationFilters {
-  radius_m: number;
-  area_band_pct: number;
-  disposition_match: DispositionMatch;
-  max_age_days: number;
-  active_only: boolean;
   floor_band: number | null;
   condition_match: string[] | null;
   building_type_match: string[] | null;

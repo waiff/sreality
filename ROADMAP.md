@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 11:59 UTC_
+_Last refreshed: 2026-05-11 12:09 UTC_
 
 **Branch:** `claude/fix-street-dropdown-M0gpC`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-11 11:59 UTC_
 **Last 10 commits:**
 
 ```
+0a2e680 roadmap: refresh auto-status block
 07a4e9d roadmap: refresh auto-status block
 1f16afd Region: render Mapy.cz suggestions by name, not result-class label
 583cf38 Merge pull request #44 from waiff/claude/debug-fix-errors-yOVNP
@@ -25,7 +26,6 @@ _Last refreshed: 2026-05-11 11:59 UTC_
 e6ba736 roadmap: refresh auto-status block
 8c1f259 api: add CORS middleware gated by CORS_ALLOW_ORIGINS env var
 0929982 Merge pull request #42 from waiff/claude/add-sales-estimate-Uzsdi
-9fa0d86 test: accept new estimate_yield kwargs in auth-test fake
 ```
 
 <!-- END AUTO-STATUS -->

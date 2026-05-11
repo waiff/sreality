@@ -8,7 +8,6 @@ import {
 import {
   fmtAbsolute,
   fmtArea,
-  fmtCount,
   fmtCzk,
   fmtRelative,
 } from '@/lib/format';
@@ -337,14 +336,6 @@ function Warnings({ warnings }: { warnings: string[] }) {
 /* Input recap                                                                */
 /* -------------------------------------------------------------------------- */
 
-const FILTER_DEFAULTS = {
-  radius_m: 1000,
-  area_band_pct: 0.20,
-  disposition_match: 'exact',
-  max_age_days: 7,
-  active_only: true,
-} as const;
-
 function InputRecap({ run }: { run: EstimationRun }) {
   const spec = run.input_spec;
   const facts: Array<[string, string | null]> = [];
@@ -397,7 +388,6 @@ function InputRecap({ run }: { run: EstimationRun }) {
         {facts.map(([label, value]) => (
           <Fact key={label} label={label} value={value} />
         ))}
-        <NonDefaultFilters run={run} />
       </dl>
 
       {run.parent_run_id != null && (
@@ -416,34 +406,6 @@ function InputRecap({ run }: { run: EstimationRun }) {
   );
 }
 
-function NonDefaultFilters({ run }: { run: EstimationRun }) {
-  const trace = run.trace;
-  const filterStep = trace?.steps.find(
-    (s) => s.kind === 'tool_call' && (s as { tool: string }).tool === 'find_comparables',
-  );
-  const filtersUsed =
-    filterStep && filterStep.kind === 'tool_call'
-      ? (filterStep.input.filters as Record<string, unknown> | undefined)
-      : undefined;
-
-  if (!filtersUsed) return null;
-
-  const out: React.ReactNode[] = [];
-  for (const [k, defaultV] of Object.entries(FILTER_DEFAULTS)) {
-    const v = filtersUsed[k];
-    if (v != null && v !== defaultV) {
-      out.push(<Fact key={k} label={prettyFilterLabel(k)} value={fmtFilterValue(k, v)} />);
-    }
-  }
-  for (const k of ['has_balcony', 'has_lift', 'has_parking', 'floor_band']) {
-    const v = filtersUsed[k];
-    if (v != null) {
-      out.push(<Fact key={k} label={prettyFilterLabel(k)} value={fmtFilterValue(k, v)} />);
-    }
-  }
-  return <>{out}</>;
-}
-
 function Fact({ label, value }: { label: string; value: string | null }) {
   return (
     <div>
@@ -460,18 +422,6 @@ function Fact({ label, value }: { label: string; value: string | null }) {
       </dd>
     </div>
   );
-}
-
-function prettyFilterLabel(k: string): string {
-  return k.replaceAll('_', ' ');
-}
-
-function fmtFilterValue(k: string, v: unknown): string {
-  if (typeof v === 'boolean') return v ? 'yes' : 'no';
-  if (k === 'area_band_pct' && typeof v === 'number') return `±${Math.round(v * 100)}%`;
-  if (k === 'radius_m' && typeof v === 'number') return `${fmtCount(v)} m`;
-  if (k === 'max_age_days' && typeof v === 'number') return `${v} days`;
-  return String(v);
 }
 
 /* -------------------------------------------------------------------------- */
