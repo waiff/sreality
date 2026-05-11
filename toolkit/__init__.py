@@ -61,9 +61,14 @@ from toolkit.neighborhoods import describe_neighborhood  # noqa: E402
 from toolkit.outliers import find_distribution_outliers  # noqa: E402
 from toolkit.snapshots import compare_snapshots  # noqa: E402
 from toolkit.summaries import summarize_listing  # noqa: E402
+from toolkit.transit_axis import find_comparables_along_axis  # noqa: E402
 from toolkit.velocity import (  # noqa: E402
     compute_listing_velocity,
     compute_market_velocity,
+)
+from toolkit.walkability import (  # noqa: E402
+    compute_amenity_supply,
+    compute_walkability,
 )
 
 __all__ = [
@@ -75,11 +80,14 @@ __all__ = [
     "cluster_comparables",
     "compare_listing_images",
     "compare_snapshots",
+    "compute_amenity_supply",
     "compute_listing_velocity",
     "compute_market_velocity",
+    "compute_walkability",
     "describe_neighborhood",
     "find_anchor_amenities",
     "find_comparables",
+    "find_comparables_along_axis",
     "find_comparables_relaxed",
     "find_distribution_outliers",
     "summarize_listing",
