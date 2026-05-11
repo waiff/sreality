@@ -24,6 +24,9 @@ CATEGORY_TYPE: dict[int, str] = {
     1: "prodej",
     2: "pronajem",
     3: "drazba",
+    # cb=4 is "prodej podílu nemovitosti" (sale of a fractional ownership
+    # share). Surfaces from the prodej index walk; not its own search slice.
+    4: "podil",
 }
 
 PRICE_UNIT_BY_CODE: dict[int, str] = {

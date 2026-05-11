@@ -1,8 +1,9 @@
 """Tests for scraper.main._run_full — focused on the mark_inactive guard.
 
-Hermetic: monkeypatches db.* functions and provides a fake client.
-Asserts that mark_inactive is called only when the index walk is
-complete (limit is None).
+Hermetic: monkeypatches db.* functions and the SrealityClient builder so
+no network is touched. Asserts that mark_inactive is called only when
+the index walk is complete (limit is None) and that it is scoped per
+category pair so a rental walk doesn't clobber sale listings.
 """
 
 from __future__ import annotations
@@ -15,22 +16,39 @@ from scraper import main as scraper_main
 
 
 class _FakeClient:
+    """Yields a deterministic per-category id range so tests can assert
+    that mark_inactive is scoped correctly."""
+
     pages_fetched = 1
 
-    def __init__(self, total_entries: int = 100) -> None:
-        self._total = total_entries
+    def __init__(
+        self,
+        category_main: int,
+        category_type: int,
+        country_id: int = 10001,
+    ) -> None:
+        self.category_main = category_main
+        self.category_type = category_type
+        self.country_id = country_id
 
     def iter_index(self):
-        for i in range(self._total):
+        # Distinct id range per (cm, ct) so the per-category seen_ids
+        # set is observable in mark_inactive call args.
+        base = self.category_main * 10000 + self.category_type * 1000
+        total = _FakeClient.total_entries
+        for i in range(total):
             yield {
-                "hash_id": 1000 + i,
+                "hash_id": base + i,
                 "price_czk": {"value_raw": 10000 + i},
             }
 
 
+_FakeClient.total_entries = 5  # type: ignore[attr-defined]
+
+
 @pytest.fixture()
 def patched_db(monkeypatch):
-    """Patch every db.* helper used by _run_full. Track mark_inactive calls."""
+    """Patch every db.* helper used by _run_full + the per-category client."""
     calls: dict[str, list] = {
         "mark_inactive": [],
         "touch_listings": [],
@@ -41,9 +59,7 @@ def patched_db(monkeypatch):
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(
-        scraper_main.db, "connect", _FakeConn,
-    )
+    monkeypatch.setattr(scraper_main.db, "connect", _FakeConn)
     monkeypatch.setattr(
         scraper_main.db, "index_summary",
         lambda _conn, _ids: (calls["index_summary"].append(set(_ids)) or {}),
@@ -57,37 +73,53 @@ def patched_db(monkeypatch):
     )
     monkeypatch.setattr(
         scraper_main.db, "mark_inactive",
-        lambda _conn, ids: (calls["mark_inactive"].append(set(ids)) or 0),
+        lambda _conn, cm, ct, ids: (
+            calls["mark_inactive"].append((cm, ct, set(ids))) or 0
+        ),
     )
     monkeypatch.setattr(
         scraper_main, "_process_one",
         lambda *_a, **_kw: "unchanged",
     )
+    # Intercept SrealityClient construction in _build_client.
+    monkeypatch.setattr(scraper_main, "SrealityClient", _FakeClient)
     return calls
 
 
-def test_run_full_calls_mark_inactive_when_no_limit(patched_db):
-    rc = scraper_main._run_full(
-        _FakeClient(total_entries=5), limit=None, dry_run=False,
-    )
+def test_run_full_calls_mark_inactive_per_category_when_no_limit(patched_db):
+    rc = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
-    assert len(patched_db["mark_inactive"]) == 1
-    assert patched_db["mark_inactive"][0] == {1000, 1001, 1002, 1003, 1004}
+    # One mark_inactive call per category in CATEGORIES.
+    assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+
+    # Each call is scoped to its own (cm_text, ct_text) and carries the
+    # ids that came from that category's index walk only.
+    expected_pairs = {
+        ("byt", "pronajem"),
+        ("byt", "prodej"),
+        ("dum", "pronajem"),
+        ("dum", "prodej"),
+        ("komercni", "pronajem"),
+        ("komercni", "prodej"),
+    }
+    actual_pairs = {(cm, ct) for cm, ct, _ids in patched_db["mark_inactive"]}
+    assert actual_pairs == expected_pairs
+
+    # Spot-check that ids are category-scoped: byt/pronajem (1, 2) base = 12000.
+    by_pair = {(cm, ct): ids for cm, ct, ids in patched_db["mark_inactive"]}
+    assert by_pair[("byt", "pronajem")] == {12000, 12001, 12002, 12003, 12004}
+    assert by_pair[("byt", "prodej")] == {11000, 11001, 11002, 11003, 11004}
 
 
 def test_run_full_skips_mark_inactive_when_limit_set(patched_db):
-    rc = scraper_main._run_full(
-        _FakeClient(total_entries=100), limit=3, dry_run=False,
-    )
+    rc = scraper_main._run_full(limit=3, dry_run=False)
     assert rc == 0
-    assert patched_db["mark_inactive"] == []  # not called
+    assert patched_db["mark_inactive"] == []
 
 
 def test_run_full_skips_mark_inactive_when_limit_zero(patched_db):
     """limit=0 still means partial view, even if no listings were seen."""
-    rc = scraper_main._run_full(
-        _FakeClient(total_entries=100), limit=0, dry_run=False,
-    )
+    rc = scraper_main._run_full(limit=0, dry_run=False)
     assert rc == 0
     assert patched_db["mark_inactive"] == []
 
@@ -95,8 +127,6 @@ def test_run_full_skips_mark_inactive_when_limit_zero(patched_db):
 def test_dry_run_never_calls_mark_inactive(patched_db, monkeypatch):
     """dry_run skips the connection altogether, so mark_inactive can't run."""
     monkeypatch.setattr(scraper_main.db, "connect", lambda: None)
-    rc = scraper_main._run_full(
-        _FakeClient(total_entries=5), limit=None, dry_run=True,
-    )
+    rc = scraper_main._run_full(limit=None, dry_run=True)
     assert rc == 0
     assert patched_db["mark_inactive"] == []

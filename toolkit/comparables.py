@@ -20,7 +20,7 @@ spatial / freshness clauses don't need to be touched.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -349,4 +349,123 @@ def _cohort_freshness_stats(listings: list[dict[str, Any]]) -> dict[str, Any]:
         "newest_data_age_days": min(ages),
         "median_data_age_days": median,
         "unverified_count": unverified,
+    }
+
+
+_DEFAULT_RELAXATION_LADDER: tuple[str, ...] = (
+    "radius_x1.5",
+    "area_band_+0.10",
+    "disposition_loose",
+    "radius_x2",
+    "area_band_+0.20",
+    "disposition_any",
+    "drop_condition",
+    "drop_building_type",
+    "drop_energy_rating",
+    "drop_floor_band",
+)
+
+
+def _apply_relaxation(
+    filters: ComparableFilters, base: ComparableFilters, action: str,
+) -> ComparableFilters:
+    """Return a new ComparableFilters with the named relaxation applied.
+
+    Cumulative actions (radius_xN, area_band_+X) are computed off `base`
+    (the original strict filters) so applying step k always yields the
+    same widened value regardless of the order of intermediate steps.
+    """
+    if action == "radius_x1.5":
+        return replace(filters, radius_m=int(round(base.radius_m * 1.5)))
+    if action == "radius_x2":
+        return replace(filters, radius_m=int(round(base.radius_m * 2.0)))
+    if action == "area_band_+0.10":
+        return replace(filters, area_band_pct=base.area_band_pct + 0.10)
+    if action == "area_band_+0.20":
+        return replace(filters, area_band_pct=base.area_band_pct + 0.20)
+    if action == "disposition_loose":
+        if filters.disposition_match == "any":
+            return filters
+        return replace(filters, disposition_match="loose")
+    if action == "disposition_any":
+        return replace(filters, disposition_match="any")
+    if action == "drop_condition":
+        return replace(filters, condition_match=None)
+    if action == "drop_building_type":
+        return replace(filters, building_type_match=None)
+    if action == "drop_energy_rating":
+        return replace(filters, energy_rating_match=None)
+    if action == "drop_floor_band":
+        return replace(filters, floor_band=None)
+    raise ValueError(f"unknown relaxation action: {action}")
+
+
+def find_comparables_relaxed(
+    conn: "psycopg.Connection",
+    target: TargetSpec,
+    filters: ComparableFilters,
+    min_results: int = 5,
+    relaxation_ladder: list[str] | None = None,
+) -> dict[str, Any]:
+    """Wrap find_comparables with a deterministic relaxation ladder.
+
+    Runs the strict query first. If result_count < min_results, walks
+    `relaxation_ladder` (default `_DEFAULT_RELAXATION_LADDER`), applying
+    each action in order until the cohort hits min_results or the ladder
+    is exhausted. Every intermediate step is recorded in
+    `data.relaxation_trace` for full provenance. Locality, category,
+    price bounds, and active_only are NEVER relaxed — they encode user
+    intent.
+    """
+    from toolkit import _max_last_seen, _now_iso
+
+    ladder = (
+        list(relaxation_ladder)
+        if relaxation_ladder is not None
+        else list(_DEFAULT_RELAXATION_LADDER)
+    )
+
+    base = filters
+    current = filters
+    trace: list[dict[str, Any]] = []
+    last_result: dict[str, Any] = find_comparables(conn, target, current)
+    trace.append({
+        "step": 0,
+        "action": None,
+        "filters_snapshot": _filters_used(target, current),
+        "result_count": last_result["metadata"]["result_count"],
+    })
+
+    relaxations_applied = 0
+    if last_result["metadata"]["result_count"] < min_results:
+        for action in ladder:
+            current = _apply_relaxation(current, base, action)
+            last_result = find_comparables(conn, target, current)
+            relaxations_applied += 1
+            trace.append({
+                "step": relaxations_applied,
+                "action": action,
+                "filters_snapshot": _filters_used(target, current),
+                "result_count": last_result["metadata"]["result_count"],
+            })
+            if last_result["metadata"]["result_count"] >= min_results:
+                break
+
+    listings = last_result["data"]["listings"]
+    return {
+        "data": {
+            "listings": listings,
+            "relaxation_trace": trace,
+            "min_results_satisfied": len(listings) >= min_results,
+        },
+        "metadata": {
+            "tool": "find_comparables_relaxed",
+            "filters_used": _filters_used(target, current),
+            "result_count": len(listings),
+            "queried_at": _now_iso(),
+            "data_freshness": _max_last_seen(listings),
+            "relaxations_applied": relaxations_applied,
+            "min_results": min_results,
+            **_cohort_freshness_stats(listings),
+        },
     }

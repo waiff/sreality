@@ -14,8 +14,51 @@ import type {
   EstimationListParams,
   EstimationListResponse,
   EstimationRun,
+  ParseResult,
   PreviewResponse,
+  SourceKind,
 } from './types';
+
+/* Sources the backend allowlists for high-confidence parsing.
+ * Anything else falls through to a best-effort parse. The order is
+ * the order shown in the UI's "Supported:" tip line. Keep in sync
+ * with scraper/source_dispatcher._KIND_SUFFIXES on the backend. */
+export const SUPPORTED_SOURCES: ReadonlyArray<{
+  kind: SourceKind;
+  label: string;
+  hostHint: string;
+}> = [
+  { kind: 'sreality',      label: 'sreality',      hostHint: 'sreality.cz' },
+  { kind: 'bezrealitky',   label: 'bezrealitky',   hostHint: 'bezrealitky.cz' },
+  { kind: 'idnes_reality', label: 'idnes-reality', hostHint: 'reality.idnes.cz' },
+  { kind: 'remax',         label: 'remax',         hostHint: 'remax-czech.cz' },
+];
+
+/* Display label for a source kind. Falls back to the raw kind so
+ * unknown future kinds surface visibly rather than silently. */
+export const sourceKindLabel = (kind: SourceKind | null): string => {
+  if (kind == null) return '—';
+  if (kind === 'unsupported') return 'unsupported';
+  const found = SUPPORTED_SOURCES.find((s) => s.kind === kind);
+  return found ? found.label : kind;
+};
+
+/* Quick host-based classification — used by the URL input to choose
+ * the right loading copy ("Fetching listing…" vs "Reading listing
+ * with Claude…") before the request goes out. The backend re-classifies
+ * authoritatively; this is a UX optimisation, not a security boundary. */
+export const classifyUrlHost = (url: string): SourceKind => {
+  let host: string;
+  try {
+    host = new URL(url.trim()).hostname.toLowerCase();
+  } catch {
+    return 'unsupported';
+  }
+  for (const { kind, hostHint } of SUPPORTED_SOURCES) {
+    if (host === hostHint || host.endsWith('.' + hostHint)) return kind;
+  }
+  return 'unsupported';
+};
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? '';
@@ -119,8 +162,27 @@ export const apiPost = <T>(
 
 /* ----- estimations ------------------------------------------------------- */
 
+// TODO(estimation-5 Part B): delete `previewListing` + the
+// `fetchEstimationPreview` re-export in lib/queries.ts once
+// UrlScrapeStep.tsx is migrated to previewListingUrl + useUrlPreview.
+// The new POST /estimations/preview routes sreality through the same
+// dispatcher, so the legacy GET endpoint becomes dead code at that point.
 export const previewListing = (url: string): Promise<PreviewResponse> =>
   request<PreviewResponse>('/estimations/preview', { query: { url } });
+
+/* POST /estimations/preview — generic URL parser (sreality fast path
+ * + LLM-driven per-source parser for everything else, dispatched on
+ * the backend). When force_refresh is true the 7-day URL cache is
+ * bypassed and a fresh parse is performed (the cache row is also
+ * upserted on success). */
+export const previewListingUrl = (
+  url: string,
+  options: { force_refresh?: boolean } = {},
+): Promise<ParseResult> =>
+  request<ParseResult>('/estimations/preview', {
+    method: 'POST',
+    json: { url, force_refresh: options.force_refresh ?? false },
+  });
 
 export const createEstimation = (
   input: CreateEstimationIn,

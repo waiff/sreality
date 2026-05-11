@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from fastapi import Header, HTTPException
+from fastapi import Depends, Header, HTTPException
 
 from scraper import db
 from scraper.sreality_client import SrealityClient
@@ -32,6 +32,16 @@ def get_sreality_client() -> SrealityClient:
     if _CLIENT is None:
         _CLIENT = SrealityClient()
     return _CLIENT
+
+
+def get_llm_client(conn: Any = Depends(get_db_conn)) -> Any:
+    """Per-request LLMClient bound to the request's DB connection.
+
+    Imported lazily so the module loads in environments without the
+    `anthropic` package (e.g. tests that don't exercise this path).
+    """
+    from api.llm_client import LLMClient
+    return LLMClient(conn)
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:

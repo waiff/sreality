@@ -302,6 +302,160 @@ def test_fetch_throttles_between_back_to_back_calls(
     assert any(abs(s - 1.5) < 0.01 for s in sleep_calls)
 
 
+# Route query rendering
+
+
+def test_build_route_query_single_type():
+    body = oc._build_route_query(
+        ["tram"],
+        bbox_minlat=50.0, bbox_minlng=14.4,
+        bbox_maxlat=50.1, bbox_maxlng=14.5,
+    )
+    assert body.startswith("[out:json][timeout:60];")
+    assert body.rstrip().endswith("out geom;")
+    assert (
+        'relation["type"="route"]["route"="tram"](50.0,14.4,50.1,14.5);'
+    ) in body
+
+
+def test_build_route_query_multiple_types():
+    body = oc._build_route_query(
+        ["tram", "subway", "bus"],
+        bbox_minlat=50.0, bbox_minlng=14.4,
+        bbox_maxlat=50.1, bbox_maxlng=14.5,
+    )
+    assert body.count("(50.0,14.4,50.1,14.5)") == 3
+    assert '"route"="tram"' in body
+    assert '"route"="subway"' in body
+    assert '"route"="bus"' in body
+
+
+# Route response parsing
+
+
+def test_parse_route_elements_emits_one_row_per_member_way():
+    rel = {
+        "type": "relation", "id": 100,
+        "tags": {"type": "route", "route": "tram", "ref": "9", "name": "Tram 9"},
+        "members": [
+            {
+                "type": "way", "ref": 11,
+                "geometry": [
+                    {"lat": 50.0, "lon": 14.0},
+                    {"lat": 50.01, "lon": 14.01},
+                ],
+            },
+            {
+                "type": "way", "ref": 12,
+                "geometry": [
+                    {"lat": 50.01, "lon": 14.01},
+                    {"lat": 50.02, "lon": 14.02},
+                ],
+            },
+            {
+                "type": "node", "ref": 99,
+                "role": "stop",
+                # nodes are stops/anchors; not lines.
+            },
+        ],
+    }
+    rows = oc._parse_route_elements([rel])
+    assert [r["source_id"] for r in rows] == [
+        "relation/100/way/11", "relation/100/way/12",
+    ]
+    assert all(r["transport_type"] == "tram" for r in rows)
+    assert all(r["route_ref"] == "9" for r in rows)
+    assert rows[0]["linestring"] == [(50.0, 14.0), (50.01, 14.01)]
+
+
+def test_parse_route_elements_drops_non_route_transport_types():
+    # train relation is intentionally out of scope
+    rel = {
+        "type": "relation", "id": 200,
+        "tags": {"type": "route", "route": "train"},
+        "members": [{"type": "way", "ref": 1, "geometry": [
+            {"lat": 50.0, "lon": 14.0}, {"lat": 50.1, "lon": 14.1},
+        ]}],
+    }
+    assert oc._parse_route_elements([rel]) == []
+
+
+def test_parse_route_elements_drops_ways_with_too_few_points():
+    rel = {
+        "type": "relation", "id": 300,
+        "tags": {"route": "bus"},
+        "members": [
+            {"type": "way", "ref": 1, "geometry": []},
+            {"type": "way", "ref": 2, "geometry": [{"lat": 50.0, "lon": 14.0}]},
+            {"type": "way", "ref": 3, "geometry": [
+                {"lat": 50.0, "lon": 14.0}, {"lat": 50.01, "lon": 14.01},
+            ]},
+        ],
+    }
+    rows = oc._parse_route_elements([rel])
+    assert [r["source_id"] for r in rows] == ["relation/300/way/3"]
+
+
+def test_parse_route_elements_handles_missing_optional_tags():
+    rel = {
+        "type": "relation", "id": 400,
+        "tags": {"route": "subway"},  # no ref, no name
+        "members": [
+            {"type": "way", "ref": 1, "geometry": [
+                {"lat": 50.0, "lon": 14.0}, {"lat": 50.01, "lon": 14.01},
+            ]},
+        ],
+    }
+    rows = oc._parse_route_elements([rel])
+    assert rows[0]["route_ref"] is None
+    assert rows[0]["name"] is None
+    assert rows[0]["transport_type"] == "subway"
+
+
+# Route fetch end-to-end
+
+
+def test_fetch_routes_empty_types_returns_empty_no_request(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_time(monkeypatch)
+    rec = _Recorder([])
+    client = oc.OverpassClient()
+    monkeypatch.setattr(client._session, "post", rec.post)
+
+    assert client.fetch_routes([], 50.0, 14.0, 50.1, 14.1) == []
+    assert rec.calls == []
+
+
+def test_fetch_routes_returns_parsed_rows(monkeypatch: pytest.MonkeyPatch):
+    _patch_time(monkeypatch)
+    payload = {
+        "elements": [{
+            "type": "relation", "id": 7,
+            "tags": {"type": "route", "route": "subway", "ref": "A", "name": "Metro A"},
+            "members": [{"type": "way", "ref": 99, "geometry": [
+                {"lat": 50.07, "lon": 14.42},
+                {"lat": 50.08, "lon": 14.43},
+            ]}],
+        }],
+    }
+    rec = _Recorder([_FakeResponse(json_data=payload)])
+    client = oc.OverpassClient()
+    monkeypatch.setattr(client._session, "post", rec.post)
+
+    rows = client.fetch_routes(
+        ["subway"], 50.0, 14.4, 50.1, 14.5,
+    )
+    assert len(rows) == 1
+    assert rows[0]["source_id"] == "relation/7/way/99"
+    assert rows[0]["transport_type"] == "subway"
+    assert rows[0]["route_ref"] == "A"
+    assert rows[0]["name"] == "Metro A"
+    body = rec.calls[0]["data"]["data"]
+    assert "(50.0,14.4,50.1,14.5)" in body
+    assert '"route"="subway"' in body
+
+
 # Live integration test — gated, NOT part of CI.
 
 

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/regenerate_roadmap_status.py"
+          }
+        ]
+      }
+    ]
+  }
+}
