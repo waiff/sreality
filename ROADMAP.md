@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-10 20:40 UTC_
+_Last refreshed: 2026-05-11 03:40 UTC_
 
-**Branch:** `claude/plan-phase-6-t5ikU`
+**Branch:** `claude/plan-phase-5-DmD0C`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-10 20:40 UTC_
 **Last 10 commits:**
 
 ```
+3a0c701 Merge pull request #37 from waiff/claude/plan-phase-6-t5ikU
+2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
+6f7e6f7 Renumber visual-layer migration 026 -> 027
 4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
 e111edb roadmap: refresh auto-status block
+0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
+ebba60d roadmap: refresh auto-status block for review session
 7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
 9e99ce5 roadmap: refresh, add scraper + operator-workflow tracks, auto-maintain
 e5dbf1e Merge pull request #34 from waiff/claude/listing-collections-feature-p07zI
-e5e812f Add operator curation: collections, notes, and tags
-0195e2a Merge pull request #31 from waiff/claude/parser-podil-and-percat-cap-vKx9w
-882add3 Map category_type_cb=4 to 'podil'; add per-category refetch cap
-6c25736 Merge pull request #30 from waiff/claude/expand-scraper-coverage-2aQNn
-c0720cf Expand scraper to all six sreality category pairs
 ```
 
 <!-- END AUTO-STATUS -->
@@ -93,6 +93,40 @@ best-effort `generic`), 7-day URL cache, daily cost soft-warning.
 block + `force_refresh` + `cost_usd_total` surfacing on `/estimate`.
 Commits `e9da41f`, `65b9967`, `d66da7e`.
 
+### Phase 5: Statistical refinement
+Two pure-Python analytical toolkit functions, both prerequisites for the
+Phase 7 reasoning agent. Stdlib-only (no sklearn/numpy) per CLAUDE.md
+"prefer the stdlib" rule.
+- `cluster_comparables` (`toolkit/clustering.py`): k-means submarket
+  detection over a listings cohort. Stateless — takes the listings
+  list returned by `find_comparables` (or any compatible shape).
+  Z-score normalises each axis so multi-axis runs aren't dominated by
+  absolute scale, runs Lloyd's algorithm with `n_restarts` deterministic
+  seeds, picks the lowest-inertia result, de-normalises centroids back
+  to original units. Axes: `price_per_m2`, `price_czk`, `area_m2`,
+  `distance_m`. Returns clusters sorted by size desc with per-axis
+  min/median/mean/max statistics and the list of `sreality_ids` in
+  each.
+- `find_comparables_relaxed` (`toolkit/comparables.py`): auto-widening
+  wrapper around `find_comparables` with full provenance. Runs the
+  strict query first; if `result_count < min_results` walks a
+  deterministic ladder of relaxations (`radius_x1.5` →
+  `area_band_+0.10` → `disposition_loose` → `radius_x2` →
+  `area_band_+0.20` → `disposition_any` → `drop_condition` →
+  `drop_building_type` → `drop_energy_rating` → `drop_floor_band`)
+  until the cohort hits `min_results` or the ladder is exhausted.
+  Locality, category, price bounds, and `active_only` are never
+  relaxed — they encode user intent. Each intermediate step is
+  recorded in `data.relaxation_trace` with the action name, full
+  filters snapshot, and resulting count. Caller can override the
+  ladder.
+- Two new POST endpoints `/tools/cluster_comparables` and
+  `/tools/find_comparables_relaxed`, bearer-token-gated. The cluster
+  endpoint takes no DB connection (stateless).
+- No `estimate_yield` auto-fallback — both tools are standalone, the
+  Phase 7 agent opts in. Existing deterministic estimation trace
+  remains unchanged.
+
 ### Phase 6: Visual layer
 Two LLM-backed analytical toolkit functions for the Phase 7 agent:
 - `summarize_listing` (`toolkit/summaries.py`): structured Claude
@@ -126,11 +160,6 @@ Two LLM-backed analytical toolkit functions for the Phase 7 agent:
 Tenant-perspective overlays beyond anchor amenities.
 - `compute_walkability`: scored composite of POI distances.
 - `find_comparables_along_axis`: transit-line-aware comparable search.
-
-### Phase 5: Statistical refinement
-- `cluster_comparables`: k-means on cohorts to surface sub-markets.
-- `find_comparables_relaxed`: auto-widening with provenance when strict
-  filters return too few results.
 
 ### Phase 7: The reasoning agent (target)
 The end-state. An Anthropic tool-use loop that takes a listing URL and
