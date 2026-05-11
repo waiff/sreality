@@ -5,10 +5,80 @@ Read this before changing anything.
 
 ## What this project is
 
-A daily scraper for Czech rental listings from sreality.cz. The output is a
-Postgres database (Supabase, Frankfurt region, PostGIS enabled) with full
-listing history. Downstream goals (out of scope until explicitly opened):
-rental-yield calculations, ClickUp integration, frontend.
+A daily scraper for Czech real estate listings from sreality.cz. Each
+nightly run walks all six meaningful category pairs in sequence —
+apartments, houses, and commercial properties, each in both rental
+and sale variants (defined as `CATEGORIES` in `scraper/main.py`). The
+output is a Postgres database (Supabase, Frankfurt region, PostGIS
+enabled) with full listing history. Downstream surfaces over the
+same data: an analytical toolkit + FastAPI service (Railway) and a
+read-only browser UI (also Railway, separate service). Still out of
+scope until explicitly opened: ClickUp integration, MCP wrapping the
+toolkit, per-user identity.
+
+## Territories
+
+The repo is split into two top-level territories with deliberately
+different rules. Identify which one a task belongs to before you start.
+
+**Backend territory** (`scraper/`, `toolkit/`, `api/`, `migrations/`,
+`tests/`, `.github/workflows/`):
+- Python 3.12, stdlib-first, `psycopg` direct to Postgres.
+- Service-role database access. Reads and writes anything.
+- Runs in GitHub Actions (scraper) or Railway (FastAPI).
+- All rules below apply: append-only migrations, snapshot-on-change,
+  no deletes, no `supabase-py`, etc.
+
+**Frontend territory** (`frontend/`):
+- Browser code. Vite + React 18 + TypeScript + Tailwind v4 SPA, served
+  by Caddy from a two-stage Docker build (see `frontend/Dockerfile`).
+  Deployed to Railway as a separate service alongside the API.
+- The U1a deliverable is a four-page database browser: **Browse**
+  (filters → Map / Table / Stats), **Listing Detail** (with snapshot
+  timeline strip — the product's signature visual element), **Region**
+  (district or radius aggregates), **Health** (operator dashboard).
+  The U2 estimation flow extends the same SPA: **Estimate**
+  (`/estimate`, two-step form: paste URL → review specs → submit
+  goes through the FastAPI service), **Estimations** (`/estimations`,
+  list of past runs filterable by source/status), **Estimation
+  Detail** (`/estimation/:id`, rent range + warnings + input recap
+  + trace timeline + comparables + re-run button). The Timeline
+  component dispatches on `step.kind` so it renders today's
+  deterministic 4-step traces and the future U4 agent's longer
+  traces without rework.
+  Future U3 / U4 work extends this UI; do not fork into a
+  separate frontend tree.
+- Connects with the **publishable (`anon`) key only**. Never embed the
+  service-role key, the `SUPABASE_DB_URL`, or any other secret in
+  browser-shipped code.
+- Reads exclusively from the `*_public` views — migration 008
+  (`listings_public`, `listing_snapshots_public`,
+  `listing_freshness_checks_public`, `listing_fetch_failures_public`)
+  and migration 015 (`images_public`) — and from the page-specific
+  RPCs in migrations 011 / 012 / 013 / 014 (`browse_stats`,
+  `region_stats`, `region_active_by_day`, `health_summary`).
+  All RPCs are `SECURITY INVOKER` and rely on anon's existing SELECT
+  grant on the public views — they don't escalate. New public-data
+  RPCs follow the same pattern; new private RPCs go through the
+  FastAPI service.
+- **No write path from the browser.** Any UI action that needs a
+  write goes through the bearer-token-gated FastAPI service, not
+  direct Postgres. The toolkit's two write-allowed exceptions
+  (`verify_listing_freshness`, `find_anchor_amenities`) are reachable
+  only via the API.
+- Frontend conventions live in `frontend/README.md`. Design tokens are
+  in `frontend/src/styles/globals.css` under a single `@theme` block;
+  **never tweak these tokens without operator approval** — they
+  encode the agreed visual direction (civic-archive feel,
+  oxidised-copper accent, borders-only depth, tabular numerals,
+  Czech locale formatting). Add new tokens only at the bottom of the
+  file with a clear domain-name.
+- Backend rules below (psycopg, no `supabase-py`, stdlib-first, etc.)
+  do not apply inside `frontend/`.
+
+When in doubt about which territory a task belongs to, ask the
+operator. Don't import frontend deps into the Python tree or vice
+versa.
 
 ## Operator profile
 
@@ -58,6 +128,26 @@ backfills) needs no confirmation — just do it and report findings.
 The MCP connection points at the production Supabase project. There is no
 separate dev/staging database. Treat every operation accordingly.
 
+## Roadmap maintenance
+
+`ROADMAP.md` is the sequencing source of truth. It has two parts:
+
+1. **Auto-status block** (between `<!-- BEGIN AUTO-STATUS -->` and
+   `<!-- END AUTO-STATUS -->`) — regenerated at session start by
+   `scripts/regenerate_roadmap_status.py`, wired through
+   `.claude/settings.json` as a `SessionStart` hook. Counts, last-scrape
+   recency, recent commits, migration tally. Never hand-edit; changes
+   will be overwritten next session. If `SUPABASE_DB_URL` is not in env
+   the block degrades gracefully to "Database unavailable this
+   session" — the hook never blocks startup.
+2. **Narrative phase entries** (everything else) — manual. After
+   shipping meaningful work (a merged PR that completes a phase
+   bullet, a new migration, a new toolkit function, a new UI page),
+   update the relevant phase entry in the same commit as the work:
+   move bullets from `## Next` to `## Done`, add new "next" items if
+   scope changed, update the map / scraper / operator-workflow tracks.
+   Don't defer roadmap updates to a follow-up commit.
+
 ## Architectural rules (do not violate without asking)
 
 1. **The schema in `migrations/` is append-only.** Never modify an existing
@@ -68,7 +158,11 @@ separate dev/staging database. Treat every operation accordingly.
    computing the content hash and inserting into `listing_snapshots` if it
    differs from the most recent snapshot for that listing.
 3. **Never delete listings.** Listings that disappear from sreality get
-   `is_active=false`. History is sacred.
+   `is_active=false`. History is sacred. The `is_active=false` inference
+   is only valid after a **complete index walk** — a partial walk
+   (`--limit N`, `--detail-only`) cannot determine which listings are
+   gone. The scraper enforces this: `mark_inactive` is skipped when
+   `--limit` is set, and `--detail-only` never reaches the index phase.
 4. **`last_seen_at` is driven by index sightings and successful
    detail fetches; failed fetches never touch it.**
    Every existing listing whose id appears in the run's index gets its
@@ -116,6 +210,41 @@ separate dev/staging database. Treat every operation accordingly.
    `verify_listing_freshness` — its primary purpose is observability
    and per-listing throttling, not history. The primary history
    table is `listing_snapshots`.
+10. **`amenities` + `amenity_fetches` are a local OSM mirror, not a
+    history table.** Populated by `find_anchor_amenities` on cache
+    miss via Overpass. Cache key is `(category, radius_m, exact
+    center, fetched_at within TTL)`. POIs accumulate; no automated
+    deletion of POIs that have disappeared from OSM (out of scope).
+    Manual SQL pruning when the audit table gets large. Categories
+    are determined by the *query* that fetched a POI, not the OSM
+    tags themselves — `ON CONFLICT (source, source_id)` overwrites
+    on subsequent fetches under different categories. The
+    canonical category taxonomy lives in
+    `toolkit/amenities.CATEGORY_TAGS`; add new categories there.
+11. **`transit_lines` + `transit_line_fetches` are a parallel OSM
+    mirror for route geometry (migration 028).** Populated by
+    `find_comparables_along_axis` on cache miss via Overpass. One
+    row per (relation, member way) pair — `source_id` is
+    `"relation/R/way/W"` — so a single relation produces N rows of
+    clean polylines and a way shared by two relations occupies two
+    rows. Avoids the merge ambiguity that bites when a route has
+    branches or loops. Cache key is sha256 of the canonicalised
+    `(bbox, transport_types)` pair; bbox values are rounded inside
+    `_bbox_around` so identical anchor + radius callers share the
+    same cache row. TTL default 30 days, matching the amenity TTL.
+    Same accumulate-and-prune discipline as amenities; allowed
+    transport types are tram / subway / bus.
+12. **`estimation_runs` is the single source of truth for every
+    estimation.** Every UI/API/ClickUp/agent invocation lands here.
+    Synchronous deterministic mode INSERTs once with a terminal
+    `status` (`'success'` or `'failed'`); the schema reserves
+    `'pending'`/`'running'` for U4's async agent without forcing
+    today's code to write twice. Failed runs still persist a row —
+    the row IS the audit trail; the endpoint returns HTTP 200 with
+    `status='failed'` and `error_message` set. Re-runs INSERT a new
+    row with `parent_run_id` set; the original is immutable. Legal
+    `source` values today: `'ui'`, `'api'`, `'clickup'` (CHECK
+    constraint, not enum — adding more is a single ALTER).
 
 ## Toolkit and API rules
 
@@ -144,22 +273,60 @@ service that exposes it (`api/`). They do not apply to the scraper.
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval
    'X days'` (default 7).** Don't trust `is_active` alone — a listing not
    seen for 30 days is functionally inactive.
-5. **No writes from the toolkit, with one explicit exception.**
-   Read-only by default. The single exception is
-   `verify_listing_freshness` (and `scraper.freshness.freshness_check`
-   that it wraps), which exists so an agent can confirm a comparable
-   is still valid before relying on it. Every call logs to
-   `listing_freshness_checks` for observability and may also write a
-   new `listing_snapshots` row, flip `listings.is_active`, or both.
+5. **No writes from the toolkit, with five explicit exceptions.**
+   Read-only by default. The exceptions are:
+   - `verify_listing_freshness` (and `scraper.freshness.freshness_check`
+     that it wraps), which exists so an agent can confirm a comparable
+     is still valid before relying on it. Every call logs to
+     `listing_freshness_checks` for observability and may also write a
+     new `listing_snapshots` row, flip `listings.is_active`, or both.
+   - `find_anchor_amenities`, which writes to the OSM-mirror tables
+     `amenities` and `amenity_fetches` on a cache miss. POI facts live
+     in OpenStreetMap, not our scrape, so we cache them locally to
+     keep repeated lookups fast and Overpass-friendly. The cache is a
+     pure mirror — no derived analytical state lives in those tables.
+   - `find_comparables_along_axis`, which writes to the OSM-mirror
+     tables `transit_lines` and `transit_line_fetches` (migration 028)
+     on a cache miss. Same rationale as `find_anchor_amenities`:
+     transit-route geometry lives in OSM, not our scrape. The cache
+     key is `(bbox, transport_types)`, hashed canonically so two
+     callers using identical params share the same cache row.
+   - `summarize_listing`, which writes a structured Claude summary of
+     a listing snapshot to `listing_summaries` (keyed on
+     `(sreality_id, snapshot_id)`) on cache miss. Same rationale as
+     the OSM mirror: the LLM is the source of truth for the summary;
+     we cache locally to keep repeat lookups fast and Anthropic-
+     friendly. Auto-invalidates when a new snapshot is recorded.
+   - `compare_listing_images`, which writes the structured pairwise
+     visual comparison to `listing_image_comparisons` (keyed on the
+     canonical-ordered pair) on cache miss. Vision is materially more
+     expensive than text, so caching matters more here than anywhere
+     else in the toolkit.
    No other toolkit function may write. The API service should still
-   connect with a read-only role if Postgres permits; the freshness
-   check then needs a separately-elevated path. For now we ship with
-   one role and discipline.
+   connect with a read-only role if Postgres permits; these five paths
+   then need a separately-elevated route. For now we ship with one
+   role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always
    `ST_DWithin(geom, target_geom, radius_m)`. Never compute distance in
    Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
+8. **API auth gated by `API_TOKEN`.** When the env var is set, every
+   endpoint except `/health` requires `Authorization: Bearer <token>`.
+   When unset (local development) the gate is a no-op. `/health` stays
+   open so Railway healthchecks keep working. The token is shared with
+   every caller; no per-user identity layer.
+9. **Trace format on `estimation_runs.trace` is versioned.**
+   `TRACE_SCHEMA_VERSION` lives in `api/estimation_runs.py`; every
+   row's `trace.version` matches that constant at write time. Shape:
+   `{version, summary, steps: [{n, kind, started_at, duration_ms,
+   output_summary, ...}]}`. Step `kind` ∈ `'tool_call' | 'computation'
+   | 'reasoning'` (last reserved for U4). Steps NEVER store full tool
+   outputs — only `output_summary`; the full data lives in dedicated
+   columns (`comparables_used` for the cohort, etc.). This caps row
+   size at single-digit kilobytes regardless of cohort size. Bumping
+   the version is a deliberate change; future readers must handle
+   older versions.
 
 ## Database access
 
@@ -177,7 +344,7 @@ Do not introduce `supabase-py` without an explicit reason and a discussion.
 
 ## Auth and secrets
 
-Seven env vars (all GitHub Actions secrets in production):
+Nine env vars (all GitHub Actions secrets in production):
 
 Database:
 - `SUPABASE_URL` - public project URL.
@@ -199,8 +366,95 @@ If any R2_* var is missing the image-download phase logs a skip and
 exits zero. The scrape still records image URLs in the database;
 downloading is decoupled and can be backfilled later.
 
+LLM-backed parsing (FastAPI service only):
+- `ANTHROPIC_API_KEY` - Anthropic API key. Required for parsing
+  non-sreality listing URLs through the source-kind dispatcher. Every
+  call is logged to `llm_calls` with token counts and USD cost.
+- `MAPY_CZ_API_KEY` - Mapy.cz REST API key. Used to geocode locality
+  strings from non-sreality listings, which rarely include coordinates
+  on the page.
+- `LLM_DAILY_COST_WARN_USD` (optional, default `5.0`) - soft warning
+  threshold. When today's `llm_calls.cost_usd` sum first crosses this
+  value, the LLMClient logs one WARNING line; subsequent calls today
+  do not re-warn. Anthropic's own console spend cap is the hard guard;
+  this is just an early-warning signal in Railway logs.
+
+Both API keys are backend-only. Never `VITE_*` prefix; never expose
+to the browser. The `frontend/` build does not see them.
+
 Never write any of these values into a committed file. `.env` is gitignored.
 Always reference secrets by env-var name in code.
+
+## LLM-backed parsing
+
+`scraper.source_dispatcher.parse_listing_url` is the single entry
+point for any listing URL (sreality or otherwise). It classifies the
+URL by domain and routes to either the deterministic sreality flow
+(`scraper.url_parser`, unchanged) or an LLM-driven per-source parser
+under `scraper/source_parsers/`. Today's allowlist is bezrealitky,
+reality.idnes, and remax-czech; everything else falls through to a
+best-effort generic parser that always reports
+`parse_confidence='best_effort'`.
+
+The LLM path:
+1. Cache check against `parsed_url_cache`. Key is sha256 of the
+   canonicalised URL (lowercase scheme/host, no query, no trailing
+   slash). Hit → return cached spec, no LLM, no cost.
+2. Fetch HTML, send to Claude with the system prompt from
+   `app_settings.llm_parse_system_prompt` and the per-source user
+   prompt from `scraper.source_parsers.<source>`. The model is
+   `app_settings.llm_parse_model` (default `claude-sonnet-4-5`).
+3. The LLM is required to invoke `record_listing` exactly once with
+   every field in a `{value, confidence}` envelope. Any deviation
+   raises `ParseError` and surfaces as a 502 from /estimations/preview
+   or a `failed` row from POST /estimations.
+4. If the page didn't yield lat/lng, geocode the locality string via
+   Mapy.cz (`scraper.geocoding`). The geocode confidence rolls into
+   `parse_confidence_per_field['lat'/'lng']`.
+5. Store the full extraction + spec + warnings in `parsed_url_cache`
+   with a 7-day TTL.
+
+Operator-tunable parser behaviour lives in `app_settings`. Editing
+the system prompt or model name in that table changes parser
+behaviour for the next preview / estimation that hits a non-sreality
+URL — no deploy needed. Every prior value is preserved in
+`app_settings_history` via the trigger from migration 020.
+
+Cost discipline: every Anthropic call is recorded in `llm_calls`
+with token counts (including cache-read / cache-write splits), USD
+cost, duration, and the optional `estimation_run_id` of the run that
+triggered the call. The `LLMClient` emits a one-time WARNING per day
+when `llm_calls.cost_usd` sum first crosses
+`LLM_DAILY_COST_WARN_USD` (default $5).
+
+## LLM-backed analysis (visual layer)
+
+Two analytical toolkit functions also reach for Claude (Phase 6,
+migration 027):
+
+- `summarize_listing` produces a structured Czech-real-estate Claude
+  summary of one listing snapshot. Fields: `headline`, `key_highlights`,
+  `concerns`, `condition_assessment`, `target_audience`. Cached in
+  `listing_summaries` keyed on `(sreality_id, snapshot_id)`; a new
+  snapshot gets a fresh summary on next call. System prompt and model
+  ID are operator-tunable via `app_settings.llm_summary_system_prompt`
+  and `llm_summary_model`. Calls log to `llm_calls` with
+  `called_for='summarize_listing'`.
+- `compare_listing_images` scores two listings across six fixed
+  tenant-relevant dimensions (`exterior`, `kitchen`, `windows_and_light`,
+  `floor_finish`, `lighting`, `styling`) using Claude vision. Image
+  bytes are pulled from R2 server-side via boto3 GetObject and base64-
+  encoded into the messages payload (more robust than depending on
+  bucket public access). Cached in `listing_image_comparisons` keyed
+  on the canonical-ordered pair. Operator-tunable settings live in
+  `app_settings.llm_image_compare_system_prompt` and
+  `llm_image_compare_model`. Calls log to `llm_calls` with
+  `called_for='compare_listing_images'`. Vision is materially more
+  expensive than text — typical pair runs at ~$0.05 — so the cache
+  matters more here than anywhere else in the toolkit.
+
+Both functions are write-allowed exceptions per toolkit rule #5
+(see "Architectural rules" above).
 
 ## Coding conventions
 
@@ -230,6 +484,33 @@ Always reference secrets by env-var name in code.
   (logs what would be written, writes nothing).
 - For testing a single listing: `--detail-only <sreality_id>`.
 - For a small live run: `--limit 10` (caps at 10 listings).
+
+## Refreshing per-source HTML fixtures
+
+The LLM-driven parsers (`scraper/source_parsers/`) are tested against
+saved listing HTML in `tests/fixtures/source_html/`. Real listings
+get taken down or change layout, so every few months the fixtures
+need a refresh. Don't fetch live in tests — that would burn LLM
+credit and break offline runs.
+
+Refresh procedure (operator):
+1. GitHub repo → **Actions** tab → **Fetch + anonymize source HTML
+   fixtures** workflow → **Run workflow**.
+2. Pick the branch you want the fixtures on.
+3. Optionally edit the URLs (defaults are baked in for the three
+   allowlisted sources). Leave a field blank to skip that source.
+4. **Run workflow**. It fetches each URL, runs the anonymization in
+   `scripts/fetch_and_anonymize_fixtures.py`, and commits the
+   resulting `*_sample.html` files back to the same branch.
+5. The skipif tests in
+   `tests/scraper/test_source_parsers/test_real_fixtures.py` light up
+   automatically once the files exist.
+
+Anonymization scope: phones → `+420 XXX XXX XXX`, emails →
+`agent@example.cz`, street numbers (`123/45`) → `XXX/YY`. Listing
+prices and the surrounding HTML structure are preserved — they're
+public data and the parsers need them. Agent names are too varied
+to scrub by regex; if a fixture leaks one, hand-edit the file.
 
 ## How to manually trigger the scraper
 
@@ -269,3 +550,20 @@ a real failure - check the GitHub Actions log for a stack trace.
 - Public read API.
 
 Do not start any of these without explicit user direction in a new session.
+
+## Follow-ups (deferred)
+
+- **Toolkit / API / frontend defaults still target apartment rentals.**
+  The scraper was expanded to collect all six category pairs (byt /
+  dum / komercni × pronajem / prodej), but the analytical and
+  estimation surfaces still hardcode `category_main="byt"` /
+  `category_type="pronajem"` as defaults. Specifically:
+  `toolkit/comparables.py` (the `category_main` / `category_type`
+  defaults around lines 57-58); `api/schemas.py` (the same defaults
+  on `FindComparablesIn`, `DescribeNeighborhoodIn`,
+  `ComputeMarketVelocityIn`, `CreateEstimationIn`, `EstimateYieldIn`);
+  the frontend's "Apartment" labelling in `EstimateForm.tsx` and the
+  rental-URL placeholder in `UrlScrapeStep.tsx`. Resolve when a
+  downstream surface (UI page, agent flow, ClickUp integration) needs
+  to operate over sales / houses / commercial. Until then the data
+  exists in the DB but the apps still default to apartment rentals.

@@ -11,13 +11,18 @@ are set; otherwise the phase is a no-op).
 
 Run with:
     python -m scraper.main                       # full run
-    python -m scraper.main --limit 10            # cap to 10 listings (testing)
+    python -m scraper.main --limit 10            # cap to 10 listings; mark-inactive skipped
     python -m scraper.main --dry-run             # log only, no DB writes
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
-    python -m scraper.main --max-detail-refetches 2000   # cap details
+    python -m scraper.main --max-detail-refetches 2000   # global cap
+    python -m scraper.main --max-detail-refetches-per-category 500  # per-cat cap
     python -m scraper.main --max-image-downloads 500     # cap images
     python -m scraper.main --image-workers 16            # tune concurrency
+
+`--limit` is production-safe: the limited scrape upserts what it sees,
+but it does NOT mark unseen listings inactive — that inference is only
+valid when the entire sreality index has been walked.
 """
 
 from __future__ import annotations
@@ -35,6 +40,20 @@ from scraper.sreality_client import SrealityClient
 
 DEFAULT_IMAGE_WORKERS = 8
 
+# All sreality category pairs we collect, as (category_main_cb,
+# category_type_cb). Rentals first (the established slice), then sales,
+# then commercial. Adding/removing a pair is the only knob needed to
+# expand or contract scrape coverage; everything downstream
+# (parser, db schema, snapshot history) is already category-agnostic.
+CATEGORIES: tuple[tuple[int, int], ...] = (
+    (1, 2),  # byt / pronajem
+    (1, 1),  # byt / prodej
+    (2, 2),  # dum / pronajem
+    (2, 1),  # dum / prodej
+    (4, 2),  # komercni / pronajem
+    (4, 1),  # komercni / prodej
+)
+
 LOG = logging.getLogger("scraper")
 
 _HREF_ID_RE = re.compile(r"/estates/(\d+)")
@@ -43,18 +62,19 @@ _HREF_ID_RE = re.compile(r"/estates/(\d+)")
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_logging(args.verbose)
-    client = _build_client()
 
     if args.detail_only is not None:
         rc = _run_detail_only(
-            client, args.detail_only, dry_run=args.dry_run
+            _build_client(CATEGORIES[0][0], CATEGORIES[0][1]),
+            args.detail_only,
+            dry_run=args.dry_run,
         )
     else:
         rc = _run_full(
-            client,
             limit=args.limit,
             dry_run=args.dry_run,
             max_refetches=args.max_detail_refetches,
+            max_refetches_per_category=args.max_detail_refetches_per_category,
         )
 
     if (
@@ -76,7 +96,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--limit",
         type=int,
         default=None,
-        help="cap number of index entries processed (testing)",
+        help=(
+            "cap number of index entries processed. With this flag the "
+            "scrape skips mark-inactive: a partial index view cannot "
+            "determine which listings have left sreality."
+        ),
     )
     p.add_argument(
         "--dry-run",
@@ -100,8 +124,21 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "cap number of listing detail fetches this run "
-            "(default: unlimited; workflow passes mode-specific cap)"
+            "global cap on listing detail fetches this run, shared "
+            "across all categories in CATEGORIES order "
+            "(default: unlimited; workflow passes 10000)"
+        ),
+    )
+    p.add_argument(
+        "--max-detail-refetches-per-category",
+        type=int,
+        default=None,
+        help=(
+            "cap on listing detail fetches per category. Combines with "
+            "--max-detail-refetches: the effective cap for any single "
+            "category is min(per-category, remaining-global). Without "
+            "this flag, an early high-volume category (e.g. byt/prodej) "
+            "can starve later categories of the shared global budget."
         ),
     )
     p.add_argument(
@@ -127,10 +164,10 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
-def _build_client() -> SrealityClient:
+def _build_client(category_main: int, category_type: int) -> SrealityClient:
     return SrealityClient(
-        category_main=int(os.environ.get("SREALITY_CATEGORY_MAIN", 1)),
-        category_type=int(os.environ.get("SREALITY_CATEGORY_TYPE", 2)),
+        category_main=category_main,
+        category_type=category_type,
         country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 10001)),
     )
 
@@ -170,16 +207,125 @@ def _run_detail_only(
 
 
 def _run_full(
-    client: SrealityClient,
     limit: int | None,
     dry_run: bool,
     max_refetches: int | None = None,
+    max_refetches_per_category: int | None = None,
 ) -> int:
-    counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
+    """Walk every category in CATEGORIES sequentially.
 
+    Sharing one DB connection and one mutable refetch-budget across
+    categories so the global per-run cap behaves the same as before —
+    listings deferred under the cap drain via the existing
+    failure-priority path on subsequent runs. The per-category cap is
+    layered on top: each category sees `min(remaining-global,
+    per-category)` as its effective cap. `--limit` is interpreted as
+    a global cap on index entries collected across the whole run, not
+    per category.
+    """
+    counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
+    total_pages = 0
+    total_index = 0
+    refetch_budget = [max_refetches] if max_refetches is not None else [None]
+
+    conn = None if dry_run else db.connect()
+    # Per-category seen_ids, captured during the walk so the
+    # mark_inactive step at the end can scope correctly.
+    walk_results: list[tuple[int, int, set[int]]] = []
+
+    try:
+        global_collected = 0
+        for category_main, category_type in CATEGORIES:
+            cm_text = parser.CATEGORY_MAIN[category_main]
+            ct_text = parser.CATEGORY_TYPE[category_type]
+            LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
+
+            client = _build_client(category_main, category_type)
+
+            remaining_for_limit = (
+                None if limit is None else max(0, limit - global_collected)
+            )
+            seen_ids, cat_counts = _walk_category(
+                client,
+                conn,
+                cat_limit=remaining_for_limit,
+                dry_run=dry_run,
+                refetch_budget=refetch_budget,
+                cat_refetch_cap=max_refetches_per_category,
+            )
+            global_collected += len(seen_ids)
+            total_pages += client.pages_fetched
+            total_index += len(seen_ids)
+            for k, v in cat_counts.items():
+                counts[k] = counts.get(k, 0) + v
+            LOG.info(
+                "CATEGORY done cm=%s ct=%s seen=%d new=%d updated=%d "
+                "unchanged=%d errors=%d",
+                cm_text, ct_text, len(seen_ids),
+                cat_counts["new"], cat_counts["updated"],
+                cat_counts["unchanged"], cat_counts["errors"],
+            )
+            walk_results.append((category_main, category_type, seen_ids))
+
+            if limit is not None and global_collected >= limit:
+                LOG.info(
+                    "INDEX limit=%d reached after category cm=%s ct=%s; "
+                    "skipping remaining categories",
+                    limit, cm_text, ct_text,
+                )
+                break
+
+        LOG.info("INDEX total=%d pages=%d", total_index, total_pages)
+
+        if conn is not None:
+            if limit is None:
+                for cm, ct, seen_ids in walk_results:
+                    cm_text = parser.CATEGORY_MAIN[cm]
+                    ct_text = parser.CATEGORY_TYPE[ct]
+                    inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
+                    LOG.info(
+                        "INACTIVE cm=%s ct=%s marked=%d",
+                        cm_text, ct_text, inactive,
+                    )
+            else:
+                LOG.info(
+                    "INACTIVE skipped: --limit %d gives a partial index view "
+                    "(is_active=false inference requires a full walk)",
+                    limit,
+                )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    LOG.info(
+        "RUN done pages=%d new=%d updated=%d unchanged=%d errors=%d",
+        total_pages,
+        counts["new"],
+        counts["updated"],
+        counts["unchanged"],
+        counts["errors"],
+    )
+    return 0
+
+
+def _walk_category(
+    client: SrealityClient,
+    conn: Any,
+    cat_limit: int | None,
+    dry_run: bool,
+    refetch_budget: list[int | None],
+    cat_refetch_cap: int | None = None,
+) -> tuple[set[int], dict[str, int]]:
+    """Walk one category's index + refetch loop.
+
+    `refetch_budget` is a single-element mutable list so the global
+    cap decrements as each category consumes refetches. `cat_refetch_cap`
+    is the per-category ceiling (None = no per-category limit).
+    """
+    counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
     index_entries: list[tuple[int, int | None]] = []
     for estate in client.iter_index():
-        if limit is not None and len(index_entries) >= limit:
+        if cat_limit is not None and len(index_entries) >= cat_limit:
             break
         sid = _extract_id(estate)
         if sid is None:
@@ -187,90 +333,65 @@ def _run_full(
             continue
         index_entries.append((sid, _extract_price(estate)))
 
-    LOG.info(
-        "INDEX total=%d pages=%d", len(index_entries), client.pages_fetched
+    seen_ids = {sid for sid, _ in index_entries}
+    existing = (
+        db.index_summary(conn, seen_ids) if conn is not None else {}
     )
 
-    seen_ids = {sid for sid, _ in index_entries}
-    conn = None if dry_run else db.connect()
+    if conn is not None and existing:
+        db.touch_listings(conn, list(existing))
 
-    try:
-        existing = (
-            db.index_summary(conn, seen_ids) if conn is not None else {}
-        )
+    to_refetch: list[int] = []
+    unchanged = 0
+    for sid, idx_price in index_entries:
+        prev = existing.get(sid)
+        if (
+            prev is not None
+            and idx_price is not None
+            and prev["price_czk"] == idx_price
+        ):
+            unchanged += 1
+        else:
+            to_refetch.append(sid)
 
-        # Bump last_seen_at for every existing listing that appeared in
-        # this index, before any detail fetches. Index appearance is the
-        # source of truth for "still on the market"; if a detail fetch
-        # later fails, the timestamp is already correct.
-        if conn is not None and existing:
-            db.touch_listings(conn, list(existing))
+    counts["unchanged"] = unchanged
+    LOG.info("PLAN unchanged=%d refetch=%d", unchanged, len(to_refetch))
 
-        to_refetch: list[int] = []
-        unchanged = 0
-        for sid, idx_price in index_entries:
-            prev = existing.get(sid)
-            if (
-                prev is not None
-                and idx_price is not None
-                and prev["price_czk"] == idx_price
-            ):
-                unchanged += 1
-            else:
-                to_refetch.append(sid)
+    if conn is not None and to_refetch:
+        failed_ids = db.active_failure_ids(conn, set(to_refetch))
+        if failed_ids:
+            priority = [s for s in to_refetch if s in failed_ids]
+            rest = [s for s in to_refetch if s not in failed_ids]
+            to_refetch = priority + rest
+            LOG.info("PLAN priority_retry=%d", len(priority))
 
-        counts["unchanged"] = unchanged
-        LOG.info("PLAN unchanged=%d refetch=%d", unchanged, len(to_refetch))
-
-        # Bump previously-failed listings to the front so the cap doesn't
-        # keep deferring them. Failed listings have a row in
-        # listing_fetch_failures with given_up=false; they get retried
-        # until either succeeding or hitting attempts >= 5.
-        if conn is not None and to_refetch:
-            failed_ids = db.active_failure_ids(conn, set(to_refetch))
-            if failed_ids:
-                priority = [s for s in to_refetch if s in failed_ids]
-                rest = [s for s in to_refetch if s not in failed_ids]
-                to_refetch = priority + rest
-                LOG.info("PLAN priority_retry=%d", len(priority))
-
-        if max_refetches is not None and len(to_refetch) > max_refetches:
-            deferred = len(to_refetch) - max_refetches
-            to_refetch = to_refetch[:max_refetches]
+    caps = [c for c in (refetch_budget[0], cat_refetch_cap) if c is not None]
+    if caps:
+        cap = min(caps)
+        if len(to_refetch) > cap:
+            deferred = len(to_refetch) - cap
+            to_refetch = to_refetch[:cap]
             LOG.info(
                 "PLAN cap=%d deferred=%d (remaining listings will be picked up next run)",
-                max_refetches, deferred,
+                cap, deferred,
             )
 
-        total_refetch = len(to_refetch)
-        if total_refetch:
-            LOG.info("DETAIL starting refetch=%d", total_refetch)
-        for i, sid in enumerate(to_refetch, start=1):
-            outcome = _process_one(client, conn, sid, dry_run=dry_run)
-            counts[outcome] = counts.get(outcome, 0) + 1
-            if i % 50 == 0:
-                LOG.info(
-                    "DETAIL progress=%d/%d new=%d updated=%d errors=%d",
-                    i, total_refetch,
-                    counts["new"], counts["updated"], counts["errors"],
-                )
+    total_refetch = len(to_refetch)
+    if total_refetch:
+        LOG.info("DETAIL starting refetch=%d", total_refetch)
+    for i, sid in enumerate(to_refetch, start=1):
+        outcome = _process_one(client, conn, sid, dry_run=dry_run)
+        counts[outcome] = counts.get(outcome, 0) + 1
+        if refetch_budget[0] is not None:
+            refetch_budget[0] = max(0, refetch_budget[0] - 1)
+        if i % 50 == 0:
+            LOG.info(
+                "DETAIL progress=%d/%d new=%d updated=%d errors=%d",
+                i, total_refetch,
+                counts["new"], counts["updated"], counts["errors"],
+            )
 
-        if conn is not None:
-            inactive = db.mark_inactive(conn, seen_ids)
-            LOG.info("INACTIVE marked=%d", inactive)
-    finally:
-        if conn is not None:
-            conn.close()
-
-    LOG.info(
-        "RUN done pages=%d new=%d updated=%d unchanged=%d errors=%d",
-        client.pages_fetched,
-        counts["new"],
-        counts["updated"],
-        counts["unchanged"],
-        counts["errors"],
-    )
-    return 0
+    return seen_ids, counts
 
 
 def _process_one(

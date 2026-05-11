@@ -1,0 +1,424 @@
+"""compute_market_velocity and compute_listing_velocity: TOM analytics.
+
+TOM (time on market) per listing:
+  - active listing: now() - first_seen_at  (still going, right-censored)
+  - delisted:       last_seen_at - first_seen_at  (final sojourn)
+
+The SQL only fetches the three timestamp columns per listing; statistics
+and classification happen in Python.
+
+Active vs delisted matters interpretively: TOM-so-far on active listings
+is right-censored (they haven't finished yet), while delisted TOM is
+final. Mixing them via population="all" gives the broadest picture but
+the agent should reason about the mix.
+"""
+
+from __future__ import annotations
+
+import statistics
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Literal
+
+from toolkit.comparables import (
+    ComparableFilters,
+    TargetSpec,
+    _shared_filter_where,
+)
+
+if TYPE_CHECKING:
+    import psycopg
+
+
+_VelocityPopulation = Literal["active", "delisted", "all"]
+_HARD_LIMIT = 5000
+
+
+VELOCITY_BANDS = {
+    "fast": 25.0,    # percentile <= 25
+    "slow": 75.0,    # 75 <= percentile < 90
+    "stuck": 90.0,   # percentile >= 90
+    # everything else is "typical"
+}
+
+
+def build_market_velocity_query(
+    target: TargetSpec,
+    filters: ComparableFilters,
+    population: _VelocityPopulation,
+) -> tuple[str, dict[str, Any]]:
+    """Render SQL + params. Exposed for hermetic tests."""
+    where, params = _shared_filter_where(target, filters)
+    if population == "active":
+        where.append("l.is_active = true")
+    elif population == "delisted":
+        where.append("l.is_active = false")
+    # "all": no clause
+
+    sql = (
+        "SELECT l.sreality_id, l.first_seen_at, l.last_seen_at, l.is_active\n"
+        "FROM listings l\n"
+        "WHERE " + "\n  AND ".join(where) + "\n"
+        "ORDER BY l.first_seen_at\n"
+        f"LIMIT {_HARD_LIMIT}"
+    )
+    return sql, params
+
+
+def compute_market_velocity(
+    conn: "psycopg.Connection",
+    target: TargetSpec,
+    filters: ComparableFilters,
+    population: _VelocityPopulation = "all",
+    trend_split_days: int = 7,
+) -> dict[str, Any]:
+    from toolkit import _now_iso
+
+    sql, params = build_market_velocity_query(target, filters, population)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+
+    now = datetime.now(timezone.utc)
+    cohort = [
+        {
+            "sreality_id": r[0],
+            "first_seen_at": r[1],
+            "last_seen_at": r[2],
+            "is_active": r[3],
+            "tom_days": _tom_days(r[1], r[2], r[3], now=now),
+        }
+        for r in rows
+    ]
+
+    active_count = sum(1 for c in cohort if c["is_active"])
+    delisted_count = len(cohort) - active_count
+    tom_values = [c["tom_days"] for c in cohort if c["tom_days"] is not None]
+    tom_stats = _stats(tom_values)
+
+    cutoff = now.timestamp() - trend_split_days * 86400
+    recent_tom = [
+        c["tom_days"] for c in cohort
+        if c["tom_days"] is not None
+        and c["first_seen_at"].timestamp() > cutoff
+    ]
+    older_tom = [
+        c["tom_days"] for c in cohort
+        if c["tom_days"] is not None
+        and c["first_seen_at"].timestamp() <= cutoff
+    ]
+
+    notes: list[str] = []
+    if len(cohort) < 5:
+        notes.append(
+            f"cohort size {len(cohort)} below 5; stats are noisy"
+        )
+    if active_count > 0 and delisted_count == 0 and population == "all":
+        notes.append(
+            "cohort contains no delisted listings; TOM is right-censored"
+        )
+
+    return {
+        "data": {
+            "cohort_size": len(cohort),
+            "active_count": active_count,
+            "delisted_count": delisted_count,
+            "population": population,
+            "tom_stats": tom_stats,
+            "trend": {
+                "split_days": trend_split_days,
+                "recent": {
+                    "n": len(recent_tom),
+                    "median_tom_days": _median_or_none(recent_tom),
+                },
+                "older": {
+                    "n": len(older_tom),
+                    "median_tom_days": _median_or_none(older_tom),
+                },
+            },
+        },
+        "metadata": {
+            "tool": "compute_market_velocity",
+            "filters_used": _filters_used(target, filters, population, trend_split_days),
+            "result_count": len(cohort),
+            "queried_at": _now_iso(),
+            "data_freshness": _max_last_seen_dt(cohort),
+            **({"notes": notes} if notes else {}),
+        },
+    }
+
+
+def compute_listing_velocity(
+    conn: "psycopg.Connection",
+    sreality_id: int,
+    radius_m: int = 1000,
+    disposition_match: Literal["exact", "loose", "any"] = "exact",
+    population: _VelocityPopulation = "all",
+) -> dict[str, Any]:
+    """Percentile-rank a single listing against its peer cohort.
+
+    Cohort is built from the listing's own lat/lng/disposition with the
+    given radius. The target listing itself is excluded from the cohort
+    so the percentile is "compared to peers", not "self vs self+peers".
+    """
+    from toolkit import _now_iso
+
+    listing = _fetch_listing_for_velocity(conn, sreality_id)
+    if listing is None:
+        return _listing_envelope(
+            sreality_id=sreality_id,
+            radius_m=radius_m,
+            disposition_match=disposition_match,
+            population=population,
+            data={"sreality_id": sreality_id, "found": False},
+            queried_at=_now_iso(),
+        )
+
+    now = datetime.now(timezone.utc)
+    target_tom = _tom_days(
+        listing["first_seen_at"], listing["last_seen_at"],
+        listing["is_active"], now=now,
+    )
+
+    if listing["lat"] is None or listing["lng"] is None:
+        return _listing_envelope(
+            sreality_id=sreality_id,
+            radius_m=radius_m,
+            disposition_match=disposition_match,
+            population=population,
+            data={
+                "sreality_id": sreality_id,
+                "found": True,
+                "is_active": listing["is_active"],
+                "tom_days": target_tom,
+                "cohort_size": 0,
+                "tom_percentile": None,
+                "classification": None,
+                "thresholds": dict(VELOCITY_BANDS),
+            },
+            queried_at=_now_iso(),
+            notes=["listing has no geom; cannot build peer cohort"],
+        )
+
+    target = TargetSpec(
+        lat=listing["lat"],
+        lng=listing["lng"],
+        disposition=listing["disposition"],
+        exclude_ids=[sreality_id],
+    )
+    filters = ComparableFilters(
+        radius_m=radius_m,
+        disposition_match=disposition_match,
+        active_only=False,  # let `population` dictate
+    )
+    sql, params = build_market_velocity_query(target, filters, population)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        peer_rows = cur.fetchall()
+
+    peer_toms = [
+        t for t in (
+            _tom_days(r[1], r[2], r[3], now=now) for r in peer_rows
+        ) if t is not None
+    ]
+
+    percentile = _percentile_rank(target_tom, peer_toms) if (
+        target_tom is not None and peer_toms
+    ) else None
+
+    classification = _classify_velocity(percentile)
+
+    data = {
+        "sreality_id": sreality_id,
+        "found": True,
+        "is_active": listing["is_active"],
+        "tom_days": target_tom,
+        "cohort_size": len(peer_toms),
+        "tom_percentile": percentile,
+        "classification": classification,
+        "thresholds": dict(VELOCITY_BANDS),
+    }
+    if len(peer_toms) < 5:
+        notes = [f"peer cohort size {len(peer_toms)} below 5; classification unreliable"]
+    else:
+        notes = []
+    return _listing_envelope(
+        sreality_id=sreality_id,
+        radius_m=radius_m,
+        disposition_match=disposition_match,
+        population=population,
+        data=data,
+        queried_at=_now_iso(),
+        notes=notes,
+    )
+
+
+def _fetch_listing_for_velocity(
+    conn: "psycopg.Connection", sreality_id: int
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT first_seen_at, last_seen_at, is_active, disposition,\n"
+            "  ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng\n"
+            "FROM listings WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "first_seen_at": row[0],
+        "last_seen_at": row[1],
+        "is_active": row[2],
+        "disposition": row[3],
+        "lat": float(row[4]) if row[4] is not None else None,
+        "lng": float(row[5]) if row[5] is not None else None,
+    }
+
+
+def _tom_days(
+    first_seen: datetime | None,
+    last_seen: datetime | None,
+    is_active: bool | None,
+    *,
+    now: datetime,
+) -> int | None:
+    if first_seen is None:
+        return None
+    end = now if is_active else (last_seen or now)
+    delta = end - first_seen
+    return max(0, delta.days)
+
+
+def _stats(values: list[int]) -> dict[str, Any]:
+    if not values:
+        return {
+            "median_days": None, "p25_days": None, "p75_days": None,
+            "min_days": None, "max_days": None, "n": 0,
+        }
+    sorted_values = sorted(values)
+    return {
+        "median_days": float(statistics.median(sorted_values)),
+        "p25_days": _pct(sorted_values, 25),
+        "p75_days": _pct(sorted_values, 75),
+        "min_days": min(sorted_values),
+        "max_days": max(sorted_values),
+        "n": len(sorted_values),
+    }
+
+
+def _pct(sorted_values: list[int], p: float) -> float | None:
+    n = len(sorted_values)
+    if n == 0:
+        return None
+    if n == 1:
+        return float(sorted_values[0])
+    k = (n - 1) * p / 100
+    lo = int(k)
+    hi = min(lo + 1, n - 1)
+    frac = k - lo
+    return sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac
+
+
+def _median_or_none(values: list[int]) -> float | None:
+    return float(statistics.median(values)) if values else None
+
+
+def _percentile_rank(value: int, peers: list[int]) -> float:
+    """Mid-rank percentile of `value` within `peers` (0..100).
+
+    Ties are split: a value equal to all peers gets 50, not 100. Avoids
+    classifying an exactly-average TOM as 'stuck'.
+    """
+    n = len(peers)
+    if n == 0:
+        return 0.0
+    lt = sum(1 for p in peers if p < value)
+    eq = sum(1 for p in peers if p == value)
+    return round(100.0 * (lt + 0.5 * eq) / n, 2)
+
+
+def _classify_velocity(percentile: float | None) -> str | None:
+    if percentile is None:
+        return None
+    if percentile >= VELOCITY_BANDS["stuck"]:
+        return "stuck"
+    if percentile >= VELOCITY_BANDS["slow"]:
+        return "slow"
+    if percentile <= VELOCITY_BANDS["fast"]:
+        return "fast"
+    return "typical"
+
+
+def _max_last_seen_dt(cohort: list[dict[str, Any]]) -> str | None:
+    stamps = [c["last_seen_at"] for c in cohort if c["last_seen_at"] is not None]
+    return max(stamps).isoformat() if stamps else None
+
+
+def _filters_used(
+    target: TargetSpec,
+    filters: ComparableFilters,
+    population: str,
+    trend_split_days: int,
+) -> dict[str, Any]:
+    return {
+        "target": {
+            "lat": target.lat,
+            "lng": target.lng,
+            "disposition": target.disposition,
+            "area_m2": target.area_m2,
+            "floor": target.floor,
+            "exclude_ids": list(target.exclude_ids),
+        },
+        "radius_m": filters.radius_m,
+        "disposition_match": filters.disposition_match,
+        "area_band_pct": filters.area_band_pct,
+        "floor_band": filters.floor_band,
+        "condition_match": (
+            list(filters.condition_match) if filters.condition_match else None
+        ),
+        "building_type_match": (
+            list(filters.building_type_match) if filters.building_type_match else None
+        ),
+        "energy_rating_match": (
+            list(filters.energy_rating_match) if filters.energy_rating_match else None
+        ),
+        "has_balcony": filters.has_balcony,
+        "has_lift": filters.has_lift,
+        "has_parking": filters.has_parking,
+        "min_price_czk": filters.min_price_czk,
+        "max_price_czk": filters.max_price_czk,
+        "category_main": filters.category_main,
+        "category_type": filters.category_type,
+        "locality_district_id": filters.locality_district_id,
+        "locality_region_id": filters.locality_region_id,
+        "include_unreliable": filters.include_unreliable,
+        "population": population,
+        "trend_split_days": trend_split_days,
+    }
+
+
+def _listing_envelope(
+    *,
+    sreality_id: int,
+    radius_m: int,
+    disposition_match: str,
+    population: str,
+    data: dict[str, Any],
+    queried_at: str,
+    notes: list[str] | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "tool": "compute_listing_velocity",
+        "filters_used": {
+            "sreality_id": sreality_id,
+            "radius_m": radius_m,
+            "disposition_match": disposition_match,
+            "population": population,
+        },
+        "result_count": data.get("cohort_size", 0),
+        "queried_at": queried_at,
+        "data_freshness": None,
+    }
+    if notes:
+        metadata["notes"] = notes
+    return {"data": data, "metadata": metadata}

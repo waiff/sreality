@@ -1,0 +1,64 @@
+name: Fetch + anonymize source HTML fixtures
+
+# Manual trigger only. Fetches each listing URL, runs the anonymization
+# in scripts/fetch_and_anonymize_fixtures.py, and commits the resulting
+# fixtures to the current branch. Operator runs this once per source
+# refresh; tests then read the saved files instead of hitting the
+# internet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bezrealitky_url:
+        description: bezrealitky.cz listing URL (leave blank to skip)
+        required: false
+        default: https://www.bezrealitky.cz/nemovitosti-byty-domy/547214-nabidka-pronajem-bytu-pod-harfou-hlavni-mesto-praha
+        type: string
+      idnes_url:
+        description: reality.idnes.cz listing URL (leave blank to skip)
+        required: false
+        default: https://reality.idnes.cz/detail/pronajem/byt/brno-veveri/69f8c898e58c5ab7d70f3505/
+        type: string
+      remax_url:
+        description: remax-czech.cz listing URL (leave blank to skip)
+        required: false
+        default: https://www.remax-czech.cz/reality/detail/438735/pronajem-bytu-1-kk-v-osobnim-vlastnictvi-31-m2-praha-8-liben
+        type: string
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requests
+        run: pip install "requests>=2.32"
+
+      - name: Fetch + anonymize
+        run: |
+          python scripts/fetch_and_anonymize_fixtures.py \
+            --output-dir tests/fixtures/source_html \
+            --bezrealitky "${{ inputs.bezrealitky_url }}" \
+            --idnes "${{ inputs.idnes_url }}" \
+            --remax "${{ inputs.remax_url }}"
+
+      - name: Commit fixtures
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/fixtures/source_html/
+          if git diff --cached --quiet; then
+            echo "No fixture changes to commit"
+          else
+            git commit -m "Refresh anonymized HTML fixtures (fetch-fixtures workflow)"
+            git push origin HEAD:${{ github.ref_name }}
+          fi

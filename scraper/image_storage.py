@@ -79,6 +79,10 @@ class R2Client:
             CacheControl="public, max-age=2592000",
         )
 
+    def download_bytes(self, key: str) -> bytes:
+        response = self._client.get_object(Bucket=self.bucket, Key=key)
+        return response["Body"].read()
+
 
 def _required(name: str) -> str:
     value = os.environ.get(name)

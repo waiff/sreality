@@ -1,0 +1,390 @@
+import { supabase } from './supabase';
+import {
+  type ListingFilters,
+  seenWithinToIso,
+} from './filters';
+import type {
+  ActiveByDayRow,
+  HealthSummary,
+  ImagePublic,
+  ListingFreshnessCheckPublic,
+  ListingPublic,
+  ListingSnapshotPublic,
+  RegionStats,
+} from './types';
+
+/* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so
+ * the bottleneck is wire-bytes, not DOM. 50k features ≈ 0.3 MB gzipped. */
+export const MAP_CAP = 50_000;
+export const TABLE_PAGE_SIZE = 50;
+
+const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,area_m2,district,last_seen_at,is_active';
+const TABLE_COLS = 'sreality_id,district,disposition,area_m2,price_czk,last_seen_at,is_active';
+
+export type SortField =
+  | 'sreality_id' | 'district' | 'disposition'
+  | 'area_m2' | 'price_czk'
+  | 'last_seen_at' | 'is_active';
+
+export type SortDirection = 'asc' | 'desc';
+
+export interface SortSpec {
+  field: SortField;
+  direction: SortDirection;
+}
+
+export const DEFAULT_SORT: SortSpec = { field: 'last_seen_at', direction: 'desc' };
+
+const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
+  'sreality_id', 'district', 'disposition',
+  'area_m2', 'price_czk',
+  'last_seen_at', 'is_active',
+];
+
+export const parseSort = (raw: string | null): SortSpec => {
+  if (!raw) return DEFAULT_SORT;
+  const direction: SortDirection = raw.startsWith('-') ? 'desc' : 'asc';
+  const field = (raw.startsWith('-') ? raw.slice(1) : raw) as SortField;
+  if (!(SORTABLE_FIELDS as ReadonlyArray<string>).includes(field)) return DEFAULT_SORT;
+  return { field, direction };
+};
+
+export const sortToParam = (s: SortSpec): string =>
+  `${s.direction === 'desc' ? '-' : ''}${s.field}`;
+
+/* Generic identity-typed helper. Postgrest's filter methods all return the
+ * same builder, so passing the chain through any subset of them preserves
+ * the input type at runtime. */
+const applyFilters = <T>(q: T, f: ListingFilters): T => {
+  let r = q as unknown as {
+    eq:  (c: string, v: unknown) => typeof r;
+    gte: (c: string, v: unknown) => typeof r;
+    lte: (c: string, v: unknown) => typeof r;
+    in:  (c: string, v: readonly unknown[]) => typeof r;
+  };
+  if (f.status === 'active') r = r.eq('is_active', true);
+  else if (f.status === 'inactive') r = r.eq('is_active', false);
+  const since = seenWithinToIso(f.seenWithin);
+  if (since) r = r.gte('last_seen_at', since);
+  if (f.districts.length) r = r.in('district', f.districts);
+  if (f.dispositions.length) r = r.in('disposition', f.dispositions);
+  if (f.priceMin != null) r = r.gte('price_czk', f.priceMin);
+  if (f.priceMax != null) r = r.lte('price_czk', f.priceMax);
+  if (f.areaMin  != null) r = r.gte('area_m2',  f.areaMin);
+  if (f.areaMax  != null) r = r.lte('area_m2',  f.areaMax);
+  if (f.hasBalcony !== 'any') r = r.eq('has_balcony', f.hasBalcony === 'yes');
+  if (f.hasLift    !== 'any') r = r.eq('has_lift',    f.hasLift    === 'yes');
+  if (f.hasParking !== 'any') r = r.eq('has_parking', f.hasParking === 'yes');
+  return r as unknown as T;
+};
+
+export interface MapRow {
+  sreality_id: number;
+  lat: number;
+  lng: number;
+  price_czk: number | null;
+  disposition: string | null;
+  area_m2: number | null;
+  district: string | null;
+  last_seen_at: string;
+  is_active: boolean;
+}
+
+export interface MapResult {
+  rows: MapRow[];
+  total: number | null;
+  capped: boolean;
+}
+
+export const fetchListingsForMap = async (
+  f: ListingFilters,
+): Promise<MapResult> => {
+  const base = supabase
+    .from('listings_public')
+    .select(MAP_COLS, { count: 'exact' })
+    .not('lat', 'is', null)
+    .not('lng', 'is', null);
+  const filtered = applyFilters(base, f);
+  const { data, count, error } = await filtered.limit(MAP_CAP);
+  if (error) throw error;
+  const rows = (data ?? []) as unknown as MapRow[];
+  return {
+    rows,
+    total: count ?? null,
+    capped: count != null && count > MAP_CAP,
+  };
+};
+
+export interface TableRow {
+  sreality_id: number;
+  district: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  price_czk: number | null;
+  last_seen_at: string;
+  is_active: boolean;
+}
+
+export interface TableResult {
+  rows: TableRow[];
+  total: number | null;
+}
+
+export const fetchListingsForTable = async (
+  f: ListingFilters,
+  sort: SortSpec,
+  page: number,
+): Promise<TableResult> => {
+  const from = (page - 1) * TABLE_PAGE_SIZE;
+  const to = from + TABLE_PAGE_SIZE - 1;
+  const base = supabase
+    .from('listings_public')
+    .select(TABLE_COLS, { count: 'exact' });
+  const filtered = applyFilters(base, f);
+  const sorted = filtered.order(sort.field, {
+    ascending: sort.direction === 'asc',
+    nullsFirst: false,
+  });
+  const { data, count, error } = await sorted.range(from, to);
+  if (error) throw error;
+  return {
+    rows: (data ?? []) as unknown as TableRow[],
+    total: count ?? null,
+  };
+};
+
+export interface DistrictFacet {
+  district: string;
+  count: number;
+}
+
+export interface BrowseStats {
+  total: number;
+  new_7d: number;
+  new_30d: number;
+  price: { p25: number; p50: number; p75: number } | null;
+  ppm2:  { p25: number; p50: number; p75: number } | null;
+  dispositions: ReadonlyArray<{ disposition: string; n: number }>;
+}
+
+export const fetchBrowseStats = async (
+  f: ListingFilters,
+): Promise<BrowseStats> => {
+  const seenDays =
+    f.seenWithin === 'any' ? null : parseInt(f.seenWithin, 10);
+  const triToBool = (t: typeof f.hasBalcony): boolean | null =>
+    t === 'any' ? null : t === 'yes';
+
+  const { data, error } = await supabase.rpc('browse_stats', {
+    districts_filter:        f.districts.length ? f.districts : null,
+    dispositions_filter:     f.dispositions.length ? f.dispositions : null,
+    price_min_filter:        f.priceMin,
+    price_max_filter:        f.priceMax,
+    area_min_filter:         f.areaMin,
+    area_max_filter:         f.areaMax,
+    active_only_filter:      f.status === 'active',
+    inactive_only_filter:    f.status === 'inactive',
+    seen_within_days_filter: seenDays,
+    has_balcony_filter:      triToBool(f.hasBalcony),
+    has_lift_filter:         triToBool(f.hasLift),
+    has_parking_filter:      triToBool(f.hasParking),
+  });
+  if (error) throw error;
+  return data as BrowseStats;
+};
+
+let districtCache: DistrictFacet[] | null = null;
+
+export const fetchDistrictFacets = async (): Promise<DistrictFacet[]> => {
+  if (districtCache) return districtCache;
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select('district')
+    .not('district', 'is', null);
+  if (error) throw error;
+  const counts = new Map<string, number>();
+  for (const row of (data ?? []) as Array<{ district: string | null }>) {
+    if (!row.district) continue;
+    counts.set(row.district, (counts.get(row.district) ?? 0) + 1);
+  }
+  districtCache = [...counts.entries()]
+    .map(([district, count]) => ({ district, count }))
+    .sort((a, b) => b.count - a.count || a.district.localeCompare(b.district));
+  return districtCache;
+};
+
+const DETAIL_COLS =
+  'sreality_id,first_seen_at,last_seen_at,is_active,' +
+  'category_main,category_type,price_czk,price_unit,' +
+  'area_m2,disposition,locality,district,locality_district_id,locality_region_id,' +
+  'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
+  'building_type,condition,energy_rating';
+
+export const fetchListingById = async (
+  sreality_id: number,
+): Promise<ListingPublic | null> => {
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select(DETAIL_COLS)
+    .eq('sreality_id', sreality_id)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as unknown as ListingPublic | null) ?? null;
+};
+
+export const fetchSnapshotsByListing = async (
+  sreality_id: number,
+): Promise<ListingSnapshotPublic[]> => {
+  const { data, error } = await supabase
+    .from('listing_snapshots_public')
+    .select('id,sreality_id,scraped_at,price_czk')
+    .eq('sreality_id', sreality_id)
+    .order('scraped_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as ListingSnapshotPublic[];
+};
+
+export const fetchFreshnessChecksByListing = async (
+  sreality_id: number,
+): Promise<ListingFreshnessCheckPublic[]> => {
+  const { data, error } = await supabase
+    .from('listing_freshness_checks_public')
+    .select('id,sreality_id,checked_at,outcome')
+    .eq('sreality_id', sreality_id)
+    .order('checked_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as ListingFreshnessCheckPublic[];
+};
+
+export const fetchImagesByListing = async (
+  sreality_id: number,
+): Promise<ImagePublic[]> => {
+  const { data, error } = await supabase
+    .from('images_public')
+    .select('id,sreality_id,sequence,sreality_url,storage_path')
+    .eq('sreality_id', sreality_id)
+    .order('sequence', { ascending: true, nullsFirst: false })
+    .order('id', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as ImagePublic[];
+};
+
+/* -------------------------------------------------------------------------- */
+/* Region page (Part D) — calls into migration 012 RPCs                       */
+/* -------------------------------------------------------------------------- */
+
+export type RegionMode =
+  | { kind: 'districts'; districts: string[] }
+  | { kind: 'radius'; lng: number; lat: number; radiusM: number };
+
+const rpcArgs = (mode: RegionMode) => {
+  if (mode.kind === 'districts') {
+    return {
+      districts_filter: mode.districts.length > 0 ? mode.districts : null,
+      center_lng: null,
+      center_lat: null,
+      radius_m: null,
+    };
+  }
+  return {
+    districts_filter: null,
+    center_lng: mode.lng,
+    center_lat: mode.lat,
+    radius_m: mode.radiusM,
+  };
+};
+
+export const isRegionDefined = (mode: RegionMode): boolean =>
+  mode.kind === 'districts' ? mode.districts.length > 0 : true;
+
+export const fetchRegionStats = async (mode: RegionMode): Promise<RegionStats> => {
+  const { data, error } = await supabase.rpc('region_stats', rpcArgs(mode));
+  if (error) throw error;
+  return data as RegionStats;
+};
+
+export const fetchRegionActiveByDay = async (
+  mode: RegionMode,
+  daysBack = 90,
+): Promise<ActiveByDayRow[]> => {
+  const { data, error } = await supabase.rpc('region_active_by_day', {
+    ...rpcArgs(mode),
+    days_back: daysBack,
+  });
+  if (error) throw error;
+  return (data ?? []) as ActiveByDayRow[];
+};
+
+/* -------------------------------------------------------------------------- */
+/* Health dashboard (Part E) — calls migration 013 health_summary RPC         */
+/* -------------------------------------------------------------------------- */
+
+export const fetchHealthSummary = async (): Promise<HealthSummary> => {
+  const { data, error } = await supabase.rpc('health_summary');
+  if (error) throw error;
+  return data as HealthSummary;
+};
+
+export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {
+  const { count, error } = await supabase
+    .from('listings_public')
+    .select('*', { count: 'exact', head: true });
+  return { ok: !error, count: count ?? null };
+};
+
+/* -------------------------------------------------------------------------- */
+/* Estimations (U2). Hits the Railway FastAPI service via lib/api.ts; pages   */
+/* combine these helpers with useQuery / useMutation directly, matching the   */
+/* convention used by Supabase fetchers above.                                */
+/* -------------------------------------------------------------------------- */
+
+import { useMutation, type UseMutationResult } from '@tanstack/react-query';
+import {
+  ApiError,
+  createEstimation,
+  getEstimation,
+  listEstimations,
+  previewListing,
+  previewListingUrl,
+} from './api';
+import type {
+  CreateEstimationIn,
+  EstimationListParams,
+  ParseResult,
+} from './types';
+
+export const estimationKeys = {
+  all: ['estimations'] as const,
+  list: (params: EstimationListParams) =>
+    ['estimations', 'list', params] as const,
+  detail: (id: number) =>
+    ['estimations', 'detail', id] as const,
+  preview: (url: string) =>
+    ['estimations', 'preview', url] as const,
+};
+
+export const fetchEstimationPreview = (url: string) => previewListing(url);
+export const fetchEstimation = (id: number) => getEstimation(id);
+export const fetchEstimationsList = (params: EstimationListParams) =>
+  listEstimations(params);
+export const submitEstimation = (input: CreateEstimationIn) =>
+  createEstimation(input);
+
+export interface UrlPreviewVars {
+  url: string;
+  force_refresh?: boolean;
+}
+
+/* Mutation wrapper around POST /estimations/preview. Pages call
+ * `mutate({ url })` for a normal preview and `mutate({ url, force_refresh: true })`
+ * for the bypass-cache path. The mutation isn't keyed (TanStack
+ * Query mutations aren't), so re-running the same URL never reads
+ * a stale React-Query cache — the cache decision lives entirely on
+ * the backend's parsed_url_cache table. */
+export const useUrlPreview = (): UseMutationResult<
+  ParseResult, ApiError, UrlPreviewVars
+> =>
+  useMutation<ParseResult, ApiError, UrlPreviewVars>({
+    mutationFn: ({ url, force_refresh }) =>
+      previewListingUrl(url, { force_refresh }),
+  });

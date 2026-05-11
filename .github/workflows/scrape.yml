@@ -1,33 +1,29 @@
 name: Daily Sreality scrape
 
-# Two run modes (apply to BOTH the listings phase and the image phase):
-#   Conservative (default, always used for cron):
-#     timeout 60 min
-#     up to 2 000 detail refetches  (= 50 min at 1.5s/detail)
-#     up to 1 000 image downloads   (= ~2 min at 8 workers)
-#     Stays well under the 2 000 min/month free tier.
-#   Aggressive (opt-in via the workflow_dispatch checkbox):
-#     timeout 350 min (~5.8 h, just under the 6h GitHub job cap)
-#     up to 10 000 detail refetches (= 250 min at 1.5s/detail)
-#     up to 10 000 image downloads  (= ~10 min at 16 workers)
-#     For manual bootstrap runs.
+# Walks all six category pairs sequentially each run:
+#   byt + dum + komercni  ×  pronajem + prodej
 #
-# Cron triggers cannot pass inputs - they always fall back to
-# conservative defaults, by design. Listings the cap defers in
-# one run get picked up next run via the same INDEX -> PLAN flow.
+# Always aggressive (the conservative profile was retired when scope
+# expanded from one category to six):
+#   timeout 350 min (~5.8 h, just under the 6h GitHub job cap)
+#   up to 10 000 detail refetches global cap, 2 000 per category
+#       (= 250 min at 1.5s/detail; per-category cap stops one
+#       high-volume category like byt/prodej from starving the rest
+#       of the categories of the shared global budget — listings the
+#       cap defers drain on subsequent runs)
+#   up to 10 000 image downloads  (= ~10 min at 16 workers)
+#
+# Cron triggers cannot pass inputs - they always fall back to the
+# defaults below. workflow_dispatch lets the operator override any
+# cap or skip the image phase for ad-hoc runs.
 
 on:
   schedule:
     - cron: "0 22 * * *"
   workflow_dispatch:
     inputs:
-      aggressive:
-        description: "Aggressive mode: longer timeout, larger image cap, more workers"
-        required: false
-        type: boolean
-        default: false
       limit:
-        description: "Cap number of index entries (blank = all)"
+        description: "Cap number of listings scraped (blank = all). Applies across the whole run, not per category. Tick 'Skip image download phase' for isolated tests."
         required: false
         type: string
       dry_run:
@@ -45,26 +41,26 @@ on:
         type: boolean
         default: false
       max_detail_refetches:
-        description: "Override listing-refetches-per-run cap (blank = mode default)"
+        description: "Override global detail-refetches-per-run cap (blank = 10000)"
+        required: false
+        type: string
+      max_detail_refetches_per_category:
+        description: "Override per-category detail-refetches cap (blank = 2000)"
         required: false
         type: string
       max_image_downloads:
-        description: "Override images-per-run cap (blank = mode default)"
+        description: "Override images-per-run cap (blank = 10000)"
         required: false
         type: string
       image_workers:
-        description: "Override concurrent workers (blank = mode default)"
+        description: "Override concurrent workers (blank = 16)"
         required: false
         type: string
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.aggressive == true && 350 || 60 }}
-    env:
-      MODE_MAX_REFETCHES: ${{ inputs.aggressive == true && '10000' || '2000' }}
-      MODE_MAX_IMAGES: ${{ inputs.aggressive == true && '10000' || '1000' }}
-      MODE_WORKERS: ${{ inputs.aggressive == true && '16' || '8' }}
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -101,20 +97,24 @@ jobs:
             ARGS="$ARGS --no-image-downloads"
           fi
 
-          # Per-input overrides win; otherwise use the mode default.
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
           if [ -z "$MAX_REFETCH" ]; then
-            MAX_REFETCH="$MODE_MAX_REFETCHES"
+            MAX_REFETCH="10000"
+          fi
+          MAX_REFETCH_PER_CAT="${{ inputs.max_detail_refetches_per_category }}"
+          if [ -z "$MAX_REFETCH_PER_CAT" ]; then
+            MAX_REFETCH_PER_CAT="2000"
           fi
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
-            MAX_IMG="$MODE_MAX_IMAGES"
+            MAX_IMG="10000"
           fi
           WORKERS="${{ inputs.image_workers }}"
           if [ -z "$WORKERS" ]; then
-            WORKERS="$MODE_WORKERS"
+            WORKERS="16"
           fi
           ARGS="$ARGS --max-detail-refetches $MAX_REFETCH"
+          ARGS="$ARGS --max-detail-refetches-per-category $MAX_REFETCH_PER_CAT"
           ARGS="$ARGS --max-image-downloads $MAX_IMG"
           ARGS="$ARGS --image-workers $WORKERS"
 

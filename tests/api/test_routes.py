@@ -21,6 +21,7 @@ from api import main as api_main
 def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
     api_main.app.dependency_overrides[deps.get_sreality_client] = lambda: object()
+    api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -129,6 +130,253 @@ def test_compare_snapshots_none_since_passes_none(client, monkeypatch):
     )
     assert res.status_code == 200
     assert captured["since"] is None
+
+
+def test_describe_neighborhood_passes_args(client, monkeypatch):
+    captured = {}
+    def fake(conn, *, lat, lng, radius_m, max_age_days, category_main, category_type):
+        captured["lat"] = lat
+        captured["lng"] = lng
+        captured["radius_m"] = radius_m
+        captured["max_age_days"] = max_age_days
+        captured["category_main"] = category_main
+        captured["category_type"] = category_type
+        return {
+            "data": {"active_listing_count": 0},
+            "metadata": {"tool": "describe_neighborhood"},
+        }
+    monkeypatch.setattr(api_main, "describe_neighborhood", fake)
+
+    res = client.post(
+        "/tools/describe_neighborhood",
+        json={
+            "lat": 50.087, "lng": 14.42,
+            "radius_m": 1500, "max_age_days": 14,
+            "category_main": "byt", "category_type": "pronajem",
+        },
+    )
+    assert res.status_code == 200
+    assert captured["lat"] == 50.087
+    assert captured["radius_m"] == 1500
+    assert captured["max_age_days"] == 14
+
+
+def test_describe_neighborhood_uses_defaults(client, monkeypatch):
+    captured = {}
+    def fake(conn, *, lat, lng, radius_m, max_age_days, category_main, category_type):
+        captured["radius_m"] = radius_m
+        captured["max_age_days"] = max_age_days
+        captured["category_main"] = category_main
+        captured["category_type"] = category_type
+        return {"data": {}, "metadata": {"tool": "describe_neighborhood"}}
+    monkeypatch.setattr(api_main, "describe_neighborhood", fake)
+
+    res = client.post(
+        "/tools/describe_neighborhood",
+        json={"lat": 50.087, "lng": 14.42},
+    )
+    assert res.status_code == 200
+    assert captured["radius_m"] == 1000
+    assert captured["max_age_days"] == 30
+    assert captured["category_main"] == "byt"
+    assert captured["category_type"] == "pronajem"
+
+
+def test_find_distribution_outliers_passes_args(client, monkeypatch):
+    captured = {}
+    def fake(conn, listings, *, field, iqr_multiplier, investigate_history):
+        captured["listings"] = listings
+        captured["field"] = field
+        captured["iqr_multiplier"] = iqr_multiplier
+        captured["investigate_history"] = investigate_history
+        return {
+            "data": {"outliers": []},
+            "metadata": {"tool": "find_distribution_outliers"},
+        }
+    monkeypatch.setattr(api_main, "find_distribution_outliers", fake)
+
+    res = client.post(
+        "/tools/find_distribution_outliers",
+        json={
+            "listings": [
+                {"sreality_id": 1, "price_per_m2": 400.0},
+                {"sreality_id": 2, "price_per_m2": 420.0},
+            ],
+            "field": "price_per_m2",
+            "iqr_multiplier": 2.0,
+            "investigate_history": False,
+        },
+    )
+    assert res.status_code == 200
+    assert len(captured["listings"]) == 2
+    assert captured["field"] == "price_per_m2"
+    assert captured["iqr_multiplier"] == 2.0
+    assert captured["investigate_history"] is False
+
+
+def test_find_distribution_outliers_uses_defaults(client, monkeypatch):
+    captured = {}
+    def fake(conn, listings, *, field, iqr_multiplier, investigate_history):
+        captured["field"] = field
+        captured["iqr_multiplier"] = iqr_multiplier
+        captured["investigate_history"] = investigate_history
+        return {"data": {"outliers": []}, "metadata": {"tool": "find_distribution_outliers"}}
+    monkeypatch.setattr(api_main, "find_distribution_outliers", fake)
+
+    res = client.post(
+        "/tools/find_distribution_outliers",
+        json={"listings": []},
+    )
+    assert res.status_code == 200
+    assert captured["field"] == "price_per_m2"
+    assert captured["iqr_multiplier"] == 1.5
+    assert captured["investigate_history"] is True
+
+
+def test_compute_market_velocity_passes_target_and_filters(client, monkeypatch):
+    captured = {}
+    def fake(conn, target, filters, population, trend_split_days):
+        captured["target"] = target
+        captured["filters"] = filters
+        captured["population"] = population
+        captured["trend_split_days"] = trend_split_days
+        return {"data": {"cohort_size": 0}, "metadata": {"tool": "compute_market_velocity"}}
+    monkeypatch.setattr(api_main, "compute_market_velocity", fake)
+
+    res = client.post(
+        "/tools/compute_market_velocity",
+        json={
+            "target": {"lat": 50.087, "lng": 14.42, "disposition": "2+kk"},
+            "radius_m": 1500,
+            "population": "active",
+            "trend_split_days": 14,
+        },
+    )
+    assert res.status_code == 200
+    assert captured["target"].lat == 50.087
+    assert captured["target"].disposition == "2+kk"
+    assert captured["filters"].radius_m == 1500
+    # Endpoint always passes active_only=False; population controls instead.
+    assert captured["filters"].active_only is False
+    assert captured["population"] == "active"
+    assert captured["trend_split_days"] == 14
+
+
+def test_compute_market_velocity_uses_defaults(client, monkeypatch):
+    captured = {}
+    def fake(conn, target, filters, population, trend_split_days):
+        captured["population"] = population
+        captured["trend_split_days"] = trend_split_days
+        captured["radius_m"] = filters.radius_m
+        return {"data": {}, "metadata": {"tool": "compute_market_velocity"}}
+    monkeypatch.setattr(api_main, "compute_market_velocity", fake)
+
+    res = client.post(
+        "/tools/compute_market_velocity",
+        json={"target": {"lat": 50.0, "lng": 14.0}},
+    )
+    assert res.status_code == 200
+    assert captured["population"] == "all"
+    assert captured["trend_split_days"] == 7
+    assert captured["radius_m"] == 1000
+
+
+def test_compute_listing_velocity_passes_args(client, monkeypatch):
+    captured = {}
+    def fake(conn, sreality_id, *, radius_m, disposition_match, population):
+        captured["sreality_id"] = sreality_id
+        captured["radius_m"] = radius_m
+        captured["disposition_match"] = disposition_match
+        captured["population"] = population
+        return {"data": {"sreality_id": sreality_id, "found": True}, "metadata": {"tool": "compute_listing_velocity"}}
+    monkeypatch.setattr(api_main, "compute_listing_velocity", fake)
+
+    res = client.post(
+        "/tools/compute_listing_velocity",
+        json={
+            "sreality_id": 12345,
+            "radius_m": 2000,
+            "disposition_match": "loose",
+            "population": "delisted",
+        },
+    )
+    assert res.status_code == 200
+    assert captured["sreality_id"] == 12345
+    assert captured["radius_m"] == 2000
+    assert captured["disposition_match"] == "loose"
+    assert captured["population"] == "delisted"
+
+
+def test_compute_listing_velocity_uses_defaults(client, monkeypatch):
+    captured = {}
+    def fake(conn, sreality_id, *, radius_m, disposition_match, population):
+        captured["radius_m"] = radius_m
+        captured["disposition_match"] = disposition_match
+        captured["population"] = population
+        return {"data": {"sreality_id": sreality_id, "found": True}, "metadata": {"tool": "compute_listing_velocity"}}
+    monkeypatch.setattr(api_main, "compute_listing_velocity", fake)
+
+    res = client.post(
+        "/tools/compute_listing_velocity",
+        json={"sreality_id": 1},
+    )
+    assert res.status_code == 200
+    assert captured["radius_m"] == 1000
+    assert captured["disposition_match"] == "exact"
+    assert captured["population"] == "all"
+
+
+def test_find_anchor_amenities_passes_args(client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {
+            "data": {"categories": {"tram_stop": {"count": 0,
+                                                  "nearest_distance_m": None,
+                                                  "items": []}},
+                     "from_cache": {"tram_stop": True}},
+            "metadata": {"tool": "find_anchor_amenities"},
+        }
+
+    monkeypatch.setattr(api_main, "find_anchor_amenities", fake)
+
+    res = client.post(
+        "/tools/find_anchor_amenities",
+        json={
+            "lat": 50.075, "lng": 14.43, "radius_m": 750,
+            "categories": ["tram_stop"], "cache_ttl_days": 14,
+        },
+    )
+
+    assert res.status_code == 200
+    assert captured["lat"] == 50.075
+    assert captured["lng"] == 14.43
+    assert captured["radius_m"] == 750
+    assert captured["categories"] == ["tram_stop"]
+    assert captured["cache_ttl_days"] == 14
+    assert res.json()["metadata"]["tool"] == "find_anchor_amenities"
+
+
+def test_find_anchor_amenities_defaults_categories_to_none(client, monkeypatch):
+    """categories=None means all-of-them inside the toolkit; the API just passes through."""
+    captured: dict[str, Any] = {}
+
+    def fake(conn, **kw):
+        captured.update(kw)
+        return {"data": {"categories": {}, "from_cache": {}},
+                "metadata": {"tool": "find_anchor_amenities"}}
+
+    monkeypatch.setattr(api_main, "find_anchor_amenities", fake)
+
+    res = client.post(
+        "/tools/find_anchor_amenities",
+        json={"lat": 50.0, "lng": 14.0},
+    )
+    assert res.status_code == 200
+    assert captured["categories"] is None
+    assert captured["radius_m"] == 1000
+    assert captured["cache_ttl_days"] == 30
 
 
 def test_invalid_body_returns_422(client):

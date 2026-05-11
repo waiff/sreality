@@ -1,0 +1,320 @@
+@import "tailwindcss";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+/*
+ * Design tokens. The world this UI lives in: residential Prague — sandstone
+ * facades, oxidised copper church domes, mansard slate, the off-white of
+ * archival paper. Civic-archive feel. Borders only, no shadows except over
+ * map tiles. See ROADMAP / U1a for full direction notes.
+ */
+@theme {
+  /* Surfaces. ~3% lightness shifts between levels — whisper-quiet. */
+  --color-paper:        #f6f3ec;          /* canvas, "laid paper" */
+  --color-paper-2:      #fbf9f3;          /* one step up: cards, panels */
+  --color-paper-3:      #ffffff;          /* highest: popovers, dropdowns */
+  --color-inset:        #efeae0;          /* one step DOWN: input bgs, code blocks */
+
+  /* Foreground hierarchy — four levels. */
+  --color-ink:          #1a1c22;          /* primary */
+  --color-ink-2:        #4a4d57;          /* secondary */
+  --color-ink-3:        #7a7d86;          /* tertiary, metadata */
+  --color-ink-4:        #b0b1b7;          /* muted, disabled, placeholder */
+
+  /* Borders — low rgba so they recede. */
+  --color-rule:         rgba(26, 28, 34, 0.08);     /* standard */
+  --color-rule-soft:    rgba(26, 28, 34, 0.05);     /* softer separation */
+  --color-rule-strong:  rgba(26, 28, 34, 0.16);     /* emphasis */
+  --color-focus:        rgba(60, 110, 99, 0.45);    /* focus ring */
+
+  /* Accent — single. Oxidised copper / verdigris from Prague's church domes. */
+  --color-copper:       #3c6e63;
+  --color-copper-2:     #2f5750;          /* hover/active */
+  --color-copper-soft:  rgba(60, 110, 99, 0.10);  /* tinted backgrounds */
+
+  /* Semantic. Brick for inactive/failures, sage for success, ochre for warn. */
+  --color-brick:        #a04b3d;
+  --color-brick-soft:   rgba(160, 75, 61, 0.10);
+  --color-sage:         #5e7a4a;
+  --color-sage-soft:    rgba(94, 122, 74, 0.10);
+  --color-ochre:        #b58438;
+  --color-ochre-soft:   rgba(181, 132, 56, 0.10);
+
+  /* Typography. */
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --font-sans:    "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    "JetBrains Mono", ui-monospace, "Menlo", monospace;
+
+  /* Radii. Tight — archival, not friendly. */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+}
+
+/* Dark mode — mirror the world after dusk: deep ink, copper still copper.
+ * Per the skill: shadows lose definition on dark, lean harder on borders. */
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-paper:        #14161b;
+    --color-paper-2:      #1a1d24;
+    --color-paper-3:      #20242c;
+    --color-inset:        #0e1015;
+
+    --color-ink:          #ece8de;
+    --color-ink-2:        #b4b3ad;
+    --color-ink-3:        #7e8086;
+    --color-ink-4:        #50535b;
+
+    --color-rule:         rgba(236, 232, 222, 0.10);
+    --color-rule-soft:    rgba(236, 232, 222, 0.06);
+    --color-rule-strong:  rgba(236, 232, 222, 0.18);
+    --color-focus:        rgba(126, 178, 167, 0.55);
+
+    --color-copper:       #7eb2a7;
+    --color-copper-2:     #9bcabd;
+    --color-copper-soft:  rgba(126, 178, 167, 0.14);
+
+    --color-brick:        #c47767;
+    --color-brick-soft:   rgba(196, 119, 103, 0.14);
+    --color-sage:         #97b27e;
+    --color-sage-soft:    rgba(151, 178, 126, 0.14);
+    --color-ochre:        #d8a763;
+    --color-ochre-soft:   rgba(216, 167, 99, 0.14);
+  }
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color-scheme: light dark;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    background-color: var(--color-paper);
+    color: var(--color-ink);
+    font-feature-settings: "ss01", "cv11";
+  }
+
+  /* Inputs are a tools surface — typed values should read clearly against
+   * the inset background, and placeholders shouldn't disappear into the chrome.
+   * Bump weight 400 → 500, lift placeholder from --color-ink-4 → --color-ink-3. */
+  input, textarea, select {
+    font-weight: 500;
+    color: var(--color-ink);
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-ink-3);
+    font-weight: 400;
+    opacity: 1;
+  }
+
+  /* Tabular numerals everywhere by default for prices, areas, counts.
+   * If a piece of UI needs proportional digits it can opt out. */
+  .num,
+  .font-mono,
+  table,
+  input[type="number"] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Headings get the display face with tight tracking. */
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+    font-weight: 600;
+    letter-spacing: -0.012em;
+    color: var(--color-ink);
+  }
+
+  /* Focus visible everywhere, never the OS default. */
+  :focus-visible {
+    outline: 2px solid var(--color-focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  /* Selection in copper-soft. */
+  ::selection {
+    background-color: var(--color-copper-soft);
+    color: var(--color-ink);
+  }
+
+  /* Subtle scrollbars in light mode. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-rule-strong);
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* Map popup — overrides maplibre-gl's default white box so it matches the
+ * paper-3 surface, with the agreed map-overlay shadow carve-out. */
+@layer components {
+  .maplibregl-popup-content {
+    background: var(--color-paper-3) !important;
+    color: var(--color-ink) !important;
+    border: 1px solid var(--color-rule) !important;
+    border-radius: var(--radius-md) !important;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08) !important;
+    padding: 12px 14px !important;
+    font-family: var(--font-sans);
+  }
+  .maplibregl-popup-tip {
+    border-top-color: var(--color-paper-3) !important;
+    border-bottom-color: var(--color-paper-3) !important;
+  }
+  .maplibregl-popup-close-button {
+    color: var(--color-ink-3) !important;
+    font-size: 18px !important;
+    padding: 2px 6px !important;
+  }
+  .maplibregl-popup-close-button:hover {
+    color: var(--color-ink) !important;
+    background: transparent !important;
+  }
+
+  .lp {
+    min-width: 180px;
+    max-width: 240px;
+  }
+  .lp-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .lp-price {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.012em;
+    color: var(--color-ink);
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .lp-inactive {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--color-brick);
+    flex-shrink: 0;
+  }
+  .lp-meta {
+    margin: 4px 0 0;
+    font-size: 0.78rem;
+    color: var(--color-ink-2);
+  }
+  .lp-mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .lp-sep {
+    margin: 0 6px;
+    color: var(--color-ink-4);
+  }
+  .lp-district {
+    margin: 6px 0 0;
+    font-size: 0.7rem;
+    letter-spacing: 0.02em;
+    color: var(--color-ink-3);
+  }
+  .lp-seen {
+    margin: 6px 0 0;
+    font-size: 0.65rem;
+    color: var(--color-ink-4);
+    cursor: help;
+  }
+  .lp-link {
+    display: inline-block;
+    margin-top: 10px;
+    font-size: 0.75rem;
+    letter-spacing: 0.02em;
+    color: var(--color-copper);
+    text-decoration: none;
+  }
+  .lp-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+}
+
+/* Region page (Part D) — copper centre pin for the radius-mode map. */
+@layer components {
+  .rm-pin {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--color-paper-3);
+    border: 2px solid var(--color-copper);
+    box-shadow: 0 0 0 1px var(--color-rule), 0 1px 3px rgba(0, 0, 0, 0.18);
+    cursor: grab;
+  }
+  .rm-pin:active { cursor: grabbing; }
+}
+
+/* Layered dual-handle range slider. Two <input type="range"> stacked on
+ * a single track; only the thumbs receive pointer events so the track can
+ * be drawn behind. */
+@layer components {
+  .range-slider {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    appearance: none;
+    pointer-events: none;
+    margin: 0;
+  }
+  .range-slider::-webkit-slider-runnable-track {
+    background: transparent;
+    border: none;
+    height: 100%;
+  }
+  .range-slider::-moz-range-track {
+    background: transparent;
+    border: none;
+    height: 100%;
+  }
+  .range-slider::-webkit-slider-thumb {
+    pointer-events: auto;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: 0;
+    border-radius: 999px;
+    background: var(--color-paper-3);
+    border: 1.5px solid var(--color-copper);
+    box-shadow: 0 0 0 1px var(--color-rule);
+    cursor: grab;
+  }
+  .range-slider::-moz-range-thumb {
+    pointer-events: auto;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    background: var(--color-paper-3);
+    border: 1.5px solid var(--color-copper);
+    box-shadow: 0 0 0 1px var(--color-rule);
+    cursor: grab;
+  }
+  .range-slider:active::-webkit-slider-thumb { cursor: grabbing; }
+  .range-slider:active::-moz-range-thumb     { cursor: grabbing; }
+  .range-slider:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--color-focus);
+  }
+  .range-slider:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px var(--color-focus);
+  }
+}
