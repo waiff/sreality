@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 07:58 UTC_
+_Last refreshed: 2026-05-11 08:29 UTC_
 
 **Branch:** `claude/plan-rental-estimator-xQgTx`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-11 07:58 UTC_
 **Last 10 commits:**
 
 ```
+0463ac4 Add agent smoke test (script + GH Actions workflow)
+da036c9 roadmap: refresh auto-status block
 24169ee Phase 7 slice 1: provider-agnostic agent + Settings page
 09c9ccf Phase 7 slice 1: add migration 028 for the reasoning agent
 2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
@@ -24,8 +26,6 @@ _Last refreshed: 2026-05-11 07:58 UTC_
 2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
 6f7e6f7 Renumber visual-layer migration 026 -> 027
 4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
-e111edb roadmap: refresh auto-status block
-0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
 ```
 
 <!-- END AUTO-STATUS -->
