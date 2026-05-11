@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 08:04 UTC_
+_Last refreshed: 2026-05-11 08:22 UTC_
 
 **Branch:** `claude/add-sales-estimate-Uzsdi`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-11 08:04 UTC_
 **Last 10 commits:**
 
 ```
+9e2f9a3 roadmap: refresh auto-status block
 d59a4b3 Merge pull request #39 from waiff/claude/add-walkability-comps-tools-MQOCx
 cdf89cc roadmap: refresh auto-status block
 1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
@@ -25,7 +26,6 @@ cdf89cc roadmap: refresh auto-status block
 2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
 6f7e6f7 Renumber visual-layer migration 026 -> 027
 4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
-e111edb roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->

@@ -232,10 +232,16 @@ export interface EstimationRun {
   input_url: string | null;
   input_sreality_id: number | null;
   input_spec: TargetSpecIn | null;
+  /* Discriminator added in migration 029. Null on legacy rows
+   * predating the migration — readers should treat null as 'rent'. */
+  estimate_kind: 'rent' | 'sale' | null;
   input_purchase_price_czk: number | null;
   estimated_monthly_rent_czk: number | null;
   rent_p25_czk: number | null;
   rent_p75_czk: number | null;
+  estimated_sale_price_czk: number | null;
+  sale_p25_czk: number | null;
+  sale_p75_czk: number | null;
   gross_yield_pct: number | null;
   confidence: Confidence | null;
   comparables_used: ComparableUsed[] | null;
@@ -288,10 +294,12 @@ export interface EstimationFilters {
 export interface CreateEstimationIn extends Partial<EstimationFilters> {
   source?: EstimationSource;
   mode?: EstimationMode;
+  estimate_kind?: 'rent' | 'sale';
   url?: string;
   spec?: TargetSpecIn;
   spec_overrides?: Partial<TargetSpecIn>;
   purchase_price_czk?: number | null;
+  expected_monthly_rent_czk?: number | null;
   parent_run_id?: number | null;
   rerun_reason?: string | null;
 }

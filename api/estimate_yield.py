@@ -3,6 +3,16 @@
 Sits outside toolkit/ deliberately. Toolkit functions return facts;
 this module synthesises an estimate + confidence + warnings on top.
 
+Supports both rental and sale estimates via the `estimate_kind`
+parameter. The analytical pipeline is identical — same comparables,
+same distribution. Only the output shape and the yield calculation
+direction change:
+  * rent: median per-m² rent → estimated_monthly_rent_czk. Yield is
+    estimated rent × 12 / purchase_price_czk (caller supplies price).
+  * sale: median per-m² price → estimated_sale_price_czk. Yield is
+    expected_monthly_rent_czk × 12 / estimated_sale_price_czk (caller
+    supplies the expected rent).
+
 The endpoint does NOT call verify_listing_freshness on every comparable
 (that would multiply load). It surfaces freshness statistics for the
 cohort instead, so the agent can decide which comparables to verify.
@@ -17,7 +27,7 @@ from __future__ import annotations
 import dataclasses
 from datetime import datetime, timezone
 from statistics import mean, median
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from api.estimation_runs import NULL_RECORDER, TraceRecorder
 from toolkit import (
@@ -31,12 +41,17 @@ if TYPE_CHECKING:
     import psycopg
 
 
+EstimateKind = Literal["rent", "sale"]
+
+
 def estimate_yield(
     conn: "psycopg.Connection",
     target: TargetSpec,
     filters: ComparableFilters,
     purchase_price_czk: int | None = None,
     *,
+    estimate_kind: EstimateKind = "rent",
+    expected_monthly_rent_czk: int | None = None,
     trace_recorder: TraceRecorder | None = None,
 ) -> dict[str, Any]:
     rec: Any = trace_recorder if trace_recorder is not None else NULL_RECORDER
@@ -46,6 +61,7 @@ def estimate_yield(
         input={
             "target": dataclasses.asdict(target),
             "filters": dataclasses.asdict(filters),
+            "estimate_kind": estimate_kind,
         },
     ) as step:
         cohort_res = find_comparables(conn, target, filters)
@@ -66,29 +82,30 @@ def estimate_yield(
             k: d.get(k) for k in ("n", "median", "p25", "p75", "iqr")
         })
 
+    scale_label = (
+        f"scale per-m² by target area ({estimate_kind})"
+        if target.area_m2 is not None
+        else f"use price_czk percentiles directly ({estimate_kind})"
+    )
     if target.area_m2 is not None:
-        with rec.computation("scale per-m² by target area") as step:
-            estimated, r25, r75 = _scale(d, target.area_m2)
-            step.set_summary({
-                "estimated_monthly_rent_czk": estimated,
-                "rent_p25_czk": r25,
-                "rent_p75_czk": r75,
-            })
+        with rec.computation(scale_label) as step:
+            estimated, p25, p75 = _scale(d, target.area_m2)
+            step.set_summary({"estimated": estimated, "p25": p25, "p75": p75})
     else:
-        with rec.computation(
-            "use price_czk percentiles directly"
-        ) as step:
+        with rec.computation(scale_label) as step:
             estimated = _to_int(d.get("median"))
-            r25 = _to_int(d.get("p25"))
-            r75 = _to_int(d.get("p75"))
-            step.set_summary({
-                "estimated_monthly_rent_czk": estimated,
-                "rent_p25_czk": r25,
-                "rent_p75_czk": r75,
-            })
+            p25 = _to_int(d.get("p25"))
+            p75 = _to_int(d.get("p75"))
+            step.set_summary({"estimated": estimated, "p25": p25, "p75": p75})
 
     sample_size = d["n"]
-    gross_yield_pct = _gross_yield(estimated, purchase_price_czk)
+    rent_for_yield, price_for_yield = _yield_inputs(
+        estimate_kind,
+        point=estimated,
+        purchase_price_czk=purchase_price_czk,
+        expected_monthly_rent_czk=expected_monthly_rent_czk,
+    )
+    gross_yield_pct = _gross_yield(rent_for_yield, price_for_yield)
     freshness = _freshness_block(listings)
     comparables_used = [_used_entry(l) for l in listings]
     verified_count = sum(
@@ -101,19 +118,19 @@ def estimate_yield(
         step.set_summary({"confidence": confidence, "warnings": warnings})
 
     return {
-        "data": {
-            "estimated_monthly_rent_czk": estimated,
-            "rent_p25_czk": r25,
-            "rent_p75_czk": r75,
-            "sample_size": sample_size,
-            "comparables_used": comparables_used,
-            "data_freshness": freshness,
-            "gross_yield_pct": gross_yield_pct,
-            "confidence": confidence,
-            "warnings": warnings,
-        },
+        "data": _shape_data(
+            estimate_kind,
+            point=estimated, p25=p25, p75=p75,
+            sample_size=sample_size,
+            comparables_used=comparables_used,
+            freshness=freshness,
+            gross_yield_pct=gross_yield_pct,
+            confidence=confidence,
+            warnings=warnings,
+        ),
         "metadata": {
             "tool": "estimate_yield",
+            "estimate_kind": estimate_kind,
             "filters_used": cohort_md["filters_used"],
             "result_count": sample_size,
             "queried_at": _now_iso(),
@@ -126,10 +143,72 @@ def estimate_yield(
     }
 
 
+def _shape_data(
+    estimate_kind: EstimateKind,
+    *,
+    point: int | None,
+    p25: int | None,
+    p75: int | None,
+    sample_size: int,
+    comparables_used: list[dict[str, Any]],
+    freshness: dict[str, Any],
+    gross_yield_pct: float | None,
+    confidence: str,
+    warnings: list[str],
+) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "estimate_kind": estimate_kind,
+        "sample_size": sample_size,
+        "comparables_used": comparables_used,
+        "data_freshness": freshness,
+        "gross_yield_pct": gross_yield_pct,
+        "confidence": confidence,
+        "warnings": warnings,
+    }
+    if estimate_kind == "rent":
+        base.update({
+            "estimated_monthly_rent_czk": point,
+            "rent_p25_czk": p25,
+            "rent_p75_czk": p75,
+            "estimated_sale_price_czk": None,
+            "sale_p25_czk": None,
+            "sale_p75_czk": None,
+        })
+    else:
+        base.update({
+            "estimated_monthly_rent_czk": None,
+            "rent_p25_czk": None,
+            "rent_p75_czk": None,
+            "estimated_sale_price_czk": point,
+            "sale_p25_czk": p25,
+            "sale_p75_czk": p75,
+        })
+    return base
+
+
+def _yield_inputs(
+    estimate_kind: EstimateKind,
+    *,
+    point: int | None,
+    purchase_price_czk: int | None,
+    expected_monthly_rent_czk: int | None,
+) -> tuple[int | None, int | None]:
+    """Return (monthly_rent, sale_price) feeding into gross_yield.
+
+    For rent estimates the point estimate IS the monthly rent and the
+    caller supplies the price. For sale estimates the point estimate
+    IS the sale price and the caller supplies the expected rent.
+    Either side missing → no yield, no warning (the calc is optional).
+    """
+    if estimate_kind == "rent":
+        return point, purchase_price_czk
+    return expected_monthly_rent_czk, point
+
+
 def _scale(
     dist_data: dict[str, Any], area_m2: float
 ) -> tuple[int | None, int | None, int | None]:
-    """Multiply per-m² percentiles by target area to get rent estimates."""
+    """Multiply per-m² percentiles by target area to get point estimates."""
     median_v = dist_data.get("median")
     p25 = dist_data.get("p25")
     p75 = dist_data.get("p75")
@@ -146,11 +225,11 @@ def _to_int(v: Any) -> int | None:
 
 
 def _gross_yield(
-    rent_czk: int | None, purchase_price_czk: int | None
+    rent_czk: int | None, price_czk: int | None
 ) -> float | None:
-    if rent_czk is None or not purchase_price_czk or purchase_price_czk <= 0:
+    if rent_czk is None or not price_czk or price_czk <= 0:
         return None
-    return round((rent_czk * 12) / purchase_price_czk * 100, 2)
+    return round((rent_czk * 12) / price_czk * 100, 2)
 
 
 def _used_entry(listing: dict[str, Any]) -> dict[str, Any]:

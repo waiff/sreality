@@ -189,22 +189,31 @@ class CreateEstimationIn(BaseModel):
     top to let the caller adjust individual fields. When `spec` is set
     directly, it is used verbatim.
 
+    `estimate_kind` selects rent vs sale. When omitted, defaults to
+    'rent' for backwards compatibility with callers built before
+    migration 029. The default `category_type` follows the kind
+    (`pronajem` for rent, `prodej` for sale) unless the caller
+    explicitly overrides it.
+
     The remaining filter fields forward into ComparableFilters
     one-to-one, mirroring EstimateYieldIn.
     """
     source: Literal["ui", "api", "clickup"] = "api"
     mode: Literal["deterministic"] = "deterministic"
 
+    estimate_kind: Literal["rent", "sale"] = "rent"
+
     url: str | None = None
     spec: TargetIn | None = None
     spec_overrides: dict[str, Any] | None = None
 
     purchase_price_czk: int | None = None
+    expected_monthly_rent_czk: int | None = None
 
     radius_m: int = 1000
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
-    max_age_days: int = 7
+    max_age_days: int | None = None
     active_only: bool = True
     floor_band: int | None = None
     condition_match: list[str] | None = None
@@ -216,7 +225,7 @@ class CreateEstimationIn(BaseModel):
     min_price_czk: int | None = None
     max_price_czk: int | None = None
     category_main: str | None = "byt"
-    category_type: str | None = "pronajem"
+    category_type: str | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
@@ -225,11 +234,17 @@ class CreateEstimationIn(BaseModel):
     rerun_reason: str | None = None
 
     @model_validator(mode="after")
-    def _validate_url_xor_spec(self) -> "CreateEstimationIn":
+    def _apply_kind_defaults(self) -> "CreateEstimationIn":
         if (self.url is None) == (self.spec is None):
             raise ValueError(
                 "Provide exactly one of 'url' or 'spec'"
             )
+        if self.category_type is None:
+            self.category_type = (
+                "pronajem" if self.estimate_kind == "rent" else "prodej"
+            )
+        if self.max_age_days is None:
+            self.max_age_days = 7 if self.estimate_kind == "rent" else 30
         return self
 
 
@@ -252,11 +267,13 @@ class ResolveLocationIn(BaseModel):
 
 class EstimateYieldIn(BaseModel):
     target: TargetIn
+    estimate_kind: Literal["rent", "sale"] = "rent"
     purchase_price_czk: int | None = None
+    expected_monthly_rent_czk: int | None = None
     radius_m: int = 1000
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
-    max_age_days: int = 7
+    max_age_days: int | None = None
     active_only: bool = True
     floor_band: int | None = None
     condition_match: list[str] | None = None
@@ -268,10 +285,20 @@ class EstimateYieldIn(BaseModel):
     min_price_czk: int | None = None
     max_price_czk: int | None = None
     category_main: str | None = "byt"
-    category_type: str | None = "pronajem"
+    category_type: str | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
+
+    @model_validator(mode="after")
+    def _apply_kind_defaults(self) -> "EstimateYieldIn":
+        if self.category_type is None:
+            self.category_type = (
+                "pronajem" if self.estimate_kind == "rent" else "prodej"
+            )
+        if self.max_age_days is None:
+            self.max_age_days = 7 if self.estimate_kind == "rent" else 30
+        return self
 
 
 # --- curation -------------------------------------------------------------

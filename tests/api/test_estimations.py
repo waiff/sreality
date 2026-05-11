@@ -65,11 +65,14 @@ def _patch_persistence(monkeypatch) -> _State:
             **{
                 k: fields.get(k)
                 for k in (
-                    "source", "mode", "status",
+                    "source", "mode", "status", "estimate_kind",
                     "input_url", "input_sreality_id", "input_spec",
                     "input_purchase_price_czk",
                     "estimated_monthly_rent_czk", "rent_p25_czk",
-                    "rent_p75_czk", "gross_yield_pct", "confidence",
+                    "rent_p75_czk",
+                    "estimated_sale_price_czk", "sale_p25_czk",
+                    "sale_p75_czk",
+                    "gross_yield_pct", "confidence",
                     "comparables_used", "trace", "warnings",
                     "error_message", "parent_run_id", "rerun_reason",
                     "source_kind", "parse_confidence",
@@ -86,6 +89,7 @@ def _patch_persistence(monkeypatch) -> _State:
 def _patch_estimate(monkeypatch, exc: Exception | None = None,
                     data: dict[str, Any] | None = None) -> None:
     def fake(conn, target, filters, purchase_price_czk=None, *,
+            estimate_kind="rent", expected_monthly_rent_czk=None,
             trace_recorder=None):
         if exc is not None:
             raise exc
@@ -94,11 +98,37 @@ def _patch_estimate(monkeypatch, exc: Exception | None = None,
                 "find_comparables", input={}
             ) as h:
                 h.set_summary({"result_count": 5})
-        return {
-            "data": data or {
+        if data is not None:
+            payload = data
+        elif estimate_kind == "sale":
+            payload = {
+                "estimate_kind": "sale",
+                "estimated_monthly_rent_czk": None,
+                "rent_p25_czk": None,
+                "rent_p75_czk": None,
+                "estimated_sale_price_czk": 6_000_000,
+                "sale_p25_czk": 5_750_000,
+                "sale_p75_czk": 6_250_000,
+                "gross_yield_pct": (
+                    round((expected_monthly_rent_czk * 12) / 6_000_000 * 100, 2)
+                    if expected_monthly_rent_czk else None
+                ),
+                "confidence": "high",
+                "sample_size": 5,
+                "comparables_used": [
+                    {"sreality_id": 1, "snapshot_id": 11},
+                ],
+                "warnings": [],
+            }
+        else:
+            payload = {
+                "estimate_kind": "rent",
                 "estimated_monthly_rent_czk": 20500,
                 "rent_p25_czk": 19000,
                 "rent_p75_czk": 22000,
+                "estimated_sale_price_czk": None,
+                "sale_p25_czk": None,
+                "sale_p75_czk": None,
                 "gross_yield_pct": 4.92,
                 "confidence": "high",
                 "sample_size": 5,
@@ -106,9 +136,8 @@ def _patch_estimate(monkeypatch, exc: Exception | None = None,
                     {"sreality_id": 1, "snapshot_id": 11},
                 ],
                 "warnings": [],
-            },
-            "metadata": {"tool": "estimate_yield"},
-        }
+            }
+        return {"data": payload, "metadata": {"tool": "estimate_yield"}}
     monkeypatch.setattr(ey, "estimate_yield", fake)
 
 
@@ -209,6 +238,55 @@ def test_post_with_url_and_spec_overrides_merges(client, monkeypatch):
     assert body["input_spec"]["area_m2"] == 60.0
     assert body["input_spec"]["floor"] == 5
     assert body["input_spec"]["lat"] == 50.087
+
+
+def test_post_sale_estimate_persists_sale_columns(client, monkeypatch):
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+
+    res = client.post(
+        "/estimations",
+        json={
+            "estimate_kind": "sale",
+            "spec": {
+                "lat": 50.087, "lng": 14.42, "area_m2": 50.0,
+                "disposition": "2+kk",
+            },
+            "expected_monthly_rent_czk": 25_000,
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["estimate_kind"] == "sale"
+    assert body["estimated_sale_price_czk"] == 6_000_000
+    assert body["sale_p25_czk"] == 5_750_000
+    assert body["sale_p75_czk"] == 6_250_000
+    assert body["estimated_monthly_rent_czk"] is None
+    assert body["gross_yield_pct"] == 5.0
+    inserted = state.inserts[1]
+    assert inserted["estimate_kind"] == "sale"
+    assert inserted["estimated_sale_price_czk"] == 6_000_000
+
+
+def test_post_default_estimate_kind_is_rent(client, monkeypatch):
+    _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+
+    res = client.post(
+        "/estimations",
+        json={
+            "spec": {
+                "lat": 50.087, "lng": 14.42, "area_m2": 50.0,
+                "disposition": "2+kk",
+            },
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["estimate_kind"] == "rent"
+    assert body["estimated_monthly_rent_czk"] == 20500
+    assert body["estimated_sale_price_czk"] is None
 
 
 def test_post_with_both_url_and_spec_returns_422(client):

@@ -505,7 +505,11 @@ def post_estimate_yield(
         locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
     )
-    return estimate_yield(conn, target, filters, body.purchase_price_czk)
+    return estimate_yield(
+        conn, target, filters, body.purchase_price_czk,
+        estimate_kind=body.estimate_kind,
+        expected_monthly_rent_czk=body.expected_monthly_rent_czk,
+    )
 
 
 # --- curation -------------------------------------------------------------
