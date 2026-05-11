@@ -50,6 +50,21 @@ class AnalyzeDistributionIn(BaseModel):
     field: Literal["price_czk", "price_per_m2", "area_m2"] = "price_per_m2"
 
 
+class ClusterComparablesIn(BaseModel):
+    listings: list[dict[str, Any]]
+    axes: list[
+        Literal["price_per_m2", "price_czk", "area_m2", "distance_m"]
+    ] = Field(default_factory=lambda: ["price_per_m2"])
+    n_clusters: int = Field(default=3, ge=2, le=8)
+    seed: int = 42
+    n_restarts: int = Field(default=5, ge=1, le=20)
+
+
+class FindComparablesRelaxedIn(FindComparablesIn):
+    min_results: int = Field(default=5, ge=1, le=50)
+    relaxation_ladder: list[str] | None = None
+
+
 class VerifyFreshnessIn(BaseModel):
     sreality_id: int
     max_age_hours: int = 24

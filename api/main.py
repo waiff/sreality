@@ -27,6 +27,7 @@ from toolkit import (
     ComparableFilters,
     TargetSpec,
     analyze_distribution,
+    cluster_comparables,
     compare_listing_images,
     compare_snapshots,
     compute_listing_velocity,
@@ -34,6 +35,7 @@ from toolkit import (
     describe_neighborhood,
     find_anchor_amenities,
     find_comparables,
+    find_comparables_relaxed,
     find_distribution_outliers,
     summarize_listing,
     verify_listing_freshness,
@@ -86,12 +88,40 @@ def post_find_comparables(
     return find_comparables(conn, target, filters)
 
 
+@app.post("/tools/find_comparables_relaxed")
+def post_find_comparables_relaxed(
+    body: s.FindComparablesRelaxedIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    target, filters = _build_comparables_inputs(body)
+    return find_comparables_relaxed(
+        conn, target, filters,
+        min_results=body.min_results,
+        relaxation_ladder=body.relaxation_ladder,
+    )
+
+
 @app.post("/tools/analyze_distribution")
 def post_analyze_distribution(
     body: s.AnalyzeDistributionIn,
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return analyze_distribution(body.listings, field=body.field)
+
+
+@app.post("/tools/cluster_comparables")
+def post_cluster_comparables(
+    body: s.ClusterComparablesIn,
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return cluster_comparables(
+        body.listings,
+        axes=body.axes,
+        n_clusters=body.n_clusters,
+        seed=body.seed,
+        n_restarts=body.n_restarts,
+    )
 
 
 @app.post("/tools/verify_listing_freshness")
