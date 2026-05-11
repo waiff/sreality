@@ -85,6 +85,43 @@ class OverpassClient:
         self._last_request_at = time.monotonic()
         return _parse_elements(payload.get("elements", []))
 
+    def fetch_routes(
+        self,
+        transport_types: list[str],
+        bbox_minlat: float,
+        bbox_minlng: float,
+        bbox_maxlat: float,
+        bbox_maxlng: float,
+    ) -> list[dict[str, Any]]:
+        """Fetch route relations of the given transport types in a bbox.
+
+        Returns one row per (relation, member way) pair. Each row carries
+        the relation's metadata (route_ref, name, transport_type) plus
+        the polyline coordinates of the member way. Splitting at the way
+        level avoids the merge ambiguity that bites if a relation has
+        branches or loops — every way is a clean polyline.
+
+        Element shape:
+          {
+            "source_id":      "relation/R/way/W",
+            "transport_type": "tram" | "subway" | "bus",
+            "route_ref":      str | None,   # e.g. "9", "A", "112"
+            "name":           str | None,
+            "linestring":     [(lat, lng), ...],   # at least 2 points
+            "tags":           dict[str, str],
+          }
+        """
+        if not transport_types:
+            return []
+        body = _build_route_query(
+            transport_types, bbox_minlat, bbox_minlng,
+            bbox_maxlat, bbox_maxlng,
+        )
+        self._throttle()
+        payload = self._post(body)
+        self._last_request_at = time.monotonic()
+        return _parse_route_elements(payload.get("elements", []))
+
     def _throttle(self) -> None:
         elapsed = time.monotonic() - self._last_request_at
         if elapsed < self.request_delay_s:
@@ -155,6 +192,76 @@ def _render_tag(key: str, value: str | bool) -> str:
 
 def _esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+_TRANSPORT_TYPES_ALLOWED: frozenset[str] = frozenset({"tram", "subway", "bus"})
+
+
+def _build_route_query(
+    transport_types: list[str],
+    bbox_minlat: float,
+    bbox_minlng: float,
+    bbox_maxlat: float,
+    bbox_maxlng: float,
+) -> str:
+    """Render Overpass QL for route relations of the given transport types.
+
+    Bbox order in Overpass QL is (south, west, north, east) =
+    (minlat, minlng, maxlat, maxlng). `out geom;` returns member way
+    geometries inline as lat/lon arrays.
+    """
+    bbox = f"{bbox_minlat},{bbox_minlng},{bbox_maxlat},{bbox_maxlng}"
+    parts = [
+        f'  relation["type"="route"]["route"="{_esc(tt)}"]({bbox});'
+        for tt in transport_types
+    ]
+    return "[out:json][timeout:60];\n(\n" + "\n".join(parts) + "\n);\nout geom;"
+
+
+def _parse_route_elements(
+    elements: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for el in elements:
+        if el.get("type") != "relation":
+            continue
+        rel_id = el.get("id")
+        if rel_id is None:
+            continue
+        tags = el.get("tags") or {}
+        transport_type = tags.get("route")
+        if transport_type not in _TRANSPORT_TYPES_ALLOWED:
+            continue
+        route_ref = tags.get("ref")
+        name = tags.get("name")
+        members = el.get("members") or []
+        for member in members:
+            if member.get("type") != "way":
+                continue
+            way_id = member.get("ref")
+            if way_id is None:
+                continue
+            geom_pts = member.get("geometry") or []
+            if len(geom_pts) < 2:
+                continue
+            coords: list[tuple[float, float]] = []
+            for pt in geom_pts:
+                lat = pt.get("lat")
+                lng = pt.get("lon")
+                if lat is None or lng is None:
+                    continue
+                coords.append((float(lat), float(lng)))
+            if len(coords) < 2:
+                continue
+            out.append({
+                "source_id":      f"relation/{rel_id}/way/{way_id}",
+                "transport_type": transport_type,
+                "route_ref":      route_ref,
+                "name":           name,
+                "linestring":     coords,
+                "tags":           tags,
+            })
+    return out
 
 
 def _parse_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:

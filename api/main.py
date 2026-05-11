@@ -33,11 +33,14 @@ from toolkit import (
     cluster_comparables,
     compare_listing_images,
     compare_snapshots,
+    compute_amenity_supply,
     compute_listing_velocity,
     compute_market_velocity,
+    compute_walkability,
     describe_neighborhood,
     find_anchor_amenities,
     find_comparables,
+    find_comparables_along_axis,
     find_comparables_relaxed,
     find_distribution_outliers,
     summarize_listing,
@@ -113,6 +116,22 @@ def post_find_comparables_relaxed(
         conn, target, filters,
         min_results=body.min_results,
         relaxation_ladder=body.relaxation_ladder,
+    )
+
+
+@app.post("/tools/find_comparables_along_axis")
+def post_find_comparables_along_axis(
+    body: s.FindComparablesAlongAxisIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    target, filters = _build_comparables_inputs(body)
+    return find_comparables_along_axis(
+        conn, target, filters,
+        transport_types=body.transport_types,
+        anchor_radius_m=body.anchor_radius_m,
+        corridor_m=body.corridor_m,
+        cache_ttl_days=body.cache_ttl_days,
     )
 
 
@@ -249,6 +268,40 @@ def post_find_anchor_amenities(
         lng=body.lng,
         radius_m=body.radius_m,
         categories=body.categories,
+        cache_ttl_days=body.cache_ttl_days,
+    )
+
+
+@app.post("/tools/compute_walkability")
+def post_compute_walkability(
+    body: s.ComputeWalkabilityIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return compute_walkability(
+        conn,
+        lat=body.lat,
+        lng=body.lng,
+        radius_m=body.radius_m,
+        categories=body.categories,
+        weights=body.weights,
+        cache_ttl_days=body.cache_ttl_days,
+    )
+
+
+@app.post("/tools/compute_amenity_supply")
+def post_compute_amenity_supply(
+    body: s.ComputeAmenitySupplyIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return compute_amenity_supply(
+        conn,
+        lat=body.lat,
+        lng=body.lng,
+        radius_m=body.radius_m,
+        categories=body.categories,
+        target_counts=body.target_counts,
         cache_ttl_days=body.cache_ttl_days,
     )
 

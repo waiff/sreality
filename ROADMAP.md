@@ -11,7 +11,7 @@ _Last refreshed: 2026-05-11 08:29 UTC_
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 24 files, latest `028_agent_runs.sql`.
+**Migrations on disk:** 25 files, latest `029_agent_runs.sql`.
 
 **Last 10 commits:**
 
@@ -20,12 +20,16 @@ _Last refreshed: 2026-05-11 08:29 UTC_
 da036c9 roadmap: refresh auto-status block
 24169ee Phase 7 slice 1: provider-agnostic agent + Settings page
 09c9ccf Phase 7 slice 1: add migration 028 for the reasoning agent
+1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
 2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
 6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
 3a0c701 Merge pull request #37 from waiff/claude/plan-phase-6-t5ikU
 2112e3a Merge remote-tracking branch 'origin/main' into claude/plan-phase-6-t5ikU
 6f7e6f7 Renumber visual-layer migration 026 -> 027
 4bd9605 Phase 6 visual layer: summarize_listing + compare_listing_images
+e111edb roadmap: refresh auto-status block
+0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
+ebba60d roadmap: refresh auto-status block for review session
 ```
 
 <!-- END AUTO-STATUS -->
@@ -154,6 +158,37 @@ Two LLM-backed analytical toolkit functions for the Phase 7 agent:
   mirror: the LLM is the source of truth, we cache locally to keep
   repeat lookups fast and Anthropic-friendly).
 
+### Phase 4b: Spatial context (tenant-perspective overlays)
+Two narrow toolkit functions on top of the OSM amenity + transit
+caches.
+- `compute_walkability` + `compute_amenity_supply`
+  (`toolkit/walkability.py`): both project the POI cohort returned
+  by `find_anchor_amenities` onto a different signal. Walkability is
+  a single 0-100 score driven by weighted nearest-POI distance.
+  Supply is the per-category count expressed as a ratio against a
+  target count, bucketed `scarce|adequate|abundant`. Two facts, two
+  tools, the agent picks. Hermetic tests mock the amenity delegate
+  so the math is exercised without an OSM round-trip.
+- `find_comparables_along_axis` (`toolkit/transit_axis.py`):
+  comparables in a corridor along a tram / subway / bus route. Two-
+  stage spatial filter — first find route relations passing within
+  `anchor_radius_m` of the target, then return listings within
+  `corridor_m` of any of those routes. Reuses the shared comparables
+  attribute filters; replaces the anchor-circle ST_DWithin with the
+  corridor join. Per-listing output names the nearest line and
+  distance to it.
+- Migration 028 adds the `transit_lines` + `transit_line_fetches`
+  cache tables (one row per relation/way pair, sha256
+  bbox+transport_types cache key). The Overpass client gets a
+  `fetch_routes` method that parses route relations into clean
+  polylines.
+- CLAUDE.md toolkit rule #5 grows from four to five write-allowed
+  exceptions; architectural rule #11 is added documenting the
+  transit-line mirror.
+- Three new POST endpoints (`/tools/compute_walkability`,
+  `/tools/compute_amenity_supply`,
+  `/tools/find_comparables_along_axis`), bearer-token-gated.
+
 ### Phase 7 slice 1: The reasoning agent (provider-agnostic)
 Synchronous tool-use loop that takes a target spec + filters and
 returns a defensible rental estimate by iterating over a curated
@@ -183,7 +218,7 @@ Trace records `kind='reasoning'` per LLM turn.
 - **Loop guards:** `max_iterations`, `max_cost_usd`,
   `wall_clock_timeout_s` — all sourced from the skill row, all
   short-circuit to `status='failed'` with `error_message`.
-- **Migration 028** adds the `skills` + `skills_history` tables and
+- **Migration 029** adds the `skills` + `skills_history` tables and
   trigger, the `'agent_estimation'` `called_for` enum, the
   `llm_calls.provider` column, and seeds `rental_estimator_v1`.
 - Apartment rentals only (`byt` / `pronajem`). Multi-category
@@ -191,10 +226,7 @@ Trace records `kind='reasoning'` per LLM turn.
 
 ## Next
 
-### Phase 4b: Spatial context (remaining)
-Tenant-perspective overlays beyond anchor amenities.
-- `compute_walkability`: scored composite of POI distances.
-- `find_comparables_along_axis`: transit-line-aware comparable search.
+## Next
 
 ### Phase 7 slice 2: Async + full toolkit + UI mode toggle
 Builds on slice 1.

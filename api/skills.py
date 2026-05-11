@@ -1,6 +1,6 @@
 """Skill loading + updating for the reasoning agent.
 
-A `Skill` is one row in the `skills` table (migration 028). The
+A `Skill` is one row in the `skills` table (migration 029). The
 canonical content lives in `skills/<name>/SKILL.md` in git; the
 migration's seed `INSERT` imports it once. Day-to-day edits happen
 through `update_skill` (Settings page → PUT /admin/skills/{name}),

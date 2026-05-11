@@ -65,6 +65,13 @@ class FindComparablesRelaxedIn(FindComparablesIn):
     relaxation_ladder: list[str] | None = None
 
 
+class FindComparablesAlongAxisIn(FindComparablesIn):
+    transport_types: list[Literal["tram", "subway", "bus"]] | None = None
+    anchor_radius_m: int = Field(default=800, ge=50, le=5000)
+    corridor_m: int = Field(default=300, ge=50, le=2000)
+    cache_ttl_days: int = Field(default=30, ge=1, le=365)
+
+
 class VerifyFreshnessIn(BaseModel):
     sreality_id: int
     max_age_hours: int = 24
@@ -126,6 +133,24 @@ class FindAnchorAmenitiesIn(BaseModel):
     lng: float
     radius_m: int = 1000
     categories: list[str] | None = None
+    cache_ttl_days: int = 30
+
+
+class ComputeWalkabilityIn(BaseModel):
+    lat: float
+    lng: float
+    radius_m: int = 1000
+    categories: list[str] | None = None
+    weights: dict[str, float] | None = None
+    cache_ttl_days: int = 30
+
+
+class ComputeAmenitySupplyIn(BaseModel):
+    lat: float
+    lng: float
+    radius_m: int = 1000
+    categories: list[str] | None = None
+    target_counts: dict[str, int] | None = None
     cache_ttl_days: int = 30
 
 

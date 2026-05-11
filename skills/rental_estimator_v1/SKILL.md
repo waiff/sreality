@@ -21,7 +21,7 @@ limits:
 
 This file is the **canonical documentation** for the
 `rental_estimator_v1` skill that the agent runs under
-(see `migrations/028_agent_runs.sql` for the seed `INSERT`). At
+(see `migrations/029_agent_runs.sql` for the seed `INSERT`). At
 runtime the live values are read from the `skills` table — editing
 them via the Settings page (or via SQL) overrides anything written
 here without a deploy. The file lingers in git as:
