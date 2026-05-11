@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 
+from api import curation
 from api import dependencies as deps
 from api import maps
 from api import schemas as s
@@ -26,17 +27,26 @@ from toolkit import (
     ComparableFilters,
     TargetSpec,
     analyze_distribution,
+    cluster_comparables,
+    compare_listing_images,
     compare_snapshots,
+    compute_amenity_supply,
     compute_listing_velocity,
     compute_market_velocity,
+    compute_walkability,
     describe_neighborhood,
     find_anchor_amenities,
     find_comparables,
+    find_comparables_along_axis,
+    find_comparables_relaxed,
     find_distribution_outliers,
+    summarize_listing,
     verify_listing_freshness,
 )
+from toolkit.image_similarity import ImageCompareError
+from toolkit.summaries import SummarizeError
 
-app = FastAPI(title="sreality toolkit API", version="0.2.5")
+app = FastAPI(title="sreality toolkit API", version="0.3.0")
 
 
 @app.get("/health")
@@ -81,12 +91,56 @@ def post_find_comparables(
     return find_comparables(conn, target, filters)
 
 
+@app.post("/tools/find_comparables_relaxed")
+def post_find_comparables_relaxed(
+    body: s.FindComparablesRelaxedIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    target, filters = _build_comparables_inputs(body)
+    return find_comparables_relaxed(
+        conn, target, filters,
+        min_results=body.min_results,
+        relaxation_ladder=body.relaxation_ladder,
+    )
+
+
+@app.post("/tools/find_comparables_along_axis")
+def post_find_comparables_along_axis(
+    body: s.FindComparablesAlongAxisIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    target, filters = _build_comparables_inputs(body)
+    return find_comparables_along_axis(
+        conn, target, filters,
+        transport_types=body.transport_types,
+        anchor_radius_m=body.anchor_radius_m,
+        corridor_m=body.corridor_m,
+        cache_ttl_days=body.cache_ttl_days,
+    )
+
+
 @app.post("/tools/analyze_distribution")
 def post_analyze_distribution(
     body: s.AnalyzeDistributionIn,
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return analyze_distribution(body.listings, field=body.field)
+
+
+@app.post("/tools/cluster_comparables")
+def post_cluster_comparables(
+    body: s.ClusterComparablesIn,
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return cluster_comparables(
+        body.listings,
+        axes=body.axes,
+        n_clusters=body.n_clusters,
+        seed=body.seed,
+        n_restarts=body.n_restarts,
+    )
 
 
 @app.post("/tools/verify_listing_freshness")
@@ -213,6 +267,77 @@ def post_find_anchor_amenities(
         categories=body.categories,
         cache_ttl_days=body.cache_ttl_days,
     )
+
+
+@app.post("/tools/compute_walkability")
+def post_compute_walkability(
+    body: s.ComputeWalkabilityIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return compute_walkability(
+        conn,
+        lat=body.lat,
+        lng=body.lng,
+        radius_m=body.radius_m,
+        categories=body.categories,
+        weights=body.weights,
+        cache_ttl_days=body.cache_ttl_days,
+    )
+
+
+@app.post("/tools/compute_amenity_supply")
+def post_compute_amenity_supply(
+    body: s.ComputeAmenitySupplyIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return compute_amenity_supply(
+        conn,
+        lat=body.lat,
+        lng=body.lng,
+        radius_m=body.radius_m,
+        categories=body.categories,
+        target_counts=body.target_counts,
+        cache_ttl_days=body.cache_ttl_days,
+    )
+
+
+@app.post("/tools/summarize_listing")
+def post_summarize_listing(
+    body: s.SummarizeListingIn,
+    conn: Any = Depends(deps.get_db_conn),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    try:
+        return summarize_listing(
+            conn, llm_client,
+            sreality_id=body.sreality_id,
+            snapshot_id=body.snapshot_id,
+            force_refresh=body.force_refresh,
+        )
+    except SummarizeError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/tools/compare_listing_images")
+def post_compare_listing_images(
+    body: s.CompareListingImagesIn,
+    conn: Any = Depends(deps.get_db_conn),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    try:
+        return compare_listing_images(
+            conn, llm_client,
+            sreality_id_a=body.sreality_id_a,
+            sreality_id_b=body.sreality_id_b,
+            n_images=body.n_images,
+            force_refresh=body.force_refresh,
+        )
+    except ImageCompareError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/tools/compute_listing_velocity")
@@ -403,6 +528,145 @@ def post_estimate_yield(
         min_parking_lots=body.min_parking_lots,
     )
     return estimate_yield(conn, target, filters, body.purchase_price_czk)
+
+
+# --- curation -------------------------------------------------------------
+# Operator-curated lists of listings, append-only notes, and free-form
+# coloured tags. Reads also flow through the *_public views in
+# migration 025 (used by the SPA via the anon key); writes always
+# come through these endpoints.
+
+
+@app.post("/collections")
+def post_create_collection(
+    body: s.CreateCollectionIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.create_collection(conn, body)
+
+
+@app.get("/collections")
+def get_list_collections(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.list_collections(conn)
+
+
+@app.get("/collections/{collection_id}")
+def get_collection(
+    collection_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.get_collection(conn, collection_id)
+
+
+@app.patch("/collections/{collection_id}")
+def patch_collection(
+    collection_id: int,
+    body: s.UpdateCollectionIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.update_collection(conn, collection_id, body)
+
+
+@app.delete("/collections/{collection_id}")
+def delete_collection(
+    collection_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.delete_collection(conn, collection_id)
+
+
+@app.post("/collections/{collection_id}/listings")
+def post_collection_listings(
+    collection_id: int,
+    body: s.AddListingsToCollectionIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.add_listings_to_collection(conn, collection_id, body)
+
+
+@app.delete("/collections/{collection_id}/listings/{sreality_id}")
+def delete_collection_listing(
+    collection_id: int,
+    sreality_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.remove_listing_from_collection(
+        conn, collection_id, sreality_id,
+    )
+
+
+@app.get("/listings/{sreality_id}/notes")
+def get_listing_notes(
+    sreality_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.list_notes(conn, sreality_id)
+
+
+@app.post("/listings/{sreality_id}/notes")
+def post_listing_note(
+    sreality_id: int,
+    body: s.CreateNoteIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.create_note(conn, sreality_id, body)
+
+
+@app.get("/tags")
+def get_tags(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.list_tags(conn)
+
+
+@app.post("/tags")
+def post_tag(
+    body: s.CreateTagIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.create_tag(conn, body)
+
+
+@app.delete("/tags/{tag_id}")
+def delete_tag(
+    tag_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.delete_tag(conn, tag_id)
+
+
+@app.post("/listings/{sreality_id}/tags")
+def post_attach_tag(
+    sreality_id: int,
+    body: s.AttachTagIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.attach_tag(conn, sreality_id, body)
+
+
+@app.delete("/listings/{sreality_id}/tags/{tag_id}")
+def delete_listing_tag(
+    sreality_id: int,
+    tag_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.detach_tag(conn, sreality_id, tag_id)
 
 
 def _build_comparables_inputs(

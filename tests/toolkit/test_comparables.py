@@ -13,7 +13,9 @@ from toolkit.comparables import (
     TargetSpec,
     build_query,
     find_comparables,
+    find_comparables_relaxed,
 )
+from toolkit.comparables import _apply_relaxation
 
 
 def test_minimal_query_only_spatial():
@@ -520,3 +522,186 @@ def test_find_comparables_sql_includes_lateral_joins():
     assert "FROM listing_snapshots" in sql
     assert "FROM listing_freshness_checks" in sql
     assert "data_age_days" in sql
+
+
+class _QueuedFakeConn:
+    """Fake connection that hands out a fresh cursor per call.
+
+    Each cursor returns the next batch of rows from `batches`, so
+    find_comparables_relaxed (which calls find_comparables multiple
+    times) sees a different result set on each strict/widened query.
+    """
+
+    def __init__(self, batches: list[list[tuple[Any, ...]]]) -> None:
+        self._batches = list(batches)
+        self.executed: list[tuple[str, dict[str, Any]]] = []
+
+    def cursor(self) -> _FakeCursor:
+        rows = self._batches.pop(0) if self._batches else []
+        cur = _FakeCursor(rows, _RESULT_COLS)
+        original_execute = cur.execute
+
+        def _record(sql: str, params: dict[str, Any]) -> None:
+            self.executed.append((sql, dict(params)))
+            original_execute(sql, params)
+
+        cur.execute = _record  # type: ignore[assignment]
+        return cur
+
+
+def test_apply_relaxation_widens_radius_off_base():
+    base = ComparableFilters(radius_m=1000)
+    once = _apply_relaxation(base, base, "radius_x1.5")
+    assert once.radius_m == 1500
+    twice = _apply_relaxation(once, base, "radius_x2")
+    assert twice.radius_m == 2000
+
+
+def test_apply_relaxation_widens_area_band_off_base():
+    base = ComparableFilters(area_band_pct=0.20)
+    once = _apply_relaxation(base, base, "area_band_+0.10")
+    assert abs(once.area_band_pct - 0.30) < 1e-9
+    twice = _apply_relaxation(once, base, "area_band_+0.20")
+    assert abs(twice.area_band_pct - 0.40) < 1e-9
+
+
+def test_apply_relaxation_loosens_disposition_match():
+    base = ComparableFilters(disposition_match="exact")
+    loose = _apply_relaxation(base, base, "disposition_loose")
+    assert loose.disposition_match == "loose"
+    any_ = _apply_relaxation(loose, base, "disposition_any")
+    assert any_.disposition_match == "any"
+
+
+def test_apply_relaxation_disposition_loose_skipped_when_already_any():
+    base = ComparableFilters(disposition_match="any")
+    out = _apply_relaxation(base, base, "disposition_loose")
+    assert out.disposition_match == "any"
+
+
+def test_apply_relaxation_drops_hard_filters():
+    base = ComparableFilters(
+        condition_match=["novostavba"],
+        building_type_match=["cihla"],
+        energy_rating_match=["A"],
+        floor_band=2,
+    )
+    assert _apply_relaxation(base, base, "drop_condition").condition_match is None
+    assert _apply_relaxation(base, base, "drop_building_type").building_type_match is None
+    assert _apply_relaxation(base, base, "drop_energy_rating").energy_rating_match is None
+    assert _apply_relaxation(base, base, "drop_floor_band").floor_band is None
+
+
+def test_apply_relaxation_unknown_action_raises():
+    base = ComparableFilters()
+    try:
+        _apply_relaxation(base, base, "expand_universe")
+    except ValueError as exc:
+        assert "expand_universe" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_relaxed_strict_enough_returns_no_relaxations():
+    conn = _QueuedFakeConn([[_row(i) for i in range(5)]])
+    res = find_comparables_relaxed(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+        min_results=5,
+    )
+    assert res["metadata"]["tool"] == "find_comparables_relaxed"
+    assert res["metadata"]["relaxations_applied"] == 0
+    assert res["data"]["min_results_satisfied"] is True
+    assert len(res["data"]["relaxation_trace"]) == 1
+    assert res["data"]["relaxation_trace"][0]["action"] is None
+    assert res["data"]["relaxation_trace"][0]["step"] == 0
+
+
+def test_relaxed_stops_at_first_step_that_satisfies():
+    conn = _QueuedFakeConn([
+        [_row(1)],
+        [_row(i) for i in range(8)],
+    ])
+    res = find_comparables_relaxed(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(radius_m=1000),
+        min_results=5,
+    )
+    assert res["metadata"]["relaxations_applied"] == 1
+    trace = res["data"]["relaxation_trace"]
+    assert len(trace) == 2
+    assert trace[0]["action"] is None
+    assert trace[0]["result_count"] == 1
+    assert trace[1]["action"] == "radius_x1.5"
+    assert trace[1]["result_count"] == 8
+    assert trace[1]["filters_snapshot"]["radius_m"] == 1500
+    assert res["metadata"]["result_count"] == 8
+    assert res["data"]["min_results_satisfied"] is True
+
+
+def test_relaxed_exhausts_ladder_when_data_never_sufficient():
+    batches = [[_row(1)] for _ in range(11)]
+    conn = _QueuedFakeConn(batches)
+    res = find_comparables_relaxed(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0, disposition="2+kk"),
+        ComparableFilters(),
+        min_results=5,
+    )
+    assert res["metadata"]["relaxations_applied"] == 10
+    assert len(res["data"]["relaxation_trace"]) == 11
+    assert res["data"]["min_results_satisfied"] is False
+    actions = [s["action"] for s in res["data"]["relaxation_trace"]]
+    assert actions[0] is None
+    assert actions[1] == "radius_x1.5"
+    assert actions[-1] == "drop_floor_band"
+
+
+def test_relaxed_custom_ladder_overrides_default_order():
+    batches = [[_row(1)], [_row(1)], [_row(i) for i in range(6)]]
+    conn = _QueuedFakeConn(batches)
+    res = find_comparables_relaxed(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+        min_results=5,
+        relaxation_ladder=["disposition_any", "drop_condition", "radius_x2"],
+    )
+    actions = [s["action"] for s in res["data"]["relaxation_trace"]]
+    assert actions == [None, "disposition_any", "drop_condition"]
+    assert res["metadata"]["relaxations_applied"] == 2
+    assert res["metadata"]["result_count"] == 6
+
+
+def test_relaxed_envelope_carries_cohort_freshness_stats():
+    conn = _QueuedFakeConn([
+        [_row(i, data_age_days=2) for i in range(6)],
+    ])
+    res = find_comparables_relaxed(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+        min_results=5,
+    )
+    md = res["metadata"]
+    assert md["oldest_data_age_days"] == 2
+    assert md["newest_data_age_days"] == 2
+    assert md["median_data_age_days"] == 2.0
+    assert md["min_results"] == 5
+    assert md["unverified_count"] == 6
+
+
+def test_relaxed_final_filters_used_reflects_last_action():
+    conn = _QueuedFakeConn([
+        [_row(1)],
+        [_row(i) for i in range(6)],
+    ])
+    res = find_comparables_relaxed(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(radius_m=800),
+        min_results=5,
+    )
+    assert res["metadata"]["filters_used"]["radius_m"] == 1200
