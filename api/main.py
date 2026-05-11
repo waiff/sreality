@@ -15,6 +15,8 @@ from api import curation
 from api import dependencies as deps
 from api import maps
 from api import schemas as s
+from api import skills as skills_module
+from api.agent import AGENT_TOOLS
 from api.estimate_yield import estimate_yield
 from api.estimation_runs import (
     create_estimation_run,
@@ -22,6 +24,7 @@ from api.estimation_runs import (
     list_estimation_runs,
     preview_estimation,
 )
+from api.routes.admin import router as admin_router
 from scraper.source_dispatcher import ParseError
 from toolkit import (
     ComparableFilters,
@@ -47,6 +50,17 @@ from toolkit.image_similarity import ImageCompareError
 from toolkit.summaries import SummarizeError
 
 app = FastAPI(title="sreality toolkit API", version="0.3.0")
+
+# Skill validation needs to know the registered agent tools and the
+# registered provider names. Populate at import time so PUT /admin/skills/*
+# rejects bogus tool / provider names with a clear 400.
+skills_module.AGENT_TOOL_NAMES = set(AGENT_TOOLS.keys())
+skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
+
+# /admin/* is exempted from the API_TOKEN bearer gate per the slice-1
+# Settings-page design (CLAUDE.md "Auth and secrets" + rule #8). The
+# private Railway URL is the security perimeter for these routes.
+app.include_router(admin_router)
 
 
 @app.get("/health")

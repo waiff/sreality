@@ -34,6 +34,29 @@ def get_sreality_client() -> SrealityClient:
     return _CLIENT
 
 
+_PROVIDERS: dict[str, Any] | None = None
+
+
+def _build_providers() -> dict[str, Any]:
+    """Construct provider singletons once. SDK clients lazy-init on first
+    `.complete()`, so a missing API key here doesn't fail at boot — it
+    fails at the request that tries to use it, with a clear ProviderError.
+    """
+    from api.providers.anthropic import AnthropicProvider
+    from api.providers.gemini import GeminiProvider
+    return {
+        "anthropic": AnthropicProvider(),
+        "gemini":    GeminiProvider(),
+    }
+
+
+def get_providers() -> dict[str, Any]:
+    global _PROVIDERS
+    if _PROVIDERS is None:
+        _PROVIDERS = _build_providers()
+    return _PROVIDERS
+
+
 def get_llm_client(conn: Any = Depends(get_db_conn)) -> Any:
     """Per-request LLMClient bound to the request's DB connection.
 
@@ -41,7 +64,7 @@ def get_llm_client(conn: Any = Depends(get_db_conn)) -> Any:
     `anthropic` package (e.g. tests that don't exercise this path).
     """
     from api.llm_client import LLMClient
-    return LLMClient(conn)
+    return LLMClient(conn, providers=get_providers())
 
 
 def require_token(authorization: str | None = Header(default=None)) -> None:

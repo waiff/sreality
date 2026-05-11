@@ -107,6 +107,31 @@ class TraceRecorder:
                 handle=handle,
             )
 
+    @contextlib.contextmanager
+    def reasoning(self) -> Iterator[StepHandle]:
+        """Capture one turn of plain-text reasoning emitted by the agent.
+
+        The handle's summary should be set to
+            {"text": "<truncated 800 chars>",
+             "tool_calls_queued": [<tool names>],
+             "provider": "<provider name>"}
+        The agent loop owns those fields; the recorder only enforces
+        the kind / monotonic step number / timing.
+        """
+        started_at = datetime.now(timezone.utc)
+        mono_start = time.monotonic()
+        handle = StepHandle()
+        try:
+            yield handle
+        finally:
+            self._append(
+                kind="reasoning",
+                started_at=started_at,
+                duration_ms=_ms_since(mono_start),
+                fields={},
+                handle=handle,
+            )
+
     def to_dict(self, summary: str) -> dict[str, Any]:
         return {
             "version": TRACE_SCHEMA_VERSION,
@@ -156,6 +181,10 @@ class _NullTraceRecorder:
 
     @contextlib.contextmanager
     def computation(self, label: str) -> Iterator[_NullStepHandle]:
+        yield _NULL_HANDLE
+
+    @contextlib.contextmanager
+    def reasoning(self) -> Iterator[_NullStepHandle]:
         yield _NULL_HANDLE
 
     def to_dict(self, summary: str) -> dict[str, Any]:
@@ -240,9 +269,10 @@ def create_estimation_run(
     """POST /estimations: resolve input, run the estimate, persist, return row.
 
     Synchronous deterministic mode goes straight to a terminal status —
-    'success' or 'failed' — in a single INSERT. The schema reserves
-    'pending'/'running' for U4's async agent without forcing today's
-    code to UPDATE the row twice.
+    'success' or 'failed' — in a single INSERT. Agent mode uses an
+    early-INSERT (status='running') so LLM costs can attribute via
+    `llm_calls.estimation_run_id` while the loop is in flight, then
+    UPDATEs to the terminal status.
     """
     from api.estimate_yield import estimate_yield
 
@@ -259,6 +289,13 @@ def create_estimation_run(
 
     target = _build_target(resolution.target_spec)
     filters = _build_filters(body)
+
+    if body.mode == "agent":
+        return _run_agent_path(
+            conn, sreality_client, llm_client, body,
+            resolution=resolution, target=target, filters=filters,
+        )
+
     recorder = TraceRecorder()
 
     try:
@@ -575,6 +612,145 @@ def _summary_line(data: dict[str, Any], radius_m: int) -> str:
         f"Found {n} comparables in {radius_m}m radius, "
         f"{confidence} confidence.{rent_part}"
     )
+
+
+def _agent_summary_line(
+    data: dict[str, Any], metadata: dict[str, Any],
+) -> str:
+    rent = data.get("estimated_monthly_rent_czk")
+    confidence = data.get("confidence") or "unknown"
+    iters = metadata.get("iterations") or 0
+    stop = metadata.get("stop_reason") or "?"
+    cost = metadata.get("total_cost_usd")
+    cost_part = f" cost ${cost:.4f}" if isinstance(cost, (int, float)) else ""
+    rent_part = (
+        f" rent ~{rent} CZK/mo." if rent is not None else " no estimate."
+    )
+    return (
+        f"agent {metadata.get('provider', '?')}/{metadata.get('skill', '?')} "
+        f"after {iters} iter{'s' if iters != 1 else ''} ({stop}){cost_part}"
+        f" {confidence}{rent_part}".strip()
+    )
+
+
+def _run_agent_path(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
+    body: s.CreateEstimationIn,
+    *,
+    resolution: _Resolution,
+    target: TargetSpec,
+    filters: ComparableFilters,
+) -> dict[str, Any]:
+    """Agent-mode dispatch. Inserts a 'running' row, drives the agent
+    loop, then UPDATEs to the terminal status. The early INSERT is what
+    lets `llm_calls.estimation_run_id` attribute every per-turn call."""
+    from api.agent import run_agent_estimation
+    from api.skills import SkillNotFound, load_skill
+
+    try:
+        skill = load_skill(conn, body.skill)
+    except SkillNotFound:
+        recorder = TraceRecorder()
+        return _persist_failed_run(
+            conn, body=body, resolution=resolution, recorder=recorder,
+            error_msg=f"unknown skill: {body.skill!r}",
+            extra_warnings=[],
+        )
+
+    recorder = TraceRecorder()
+    run_id = _insert_run(
+        conn,
+        source=body.source,
+        mode="agent",
+        status="running",
+        input_url=resolution.input_url,
+        input_sreality_id=resolution.input_sreality_id,
+        input_spec=resolution.target_spec,
+        input_purchase_price_czk=body.purchase_price_czk,
+        estimated_monthly_rent_czk=None,
+        rent_p25_czk=None,
+        rent_p75_czk=None,
+        gross_yield_pct=None,
+        confidence=None,
+        comparables_used=None,
+        trace=recorder.to_dict("agent running"),
+        warnings=None,
+        error_message=None,
+        parent_run_id=body.parent_run_id,
+        rerun_reason=body.rerun_reason,
+        source_kind=resolution.source_kind,
+        parse_confidence=resolution.parse_confidence,
+        parse_confidence_per_field=resolution.parse_confidence_per_field,
+        source_html=resolution.source_html,
+    )
+
+    try:
+        agent_result = run_agent_estimation(
+            conn, sreality_client, llm_client,
+            target, filters, body.purchase_price_czk,
+            skill=skill, provider=body.provider,
+            recorder=recorder, estimation_run_id=run_id,
+        )
+    except Exception as exc:
+        LOG.warning("agent run failed: %s", exc)
+        trace = recorder.to_dict(f"agent failed: {type(exc).__name__}")
+        _update_run_terminal(
+            conn, run_id,
+            status="failed",
+            trace=trace,
+            warnings=list(resolution.parse_warnings) or None,
+            error_message=f"{type(exc).__name__}: {exc}"[:1000],
+        )
+        return _fetch_run(conn, run_id) or {}
+
+    d = agent_result.data
+    md = agent_result.metadata
+    status = "success" if md.get("stop_reason") == "record_estimate" else "failed"
+    trace = recorder.to_dict(_agent_summary_line(d, md))
+    merged_warnings = list(resolution.parse_warnings)
+    merged_warnings.extend(d.get("warnings") or [])
+
+    err: str | None = None
+    if status == "failed":
+        err = f"agent halted: {md.get('stop_reason')}"
+
+    _update_run_terminal(
+        conn, run_id,
+        status=status,
+        estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
+        rent_p25_czk=d.get("rent_p25_czk"),
+        rent_p75_czk=d.get("rent_p75_czk"),
+        gross_yield_pct=d.get("gross_yield_pct"),
+        confidence=d.get("confidence"),
+        comparables_used=d.get("comparables_used"),
+        trace=trace,
+        warnings=merged_warnings or None,
+        error_message=err,
+    )
+    return _fetch_run(conn, run_id) or {}
+
+
+def _update_run_terminal(
+    conn: "psycopg.Connection",
+    run_id: int,
+    **fields: Any,
+) -> None:
+    """Parameterised UPDATE that writes only the supplied columns."""
+    for k in ("comparables_used", "trace", "warnings"):
+        if fields.get(k) is not None:
+            fields[k] = Jsonb(fields[k])
+    sets: list[str] = []
+    params: dict[str, Any] = {"id": run_id}
+    for col, val in fields.items():
+        sets.append(f"{col} = %({col})s")
+        params[col] = val
+    sql = (
+        f"UPDATE estimation_runs SET {', '.join(sets)} WHERE id = %(id)s"
+    )
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(sql, params)
 
 
 def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:

@@ -193,7 +193,11 @@ class CreateEstimationIn(BaseModel):
     one-to-one, mirroring EstimateYieldIn.
     """
     source: Literal["ui", "api", "clickup"] = "api"
-    mode: Literal["deterministic"] = "deterministic"
+    mode: Literal["deterministic", "agent"] = "deterministic"
+
+    # Agent-mode only; ignored when mode == 'deterministic'.
+    provider: Literal["anthropic", "gemini"] = "anthropic"
+    skill: str = "rental_estimator_v1"
 
     url: str | None = None
     spec: TargetIn | None = None

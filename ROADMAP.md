@@ -5,17 +5,21 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 07:22 UTC_
+_Last refreshed: 2026-05-11 08:29 UTC_
 
-**Branch:** `claude/add-walkability-comps-tools-MQOCx`
+**Branch:** `claude/plan-rental-estimator-xQgTx`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 24 files, latest `028_transit_lines.sql`.
+**Migrations on disk:** 25 files, latest `029_agent_runs.sql`.
 
 **Last 10 commits:**
 
 ```
+0463ac4 Add agent smoke test (script + GH Actions workflow)
+da036c9 roadmap: refresh auto-status block
+24169ee Phase 7 slice 1: provider-agnostic agent + Settings page
+09c9ccf Phase 7 slice 1: add migration 028 for the reasoning agent
 1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
 2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
 6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
@@ -185,34 +189,58 @@ caches.
   `/tools/compute_amenity_supply`,
   `/tools/find_comparables_along_axis`), bearer-token-gated.
 
+### Phase 7 slice 1: The reasoning agent (provider-agnostic)
+Synchronous tool-use loop that takes a target spec + filters and
+returns a defensible rental estimate by iterating over a curated
+toolkit subset. Writes to `estimation_runs` with `mode='agent'`,
+early-INSERTs `status='running'`, finalises to `success`/`failed`.
+Trace records `kind='reasoning'` per LLM turn.
+- **Provider-agnostic.** `api/providers/` defines a `CompletionProvider`
+  Protocol with neutral message / tool / completion types; two
+  implementations ship: `AnthropicProvider` (SDK = `anthropic`) and
+  `GeminiProvider` (SDK = `google-genai`). `LLMClient` is now a
+  provider-agnostic audit orchestrator. Adding a third provider is
+  one new file implementing the same Protocol.
+- **`skills` table + history trigger.** Each skill = a bundle of
+  (system prompt + allowed tools + per-provider preferred model +
+  loop limits). DB-backed at runtime; on-disk
+  `skills/<name>/SKILL.md` is the canonical seed (committed in git
+  as documentation). Operator edits live values via the Settings
+  page; every change preserved in `skills_history`.
+- **Curated tool subset for slice 1:**
+  `find_comparables_relaxed`, `analyze_distribution`,
+  `find_distribution_outliers`, `describe_neighborhood`,
+  `verify_listing_freshness` + `record_estimate` terminator.
+- **Settings page** (`/settings`) edits skills and `app_settings`.
+  `/admin/*` routes are exempted from the `API_TOKEN` bearer gate
+  per operator decision (private Railway URL is the security
+  perimeter; same exemption category as `/health`).
+- **Loop guards:** `max_iterations`, `max_cost_usd`,
+  `wall_clock_timeout_s` — all sourced from the skill row, all
+  short-circuit to `status='failed'` with `error_message`.
+- **Migration 029** adds the `skills` + `skills_history` tables and
+  trigger, the `'agent_estimation'` `called_for` enum, the
+  `llm_calls.provider` column, and seeds `rental_estimator_v1`.
+- Apartment rentals only (`byt` / `pronajem`). Multi-category
+  defaults stay deferred to Phase 1.5b.
+
 ## Next
 
-### Phase 7: The reasoning agent (target)
-The end-state. An Anthropic tool-use loop that takes a listing URL and
-returns a rental estimate by iterating over the toolkit: parse → seed
-comparables → critique → expand or relax → revisit visual similarity →
-produce a defensible range. Writes to `estimation_runs` with
-`mode='agent'`, `status` transitions through `'pending'` → `'running'` →
-terminal, `trace.steps` include `kind='reasoning'`. Schema is already
-agent-ready (migration 010 + trace v1). Built only after the toolkit has
-been used and refined for ~1 month against real data.
+## Next
 
-Hard prerequisites:
-- Phase 6 visual layer (`summarize_listing` + `compare_listing_images`)
-  — agent must be able to filter and rank cohorts by appearance.
-- Phase 5 statistical refinement (`cluster_comparables` +
-  `find_comparables_relaxed`) — agent needs auto-widening when strict
-  filters return < 3 hits.
-- Scraper Phase 1.5b multi-category UI defaults — so non-apartment-rental
-  URLs work end to end.
-
-Soft prerequisites:
-- Phase 4b walkability + transit-axis comparables — useful but not
-  blocking.
-- Scraper Phase 2 multi-portal ingestion — broadens cohort but agent
-  works without it.
-- Operator-workflow Phase U2.6 collections — gives operator a way to
-  seed and audit agent runs but agent works without it.
+### Phase 7 slice 2: Async + full toolkit + UI mode toggle
+Builds on slice 1.
+- Async execution: real `status='pending'/'running'` lifecycle with
+  a background worker and a polling endpoint. Removes the
+  synchronous HTTP wall-clock cap.
+- Expose the rest of the toolkit (`cluster_comparables`, the two
+  velocity tools, the visual layer) by adding skills that whitelist
+  them.
+- Frontend `/estimate` gets a mode toggle (`deterministic` /
+  `agent`), a provider picker (anthropic / gemini), and a skill
+  picker.
+- Third provider (OpenAI or Vertex AI service-account auth).
+- Per-skill A/B comparison view on `/estimations`.
 
 ## UI track (parallel, independent of analytical phases)
 
