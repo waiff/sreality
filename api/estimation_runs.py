@@ -1,9 +1,9 @@
 """Persistence and trace machinery for /estimations endpoints.
 
-Trace contract (locked at TRACE_SCHEMA_VERSION = 1):
+Trace contract (TRACE_SCHEMA_VERSION = 2):
 
     {
-      "version": 1,
+      "version": 2,
       "summary": "<one-line human-readable summary>",
       "steps": [
         {
@@ -14,11 +14,17 @@ Trace contract (locked at TRACE_SCHEMA_VERSION = 1):
           "output_summary": {...},                 # NEVER full output
           # tool_call adds:    "tool", "input"
           # computation adds:  "label"
-          # reasoning reserved for Phase U4 agent.
         },
         ...
       ]
     }
+
+Version 2 is additive over version 1: agent-mode runs append a final
+`computation` step labelled `'comparable_selection_summary'` whose
+`output_summary` carries the per-iteration filter ladder + cohort
+diffs + final picks. Deterministic-mode traces remain a 4-step flat
+list; the only schema change at the deterministic level is the
+`version` field.
 
 Full tool outputs (lists of comparables, full distribution stats) live
 in dedicated columns on estimation_runs (comparables_used etc.), not
@@ -53,7 +59,20 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
-TRACE_SCHEMA_VERSION = 1
+TRACE_SCHEMA_VERSION = 2
+
+# Filter defaults used by /estimations now that the request schema no
+# longer carries them. Agent-mode runs override these per-iteration
+# (the agent picks what to widen and by how much); deterministic-mode
+# runs use them as-is for a single shot.
+_DEFAULT_RADIUS_M = 1000
+_DEFAULT_AREA_BAND_PCT = 0.20
+_DEFAULT_DISPOSITION_MATCH = "exact"
+_DEFAULT_ACTIVE_ONLY = True
+
+
+def _default_max_age_days(estimate_kind: str) -> int:
+    return 7 if estimate_kind == "rent" else 30
 
 
 class StepHandle:
@@ -593,11 +612,11 @@ def _build_target(spec: dict[str, Any] | None) -> TargetSpec:
 
 def _build_filters(body: s.CreateEstimationIn) -> ComparableFilters:
     return ComparableFilters(
-        radius_m=body.radius_m,
-        area_band_pct=body.area_band_pct,
-        disposition_match=body.disposition_match,
-        max_age_days=body.max_age_days,
-        active_only=body.active_only,
+        radius_m=_DEFAULT_RADIUS_M,
+        area_band_pct=_DEFAULT_AREA_BAND_PCT,
+        disposition_match=_DEFAULT_DISPOSITION_MATCH,
+        max_age_days=_default_max_age_days(body.estimate_kind),
+        active_only=_DEFAULT_ACTIVE_ONLY,
         floor_band=body.floor_band,
         condition_match=body.condition_match,
         building_type_match=body.building_type_match,

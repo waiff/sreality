@@ -217,8 +217,14 @@ class CreateEstimationIn(BaseModel):
     (`pronajem` for rent, `prodej` for sale) unless the caller
     explicitly overrides it.
 
-    The remaining filter fields forward into ComparableFilters
-    one-to-one, mirroring EstimateYieldIn.
+    The five comparable-search knobs (radius_m, area_band_pct,
+    disposition_match, max_age_days, active_only) were removed from
+    this schema: agent-mode runs choose them per-iteration, and
+    deterministic runs use the built-in defaults in
+    `api.estimation_runs._build_filters`. UI callers default to
+    `mode='agent'`; direct API callers may still pass
+    `mode='deterministic'` for a single-shot estimate with the
+    built-in filter defaults.
     """
     source: Literal["ui", "api", "clickup"] = "api"
     mode: Literal["deterministic", "agent"] = "deterministic"
@@ -236,11 +242,6 @@ class CreateEstimationIn(BaseModel):
     purchase_price_czk: int | None = None
     expected_monthly_rent_czk: int | None = None
 
-    radius_m: int = 1000
-    area_band_pct: float = 0.20
-    disposition_match: Literal["exact", "loose", "any"] = "exact"
-    max_age_days: int | None = None
-    active_only: bool = True
     floor_band: int | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
@@ -280,8 +281,6 @@ class CreateEstimationIn(BaseModel):
             self.category_type = (
                 "pronajem" if self.estimate_kind == "rent" else "prodej"
             )
-        if self.max_age_days is None:
-            self.max_age_days = 7 if self.estimate_kind == "rent" else 30
         return self
 
 
