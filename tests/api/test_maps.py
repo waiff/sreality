@@ -14,11 +14,16 @@ from api import main as api_main
 from api import maps
 
 
+# Mirrors Mapy.cz's actual /v1/suggest shape: `label` is the result-class
+# tag ("Ulice ", "Část obce "), NOT the human-readable place name. The
+# specific name lives in `name`; the address with city/region context lives
+# in `location`. See scraper/geocoding.py:13–38 for the schema notes.
 _MOCK_SUGGEST = {
     "items": [
         {
             "name": "Vinohrady",
-            "label": "Vinohrady, Praha",
+            "label": "Část obce ",
+            "location": "Vinohrady, Praha 2, Hlavní město Praha",
             "type": "regional.municipality_part",
             "position": {"lon": 14.441, "lat": 50.077},
             "regionalStructure": [
@@ -30,7 +35,8 @@ _MOCK_SUGGEST = {
         },
         {
             "name": "Vinohradská",
-            "label": "Vinohradská, Praha",
+            "label": "Ulice ",
+            "location": "Vinohradská, Praha 2, Hlavní město Praha",
             "type": "regional.street",
             "position": {"lon": 14.45, "lat": 50.08},
             "regionalStructure": [],
