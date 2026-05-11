@@ -216,6 +216,42 @@ export interface ComparableUsed {
   verified_during_estimate: boolean;
 }
 
+/* Output of toolkit/summaries.py:summarize_listing — the five legacy
+ * fields plus the three sections added in migration 031. Older cached
+ * rows may be missing the new fields; renderers must tolerate
+ * absence and show "—" rather than crashing. */
+export interface ListingSummaryBody {
+  headline: string;
+  key_highlights: string[];
+  concerns: string[];
+  condition_assessment: 'excellent' | 'good' | 'average' | 'poor' | 'unknown' | string;
+  target_audience:
+    | 'family' | 'couple' | 'single_professional'
+    | 'investor' | 'student' | 'general' | string;
+  location_summary?: string | null;
+  building_summary?: string | null;
+  apartment_summary?: string | null;
+}
+
+/* Persisted on estimation_runs.subject_summary by the backend after a
+ * successful run. Carries the snapshot id so the UI can deep-link to
+ * the exact snapshot the summary was generated against. */
+export interface SubjectSummary {
+  snapshot_id: number | null;
+  summary: ListingSummaryBody;
+}
+
+/* POST /listings/summaries response shape — one row per requested
+ * (sreality_id, snapshot_id) pair. Per-item failures surface as
+ * `summary: null` + `error: <reason>`; a single bad id never fails
+ * the whole request. */
+export interface ListingSummaryBatchRow {
+  sreality_id: number;
+  snapshot_id: number | null;
+  summary: ListingSummaryBody | null;
+  error: string | null;
+}
+
 export type TraceStepKind = 'tool_call' | 'computation' | 'reasoning';
 
 interface TraceStepBase {
@@ -295,6 +331,11 @@ export interface EstimationRun {
    * value is never null in practice, but the type tolerates it for
    * forward compatibility. */
   cost_usd_total: number | null;
+  /* Migration 031 — structured Czech-real-estate summary of the
+   * subject listing, generated server-side at estimation time when
+   * input_sreality_id was set. Null on legacy runs and on runs
+   * where no listing was resolved (spec-only inputs, parse failures). */
+  subject_summary: SubjectSummary | null;
 }
 
 /* Filter half of the POST /estimations body — mirrors ComparableFilters

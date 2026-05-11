@@ -182,6 +182,21 @@ class SummarizeListingIn(BaseModel):
     force_refresh: bool = False
 
 
+class SummarizeListingsBatchItem(BaseModel):
+    sreality_id: int
+    snapshot_id: int | None = None
+
+
+class SummarizeListingsBatchIn(BaseModel):
+    """Batch wrapper around summarize_listing for the Estimate page.
+
+    Returns one row per requested item — `{summary, snapshot_id}` on
+    success or `{error}` on failure. Cache hits skip the LLM, so
+    repeat calls for the same pairs are effectively free.
+    """
+    items: list[SummarizeListingsBatchItem] = Field(default_factory=list, max_length=50)
+
+
 class CompareListingImagesIn(BaseModel):
     sreality_id_a: int
     sreality_id_b: int

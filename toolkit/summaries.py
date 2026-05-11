@@ -45,11 +45,18 @@ class SummarizeError(RuntimeError):
     """Raised when a summary cannot be produced (no listing, no snapshot, LLM refused)."""
 
 
+_REQUIRED_SUMMARY_FIELDS: tuple[str, ...] = (
+    "headline", "key_highlights", "concerns",
+    "condition_assessment", "target_audience",
+    "location_summary", "building_summary", "apartment_summary",
+)
+
+
 RECORD_LISTING_SUMMARY_TOOL: dict[str, Any] = {
     "name": "record_listing_summary",
     "description": (
         "Record the structured summary for a single listing. Call "
-        "exactly once with all five fields. Strict facts only; do "
+        "exactly once with all eight fields. Strict facts only; do "
         "not invent qualities."
     ),
     "input_schema": {
@@ -84,11 +91,20 @@ RECORD_LISTING_SUMMARY_TOOL: dict[str, Any] = {
                 "enum": list(_AUDIENCE_VALUES),
                 "description": "Most likely tenant fit based on size, layout, and locality cues.",
             },
+            "location_summary": {
+                "type": "string",
+                "description": "1-2 sentences (max 240 chars) about the listing's location, neighbourhood, and transit.",
+            },
+            "building_summary": {
+                "type": "string",
+                "description": "1-2 sentences (max 240 chars) about the building: material, era, lift, common areas, energy rating.",
+            },
+            "apartment_summary": {
+                "type": "string",
+                "description": "1-2 sentences (max 240 chars) about the apartment: disposition, area, layout, condition, balcony/parking/furnishing.",
+            },
         },
-        "required": [
-            "headline", "key_highlights", "concerns",
-            "condition_assessment", "target_audience",
-        ],
+        "required": list(_REQUIRED_SUMMARY_FIELDS),
     },
 }
 
@@ -291,8 +307,7 @@ def _extract_tool_call(
     payload = matching[0].get("input") or {}
     if not isinstance(payload, dict):
         raise SummarizeError("record_listing_summary input was not an object")
-    for key in ("headline", "key_highlights", "concerns",
-                "condition_assessment", "target_audience"):
+    for key in _REQUIRED_SUMMARY_FIELDS:
         if key not in payload:
             raise SummarizeError(f"record_listing_summary missing field: {key}")
     return dict(payload)
@@ -312,8 +327,13 @@ def _cache_lookup(
         row = cur.fetchone()
     if row is None:
         return None
+    summary = row[0]
+    if not isinstance(summary, dict) or not all(
+        k in summary for k in _REQUIRED_SUMMARY_FIELDS
+    ):
+        return None
     return {
-        "summary": row[0],
+        "summary": summary,
         "model": row[1],
         "cost_usd": float(row[2]) if row[2] is not None else None,
     }

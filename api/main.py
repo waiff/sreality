@@ -351,6 +351,51 @@ def post_summarize_listing(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post("/listings/summaries")
+def post_listings_summaries(
+    body: s.SummarizeListingsBatchIn,
+    conn: Any = Depends(deps.get_db_conn),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Batch summarize_listing for the Estimate page comparables table.
+
+    Sequential under the hood — cache hits are sub-millisecond and
+    the typical batch is 5 comparables. Per-item failures are reported
+    inline; a single bad id never fails the whole request.
+    """
+    out: list[dict[str, Any]] = []
+    for item in body.items:
+        try:
+            result = summarize_listing(
+                conn, llm_client,
+                sreality_id=item.sreality_id,
+                snapshot_id=item.snapshot_id,
+            )
+            data = result["data"]
+            out.append({
+                "sreality_id": item.sreality_id,
+                "snapshot_id": data.get("snapshot_id"),
+                "summary": data.get("summary"),
+                "error": None,
+            })
+        except SummarizeError as exc:
+            out.append({
+                "sreality_id": item.sreality_id,
+                "snapshot_id": item.snapshot_id,
+                "summary": None,
+                "error": str(exc),
+            })
+        except Exception as exc:  # noqa: BLE001 — per-item isolation
+            out.append({
+                "sreality_id": item.sreality_id,
+                "snapshot_id": item.snapshot_id,
+                "summary": None,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+    return {"data": out}
+
+
 @app.post("/tools/compare_listing_images")
 def post_compare_listing_images(
     body: s.CompareListingImagesIn,
