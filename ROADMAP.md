@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 12:05 UTC_
+_Last refreshed: 2026-05-11 13:04 UTC_
 
 **Branch:** `claude/fix-estimate-search-params-mv978`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-11 12:05 UTC_
 **Last 10 commits:**
 
 ```
+869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
+7476a00 Merge main into claude/fix-estimate-search-params-mv978
 3e59110 estimate: hand cohort filters to the agent, surface its strategy in the trace
+3d32614 Merge pull request #45 from waiff/claude/review-unmerged-commits-HCsoE
+672902b Merge remote-tracking branch 'origin/main' into claude/review-unmerged-commits-HCsoE
+dfaea3e roadmap: refresh auto-status block
 0368c61 roadmap: refresh auto-status block
 583cf38 Merge pull request #44 from waiff/claude/debug-fix-errors-yOVNP
+1692c13 roadmap: refresh auto-status block
 79f162f Merge remote-tracking branch 'origin/main' into claude/debug-fix-errors-yOVNP
-9a8db57 roadmap: refresh auto-status block
-023b34c roadmap: refresh auto-status block
-e6ba736 roadmap: refresh auto-status block
-8c1f259 api: add CORS middleware gated by CORS_ALLOW_ORIGINS env var
-0929982 Merge pull request #42 from waiff/claude/add-sales-estimate-Uzsdi
-9fa0d86 test: accept new estimate_yield kwargs in auth-test fake
 ```
 
 <!-- END AUTO-STATUS -->

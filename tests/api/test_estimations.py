@@ -347,6 +347,75 @@ def test_post_with_parent_run_id_populates_fk(client, monkeypatch):
     assert body["rerun_reason"] == "force refetch"
 
 
+def test_post_with_mode_agent_does_not_500(client, monkeypatch):
+    """Regression: the agent-path _insert_run used to omit estimate_kind
+    and the three sale columns, KeyError-ing inside psycopg and bubbling
+    out as a generic 500. POST should land a real row instead."""
+    state = _patch_persistence(monkeypatch)
+
+    def fake_update(conn, run_id: int, **fields: Any) -> None:
+        state.inserts[run_id].update(fields)
+
+    monkeypatch.setattr(er, "_update_run_terminal", fake_update)
+
+    from api import agent as agent_mod
+    from api import skills as sk
+
+    monkeypatch.setattr(
+        agent_mod, "run_agent_estimation",
+        lambda *a, **kw: agent_mod.AgentResult(
+            data={
+                "estimated_monthly_rent_czk": 25000,
+                "rent_p25_czk": 23000,
+                "rent_p75_czk": 27000,
+                "gross_yield_pct": None,
+                "confidence": "medium",
+                "comparables_used": [],
+                "warnings": [],
+            },
+            metadata={
+                "stop_reason": "record_estimate",
+                "iterations": 1,
+                "total_cost_usd": 0.0,
+                "provider": "anthropic",
+                "skill": "rental_estimator_v1",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        sk, "load_skill",
+        lambda conn, name: sk.Skill(
+            name=name, description="", system_prompt="",
+            allowed_tools=["record_estimate"],
+            preferred_model={"anthropic": "x", "gemini": "y"},
+            limits=sk.SkillLimits(
+                max_iterations=5, max_cost_usd=1.0,
+                wall_clock_timeout_s=60.0,
+            ),
+        ),
+    )
+
+    res = client.post(
+        "/estimations",
+        json={
+            "mode": "agent",
+            "spec": {
+                "lat": 50.0, "lng": 14.0, "area_m2": 50.0,
+                "disposition": "2+kk",
+            },
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["mode"] == "agent"
+    assert body["estimate_kind"] == "rent"
+    assert len(state.inserts) == 1
+    inserted = state.inserts[1]
+    assert inserted["estimate_kind"] == "rent"
+    assert inserted["estimated_sale_price_czk"] is None
+
+
 def test_post_invalid_source_returns_422(client):
     res = client.post(
         "/estimations",
