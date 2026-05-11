@@ -248,6 +248,17 @@ def post_compute_market_velocity(
         locality_district_id=body.locality_district_id,
         locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
+        category_sub_cb=body.category_sub_cb,
+        furnished=body.furnished,
+        terrace=body.terrace,
+        cellar=body.cellar,
+        garage=body.garage,
+        ownership=body.ownership,
+        min_estate_area=body.min_estate_area,
+        max_estate_area=body.max_estate_area,
+        min_usable_area=body.min_usable_area,
+        max_usable_area=body.max_usable_area,
+        min_parking_lots=body.min_parking_lots,
     )
     return compute_market_velocity(
         conn, target, filters,
@@ -518,6 +529,17 @@ def post_estimate_yield(
         locality_district_id=body.locality_district_id,
         locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
+        category_sub_cb=body.category_sub_cb,
+        furnished=body.furnished,
+        terrace=body.terrace,
+        cellar=body.cellar,
+        garage=body.garage,
+        ownership=body.ownership,
+        min_estate_area=body.min_estate_area,
+        max_estate_area=body.max_estate_area,
+        min_usable_area=body.min_usable_area,
+        max_usable_area=body.max_usable_area,
+        min_parking_lots=body.min_parking_lots,
     )
     return estimate_yield(conn, target, filters, body.purchase_price_czk)
 
@@ -692,5 +714,16 @@ def _build_comparables_inputs(
         locality_district_id=body.locality_district_id,
         locality_region_id=body.locality_region_id,
         include_unreliable=body.include_unreliable,
+        category_sub_cb=body.category_sub_cb,
+        furnished=body.furnished,
+        terrace=body.terrace,
+        cellar=body.cellar,
+        garage=body.garage,
+        ownership=body.ownership,
+        min_estate_area=body.min_estate_area,
+        max_estate_area=body.max_estate_area,
+        min_usable_area=body.min_usable_area,
+        max_usable_area=body.max_usable_area,
+        min_parking_lots=body.min_parking_lots,
     )
     return target, filters
