@@ -322,9 +322,15 @@ def test_route_wired_via_app(monkeypatch):
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
 
     captured: dict[str, Any] = {}
-    def fake(conn, target, filters, purchase_price_czk=None):
+    def fake(
+        conn, target, filters, purchase_price_czk=None,
+        *, estimate_kind="rent", expected_monthly_rent_czk=None,
+        trace_recorder=None,
+    ):
         captured["target"] = target
         captured["price"] = purchase_price_czk
+        captured["kind"] = estimate_kind
+        captured["expected_rent"] = expected_monthly_rent_czk
         return {"data": {"sample_size": 0}, "metadata": {"tool": "estimate_yield"}}
     monkeypatch.setattr(api_main, "estimate_yield", fake)
 
@@ -342,3 +348,83 @@ def test_route_wired_via_app(monkeypatch):
     assert res.status_code == 200
     assert captured["target"].lat == 50.087
     assert captured["price"] == 5_000_000
+    assert captured["kind"] == "rent"
+
+
+def test_sale_kind_emits_sale_keys_and_reverse_yield(monkeypatch):
+    listings = [_listing(i, price_per_m2=120_000.0) for i in range(20)]
+    _patch(
+        monkeypatch, listings,
+        dist_data={
+            "n": 20, "field": "price_per_m2",
+            "median": 120_000.0, "p25": 115_000.0, "p75": 125_000.0,
+            "iqr": 10_000.0,
+            "min": 110_000.0, "max": 130_000.0,
+            "mean": 120_000.0, "stddev": 4_000.0,
+            "p10": 112_000.0, "p90": 128_000.0, "outlier_ids": [],
+        },
+    )
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+        filters=ComparableFilters(),
+        estimate_kind="sale",
+        expected_monthly_rent_czk=25_000,
+    )
+    d = res["data"]
+    assert d["estimate_kind"] == "sale"
+    assert d["estimated_sale_price_czk"] == 6_000_000   # 120000 * 50
+    assert d["sale_p25_czk"] == 5_750_000
+    assert d["sale_p75_czk"] == 6_250_000
+    # Rent fields are explicitly null in sale mode.
+    assert d["estimated_monthly_rent_czk"] is None
+    assert d["rent_p25_czk"] is None
+    # Reverse yield: 25000 * 12 / 6_000_000 * 100 = 5.0
+    assert d["gross_yield_pct"] == 5.0
+
+
+def test_sale_kind_without_expected_rent_skips_yield(monkeypatch):
+    listings = [_listing(i, price_per_m2=120_000.0) for i in range(20)]
+    _patch(
+        monkeypatch, listings,
+        dist_data={
+            "n": 20, "field": "price_per_m2",
+            "median": 120_000.0, "p25": 115_000.0, "p75": 125_000.0,
+            "iqr": 10_000.0,
+            "min": 110_000.0, "max": 130_000.0,
+            "mean": 120_000.0, "stddev": 4_000.0,
+            "p10": 112_000.0, "p90": 128_000.0, "outlier_ids": [],
+        },
+    )
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+        filters=ComparableFilters(),
+        estimate_kind="sale",
+    )
+    assert res["data"]["gross_yield_pct"] is None
+    assert res["data"]["estimated_sale_price_czk"] == 6_000_000
+
+
+def test_rent_kind_default_unchanged_signature(monkeypatch):
+    """Calling estimate_yield without estimate_kind keeps legacy behaviour."""
+    listings = [_listing(i) for i in range(20)]
+    _patch(
+        monkeypatch, listings,
+        dist_data={
+            "n": 20, "field": "price_per_m2",
+            "median": 400.0, "p25": 395.0, "p75": 405.0,
+            "iqr": 10.0, "min": 380.0, "max": 420.0,
+            "mean": 400.0, "stddev": 5.0, "p10": 390.0, "p90": 410.0,
+            "outlier_ids": [],
+        },
+    )
+    res = ey.estimate_yield(
+        conn=None,
+        target=TargetSpec(lat=50.0, lng=14.0, area_m2=50.0),
+        filters=ComparableFilters(),
+    )
+    d = res["data"]
+    assert d["estimate_kind"] == "rent"
+    assert d["estimated_monthly_rent_czk"] is not None
+    assert d["estimated_sale_price_czk"] is None

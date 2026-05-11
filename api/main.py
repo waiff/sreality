@@ -557,7 +557,11 @@ def post_estimate_yield(
         max_usable_area=body.max_usable_area,
         min_parking_lots=body.min_parking_lots,
     )
-    return estimate_yield(conn, target, filters, body.purchase_price_czk)
+    return estimate_yield(
+        conn, target, filters, body.purchase_price_czk,
+        estimate_kind=body.estimate_kind,
+        expected_monthly_rent_czk=body.expected_monthly_rent_czk,
+    )
 
 
 # --- curation -------------------------------------------------------------

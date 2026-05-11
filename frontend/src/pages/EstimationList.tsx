@@ -233,9 +233,10 @@ function RunsTable({
             <tr>
               <Th align="left">When</Th>
               <Th align="left">Source</Th>
+              <Th align="left">Kind</Th>
               <Th align="left">Status</Th>
               <Th align="left">Input</Th>
-              <Th align="right">Rent estimate</Th>
+              <Th align="right">Estimate</Th>
               <Th align="left">Confidence</Th>
               <Th align="right">N</Th>
             </tr>
@@ -292,15 +293,16 @@ function Row({ run }: { run: EstimationRun }) {
         <SourceBadge source={run.source} />
       </td>
       <td className="px-4 py-2.5 align-middle">
+        <KindBadge kind={run.estimate_kind} />
+      </td>
+      <td className="px-4 py-2.5 align-middle">
         <StatusPill status={run.status} />
       </td>
       <td className="px-4 py-2.5 align-middle max-w-[300px]">
         <InputCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
-        {run.estimated_monthly_rent_czk != null
-          ? fmtCzk(run.estimated_monthly_rent_czk)
-          : <span className="text-[var(--color-ink-4)]">—</span>}
+        <EstimateCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle">
         {run.confidence ? <ConfidenceBadge confidence={run.confidence} /> : <span className="text-[var(--color-ink-4)]">—</span>}
@@ -357,6 +359,35 @@ function SourceBadge({ source }: { source: EstimationSource }) {
     <span className="inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.16em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper)] text-[var(--color-ink-3)] border border-[var(--color-rule)]">
       {source}
     </span>
+  );
+}
+
+function KindBadge({ kind }: { kind: EstimationRun['estimate_kind'] }) {
+  const resolved = kind ?? 'rent';
+  const label = resolved === 'sale' ? 'sale' : 'rent';
+  return (
+    <span className="inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.16em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper)] text-[var(--color-ink-3)] border border-[var(--color-rule)]">
+      {label}
+    </span>
+  );
+}
+
+function EstimateCell({ run }: { run: EstimationRun }) {
+  const kind = run.estimate_kind ?? 'rent';
+  if (kind === 'sale') {
+    if (run.estimated_sale_price_czk == null) {
+      return <span className="text-[var(--color-ink-4)]">—</span>;
+    }
+    return <>{fmtCzk(run.estimated_sale_price_czk)}</>;
+  }
+  if (run.estimated_monthly_rent_czk == null) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  return (
+    <>
+      {fmtCzk(run.estimated_monthly_rent_czk)}
+      <span className="ml-1 text-[var(--color-ink-3)] text-[0.7rem]">/mo</span>
+    </>
   );
 }
 

@@ -14,7 +14,13 @@ import type {
 /* + the filter parameters. Step 6 packs this into CreateEstimationIn.        */
 /* -------------------------------------------------------------------------- */
 
+export type EstimateKind = 'rent' | 'sale';
+
 export interface EstimateFormState {
+  // What we're estimating. Drives output shape, default category_type,
+  // and which "yield" input field is shown.
+  estimate_kind: EstimateKind;
+
   // Spec — TargetIn fields.
   lat: number | null;
   lng: number | null;
@@ -47,8 +53,12 @@ export interface EstimateFormState {
   garage: TriValue;
   parking_lots: number | null;
 
-  // Yield.
+  // Yield. For rent estimates the user can supply a purchase price to
+  // get gross yield. For sale estimates the user can supply an
+  // expected monthly rent to get the reverse yield from the estimated
+  // sale price.
   purchase_price_czk: number | null;
+  expected_monthly_rent_czk: number | null;
 
   // Filter parameters (Advanced).
   radius_m: number;
@@ -68,6 +78,10 @@ export const FORM_DEFAULTS = {
   active_only: true,
 };
 
+export function defaultMaxAgeDays(kind: EstimateKind): number {
+  return kind === 'rent' ? 7 : 30;
+}
+
 export const DISPOSITIONS: ReadonlyArray<Disposition> = [
   '1+kk', '1+1',
   '2+kk', '2+1',
@@ -79,8 +93,10 @@ export const DISPOSITIONS: ReadonlyArray<Disposition> = [
 export function buildInitialFormState(
   spec: TargetSpecIn,
   listing: PreviewListing,
+  kind: EstimateKind = 'rent',
 ): EstimateFormState {
   return {
+    estimate_kind: kind,
     lat: spec.lat,
     lng: spec.lng,
     area_m2: spec.area_m2,
@@ -105,7 +121,9 @@ export function buildInitialFormState(
     garage: triFromBool(listing.garage),
     parking_lots: listing.parking_lots,
     purchase_price_czk: null,
+    expected_monthly_rent_czk: null,
     ...FORM_DEFAULTS,
+    max_age_days: defaultMaxAgeDays(kind),
   };
 }
 
@@ -158,6 +176,16 @@ export default function EstimateForm({
 
   const valid = useMemo(() => isFormValid(state), [state]);
 
+  const setKind = (kind: EstimateKind) => {
+    if (kind === state.estimate_kind) return;
+    const userTouchedAge = state.max_age_days !== defaultMaxAgeDays(state.estimate_kind);
+    onChange({
+      ...state,
+      estimate_kind: kind,
+      max_age_days: userTouchedAge ? state.max_age_days : defaultMaxAgeDays(kind),
+    });
+  };
+
   return (
     <form
       onSubmit={(e) => {
@@ -166,6 +194,23 @@ export default function EstimateForm({
       }}
       className="space-y-7"
     >
+      {/* ---------------- Estimate kind ---------------- */}
+      <Section label="Estimate kind">
+        <ButtonRow
+          options={[
+            { value: 'rent', label: 'Rent (monthly)' },
+            { value: 'sale', label: 'Sale price' },
+          ]}
+          value={state.estimate_kind}
+          onChange={setKind}
+        />
+        <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+          {state.estimate_kind === 'rent'
+            ? 'Comparables drawn from active rental listings (pronájem). Result is a monthly rent in CZK.'
+            : 'Comparables drawn from sale listings (prodej). Result is a sale price in CZK.'}
+        </p>
+      </Section>
+
       {/* ---------------- Apartment ---------------- */}
       <Section label="Apartment">
         <Row>
@@ -282,22 +327,45 @@ export default function EstimateForm({
 
       {/* ---------------- Yield ---------------- */}
       <Section label="Yield">
-        <Field label="Purchase price" htmlFor="f-price">
-          <NumberInput
-            id="f-price"
-            value={state.purchase_price_czk}
-            onChange={(v) =>
-              set('purchase_price_czk', v != null ? Math.round(v) : null)
-            }
-            step="100000"
-            placeholder="—"
-            suffix="Kč"
-          />
-        </Field>
-        <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
-          Optional. If set, the result includes gross yield % (annualised
-          rent ÷ purchase price).
-        </p>
+        {state.estimate_kind === 'rent' ? (
+          <>
+            <Field label="Purchase price" htmlFor="f-price">
+              <NumberInput
+                id="f-price"
+                value={state.purchase_price_czk}
+                onChange={(v) =>
+                  set('purchase_price_czk', v != null ? Math.round(v) : null)
+                }
+                step="100000"
+                placeholder="—"
+                suffix="Kč"
+              />
+            </Field>
+            <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+              Optional. If set, the result includes gross yield % (annualised
+              estimated rent ÷ purchase price).
+            </p>
+          </>
+        ) : (
+          <>
+            <Field label="Expected monthly rent" htmlFor="f-erent">
+              <NumberInput
+                id="f-erent"
+                value={state.expected_monthly_rent_czk}
+                onChange={(v) =>
+                  set('expected_monthly_rent_czk', v != null ? Math.round(v) : null)
+                }
+                step="500"
+                placeholder="—"
+                suffix="Kč/mo"
+              />
+            </Field>
+            <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+              Optional. If set, the result includes gross yield % (annualised
+              expected rent ÷ estimated sale price).
+            </p>
+          </>
+        )}
       </Section>
 
       {/* ---------------- Advanced ---------------- */}

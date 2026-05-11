@@ -39,7 +39,7 @@ def client(monkeypatch):
     def fake_compare(conn, sid, since):
         return {"data": {"snapshot_count": 0}, "metadata": {"tool": "compare_snapshots"}}
 
-    def fake_estimate(conn, target, filters, purchase_price_czk=None):
+    def fake_estimate(conn, target, filters, purchase_price_czk=None, **_kw):
         return {"data": {"sample_size": 0}, "metadata": {"tool": "estimate_yield"}}
 
     def fake_neighborhood(conn, **_kw):

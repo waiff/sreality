@@ -179,11 +179,16 @@ function BackArrow() {
 
 function Header({ run }: { run: EstimationRun }) {
   const failed = run.status === 'failed';
+  const kind = run.estimate_kind ?? 'rent';
   const headline = failed
     ? 'Estimation failed'
-    : run.estimated_monthly_rent_czk != null
-      ? `${fmtCzk(run.estimated_monthly_rent_czk)} / mo`
-      : 'No estimate produced';
+    : kind === 'sale'
+      ? run.estimated_sale_price_czk != null
+        ? fmtCzk(run.estimated_sale_price_czk)
+        : 'No estimate produced'
+      : run.estimated_monthly_rent_czk != null
+        ? `${fmtCzk(run.estimated_monthly_rent_czk)} / mo`
+        : 'No estimate produced';
 
   return (
     <div className="mt-5 flex items-start justify-between gap-6">
@@ -260,13 +265,17 @@ function SourceBadge({ source }: { source: EstimationSource }) {
 /* -------------------------------------------------------------------------- */
 
 function RentRange({ run }: { run: EstimationRun }) {
-  const median = run.estimated_monthly_rent_czk;
-  const p25 = run.rent_p25_czk;
-  const p75 = run.rent_p75_czk;
+  const kind = run.estimate_kind ?? 'rent';
+  const isSale = kind === 'sale';
+  const median = isSale ? run.estimated_sale_price_czk : run.estimated_monthly_rent_czk;
+  const p25 = isSale ? run.sale_p25_czk : run.rent_p25_czk;
+  const p75 = isSale ? run.sale_p75_czk : run.rent_p75_czk;
+  const sectionLabel = isSale ? 'Sale price range' : 'Rent range';
+  const stripLabel = isSale ? 'Sale price (Kč)' : 'Monthly rent (Kč)';
   if (median == null || p25 == null || p75 == null) {
     return (
       <div>
-        <SectionLabel>Rent range</SectionLabel>
+        <SectionLabel>{sectionLabel}</SectionLabel>
         <p className="mt-2 text-sm text-[var(--color-ink-3)]">
           Range data not available.
         </p>
@@ -275,10 +284,10 @@ function RentRange({ run }: { run: EstimationRun }) {
   }
   return (
     <div>
-      <SectionLabel>Rent range</SectionLabel>
+      <SectionLabel>{sectionLabel}</SectionLabel>
       <div className="mt-3">
         <RangeStrip
-          label="Monthly rent (Kč)"
+          label={stripLabel}
           triple={{ p25, p50: median, p75 }}
           format={(n) => fmtCzk(n)}
         />
@@ -606,6 +615,7 @@ function RerunBlock({
 function buildRerunPayload(run: EstimationRun): CreateEstimationIn {
   const base: CreateEstimationIn = {
     source: 'ui',
+    estimate_kind: run.estimate_kind ?? 'rent',
     parent_run_id: run.id,
     rerun_reason: 'manual',
     purchase_price_czk: run.input_purchase_price_czk,
