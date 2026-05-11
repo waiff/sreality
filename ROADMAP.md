@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 14:12 UTC_
+_Last refreshed: 2026-05-11 14:19 UTC_
 
 **Branch:** `claude/map-comparables-popup-jVns6`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-11 14:12 UTC_
 **Last 10 commits:**
 
 ```
+1bdeffd estimate: subject summary + comparables map popup
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
 ab6c923 roadmap: refresh auto-status block
 869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
@@ -25,7 +26,6 @@ b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv97
 3d32614 Merge pull request #45 from waiff/claude/review-unmerged-commits-HCsoE
 672902b Merge remote-tracking branch 'origin/main' into claude/review-unmerged-commits-HCsoE
 dfaea3e roadmap: refresh auto-status block
-0368c61 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
