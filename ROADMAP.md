@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 11:45 UTC_
+_Last refreshed: 2026-05-11 11:47 UTC_
 
 **Branch:** `claude/review-unmerged-commits-HCsoE`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-11 11:45 UTC_
 **Last 10 commits:**
 
 ```
+dfaea3e roadmap: refresh auto-status block
 1692c13 roadmap: refresh auto-status block
 0929982 Merge pull request #42 from waiff/claude/add-sales-estimate-Uzsdi
 9fa0d86 test: accept new estimate_yield kwargs in auth-test fake
@@ -25,7 +26,6 @@ a161a02 Merge main into add-sales-estimate (after PR #41 merge), resolve ROADMAP
 c95fbf6 Merge pull request #41 from waiff/claude/health-page-categories-GE14s
 8b13ab3 roadmap: refresh auto-status block
 6161699 Merge main into add-sales-estimate, resolve conflicts and renumber migration to 030
-042768d frontend: pipe VITE_API_BASE_URL and VITE_API_TOKEN through Docker build
 ```
 
 <!-- END AUTO-STATUS -->

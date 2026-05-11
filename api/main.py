@@ -6,10 +6,12 @@ response shaping; the agent layer consumes the dicts directly.
 
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from api import curation
 from api import dependencies as deps
@@ -50,6 +52,20 @@ from toolkit.image_similarity import ImageCompareError
 from toolkit.summaries import SummarizeError
 
 app = FastAPI(title="sreality toolkit API", version="0.3.0")
+
+_cors_origins = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOW_ORIGINS", "").split(",")
+    if o.strip()
+]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 # Skill validation needs to know the registered agent tools and the
 # registered provider names. Populate at import time so PUT /admin/skills/*
