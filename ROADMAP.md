@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 06:39 UTC_
+_Last refreshed: 2026-05-11 07:22 UTC_
 
 **Branch:** `claude/add-walkability-comps-tools-MQOCx`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-11 06:39 UTC_
 **Last 10 commits:**
 
 ```
+1c99d70 Phase 4b spatial context: walkability + transit-axis comparables
 2d0e57e Merge pull request #38 from waiff/claude/plan-phase-5-DmD0C
 6b53bed Phase 5 statistical refinement: cluster_comparables + find_comparables_relaxed
 3a0c701 Merge pull request #37 from waiff/claude/plan-phase-6-t5ikU
@@ -25,7 +26,6 @@ _Last refreshed: 2026-05-11 06:39 UTC_
 e111edb roadmap: refresh auto-status block
 0bc277a Merge pull request #36 from waiff/claude/review-u2.6-progress-d8st9
 ebba60d roadmap: refresh auto-status block for review session
-7209cf0 Merge pull request #35 from waiff/claude/update-development-roadmap-1Zjpw
 ```
 
 <!-- END AUTO-STATUS -->
