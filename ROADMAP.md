@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 11:13 UTC_
+_Last refreshed: 2026-05-12 11:15 UTC_
 
 **Branch:** `claude/fix-street-dropdown-M0gpC`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 31 files, latest `031_estimation_subject_summary.sql`.
+**Migrations on disk:** 32 files, latest `032_skill_rental_estimator_full.sql`.
 
 **Last 10 commits:**
 
 ```
+d3034c4 Merge main into claude/fix-street-dropdown-M0gpC
 4971fca roadmap: refresh auto-status block
-7cdc7f1 Merge main into claude/fix-street-dropdown-M0gpC
-7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
-ab6c923 roadmap: refresh auto-status block
-869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
-2ff7dba Merge main into claude/fix-street-dropdown-M0gpC
-b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv978
-7476a00 Merge main into claude/fix-estimate-search-params-mv978
-0a2e680 roadmap: refresh auto-status block
-3e59110 estimate: hand cohort filters to the agent, surface its strategy in the trace
+ab1ea40 Merge pull request #51 from waiff/claude/review-agent-implementation-RHIlb
+d2851e1 Merge pull request #52 from waiff/claude/add-new-skill-4zWHz
+7e886b7 skills: add interface-design Claude Code skill
+e4f0335 agent: opt into Anthropic prompt caching on system + tools
+3883b62 roadmap: refresh auto-status block
+d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
+7d08ebb roadmap: refresh auto-status block
+8ce97f0 estimate: per-run provider, rent default, delisted-only cohort
 ```
 
 <!-- END AUTO-STATUS -->
@@ -185,6 +185,50 @@ caches.
   `/tools/compute_amenity_supply`,
   `/tools/find_comparables_along_axis`), bearer-token-gated.
 
+### Phase 7 slice 1.5: Full-toolkit skill
+The slice‑1 agent could only reach 6 tools. Slice 1.5 makes the
+seven dormant analytical tools from phases 3b / 4b / 6 — already
+built and exposed as REST endpoints, but never wired into the loop
+— reachable to the reasoning agent via a richer skill.
+- **Seven new entries in `api/agent.py:_build_tool_registry`:**
+  `compute_market_velocity`, `compute_listing_velocity`,
+  `compute_walkability`, `compute_amenity_supply`,
+  `find_comparables_along_axis`, `summarize_listing`,
+  `compare_listing_images`. Each has a per-tool JSON schema, a
+  handler that translates LLM args into the toolkit signature, and
+  a bounded `_tool_summary` case. `_LoopState` gains an
+  `llm_client` field so the visual-layer handlers (which need an
+  LLM under the hood) can dispatch without a global.
+- **Cohort‑merge semantics on `find_comparables_along_axis`:** new
+  listings from the corridor query are deduped by `sreality_id`
+  and appended to `state.last_cohort` so a subsequent
+  `analyze_distribution` / `find_distribution_outliers` sees them
+  together with the relaxed-find cohort. Returned data includes
+  `cohort_added` and `cohort_size_after_merge` for trace clarity.
+- **Cohort gate on `compare_listing_images`:** both ids must
+  already be in `state.last_cohort`. Without the gate, the agent
+  could ask vision about random sreality_ids that may not have R2
+  images at all. Vision is the most expensive tool in the kit
+  (~$0.05/pair); the system prompt caps usage at two pairs per
+  run.
+- **`skills/rental_estimator_full_v1/SKILL.md`:** the canonical
+  prompt copy. Extends `rental_estimator_v1`'s operating
+  principles with six new gated steps (when to call velocity, when
+  to reach for walkability vs. amenity supply, when to extend
+  along an axis, when to summarise, when to use vision). Loop
+  limits widened to 20 iterations / $2.00 / 240s — the slice-1
+  defaults assumed a 6-tool ceiling.
+- **Migration 032:** seeds the new `rental_estimator_full_v1` row
+  in `skills`. No schema changes (the table already exists from
+  migration 029). `rental_estimator_v1` stays in place for runs
+  that prefer the cheap deterministic ladder.
+- Apartment rentals only (`byt` / `pronajem`); multi-category
+  defaults still tracked under Phase 1.5b.
+- 15 new hermetic tests in `tests/api/test_agent_full_handlers.py`
+  cover argument routing, defaults, cohort merge, the
+  vision-gate, and the new `_tool_summary` cases. Full api suite
+  stays at 189 passing.
+
 ### Phase 7 slice 1: The reasoning agent (provider-agnostic)
 Synchronous tool-use loop that takes a target spec + filters and
 returns a defensible rental estimate by iterating over a curated
@@ -224,17 +268,21 @@ Trace records `kind='reasoning'` per LLM turn.
 
 ## Next
 
-### Phase 7 slice 2: Async + full toolkit + UI mode toggle
-Builds on slice 1.
+### Phase 7 slice 2: Async + UI mode toggle + third provider
+Builds on slice 1 / 1.5. The tool-exposure piece of the original
+slice 2 shipped as slice 1.5 above; what remains:
 - Async execution: real `status='pending'/'running'` lifecycle with
   a background worker and a polling endpoint. Removes the
   synchronous HTTP wall-clock cap.
-- Expose the rest of the toolkit (`cluster_comparables`, the two
-  velocity tools, the visual layer) by adding skills that whitelist
-  them.
 - Frontend `/estimate` gets a mode toggle (`deterministic` /
   `agent`), a provider picker (anthropic / gemini), and a skill
-  picker.
+  picker that surfaces `rental_estimator_v1` vs.
+  `rental_estimator_full_v1` (and any future skill).
+- Surface `cluster_comparables` (Phase 5) — slice 1.5 left this
+  out because the agent rarely needs it without async (clustering
+  is more useful as a top-of-page UI summary than a mid-loop
+  step). Decide whether it becomes an agent tool, a UI-only
+  surface, or both.
 - Third provider (OpenAI or Vertex AI service-account auth).
 - Per-skill A/B comparison view on `/estimations`.
 
