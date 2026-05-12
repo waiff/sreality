@@ -18,6 +18,7 @@ import type {
   EstimationSource,
   EstimationStatus,
 } from '@/lib/types';
+import { ControlGroup } from '@/components/controls';
 
 const PAGE_SIZE = 50;
 
@@ -145,14 +146,16 @@ function FilterBar({
   onStatus: (v: string | null) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-      <FilterGroup label="Source" value={source} options={SOURCES} onChange={onSource} />
-      <FilterGroup label="Status" value={status} options={STATUSES} onChange={onStatus} />
-    </div>
+    <ControlGroup title="Filter runs">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <SegmentedFilter label="Source" value={source} options={SOURCES} onChange={onSource} />
+        <SegmentedFilter label="Status" value={status} options={STATUSES} onChange={onStatus} />
+      </div>
+    </ControlGroup>
   );
 }
 
-function FilterGroup<T extends string>({
+function SegmentedFilter<T extends string>({
   label,
   value,
   options,

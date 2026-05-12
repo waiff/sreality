@@ -4,7 +4,6 @@ import {
   useRef,
   useState,
   type ChangeEvent,
-  type ReactNode,
 } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { fetchDistrictFacets } from '@/lib/queries';
@@ -12,7 +11,6 @@ import {
   type ListingFilters,
   type ListingStatus,
   type SeenWithin,
-  type TriState,
   PRICE_BOUNDS,
   AREA_BOUNDS,
   ESTATE_AREA_BOUNDS,
@@ -22,6 +20,13 @@ import {
 } from '@/lib/filters';
 import { fmtCount, FURNISHED_LABELS, OWNERSHIP_LABELS, CATEGORY_SUB_LABELS } from '@/lib/format';
 import type { Disposition, Furnished, Ownership } from '@/lib/types';
+import {
+  ControlGroup,
+  Section,
+  NumberCell,
+  PickButton,
+  TriRow,
+} from '@/components/controls';
 
 interface SidebarProps {
   filters: ListingFilters;
@@ -49,109 +54,115 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
         )}
       </div>
 
-      <div className="px-5 py-5 space-y-7">
-        <DistrictPicker
-          value={filters.districts}
-          onChange={(v) => set('districts', v)}
-        />
-
-        <DispositionPicker
-          value={filters.dispositions}
-          onChange={(v) => set('dispositions', v)}
-        />
-
-        <RangeFilter
-          label="Price"
-          unit="Kč"
-          bounds={PRICE_BOUNDS}
-          value={[filters.priceMin, filters.priceMax]}
-          onChange={([min, max]) =>
-            onChange({ ...filters, priceMin: min, priceMax: max })
-          }
-        />
-
-        <RangeFilter
-          label="Area"
-          unit="m²"
-          bounds={AREA_BOUNDS}
-          value={[filters.areaMin, filters.areaMax]}
-          onChange={([min, max]) =>
-            onChange({ ...filters, areaMin: min, areaMax: max })
-          }
-        />
-
-        <ActiveBlock
-          status={filters.status}
-          seenWithin={filters.seenWithin}
-          onStatus={(v) => set('status', v)}
-          onSeen={(v) => set('seenWithin', v)}
-        />
-
-        <Section label="Has">
-          <div className="space-y-2">
-            <TriRow label="Balcony"  value={filters.hasBalcony} onChange={(v) => set('hasBalcony', v)} />
-            <TriRow label="Lift"     value={filters.hasLift}    onChange={(v) => set('hasLift', v)} />
-            <TriRow label="Parking"  value={filters.hasParking} onChange={(v) => set('hasParking', v)} />
-            <TriRow label="Terrace"  value={filters.terrace}    onChange={(v) => set('terrace', v)} />
-            <TriRow label="Cellar"   value={filters.cellar}     onChange={(v) => set('cellar', v)} />
-            <TriRow label="Garage"   value={filters.garage}     onChange={(v) => set('garage', v)} />
-          </div>
-        </Section>
-
-        <RangeFilter
-          label="Lot area"
-          unit="m²"
-          bounds={ESTATE_AREA_BOUNDS}
-          value={[filters.estateAreaMin, filters.estateAreaMax]}
-          onChange={([min, max]) =>
-            onChange({ ...filters, estateAreaMin: min, estateAreaMax: max })
-          }
-        />
-
-        <RangeFilter
-          label="Usable area"
-          unit="m²"
-          bounds={USABLE_AREA_BOUNDS}
-          value={[filters.usableAreaMin, filters.usableAreaMax]}
-          onChange={([min, max]) =>
-            onChange({ ...filters, usableAreaMin: min, usableAreaMax: max })
-          }
-        />
-
-        <Section label="Min parking spaces">
-          <NumberCell
-            value={filters.parkingLotsMin}
-            placeholder="0"
-            onChange={(e) => {
-              const raw = e.target.value.replace(/\s/g, '');
-              if (raw === '') {
-                set('parkingLotsMin', null);
-                return;
-              }
-              const n = Number(raw);
-              if (Number.isFinite(n) && n >= 0) set('parkingLotsMin', Math.trunc(n));
-            }}
+      <div className="px-5 py-5 space-y-9">
+        <ControlGroup title="Where">
+          <DistrictPicker
+            value={filters.districts}
+            onChange={(v) => set('districts', v)}
           />
-        </Section>
+        </ControlGroup>
 
-        <EnumPicker<Furnished>
-          label="Furnished"
-          value={filters.furnished}
-          options={FURNISHED_OPTIONS}
-          onChange={(v) => set('furnished', v)}
-        />
+        <ControlGroup title="Listing">
+          <DispositionPicker
+            value={filters.dispositions}
+            onChange={(v) => set('dispositions', v)}
+          />
+          <SubcategoryPicker
+            value={filters.categorySubCb}
+            onChange={(v) => set('categorySubCb', v)}
+          />
+        </ControlGroup>
 
-        <EnumPicker<Ownership>
-          label="Ownership"
-          value={filters.ownership}
-          options={OWNERSHIP_OPTIONS}
-          onChange={(v) => set('ownership', v)}
-        />
+        <ControlGroup title="Price & size">
+          <RangeFilter
+            label="Price"
+            unit="Kč"
+            bounds={PRICE_BOUNDS}
+            value={[filters.priceMin, filters.priceMax]}
+            onChange={([min, max]) =>
+              onChange({ ...filters, priceMin: min, priceMax: max })
+            }
+          />
+          <RangeFilter
+            label="Area"
+            unit="m²"
+            bounds={AREA_BOUNDS}
+            value={[filters.areaMin, filters.areaMax]}
+            onChange={([min, max]) =>
+              onChange({ ...filters, areaMin: min, areaMax: max })
+            }
+          />
+          <RangeFilter
+            label="Lot area"
+            unit="m²"
+            bounds={ESTATE_AREA_BOUNDS}
+            value={[filters.estateAreaMin, filters.estateAreaMax]}
+            onChange={([min, max]) =>
+              onChange({ ...filters, estateAreaMin: min, estateAreaMax: max })
+            }
+          />
+          <RangeFilter
+            label="Usable area"
+            unit="m²"
+            bounds={USABLE_AREA_BOUNDS}
+            value={[filters.usableAreaMin, filters.usableAreaMax]}
+            onChange={([min, max]) =>
+              onChange({ ...filters, usableAreaMin: min, usableAreaMax: max })
+            }
+          />
+        </ControlGroup>
 
-        <SubcategoryPicker
-          value={filters.categorySubCb}
-          onChange={(v) => set('categorySubCb', v)}
-        />
+        <ControlGroup title="Status">
+          <ActiveBlock
+            status={filters.status}
+            seenWithin={filters.seenWithin}
+            onStatus={(v) => set('status', v)}
+            onSeen={(v) => set('seenWithin', v)}
+          />
+        </ControlGroup>
+
+        <ControlGroup title="Amenities">
+          <Section label="Has">
+            <div className="space-y-2">
+              <TriRow label="Balcony"  value={filters.hasBalcony} onChange={(v) => set('hasBalcony', v)} />
+              <TriRow label="Lift"     value={filters.hasLift}    onChange={(v) => set('hasLift', v)} />
+              <TriRow label="Parking"  value={filters.hasParking} onChange={(v) => set('hasParking', v)} />
+              <TriRow label="Terrace"  value={filters.terrace}    onChange={(v) => set('terrace', v)} />
+              <TriRow label="Cellar"   value={filters.cellar}     onChange={(v) => set('cellar', v)} />
+              <TriRow label="Garage"   value={filters.garage}     onChange={(v) => set('garage', v)} />
+            </div>
+          </Section>
+
+          <Section label="Min parking spaces">
+            <NumberCell
+              value={filters.parkingLotsMin}
+              placeholder="0"
+              onChange={(e) => {
+                const raw = e.target.value.replace(/\s/g, '');
+                if (raw === '') {
+                  set('parkingLotsMin', null);
+                  return;
+                }
+                const n = Number(raw);
+                if (Number.isFinite(n) && n >= 0) set('parkingLotsMin', Math.trunc(n));
+              }}
+            />
+          </Section>
+
+          <EnumPicker<Furnished>
+            label="Furnished"
+            value={filters.furnished}
+            options={FURNISHED_OPTIONS}
+            onChange={(v) => set('furnished', v)}
+          />
+
+          <EnumPicker<Ownership>
+            label="Ownership"
+            value={filters.ownership}
+            options={OWNERSHIP_OPTIONS}
+            onChange={(v) => set('ownership', v)}
+          />
+        </ControlGroup>
       </div>
     </aside>
   );
@@ -210,32 +221,6 @@ function EnumPicker<T extends string>({
   );
 }
 
-function PickButton({
-  on,
-  onClick,
-  children,
-}: {
-  on: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={[
-        'px-2 py-1.5 text-xs rounded-[var(--radius-sm)] border transition-colors',
-        on
-          ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]'
-          : 'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)]',
-      ].join(' ')}
-      aria-pressed={on}
-    >
-      {children}
-    </button>
-  );
-}
-
 /* -------------------------------------------------------------------------- */
 /* Subcategory dropdown (sreality category_sub_cb). The full taxonomy is       */
 /* large (~30 codes) so a <select> is the right shape rather than a button     */
@@ -269,27 +254,6 @@ function SubcategoryPicker({
         ))}
       </select>
     </Section>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Section + label scaffolding                                                */
-/* -------------------------------------------------------------------------- */
-
-function Section({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <Label>{label}</Label>
-      <div className="mt-2.5">{children}</div>
-    </div>
-  );
-}
-
-function Label({ children }: { children: ReactNode }) {
-  return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-      {children}
-    </p>
   );
 }
 
@@ -425,25 +389,17 @@ function DispositionPicker({
   return (
     <Section label="Disposition">
       <div className="grid grid-cols-4 gap-1.5">
-        {DISPOSITIONS.map((d) => {
-          const on = value.includes(d);
-          return (
-            <button
-              key={d}
-              type="button"
-              onClick={() => toggle(d)}
-              className={[
-                'px-2 py-1.5 text-xs rounded-[var(--radius-sm)] border transition-colors font-mono tabular-nums',
-                on
-                  ? 'bg-[var(--color-copper)] text-white border-[var(--color-copper)]'
-                  : 'bg-[var(--color-paper-2)] text-[var(--color-ink-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]',
-              ].join(' ')}
-              aria-pressed={on}
-            >
-              {d}
-            </button>
-          );
-        })}
+        {DISPOSITIONS.map((d) => (
+          <PickButton
+            key={d}
+            on={value.includes(d)}
+            onClick={() => toggle(d)}
+            variant="solid"
+            className="font-mono tabular-nums"
+          >
+            {d}
+          </PickButton>
+        ))}
       </div>
     </Section>
   );
@@ -534,27 +490,6 @@ function RangeFilter({
   );
 }
 
-function NumberCell({
-  value,
-  placeholder,
-  onChange,
-}: {
-  value: number | null;
-  placeholder: string;
-  onChange: (e: ChangeEvent<HTMLInputElement>) => void;
-}) {
-  return (
-    <input
-      type="text"
-      inputMode="numeric"
-      value={value ?? ''}
-      placeholder={placeholder}
-      onChange={onChange}
-      className="w-full min-w-0 px-2 py-1.5 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-    />
-  );
-}
-
 /* -------------------------------------------------------------------------- */
 /* Active + Last-seen-within combined block                                   */
 /* -------------------------------------------------------------------------- */
@@ -586,97 +521,31 @@ function ActiveBlock({
   return (
     <Section label="Status">
       <div className="grid grid-cols-3 gap-1">
-        {STATUS_OPTS.map((opt) => {
-          const on = status === opt.value;
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => onStatus(opt.value)}
-              className={[
-                'px-2 py-1.5 text-xs rounded-[var(--radius-sm)] border transition-colors',
-                on
-                  ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]'
-                  : 'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)]',
-              ].join(' ')}
-              aria-pressed={on}
-            >
-              {opt.label}
-            </button>
-          );
-        })}
+        {STATUS_OPTS.map((opt) => (
+          <PickButton
+            key={opt.value}
+            on={status === opt.value}
+            onClick={() => onStatus(opt.value)}
+          >
+            {opt.label}
+          </PickButton>
+        ))}
       </div>
       <p className="mt-3 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
         Last seen within
       </p>
       <div className="mt-1.5 grid grid-cols-4 gap-1">
-        {SEEN_OPTS.map((opt) => {
-          const on = seenWithin === opt.value;
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => onSeen(opt.value)}
-              className={[
-                'px-2 py-1 text-xs rounded-[var(--radius-sm)] border transition-colors',
-                on
-                  ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]'
-                  : 'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)]',
-              ].join(' ')}
-              aria-pressed={on}
-            >
-              {opt.label}
-            </button>
-          );
-        })}
+        {SEEN_OPTS.map((opt) => (
+          <PickButton
+            key={opt.value}
+            on={seenWithin === opt.value}
+            onClick={() => onSeen(opt.value)}
+            className="px-2 py-1"
+          >
+            {opt.label}
+          </PickButton>
+        ))}
       </div>
     </Section>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Tri-state row (any / yes / no)                                             */
-/* -------------------------------------------------------------------------- */
-
-const TRI_OPTS: ReadonlyArray<{ value: TriState; label: string }> = [
-  { value: 'any', label: 'any' },
-  { value: 'yes', label: 'yes' },
-  { value: 'no',  label: 'no'  },
-];
-
-function TriRow({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: TriState;
-  onChange: (v: TriState) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <span className="text-sm text-[var(--color-ink-2)]">{label}</span>
-      <div className="grid grid-cols-3 gap-0.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-0.5">
-        {TRI_OPTS.map((opt) => {
-          const on = value === opt.value;
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => onChange(opt.value)}
-              className={[
-                'px-2.5 py-0.5 text-[0.7rem] rounded-[var(--radius-xs)] transition-colors',
-                on
-                  ? 'bg-[var(--color-copper)] text-white'
-                  : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
-              ].join(' ')}
-              aria-pressed={on}
-            >
-              {opt.label}
-            </button>
-          );
-        })}
-      </div>
-    </div>
   );
 }

@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
+import { Section } from '@/components/controls';
 import { fetchDistrictFacets } from '@/lib/queries';
 import { fmtCount } from '@/lib/format';
 
@@ -191,42 +192,41 @@ function RadiusPicker({
   onRadiusChange: (next: number) => void;
 }) {
   return (
-    <div className="space-y-3">
+    <div className="space-y-5">
       <Suspense fallback={<MapSkeleton />}>
         <RegionMap center={center} radiusM={radiusM} onCenterChange={onCenterChange} />
       </Suspense>
 
-      <div>
+      <Section label="Radius">
         <div className="flex items-baseline justify-between">
-          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-            Radius
-          </p>
-          <p className="font-mono tabular-nums text-sm text-[var(--color-ink)]">
+          <input
+            type="range"
+            min={RADIUS_MIN}
+            max={RADIUS_MAX}
+            step={RADIUS_STEP}
+            value={radiusM}
+            onChange={(e) => onRadiusChange(Number(e.target.value))}
+            aria-label="Radius (metres)"
+            className="flex-1 h-2 appearance-none bg-[var(--color-rule-strong)] rounded-full accent-[var(--color-copper)]"
+          />
+          <p className="ml-3 font-mono tabular-nums text-sm text-[var(--color-ink)] min-w-[3.5rem] text-right">
             {fmtRadius(radiusM)}
           </p>
         </div>
-        <input
-          type="range"
-          min={RADIUS_MIN}
-          max={RADIUS_MAX}
-          step={RADIUS_STEP}
-          value={radiusM}
-          onChange={(e) => onRadiusChange(Number(e.target.value))}
-          aria-label="Radius (metres)"
-          className="mt-1.5 w-full h-2 appearance-none bg-[var(--color-rule-strong)] rounded-full accent-[var(--color-copper)]"
-        />
-        <div className="flex justify-between mt-0.5 text-[0.65rem] tabular-nums text-[var(--color-ink-4)] font-mono">
+        <div className="flex justify-between mt-0.5 text-[0.65rem] tabular-nums text-[var(--color-ink-4)] font-mono pr-[4.25rem]">
           <span>250 m</span>
           <span>5 km</span>
         </div>
-      </div>
+      </Section>
 
-      <div className="text-[0.7rem] tabular-nums text-[var(--color-ink-3)] font-mono">
-        Centre: {fmtLatLng(center.lat)}, {fmtLatLng(center.lng)}
-      </div>
-      <p className="text-[0.7rem] text-[var(--color-ink-3)] tracking-wide">
-        Drag the pin or click the map to move the centre.
-      </p>
+      <Section label="Centre">
+        <p className="text-sm tabular-nums text-[var(--color-ink)] font-mono">
+          {fmtLatLng(center.lat)}, {fmtLatLng(center.lng)}
+        </p>
+        <p className="mt-1 text-[0.7rem] text-[var(--color-ink-3)] tracking-wide">
+          Drag the pin or click the map to move the centre.
+        </p>
+      </Section>
     </div>
   );
 }
