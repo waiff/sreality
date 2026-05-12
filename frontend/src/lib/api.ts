@@ -14,6 +14,7 @@ import type {
   EstimationListParams,
   EstimationListResponse,
   EstimationRun,
+  ListingSummaryBatchRow,
   ParseResult,
   PreviewResponse,
   SourceKind,
@@ -197,6 +198,19 @@ export const listEstimations = (
 ): Promise<EstimationListResponse> =>
   request<EstimationListResponse>('/estimations', {
     query: params as Record<string, QueryValue>,
+  });
+
+/* POST /listings/summaries — batch wrapper around the
+ * summarize_listing toolkit function. The backend cache means
+ * repeat calls for the same (sreality_id, snapshot_id) pairs are
+ * effectively free. Per-item failures surface inline; one bad id
+ * never fails the whole request. */
+export const fetchListingSummaries = (
+  items: ReadonlyArray<{ sreality_id: number; snapshot_id: number | null }>,
+): Promise<{ data: ListingSummaryBatchRow[] }> =>
+  request<{ data: ListingSummaryBatchRow[] }>('/listings/summaries', {
+    method: 'POST',
+    json: { items },
   });
 
 /* ----- admin / Settings page --------------------------------------------

@@ -7,7 +7,6 @@ import UrlScrapeStep, {
 } from '@/components/UrlScrapeStep';
 import EstimateForm, {
   type EstimateFormState,
-  type EstimateKind,
   buildInitialFormState,
 } from '@/components/EstimateForm';
 import { fetchListingById, submitEstimation } from '@/lib/queries';
@@ -59,11 +58,10 @@ export default function Estimate() {
   }, [fromListingId, fromListingQuery.data, stage.kind, params, setParams]);
 
   const enterEditing = (resolved: ResolvedInput) => {
-    const inferred = inferEstimateKind(resolved);
     setStage({
       kind: 'editing',
       resolved,
-      form: buildInitialFormState(resolved.spec, resolved.listing, inferred),
+      form: buildInitialFormState(resolved.spec, resolved.listing, 'rent'),
     });
   };
 
@@ -173,15 +171,6 @@ function EditingStage({
       </div>
     </div>
   );
-}
-
-function inferEstimateKind(resolved: ResolvedInput): EstimateKind {
-  const ct = resolved.listing.category_type;
-  if (ct === 'prodej') return 'sale';
-  if (resolved.origin.kind === 'url' && /\/prodej\//.test(resolved.origin.url)) {
-    return 'sale';
-  }
-  return 'rent';
 }
 
 function submitErrorMessage(err: ApiError): string {

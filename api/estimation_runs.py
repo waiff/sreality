@@ -236,6 +236,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "parent_run_id", "rerun_reason",
     "source_kind", "parse_confidence", "parse_confidence_per_field",
     "source_html",
+    "subject_summary",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -279,6 +280,35 @@ _EMPTY_RESOLUTION = _Resolution(
     parse_confidence_per_field=None, source_html=None,
     parse_warnings=[],
 )
+
+
+def _build_subject_summary(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    sreality_id: int | None,
+) -> dict[str, Any] | None:
+    """Run summarize_listing on the subject, best-effort.
+
+    Subject summary is informational; a failure (no listing in DB, LLM
+    refusal, missing API key) must not turn a successful estimation into
+    a failed one. Return None and let the caller persist that.
+    """
+    if sreality_id is None:
+        return None
+    try:
+        from toolkit.summaries import summarize_listing
+        result = summarize_listing(conn, llm_client, sreality_id=sreality_id)
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        LOG.info("subject summary skipped for %s: %s", sreality_id, exc)
+        return None
+    data = result.get("data") or {}
+    summary = data.get("summary")
+    if not isinstance(summary, dict):
+        return None
+    return {
+        "snapshot_id": data.get("snapshot_id"),
+        "summary": summary,
+    }
 
 
 def create_estimation_run(
@@ -339,6 +369,9 @@ def create_estimation_run(
     trace = recorder.to_dict(summary_text)
     merged_warnings = list(resolution.parse_warnings)
     merged_warnings.extend(d.get("warnings") or [])
+    subject_summary = _build_subject_summary(
+        conn, llm_client, resolution.input_sreality_id,
+    )
     run_id = _insert_run(
         conn,
         source=body.source,
@@ -367,6 +400,7 @@ def create_estimation_run(
         parse_confidence=resolution.parse_confidence,
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
+        subject_summary=subject_summary,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -593,6 +627,7 @@ def _persist_failed_run(
         parse_confidence=resolution.parse_confidence,
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
+        subject_summary=None,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -617,6 +652,7 @@ def _build_filters(body: s.CreateEstimationIn) -> ComparableFilters:
         disposition_match=_DEFAULT_DISPOSITION_MATCH,
         max_age_days=_default_max_age_days(body.estimate_kind),
         active_only=_DEFAULT_ACTIVE_ONLY,
+        population=body.population,
         floor_band=body.floor_band,
         condition_match=body.condition_match,
         building_type_match=body.building_type_match,
@@ -739,6 +775,7 @@ def _run_agent_path(
         parse_confidence=resolution.parse_confidence,
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
+        subject_summary=None,
     )
 
     try:
@@ -771,6 +808,12 @@ def _run_agent_path(
     if status == "failed":
         err = f"agent halted: {md.get('stop_reason')}"
 
+    subject_summary = (
+        _build_subject_summary(conn, llm_client, resolution.input_sreality_id)
+        if status == "success"
+        else None
+    )
+
     _update_run_terminal(
         conn, run_id,
         status=status,
@@ -783,6 +826,7 @@ def _run_agent_path(
         trace=trace,
         warnings=merged_warnings or None,
         error_message=err,
+        subject_summary=subject_summary,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -793,7 +837,7 @@ def _update_run_terminal(
     **fields: Any,
 ) -> None:
     """Parameterised UPDATE that writes only the supplied columns."""
-    for k in ("comparables_used", "trace", "warnings"):
+    for k in ("comparables_used", "trace", "warnings", "subject_summary"):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])
     sets: list[str] = []
@@ -811,7 +855,7 @@ def _update_run_terminal(
 def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
     for k in (
         "input_spec", "comparables_used", "trace", "warnings",
-        "parse_confidence_per_field",
+        "parse_confidence_per_field", "subject_summary",
     ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])

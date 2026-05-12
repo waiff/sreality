@@ -77,12 +77,14 @@ def _patch_persistence(monkeypatch) -> _State:
                     "error_message", "parent_run_id", "rerun_reason",
                     "source_kind", "parse_confidence",
                     "parse_confidence_per_field", "source_html",
+                    "subject_summary",
                 )
             },
         }
 
     monkeypatch.setattr(er, "_insert_run", fake_insert)
     monkeypatch.setattr(er, "_fetch_run", fake_fetch)
+    monkeypatch.setattr(er, "_build_subject_summary", lambda *a, **kw: None)
     return state
 
 

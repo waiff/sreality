@@ -379,6 +379,68 @@ def test_find_anchor_amenities_defaults_categories_to_none(client, monkeypatch):
     assert captured["cache_ttl_days"] == 30
 
 
+def test_listings_summaries_batch_returns_per_item_results(client, monkeypatch):
+    """POST /listings/summaries fans out summarize_listing per item.
+
+    Per-item failures are reported inline; one bad id never fails the whole
+    request. Cache hits are honoured by the underlying tool.
+    """
+    from toolkit.summaries import SummarizeError
+
+    def fake(conn, llm_client, *, sreality_id, snapshot_id=None, force_refresh=False):
+        if sreality_id == 999:
+            raise SummarizeError("no snapshot found for sreality_id=999")
+        return {
+            "data": {
+                "sreality_id": sreality_id,
+                "snapshot_id": snapshot_id or (sreality_id * 10),
+                "summary": {
+                    "headline": f"summary for {sreality_id}",
+                    "key_highlights": [],
+                    "concerns": [],
+                    "condition_assessment": "good",
+                    "target_audience": "couple",
+                    "location_summary": "loc",
+                    "building_summary": "bld",
+                    "apartment_summary": "apt",
+                },
+                "model": "claude-sonnet-4-5",
+                "cost_usd": 0.0042,
+                "cache_hit": True,
+            },
+            "metadata": {"tool": "summarize_listing"},
+        }
+
+    monkeypatch.setattr(api_main, "summarize_listing", fake)
+
+    res = client.post(
+        "/listings/summaries",
+        json={
+            "items": [
+                {"sreality_id": 111, "snapshot_id": 1110},
+                {"sreality_id": 222},
+                {"sreality_id": 999},
+            ],
+        },
+    )
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert len(data) == 3
+    assert data[0]["sreality_id"] == 111
+    assert data[0]["snapshot_id"] == 1110
+    assert data[0]["summary"]["headline"] == "summary for 111"
+    assert data[0]["error"] is None
+    assert data[1]["snapshot_id"] == 2220
+    assert data[2]["summary"] is None
+    assert "no snapshot" in data[2]["error"]
+
+
+def test_listings_summaries_batch_empty_items(client):
+    res = client.post("/listings/summaries", json={"items": []})
+    assert res.status_code == 200
+    assert res.json() == {"data": []}
+
+
 def test_invalid_body_returns_422(client):
     res = client.post(
         "/tools/find_comparables",

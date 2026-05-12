@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 11:11 UTC_
+_Last refreshed: 2026-05-12 11:13 UTC_
 
 **Branch:** `claude/fix-street-dropdown-M0gpC`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 30 files, latest `030_sales_estimate.sql`.
+**Migrations on disk:** 31 files, latest `031_estimation_subject_summary.sql`.
 
 **Last 10 commits:**
 
 ```
+4971fca roadmap: refresh auto-status block
 7cdc7f1 Merge main into claude/fix-street-dropdown-M0gpC
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
 ab6c923 roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv97
 7476a00 Merge main into claude/fix-estimate-search-params-mv978
 0a2e680 roadmap: refresh auto-status block
 3e59110 estimate: hand cohort filters to the agent, surface its strategy in the trace
-3d32614 Merge pull request #45 from waiff/claude/review-unmerged-commits-HCsoE
 ```
 
 <!-- END AUTO-STATUS -->

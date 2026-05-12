@@ -186,6 +186,8 @@ export interface HealthSummary {
 export type EstimationStatus = 'pending' | 'running' | 'success' | 'failed';
 export type EstimationSource = 'ui' | 'api' | 'clickup';
 export type EstimationMode = 'deterministic' | 'agent';
+export type EstimationProvider = 'anthropic' | 'gemini';
+export type Population = 'active' | 'delisted' | 'all';
 /* Result confidence (estimate_yield) only ever returns the first three;
  * parse confidence (URL parser) can additionally be 'best_effort'. The
  * widened union covers both call sites. */
@@ -214,6 +216,42 @@ export interface ComparableUsed {
   snapshot_date: string | null;
   data_age_days: number | null;
   verified_during_estimate: boolean;
+}
+
+/* Output of toolkit/summaries.py:summarize_listing — the five legacy
+ * fields plus the three sections added in migration 031. Older cached
+ * rows may be missing the new fields; renderers must tolerate
+ * absence and show "—" rather than crashing. */
+export interface ListingSummaryBody {
+  headline: string;
+  key_highlights: string[];
+  concerns: string[];
+  condition_assessment: 'excellent' | 'good' | 'average' | 'poor' | 'unknown' | string;
+  target_audience:
+    | 'family' | 'couple' | 'single_professional'
+    | 'investor' | 'student' | 'general' | string;
+  location_summary?: string | null;
+  building_summary?: string | null;
+  apartment_summary?: string | null;
+}
+
+/* Persisted on estimation_runs.subject_summary by the backend after a
+ * successful run. Carries the snapshot id so the UI can deep-link to
+ * the exact snapshot the summary was generated against. */
+export interface SubjectSummary {
+  snapshot_id: number | null;
+  summary: ListingSummaryBody;
+}
+
+/* POST /listings/summaries response shape — one row per requested
+ * (sreality_id, snapshot_id) pair. Per-item failures surface as
+ * `summary: null` + `error: <reason>`; a single bad id never fails
+ * the whole request. */
+export interface ListingSummaryBatchRow {
+  sreality_id: number;
+  snapshot_id: number | null;
+  summary: ListingSummaryBody | null;
+  error: string | null;
 }
 
 export type TraceStepKind = 'tool_call' | 'computation' | 'reasoning';
@@ -295,6 +333,11 @@ export interface EstimationRun {
    * value is never null in practice, but the type tolerates it for
    * forward compatibility. */
   cost_usd_total: number | null;
+  /* Migration 031 — structured Czech-real-estate summary of the
+   * subject listing, generated server-side at estimation time when
+   * input_sreality_id was set. Null on legacy runs and on runs
+   * where no listing was resolved (spec-only inputs, parse failures). */
+  subject_summary: SubjectSummary | null;
 }
 
 /* Filter half of the POST /estimations body — mirrors ComparableFilters
@@ -335,6 +378,9 @@ export interface EstimationFilters {
 export interface CreateEstimationIn extends Partial<EstimationFilters> {
   source?: EstimationSource;
   mode?: EstimationMode;
+  provider?: EstimationProvider;
+  skill?: string;
+  population?: Population;
   estimate_kind?: 'rent' | 'sale';
   url?: string;
   spec?: TargetSpecIn;
