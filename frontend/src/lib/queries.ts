@@ -245,6 +245,7 @@ export const fetchBrowseStats = async (
     cellar_filter:           triToBool(f.cellar),
     garage_filter:           triToBool(f.garage),
     category_sub_cb_filter:  f.categorySubCb,
+    tag_ids:                 f.tags.length ? f.tags : null,
   });
   if (error) throw error;
   return data as BrowseStats;

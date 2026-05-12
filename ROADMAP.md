@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 17:40 UTC_
+_Last refreshed: 2026-05-12 18:55 UTC_
 
 **Branch:** `claude/review-roadmap-scope-BHt5w`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 32 files, latest `032_skill_rental_estimator_full.sql`.
+**Migrations on disk:** 33 files, latest `033_browse_stats_tag_ids.sql`.
 
 **Last 10 commits:**
 
 ```
+9e8574c roadmap: refresh auto-status block
 71582f7 frontend: U2.6 curation UI (collections, tags, notes)
 c96af29 roadmap: refresh auto-status block
 2ee3f67 Merge pull request #56 from waiff/claude/redesign-estimation-workflow-XJOiN
@@ -25,7 +26,6 @@ c96af29 roadmap: refresh auto-status block
 9941327 Merge remote-tracking branch 'origin/main' into claude/check-skill-access-o17oY
 d2645b2 frontend: group controls + add Settings-page light/dark toggle
 866e21a Merge pull request #46 from waiff/claude/fix-street-dropdown-M0gpC
-e350c67 Merge main into claude/fix-street-dropdown-M0gpC
 ```
 
 <!-- END AUTO-STATUS -->
@@ -498,11 +498,17 @@ notes — end-to-end.
 - Future hook (out of scope, but the schema supports it): the agent
   reads collections as seed examples — "estimate this listing using
   only comparables from collection X."
-- Deferred follow-ups: tags filter does NOT yet flow through
-  `browse_stats` (the RPC has no `tag_ids` parameter), so the Browse
-  Stats tab reports the broader cohort; tag rename / recolour are
-  out of scope in v1 (delete + recreate). Both are easy to add when
-  needed.
+- Follow-ups landed:
+  - Migration 033 adds `tag_ids bigint[]` to `browse_stats` with the
+    same AND-semantics as `listings_with_tags`. The Browse Stats
+    tab now agrees with Map / Table when the operator filters by
+    tag.
+  - `PATCH /tags/{tag_id}` (`api/curation.update_tag` +
+    `api/schemas.UpdateTagIn`) supports in-place rename + recolour;
+    listing attachments are preserved because `listing_tags` joins
+    by `tag_id`, not by name. A shared `TagEditPopover` wires
+    rename / recolour / delete into both tag pickers — the
+    CurationBlock matches list and the Browse Filters "Add" rows.
 
 ## Summarize track (parallel)
 

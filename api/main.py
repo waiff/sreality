@@ -719,6 +719,16 @@ def post_tag(
     return curation.create_tag(conn, body)
 
 
+@app.patch("/tags/{tag_id}")
+def patch_tag(
+    tag_id: int,
+    body: s.UpdateTagIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.update_tag(conn, tag_id, body)
+
+
 @app.delete("/tags/{tag_id}")
 def delete_tag(
     tag_id: int,

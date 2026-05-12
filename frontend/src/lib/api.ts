@@ -340,6 +340,12 @@ export const listTags = (): Promise<{ data: Tag[] }> =>
 export const createTag = (input: { name: string; color: TagColor }): Promise<Tag> =>
   request<Tag>('/tags', { method: 'POST', json: input });
 
+export const updateTag = (
+  id: number,
+  patch: { name?: string | null; color?: TagColor | null },
+): Promise<Tag> =>
+  request<Tag>(`/tags/${id}`, { method: 'PATCH', json: patch });
+
 export const deleteTag = (id: number): Promise<{ deleted: true }> =>
   request<{ deleted: true }>(`/tags/${id}`, { method: 'DELETE' });
 

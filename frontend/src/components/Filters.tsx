@@ -9,6 +9,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fetchDistrictFacets, curationKeys } from '@/lib/queries';
 import { listTags } from '@/lib/api';
 import type { Tag } from '@/lib/types';
+import TagEditPopover from '@/components/curation/TagEditPopover';
 import {
   type ListingFilters,
   type ListingStatus,
@@ -249,7 +250,16 @@ function TagsPicker({
           <ul className="mt-1.5 flex flex-wrap gap-1.5">
             {remaining.map((t) => (
               <li key={t.id}>
-                <FilterTagAddButton t={t} onAdd={() => add(t.id)} />
+                <FilterTagAddButton
+                  t={t}
+                  onAdd={() => add(t.id)}
+                  otherNames={tags
+                    .filter((x) => x.id !== t.id)
+                    .map((x) => x.name.toLowerCase())}
+                  onDeleted={(id) => {
+                    if (value.includes(id)) remove(id);
+                  }}
+                />
               </li>
             ))}
           </ul>
@@ -285,20 +295,39 @@ function FilterTagChip({ t, onRemove }: { t: Tag; onRemove: () => void }) {
   );
 }
 
-function FilterTagAddButton({ t, onAdd }: { t: Tag; onAdd: () => void }) {
+function FilterTagAddButton({
+  t,
+  onAdd,
+  otherNames,
+  onDeleted,
+}: {
+  t: Tag;
+  onAdd: () => void;
+  otherNames: string[];
+  onDeleted: (id: number) => void;
+}) {
   return (
-    <button
-      type="button"
-      onClick={onAdd}
-      className="inline-flex items-center gap-1.5 px-2 py-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] transition-colors"
-    >
-      <span
-        aria-hidden
-        className="w-2 h-2 rounded-full"
-        style={{ background: `var(--color-tag-${t.color})` }}
-      />
-      <span>{t.name}</span>
-    </button>
+    <span className="inline-flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] hover:border-[var(--color-rule-strong)] transition-colors">
+      <button
+        type="button"
+        onClick={onAdd}
+        className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
+      >
+        <span
+          aria-hidden
+          className="w-2 h-2 rounded-full"
+          style={{ background: `var(--color-tag-${t.color})` }}
+        />
+        <span>{t.name}</span>
+      </button>
+      <span className="pr-0.5">
+        <TagEditPopover
+          tag={t}
+          otherNames={otherNames}
+          onDeleted={onDeleted}
+        />
+      </span>
+    </span>
   );
 }
 

@@ -35,6 +35,7 @@ import {
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
 import type { Collection, Note, Tag, TagColor } from '@/lib/types';
 import { TAG_COLORS } from '@/lib/types';
+import TagEditPopover from '@/components/curation/TagEditPopover';
 
 export default function CurationBlock({ sreality_id }: { sreality_id: number }) {
   return (
@@ -366,7 +367,7 @@ function TagPicker({
           />
           <ul role="listbox" className="mt-1.5 max-h-56 overflow-y-auto">
             {matches.map((t) => (
-              <li key={t.id}>
+              <li key={t.id} className="flex items-center gap-0.5 rounded-[var(--radius-xs)] hover:bg-[var(--color-copper-soft)]">
                 <button
                   type="button"
                   onClick={() => {
@@ -375,22 +376,30 @@ function TagPicker({
                     setOpen(false);
                   }}
                   disabled={pending}
-                  className="w-full flex items-center justify-between gap-2 px-2 py-1 text-left rounded-[var(--radius-xs)] hover:bg-[var(--color-copper-soft)] disabled:opacity-60"
+                  className="flex-1 min-w-0 flex items-center justify-between gap-2 px-2 py-1 text-left disabled:opacity-60"
                 >
-                  <span className="inline-flex items-center gap-2 text-sm">
+                  <span className="inline-flex items-center gap-2 text-sm min-w-0">
                     <span
                       aria-hidden
-                      className="w-2 h-2 rounded-full"
+                      className="w-2 h-2 rounded-full shrink-0"
                       style={{ background: `var(--color-tag-${t.color})` }}
                     />
                     <span className="text-[var(--color-ink)] truncate">
                       {t.name}
                     </span>
                   </span>
-                  <span className="font-mono tabular-nums text-[0.7rem] text-[var(--color-ink-4)]">
+                  <span className="font-mono tabular-nums text-[0.7rem] text-[var(--color-ink-4)] shrink-0">
                     {t.listing_count}
                   </span>
                 </button>
+                <span className="pr-1 shrink-0">
+                  <TagEditPopover
+                    tag={t}
+                    otherNames={existingNames.filter(
+                      (n) => n !== t.name.toLowerCase(),
+                    )}
+                  />
+                </span>
               </li>
             ))}
             {matches.length === 0 && !canCreate && (

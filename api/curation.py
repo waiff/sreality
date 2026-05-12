@@ -276,6 +276,40 @@ def create_tag(
     return _to_tag(row, listing_count=0)
 
 
+def update_tag(
+    conn: "psycopg.Connection",
+    tag_id: int,
+    body: s.UpdateTagIn,
+) -> dict[str, Any]:
+    """Rename and/or recolour a tag in place. Listing attachments are
+    untouched — the listing_tags rows join by tag_id, not name."""
+    sets: list[str] = []
+    params: list[Any] = []
+    if body.name is not None:
+        sets.append("name = %s")
+        params.append(body.name)
+    if body.color is not None:
+        sets.append("color = %s")
+        params.append(body.color)
+    if not sets:
+        row = _fetch_tag(conn, tag_id)
+        if row is None:
+            raise HTTPException(404, "tag not found")
+        return row
+    params.append(tag_id)
+    sql = f"UPDATE tags SET {', '.join(sets)} WHERE id = %s"
+    try:
+        with conn.transaction(), conn.cursor() as cur:
+            cur.execute(sql, params)
+            if cur.rowcount == 0:
+                raise HTTPException(404, "tag not found")
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "tag name already exists")
+    row = _fetch_tag(conn, tag_id)
+    assert row is not None
+    return row
+
+
 def delete_tag(
     conn: "psycopg.Connection", tag_id: int,
 ) -> dict[str, Any]:
@@ -337,6 +371,18 @@ def _fetch_collection(
     if row is None:
         return None
     return _to_collection_full(row)
+
+
+def _fetch_tag(
+    conn: "psycopg.Connection", tag_id: int,
+) -> dict[str, Any] | None:
+    sql = f"SELECT {_TAG_FULL_PROJECTION} FROM tags t WHERE t.id = %s"
+    with conn.cursor() as cur:
+        cur.execute(sql, (tag_id,))
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return _to_tag_full(row)
 
 
 def _to_collection(row: tuple[Any, ...], *, listing_count: int) -> dict[str, Any]:
