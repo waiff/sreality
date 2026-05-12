@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 16:48 UTC_
+_Last refreshed: 2026-05-12 11:03 UTC_
 
-**Branch:** `claude/agent-tools-configuration-hcQQe`
+**Branch:** `claude/check-interface-design-skill-VMNx2`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-11 16:48 UTC_
 **Last 10 commits:**
 
 ```
+d2851e1 Merge pull request #52 from waiff/claude/add-new-skill-4zWHz
+7e886b7 skills: add interface-design Claude Code skill
+d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
+7d08ebb roadmap: refresh auto-status block
 8ce97f0 estimate: per-run provider, rent default, delisted-only cohort
 6a5ad8d Merge pull request #49 from waiff/claude/map-comparables-popup-jVns6
 37e47cb roadmap: refresh auto-status block
 1bdeffd estimate: subject summary + comparables map popup
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
 ab6c923 roadmap: refresh auto-status block
-869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
-b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv978
-7476a00 Merge main into claude/fix-estimate-search-params-mv978
-3e59110 estimate: hand cohort filters to the agent, surface its strategy in the trace
 ```
 
 <!-- END AUTO-STATUS -->
