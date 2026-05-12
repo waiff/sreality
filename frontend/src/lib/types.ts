@@ -519,3 +519,96 @@ export interface CollectionWithListings {
   collection: Collection;
   listings: CollectionListingRow[];
 }
+
+/* --------------------------------------------------------------------
+ * Buildings (Phase B0)
+ *
+ * Type stubs for the building-decomposition flow. B0 ships persistence
+ * + read endpoints only; B1 adds the URL ingest + the agent extractor
+ * and a `/building/:id` page that consumes these types.
+ * ------------------------------------------------------------------ */
+
+export type BuildingStatus =
+  | 'pending'
+  | 'extracting'
+  | 'awaiting_input'
+  | 'estimating'
+  | 'success'
+  | 'failed';
+
+export type BuildingUnitSource =
+  | 'description'
+  | 'floor_plan'
+  | 'both'
+  | 'user_added';
+
+export interface BuildingUnit {
+  unit_id: string;
+  label: string | null;
+  floor: string | null;
+  area_m2: number | null;
+  disposition: string | null;
+  condition: string | null;
+  is_potential: boolean;
+  source: BuildingUnitSource | null;
+  notes: string | null;
+}
+
+/* Embedded child-estimation projection on GET /buildings/{id}.
+ * Slimmer than EstimationRun — full detail lives at /estimation/:id. */
+export interface BuildingChildRun {
+  id: number;
+  created_at: string;
+  status: EstimationStatus;
+  estimate_kind: 'rent' | 'sale' | null;
+  building_unit_id: string | null;
+  estimated_monthly_rent_czk: number | null;
+  rent_p25_czk: number | null;
+  rent_p75_czk: number | null;
+  estimated_sale_price_czk: number | null;
+  sale_p25_czk: number | null;
+  sale_p75_czk: number | null;
+  confidence: Confidence | null;
+  error_message: string | null;
+}
+
+export interface BuildingRun {
+  id: number;
+  created_at: string;
+  source: EstimationSource;
+  status: BuildingStatus;
+  input_url: string | null;
+  input_sreality_id: number | null;
+  input_spec: TargetSpecIn | null;
+  source_kind: SourceKind | null;
+  parse_confidence: Confidence | null;
+  parse_confidence_per_field: Record<string, Confidence> | null;
+  source_html: string | null;
+  subject_summary: SubjectSummary | null;
+  units_proposal: BuildingUnit[] | null;
+  units: BuildingUnit[] | null;
+  total_rent_p25_czk: number | null;
+  total_rent_p50_czk: number | null;
+  total_rent_p75_czk: number | null;
+  total_sale_p25_czk: number | null;
+  total_sale_p50_czk: number | null;
+  total_sale_p75_czk: number | null;
+  /* Phase B3 — operator-tunable spreadsheet inputs + cached outputs. */
+  business_case: Record<string, unknown> | null;
+  warnings: string[] | null;
+  error_message: string | null;
+  /* Only present on GET /buildings/{id}, not on the list endpoint. */
+  children?: BuildingChildRun[];
+}
+
+export interface CreateBuildingIn {
+  source: EstimationSource;
+  input_url?: string | null;
+}
+
+export interface BuildingListResponse {
+  data: BuildingRun[];
+  total: number;
+  limit: number;
+  offset: number;
+}
