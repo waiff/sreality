@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 21:27 UTC_
+_Last refreshed: 2026-05-12 21:31 UTC_
 
-**Branch:** `claude/add-building-paste-feature-NmQIy`
+**Branch:** `claude/plan-phase-b1-skill-reuse-VrgpZ`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-12 21:27 UTC_
 **Last 10 commits:**
 
 ```
+c028816 Merge pull request #59 from waiff/claude/add-building-paste-feature-NmQIy
+6b95c75 roadmap: refresh auto-status block
 182fc2a building: renumber 034 -> 035 + apply migration
 40ad67d building: Phase B0 schema + scaffolding (migration not yet applied)
 d2a2e30 roadmap: refresh auto-status block
@@ -24,8 +26,6 @@ f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
 9e8574c roadmap: refresh auto-status block
 71582f7 frontend: U2.6 curation UI (collections, tags, notes)
 c96af29 roadmap: refresh auto-status block
-2ee3f67 Merge pull request #56 from waiff/claude/redesign-estimation-workflow-XJOiN
-4ebf817 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -220,26 +220,66 @@ Trace records `kind='reasoning'` per LLM turn.
 - Apartment rentals only (`byt` / `pronajem`). Multi-category
   defaults stay deferred to Phase 1.5b.
 
+### Phase B0: Building decomposition — schema + scaffolding
+Persistence foundation + read endpoints for the building-paste flow.
+PR #59. Full description under "Building decomposition track" below.
+- Migration 035: `building_runs` parent table with full status
+  lifecycle CHECK (`pending` → `extracting` → `awaiting_input` →
+  `estimating` → `success` | `failed`); `business_case jsonb`
+  reserved for B3; `building_run_id` (FK,
+  `ON DELETE SET NULL`) + `building_unit_id` (text) columns on
+  `estimation_runs`. Architectural rule #13 added to CLAUDE.md.
+- `api/building_runs.py` (`create_building_run`, `get_building_run`,
+  `list_building_runs`) + Pydantic schemas (`CreateBuildingIn`,
+  `BuildingUnit`, `BuildingOut`). Minimal `POST /buildings` inserts
+  a `status='pending'` shell so the read path can be exercised
+  end-to-end before B1 lands; `GET /buildings`, `GET /buildings/{id}`
+  return rows with children surfaced via a side-query on
+  `estimation_runs`. All bearer-gated.
+- Frontend type stubs only in `frontend/src/lib/types.ts`
+  (`BuildingRun`, `BuildingUnit`, `BuildingStatus`); no pages or
+  components yet — those ship with B1.
+
 ## Next
 
-### Phase B0: Building decomposition — schema + scaffolding (active)
+### Phase B1: Building decomposition — URL ingest + unit extractor + confirmation UI (active)
 
-First slice of the "paste a whole-building listing → decompose into
-apartment units → estimate each → roll up + business case" workflow.
-B0 lays the persistence foundation and read endpoints; B1 adds URL
-ingest + agent-driven unit extraction; B2 fans out per-unit
-estimations + rollup view; B3 layers the spreadsheet-style business
-case on top. Full description under "Building decomposition track"
-below.
+Second slice of the building-paste flow. Builds on B0's persistence:
+operator pastes a `dum` (house) or `komercni` URL → backend parses
+via the existing dispatcher → an LLM-vision skill reads the
+description + floor plans + photos → proposes a unit list → the UI
+renders an editable confirmation step → operator confirms. End of B1
+the building is in `status='awaiting_input'` until the operator
+submits, then advances to `estimating`. B2 picks up the per-unit
+estimation fan-out from there.
 
-Slice scope:
-- Migration 035: `building_runs` parent table; `building_run_id` +
-  `building_unit_id` columns on `estimation_runs`.
-- `api/building_runs.py` module + Pydantic schemas + read endpoints
-  (`GET /buildings`, `GET /buildings/{id}`). One minimal `POST
-  /buildings` that inserts a `status='pending'` shell so the read
-  path can be exercised end-to-end before B1 lands.
-- Frontend type stubs only (no UI yet — that ships with B1).
+Full description (including the apartment-skill-reuse note on the
+B2 orchestrator step) under "Building decomposition track" below.
+
+Headline scope:
+- Migration 036: `building_unit_extractions` cache table
+  + `'extract_building_units'` value on `llm_calls.called_for`
+  + four `app_settings` rows for the new skill / prompt / model
+  (`llm_building_extractor_system_prompt`, `llm_building_extractor_model`,
+  `llm_building_extractor_max_images`, `building_default_estimator_skill`).
+- New toolkit function `toolkit.building_extraction.extract_building_units`
+  — write-allowed exception per toolkit rule #5; same cache pattern as
+  `summarize_listing` (keyed on `(sreality_id, snapshot_id)`).
+- New skill `building_unit_extractor_v1` (vision extractor, not an
+  estimator) — on-disk `skills/building_unit_extractor_v1/SKILL.md`
+  + migration seed `INSERT`. Allowed tools: `extract_building_units`
+  + `record_building_units` terminator. Distinct from the apartment
+  estimator skill — its job is structural extraction only.
+- `POST /buildings/from_url` replaces B0's minimal `POST /buildings`
+  as the operator-facing entry. Rejects `category_main='byt'` (those
+  go through `/estimations`).
+- `POST /buildings/{id}/confirm_units` accepts the operator-edited
+  unit list, validates, writes to `units`, advances status to
+  `estimating`. Idempotency via 409 on non-`awaiting_input` rows.
+- Frontend: new `kind` toggle on `NewEstimationModal` ("apartment" /
+  "building"), `BuildingUnitEditor` component for the review step,
+  new `/building/:id` page (initially read-only — full rollup view
+  ships with B2).
 
 ### Phase 7 slice 2: Async + full toolkit + UI mode toggle
 Builds on slice 1.
@@ -545,9 +585,10 @@ Reference business case: `model_Kralupska.xlsx` (operator-supplied,
 2026-05-12). Six blocks: Assumptions, Floor Schedule, Unit
 Schedule, Cost Stack (with VAT splits), Revenue & P&L, Returns.
 
-### Phase B0: Schema + scaffolding (next — active)
+### Phase B0: Schema + scaffolding (done)
 
 Pure plumbing. No agent changes, no UI changes beyond type stubs.
+Shipped in PR #59.
 - Migration 035 (`035_building_runs.sql`): new `building_runs`
   parent table; `building_run_id` (FK) + `building_unit_id` (text)
   columns on `estimation_runs`. Status lifecycle: `pending` →
@@ -569,45 +610,268 @@ Pure plumbing. No agent changes, no UI changes beyond type stubs.
 - Tests: hermetic CRUD tests in `tests/api/test_buildings.py`
   modeled on the `_State`-style fakes from `test_estimations.py`.
 
-### Phase B1: URL ingest + agent unit proposal + confirmation UI
+### Phase B1: URL ingest + unit extractor + confirmation UI (next — active)
 
-- New toolkit function `extract_building_units` — reads the parsed
-  building spec + latest snapshot description + N images from R2
-  via Claude vision; returns `{units: [...], building: {...},
-  confidence}`. Cached on `(sreality_id, snapshot_id)` like
-  `listing_summaries`. Write-allowed exception per toolkit rule #5
-  (LLM is the source of truth; cache locally to keep repeats fast).
-  Migration for the cache table.
-- New skill `building_unit_extractor_v1`: system prompt teaches the
-  model to read description + floor plans, identify discrete units
-  including potential ones, return the `record_building_units` tool
-  envelope. On-disk SKILL.md + migration seed `INSERT`.
-- `POST /buildings/from_url` replaces B0's minimal `POST /buildings`
-  as the operator-facing entry: parses via
-  `scraper.source_dispatcher`, persists `input_*` + `source_*`
-  fields, kicks off the extractor synchronously for v1 (Phase 7
-  slice 2's async lifecycle will retrofit when it lands).
-- Frontend: a new two-step "Paste a building" modal (or a kind toggle
-  on `NewEstimationModal`) — paste URL → review extracted units +
-  edit (add / remove / edit floor/m²/disposition/condition) → submit.
-  Confirmed list writes to `building_runs.units` and advances status
-  to `estimating`.
+Builds on B0's persistence. The output of B1 is a `building_runs`
+row sitting in `status='awaiting_input'` (extractor ran,
+`units_proposal` populated, ready for the operator's review) which
+transitions to `estimating` on confirmation. Per-unit fan-out
+lands in B2; B1 stops at the human-in-the-loop gate.
+
+**Data + migration**
+
+- Migration 036 (`036_building_unit_extractions.sql`):
+  - New cache table `building_unit_extractions` keyed on
+    `(sreality_id, snapshot_id)` — same shape as `listing_summaries`
+    (migration 027): `extracted_at`, `model`, `units jsonb`,
+    `building jsonb`, `confidence text`, `warnings jsonb`,
+    `cost_usd numeric`. New snapshot auto-invalidates by virtue of
+    the PK including `snapshot_id`. RLS enabled, no policies (read
+    through API).
+  - `'extract_building_units'` added to `llm_calls.called_for`
+    CHECK constraint so the audit trail tags vision calls
+    consistently.
+  - Four `app_settings` seeds:
+    `llm_building_extractor_system_prompt` (the canonical prompt
+    body, mirrors the on-disk SKILL.md),
+    `llm_building_extractor_model` (`claude-sonnet-4-5` by default,
+    operator-tunable via `/settings`),
+    `llm_building_extractor_max_images` (default `8` — enough to
+    cover hero + floor plans + interior on a typical sreality `dum`
+    listing without ballooning the token bill), and
+    `building_default_estimator_skill` (default
+    `rental_estimator_v1`, used by the B2 orchestrator — see the
+    "apartment skill reuse" note on B2's orchestrator step).
+  - Every prior value preserved via the existing
+    `app_settings_history` trigger (migration 020).
+
+**Toolkit function**
+
+- `toolkit.building_extraction.extract_building_units(
+  sreality_id, snapshot_id, max_images=8, force_refresh=False) ->
+  envelope`. Write-allowed exception per CLAUDE.md toolkit rule #5
+  (LLM is the source of truth; cache locally so the
+  inevitable B1→B2 round-trip and any later re-extraction don't
+  re-bill). Same envelope contract as every other toolkit function
+  (`{data, metadata}`). The `data` payload is the structured unit
+  proposal:
+  ```python
+  {
+    "units": [
+      {"id": "u1", "floor": 1, "area_m2": 72, "disposition": "3+kk",
+       "condition": "good", "notes": "...", "is_potential": false},
+      ...
+    ],
+    "building": {"floor_count": 4, "year_built": 1932,
+                 "condition": "good", "total_area_m2": 320,
+                 "construction_type": "brick"},
+    "confidence": "high|medium|low",
+    "warnings": [...],
+  }
+  ```
+- Pulls description text from the latest snapshot's parsed fields
+  (already on `listing_snapshots.raw_json`) and up to `max_images`
+  images from R2 via boto3 `GetObject`, base64-encoded into the
+  Claude vision payload — same pattern as `compare_listing_images`
+  in `toolkit.image_similarity`.
+- Calls log to `llm_calls` with
+  `called_for='extract_building_units'`, the building_run_id (when
+  invoked through the API), token / cost columns populated.
+- Cohort floor: if the listing has no images in R2 (image-download
+  phase hasn't caught up yet, or `R2_*` env vars missing), the
+  function falls back to description-only and stamps
+  `confidence='low'` + a warning. Never crashes the building flow.
+
+**Skill — and why it is NOT the apartment estimator**
+
+- New skill `building_unit_extractor_v1`:
+  - On-disk seed: `skills/building_unit_extractor_v1/SKILL.md`
+    (canonical content + frontmatter, mirroring
+    `skills/rental_estimator_v1/SKILL.md`).
+  - Migration 036 seed `INSERT` into `skills` table (same pattern
+    as migration 029's `rental_estimator_v1` seed, migration 032's
+    `rental_estimator_full_v1` seed). Operator edits live values
+    via `/settings`; `skills_history` trigger preserves every
+    prior version (per Phase 7 slice 1).
+  - Allowed tools: `extract_building_units` (the toolkit wrapper
+    above) + `record_building_units` (the terminator — same shape
+    contract as `record_estimate`, validated server-side).
+  - Preferred model: anthropic = `claude-sonnet-4-5`, gemini =
+    `gemini-2.5-pro` (vision-capable on both providers).
+  - Limits: `max_iterations: 4`, `max_cost_usd: 0.30`,
+    `wall_clock_timeout_s: 90`. Lower than the estimator's caps
+    because extraction is a one-shot vision call, not an iterative
+    cohort search.
+  - System prompt teaches the model to: (a) read the description
+    text first to anchor on stated unit count + total area,
+    (b) cross-check against floor plans, (c) emit one entry per
+    discrete unit including potential ones (e.g. an unconverted
+    attic worth flagging `is_potential=true`), (d) populate
+    `condition` from the provided photos when the text is silent,
+    (e) terminate with `record_building_units`.
+  - **This is an extractor skill, not an estimator skill.** Per-unit
+    rent / sale estimation in B2 reuses the existing
+    `rental_estimator_v1` / `rental_estimator_full_v1` skill (see
+    the apartment-skill-reuse note on B2's orchestrator step) so
+    that an apartment estimated inside a building is computed
+    exactly the same way as a standalone apartment estimation, and
+    any improvement to the apartment estimator skill rolls into the
+    building flow automatically.
+
+**API endpoints**
+
+- `POST /buildings/from_url` — operator-facing entry, replaces
+  B0's minimal `POST /buildings` shell:
+  1. Routes the input URL through
+     `scraper.source_dispatcher.parse_listing_url` (reused as-is —
+     same cache, same per-source parsers, same audit trail in
+     `parsed_url_cache` and `llm_calls`).
+  2. Validates the parse: `category_main` must be `'dum'` or
+     `'komercni'`. A `byt` URL returns HTTP 400 with a hint to use
+     `/estimations` instead — apartments don't decompose.
+  3. Inserts `building_runs` row in `status='pending'` with all
+     `input_*` + `source_*` + `subject_summary` columns populated
+     from the parse output. (The `subject_summary.building` sub-
+     object will be overwritten by the extractor's `building`
+     field in step 5.)
+  4. Transitions `status` to `'extracting'` and runs the
+     extractor synchronously (v1; Phase 7 slice 2's async lifecycle
+     will retrofit polling later). On extractor failure, transitions
+     to `status='failed'` with `error_message` set; the row IS
+     the audit trail, same discipline as estimation_runs.
+  5. On success, writes the extractor output to `units_proposal`
+     (append-only after this point) and to `subject_summary` (which
+     keeps the operator-visible "what we know about the building"
+     blob in one place), transitions to `status='awaiting_input'`,
+     returns the row. Total latency ~10-30 s on a typical
+     `dum` listing — within the 90s skill timeout.
+- `POST /buildings/{id}/confirm_units` — the human-in-the-loop gate:
+  1. Accepts the operator-edited unit list (the
+     `record_building_units` envelope's `units` array). Rejects if
+     `status != 'awaiting_input'` (HTTP 409 — building already in
+     a later state).
+  2. Validates each entry's shape via the existing `BuildingUnit`
+     Pydantic schema from B0 (`id`, `floor`, `area_m2`,
+     `disposition`, `condition`, `notes`, `is_potential`).
+  3. Writes the confirmed list to `units` (mutable until estimation
+     starts in B2, after which B2 freezes it).
+  4. Transitions `status` to `'estimating'`. B2's orchestrator
+     picks up from there. For B1's scope we stop here — a building
+     in `estimating` with no child runs is a valid intermediate
+     state.
+- `POST /buildings/{id}/re_extract` — re-run the extractor against
+  the current snapshot (forces cache miss via `force_refresh=True`).
+  Only valid while the building is in `awaiting_input`; returns 409
+  otherwise. Useful when a new snapshot lands between paste and
+  confirmation and the operator wants the extractor to see it.
+- B0's old minimal `POST /buildings` is removed — every operator-
+  facing creation goes through `from_url` from B1 onward.
+
+**Frontend**
+
+- `NewEstimationModal` grows a `kind` toggle ("Apartment" /
+  "Building"), defaulting to apartment so existing flows stay
+  unchanged. Pasting a URL with `kind='building'` routes the
+  request to `/buildings/from_url` instead of `/estimations`.
+- Step 2 of the building flow renders a new `BuildingUnitEditor`
+  component: a table of unit rows (floor / area / disposition /
+  condition / notes / `is_potential` checkbox), add / remove
+  buttons, plus a building summary header (year built, floor count,
+  total m², construction type). Each editable field maps 1:1 to a
+  `BuildingUnit` field. Submitting POSTs to
+  `/buildings/{id}/confirm_units`.
+- New `/building/:id` route — initial read-only view of a building
+  row. For B1 it renders: subject summary block, current status
+  badge (with a CTA for `awaiting_input` rows that opens the
+  `BuildingUnitEditor` in confirm mode), units list (proposal or
+  confirmed), warnings block, link back to the source URL. The
+  full rollup view + per-unit estimate strips ship with B2.
+- The Estimations list page (`/estimations`) is unchanged — building
+  rows live on `/buildings` (a new list page) so the two
+  conceptually-different things don't blend. `/buildings` is a slim
+  table modeled on `/estimations` (source / status / created_at /
+  unit count / link). The shared `EstimationsListPage` filter +
+  pagination conventions apply.
+
+**Tests**
+
+- `tests/toolkit/test_building_extraction.py`: hermetic test that
+  stubs the Claude vision call with a saved fixture response and
+  exercises the cache hit / miss branches, plus the fallback path
+  when R2 is unreachable.
+- `tests/api/test_buildings_b1.py`: integration tests for
+  `POST /buildings/from_url` (parse success, `byt` rejection,
+  extractor failure, cache hit) and
+  `POST /buildings/{id}/confirm_units` (happy path, status guard,
+  schema validation). Modeled on the `_State` fakes from
+  `tests/api/test_estimations.py`; no real LLM, no real DB.
+- `tests/skills/test_building_unit_extractor_v1.py`: validates the
+  SKILL.md frontmatter + migration seed are in sync (same pattern
+  as the existing `rental_estimator_v1` test).
+- Frontend: `BuildingUnitEditor.test.tsx` snapshot + interaction
+  test for add / remove / edit / submit; `BuildingPage.test.tsx`
+  for the `awaiting_input` CTA branch.
+
+**Out of scope for B1 (deferred to B2 / later)**
+
+- Per-unit rent / sale estimation fan-out — that's the B2
+  orchestrator's job, which reuses the existing apartment
+  estimator skill (see B2 below).
+- Building rollup totals — same.
+- The Excel-style business case tab — B3.
+- Async / polling lifecycle — Phase 7 slice 2.
+- Multi-portal (bezrealitky / idnes / remax) building paste — the
+  source_dispatcher already routes those URLs, but per-source
+  building parsers may need extra fields beyond what the apartment
+  flow exercises; defer until a real bezrealitky `dum` URL surfaces
+  in operator testing.
 
 ### Phase B2: Per-unit fan-out + building rollup view
 
-- Orchestrator in `api/building_runs.py` (or a new `building_agent.py`):
-  on `units` confirmation, INSERT one rent + one sale
-  `estimation_runs` row per unit, each linked back via
+- **Orchestrator** in `api/building_runs.py` (or a new
+  `building_agent.py`): on `units` confirmation, INSERT one rent
+  + one sale `estimation_runs` row per unit, each linked back via
   `building_run_id` + `building_unit_id`. Reuse the existing
-  agent-mode plumbing — the orchestrator is just a fan-out + watcher.
-- Rollup: when all child runs reach a terminal status, write
-  summed `total_rent_p25/p50/p75_czk` + `total_sale_p25/p50/p75_czk`
-  to `building_runs`. P50 is straight sum across units; P25 / P75 use
-  the per-unit IQR endpoints summed (matches how the operator reads
-  the spreadsheet).
-- Frontend: new `/building/:id` page — building subject summary at
-  the top, units list with per-unit estimate strips, rollup totals,
-  link out to each child estimation for detail.
+  agent-mode plumbing — the orchestrator is just a fan-out +
+  watcher, no new LLM loop.
+  - **Reuse the existing apartment estimator skill.** Each child
+    `estimation_runs` row submitted by the B2 orchestrator runs
+    under the operator's configured apartment estimator skill —
+    today `rental_estimator_v1` (slice 1) or
+    `rental_estimator_full_v1` (slice 1.5), sourced from
+    `app_settings.building_default_estimator_skill` (seeded by
+    migration 036 to `rental_estimator_v1`, operator-tunable via
+    `/settings`). The child rows pass `category_main='byt'`,
+    `category_type='pronajem'` for rent (and `'prodej'` for sale),
+    `area_m2` and `disposition` from the confirmed `units` entry,
+    and `lat`/`lng` from the parent building's parse output. This
+    is a deliberate design choice: an apartment unit inside a
+    building must be estimated exactly the same way as a
+    standalone apartment, so the two surfaces stay consistent and
+    any improvement to the apartment skill (better prompts,
+    additional tools, model upgrades) rolls into the building
+    flow automatically with zero per-flow work. Adding a separate
+    "building-apartment estimator" skill would duplicate prompt
+    engineering, drift over time, and silently produce different
+    numbers for the same unit depending on the surface — exactly
+    what we want to avoid. (Sale-side estimation reuses the same
+    discipline once a sale-specific skill exists; until then sale
+    children fall back to deterministic mode — see "out of scope"
+    below.)
+- **Rollup**: when all child runs reach a terminal status, write
+  summed `total_rent_p25/p50/p75_czk` +
+  `total_sale_p25/p50/p75_czk` to `building_runs`. P50 is straight
+  sum across units; P25 / P75 use the per-unit IQR endpoints
+  summed (matches how the operator reads the spreadsheet).
+- **Frontend**: extend `/building/:id` from B1's read-only view —
+  building subject summary at the top, units list with per-unit
+  estimate strips (reusing the `EstimationStrip` component from
+  `/estimation/:id`), rollup totals, link out to each child
+  estimation for detail.
+- **Out of scope for B2**: sale-side skill (rent reuse is the
+  minimum bar). The sale child rows in B2 run in deterministic
+  mode against the existing sale-estimation path until a
+  `sale_estimator_v1` skill ships in a later phase.
 
 ### Phase B3: Business case tab
 
