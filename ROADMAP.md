@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 15:53 UTC_
+_Last refreshed: 2026-05-12 17:40 UTC_
 
 **Branch:** `claude/review-roadmap-scope-BHt5w`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-12 15:53 UTC_
 **Last 10 commits:**
 
 ```
+71582f7 frontend: U2.6 curation UI (collections, tags, notes)
 c96af29 roadmap: refresh auto-status block
 2ee3f67 Merge pull request #56 from waiff/claude/redesign-estimation-workflow-XJOiN
 4ebf817 roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ c96af29 roadmap: refresh auto-status block
 d2645b2 frontend: group controls + add Settings-page light/dark toggle
 866e21a Merge pull request #46 from waiff/claude/fix-street-dropdown-M0gpC
 e350c67 Merge main into claude/fix-street-dropdown-M0gpC
-d3034c4 Merge main into claude/fix-street-dropdown-M0gpC
 ```
 
 <!-- END AUTO-STATUS -->
