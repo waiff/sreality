@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 15:35 UTC_
+_Last refreshed: 2026-05-12 15:53 UTC_
 
 **Branch:** `claude/review-roadmap-scope-BHt5w`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-12 15:35 UTC_
 **Last 10 commits:**
 
 ```
+c96af29 roadmap: refresh auto-status block
 2ee3f67 Merge pull request #56 from waiff/claude/redesign-estimation-workflow-XJOiN
 4ebf817 roadmap: refresh auto-status block
 37593e5 frontend: estimation popup CTA + nav redesign
@@ -25,7 +26,6 @@ d2645b2 frontend: group controls + add Settings-page light/dark toggle
 866e21a Merge pull request #46 from waiff/claude/fix-street-dropdown-M0gpC
 e350c67 Merge main into claude/fix-street-dropdown-M0gpC
 d3034c4 Merge main into claude/fix-street-dropdown-M0gpC
-6483fcc Merge pull request #54 from waiff/claude/scope-next-phase-IdGZq
 ```
 
 <!-- END AUTO-STATUS -->
@@ -464,34 +464,45 @@ User-facing features that don't fit the analytical, estimation, UI,
 map, or scraper tracks. Operator-scoped (single shared identity, no
 per-user accounts — matches today's bearer-token model).
 
-### Phase U2.6: Collections + tags (next)
-Operator watchlists over listings, with freeform tags.
-- New numbered migration (e.g. `022_collections.sql`):
-  `collections(id uuid pk, name, description, color, created_at,
-  updated_at)`, `listing_collections(collection_id, sreality_id,
-  added_at, note, primary key (collection_id, sreality_id))`,
-  `listing_tags(sreality_id, tag, added_at, primary key
-  (sreality_id, tag))`. Tags are flat strings; collections are
-  named groups. A listing can be in many collections and have many
-  tags.
-- Public views (`collections_public`, `listing_collections_public`,
-  `listing_tags_public`) with SELECT to anon — read path matches
-  the rest of U1a.
-- **Write path through the FastAPI service**, never the browser
-  (CLAUDE.md territories rule). New endpoints, all bearer-gated:
-  `POST /collections`, `PATCH /collections/{id}`,
-  `DELETE /collections/{id}`,
-  `POST /collections/{id}/listings`,
-  `DELETE /collections/{id}/listings/{sreality_id}`,
-  `POST /listings/{sreality_id}/tags`,
-  `DELETE /listings/{sreality_id}/tags/{tag}`.
-- Frontend: `/collections` (list of collections with member counts),
-  `/collection/:id` (member listings table reusing Browse's table),
-  and on `/listing/:sreality_id` an "Add to collection" picker plus
-  a tag chip input with autocomplete over distinct existing tags.
-- Future hook (out of scope for this phase but the schema supports
-  it): the agent reads collections as seed examples — "estimate
-  this listing using only comparables from collection X."
+### Phase U2.6: Collections + tags + notes (done)
+Operator watchlists, freeform coloured tags, and per-listing journal
+notes — end-to-end.
+- Migrations 022 (`collections` + `collection_listings`), 023
+  (`listing_notes`), 024 (`tags` + `listing_tags`, palette pinned
+  to eight named colours by CHECK), 025 (`*_public` views +
+  `listings_with_tags(tag_ids)` RPC with AND-semantics, capped at
+  5000 rows).
+- API: `api/curation.py` exposes CRUD over `/collections`,
+  `/listings/{id}/notes`, and `/tags`; routes wired in `api/main.py`
+  around line 612+. All bearer-gated per CLAUDE.md toolkit rule #8.
+  Tag colour mirrored in `api/schemas.TagColor` (eight-name Literal).
+- Frontend:
+  - `/collections` index with inline new-collection form, listing
+    counts, soft-delete with confirm.
+  - `/collection/:id` detail with rename/description edit, delete,
+    and a slim member-listings table reusing the Browse/ListingTable
+    visual language (sreality_id link, district / disposition / area
+    / price / last seen / status / added_at + remove button).
+  - `ListingDetail` gains a `CurationBlock` sitting between
+    KeyFactsBlock and TimestampsBlock: every collection rendered as a
+    toggle (✓/+ chip), tag chips with an autocomplete picker that
+    can create a new tag inline (eight-colour palette), and a
+    collapsing notes journal (textarea + chronological list).
+  - Browse `Filters.tsx` Curation group exposes a tags facet —
+    AND-semantics, delegates to the `listings_with_tags` RPC.
+- New tokens: `--color-tag-{copper,sage,brick,ochre,slate,plum,teal,sand}`
+  + `-soft` pair, scoped at the bottom of `globals.css` per the
+  "new tokens by domain-name" rule; the four pre-existing semantic
+  colours alias their global token, the four new ones (slate, plum,
+  teal, sand) ship with new swatches and light/dark variants.
+- Future hook (out of scope, but the schema supports it): the agent
+  reads collections as seed examples — "estimate this listing using
+  only comparables from collection X."
+- Deferred follow-ups: tags filter does NOT yet flow through
+  `browse_stats` (the RPC has no `tag_ids` parameter), so the Browse
+  Stats tab reports the broader cohort; tag rename / recolour are
+  out of scope in v1 (delete + recreate). Both are easy to add when
+  needed.
 
 ## Summarize track (parallel)
 

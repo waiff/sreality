@@ -384,3 +384,67 @@
     box-shadow: 0 0 0 3px var(--color-focus);
   }
 }
+
+/* ----------------------------------------------------------------------------
+ * Tag palette (U2.6). Eight-name closed set, enforced server-side by the
+ * CHECK constraint in migration 024 and by api/schemas.TagColor. The four
+ * names that already exist as global semantics (copper, sage, brick, ochre)
+ * reuse those swatches so the visual language stays coherent; slate, plum,
+ * teal, sand are introduced here as tag-only tokens. The `-fg` pairs are
+ * meant for solid-pill text on the `-soft` background.
+ * Adding a new colour = a new migration (ALTER CHECK) + new tokens here.
+ * -------------------------------------------------------------------------- */
+:root {
+  --color-tag-copper:      var(--color-copper);
+  --color-tag-copper-soft: var(--color-copper-soft);
+  --color-tag-sage:        var(--color-sage);
+  --color-tag-sage-soft:   var(--color-sage-soft);
+  --color-tag-brick:       var(--color-brick);
+  --color-tag-brick-soft:  var(--color-brick-soft);
+  --color-tag-ochre:       var(--color-ochre);
+  --color-tag-ochre-soft:  var(--color-ochre-soft);
+
+  --color-tag-slate:       #4a5b73;
+  --color-tag-slate-soft:  rgba(74, 91, 115, 0.10);
+  --color-tag-plum:        #7a4664;
+  --color-tag-plum-soft:   rgba(122, 70, 100, 0.10);
+  --color-tag-teal:        #2e6f7c;
+  --color-tag-teal-soft:   rgba(46, 111, 124, 0.10);
+  --color-tag-sand:        #9c8c5e;
+  --color-tag-sand-soft:   rgba(156, 140, 94, 0.10);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-tag-slate:       #8a9bb3;
+    --color-tag-slate-soft:  rgba(138, 155, 179, 0.16);
+    --color-tag-plum:        #b687a3;
+    --color-tag-plum-soft:   rgba(182, 135, 163, 0.16);
+    --color-tag-teal:        #74b0bb;
+    --color-tag-teal-soft:   rgba(116, 176, 187, 0.16);
+    --color-tag-sand:        #ccb986;
+    --color-tag-sand-soft:   rgba(204, 185, 134, 0.16);
+  }
+}
+
+:root[data-theme="light"] {
+  --color-tag-slate:       #4a5b73;
+  --color-tag-slate-soft:  rgba(74, 91, 115, 0.10);
+  --color-tag-plum:        #7a4664;
+  --color-tag-plum-soft:   rgba(122, 70, 100, 0.10);
+  --color-tag-teal:        #2e6f7c;
+  --color-tag-teal-soft:   rgba(46, 111, 124, 0.10);
+  --color-tag-sand:        #9c8c5e;
+  --color-tag-sand-soft:   rgba(156, 140, 94, 0.10);
+}
+
+:root[data-theme="dark"] {
+  --color-tag-slate:       #8a9bb3;
+  --color-tag-slate-soft:  rgba(138, 155, 179, 0.16);
+  --color-tag-plum:        #b687a3;
+  --color-tag-plum-soft:   rgba(182, 135, 163, 0.16);
+  --color-tag-teal:        #74b0bb;
+  --color-tag-teal-soft:   rgba(116, 176, 187, 0.16);
+  --color-tag-sand:        #ccb986;
+  --color-tag-sand-soft:   rgba(204, 185, 134, 0.16);
+}

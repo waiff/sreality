@@ -10,13 +10,18 @@
  */
 
 import type {
+  Collection,
+  CollectionWithListings,
   CreateEstimationIn,
   EstimationListParams,
   EstimationListResponse,
   EstimationRun,
   ListingSummaryBatchRow,
+  Note,
   ParseResult,
   SourceKind,
+  Tag,
+  TagColor,
 } from './types';
 
 /* Sources the backend allowlists for high-confidence parsing.
@@ -276,3 +281,98 @@ export const updateAppSetting = (
 
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
+
+/* ----- curation (U2.6) ---------------------------------------------------
+ *
+ * Collections, tags, and notes. Reads of `which tags / which collections
+ * does listing X belong to` go through the *_public Supabase views (see
+ * lib/queries.ts) — there is no per-listing GET on the API. Everything
+ * else (list-by-domain, create, update, delete, attach, detach) goes
+ * through the bearer-gated FastAPI endpoints wrapped below.
+ */
+
+/* Collections */
+
+export const listCollections = (): Promise<{ data: Collection[]; total: number }> =>
+  request<{ data: Collection[]; total: number }>('/collections');
+
+export const getCollection = (id: number): Promise<CollectionWithListings> =>
+  request<CollectionWithListings>(`/collections/${id}`);
+
+export const createCollection = (input: {
+  name: string;
+  description?: string | null;
+}): Promise<Collection> =>
+  request<Collection>('/collections', { method: 'POST', json: input });
+
+export const updateCollection = (
+  id: number,
+  input: { name?: string | null; description?: string | null },
+): Promise<Collection> =>
+  request<Collection>(`/collections/${id}`, { method: 'PATCH', json: input });
+
+export const deleteCollection = (id: number): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(`/collections/${id}`, { method: 'DELETE' });
+
+export const addListingsToCollection = (
+  id: number,
+  sreality_ids: number[],
+): Promise<{ added: number; skipped: number }> =>
+  request<{ added: number; skipped: number }>(`/collections/${id}/listings`, {
+    method: 'POST',
+    json: { sreality_ids },
+  });
+
+export const removeListingFromCollection = (
+  id: number,
+  sreality_id: number,
+): Promise<{ removed: boolean }> =>
+  request<{ removed: boolean }>(
+    `/collections/${id}/listings/${sreality_id}`,
+    { method: 'DELETE' },
+  );
+
+/* Tags */
+
+export const listTags = (): Promise<{ data: Tag[] }> =>
+  request<{ data: Tag[] }>('/tags');
+
+export const createTag = (input: { name: string; color: TagColor }): Promise<Tag> =>
+  request<Tag>('/tags', { method: 'POST', json: input });
+
+export const deleteTag = (id: number): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(`/tags/${id}`, { method: 'DELETE' });
+
+export const attachTag = (
+  sreality_id: number,
+  tag_id: number,
+): Promise<{ attached: boolean }> =>
+  request<{ attached: boolean }>(`/listings/${sreality_id}/tags`, {
+    method: 'POST',
+    json: { tag_id },
+  });
+
+export const detachTag = (
+  sreality_id: number,
+  tag_id: number,
+): Promise<{ detached: boolean }> =>
+  request<{ detached: boolean }>(
+    `/listings/${sreality_id}/tags/${tag_id}`,
+    { method: 'DELETE' },
+  );
+
+/* Notes (per-listing journal) */
+
+export const listListingNotes = (
+  sreality_id: number,
+): Promise<{ data: Note[] }> =>
+  request<{ data: Note[] }>(`/listings/${sreality_id}/notes`);
+
+export const createListingNote = (
+  sreality_id: number,
+  body: string,
+): Promise<Note> =>
+  request<Note>(`/listings/${sreality_id}/notes`, {
+    method: 'POST',
+    json: { body },
+  });

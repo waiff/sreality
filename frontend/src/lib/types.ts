@@ -461,3 +461,61 @@ export interface ParseResult {
   cost_usd: number | null;
   sreality_id: number | null;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Curation (U2.6). Wire shapes mirror api/curation.py and migrations 022-025. */
+/* -------------------------------------------------------------------------- */
+
+/* Mirrors the 024 CHECK constraint + api/schemas.TagColor. Adding a new
+ * colour requires a migration + a globals.css token + a bump here. */
+export type TagColor =
+  | 'copper' | 'sage' | 'brick' | 'ochre'
+  | 'slate'  | 'plum' | 'teal'  | 'sand';
+
+export const TAG_COLORS: ReadonlyArray<TagColor> = [
+  'copper', 'sage', 'brick', 'ochre',
+  'slate',  'plum', 'teal',  'sand',
+];
+
+export interface Collection {
+  id: number;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+  listing_count: number;
+}
+
+export interface Tag {
+  id: number;
+  name: string;
+  color: TagColor;
+  created_at: string;
+  listing_count: number;
+}
+
+export interface Note {
+  id: number;
+  sreality_id: number;
+  body: string;
+  created_at: string;
+}
+
+/* GET /collections/{id} embeds a slimmer listing projection than
+ * ListingPublic — see api/curation.get_collection. Renderers expand
+ * with fetchListingsByIds() when more detail is needed. */
+export interface CollectionListingRow {
+  sreality_id: number;
+  district: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  price_czk: number | null;
+  last_seen_at: string;
+  is_active: boolean;
+  added_at: string;
+}
+
+export interface CollectionWithListings {
+  collection: Collection;
+  listings: CollectionListingRow[];
+}
