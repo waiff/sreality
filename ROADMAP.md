@@ -5,17 +5,19 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 11:07 UTC_
+_Last refreshed: 2026-05-12 13:53 UTC_
 
 **Branch:** `claude/check-skill-access-o17oY`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 31 files, latest `031_estimation_subject_summary.sql`.
+**Migrations on disk:** 32 files, latest `032_skill_rental_estimator_full.sql`.
 
 **Last 10 commits:**
 
 ```
+d2645b2 frontend: group controls + add Settings-page light/dark toggle
+d54803a roadmap: refresh auto-status block
 d2851e1 Merge pull request #52 from waiff/claude/add-new-skill-4zWHz
 7e886b7 skills: add interface-design Claude Code skill
 d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
@@ -24,8 +26,6 @@ d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
 6a5ad8d Merge pull request #49 from waiff/claude/map-comparables-popup-jVns6
 37e47cb roadmap: refresh auto-status block
 1bdeffd estimate: subject summary + comparables map popup
-7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
-ab6c923 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->

@@ -84,7 +84,7 @@ export const resolveSuggestion = async (
   pick: MapySuggestion,
 ): Promise<LocationResolution> => {
   const body = {
-    label: pick.label,
+    label: pick.location ?? pick.name,
     lat: pick.position?.lat ?? null,
     lng: pick.position?.lon ?? null,
     type: pick.type,

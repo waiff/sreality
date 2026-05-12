@@ -33,9 +33,16 @@ from api.providers import (
 )
 from toolkit import (
     analyze_distribution,
+    compare_listing_images,
+    compute_amenity_supply,
+    compute_listing_velocity,
+    compute_market_velocity,
+    compute_walkability,
     describe_neighborhood,
+    find_comparables_along_axis,
     find_comparables_relaxed,
     find_distribution_outliers,
+    summarize_listing,
     verify_listing_freshness,
 )
 from toolkit.comparables import ComparableFilters, TargetSpec
@@ -183,6 +190,165 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             },
             handler=_handle_verify_listing_freshness,
         ),
+        "compute_market_velocity": _ToolDef(
+            name="compute_market_velocity",
+            description=(
+                "TOM (time-on-market) statistics across the target's spatial "
+                "+ attribute cohort. Returns median/p25/p75 TOM days, an "
+                "active vs delisted split, and a recent-vs-older trend. Use "
+                "when the cohort price spread is wide enough to suspect "
+                "demand is doing the work — slow markets justify lower "
+                "confidence."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
+                    "population": {
+                        "type": "string",
+                        "enum": ["active", "delisted", "all"],
+                    },
+                    "trend_split_days": {
+                        "type": "integer", "minimum": 1, "maximum": 90,
+                    },
+                },
+                "required": [],
+            },
+            handler=_handle_compute_market_velocity,
+        ),
+        "compute_listing_velocity": _ToolDef(
+            name="compute_listing_velocity",
+            description=(
+                "Percentile-rank one listing's TOM within its peer cohort and "
+                "classify it (fast/typical/slow/stuck). Use on a specific "
+                "comparable when its price looks anomalous — a 'stuck' "
+                "listing pulling the upper tail up is a candidate to set "
+                "aside before quoting p75."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sreality_id": {"type": "integer"},
+                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
+                    "disposition_match": {
+                        "type": "string",
+                        "enum": ["exact", "loose", "any"],
+                    },
+                    "population": {
+                        "type": "string",
+                        "enum": ["active", "delisted", "all"],
+                    },
+                },
+                "required": ["sreality_id"],
+            },
+            handler=_handle_compute_listing_velocity,
+        ),
+        "compute_walkability": _ToolDef(
+            name="compute_walkability",
+            description=(
+                "Weighted 0-100 walkability score from nearest-POI distances "
+                "to transit, supermarkets, pharmacies, schools, parks. Use "
+                "once per estimate to contextualise location quality — a "
+                "below-50 score in a same-radius cohort warrants a warning."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 2000},
+                },
+                "required": [],
+            },
+            handler=_handle_compute_walkability,
+        ),
+        "compute_amenity_supply": _ToolDef(
+            name="compute_amenity_supply",
+            description=(
+                "Per-category POI count vs target counts (transit, food, "
+                "health, education, parks), bucketed scarce/adequate/"
+                "abundant. Complementary to compute_walkability — use when "
+                "the score is mid-range and you want to know *what* is "
+                "missing."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 2000},
+                },
+                "required": [],
+            },
+            handler=_handle_compute_amenity_supply,
+        ),
+        "find_comparables_along_axis": _ToolDef(
+            name="find_comparables_along_axis",
+            description=(
+                "Comparables in a corridor along tram / subway / bus routes "
+                "passing near the target. Listings get merged into the "
+                "active cohort (deduped by sreality_id) so subsequent "
+                "analyze_distribution / find_distribution_outliers see them. "
+                "Use when the target is on a strong transit axis and "
+                "circle-radius cohorts under-represent peers down the line."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "transport_types": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["tram", "subway", "bus"],
+                        },
+                    },
+                    "anchor_radius_m": {
+                        "type": "integer", "minimum": 100, "maximum": 2000,
+                    },
+                    "corridor_m": {
+                        "type": "integer", "minimum": 100, "maximum": 1000,
+                    },
+                },
+                "required": [],
+            },
+            handler=_handle_find_comparables_along_axis,
+        ),
+        "summarize_listing": _ToolDef(
+            name="summarize_listing",
+            description=(
+                "Structured Claude summary of one listing snapshot — "
+                "headline, key_highlights, concerns, condition_assessment, "
+                "target_audience. Cached per (sreality_id, snapshot_id); "
+                "repeat calls within a run are free. Use to triage a "
+                "specific comparable before deciding to keep/drop it."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sreality_id": {"type": "integer"},
+                },
+                "required": ["sreality_id"],
+            },
+            handler=_handle_summarize_listing,
+        ),
+        "compare_listing_images": _ToolDef(
+            name="compare_listing_images",
+            description=(
+                "Claude vision pairwise comparison of two cohort listings "
+                "across six tenant-relevant dimensions (exterior, kitchen, "
+                "windows_and_light, floor_finish, lighting, styling). Both "
+                "ids must already be in the current cohort. Vision is "
+                "~$0.05/pair — call sparingly (typically once or twice when "
+                "two comparables price-diverge sharply and the gap might "
+                "reflect condition)."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sreality_id_a": {"type": "integer"},
+                    "sreality_id_b": {"type": "integer"},
+                    "n_images": {"type": "integer", "minimum": 1, "maximum": 12},
+                },
+                "required": ["sreality_id_a", "sreality_id_b"],
+            },
+            handler=_handle_compare_listing_images,
+        ),
         "record_estimate": _ToolDef(
             name="record_estimate",
             description=(
@@ -236,6 +402,7 @@ class _LoopState:
     """Mutable state carried through the agent loop."""
     conn: "psycopg.Connection"
     sreality_client: "SrealityClient"
+    llm_client: "LLMClient"
     target: TargetSpec
     base_filters: ComparableFilters
     last_cohort: list[dict[str, Any]] = field(default_factory=list)
@@ -278,6 +445,7 @@ def run_agent_estimation(
     state = _LoopState(
         conn=conn,
         sreality_client=sreality_client,
+        llm_client=llm_client,
         target=target,
         base_filters=filters,
     )
@@ -532,6 +700,113 @@ def _handle_verify_listing_freshness(
     )
 
 
+def _handle_compute_market_velocity(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    from dataclasses import replace
+    filters = state.base_filters
+    if "radius_m" in args:
+        filters = replace(filters, radius_m=int(args["radius_m"]))
+    return compute_market_velocity(
+        state.conn, state.target, filters,
+        population=args.get("population", "all"),
+        trend_split_days=int(args.get("trend_split_days", 7)),
+    )
+
+
+def _handle_compute_listing_velocity(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    return compute_listing_velocity(
+        state.conn,
+        int(args["sreality_id"]),
+        radius_m=int(args.get("radius_m", state.base_filters.radius_m)),
+        disposition_match=args.get(
+            "disposition_match", state.base_filters.disposition_match,
+        ),
+        population=args.get("population", "all"),
+    )
+
+
+def _handle_compute_walkability(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    return compute_walkability(
+        state.conn,
+        lat=state.target.lat,
+        lng=state.target.lng,
+        radius_m=int(args.get("radius_m", 1000)),
+    )
+
+
+def _handle_compute_amenity_supply(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    return compute_amenity_supply(
+        state.conn,
+        lat=state.target.lat,
+        lng=state.target.lng,
+        radius_m=int(args.get("radius_m", 1000)),
+    )
+
+
+def _handle_find_comparables_along_axis(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    result = find_comparables_along_axis(
+        state.conn, state.target, state.base_filters,
+        transport_types=args.get("transport_types"),
+        anchor_radius_m=int(args.get("anchor_radius_m", 800)),
+        corridor_m=int(args.get("corridor_m", 300)),
+    )
+    new_listings = result.get("data", {}).get("listings") or []
+
+    # Merge into the active cohort, deduped by sreality_id. Existing
+    # entries win — they came from find_comparables_relaxed and carry
+    # the canonical numeric fields (distance_m to the anchor, etc).
+    existing_ids = {int(l["sreality_id"]) for l in state.last_cohort}
+    added = 0
+    for listing in new_listings:
+        sid = int(listing["sreality_id"])
+        if sid not in existing_ids:
+            state.last_cohort.append(listing)
+            existing_ids.add(sid)
+            added += 1
+    result["data"]["cohort_added"] = added
+    result["data"]["cohort_size_after_merge"] = len(state.last_cohort)
+    return result
+
+
+def _handle_summarize_listing(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    return summarize_listing(
+        state.conn, state.llm_client,
+        sreality_id=int(args["sreality_id"]),
+    )
+
+
+def _handle_compare_listing_images(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    a = int(args["sreality_id_a"])
+    b = int(args["sreality_id_b"])
+    cohort_ids = {int(l["sreality_id"]) for l in state.last_cohort}
+    missing = [sid for sid in (a, b) if sid not in cohort_ids]
+    if missing:
+        raise ValueError(
+            f"compare_listing_images: id(s) {missing} are not in the current "
+            f"cohort. Build the cohort with find_comparables_relaxed first, "
+            f"then compare two ids from the result."
+        )
+    return compare_listing_images(
+        state.conn, state.llm_client,
+        sreality_id_a=a,
+        sreality_id_b=b,
+        n_images=int(args.get("n_images", 6)),
+    )
+
+
 # --- result summaries -----------------------------------------------------
 
 def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -569,6 +844,63 @@ def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
         return {
             "is_live": data.get("is_live"),
             "from_cache": data.get("from_cache"),
+        }
+    if name == "compute_market_velocity":
+        tom = data.get("tom_stats") or {}
+        return {
+            "cohort_size": data.get("cohort_size"),
+            "active_count": data.get("active_count"),
+            "delisted_count": data.get("delisted_count"),
+            "median_tom_days": tom.get("median_days"),
+            "p75_tom_days": tom.get("p75_days"),
+        }
+    if name == "compute_listing_velocity":
+        return {
+            "sreality_id": data.get("sreality_id"),
+            "tom_days": data.get("tom_days"),
+            "tom_percentile": data.get("tom_percentile"),
+            "classification": data.get("classification"),
+            "cohort_size": data.get("cohort_size"),
+        }
+    if name == "compute_walkability":
+        return {
+            "walkability_score": data.get("walkability_score"),
+            "n_categories_with_data": md.get("result_count"),
+            "missing_categories": data.get("missing_categories") or [],
+        }
+    if name == "compute_amenity_supply":
+        summary = data.get("summary") or {}
+        return {
+            "n_scarce": len(summary.get("scarce") or []),
+            "n_adequate": len(summary.get("adequate") or []),
+            "n_abundant": len(summary.get("abundant") or []),
+            "scarce_categories": (summary.get("scarce") or [])[:5],
+        }
+    if name == "find_comparables_along_axis":
+        return {
+            "axis_listings": md.get("result_count"),
+            "lines_considered": md.get("lines_considered"),
+            "cohort_added": data.get("cohort_added"),
+            "cohort_size_after_merge": data.get("cohort_size_after_merge"),
+        }
+    if name == "summarize_listing":
+        summary = data.get("summary") or {}
+        highlights = summary.get("key_highlights") or []
+        return {
+            "sreality_id": data.get("sreality_id"),
+            "headline": summary.get("headline"),
+            "condition_assessment": summary.get("condition_assessment"),
+            "n_highlights": len(highlights),
+            "n_concerns": len(summary.get("concerns") or []),
+            "cache_hit": data.get("cache_hit"),
+        }
+    if name == "compare_listing_images":
+        comp = data.get("comparison") or {}
+        return {
+            "sreality_id_a": data.get("sreality_id_a"),
+            "sreality_id_b": data.get("sreality_id_b"),
+            "overall_similarity": comp.get("overall_similarity"),
+            "cache_hit": data.get("cache_hit"),
         }
     return {"keys": list(data.keys())[:6]}
 

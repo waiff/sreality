@@ -87,7 +87,7 @@ export default function LocationSearchBox({ onResolve, onUnconfigured }: Props) 
       try {
         const result = await resolveSuggestion(item);
         onResolve(result);
-        setQuery(item.label);
+        setQuery(item.location ?? item.name);
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : 'Resolve failed');
         setStatus('error');
@@ -197,32 +197,43 @@ export default function LocationSearchBox({ onResolve, onUnconfigured }: Props) 
               Žádné výsledky.
             </li>
           )}
-          {items.map((item, idx) => (
-            <li key={`${item.label}-${idx}`}>
-              <button
-                type="button"
-                id={`location-suggestion-${idx}`}
-                role="option"
-                aria-selected={idx === activeIdx}
-                onMouseEnter={() => setActiveIdx(idx)}
-                onClick={() => void pick(item)}
-                className={[
-                  'w-full flex items-center gap-3 px-3 py-1.5 text-left text-sm',
-                  idx === activeIdx
-                    ? 'bg-[var(--color-copper-soft)]'
-                    : 'hover:bg-[var(--color-copper-soft)]',
-                ].join(' ')}
-              >
-                <PinIcon className="shrink-0 text-[var(--color-ink-3)]" />
-                <span className="flex-1 min-w-0 truncate text-[var(--color-ink)]">
-                  {item.label}
-                </span>
-                <span className="shrink-0 text-[0.65rem] tracking-[0.08em] uppercase text-[var(--color-ink-3)] border border-[var(--color-rule)] rounded-[var(--radius-xs)] px-1.5 py-0.5">
-                  {typeBadge(item.type)}
-                </span>
-              </button>
-            </li>
-          ))}
+          {items.map((item, idx) => {
+            const subtitle =
+              item.location && item.location !== item.name ? item.location : null;
+            return (
+              <li key={`${item.name}-${idx}`}>
+                <button
+                  type="button"
+                  id={`location-suggestion-${idx}`}
+                  role="option"
+                  aria-selected={idx === activeIdx}
+                  onMouseEnter={() => setActiveIdx(idx)}
+                  onClick={() => void pick(item)}
+                  className={[
+                    'w-full flex items-center gap-3 px-3 py-1.5 text-left text-sm',
+                    idx === activeIdx
+                      ? 'bg-[var(--color-copper-soft)]'
+                      : 'hover:bg-[var(--color-copper-soft)]',
+                  ].join(' ')}
+                >
+                  <PinIcon className="shrink-0 text-[var(--color-ink-3)]" />
+                  <span className="flex-1 min-w-0">
+                    <span className="block truncate text-[var(--color-ink)]">
+                      {item.name}
+                    </span>
+                    {subtitle && (
+                      <span className="block truncate text-[0.7rem] text-[var(--color-ink-3)]">
+                        {subtitle}
+                      </span>
+                    )}
+                  </span>
+                  <span className="shrink-0 text-[0.65rem] tracking-[0.08em] uppercase text-[var(--color-ink-3)] border border-[var(--color-rule)] rounded-[var(--radius-xs)] px-1.5 py-0.5">
+                    {typeBadge(item.type)}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
