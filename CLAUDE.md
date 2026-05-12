@@ -117,20 +117,52 @@ codebase — future sessions or fresh rebuilds will be missing the change.
 Correct flow for any schema change:
 
 1. Write the new numbered migration file (`00N_*.sql`) in `migrations/`.
-2. Show the migration to the operator and get explicit approval before running.
-3. Apply via MCP (`apply_migration`), verify with a SELECT.
-4. Commit the migration file in the same change.
-5. Report what was applied and what was verified.
+2. Apply via MCP (`apply_migration`), verify with a SELECT.
+3. Commit the migration file in the same change.
+4. Report what was applied and what was verified.
 
 Never apply a SQL change that doesn't correspond to a committed migration
 file.
 
-Never run destructive operations (`DROP TABLE`, `DELETE` without `WHERE`,
-`TRUNCATE`, `ALTER COLUMN` that changes type or drops a column) without
-explicit operator confirmation in chat. "Yes, apply it" is required.
+**Approval gate.** Step 2 needs no operator confirmation when the migration
+is *additive only*. A migration is additive only when every statement is
+one of:
+
+- `CREATE TABLE` (or `CREATE TABLE IF NOT EXISTS`).
+- `CREATE INDEX` / `CREATE UNIQUE INDEX` (use `CONCURRENTLY` where the
+  operation type allows).
+- `CREATE VIEW`, `CREATE MATERIALIZED VIEW`, or `CREATE OR REPLACE VIEW`
+  *with columns only added* — never removed or renamed.
+- `CREATE FUNCTION` or `CREATE OR REPLACE FUNCTION` with the **same input
+  signature** (no `DROP FUNCTION` + `CREATE FUNCTION` signature-change
+  pattern).
+- `CREATE TRIGGER`, `CREATE TYPE`, `CREATE DOMAIN`.
+- `ALTER TABLE ... ADD COLUMN` when the column is nullable OR has a
+  `DEFAULT`.
+- `ALTER TABLE ... ADD CONSTRAINT ... NOT VALID`, or any `ADD CONSTRAINT`
+  on a brand-new table created in the same migration.
+- `GRANT` to existing roles (`anon`, `authenticated`, `service_role`).
+- `COMMENT ON ...`.
+- `INSERT INTO` a table created earlier in the same migration (seed rows).
+
+Anything else needs an explicit "Yes, apply it" in chat *before* running
+`apply_migration`. In particular:
+
+- Any `DROP` (TABLE, COLUMN, INDEX, VIEW, FUNCTION, TYPE, TRIGGER,
+  CONSTRAINT, POLICY).
+- `ALTER COLUMN ... TYPE` / `SET NOT NULL` / `DROP DEFAULT`.
+- `RENAME` (table, column, function, type).
+- `UPDATE`, `DELETE`, `TRUNCATE`.
+- `ADD COLUMN ... NOT NULL` without a `DEFAULT`.
+- The `DROP FUNCTION foo(...); CREATE FUNCTION foo(...)` signature-change
+  pattern (see migrations 024 and 033).
+- `INSERT` / `UPDATE` against any pre-existing table.
+
+The migration file still goes in `migrations/` either way — the approval
+gate only governs whether MCP can apply it without asking first.
 
 Read-only inspection (counts, sample rows, schema introspection, verifying
-backfills) needs no confirmation — just do it and report findings.
+backfills) never needs confirmation — just do it and report findings.
 
 The MCP connection points at the production Supabase project. There is no
 separate dev/staging database. Treat every operation accordingly.
@@ -147,20 +179,26 @@ separate dev/staging database. Treat every operation accordingly.
    will be overwritten next session. If `SUPABASE_DB_URL` is not in env
    the block degrades gracefully to "Database unavailable this
    session" — the hook never blocks startup.
-2. **Narrative phase entries** (everything else) — manual. After
-   shipping meaningful work (a merged PR that completes a phase
-   bullet, a new migration, a new toolkit function, a new UI page),
-   update the relevant phase entry in the same commit as the work:
-   move bullets from `## Next` to `## Done`, add new "next" items if
-   scope changed, update the map / scraper / operator-workflow tracks.
-   Don't defer roadmap updates to a follow-up commit.
+2. **Narrative phase entries** live in `roadmap/<track>.md` —
+   `analytical.md`, `ui.md`, `map.md`, `scraper.md`,
+   `operator-workflow.md`, `summarize.md`. `ROADMAP.md` itself holds only
+   the auto-status block, the Tracks index pointing to those files, and
+   the low-churn `Out of scope` / `Data preconditions` sections. After
+   shipping meaningful work (a merged PR that completes a phase bullet, a
+   new migration, a new toolkit function, a new UI page), update the
+   relevant **track file** in the same commit: move bullets from
+   `## Next` to `## Done`, add new "next" items if scope changed. One
+   track per file means parallel sessions touching different tracks
+   don't collide. Don't defer roadmap updates to a follow-up commit.
 
 ## Architectural rules (do not violate without asking)
 
 1. **The schema in `migrations/` is append-only.** Never modify an existing
    migration. Schema changes go in a new numbered file (`002_*.sql`,
-   `003_*.sql`...) and are applied via the Supabase MCP after operator
-   approval. See "Database access and Supabase MCP" for the full flow.
+   `003_*.sql`...) and are applied via the Supabase MCP. Additive-only
+   migrations apply without confirmation; destructive or data-modifying
+   statements need explicit operator approval first — see "Database access
+   and Supabase MCP" for the exact list.
 2. **Snapshots on content change only.** Never insert into `listings` without
    computing the content hash and inserting into `listing_snapshots` if it
    differs from the most recent snapshot for that listing.
