@@ -134,7 +134,7 @@ def _render_block(db_facts: dict[str, object] | None) -> str:
         BEGIN,
         "<!-- This block is overwritten at the start of every Claude Code session.",
         "     Do not hand-edit; changes will be lost. The narrative phase entries",
-        "     below the block are the manual sequencing source of truth. -->",
+        "     live in roadmap/<track>.md per the Tracks index below. -->",
         "",
         f"_Last refreshed: {now}_",
         "",
