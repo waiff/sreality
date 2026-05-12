@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 20:09 UTC_
+_Last refreshed: 2026-05-12 20:30 UTC_
 
 **Branch:** `claude/add-building-paste-feature-NmQIy`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-12 20:09 UTC_
 **Last 10 commits:**
 
 ```
+d2a2e30 roadmap: refresh auto-status block
 d6396fe Merge pull request #57 from waiff/claude/review-roadmap-scope-BHt5w
 f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
 9e8574c roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ c96af29 roadmap: refresh auto-status block
 4ebf817 roadmap: refresh auto-status block
 37593e5 frontend: estimation popup CTA + nav redesign
 90f6be1 Merge pull request #55 from waiff/claude/check-skill-access-o17oY
-9941327 Merge remote-tracking branch 'origin/main' into claude/check-skill-access-o17oY
 ```
 
 <!-- END AUTO-STATUS -->
@@ -222,7 +222,24 @@ Trace records `kind='reasoning'` per LLM turn.
 
 ## Next
 
-## Next
+### Phase B0: Building decomposition — schema + scaffolding (active)
+
+First slice of the "paste a whole-building listing → decompose into
+apartment units → estimate each → roll up + business case" workflow.
+B0 lays the persistence foundation and read endpoints; B1 adds URL
+ingest + agent-driven unit extraction; B2 fans out per-unit
+estimations + rollup view; B3 layers the spreadsheet-style business
+case on top. Full description under "Building decomposition track"
+below.
+
+Slice scope:
+- Migration 034: `building_runs` parent table; `building_run_id` +
+  `building_unit_id` columns on `estimation_runs`.
+- `api/building_runs.py` module + Pydantic schemas + read endpoints
+  (`GET /buildings`, `GET /buildings/{id}`). One minimal `POST
+  /buildings` that inserts a `status='pending'` shell so the read
+  path can be exercised end-to-end before B1 lands.
+- Frontend type stubs only (no UI yet — that ships with B1).
 
 ### Phase 7 slice 2: Async + full toolkit + UI mode toggle
 Builds on slice 1.
@@ -509,6 +526,109 @@ notes — end-to-end.
     by `tag_id`, not by name. A shared `TagEditPopover` wires
     rename / recolour / delete into both tag pickers — the
     CurationBlock matches list and the Browse Filters "Add" rows.
+
+## Building decomposition track (parallel)
+
+The "paste a whole-building listing" workflow. Operator drops a
+`rodinný dům` URL into the same paste field they use for apartments
+today; the system reads description + floor-plan images, proposes
+the apartment units inside the building (including potential ones
+like an unconverted attic), the operator confirms / edits the unit
+list and the per-unit condition, the agent fans out one rent + one
+sale estimate per unit, results are grouped and summed at the
+building level, and a spreadsheet-style business-case overlay
+computes the development P&L (acquisition + reno + new build + soft
+costs + VAT in/out + debt service → EBIT / EBT / MOIC / IRR /
+yield-on-cost).
+
+Reference business case: `model_Kralupska.xlsx` (operator-supplied,
+2026-05-12). Six blocks: Assumptions, Floor Schedule, Unit
+Schedule, Cost Stack (with VAT splits), Revenue & P&L, Returns.
+
+### Phase B0: Schema + scaffolding (next — active)
+
+Pure plumbing. No agent changes, no UI changes beyond type stubs.
+- Migration 034 (`034_building_runs.sql`): new `building_runs`
+  parent table; `building_run_id` (FK) + `building_unit_id` (text)
+  columns on `estimation_runs`. Status lifecycle: `pending` →
+  `extracting` → `awaiting_input` → `estimating` → `success` |
+  `failed`. The `awaiting_input` pause is the human-in-the-loop gate
+  that distinguishes the building flow from today's single-shot
+  estimation_runs flow. Per CLAUDE.md architectural rule #13.
+- `api/building_runs.py` module: `create_building_run`,
+  `get_building_run`, `list_building_runs`. Children are surfaced
+  on the detail response via a side-query on `estimation_runs`.
+- API endpoints: `POST /buildings` (minimal shell — `{source,
+  input_url?}` → `status='pending'`), `GET /buildings`,
+  `GET /buildings/{id}`. All bearer-gated.
+- Pydantic schemas: `CreateBuildingIn`, `BuildingUnit` (the JSONB
+  unit record schema, used by B1 onwards), `BuildingRunOut` shape
+  documented via `_BUILDING_COLUMNS`.
+- Frontend type stubs in `frontend/src/lib/types.ts` (`BuildingRun`,
+  `BuildingUnit`, `BuildingStatus`). No new pages or components.
+- Tests: hermetic CRUD tests in `tests/api/test_buildings.py`
+  modeled on the `_State`-style fakes from `test_estimations.py`.
+
+### Phase B1: URL ingest + agent unit proposal + confirmation UI
+
+- New toolkit function `extract_building_units` — reads the parsed
+  building spec + latest snapshot description + N images from R2
+  via Claude vision; returns `{units: [...], building: {...},
+  confidence}`. Cached on `(sreality_id, snapshot_id)` like
+  `listing_summaries`. Write-allowed exception per toolkit rule #5
+  (LLM is the source of truth; cache locally to keep repeats fast).
+  Migration for the cache table.
+- New skill `building_unit_extractor_v1`: system prompt teaches the
+  model to read description + floor plans, identify discrete units
+  including potential ones, return the `record_building_units` tool
+  envelope. On-disk SKILL.md + migration seed `INSERT`.
+- `POST /buildings/from_url` replaces B0's minimal `POST /buildings`
+  as the operator-facing entry: parses via
+  `scraper.source_dispatcher`, persists `input_*` + `source_*`
+  fields, kicks off the extractor synchronously for v1 (Phase 7
+  slice 2's async lifecycle will retrofit when it lands).
+- Frontend: a new two-step "Paste a building" modal (or a kind toggle
+  on `NewEstimationModal`) — paste URL → review extracted units +
+  edit (add / remove / edit floor/m²/disposition/condition) → submit.
+  Confirmed list writes to `building_runs.units` and advances status
+  to `estimating`.
+
+### Phase B2: Per-unit fan-out + building rollup view
+
+- Orchestrator in `api/building_runs.py` (or a new `building_agent.py`):
+  on `units` confirmation, INSERT one rent + one sale
+  `estimation_runs` row per unit, each linked back via
+  `building_run_id` + `building_unit_id`. Reuse the existing
+  agent-mode plumbing — the orchestrator is just a fan-out + watcher.
+- Rollup: when all child runs reach a terminal status, write
+  summed `total_rent_p25/p50/p75_czk` + `total_sale_p25/p50/p75_czk`
+  to `building_runs`. P50 is straight sum across units; P25 / P75 use
+  the per-unit IQR endpoints summed (matches how the operator reads
+  the spreadsheet).
+- Frontend: new `/building/:id` page — building subject summary at
+  the top, units list with per-unit estimate strips, rollup totals,
+  link out to each child estimation for detail.
+
+### Phase B3: Business case tab
+
+- Storage: `building_runs.business_case` JSONB (column exists from
+  B0). Holds assumptions + floor schedule + unit-schedule overrides
+  + computed outputs. JSONB grain because the spreadsheet is
+  non-tabular and operator-tunable.
+- Math engine: `api/business_case.py` — pure-Python port of the
+  `model_Kralupska.xlsx` formulas (~30 lines of Excel logic).
+  Stdlib only. Inputs from the column above + the unit list +
+  the latest rollup totals; outputs EBIT / EBT / MOIC / IRR /
+  yield-on-cost + the per-row breakdowns.
+- API: `PUT /buildings/{id}/business_case` (idempotent save +
+  recompute); the GET returns the persisted state.
+- Frontend: an Excel-like grid as a new tab on the building page.
+  Option A: hand-rolled `<table>` + per-cell `<input>`, save-on-blur
+  to the PUT. Option B: an off-the-shelf grid (Handsontable
+  Community / `react-spreadsheet`) — needs operator approval for the
+  new dep. Default recommendation is A on the strength of "no new
+  deps without justification"; revisit if the hand-rolled grid
+  proves too rigid.
 
 ## Summarize track (parallel)
 

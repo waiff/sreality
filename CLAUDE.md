@@ -252,6 +252,25 @@ separate dev/staging database. Treat every operation accordingly.
     row with `parent_run_id` set; the original is immutable. Legal
     `source` values today: `'ui'`, `'api'`, `'clickup'` (CHECK
     constraint, not enum — adding more is a single ALTER).
+13. **`building_runs` is the parent grouping for the
+    paste-a-building workflow.** One row per pasted house listing
+    (typically `category_main='dum'`). Children are normal
+    `estimation_runs` rows linked back via `building_run_id` (FK,
+    `ON DELETE SET NULL` so child estimations survive parent
+    cleanup) + `building_unit_id` (stable string ID matching an
+    entry in the parent's `units` JSONB). The unit list lives as
+    JSONB on the parent — operator-curated, ~5-10 entries, not an
+    analytical object. Status flow: `pending` → `extracting` →
+    `awaiting_input` → `estimating` → `success` | `failed`. The
+    `awaiting_input` pause is the human-in-the-loop gate where the
+    operator confirms / edits the agent's tentative unit
+    decomposition before per-unit estimates fan out — the explicit
+    departure from today's `estimation_runs` single-shot flow.
+    `units_proposal` (agent output, append-only after extraction)
+    and `units` (operator-confirmed) are kept separate so the
+    extractor's original guess is auditable. The business-case
+    overlay (Phase B3) lives in `business_case jsonb` on this
+    same row.
 
 ## Toolkit and API rules
 

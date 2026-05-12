@@ -20,6 +20,11 @@ from api import schemas as s
 from api import skills as skills_module
 from api.agent import AGENT_TOOLS
 from api.estimate_yield import estimate_yield
+from api.building_runs import (
+    create_building_run,
+    get_building_run,
+    list_building_runs,
+)
 from api.estimation_runs import (
     create_estimation_run,
     get_estimation_run,
@@ -554,6 +559,47 @@ def list_estimations(
         limit=limit,
         offset=offset,
     )
+
+
+@app.post("/buildings")
+def post_buildings(
+    body: s.CreateBuildingIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return create_building_run(conn, body)
+
+
+@app.get("/buildings")
+def get_buildings(
+    source: str | None = None,
+    status: s.BuildingStatus | None = None,
+    sreality_id: int | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return list_building_runs(
+        conn,
+        source=source,
+        status=status,
+        sreality_id=sreality_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/buildings/{building_id}")
+def get_building(
+    building_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    row = get_building_run(conn, building_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="building run not found")
+    return row
 
 
 @app.post("/estimate_yield")
