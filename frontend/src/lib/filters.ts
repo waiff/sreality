@@ -28,6 +28,10 @@ export interface ListingFilters {
   usableAreaMin: number | null;
   usableAreaMax: number | null;
   parkingLotsMin: number | null;
+  /* Migration 025 — operator tags. AND-semantics: a listing must carry
+   * every selected tag id. Stored as ids (not names) so renames /
+   * recolour-by-delete-recreate stay queryable. */
+  tags: number[];
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -53,6 +57,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   usableAreaMin: null,
   usableAreaMax: null,
   parkingLotsMin: null,
+  tags: [],
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -141,7 +146,18 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     usableAreaMin: usableMin,
     usableAreaMax: usableMax,
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
+    tags: parseIntList(sp.get('tags')),
   };
+};
+
+const parseIntList = (s: string | null): number[] => {
+  if (!s) return [];
+  const out: number[] = [];
+  for (const part of s.split(',')) {
+    const n = Number(part);
+    if (Number.isInteger(n) && n > 0) out.push(n);
+  }
+  return out;
 };
 
 export const toSearchParams = (f: ListingFilters): URLSearchParams => {
@@ -172,6 +188,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
     sp.set('usable', `${f.usableAreaMin ?? ''}-${f.usableAreaMax ?? ''}`);
   }
   if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
+  if (f.tags.length) sp.set('tags', f.tags.join(','));
   return sp;
 };
 
@@ -222,4 +239,5 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.estateAreaMax == null &&
   f.usableAreaMin == null &&
   f.usableAreaMax == null &&
-  f.parkingLotsMin == null;
+  f.parkingLotsMin == null &&
+  f.tags.length === 0;

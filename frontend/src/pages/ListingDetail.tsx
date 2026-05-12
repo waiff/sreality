@@ -28,6 +28,9 @@ import SnapshotTimeline from '@/components/SnapshotTimeline';
 
 const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
 const Gallery = lazy(() => import('@/components/listing-detail/Gallery'));
+const CurationBlock = lazy(
+  () => import('@/components/listing-detail/CurationBlock'),
+);
 
 const DAY_MS = 86_400_000;
 
@@ -106,6 +109,10 @@ export default function ListingDetail() {
       <GalleryBlock images={images} isActive={listing.is_active} loading={imagesQ.isLoading} />
       <Hairline />
       <KeyFactsBlock listing={listing} />
+      <Hairline />
+      <Suspense fallback={null}>
+        <CurationBlock sreality_id={listing.sreality_id} />
+      </Suspense>
       <Hairline />
       <TimestampsBlock listing={listing} />
       <Hairline />

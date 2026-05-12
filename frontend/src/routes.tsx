@@ -6,6 +6,8 @@ import Region from './pages/Region';
 import Health from './pages/Health';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
+import Collections from './pages/Collections';
+import CollectionDetail from './pages/CollectionDetail';
 import Settings from './pages/Settings';
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
@@ -25,6 +27,8 @@ export const routes: RouteObject[] = [
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList /> },
       { path: 'estimation/:id', element: <EstimationDetail /> },
+      { path: 'collections', element: <Collections /> },
+      { path: 'collection/:id', element: <CollectionDetail /> },
       { path: 'settings', element: <Settings /> },
       { path: 'dev/confidence-indicator', element: <DevConfidencePreview /> },
       { path: '*', element: <NotFound /> },

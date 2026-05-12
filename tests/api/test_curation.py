@@ -179,6 +179,20 @@ def store(monkeypatch):
         }
         return {"deleted": True}
 
+    def fake_update_tag(conn, tid, body):
+        if tid not in state["tags"]:
+            from fastapi import HTTPException
+            raise HTTPException(404, "tag not found")
+        if body.name is not None:
+            for other_tid, t in state["tags"].items():
+                if other_tid != tid and t["name"].lower() == body.name.lower():
+                    from fastapi import HTTPException
+                    raise HTTPException(409, "tag name already exists")
+            state["tags"][tid]["name"] = body.name
+        if body.color is not None:
+            state["tags"][tid]["color"] = body.color
+        return _tag_to_dict(tid)
+
     def fake_attach_tag(conn, sid, body):
         if body.tag_id not in state["tags"]:
             from fastapi import HTTPException
@@ -210,6 +224,7 @@ def store(monkeypatch):
     monkeypatch.setattr(curation, "list_tags", fake_list_tags)
     monkeypatch.setattr(curation, "create_tag", fake_create_tag)
     monkeypatch.setattr(curation, "delete_tag", fake_delete_tag)
+    monkeypatch.setattr(curation, "update_tag", fake_update_tag)
     monkeypatch.setattr(curation, "attach_tag", fake_attach_tag)
     monkeypatch.setattr(curation, "detach_tag", fake_detach_tag)
 
@@ -440,6 +455,48 @@ def test_delete_tag_cascades_attachments(client, store):
 def test_delete_unknown_tag_404(client, store):
     res = client.delete("/tags/999")
     assert res.status_code == 404
+
+
+def test_patch_tag_rename(client, store):
+    client.post("/tags", json={"name": "hot", "color": "brick"})
+    res = client.patch("/tags/1", json={"name": "scorching"})
+    assert res.status_code == 200
+    assert res.json()["name"] == "scorching"
+    assert res.json()["color"] == "brick"
+
+
+def test_patch_tag_recolour(client, store):
+    client.post("/tags", json={"name": "hot", "color": "brick"})
+    res = client.patch("/tags/1", json={"color": "sage"})
+    assert res.status_code == 200
+    assert res.json()["color"] == "sage"
+    assert res.json()["name"] == "hot"
+
+
+def test_patch_tag_preserves_attachments(client, store):
+    client.post("/tags", json={"name": "hot", "color": "brick"})
+    client.post("/listings/42/tags", json={"tag_id": 1})
+    res = client.patch("/tags/1", json={"name": "scorching", "color": "sage"})
+    assert res.status_code == 200
+    assert res.json()["listing_count"] == 1
+
+
+def test_patch_tag_duplicate_name_409(client, store):
+    client.post("/tags", json={"name": "hot", "color": "brick"})
+    client.post("/tags", json={"name": "warm", "color": "sage"})
+    res = client.patch("/tags/2", json={"name": "HOT"})
+    assert res.status_code == 409
+
+
+def test_patch_unknown_tag_404(client, store):
+    res = client.patch("/tags/999", json={"name": "ghost"})
+    assert res.status_code == 404
+
+
+def test_patch_tag_invalid_color_422(client, store):
+    client.post("/tags", json={"name": "hot", "color": "brick"})
+    res = client.patch("/tags/1", json={"color": "neon"})
+    assert res.status_code == 422
 
 
 # --- direct unit coverage of curation helpers (no FastAPI) -----------------

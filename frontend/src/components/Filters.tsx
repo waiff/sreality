@@ -6,7 +6,10 @@ import {
   type ChangeEvent,
 } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { fetchDistrictFacets } from '@/lib/queries';
+import { fetchDistrictFacets, curationKeys } from '@/lib/queries';
+import { listTags } from '@/lib/api';
+import type { Tag } from '@/lib/types';
+import TagEditPopover from '@/components/curation/TagEditPopover';
 import {
   type ListingFilters,
   type ListingStatus,
@@ -163,8 +166,168 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
             onChange={(v) => set('ownership', v)}
           />
         </ControlGroup>
+
+        <ControlGroup title="Curation">
+          <TagsPicker
+            value={filters.tags}
+            onChange={(v) => set('tags', v)}
+          />
+        </ControlGroup>
       </div>
     </aside>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tags picker — operator tags from migration 024. AND-semantics: a listing    */
+/* must carry every selected tag id (enforced server-side by the              */
+/* listings_with_tags RPC). The Browse stats panel does NOT filter by tags    */
+/* in v1 — only the map / table cohorts do.                                   */
+/* -------------------------------------------------------------------------- */
+
+function TagsPicker({
+  value,
+  onChange,
+}: {
+  value: number[];
+  onChange: (next: number[]) => void;
+}) {
+  const tagsQ = useQuery({
+    queryKey: curationKeys.tags,
+    queryFn: listTags,
+    staleTime: 60_000,
+  });
+  const tags = tagsQ.data?.data ?? [];
+  const byId = useMemo(() => {
+    const m = new Map<number, Tag>();
+    for (const t of tags) m.set(t.id, t);
+    return m;
+  }, [tags]);
+
+  const remaining = tags.filter((t) => !value.includes(t.id));
+
+  const add = (id: number) => onChange([...value, id]);
+  const remove = (id: number) => onChange(value.filter((x) => x !== id));
+
+  if (tagsQ.isLoading) {
+    return (
+      <Section label="Tags">
+        <p className="text-[0.75rem] text-[var(--color-ink-4)]">Loading…</p>
+      </Section>
+    );
+  }
+
+  if (tags.length === 0) {
+    return (
+      <Section label="Tags">
+        <p className="text-[0.75rem] text-[var(--color-ink-4)]">
+          No tags yet. Add one from any listing's detail page.
+        </p>
+      </Section>
+    );
+  }
+
+  return (
+    <Section label="Tags">
+      {value.length > 0 && (
+        <ul className="flex flex-wrap gap-1.5">
+          {value.map((id) => {
+            const t = byId.get(id);
+            if (!t) return null;
+            return (
+              <li key={id}>
+                <FilterTagChip t={t} onRemove={() => remove(id)} />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {remaining.length > 0 && (
+        <div className={value.length > 0 ? 'mt-2' : ''}>
+          <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            Add
+          </p>
+          <ul className="mt-1.5 flex flex-wrap gap-1.5">
+            {remaining.map((t) => (
+              <li key={t.id}>
+                <FilterTagAddButton
+                  t={t}
+                  onAdd={() => add(t.id)}
+                  otherNames={tags
+                    .filter((x) => x.id !== t.id)
+                    .map((x) => x.name.toLowerCase())}
+                  onDeleted={(id) => {
+                    if (value.includes(id)) remove(id);
+                  }}
+                />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {value.length > 0 && (
+        <p className="mt-2 text-[0.65rem] text-[var(--color-ink-4)]">
+          A listing must carry every selected tag.
+        </p>
+      )}
+    </Section>
+  );
+}
+
+function FilterTagChip({ t, onRemove }: { t: Tag; onRemove: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onRemove}
+      aria-label={`Remove ${t.name}`}
+      className="group inline-flex items-center gap-1.5 px-2 py-1 text-xs rounded-[var(--radius-sm)] border transition-colors"
+      style={{
+        background: `var(--color-tag-${t.color}-soft)`,
+        color: `var(--color-tag-${t.color})`,
+        borderColor: `var(--color-tag-${t.color})`,
+      }}
+    >
+      <span>{t.name}</span>
+      <span aria-hidden className="opacity-60 group-hover:opacity-100">
+        ×
+      </span>
+    </button>
+  );
+}
+
+function FilterTagAddButton({
+  t,
+  onAdd,
+  otherNames,
+  onDeleted,
+}: {
+  t: Tag;
+  onAdd: () => void;
+  otherNames: string[];
+  onDeleted: (id: number) => void;
+}) {
+  return (
+    <span className="inline-flex items-center gap-0.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] hover:border-[var(--color-rule-strong)] transition-colors">
+      <button
+        type="button"
+        onClick={onAdd}
+        className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
+      >
+        <span
+          aria-hidden
+          className="w-2 h-2 rounded-full"
+          style={{ background: `var(--color-tag-${t.color})` }}
+        />
+        <span>{t.name}</span>
+      </button>
+      <span className="pr-0.5">
+        <TagEditPopover
+          tag={t}
+          otherNames={otherNames}
+          onDeleted={onDeleted}
+        />
+      </span>
+    </span>
   );
 }
 

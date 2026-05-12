@@ -403,5 +403,10 @@ class CreateTagIn(BaseModel):
     color: TagColor
 
 
+class UpdateTagIn(BaseModel):
+    name:  str | None = Field(default=None, min_length=1, max_length=50)
+    color: TagColor | None = None
+
+
 class AttachTagIn(BaseModel):
     tag_id: int

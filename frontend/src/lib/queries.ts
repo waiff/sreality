@@ -111,16 +111,41 @@ export interface MapResult {
   capped: boolean;
 }
 
+/* Tags facet is composed of two server queries: (1) listings_with_tags RPC
+ * resolves the ids matching ALL selected tag ids, (2) the regular listings
+ * query gets .in('sreality_id', ids) appended. Returns null if no tags
+ * are selected (skip the prefilter entirely), an empty array if none
+ * match (caller should short-circuit to empty results), or the id list.
+ * Declared as a hoistable function so the Map/Table fetchers below can
+ * call it without forward-reference issues. */
+async function resolveTagPrefilter(
+  f: ListingFilters,
+): Promise<number[] | null> {
+  if (f.tags.length === 0) return null;
+  const { data, error } = await supabase.rpc('listings_with_tags', {
+    tag_ids: f.tags,
+  });
+  if (error) throw error;
+  return ((data ?? []) as Array<{ sreality_id: number }>).map(
+    (r) => r.sreality_id,
+  );
+}
+
 export const fetchListingsForMap = async (
   f: ListingFilters,
 ): Promise<MapResult> => {
+  const tagIds = await resolveTagPrefilter(f);
+  if (tagIds != null && tagIds.length === 0) {
+    return { rows: [], total: 0, capped: false };
+  }
   const base = supabase
     .from('listings_public')
     .select(MAP_COLS, { count: 'exact' })
     .not('lat', 'is', null)
     .not('lng', 'is', null);
   const filtered = applyFilters(base, f);
-  const { data, count, error } = await filtered.limit(MAP_CAP);
+  const scoped = tagIds != null ? filtered.in('sreality_id', tagIds) : filtered;
+  const { data, count, error } = await scoped.limit(MAP_CAP);
   if (error) throw error;
   const rows = (data ?? []) as unknown as MapRow[];
   return {
@@ -156,13 +181,18 @@ export const fetchListingsForTable = async (
   sort: SortSpec,
   page: number,
 ): Promise<TableResult> => {
+  const tagIds = await resolveTagPrefilter(f);
+  if (tagIds != null && tagIds.length === 0) {
+    return { rows: [], total: 0 };
+  }
   const from = (page - 1) * TABLE_PAGE_SIZE;
   const to = from + TABLE_PAGE_SIZE - 1;
   const base = supabase
     .from('listings_public')
     .select(TABLE_COLS, { count: 'exact' });
   const filtered = applyFilters(base, f);
-  const sorted = filtered.order(sort.field, {
+  const scoped = tagIds != null ? filtered.in('sreality_id', tagIds) : filtered;
+  const sorted = scoped.order(sort.field, {
     ascending: sort.direction === 'asc',
     nullsFirst: false,
   });
@@ -173,6 +203,7 @@ export const fetchListingsForTable = async (
     total: count ?? null,
   };
 };
+
 
 export interface DistrictFacet {
   district: string;
@@ -214,6 +245,7 @@ export const fetchBrowseStats = async (
     cellar_filter:           triToBool(f.cellar),
     garage_filter:           triToBool(f.garage),
     category_sub_cb_filter:  f.categorySubCb,
+    tag_ids:                 f.tags.length ? f.tags : null,
   });
   if (error) throw error;
   return data as BrowseStats;
@@ -462,3 +494,64 @@ export const useUrlPreview = (): UseMutationResult<
     mutationFn: ({ url, force_refresh }) =>
       previewListingUrl(url, { force_refresh }),
   });
+
+/* -------------------------------------------------------------------------- */
+/* Curation (U2.6) — read paths.                                              */
+/*                                                                            */
+/* The "list collections / tags / notes" indices go through the bearer-gated  */
+/* FastAPI service (lib/api.ts) so listing_count + ordering live in one      */
+/* place. The reverse-index queries below — "which tags / collections does    */
+/* listing X belong to" — read directly from the *_public views via the anon  */
+/* key, matching the same read-only pattern Browse / Region already use. The  */
+/* `listings_with_tags(tag_ids)` RPC powers the Browse "tags" facet:          */
+/* AND-semantics across the supplied ids, capped at 5000 rows on the server.  */
+/* -------------------------------------------------------------------------- */
+
+export const fetchListingTagIds = async (
+  sreality_id: number,
+): Promise<number[]> => {
+  const { data, error } = await supabase
+    .from('listing_tags_public')
+    .select('tag_id')
+    .eq('sreality_id', sreality_id);
+  if (error) throw error;
+  return ((data ?? []) as Array<{ tag_id: number }>).map((r) => r.tag_id);
+};
+
+export const fetchListingCollectionIds = async (
+  sreality_id: number,
+): Promise<number[]> => {
+  const { data, error } = await supabase
+    .from('collection_listings_public')
+    .select('collection_id')
+    .eq('sreality_id', sreality_id);
+  if (error) throw error;
+  return ((data ?? []) as Array<{ collection_id: number }>).map(
+    (r) => r.collection_id,
+  );
+};
+
+export const fetchListingIdsWithAllTags = async (
+  tag_ids: number[],
+): Promise<number[]> => {
+  if (tag_ids.length === 0) return [];
+  const { data, error } = await supabase.rpc('listings_with_tags', {
+    tag_ids,
+  });
+  if (error) throw error;
+  return ((data ?? []) as Array<{ sreality_id: number }>).map(
+    (r) => r.sreality_id,
+  );
+};
+
+export const curationKeys = {
+  collections: ['curation', 'collections'] as const,
+  collection: (id: number) => ['curation', 'collection', id] as const,
+  tags: ['curation', 'tags'] as const,
+  listingTags: (sreality_id: number) =>
+    ['curation', 'listing-tags', sreality_id] as const,
+  listingCollections: (sreality_id: number) =>
+    ['curation', 'listing-collections', sreality_id] as const,
+  listingNotes: (sreality_id: number) =>
+    ['curation', 'listing-notes', sreality_id] as const,
+};

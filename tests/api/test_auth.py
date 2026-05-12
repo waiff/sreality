@@ -146,6 +146,13 @@ def client(monkeypatch):
         lambda conn, tid: {"deleted": True},
     )
     monkeypatch.setattr(
+        api_curation, "update_tag",
+        lambda conn, tid, body: {
+            "id": tid, "name": body.name or "hot",
+            "color": body.color or "brick", "listing_count": 0,
+        },
+    )
+    monkeypatch.setattr(
         api_curation, "attach_tag",
         lambda conn, sid, body: {"attached": True},
     )
@@ -190,6 +197,7 @@ _PATCH_COLLECTION_BODY = {"name": "renamed"}
 _ADD_LISTINGS_BODY = {"sreality_ids": [1]}
 _CREATE_NOTE_BODY = {"body": "smoke"}
 _CREATE_TAG_BODY = {"name": "hot", "color": "brick"}
+_PATCH_TAG_BODY = {"name": "renamed", "color": "sage"}
 _ATTACH_TAG_BODY = {"tag_id": 1}
 
 
@@ -222,6 +230,7 @@ def _gated_calls(client) -> list:
         ("POST",   "/listings/1/notes", _CREATE_NOTE_BODY),
         ("GET",    "/tags", None),
         ("POST",   "/tags", _CREATE_TAG_BODY),
+        ("PATCH",  "/tags/1", _PATCH_TAG_BODY),
         ("DELETE", "/tags/1", None),
         ("POST",   "/listings/1/tags", _ATTACH_TAG_BODY),
         ("DELETE", "/listings/1/tags/1", None),
