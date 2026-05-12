@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 19:55 UTC_
+_Last refreshed: 2026-05-12 21:27 UTC_
 
 **Branch:** `claude/review-roadmap-scope-BHt5w`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-12 19:55 UTC_
 **Last 10 commits:**
 
 ```
+1712e97 phase 7 slice 2: async agent + UI pickers + A/B compare
 f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
 9e8574c roadmap: refresh auto-status block
 71582f7 frontend: U2.6 curation UI (collections, tags, notes)
@@ -25,7 +26,6 @@ c96af29 roadmap: refresh auto-status block
 37593e5 frontend: estimation popup CTA + nav redesign
 90f6be1 Merge pull request #55 from waiff/claude/check-skill-access-o17oY
 9941327 Merge remote-tracking branch 'origin/main' into claude/check-skill-access-o17oY
-d2645b2 frontend: group controls + add Settings-page light/dark toggle
 ```
 
 <!-- END AUTO-STATUS -->
