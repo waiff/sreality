@@ -6,6 +6,7 @@ import Region from './pages/Region';
 import Health from './pages/Health';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
+import EstimationCompare from './pages/EstimationCompare';
 import Collections from './pages/Collections';
 import CollectionDetail from './pages/CollectionDetail';
 import Settings from './pages/Settings';
@@ -26,6 +27,7 @@ export const routes: RouteObject[] = [
       { path: 'health', element: <Health /> },
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList /> },
+      { path: 'estimations/compare', element: <EstimationCompare /> },
       { path: 'estimation/:id', element: <EstimationDetail /> },
       { path: 'collections', element: <Collections /> },
       { path: 'collection/:id', element: <CollectionDetail /> },

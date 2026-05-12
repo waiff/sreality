@@ -18,12 +18,17 @@ import {
 import { ApiError, fetchListingSummaries } from '@/lib/api';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
+import {
+  RunOptionsPicker,
+  type RunOptionsValue,
+} from '@/components/estimation/RunOptionsPicker';
 import { PickButton } from '@/components/controls';
 import type {
   ComparableUsed,
   Confidence,
   CreateEstimationIn,
   Disposition,
+  EstimationMode,
   EstimationProvider,
   EstimationRun,
   EstimationSource,
@@ -52,6 +57,14 @@ export default function EstimationDetail() {
     queryFn: () => fetchEstimation(id as number),
     enabled: id != null,
     staleTime: 60_000,
+    // While the agent loop is running in the background (Phase 7 slice 2
+    // async path), poll every 2s so the operator sees the status flip
+    // and the trace fill in without a manual refresh. Stops polling
+    // automatically once the row reaches a terminal status.
+    refetchInterval: (q) => {
+      const s = q.state.data?.status;
+      return s === 'pending' || s === 'running' ? 2_000 : false;
+    },
   });
 
   const rerunMut = useMutation<EstimationRun, ApiError, RerunInput>({
@@ -90,11 +103,19 @@ export default function EstimationDetail() {
 
   const run = runQ.data!;
   const isFailed = run.status === 'failed';
+  const isRunning = run.status === 'pending' || run.status === 'running';
 
   return (
     <Page>
       <Crumb />
       <Header run={run} />
+
+      {isRunning && (
+        <>
+          <Hairline />
+          <RunningBanner run={run} />
+        </>
+      )}
 
       {!isFailed && run.subject_summary && (
         <>
@@ -339,6 +360,36 @@ function FailedBlock({ run }: { run: EstimationRun }) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Running banner — shown while the async agent loop is still executing in    */
+/* the background. Auto-disappears when refetchInterval picks up the          */
+/* terminal status. Phase 7 slice 2.                                          */
+/* -------------------------------------------------------------------------- */
+
+function RunningBanner({ run }: { run: EstimationRun }) {
+  const provider = run.provider ?? 'anthropic';
+  const skill = run.skill_name ?? '—';
+  return (
+    <div className="mt-4 px-4 py-3 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)]">
+      <div className="flex items-center gap-2.5">
+        <span
+          className="w-2 h-2 rounded-full bg-[var(--color-copper)] animate-pulse"
+          aria-hidden
+        />
+        <p className="text-[0.85rem] text-[var(--color-copper)]">
+          Agent is thinking…
+        </p>
+      </div>
+      <p className="mt-1.5 text-[0.75rem] text-[var(--color-ink-3)] leading-relaxed">
+        Running <span className="font-mono">{skill}</span> on{' '}
+        <span className="font-mono">{provider}</span>. The page refreshes
+        automatically when the run finishes — typically 30 seconds to
+        4 minutes for an agent loop.
+      </p>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Warnings                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -428,6 +479,13 @@ function InputRecap({ run }: { run: EstimationRun }) {
             #{run.parent_run_id}
           </Link>
           {run.rerun_reason ? ` · ${run.rerun_reason}` : ''}
+          {' · '}
+          <Link
+            to={`/estimations/compare?ids=${run.parent_run_id},${run.id}`}
+            className="text-[var(--color-copper)] hover:underline underline-offset-2"
+          >
+            Compare with parent →
+          </Link>
         </p>
       )}
     </div>
@@ -750,7 +808,9 @@ function Th({ align, children }: { align: 'left' | 'right'; children: React.Reac
 type RerunOverrides = {
   spec?: TargetSpecIn;
   estimate_kind?: 'rent' | 'sale';
+  mode?: EstimationMode;
   provider?: EstimationProvider;
+  skill?: string;
   population?: Population;
   purchase_price_czk?: number | null;
   expected_monthly_rent_czk?: number | null;
@@ -776,7 +836,9 @@ interface AdjustState {
   disposition: Disposition | null;
   floor: number | null;
   estimate_kind: 'rent' | 'sale';
+  mode: EstimationMode;
   provider: EstimationProvider;
+  skill: string;
   population: Population;
   purchase_price_czk: number | null;
   expected_monthly_rent_czk: number | null;
@@ -784,14 +846,17 @@ interface AdjustState {
 
 function adjustStateFromRun(run: EstimationRun): AdjustState {
   const spec = run.input_spec;
+  const kind = run.estimate_kind ?? 'rent';
   return {
     lat: spec?.lat ?? null,
     lng: spec?.lng ?? null,
     area_m2: spec?.area_m2 ?? null,
     disposition: spec?.disposition ?? null,
     floor: spec?.floor ?? null,
-    estimate_kind: run.estimate_kind ?? 'rent',
-    provider: 'anthropic',
+    estimate_kind: kind,
+    mode: run.mode ?? (kind === 'rent' ? 'agent' : 'deterministic'),
+    provider: run.provider ?? 'anthropic',
+    skill: run.skill_name ?? 'rental_estimator_v1',
     population: 'active',
     purchase_price_czk: run.input_purchase_price_czk,
     expected_monthly_rent_czk: null,
@@ -830,7 +895,9 @@ function RerunBlock({
         exclude_ids: run.input_spec?.exclude_ids ?? [],
       },
       estimate_kind: state.estimate_kind,
+      mode: state.mode,
       provider: state.provider,
+      skill: state.skill,
       population: state.population,
       purchase_price_czk:
         state.estimate_kind === 'rent' ? state.purchase_price_czk : null,
@@ -996,17 +1063,18 @@ function AdjustPanel({
 
       {state.estimate_kind === 'rent' && (
         <>
-          <div>
-            <FieldLabel>Model provider</FieldLabel>
-            <SegRow
-              options={[
-                { value: 'anthropic', label: 'Claude' },
-                { value: 'gemini', label: 'Gemini' },
-              ]}
-              value={state.provider}
-              onChange={(v) => set('provider', v)}
-            />
-          </div>
+          <RunOptionsPicker
+            value={{
+              mode: state.mode,
+              provider: state.provider,
+              skill: state.skill,
+            }}
+            onChange={(next: RunOptionsValue) => {
+              set('mode', next.mode);
+              set('provider', next.provider);
+              set('skill', next.skill);
+            }}
+          />
           <div>
             <FieldLabel>Comparable population</FieldLabel>
             <SegRow
@@ -1192,7 +1260,10 @@ function buildRerunPayload(
 ): CreateEstimationIn {
   const estimateKind =
     overrides?.estimate_kind ?? run.estimate_kind ?? 'rent';
-  const mode = estimateKind === 'rent' ? 'agent' : 'deterministic';
+  const mode =
+    overrides?.mode ??
+    run.mode ??
+    (estimateKind === 'rent' ? 'agent' : 'deterministic');
   const purchasePrice =
     overrides?.purchase_price_czk !== undefined
       ? overrides.purchase_price_czk
@@ -1211,6 +1282,7 @@ function buildRerunPayload(
     purchase_price_czk: purchasePrice,
     expected_monthly_rent_czk: expectedRent,
     ...(overrides?.provider ? { provider: overrides.provider } : {}),
+    ...(overrides?.skill ? { skill: overrides.skill } : {}),
     ...(overrides?.population ? { population: overrides.population } : {}),
   };
 

@@ -78,13 +78,24 @@ def _patch_persistence(monkeypatch) -> _State:
                     "source_kind", "parse_confidence",
                     "parse_confidence_per_field", "source_html",
                     "subject_summary",
+                    "provider", "skill_name",
                 )
             },
         }
 
+    # Bridge the FastAPI BackgroundTasks indirection. In production the bg
+    # wrapper opens its own DB conn + LLM client; in tests we run the
+    # finish step synchronously through `_finish_agent_run` with the
+    # patched persistence + the test's stubbed agent loop. After the
+    # request the bg task has already run and `state.inserts[run_id]`
+    # reflects the terminal status.
+    def fake_finish_in_bg(**kw: Any) -> None:
+        er._finish_agent_run(object(), object(), object(), **kw)
+
     monkeypatch.setattr(er, "_insert_run", fake_insert)
     monkeypatch.setattr(er, "_fetch_run", fake_fetch)
     monkeypatch.setattr(er, "_build_subject_summary", lambda *a, **kw: None)
+    monkeypatch.setattr(er, "_finish_agent_run_in_bg", fake_finish_in_bg)
     return state
 
 
@@ -350,9 +361,16 @@ def test_post_with_parent_run_id_populates_fk(client, monkeypatch):
 
 
 def test_post_with_mode_agent_does_not_500(client, monkeypatch):
-    """Regression: the agent-path _insert_run used to omit estimate_kind
+    """POST /estimations in agent mode INSERTs a `status='running'` row
+    synchronously and schedules the loop on FastAPI BackgroundTasks. The
+    response body returns `'running'`; the bg task then flips the row to
+    its terminal status (`'success'` here). Both halves are asserted.
+
+    Regression note: the agent-path _insert_run used to omit estimate_kind
     and the three sale columns, KeyError-ing inside psycopg and bubbling
-    out as a generic 500. POST should land a real row instead."""
+    out as a generic 500. The terminal row landing in state.inserts is
+    the proof that the column-list shape stays correct after the async
+    split (Phase 7 slice 2)."""
     state = _patch_persistence(monkeypatch)
 
     def fake_update(conn, run_id: int, **fields: Any) -> None:
@@ -409,13 +427,23 @@ def test_post_with_mode_agent_does_not_500(client, monkeypatch):
     )
     assert res.status_code == 200
     body = res.json()
-    assert body["status"] == "success"
+    # Synchronous half of the async path: the row exists with the
+    # `running` status before the loop completes.
+    assert body["status"] == "running"
     assert body["mode"] == "agent"
     assert body["estimate_kind"] == "rent"
+    assert body["provider"] == "anthropic"
+    assert body["skill_name"] == "rental_estimator_v1"
+    # Background half: the bg wrapper has run (TestClient awaits it) and
+    # `_update_run_terminal` flipped the row to success.
     assert len(state.inserts) == 1
     inserted = state.inserts[1]
+    assert inserted["status"] == "success"
     assert inserted["estimate_kind"] == "rent"
     assert inserted["estimated_sale_price_czk"] is None
+    assert inserted["estimated_monthly_rent_czk"] == 25000
+    assert inserted["provider"] == "anthropic"
+    assert inserted["skill_name"] == "rental_estimator_v1"
 
 
 def test_post_invalid_source_returns_422(client):

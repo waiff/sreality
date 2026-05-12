@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 18:55 UTC_
+_Last refreshed: 2026-05-12 19:55 UTC_
 
 **Branch:** `claude/review-roadmap-scope-BHt5w`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 33 files, latest `033_browse_stats_tag_ids.sql`.
+**Migrations on disk:** 34 files, latest `034_estimation_runs_provider_skill.sql`.
 
 **Last 10 commits:**
 
 ```
+f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
 9e8574c roadmap: refresh auto-status block
 71582f7 frontend: U2.6 curation UI (collections, tags, notes)
 c96af29 roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ c96af29 roadmap: refresh auto-status block
 90f6be1 Merge pull request #55 from waiff/claude/check-skill-access-o17oY
 9941327 Merge remote-tracking branch 'origin/main' into claude/check-skill-access-o17oY
 d2645b2 frontend: group controls + add Settings-page light/dark toggle
-866e21a Merge pull request #46 from waiff/claude/fix-street-dropdown-M0gpC
 ```
 
 <!-- END AUTO-STATUS -->
@@ -222,21 +222,53 @@ Trace records `kind='reasoning'` per LLM turn.
 
 ## Next
 
-## Next
+### Phase 7 slice 2: Async + UI pickers + A/B compare (done)
+Builds on slice 1. Operator chose "core slice, no third provider"
+during planning; the OpenAI / Vertex bullet is dropped from the
+roadmap rather than deferred.
+- **Async lifecycle.** Agent runs INSERT a `status='running'` row
+  synchronously and finish the loop on FastAPI BackgroundTasks. The
+  HTTP POST returns the running row in <2s; the SPA polls the
+  detail + list pages every 2s / 5s while non-terminal rows are
+  visible. Removes the synchronous Railway-5-minute wall.
+  Implemented as the `_start_agent_run` → `_finish_agent_run` split
+  in `api/estimation_runs.py`, with `_finish_agent_run_in_bg`
+  opening a fresh DB connection inside the background task.
+- **First-class agent provenance.** Migration 034 adds
+  `provider` + `skill_name` columns to `estimation_runs` (backfilled
+  from `trace.summary` for pre-slice-2 agent runs). Surfaced as
+  chips on the list page and as compare-row inputs.
+- **UI pickers.** `RunOptionsPicker` (mode / provider / skill)
+  wired into the NewEstimationModal under an Advanced disclosure
+  (collapsed by default — the 90% paste-URL-and-go path is
+  untouched) and into EstimationDetail's re-run form. Both default
+  to the kind-appropriate values, so existing operator habits keep
+  working.
+- **A/B comparison.** New `/estimations/compare?ids=a,b,c` page
+  fetches each run via the existing GET endpoint and renders side-
+  by-side rows for mode/provider/skill/status/rent-range/cost/
+  iter-count/stop-reason. Entry points: "Compare with parent" link
+  on EstimationDetail when `parent_run_id` is set, and a multi-
+  select + Compare bar on EstimationList.
+- **Full toolkit access.** Already shipped in slice 1.5 via
+  `rental_estimator_full_v1` (13 tools, migration 032). Slice 2
+  just makes it pickable from the UI.
 
-### Phase 7 slice 2: Async + full toolkit + UI mode toggle
-Builds on slice 1.
-- Async execution: real `status='pending'/'running'` lifecycle with
-  a background worker and a polling endpoint. Removes the
-  synchronous HTTP wall-clock cap.
-- Expose the rest of the toolkit (`cluster_comparables`, the two
-  velocity tools, the visual layer) by adding skills that whitelist
-  them.
-- Frontend `/estimate` gets a mode toggle (`deterministic` /
-  `agent`), a provider picker (anthropic / gemini), and a skill
-  picker.
-- Third provider (OpenAI or Vertex AI service-account auth).
-- Per-skill A/B comparison view on `/estimations`.
+### Deferred (slice 2.5+)
+- **Crash recovery for in-process bg tasks.** Today
+  `scripts/sweep_stuck_running_runs.py` is a manual SQL/script
+  operation when Railway redeploys mid-run leaves rows stuck in
+  `'running'`. Productionising (cron-runnable Actions workflow or
+  pg LISTEN-based) is a follow-up.
+- **Worker-service refactor (only if usage scales).** If the app
+  ever opens beyond a single operator — multi-tenant access,
+  ClickUp bulk-estimate jobs, public sign-up — refactor the
+  in-process `BackgroundTasks` path into a dedicated Railway worker
+  service consuming a job queue. The `_start_agent_run` /
+  `_finish_agent_run` split introduced in slice 2 is the seam.
+  Until that point in-process is the cheaper, simpler default; a
+  container restart mid-run leaves a row stuck in `'running'`
+  which the sweep script cleans up.
 
 ## UI track (parallel, independent of analytical phases)
 

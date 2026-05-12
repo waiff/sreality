@@ -446,13 +446,20 @@ export const ping = async (): Promise<{ ok: boolean; count: number | null }> => 
 /* convention used by Supabase fetchers above.                                */
 /* -------------------------------------------------------------------------- */
 
-import { useMutation, type UseMutationResult } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  type UseMutationResult,
+  type UseQueryResult,
+} from '@tanstack/react-query';
 import {
   ApiError,
   createEstimation,
   getEstimation,
   listEstimations,
+  listSkills,
   previewListingUrl,
+  type Skill,
 } from './api';
 import type {
   CreateEstimationIn,
@@ -493,6 +500,22 @@ export const useUrlPreview = (): UseMutationResult<
   useMutation<ParseResult, ApiError, UrlPreviewVars>({
     mutationFn: ({ url, force_refresh }) =>
       previewListingUrl(url, { force_refresh }),
+  });
+
+/* Skills index for the RunOptionsPicker (Phase 7 slice 2). Cached for
+ * five minutes because operators rarely edit skill rows; the Settings
+ * page is the canonical edit surface and invalidates this key
+ * explicitly when it writes. */
+export const skillsKeys = {
+  all: ['skills'] as const,
+  list: () => ['skills', 'list'] as const,
+};
+
+export const useSkills = (): UseQueryResult<Skill[], ApiError> =>
+  useQuery<Skill[], ApiError>({
+    queryKey: skillsKeys.list(),
+    queryFn: () => listSkills().then((r) => r.data),
+    staleTime: 5 * 60 * 1000,
   });
 
 /* -------------------------------------------------------------------------- */

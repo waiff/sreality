@@ -237,6 +237,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "source_kind", "parse_confidence", "parse_confidence_per_field",
     "source_html",
     "subject_summary",
+    "provider", "skill_name",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -316,14 +317,21 @@ def create_estimation_run(
     sreality_client: "SrealityClient",
     llm_client: "LLMClient",
     body: s.CreateEstimationIn,
+    *,
+    background_tasks: Any = None,
 ) -> dict[str, Any]:
     """POST /estimations: resolve input, run the estimate, persist, return row.
 
     Synchronous deterministic mode goes straight to a terminal status —
-    'success' or 'failed' — in a single INSERT. Agent mode uses an
-    early-INSERT (status='running') so LLM costs can attribute via
-    `llm_calls.estimation_run_id` while the loop is in flight, then
-    UPDATEs to the terminal status.
+    'success' or 'failed' — in a single INSERT.
+
+    Agent mode INSERTs a `status='running'` row first so per-turn
+    `llm_calls.estimation_run_id` rows can attribute. When
+    `background_tasks` is supplied (HTTP path), the loop + terminal
+    UPDATE run in a FastAPI background task and the handler returns the
+    `running` row immediately. Without `background_tasks` (tests,
+    non-HTTP callers) the agent path runs synchronously in the same
+    request.
     """
     from api.estimate_yield import estimate_yield
 
@@ -342,10 +350,26 @@ def create_estimation_run(
     filters = _build_filters(body)
 
     if body.mode == "agent":
-        return _run_agent_path(
-            conn, sreality_client, llm_client, body,
-            resolution=resolution, target=target, filters=filters,
+        if background_tasks is None:
+            return _run_agent_path(
+                conn, sreality_client, llm_client, body,
+                resolution=resolution, target=target, filters=filters,
+            )
+        start = _start_agent_run(conn, body, resolution)
+        if isinstance(start, dict):
+            return start
+        run_id, skill, recorder = start
+        background_tasks.add_task(
+            _finish_agent_run_in_bg,
+            run_id=run_id,
+            skill=skill,
+            recorder=recorder,
+            body=body,
+            resolution=resolution,
+            target=target,
+            filters=filters,
         )
+        return _fetch_run(conn, run_id) or {}
 
     recorder = TraceRecorder()
 
@@ -401,6 +425,8 @@ def create_estimation_run(
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
         subject_summary=subject_summary,
+        provider=None,
+        skill_name=None,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -628,6 +654,8 @@ def _persist_failed_run(
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
         subject_summary=None,
+        provider=body.provider if body.mode == "agent" else None,
+        skill_name=body.skill if body.mode == "agent" else None,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -720,28 +748,25 @@ def _agent_summary_line(
     )
 
 
-def _run_agent_path(
+def _start_agent_run(
     conn: "psycopg.Connection",
-    sreality_client: "SrealityClient",
-    llm_client: "LLMClient",
     body: s.CreateEstimationIn,
-    *,
     resolution: _Resolution,
-    target: TargetSpec,
-    filters: ComparableFilters,
-) -> dict[str, Any]:
-    """Agent-mode dispatch. Inserts a 'running' row, drives the agent
-    loop, then UPDATEs to the terminal status. The early INSERT is what
-    lets `llm_calls.estimation_run_id` attribute every per-turn call."""
-    from api.agent import run_agent_estimation
+) -> tuple[int, Any, TraceRecorder] | dict[str, Any]:
+    """Load the skill and INSERT a `status='running'` row.
+
+    Returns `(run_id, skill, recorder)` on success — the caller drives
+    the agent loop from there. On `SkillNotFound` persists a failed row
+    directly and returns the row dict; callers should detect a dict
+    result and short-circuit (no loop to run).
+    """
     from api.skills import SkillNotFound, load_skill
 
     try:
         skill = load_skill(conn, body.skill)
     except SkillNotFound:
-        recorder = TraceRecorder()
         return _persist_failed_run(
-            conn, body=body, resolution=resolution, recorder=recorder,
+            conn, body=body, resolution=resolution, recorder=TraceRecorder(),
             error_msg=f"unknown skill: {body.skill!r}",
             extra_warnings=[],
         )
@@ -776,7 +801,27 @@ def _run_agent_path(
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
         subject_summary=None,
+        provider=body.provider,
+        skill_name=skill.name,
     )
+    return run_id, skill, recorder
+
+
+def _finish_agent_run(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
+    *,
+    run_id: int,
+    skill: Any,
+    recorder: TraceRecorder,
+    body: s.CreateEstimationIn,
+    resolution: _Resolution,
+    target: TargetSpec,
+    filters: ComparableFilters,
+) -> dict[str, Any]:
+    """Drive the agent loop, then UPDATE to the terminal status."""
+    from api.agent import run_agent_estimation
 
     try:
         agent_result = run_agent_estimation(
@@ -829,6 +874,94 @@ def _run_agent_path(
         subject_summary=subject_summary,
     )
     return _fetch_run(conn, run_id) or {}
+
+
+def _run_agent_path(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
+    body: s.CreateEstimationIn,
+    *,
+    resolution: _Resolution,
+    target: TargetSpec,
+    filters: ComparableFilters,
+) -> dict[str, Any]:
+    """Synchronous agent path — INSERT(running), drive the loop, UPDATE.
+
+    Used by tests and by callers that don't supply FastAPI's
+    BackgroundTasks. The HTTP path schedules `_finish_agent_run_in_bg`
+    on the request's `BackgroundTasks` so the response returns
+    immediately with `status='running'`.
+    """
+    start = _start_agent_run(conn, body, resolution)
+    if isinstance(start, dict):
+        return start
+    run_id, skill, recorder = start
+    return _finish_agent_run(
+        conn, sreality_client, llm_client,
+        run_id=run_id, skill=skill, recorder=recorder,
+        body=body, resolution=resolution, target=target, filters=filters,
+    )
+
+
+def _finish_agent_run_in_bg(
+    *,
+    run_id: int,
+    skill: Any,
+    recorder: TraceRecorder,
+    body: s.CreateEstimationIn,
+    resolution: _Resolution,
+    target: TargetSpec,
+    filters: ComparableFilters,
+) -> None:
+    """FastAPI BackgroundTasks wrapper around `_finish_agent_run`.
+
+    The HTTP request's `psycopg.Connection` doesn't outlive the response,
+    so we open a fresh connection (and rebind a fresh `LLMClient`) here
+    and run the agent loop in it. Crashes get caught and written to the
+    run row as `status='failed'` so the operator can see what happened —
+    they cannot bubble back to a caller because the HTTP response has
+    already been returned.
+
+    SCALE NOTE — when this app outgrows the single-operator profile
+    (multi-tenant access, ClickUp bulk-estimate jobs, public sign-up),
+    refactor this in-process pattern into a dedicated Railway worker
+    service: a second container consuming a job queue (or polling
+    `estimation_runs` for `status='pending'`) and calling
+    `_finish_agent_run` with its own connection. The split between
+    `_start_agent_run` and `_finish_agent_run` above is the seam — the
+    worker would simply pick up where this wrapper leaves off. Until
+    that point in-process BackgroundTasks is the cheaper, simpler
+    default; a container restart mid-run leaves a row stuck in
+    `'running'` which `scripts/sweep_stuck_running_runs.py` cleans up.
+    """
+    from api.dependencies import get_providers, get_sreality_client
+    from api.llm_client import LLMClient
+    from scraper import db
+
+    conn = db.connect()
+    try:
+        sreality_client = get_sreality_client()
+        llm_client = LLMClient(conn, providers=get_providers())
+        _finish_agent_run(
+            conn, sreality_client, llm_client,
+            run_id=run_id, skill=skill, recorder=recorder,
+            body=body, resolution=resolution, target=target, filters=filters,
+        )
+    except Exception as exc:
+        LOG.exception("background agent run %s crashed", run_id)
+        try:
+            _update_run_terminal(
+                conn, run_id,
+                status="failed",
+                error_message=f"bg-crash: {type(exc).__name__}: {exc}"[:1000],
+            )
+        except Exception:
+            LOG.exception(
+                "could not record background failure for run %s", run_id,
+            )
+    finally:
+        conn.close()
 
 
 def _update_run_terminal(

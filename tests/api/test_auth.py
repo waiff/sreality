@@ -59,7 +59,7 @@ def client(monkeypatch):
         return {"data": {"categories": {}, "from_cache": {}},
                 "metadata": {"tool": "find_anchor_amenities"}}
 
-    def fake_create_run(conn, c, llm_client, body):
+    def fake_create_run(conn, c, llm_client, body, **_kw):
         return {"id": 1, "status": "success"}
 
     def fake_get_run(conn, run_id):

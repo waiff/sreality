@@ -26,11 +26,27 @@ import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { ApiError, previewListingUrl } from '@/lib/api';
 import { submitEstimation } from '@/lib/queries';
+import {
+  RunOptionsPicker,
+  type RunOptionsValue,
+} from '@/components/estimation/RunOptionsPicker';
 import type {
   CreateEstimationIn,
   EstimationRun,
   ParseResult,
 } from '@/lib/types';
+
+const DEFAULT_RUN_OPTS_RENT: RunOptionsValue = {
+  mode: 'agent',
+  provider: 'anthropic',
+  skill: 'rental_estimator_v1',
+};
+
+const DEFAULT_RUN_OPTS_SALE: RunOptionsValue = {
+  mode: 'deterministic',
+  provider: 'anthropic',
+  skill: 'rental_estimator_v1',
+};
 
 /* -------------------------------------------------------------------------- */
 /* Context — wires the CTA button (Shell) and the "+ New estimation"          */
@@ -77,13 +93,17 @@ export function NewEstimationProvider({ children }: { children: ReactNode }) {
 
 function NewEstimationModal({ onClose }: { onClose: () => void }) {
   const [url, setUrl] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // null = use the preview-kind-driven default; non-null = operator
+  // explicitly picked something in the Advanced disclosure and we honour it.
+  const [runOpts, setRunOpts] = useState<RunOptionsValue | null>(null);
   const navigate = useNavigate();
 
   const previewMut = useMutation<ParseResult, ApiError, string>({
     mutationFn: (url) => previewListingUrl(url),
   });
   const submitMut = useMutation<EstimationRun, ApiError, ParseResult>({
-    mutationFn: (preview) => submitEstimation(buildPayload(preview)),
+    mutationFn: (preview) => submitEstimation(buildPayload(preview, runOpts)),
     onSuccess: (run) => {
       onClose();
       navigate(`/estimation/${run.id}`);
@@ -192,6 +212,28 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
             We scrape the listing, kick off the estimate, and open the run.
             You can adjust the spec and re-run from the detail page.
           </p>
+
+          <div className="mt-5 pt-4 border-t border-[var(--color-rule)]">
+            <button
+              type="button"
+              onClick={() => {
+                if (runOpts == null) setRunOpts(DEFAULT_RUN_OPTS_RENT);
+                setAdvancedOpen((v) => !v);
+              }}
+              disabled={pending}
+              className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors disabled:opacity-40"
+            >
+              {advancedOpen ? '— Advanced' : '+ Advanced (mode, provider, skill)'}
+            </button>
+            {advancedOpen && runOpts && (
+              <div className="mt-3">
+                <RunOptionsPicker
+                  value={runOpts}
+                  onChange={setRunOpts}
+                />
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -202,13 +244,18 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function buildPayload(preview: ParseResult): CreateEstimationIn {
+function buildPayload(
+  preview: ParseResult,
+  runOpts: RunOptionsValue | null,
+): CreateEstimationIn {
   const kind = previewToEstimateKind(preview);
-  const mode = kind === 'rent' ? 'agent' : 'deterministic';
+  const opts =
+    runOpts ?? (kind === 'rent' ? DEFAULT_RUN_OPTS_RENT : DEFAULT_RUN_OPTS_SALE);
   return {
     source: 'ui',
-    mode,
-    provider: 'anthropic',
+    mode: opts.mode,
+    provider: opts.provider,
+    skill: opts.skill,
     population: 'active',
     estimate_kind: kind,
     url: preview.source_url,

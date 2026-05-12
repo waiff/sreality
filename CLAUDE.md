@@ -244,14 +244,37 @@ separate dev/staging database. Treat every operation accordingly.
 12. **`estimation_runs` is the single source of truth for every
     estimation.** Every UI/API/ClickUp/agent invocation lands here.
     Synchronous deterministic mode INSERTs once with a terminal
-    `status` (`'success'` or `'failed'`); the schema reserves
-    `'pending'`/`'running'` for U4's async agent without forcing
-    today's code to write twice. Failed runs still persist a row —
+    `status` (`'success'` or `'failed'`). Agent mode (Phase 7 slice 2)
+    INSERTs a `status='running'` row synchronously and finishes the
+    loop on FastAPI BackgroundTasks; the HTTP POST returns the
+    running row in <2s and the SPA polls until the row reaches a
+    terminal status. The split lives in `api.estimation_runs._start_agent_run`
+    (INSERT) → `_finish_agent_run` (loop + UPDATE) →
+    `_finish_agent_run_in_bg` (the BackgroundTasks wrapper that
+    opens a fresh DB connection). Failed runs still persist a row —
     the row IS the audit trail; the endpoint returns HTTP 200 with
     `status='failed'` and `error_message` set. Re-runs INSERT a new
     row with `parent_run_id` set; the original is immutable. Legal
     `source` values today: `'ui'`, `'api'`, `'clickup'` (CHECK
     constraint, not enum — adding more is a single ALTER).
+    Provider + skill_name are first-class columns (migration 034),
+    backfilled from `trace.summary` for slice-1 rows; deterministic
+    runs leave both NULL.
+13. **Container restarts can orphan running agent rows.** The
+    in-process BackgroundTasks pattern from rule 12 is fine for a
+    single operator but does not survive a Railway redeploy that
+    happens mid-loop — the bg task dies and its row stays
+    `status='running'`. Run
+    `python scripts/sweep_stuck_running_runs.py` manually to flip
+    those rows to `status='failed'` so the SPA's polling stops
+    spinning on them. Default cutoff is 10 minutes (longer than the
+    longest skill's `wall_clock_timeout_s`); pass `--minutes N` to
+    override and `--dry-run` to inspect without writing. When the
+    app outgrows the single-operator profile (multi-tenant access,
+    ClickUp bulk-estimate jobs, public sign-up), refactor this
+    in-process pattern into a dedicated Railway worker service —
+    the seam is the `_start_agent_run` / `_finish_agent_run` split
+    in `api/estimation_runs.py`.
 
 ## Toolkit and API rules
 

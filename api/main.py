@@ -10,7 +10,7 @@ import os
 from datetime import timedelta
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import curation
@@ -451,12 +451,16 @@ def post_estimations_preview(
 @app.post("/estimations")
 def post_estimations(
     body: s.CreateEstimationIn,
+    background_tasks: BackgroundTasks,
     conn: Any = Depends(deps.get_db_conn),
     client: Any = Depends(deps.get_sreality_client),
     llm_client: Any = Depends(deps.get_llm_client),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return create_estimation_run(conn, client, llm_client, body)
+    return create_estimation_run(
+        conn, client, llm_client, body,
+        background_tasks=background_tasks,
+    )
 
 
 @app.get("/estimations/preview")

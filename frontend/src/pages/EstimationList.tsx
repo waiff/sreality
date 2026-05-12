@@ -1,5 +1,5 @@
-import { useMemo } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useMemo, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import {
   estimationKeys,
@@ -26,8 +26,12 @@ const PAGE_SIZE = 50;
 const SOURCES: ReadonlyArray<EstimationSource> = ['ui', 'api', 'clickup'];
 const STATUSES: ReadonlyArray<EstimationStatus> = ['success', 'failed', 'pending', 'running'];
 
+const MAX_COMPARE = 3;
+
 export default function EstimationList() {
   const [params, setParams] = useSearchParams();
+  const navigate = useNavigate();
+  const [selected, setSelected] = useState<Set<number>>(() => new Set());
 
   const source = (params.get('source') as EstimationSource | null) ?? null;
   const status = (params.get('status') as EstimationStatus | null) ?? null;
@@ -49,6 +53,17 @@ export default function EstimationList() {
     queryFn: () => fetchEstimationsList(queryParams),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
+    // Cheap auto-refresh while any visible row is still running so the
+    // list reflects the async agent path without manual reload. Polls
+    // every 5s (less aggressive than the detail page since a list update
+    // is heavier) and stops automatically when no rows are non-terminal.
+    refetchInterval: (q) => {
+      const rows = q.state.data?.data;
+      const anyRunning = rows?.some(
+        (r) => r.status === 'pending' || r.status === 'running',
+      );
+      return anyRunning ? 5_000 : false;
+    },
   });
 
   const setFilter = (key: 'source' | 'status', value: string | null) => {
@@ -66,6 +81,24 @@ export default function EstimationList() {
     setParams(sp, { replace: false });
   };
 
+  const toggleSelect = (id: number) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else if (next.size < MAX_COMPARE) {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const openCompare = () => {
+    if (selected.size < 2) return;
+    const ids = [...selected].join(',');
+    navigate(`/estimations/compare?ids=${ids}`);
+  };
+
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
       <Header />
@@ -77,6 +110,15 @@ export default function EstimationList() {
           onStatus={(v) => setFilter('status', v)}
         />
       </div>
+
+      {selected.size > 0 && (
+        <CompareBar
+          count={selected.size}
+          max={MAX_COMPARE}
+          onClear={() => setSelected(new Set())}
+          onCompare={openCompare}
+        />
+      )}
 
       <div className="mt-6">
         {listQ.isLoading && !listQ.data ? (
@@ -93,8 +135,59 @@ export default function EstimationList() {
             total={listQ.data.total}
             page={page}
             onPage={setPage}
+            selected={selected}
+            onToggleSelect={toggleSelect}
+            maxSelected={MAX_COMPARE}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+function CompareBar({
+  count,
+  max,
+  onClear,
+  onCompare,
+}: {
+  count: number;
+  max: number;
+  onClear: () => void;
+  onCompare: () => void;
+}) {
+  const canCompare = count >= 2;
+  return (
+    <div className="mt-4 flex items-center justify-between gap-3 px-4 py-2 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)]">
+      <p className="text-[0.8rem] text-[var(--color-copper)]">
+        {count}/{max} selected for comparison
+        {!canCompare && (
+          <span className="ml-2 text-[var(--color-ink-3)]">
+            (pick at least 2)
+          </span>
+        )}
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-[0.78rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] transition-colors"
+        >
+          Clear
+        </button>
+        <button
+          type="button"
+          onClick={onCompare}
+          disabled={!canCompare}
+          className={[
+            'px-3 py-1.5 text-[0.8rem] rounded-[var(--radius-sm)] border transition-colors',
+            canCompare
+              ? 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)]'
+              : 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed',
+          ].join(' ')}
+        >
+          Compare
+        </button>
       </div>
     </div>
   );
@@ -221,11 +314,17 @@ function RunsTable({
   total,
   page,
   onPage,
+  selected,
+  onToggleSelect,
+  maxSelected,
 }: {
   rows: EstimationRun[];
   total: number;
   page: number;
   onPage: (n: number) => void;
+  selected: Set<number>;
+  onToggleSelect: (id: number) => void;
+  maxSelected: number;
 }) {
   const totalPages = total > 0 ? Math.ceil(total / PAGE_SIZE) : 1;
   const start = (page - 1) * PAGE_SIZE + 1;
@@ -237,6 +336,7 @@ function RunsTable({
         <table className="w-full text-sm">
           <thead className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
             <tr>
+              <Th align="left">&nbsp;</Th>
               <Th align="left">When</Th>
               <Th align="left">Source</Th>
               <Th align="left">Kind</Th>
@@ -249,7 +349,15 @@ function RunsTable({
           </thead>
           <tbody>
             {rows.map((r) => (
-              <Row key={r.id} run={r} />
+              <Row
+                key={r.id}
+                run={r}
+                selected={selected.has(r.id)}
+                onToggleSelect={() => onToggleSelect(r.id)}
+                selectableMaxedOut={
+                  !selected.has(r.id) && selected.size >= maxSelected
+                }
+              />
             ))}
           </tbody>
         </table>
@@ -280,10 +388,30 @@ function Th({ align, children }: { align: 'left' | 'right'; children: React.Reac
   );
 }
 
-function Row({ run }: { run: EstimationRun }) {
+function Row({
+  run,
+  selected,
+  onToggleSelect,
+  selectableMaxedOut,
+}: {
+  run: EstimationRun;
+  selected: boolean;
+  onToggleSelect: () => void;
+  selectableMaxedOut: boolean;
+}) {
   const compsCount = run.comparables_used?.length ?? null;
   return (
     <tr className="border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors">
+      <td className="px-4 py-2.5 align-middle">
+        <input
+          type="checkbox"
+          checked={selected}
+          disabled={selectableMaxedOut}
+          onChange={onToggleSelect}
+          aria-label={`Select run #${run.id} for comparison`}
+          className="accent-[var(--color-copper)] disabled:opacity-40 disabled:cursor-not-allowed"
+        />
+      </td>
       <td
         className="px-4 py-2.5 align-middle text-[var(--color-ink-2)] tabular-nums"
         title={fmtAbsolute(run.created_at)}
@@ -296,7 +424,7 @@ function Row({ run }: { run: EstimationRun }) {
         </Link>
       </td>
       <td className="px-4 py-2.5 align-middle">
-        <SourceBadge source={run.source} />
+        <SourceCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle">
         <KindBadge kind={run.estimate_kind} />
@@ -365,6 +493,26 @@ function SourceBadge({ source }: { source: EstimationSource }) {
     <span className="inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.16em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper)] text-[var(--color-ink-3)] border border-[var(--color-rule)]">
       {source}
     </span>
+  );
+}
+
+/* Source column cell. Stacks the source badge on top of agent provenance
+ * chips (provider · skill_name) when the run is agent-mode. Deterministic
+ * runs and pre-slice-2 runs that didn't backfill cleanly render with only
+ * the source badge. Phase 7 slice 2. */
+function SourceCell({ run }: { run: EstimationRun }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <SourceBadge source={run.source} />
+      {run.mode === 'agent' && (run.provider || run.skill_name) && (
+        <span
+          className="font-mono text-[0.65rem] text-[var(--color-ink-4)] truncate"
+          title={`${run.provider ?? '—'} · ${run.skill_name ?? '—'}`}
+        >
+          {run.provider ?? '?'} · {run.skill_name ?? '?'}
+        </span>
+      )}
+    </div>
   );
 }
 

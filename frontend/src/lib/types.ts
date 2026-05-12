@@ -338,6 +338,13 @@ export interface EstimationRun {
    * input_sreality_id was set. Null on legacy runs and on runs
    * where no listing was resolved (spec-only inputs, parse failures). */
   subject_summary: SubjectSummary | null;
+  /* Migration 034 — first-class agent provenance. Both null on
+   * deterministic runs and on pre-slice-2 agent runs that crashed
+   * before logging the summary line (backfill couldn't recover
+   * them). Renderers should treat null as "unknown" rather than
+   * crashing or hiding the column entirely. */
+  provider: EstimationProvider | null;
+  skill_name: string | null;
 }
 
 /* Filter half of the POST /estimations body — mirrors ComparableFilters
