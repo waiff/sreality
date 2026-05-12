@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-11 13:10 UTC_
+_Last refreshed: 2026-05-12 11:11 UTC_
 
 **Branch:** `claude/fix-street-dropdown-M0gpC`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-11 13:10 UTC_
 **Last 10 commits:**
 
 ```
+7cdc7f1 Merge main into claude/fix-street-dropdown-M0gpC
+7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
+ab6c923 roadmap: refresh auto-status block
+869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
 2ff7dba Merge main into claude/fix-street-dropdown-M0gpC
 b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv978
 7476a00 Merge main into claude/fix-estimate-search-params-mv978
 0a2e680 roadmap: refresh auto-status block
 3e59110 estimate: hand cohort filters to the agent, surface its strategy in the trace
 3d32614 Merge pull request #45 from waiff/claude/review-unmerged-commits-HCsoE
-672902b Merge remote-tracking branch 'origin/main' into claude/review-unmerged-commits-HCsoE
-07a4e9d roadmap: refresh auto-status block
-1f16afd Region: render Mapy.cz suggestions by name, not result-class label
-dfaea3e roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
