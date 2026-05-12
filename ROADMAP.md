@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 15:16 UTC_
+_Last refreshed: 2026-05-12 15:35 UTC_
 
-**Branch:** `claude/redesign-estimation-workflow-XJOiN`
+**Branch:** `claude/review-roadmap-scope-BHt5w`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-12 15:16 UTC_
 **Last 10 commits:**
 
 ```
+2ee3f67 Merge pull request #56 from waiff/claude/redesign-estimation-workflow-XJOiN
+4ebf817 roadmap: refresh auto-status block
 37593e5 frontend: estimation popup CTA + nav redesign
 90f6be1 Merge pull request #55 from waiff/claude/check-skill-access-o17oY
 9941327 Merge remote-tracking branch 'origin/main' into claude/check-skill-access-o17oY
@@ -24,8 +26,6 @@ d2645b2 frontend: group controls + add Settings-page light/dark toggle
 e350c67 Merge main into claude/fix-street-dropdown-M0gpC
 d3034c4 Merge main into claude/fix-street-dropdown-M0gpC
 6483fcc Merge pull request #54 from waiff/claude/scope-next-phase-IdGZq
-4971fca roadmap: refresh auto-status block
-24d209e Merge remote-tracking branch 'origin/main' into claude/scope-next-phase-IdGZq
 ```
 
 <!-- END AUTO-STATUS -->
