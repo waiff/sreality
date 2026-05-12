@@ -66,7 +66,12 @@ class AnthropicProvider:
         if system:
             kwargs["system"] = system
         if tools:
-            kwargs["tools"] = [_tool_to_anthropic(t) for t in tools]
+            tool_dicts = [_tool_to_anthropic(t) for t in tools]
+            # One cache breakpoint at the end of tools captures
+            # system + tools as a single cached prefix; from turn 2
+            # of an agent loop onward this is a guaranteed cache hit.
+            tool_dicts[-1]["cache_control"] = {"type": "ephemeral"}
+            kwargs["tools"] = tool_dicts
 
         try:
             raw = client.messages.create(**kwargs)

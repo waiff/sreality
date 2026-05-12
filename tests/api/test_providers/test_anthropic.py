@@ -174,6 +174,35 @@ def test_cache_tokens_extracted(patch_anthropic):
     assert out.usage.cache_write_tokens == 5
 
 
+def test_cache_control_on_last_tool(patch_anthropic):
+    sdk = patch_anthropic(_RawResponse(text="ok"))
+    p = AnthropicProvider()
+    p.complete(
+        system="be terse",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[
+            ToolSchema(name="first", description="d1", input_schema={}),
+            ToolSchema(name="second", description="d2", input_schema={}),
+        ],
+        model="claude-sonnet-4-5",
+    )
+    sent_tools = sdk.calls[0]["tools"]
+    assert "cache_control" not in sent_tools[0]
+    assert sent_tools[-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_no_cache_control_when_tools_empty(patch_anthropic):
+    sdk = patch_anthropic(_RawResponse(text="ok"))
+    p = AnthropicProvider()
+    p.complete(
+        system="be terse",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[],
+        model="claude-sonnet-4-5",
+    )
+    assert "tools" not in sdk.calls[0]
+
+
 def test_missing_api_key_raises():
     p = AnthropicProvider(api_key=None)
     with pytest.raises(Exception, match="ANTHROPIC_API_KEY"):
