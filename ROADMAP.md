@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 04:54 UTC_
+_Last refreshed: 2026-05-12 11:08 UTC_
 
 **Branch:** `claude/scope-next-phase-IdGZq`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-12 04:54 UTC_
 **Last 10 commits:**
 
 ```
+f32b9f7 agent: expose phase 3b/4b/6 toolkit via rental_estimator_full_v1
 2b266a2 roadmap: refresh auto-status block
 d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
 7d08ebb roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
 1bdeffd estimate: subject summary + comparables map popup
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
 ab6c923 roadmap: refresh auto-status block
-869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
 ```
 
 <!-- END AUTO-STATUS -->
