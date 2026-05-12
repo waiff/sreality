@@ -1,0 +1,27 @@
+-- 032_drop_unused_raw_json_gin.sql
+-- Drop the GIN index on listings.raw_json. It was created in
+-- 001_initial.sql ("just in case we want to query the source JSON")
+-- and has accumulated a 1.69 GB on-disk footprint without ever being
+-- used: pg_stat_user_indexes shows lifetime idx_scan = 0. No frontend
+-- page, no API endpoint, and no toolkit function reads through it —
+-- analytical queries all go through the typed columns we promote in
+-- migrations 016 / 022 / etc.
+--
+-- The reason we are removing it now: the daily scraper's
+-- `db.touch_listings` step runs an UPDATE that sets `last_seen_at`
+-- and `is_active` on ~13k rows per category in 1000-id chunks.
+-- Both of those columns are indexed, which defeats Postgres's HOT
+-- (Heap-Only Tuple) optimisation, so each updated row writes a new
+-- tuple version and every index on the table — including this 1.69
+-- GB GIN — has to be re-keyed for that row. pg_stat_statements
+-- shows the chunked UPDATE creeping up to mean 30s / max 116s, and
+-- the 2026-05-10 + 2026-05-11 scrape runs both crashed at the
+-- Supabase pooler's 2-minute statement timeout
+-- (postgres log: "canceling statement due to statement timeout"
+-- at 2026-05-12 00:21:58 UTC).
+--
+-- Dropping the index reclaims ~1.69 GB and removes the dominant
+-- per-row write cost. If a future analytical workflow needs to
+-- search inside raw_json, recreate the index in a new migration.
+
+drop index if exists listings_raw_json_idx;
