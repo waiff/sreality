@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 13:53 UTC_
+_Last refreshed: 2026-05-12 15:16 UTC_
 
-**Branch:** `claude/check-skill-access-o17oY`
+**Branch:** `claude/redesign-estimation-workflow-XJOiN`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-12 13:53 UTC_
 **Last 10 commits:**
 
 ```
+37593e5 frontend: estimation popup CTA + nav redesign
+90f6be1 Merge pull request #55 from waiff/claude/check-skill-access-o17oY
+9941327 Merge remote-tracking branch 'origin/main' into claude/check-skill-access-o17oY
 d2645b2 frontend: group controls + add Settings-page light/dark toggle
-d54803a roadmap: refresh auto-status block
-d2851e1 Merge pull request #52 from waiff/claude/add-new-skill-4zWHz
-7e886b7 skills: add interface-design Claude Code skill
-d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
-7d08ebb roadmap: refresh auto-status block
-8ce97f0 estimate: per-run provider, rent default, delisted-only cohort
-6a5ad8d Merge pull request #49 from waiff/claude/map-comparables-popup-jVns6
-37e47cb roadmap: refresh auto-status block
-1bdeffd estimate: subject summary + comparables map popup
+866e21a Merge pull request #46 from waiff/claude/fix-street-dropdown-M0gpC
+e350c67 Merge main into claude/fix-street-dropdown-M0gpC
+d3034c4 Merge main into claude/fix-street-dropdown-M0gpC
+6483fcc Merge pull request #54 from waiff/claude/scope-next-phase-IdGZq
+4971fca roadmap: refresh auto-status block
+24d209e Merge remote-tracking branch 'origin/main' into claude/scope-next-phase-IdGZq
 ```
 
 <!-- END AUTO-STATUS -->
