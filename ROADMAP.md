@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 21:09 UTC_
+_Last refreshed: 2026-05-12 21:27 UTC_
 
 **Branch:** `claude/add-building-paste-feature-NmQIy`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-12 21:09 UTC_
 **Last 10 commits:**
 
 ```
+182fc2a building: renumber 034 -> 035 + apply migration
 40ad67d building: Phase B0 schema + scaffolding (migration not yet applied)
 d2a2e30 roadmap: refresh auto-status block
 d6396fe Merge pull request #57 from waiff/claude/review-roadmap-scope-BHt5w
@@ -25,7 +26,6 @@ f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
 c96af29 roadmap: refresh auto-status block
 2ee3f67 Merge pull request #56 from waiff/claude/redesign-estimation-workflow-XJOiN
 4ebf817 roadmap: refresh auto-status block
-37593e5 frontend: estimation popup CTA + nav redesign
 ```
 
 <!-- END AUTO-STATUS -->
