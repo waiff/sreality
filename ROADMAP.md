@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 20:30 UTC_
+_Last refreshed: 2026-05-12 21:09 UTC_
 
 **Branch:** `claude/add-building-paste-feature-NmQIy`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 33 files, latest `033_browse_stats_tag_ids.sql`.
+**Migrations on disk:** 34 files, latest `035_building_runs.sql`.
 
 **Last 10 commits:**
 
 ```
+40ad67d building: Phase B0 schema + scaffolding (migration not yet applied)
 d2a2e30 roadmap: refresh auto-status block
 d6396fe Merge pull request #57 from waiff/claude/review-roadmap-scope-BHt5w
 f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
@@ -25,7 +26,6 @@ c96af29 roadmap: refresh auto-status block
 2ee3f67 Merge pull request #56 from waiff/claude/redesign-estimation-workflow-XJOiN
 4ebf817 roadmap: refresh auto-status block
 37593e5 frontend: estimation popup CTA + nav redesign
-90f6be1 Merge pull request #55 from waiff/claude/check-skill-access-o17oY
 ```
 
 <!-- END AUTO-STATUS -->
@@ -233,7 +233,7 @@ case on top. Full description under "Building decomposition track"
 below.
 
 Slice scope:
-- Migration 034: `building_runs` parent table; `building_run_id` +
+- Migration 035: `building_runs` parent table; `building_run_id` +
   `building_unit_id` columns on `estimation_runs`.
 - `api/building_runs.py` module + Pydantic schemas + read endpoints
   (`GET /buildings`, `GET /buildings/{id}`). One minimal `POST
@@ -548,7 +548,7 @@ Schedule, Cost Stack (with VAT splits), Revenue & P&L, Returns.
 ### Phase B0: Schema + scaffolding (next — active)
 
 Pure plumbing. No agent changes, no UI changes beyond type stubs.
-- Migration 034 (`034_building_runs.sql`): new `building_runs`
+- Migration 035 (`035_building_runs.sql`): new `building_runs`
   parent table; `building_run_id` (FK) + `building_unit_id` (text)
   columns on `estimation_runs`. Status lifecycle: `pending` →
   `extracting` → `awaiting_input` → `estimating` → `success` |

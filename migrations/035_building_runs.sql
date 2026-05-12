@@ -1,4 +1,10 @@
--- 034_building_runs.sql
+-- 035_building_runs.sql
+--
+-- (Originally drafted as 034; renumbered to 035 because slot 034 was
+-- claimed by 034_estimation_runs_provider_skill.sql on
+-- claude/review-roadmap-scope-BHt5w, which was applied to the live
+-- DB before this migration. Renumbered before apply; safe coexist —
+-- the two migrations touch disjoint columns on estimation_runs.)
 --
 -- Parent grouping for the "paste a whole-building listing → decompose
 -- into apartment units → estimate each → roll up + business case"
