@@ -3,9 +3,9 @@ import type { Confidence } from '@/lib/types';
 
 /* Temporary review surface for the ConfidenceIndicator component
  * (estimation-5 Part C1 design gate). Renders the indicator at every
- * defined confidence level and in the surrounding chrome it'll live
- * in once Part C2-4 wires it into EstimateForm. Delete this file +
- * the route in routes.tsx once the icon is in real use. */
+ * defined confidence level and in the surrounding chrome it would
+ * sit in on an editable spec form. Delete this file + the route in
+ * routes.tsx once the icon is in real use. */
 
 type Row = {
   confidence: Confidence | null;
@@ -42,8 +42,7 @@ export default function DevConfidencePreview() {
       </header>
 
       {/* In-context preview: how the indicator looks next to the
-          uppercase tracked-out FieldHeader label that EstimateForm
-          uses today. */}
+          uppercase tracked-out FieldHeader label spec forms use. */}
       <section className="mb-10">
         <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium mb-3">
           In-context (uppercase tracked label · indicator · input)

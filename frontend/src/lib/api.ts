@@ -16,7 +16,6 @@ import type {
   EstimationRun,
   ListingSummaryBatchRow,
   ParseResult,
-  PreviewResponse,
   SourceKind,
 } from './types';
 
@@ -162,14 +161,6 @@ export const apiPost = <T>(
 ): Promise<T> => request<T>(path, { method: 'POST', json: body, signal });
 
 /* ----- estimations ------------------------------------------------------- */
-
-// TODO(estimation-5 Part B): delete `previewListing` + the
-// `fetchEstimationPreview` re-export in lib/queries.ts once
-// UrlScrapeStep.tsx is migrated to previewListingUrl + useUrlPreview.
-// The new POST /estimations/preview routes sreality through the same
-// dispatcher, so the legacy GET endpoint becomes dead code at that point.
-export const previewListing = (url: string): Promise<PreviewResponse> =>
-  request<PreviewResponse>('/estimations/preview', { query: { url } });
 
 /* POST /estimations/preview — generic URL parser (sreality fast path
  * + LLM-driven per-source parser for everything else, dispatched on
