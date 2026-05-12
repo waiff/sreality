@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 11:08 UTC_
+_Last refreshed: 2026-05-12 11:15 UTC_
 
-**Branch:** `claude/scope-next-phase-IdGZq`
+**Branch:** `claude/fix-street-dropdown-M0gpC`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-12 11:08 UTC_
 **Last 10 commits:**
 
 ```
-f32b9f7 agent: expose phase 3b/4b/6 toolkit via rental_estimator_full_v1
-2b266a2 roadmap: refresh auto-status block
+d3034c4 Merge main into claude/fix-street-dropdown-M0gpC
+4971fca roadmap: refresh auto-status block
+ab1ea40 Merge pull request #51 from waiff/claude/review-agent-implementation-RHIlb
+d2851e1 Merge pull request #52 from waiff/claude/add-new-skill-4zWHz
+7e886b7 skills: add interface-design Claude Code skill
+e4f0335 agent: opt into Anthropic prompt caching on system + tools
+3883b62 roadmap: refresh auto-status block
 d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
 7d08ebb roadmap: refresh auto-status block
 8ce97f0 estimate: per-run provider, rent default, delisted-only cohort
-6a5ad8d Merge pull request #49 from waiff/claude/map-comparables-popup-jVns6
-37e47cb roadmap: refresh auto-status block
-1bdeffd estimate: subject summary + comparables map popup
-7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
-ab6c923 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
