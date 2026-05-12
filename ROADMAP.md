@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 04:59 UTC_
+_Last refreshed: 2026-05-12 11:07 UTC_
 
 **Branch:** `claude/review-agent-implementation-RHIlb`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-12 04:59 UTC_
 **Last 10 commits:**
 
 ```
+e4f0335 agent: opt into Anthropic prompt caching on system + tools
+3883b62 roadmap: refresh auto-status block
 d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
 7d08ebb roadmap: refresh auto-status block
 8ce97f0 estimate: per-run provider, rent default, delisted-only cohort
@@ -24,8 +26,6 @@ d370e68 Merge pull request #50 from waiff/claude/agent-tools-configuration-hcQQe
 1bdeffd estimate: subject summary + comparables map popup
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
 ab6c923 roadmap: refresh auto-status block
-869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
-b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv978
 ```
 
 <!-- END AUTO-STATUS -->
