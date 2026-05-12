@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 18:55 UTC_
+_Last refreshed: 2026-05-12 20:09 UTC_
 
-**Branch:** `claude/review-roadmap-scope-BHt5w`
+**Branch:** `claude/add-building-paste-feature-NmQIy`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-12 18:55 UTC_
 **Last 10 commits:**
 
 ```
+d6396fe Merge pull request #57 from waiff/claude/review-roadmap-scope-BHt5w
+f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
 9e8574c roadmap: refresh auto-status block
 71582f7 frontend: U2.6 curation UI (collections, tags, notes)
 c96af29 roadmap: refresh auto-status block
@@ -24,8 +26,6 @@ c96af29 roadmap: refresh auto-status block
 37593e5 frontend: estimation popup CTA + nav redesign
 90f6be1 Merge pull request #55 from waiff/claude/check-skill-access-o17oY
 9941327 Merge remote-tracking branch 'origin/main' into claude/check-skill-access-o17oY
-d2645b2 frontend: group controls + add Settings-page light/dark toggle
-866e21a Merge pull request #46 from waiff/claude/fix-street-dropdown-M0gpC
 ```
 
 <!-- END AUTO-STATUS -->
