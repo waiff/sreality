@@ -136,9 +136,9 @@ export function NumberCell({
 
 /* -------------------------------------------------------------------------- */
 /* TriRow — any / yes / no segmented control on a single label row. Used     */
-/* by Filters.tsx and EstimateForm.tsx with structurally identical string     */
-/* unions; the generic <T extends TriValue> keeps each caller's narrower      */
-/* type intact at the boundary.                                               */
+/* by Filters.tsx (and any future spec form) with structurally identical      */
+/* string unions; the generic <T extends TriValue> keeps each caller's        */
+/* narrower type intact at the boundary.                                      */
 /* -------------------------------------------------------------------------- */
 
 const TRI_OPTS: ReadonlyArray<{ value: TriValue; label: string }> = [

@@ -4,12 +4,11 @@ import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
 import Region from './pages/Region';
 import Health from './pages/Health';
-import Estimate from './pages/Estimate';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
 import Settings from './pages/Settings';
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
-// once design is approved and the indicator is in real use in EstimateForm.
+// once design is approved and the indicator is in real use.
 import DevConfidencePreview from './pages/DevConfidencePreview';
 
 export const routes: RouteObject[] = [
@@ -23,7 +22,7 @@ export const routes: RouteObject[] = [
       { path: 'listing/:sreality_id', element: <ListingDetail /> },
       { path: 'region', element: <Region /> },
       { path: 'health', element: <Health /> },
-      { path: 'estimate', element: <Estimate /> },
+      { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList /> },
       { path: 'estimation/:id', element: <EstimationDetail /> },
       { path: 'settings', element: <Settings /> },

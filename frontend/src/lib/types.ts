@@ -407,56 +407,12 @@ export interface EstimationListResponse {
   offset: number;
 }
 
-/* GET /estimations/preview response. The `spec` field is shaped so it
- * can be POSTed back to /estimations as `spec` verbatim. The `listing`
- * block is informational + drives filter pre-fill. */
-export interface PreviewListing {
-  price_czk: number | null;
-  price_unit: string | null;
-  category_main: string | null;
-  category_type: string | null;
-  locality: string | null;
-  district: string | null;
-  locality_district_id: number | null;
-  locality_region_id: number | null;
-  total_floors: number | null;
-  has_balcony: boolean | null;
-  has_lift: boolean | null;
-  has_parking: boolean | null;
-  building_type: string | null;
-  condition: string | null;
-  energy_rating: string | null;
-  /* Migration 022 — see ListingPublic. Set on the preview shape so
-   * the spec-review step can pre-fill the new editable rows. */
-  estate_area: number | null;
-  usable_area: number | null;
-  garden_area: number | null;
-  category_sub_cb: number | null;
-  furnished: Furnished | null;
-  terrace: boolean | null;
-  cellar: boolean | null;
-  garage: boolean | null;
-  parking_lots: number | null;
-  ownership: Ownership | null;
-  image_count: number;
-}
-
-export interface PreviewResponse {
-  url: string;
-  sreality_id: number;
-  in_database: boolean;
-  fetched_at: string;
-  spec: TargetSpecIn;
-  listing: PreviewListing;
-}
-
 /* POST /estimations/preview response (estimation-4). Routes any URL
  * through the source-kind dispatcher: sreality fast-path or LLM-driven
  * per-source parser. The `spec` block is the same TargetSpecIn shape
  * that gets POSTed back to /estimations. The `listing` block is the
- * informational sidecar (same shape as PreviewListing minus image_count
- * which is sreality-specific). Provenance fields document where the
- * data came from and how confident the parser was. */
+ * informational sidecar. Provenance fields document where the data
+ * came from and how confident the parser was. */
 export interface ParseListing {
   price_czk: number | null;
   price_unit: string | null;

@@ -420,7 +420,6 @@ import {
   createEstimation,
   getEstimation,
   listEstimations,
-  previewListing,
   previewListingUrl,
 } from './api';
 import type {
@@ -439,7 +438,6 @@ export const estimationKeys = {
     ['estimations', 'preview', url] as const,
 };
 
-export const fetchEstimationPreview = (url: string) => previewListing(url);
 export const fetchEstimation = (id: number) => getEstimation(id);
 export const fetchEstimationsList = (params: EstimationListParams) =>
   listEstimations(params);
