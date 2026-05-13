@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:01 UTC_
+_Last refreshed: 2026-05-13 11:14 UTC_
 
-**Branch:** `claude/browse-listings-map-layout-PHwYj`
+**Branch:** `claude/listing-notification-feature-KGhck`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 11:01 UTC_
 **Last 10 commits:**
 
 ```
+cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwYj
+1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
 6da728b roadmap: refresh auto-status block
 226df51 browse: sreality-style 3-column layout + category picker + map polish
-afb9600 Merge pull request #62 from waiff/claude/plan-phase-b2-U4ULP
-5457710 roadmap: refresh auto-status block
-8ab4982 roadmap: refresh auto-status block
-edcf0c3 roadmap: plan Phase B2 (per-unit fan-out + building rollup view)
-59e9263 Merge pull request #61 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
-038193e building: Phase B1 — URL ingest + unit extractor + confirmation UI
-fbc584d Merge pull request #60 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
-fbf8dc3 roadmap: plan Phase B1 (URL ingest + unit extractor + confirmation UI)
+527f210 Merge pull request #63 from waiff/claude/estimation-price-by-condition-eLUE4
+4df43c6 merge: resolve ROADMAP.md auto-status conflict with origin/main
+4b19f37 roadmap: refresh auto-status block
+d0f5085 roadmap: refresh auto-status block
+715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
+b0495c8 estimation: add condition-scenario columns to estimation_runs (migration not yet applied)
 ```
 
 <!-- END AUTO-STATUS -->
@@ -566,6 +566,126 @@ notes — end-to-end.
     by `tag_id`, not by name. A shared `TagEditPopover` wires
     rename / recolour / delete into both tag pickers — the
     CurationBlock matches list and the Browse Filters "Add" rows.
+
+### Phase U2.7: New-listing notifications (proposed)
+
+Push the operator a notification (email first, other channels later)
+the moment a freshly scraped listing matches a preset filter. Bridges
+the gap between the scraper's append-only walk and a low-latency
+alert surface — today the operator only sees new listings by
+re-running Browse manually.
+
+Two cross-cutting pieces have to land together: a notification
+backend + UI for managing subscriptions, and a scraper cadence
+change so the underlying data refreshes more often than nightly.
+
+**Notification surface**
+
+- Migration: `notification_subscriptions` (one row per saved filter
+  spec, columns mirroring the Browse filter sidebar — district /
+  disposition / price range / area range / has-balcony / has-parking
+  / category_main / category_type / tag_ids, plus `is_active`,
+  `name`, `created_at`, `updated_at`). One operator identity today
+  so no `user_id` column yet — see open questions below.
+- Migration: `notification_dispatches(subscription_id, sreality_id,
+  dispatched_at, channel, status, error_message)` — append-only
+  audit + dedup guard so a (subscription, listing) pair never
+  re-fires even if the matcher re-runs.
+- API: new `/notifications/*` routes (CRUD on subscriptions, list of
+  recent dispatches, manual "test send" for a subscription). Bearer-
+  gated; browser writes flow through here, never direct Postgres.
+- Frontend `/notifications` page: list / create / edit / delete
+  subscriptions, reusing the Browse `Filters.tsx` components so the
+  filter spec stays canonical across surfaces. A "matches today"
+  counter per subscription drives intuition before the operator
+  enables alerts.
+- Listing Detail gets a "notify on listings like this" affordance
+  that pre-fills a new subscription from the listing's facets.
+
+**Dispatch worker**
+
+- New scheduled job (GitHub Actions cron, or Railway scheduled
+  function — pick alongside the cadence decision below). Every run:
+  1. Find listings inserted into `listings` since the previous
+     successful dispatch run. Driven by `listings.first_seen_at` (or
+     `created_at` if cleaner). Anti-join against
+     `notification_dispatches` to skip anything already fired.
+  2. For each active subscription, run the filter spec against that
+     window. Reuse `_shared_filter_where` so the matcher and Browse
+     can never disagree on what a filter means.
+  3. Fan out emails (one message per (subscription, listing) match,
+     or one digest per subscription per run — pick during scope
+     review). Write a row to `notification_dispatches` per send.
+- Email provider: one of SendGrid / Postmark / Mailgun / SES (see
+  open questions). Provider credentials are env-only, never
+  inlined into the browser bundle. Architectural rule #1 (append-
+  only migrations), #2 (snapshot-on-change), #3 (no deletes),
+  #4 (last_seen_at semantics) all preserved — this feature is
+  read-mostly over the listings tables and writes only to the new
+  notification tables.
+
+**Scraper cadence change (cross-cutting, required)**
+
+Current nightly cron surfaces new listings ~24h late, which makes
+the alert feature feel useless. Operator proposal: run the scraper
+every five minutes. Naive translation of the six-category nightly
+walk to a 5-min cron is too aggressive — 288 full runs/day would
+hammer sreality and blow the GitHub Actions minute budget. Two
+viable shapes to choose between:
+
+- **Shape A — light "new-listings probe":** a new entry point that
+  walks only the first 1-2 index pages per category sorted by
+  newest, no detail refetch of existing listings, no
+  `mark_inactive` call (architectural rule #3 already forbids
+  inferring inactivity from a partial walk — the existing
+  `mark_inactive` skip-when-`--limit` branch lights up here). The
+  full nightly walk stays untouched, preserving snapshot density
+  and inactive bookkeeping. Recommended default.
+- **Shape B — lower-footprint full walk on a tighter cron:** keep
+  one cron, drop per-run cost, accept that inactive inference still
+  only runs in the nightly job. Higher risk of rate-limiting and
+  minute-budget pressure; only worth doing if shape A leaves
+  meaningful new listings undetected.
+
+Both shapes preserve the snapshot-on-change discipline (rule #2)
+and the is_active-after-complete-walk rule (rule #3). Both reuse
+the existing `listing_fetch_failures` queue so a probe that fails
+to fetch a fresh listing doesn't drop it on the floor.
+
+**Open questions (operator to decide before B1-equivalent work
+starts)**
+
+- **Channels.** Start with email only, or include SMS / push from
+  the outset? Email-first is the assumption above.
+- **Email provider.** SendGrid, Postmark, Mailgun, or AWS SES?
+  Affects pricing model, env-var surface, and template tooling. No
+  current dependency, so this is a fresh pick — same discipline as
+  CLAUDE.md's "no new dependencies without justification" rule.
+- **Cadence.** Is 5 minutes the firm target, or is 15-30 minutes
+  acceptable? Lower cadence relaxes rate-limit and minute-budget
+  pressure. Affects shape A vs. shape B above.
+- **Per-user identity.** Today's model is one shared operator
+  (`API_TOKEN` bearer, shared `anon` key). Multi-recipient
+  notifications are the first real argument for opening per-user
+  accounts — explicitly out of scope today. Default for this phase:
+  stay single-operator, send all alerts to one configured address
+  in env. Reopen identity work as a separate phase if a second
+  recipient is needed.
+- **Digest vs. per-listing.** One email per match (chatty, fast) or
+  one digest per subscription per run (quieter, slight latency
+  cost)? Affects `notification_dispatches` shape — current schema
+  draft supports both.
+
+**Out of scope for this phase**
+
+- Per-user accounts / authentication (one shared operator stays the
+  identity model; see open question above).
+- SMS / push notifications (email-first).
+- "AI-curated" alerts where the Phase 7 agent picks listings the
+  operator might like — that's a later layer on top of this
+  scaffolding.
+- Re-notification on snapshot change (price drop, status change).
+  Listed as a "next" follow-up once new-listing alerts ship.
 
 ## Building decomposition track (parallel)
 
