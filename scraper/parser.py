@@ -52,6 +52,97 @@ OWNERSHIP: dict[int, str] = {
     3: "statni",      # státní/obecní
 }
 
+# Canonical district labels keyed by sreality's locality_district_id.
+# Mirrors the seed in migration 041_district_canonical_label.sql; the
+# DB row is the runtime source of truth for the backfilled column,
+# this dict feeds the parser on new rows. IDs 1..77 are the 76 Czech
+# okresy outside Prague (47 is the city of Prague). 5001..5022 are
+# Praha 1..22 — all collapsed to a single "Praha" label per operator
+# preference; the locality_district_id column still carries the
+# finer value. Unknown IDs (including -1 used for foreign listings)
+# return None so the trailing-locality-segment fallback still labels
+# them with their country name.
+DISTRICTS: dict[int, str] = {
+    1:  "okres České Budějovice",
+    2:  "okres Český Krumlov",
+    3:  "okres Jindřichův Hradec",
+    4:  "okres Písek",
+    5:  "okres Prachatice",
+    6:  "okres Strakonice",
+    7:  "okres Tábor",
+    8:  "okres Domažlice",
+    9:  "okres Cheb",
+    10: "okres Karlovy Vary",
+    11: "okres Klatovy",
+    12: "okres Plzeň-město",
+    13: "okres Plzeň-jih",
+    14: "okres Plzeň-sever",
+    15: "okres Rokycany",
+    16: "okres Sokolov",
+    17: "okres Tachov",
+    18: "okres Česká Lípa",
+    19: "okres Děčín",
+    20: "okres Chomutov",
+    21: "okres Jablonec nad Nisou",
+    22: "okres Liberec",
+    23: "okres Litoměřice",
+    24: "okres Louny",
+    25: "okres Most",
+    26: "okres Teplice",
+    27: "okres Ústí nad Labem",
+    28: "okres Hradec Králové",
+    29: "okres Chrudim",
+    30: "okres Jičín",
+    31: "okres Náchod",
+    32: "okres Pardubice",
+    33: "okres Rychnov nad Kněžnou",
+    34: "okres Semily",
+    35: "okres Svitavy",
+    36: "okres Trutnov",
+    37: "okres Ústí nad Orlicí",
+    38: "okres Zlín",
+    39: "okres Kroměříž",
+    40: "okres Prostějov",
+    41: "okres Uherské Hradiště",
+    42: "okres Olomouc",
+    43: "okres Přerov",
+    44: "okres Šumperk",
+    45: "okres Vsetín",
+    46: "okres Jeseník",
+    47: "Praha",
+    48: "okres Benešov",
+    49: "okres Beroun",
+    50: "okres Kladno",
+    51: "okres Kolín",
+    52: "okres Kutná Hora",
+    53: "okres Mladá Boleslav",
+    54: "okres Mělník",
+    55: "okres Nymburk",
+    56: "okres Praha-východ",
+    57: "okres Praha-západ",
+    58: "okres Příbram",
+    59: "okres Rakovník",
+    60: "okres Bruntál",
+    61: "okres Frýdek-Místek",
+    62: "okres Karviná",
+    63: "okres Nový Jičín",
+    64: "okres Opava",
+    65: "okres Ostrava-město",
+    66: "okres Havlíčkův Brod",
+    67: "okres Jihlava",
+    68: "okres Pelhřimov",
+    69: "okres Třebíč",
+    70: "okres Žďár nad Sázavou",
+    71: "okres Blansko",
+    72: "okres Brno-město",
+    73: "okres Brno-venkov",
+    74: "okres Břeclav",
+    75: "okres Hodonín",
+    76: "okres Vyškov",
+    77: "okres Znojmo",
+    **{i: "Praha" for i in range(5001, 5023)},
+}
+
 _DISPOSITION_RE = re.compile(r"\b(\d\+(?:kk|\d))\b", re.IGNORECASE)
 _FLOOR_RE = re.compile(r"\s*(-?\d+)\.\s*podla", re.IGNORECASE)
 _TOTAL_FLOORS_RE = re.compile(r"z\s*celkem\s*(\d+)", re.IGNORECASE)
@@ -92,7 +183,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "area_m2": _area_m2(rec, items_by_name),
         "disposition": _disposition(raw),
         "locality": _locality_value(raw),
-        "district": _district(raw),
+        "district": _district(rec, raw),
         "locality_district_id": _int_or_none(rec.get("locality_district_id")),
         "locality_region_id": _int_or_none(rec.get("locality_region_id")),
         "locality_municipality_id": _id_or_none(rec.get("locality_municipality_id")),
@@ -210,8 +301,14 @@ def _locality_value(raw: dict[str, Any]) -> str | None:
     return val if isinstance(val, str) and val else None
 
 
-def _district(raw: dict[str, Any]) -> str | None:
-    """Best-effort district extraction from the human-readable locality."""
+def _district(rec: dict[str, Any], raw: dict[str, Any]) -> str | None:
+    """Canonical district label derived from locality_district_id, with
+    a trailing-locality-segment fallback for IDs we don't map (today
+    only `-1`, used by sreality for foreign listings — preserves the
+    country name in `district`)."""
+    label = DISTRICTS.get(_int_or_none(rec.get("locality_district_id")) or 0)
+    if label is not None:
+        return label
     text = _locality_value(raw)
     if not text:
         return None
