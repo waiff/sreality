@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 20:23 UTC_
+_Last refreshed: 2026-05-13 20:49 UTC_
 
-**Branch:** `claude/resolve-error-NDaqH`
+**Branch:** `claude/resolve-error-defensive-fixes`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-13 20:23 UTC_
 **Last 10 commits:**
 
 ```
+63bfbc6 api: catch unhandled exceptions + persist target build failures
+f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
 2eb44a5 merge: resolve ROADMAP auto-status conflict with origin/main
 1511b4a roadmap: refresh auto-status block
 5dfd09e roadmap: refresh auto-status block
@@ -24,8 +26,6 @@ d61711f merge: resolve migration-043 slot collision with origin/main
 9dce66e roadmap: refresh auto-status block
 76850b0 manual rental estimates: table, API, agent tool, listing-detail panel
 10cfe87 Merge pull request #79 from waiff/claude/build-ai-feedback-loop-56uah
-72c764c Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
-d676069 phase-ai slice A: capture full tool-call payloads alongside trace
 ```
 
 <!-- END AUTO-STATUS -->
