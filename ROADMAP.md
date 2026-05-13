@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 12:55 UTC_
+_Last refreshed: 2026-05-13 13:11 UTC_
 
 **Branch:** `claude/browse-listings-map-layout-PHwYj`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 12:55 UTC_
 **Last 10 commits:**
 
 ```
-1d4cbfb roadmap: refresh auto-status block
-7dec0d6 browse: photo carousel on listing cards
-d1a938c roadmap: refresh auto-status block
-14d3a40 browse: recede inactive listing cards in the civic-archive language
-4b34040 merge: resolve ROADMAP.md auto-status conflict with origin/main
-a8cef98 roadmap: refresh auto-status block
-7750331 browse: map viewport acts as a filter + denser cards
-4dc921b Merge pull request #65 from waiff/claude/fix-agent-comparables-xeR9j
-67c2160 test: wrap fake estimate_yield return in {data, metadata} envelope
-b8dd611 Merge remote-tracking branch 'origin/main' into claude/fix-agent-comparables-xeR9j
+8b4a3e6 browse: raise cards carousel per-listing cap from 5 to 50
+7a016d2 merge: resolve ROADMAP.md auto-status conflict with origin/main
+56e2d60 Merge pull request #70 from waiff/claude/fix-district-filter-KS8V7
+1a10607 test: assert canonical district label, add foreign + Praha fallback cases
+3474ac3 Merge pull request #66 from waiff/claude/listing-notification-feature-KGhck
+0ca1e6c Merge remote-tracking branch 'origin/main' into claude/listing-notification-feature-KGhck
+51cb38d Merge pull request #69 from waiff/claude/fix-inactive-listings-marking-3Cjz4
+760ca5a scraper: canonical district labels from locality_district_id
+090c2bf Merge remote-tracking branch 'origin/main' into claude/fix-inactive-listings-marking-3Cjz4
+84ed10b roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
