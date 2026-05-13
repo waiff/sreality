@@ -1211,7 +1211,28 @@ lands in B2; B1 stops at the human-in-the-loop gate.
   flow exercises; defer until a real bezrealitky `dum` URL surfaces
   in operator testing.
 
-### Phase B2: Per-unit fan-out + building rollup view
+### Phase B2: Per-unit fan-out + building rollup view (shipped — rent slice)
+
+Implementation landed: `api/building_orchestrator.py:fan_out_unit_estimations`
+runs synchronously from `POST /buildings/{id}/confirm_units`. For each
+confirmed unit it inserts one `estimation_runs` row (mode='agent',
+estimate_kind='rent'), wired back via `building_run_id` +
+`building_unit_id`, then drives `run_agent_estimation` under the skill
+named by `app_settings.building_default_estimator_skill`. The parent's
+`special_instructions`, `contextual_text`, and uploaded attachments
+flow into every child, so the agent can call `read_floor_plan` on the
+attached drawings. Rollup (`rollup_building_estimates`) sums successful
+children's `rent_p25/p50/p75_czk` into `total_rent_*_czk` and
+transitions the parent to `success` / `failed`. Per-child failures
+don't kill the fan-out — the parent succeeds as long as at least one
+child does. Frontend renders per-unit estimate strips + rollup totals
+on `/building/:id`. Hermetic tests live in
+`tests/api/test_building_orchestrator.py`. **Sale-side fan-out remains
+out of scope per the original "Out of scope for B2" note below; the
+sale `total_*` columns stay null until a `sale_estimator_v1` skill
+ships.**
+
+Below is the original B2 specification, kept for reference:
 
 - **Orchestrator** in `api/building_runs.py` (or a new
   `building_agent.py`): on `units` confirmation, INSERT one rent

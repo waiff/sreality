@@ -594,9 +594,13 @@ def post_buildings_confirm_units(
     building_id: int,
     body: s.ConfirmBuildingUnitsIn,
     conn: Any = Depends(deps.get_db_conn),
+    sreality_client: Any = Depends(deps.get_sreality_client),
+    llm_client: Any = Depends(deps.get_llm_client),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return confirm_units(conn, building_id, body)
+    return confirm_units(
+        conn, sreality_client, llm_client, building_id, body,
+    )
 
 
 @app.post("/buildings/{building_id}/re_extract")
