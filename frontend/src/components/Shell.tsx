@@ -8,7 +8,6 @@ import {
 const navLinks: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/browse',      label: 'Browse' },
   { to: '/listing',     label: 'Listing' },
-  { to: '/region',      label: 'Region' },
   { to: '/estimations', label: 'Estimations' },
   { to: '/collections', label: 'Collections' },
   { to: '/health',      label: 'Health' },
