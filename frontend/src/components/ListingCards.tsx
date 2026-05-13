@@ -1,3 +1,4 @@
+import { useState, type MouseEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { CARD_PAGE_SIZE, type CardRow } from '@/lib/queries';
 import { fmtArea, fmtCzk, fmtPricePerM2 } from '@/lib/format';
@@ -83,18 +84,56 @@ function Card({ r }: { r: CardRow }) {
   const place = [r.locality, r.district].filter(Boolean).join(', ');
   const isRent = r.category_type === 'pronajem';
   const priceSuffix = isRent && r.price_czk != null ? ' /měs' : '';
+  const inactive = !r.is_active;
+  /* Inactive cards recede via surface tint + softened ink, not via
+   * an opacity layer (which fights anti-aliasing and reads as broken
+   * rather than archived). Surface drops to --color-inset, matching
+   * "filed away" in the paper / archive language; image gets a
+   * gentle desaturation so it still reads as a photo. */
+  const surface = inactive
+    ? 'bg-[var(--color-inset)] border-[var(--color-rule-soft)] hover:border-[var(--color-rule)]'
+    : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
+  const titleColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
+  const priceColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
+  const imageFilter = inactive
+    ? 'saturate-[0.55] brightness-[0.95]'
+    : '';
+
+  /* Index of the currently visible image. Local state — the carousel
+   * doesn't outlive the card mount because the card is the entity
+   * being browsed. preventDefault on the chevrons stops the wrapping
+   * <Link> from navigating to the detail page when paging through. */
+  const images = r.image_urls;
+  const [index, setIndex] = useState(0);
+  const safeIndex = images.length === 0 ? 0 : Math.min(index, images.length - 1);
+  const hasMany = images.length > 1;
+
+  const step = (delta: number) => (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (images.length === 0) return;
+    const next = (safeIndex + delta + images.length) % images.length;
+    setIndex(next);
+  };
+
   return (
     <Link
       to={`/listing/${r.sreality_id}`}
-      className="group block rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] hover:border-[var(--color-rule-strong)] transition-colors overflow-hidden"
+      className={[
+        'group block rounded-[var(--radius-sm)] border transition-colors overflow-hidden',
+        surface,
+      ].join(' ')}
     >
       <div className="aspect-[5/4] bg-[var(--color-inset)] overflow-hidden relative">
-        {r.image_url ? (
+        {images.length > 0 ? (
           <img
-            src={r.image_url}
+            src={images[safeIndex]}
             alt=""
             loading="lazy"
-            className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.02]"
+            className={[
+              'w-full h-full object-cover transition-transform duration-200 group-hover:scale-[1.02]',
+              imageFilter,
+            ].join(' ')}
             onError={(e) => {
               (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
             }}
@@ -104,14 +143,49 @@ function Card({ r }: { r: CardRow }) {
             no image
           </div>
         )}
-        {!r.is_active && (
-          <span className="absolute top-1 left-1 px-1 py-0.5 text-[0.6rem] tracking-wider uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/95 border border-[var(--color-rule)] text-[var(--color-ink-3)]">
+
+        {inactive && (
+          <span
+            className="absolute top-1 right-1 px-1.5 py-0.5 text-[0.6rem] tracking-[0.14em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-ochre-soft)] border border-[var(--color-ochre)]/30 text-[var(--color-ochre)] backdrop-blur-sm font-medium"
+            title="This listing is no longer active on sreality"
+          >
             inactive
           </span>
         )}
+
+        {/* Carousel chrome — only when there's more than one photo.
+          * Chevrons fade in on card hover so the photo dominates at
+          * rest; the counter is always visible (informative, not an
+          * affordance). Both pieces are translucent paper-3 with
+          * backdrop-blur so they sit cleanly on any photo. */}
+        {hasMany && (
+          <>
+            <button
+              type="button"
+              onClick={step(-1)}
+              aria-label="Previous photo"
+              className="absolute top-1/2 left-1 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm opacity-0 group-hover:opacity-100 hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-opacity"
+            >
+              <Chevron dir="left" />
+            </button>
+            <button
+              type="button"
+              onClick={step(1)}
+              aria-label="Next photo"
+              className="absolute top-1/2 right-1 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm opacity-0 group-hover:opacity-100 hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-opacity"
+            >
+              <Chevron dir="right" />
+            </button>
+            <span
+              className="absolute bottom-1 right-1 px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm"
+            >
+              {safeIndex + 1} / {images.length}
+            </span>
+          </>
+        )}
       </div>
       <div className="p-2">
-        <h3 className="text-[0.78rem] leading-snug text-[var(--color-ink)] line-clamp-2">
+        <h3 className={`text-[0.78rem] leading-snug line-clamp-2 ${titleColor}`}>
           {title}
         </h3>
         {place && (
@@ -120,7 +194,7 @@ function Card({ r }: { r: CardRow }) {
           </p>
         )}
         <div className="mt-1 flex items-baseline justify-between gap-1">
-          <p className="text-[0.78rem] font-medium text-[var(--color-ink)] tabular-nums">
+          <p className={`text-[0.78rem] font-medium tabular-nums ${priceColor}`}>
             {fmtCzk(r.price_czk)}
             <span className="text-[var(--color-ink-3)] text-[0.65rem]">{priceSuffix}</span>
           </p>
@@ -145,6 +219,25 @@ function formatTitle(r: CardRow): string {
   if (r.disposition) parts.push(r.disposition);
   if (r.area_m2 != null) parts.push(fmtArea(r.area_m2));
   return parts.join(' · ');
+}
+
+function Chevron({ dir }: { dir: 'left' | 'right' }) {
+  const d = dir === 'left' ? 'M7.5 3 L4 6 L7.5 9' : 'M4.5 3 L8 6 L4.5 9';
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      aria-hidden
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d={d} />
+    </svg>
+  );
 }
 
 function Pager({

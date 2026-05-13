@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 12:56 UTC_
+_Last refreshed: 2026-05-13 12:58 UTC_
 
 **Branch:** `claude/agent-tools-configuration-hcQQe`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 12:56 UTC_
 **Last 10 commits:**
 
 ```
+4d77b1f Merge remote-tracking branch 'origin/main' into claude/agent-tools-configuration-hcQQe
 bac38bf roadmap: refresh auto-status block
+56e2d60 Merge pull request #70 from waiff/claude/fix-district-filter-KS8V7
+1a10607 test: assert canonical district label, add foreign + Praha fallback cases
+3474ac3 Merge pull request #66 from waiff/claude/listing-notification-feature-KGhck
 ba1970b roadmap: refresh auto-status block
 7969cc7 agent: surface population in the initial user message
-eeaf863 agent: 180-day delisted-first cohort + skill import/export
-7d08ebb roadmap: refresh auto-status block
-8ce97f0 estimate: per-run provider, rent default, delisted-only cohort
-6a5ad8d Merge pull request #49 from waiff/claude/map-comparables-popup-jVns6
-37e47cb roadmap: refresh auto-status block
-1bdeffd estimate: subject summary + comparables map popup
-7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
+0ca1e6c Merge remote-tracking branch 'origin/main' into claude/listing-notification-feature-KGhck
+51cb38d Merge pull request #69 from waiff/claude/fix-inactive-listings-marking-3Cjz4
+760ca5a scraper: canonical district labels from locality_district_id
 ```
 
 <!-- END AUTO-STATUS -->
