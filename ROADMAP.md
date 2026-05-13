@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 19:05 UTC_
+_Last refreshed: 2026-05-13 19:17 UTC_
 
 **Branch:** `claude/rental-estimates-agent-tools-Lompi`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-13 19:05 UTC_
 **Last 10 commits:**
 
 ```
+a7fdba4 roadmap: refresh auto-status block
 fdb5c6b roadmap: scope manual rental estimates + deferred agent code-exec
 1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
 bababba roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
 668a033 roadmap: add Phase U-Nav for unified browse → detail navigation
 46f7b5e Merge pull request #74 from waiff/claude/browse-listings-map-layout-PHwYj
 6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
-b2d94cb browse: cross-source hover sync between cards, table, and map
 ```
 
 <!-- END AUTO-STATUS -->
