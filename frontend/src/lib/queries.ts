@@ -277,9 +277,14 @@ export const fetchListingsForCards = async (
   if (error) throw error;
   const baseRows = (data ?? []) as unknown as Omit<CardRow, 'image_urls'>[];
   if (baseRows.length === 0) return { rows: [], total: count ?? 0 };
+  /* fetchImagesByListingIds already pulls every image row for the
+   * visible ids over the wire; perId is a client-side retention cap.
+   * 50 comfortably covers any sreality listing (typical max ~25) so
+   * the card carousel never silently truncates. URLs only — actual
+   * image bytes are lazy-loaded by the <img loading="lazy">. */
   const images = await fetchImagesByListingIds(
     baseRows.map((r) => r.sreality_id),
-    5,
+    50,
   );
   const rows: CardRow[] = baseRows.map((r) => {
     const imgs = images.get(r.sreality_id) ?? [];
