@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:14 UTC_
+_Last refreshed: 2026-05-13 11:20 UTC_
 
 **Branch:** `claude/listing-notification-feature-KGhck`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-13 11:14 UTC_
 **Last 10 commits:**
 
 ```
+a6b6008 roadmap: plan Phase U2.7 (new-listing notifications)
 cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwYj
 1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
 6da728b roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwY
 4b19f37 roadmap: refresh auto-status block
 d0f5085 roadmap: refresh auto-status block
 715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
-b0495c8 estimation: add condition-scenario columns to estimation_runs (migration not yet applied)
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1013,6 +1013,158 @@ lands in B2; B1 stops at the human-in-the-loop gate.
   new dep. Default recommendation is A on the strength of "no new
   deps without justification"; revisit if the hand-rolled grid
   proves too rigid.
+
+## Skill refinement track (parallel)
+
+Closing the loop on the Phase 7 agent: today the operator can edit a
+skill's system prompt via `/settings`, but there is no structured way
+to learn from a specific estimation that went well or badly. This
+track adds (a) deeper trace inspection so the operator can actually
+see *why* the agent picked the comparables it picked, and (b) a
+feedback-driven prompt refinement loop where the operator's written
+critique of a specific run gets fed back into the skill that produced
+it.
+
+### Phase AI: Feedback-driven skill refinement (proposed)
+
+**Trace inspection enrichment**
+
+The existing trace already records every tool call's parameters and
+an `output_summary` per architectural rule #9 (capping row size at
+single-digit kilobytes regardless of cohort size). What's missing is
+the ability to drill from a tool call's row in the timeline into the
+full payload it returned — concretely, the operator wants to see
+"this `find_comparables_relaxed` call with these filters returned 42
+listings; the 8 that ended up in `comparables_used` were picked
+because of this reasoning step; here are the 34 that didn't make
+the cut and why."
+
+- Trace step rows in the UI already render `filters_used` from the
+  tool's metadata envelope (per toolkit rule #2). What they don't
+  render: the listings that came back from the call but weren't
+  selected. Two viable shapes:
+  - **Shape A — payload side-table.** New table
+    `estimation_trace_payloads(estimation_run_id, step_n,
+    full_output jsonb, captured_at)` written at trace-finalisation
+    time. Architectural rule #9 stays intact (the trace JSONB on
+    `estimation_runs` keeps only the summary); this is a separate,
+    lazily-loaded record. UI fetches `/estimations/{id}/trace/{n}/payload`
+    on click-to-expand. Recommended default.
+  - **Shape B — on-demand re-execution.** No new storage; the UI
+    re-runs the tool with the recorded params. Cheaper at write
+    time but breaks the freshness contract — the listings table
+    moves under the agent's feet, so the operator sees a different
+    cohort than the run actually used. Bad for the audit story.
+- The Timeline component (`frontend/src/components/Timeline.tsx`)
+  already dispatches on `step.kind`; this is a new render mode on
+  `tool_call` steps that exposes the expandable payload view +
+  per-listing "did this make `comparables_used`? if not, why?"
+  annotation.
+- The "why" annotation per non-selected listing comes from the
+  reasoning step that immediately follows the tool call (per the
+  Phase 7 slice 1 trace shape — reasoning kind is emitted per LLM
+  turn). The UI surfaces the relevant slice of that reasoning
+  alongside the listings table.
+
+**Feedback capture**
+
+- Migration: `estimation_feedback(id, estimation_run_id, feedback_text,
+  submitted_at, status, refinement_id)` — one row per operator
+  feedback submission, linked back to the run. `status` lifecycle:
+  `submitted` → `refining` → `proposed` | `applied` | `dismissed` |
+  `failed`. Append-only (architectural rule #1 spirit even though
+  this is operational data, not history).
+- API: `POST /estimations/{id}/feedback` accepts
+  `{feedback_text: str, kick_off_refinement: bool = true}` and
+  inserts a row. Bearer-gated. Defaults to immediately kicking off
+  the refinement loop so the operator gets a same-session proposal;
+  setting the flag false stores the feedback without spending LLM
+  credit.
+- Frontend: a "Provide feedback" button sits alongside the existing
+  "Re-run" button on `/estimation/:id`. Click opens a modal with a
+  textarea + submit. Past feedback for a run renders inline (one
+  block per submission, status badge, link to the proposed
+  refinement when applicable).
+
+**Refinement loop**
+
+- New skill `skill_refiner_v1` (on-disk seed
+  `skills/skill_refiner_v1/SKILL.md` + migration seed `INSERT`,
+  same pattern as `rental_estimator_v1` per Phase 7 slice 1). Input
+  context: the original skill (system prompt + allowed tools +
+  preferred model + limits, sourced fresh from the `skills` row at
+  refinement time), the full estimation trace including the new
+  trace payloads, and the operator's feedback text. Output: a
+  proposed updated `system_prompt` (and optionally an updated
+  `allowed_tools` whitelist when the feedback says "stop using
+  tool X" or "you should have used tool Y"), plus a one-paragraph
+  explanation of what the refiner changed and why.
+- Limits: `max_iterations: 2`, `max_cost_usd: 0.40`,
+  `wall_clock_timeout_s: 60`. The refiner is a single reasoning
+  pass over a fully-materialised context, not an iterative tool-
+  use loop, so limits sit lower than the estimator's.
+- Calls log to `llm_calls` with `called_for='refine_skill'` (new
+  value on the CHECK constraint via the same migration).
+
+**Apply vs. suggest — the safety-critical choice**
+
+- **Default: suggest-then-confirm.** The refiner writes the proposed
+  new prompt to a new staging table `skill_refinements(id, skill_id,
+  original_prompt, proposed_prompt, proposed_allowed_tools,
+  refiner_explanation, source_feedback_id, status, created_at,
+  applied_at)`. Status: `proposed` → `applied` | `dismissed`. The
+  operator reviews the diff on `/settings/skills/{name}/refinements`
+  and clicks Apply (which writes through `PUT /admin/skills/{name}`,
+  letting the existing `skills_history` trigger from migration 029
+  preserve the prior value automatically) or Dismiss.
+- **Optional: auto-apply.** Operator can flag a skill as
+  `auto_apply_refinements: true` via `/settings`. Useful for early
+  iteration when the operator wants tight loops; risky in the long
+  run because LLM-written prompt edits will drift the skill's
+  behaviour silently. Strongly recommend leaving this off in
+  production.
+- Either path goes through `skills_history` for full audit and
+  rollback, same discipline as `app_settings_history` (migration
+  020).
+
+**Open questions (operator to decide before implementation starts)**
+
+- **Payload retention.** How long do we keep `estimation_trace_payloads`
+  rows? Forever bloats the table (a single run's payload can be
+  hundreds of KB); 30 days mirrors `listing_freshness_checks` and
+  is the recommended default. Old rows just remove the
+  drill-down ability — the trace summary stays intact.
+- **Refinement scope.** Does the refiner update the *same* skill the
+  run used, or fork to a new `_v2`/`_vN` skill so the original stays
+  pristine for A/B comparison? Forking is heavier but matches how
+  the Phase 7 slice 2 A/B view assumes multiple skill variants.
+- **Allowed-tools edits.** Should the refiner be allowed to change
+  the tool whitelist, or only the system prompt? Prompt-only is
+  simpler and harder to break things with; tool-whitelist edits
+  unlock real behaviour change but need stricter validation
+  (refusing to whitelist a tool that doesn't exist, etc.).
+- **Feedback batching.** Apply each feedback submission individually
+  (chatty, fast iteration, more LLM cost), or accumulate N
+  submissions and refine once over the bundle (cheaper, slower
+  iteration)? Default: per-submission, behind the
+  `kick_off_refinement` flag so the operator can batch manually.
+- **Default model for the refiner.** A capable model (Claude Opus,
+  GPT-4o, Gemini Pro) is worth the cost here — it's writing prompts
+  that drive every subsequent estimation. Lock to a specific model
+  via `app_settings.llm_skill_refiner_model` so the operator can
+  swap without redeploying.
+
+**Out of scope for Phase AI**
+
+- Automated regression testing of refined skills (re-running the
+  refined skill against a fixture set of past estimations to check
+  for behaviour drift) — that's a follow-up phase once the basic
+  loop is in place.
+- Multi-operator feedback aggregation — today's single-operator
+  identity model applies (same as Phase U2.7).
+- Cross-skill refinement ("learning from the rental skill should
+  improve the sale skill") — out of scope; each skill is refined
+  in isolation against its own runs.
 
 ## Summarize track (parallel)
 
