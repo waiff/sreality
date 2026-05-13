@@ -5,22 +5,22 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 19:24 UTC_
+_Last refreshed: 2026-05-13 20:15 UTC_
 
-**Branch:** `claude/build-ai-feedback-loop-56uah`
+**Branch:** `claude/resolve-error-NDaqH`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 44 files, latest `045_skill_attachment_tool.sql`.
+**Migrations on disk:** 46 files, latest `047_skill_manual_estimates_tool.sql`.
 
 **Last 10 commits:**
 
 ```
-9dce66e roadmap: refresh auto-status block
-76850b0 manual rental estimates: table, API, agent tool, listing-detail panel
+1511b4a roadmap: refresh auto-status block
+5dfd09e roadmap: refresh auto-status block
 10cfe87 Merge pull request #79 from waiff/claude/build-ai-feedback-loop-56uah
+72c764c Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
 d676069 phase-ai slice A: capture full tool-call payloads alongside trace
-694e80e migrations: add 043 estimation_trace_payloads side-table
 2ecf104 Merge pull request #78 from waiff/claude/rental-estimates-agent-tools-Lompi
 cda35d1 merge: resolve ROADMAP auto-status conflict with origin/main
 ddd81bf roadmap: refresh auto-status block
