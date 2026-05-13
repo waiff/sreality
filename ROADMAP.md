@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 12:41 UTC_
+_Last refreshed: 2026-05-13 12:53 UTC_
 
 **Branch:** `claude/agent-tools-configuration-hcQQe`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-13 12:41 UTC_
 **Last 10 commits:**
 
 ```
+ba1970b roadmap: refresh auto-status block
+7969cc7 agent: surface population in the initial user message
 eeaf863 agent: 180-day delisted-first cohort + skill import/export
 7d08ebb roadmap: refresh auto-status block
 8ce97f0 estimate: per-run provider, rent default, delisted-only cohort
@@ -24,8 +26,6 @@ eeaf863 agent: 180-day delisted-first cohort + skill import/export
 1bdeffd estimate: subject summary + comparables map popup
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
 ab6c923 roadmap: refresh auto-status block
-869004c estimate: fix POST /estimations 500 in agent mode and route sale to deterministic
-b4a0f56 Merge pull request #47 from waiff/claude/fix-estimate-search-params-mv978
 ```
 
 <!-- END AUTO-STATUS -->
