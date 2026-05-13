@@ -2,7 +2,7 @@
 
 Operator-recorded point-estimate rental figures attached to a listing.
 Mutable rows; history trigger captures the pre-state on UPDATE and
-DELETE (migration 043). Read path: SPA reads from
+DELETE (migration 046). Read path: SPA reads from
 `manual_rental_estimates_public` with the anon key. Write path: these
 bearer-gated endpoints from the FastAPI service.
 

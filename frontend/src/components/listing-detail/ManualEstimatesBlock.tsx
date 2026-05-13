@@ -2,7 +2,7 @@
  *
  * Reads + writes go through the bearer-gated FastAPI service; the same
  * data is also exposed read-only via manual_rental_estimates_public
- * (migration 043) for the SPA's anon-key path, but for consistency with
+ * (migration 046) for the SPA's anon-key path, but for consistency with
  * the rest of the curation surface we hit the API for both directions.
  */
 

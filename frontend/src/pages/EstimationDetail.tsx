@@ -133,7 +133,7 @@ export default function EstimationDetail() {
 
       <SectionLabel>Trace</SectionLabel>
       <div className="mt-4">
-        <Timeline trace={run.trace} />
+        <Timeline trace={run.trace} runId={run.id} />
       </div>
 
       {!isFailed && (

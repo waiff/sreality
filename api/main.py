@@ -35,6 +35,7 @@ from api import attachments as attachments_module
 from api.estimation_runs import (
     create_estimation_run,
     get_estimation_run,
+    get_trace_payload,
     list_estimation_runs,
     preview_estimation,
 )
@@ -544,6 +545,22 @@ def get_estimation(
     return row
 
 
+@app.get("/estimations/{run_id}/trace/{step_n}/payload")
+def get_estimation_trace_payload(
+    run_id: int,
+    step_n: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    payload = get_trace_payload(conn, run_id, step_n)
+    if payload is None:
+        raise HTTPException(
+            status_code=404,
+            detail="trace payload not found for this run/step",
+        )
+    return payload
+
+
 @app.get("/estimations")
 def list_estimations(
     source: str | None = None,
@@ -917,7 +934,7 @@ def delete_listing_tag(
 # --- manual rental estimates --------------------------------------------
 # Phase U-ME: point-estimate rental figures attached to a listing.
 # Reads are also exposed via the manual_rental_estimates_public view
-# (anon select grant from migration 043) for the SPA; these bearer-gated
+# (anon select grant from migration 046) for the SPA; these bearer-gated
 # endpoints carry the write path and a token-gated read for direct API
 # callers.
 

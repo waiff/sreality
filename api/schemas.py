@@ -417,7 +417,7 @@ class AttachTagIn(BaseModel):
 
 # --- manual rental estimates ---------------------------------------------
 # Operator-recorded point estimates attached to a listing (Phase U-ME).
-# See migration 043 and CLAUDE.md "Operator workflow track".
+# See migration 046 and CLAUDE.md "Operator workflow track".
 
 ManualEstimateSourceKind = Literal[
     "broker", "gut", "external_comp", "portfolio", "other",

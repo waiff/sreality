@@ -1,4 +1,10 @@
--- 043_manual_rental_estimates.sql
+-- 046_manual_rental_estimates.sql
+--
+-- (Originally drafted as 043; renumbered because slot 043 was claimed
+-- by 043_estimation_trace_payloads.sql on main's Phase AI slice A
+-- before this branch landed. Renumbered before merge — the live DB
+-- already has both migrations applied; this rename is filename-only.)
+--
 -- Operator-recorded manual rental estimates attached to listings.
 --
 -- One-to-many on sreality_id. A listing can carry estimates from

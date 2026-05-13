@@ -1,6 +1,10 @@
--- 046_skill_manual_estimates_tool.sql
+-- 047_skill_manual_estimates_tool.sql
 --
--- Wires the `get_manual_rental_estimates` tool (added by migration 043 +
+-- (Originally drafted as 046; bumped alongside the 043 → 046 rename of
+-- manual_rental_estimates.sql. Both files were renumbered before merge;
+-- the live DB has both applied — this rename is filename-only.)
+--
+-- Wires the `get_manual_rental_estimates` tool (added by migration 046 +
 -- new toolkit/manual_estimates.py) into the estimator skills.
 --
 -- Same shape as migration 045 (`read_floor_plan` add): only the

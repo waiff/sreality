@@ -7,25 +7,25 @@
 
 _Last refreshed: 2026-05-13 19:24 UTC_
 
-**Branch:** `claude/rental-estimates-agent-tools-Lompi`
+**Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 43 files, latest `045_skill_attachment_tool.sql`.
+**Migrations on disk:** 44 files, latest `045_skill_attachment_tool.sql`.
 
 **Last 10 commits:**
 
 ```
+9dce66e roadmap: refresh auto-status block
+76850b0 manual rental estimates: table, API, agent tool, listing-detail panel
+10cfe87 Merge pull request #79 from waiff/claude/build-ai-feedback-loop-56uah
+d676069 phase-ai slice A: capture full tool-call payloads alongside trace
+694e80e migrations: add 043 estimation_trace_payloads side-table
+2ecf104 Merge pull request #78 from waiff/claude/rental-estimates-agent-tools-Lompi
 cda35d1 merge: resolve ROADMAP auto-status conflict with origin/main
 ddd81bf roadmap: refresh auto-status block
 bb74bc4 Merge pull request #77 from waiff/claude/add-estimation-files-context-ugzqK
 355e762 roadmap: refresh auto-status block
-a7fdba4 roadmap: refresh auto-status block
-fdb5c6b roadmap: scope manual rental estimates + deferred agent code-exec
-abb5ccd merge: resolve ROADMAP auto-status conflict with origin/main
-4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
-1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
-bababba roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -886,13 +886,15 @@ Shape locked with the operator:
   `notes` (≤4000 chars).
 
 Scope:
-- Migration 043: `manual_rental_estimates` (FK
+- Migration 046: `manual_rental_estimates` (FK
   `sreality_id`, the fields above, `created_at`, `updated_at`,
   `updated_by`) + `manual_rental_estimates_history` (append-only,
   `change_kind` ∈ `update / delete`) + BEFORE UPDATE / AFTER
   DELETE trigger. `manual_rental_estimates_public` view with
   anon select grant (same pattern as `listing_notes_public` in
-  migration 025).
+  migration 025). (Originally drafted as 043; renumbered after
+  main's Phase AI slice A claimed slot 043 with
+  `043_estimation_trace_payloads.sql`.)
 - API: new `api/manual_estimates.py` exposing CRUD over
   `/listings/{id}/manual_estimates` (GET + POST) and
   `/manual_estimates/{id}` (PATCH + DELETE). All bearer-gated
@@ -907,20 +909,19 @@ Scope:
   `api/agent.py:_build_tool_registry()` so the tool is callable
   by name from the agent loop. Provider-agnostic — no changes
   needed in `api/providers/`.
-- Migration 046: `UPDATE skills` for `rental_estimator_v1` *and*
+- Migration 047: `UPDATE skills` for `rental_estimator_v1` *and*
   `rental_estimator_full_v1` (the sibling skill added by main's
   PR #77 — both want the new tool). Appends
-  `get_manual_rental_estimates` to `allowed_tools` and inserts a
-  new "CONSULT MANUAL ESTIMATES" step into each system prompt
-  between "VERIFY A SUSPICIOUS COMPARABLE" and "WRITE 1-2
-  SENTENCES OF REASONING". The skill's prompt instructs the
-  agent: call the tool once before `record_estimate`; if the
-  point estimate diverges from any manual figure by more than
-  ~15%, name each manual figure and its `source_kind` in
-  `warnings`. Both on-disk `SKILL.md` files updated in the same
-  commit so the files and DB rows stay in sync. (Slot 046 is the
-  next free — main has claimed 044 `estimation_custom_inputs` and
-  045 `skill_attachment_tool` since this phase was scoped.)
+  `get_manual_rental_estimates` to `allowed_tools` (idempotent
+  guard via `not (allowed_tools @> ...)`), same shape as
+  migration 045's `read_floor_plan` add. The `system_prompt`
+  update that inserts the "CONSULT MANUAL ESTIMATES" step into
+  each skill's instructions is *not* part of this migration —
+  per migration 045's precedent, prompt edits are an operator
+  action via the Settings UI so we never overwrite hand-edits.
+  The on-disk `SKILL.md` files carry the inline numbered step
+  as canonical documentation. (Originally drafted as 046; bumped
+  alongside the 043 → 046 rename above.)
 - Frontend: `ManualEstimatesBlock` slotted into
   `frontend/src/pages/ListingDetail.tsx` after `CurationBlock`
   (manual estimates are operator-curated like tags/notes;
@@ -1402,7 +1403,66 @@ feedback-driven prompt refinement loop where the operator's written
 critique of a specific run gets fed back into the skill that produced
 it.
 
-### Phase AI: Feedback-driven skill refinement (proposed)
+### Phase AI: Feedback-driven skill refinement (active)
+
+Sliced into three independent PRs along the data-flow boundary:
+slice A captures full tool-call payloads alongside the existing
+bounded trace; slice B adds operator feedback capture; slice C
+drives the actual refiner skill. Each slice is independently
+useful.
+
+#### Slice A: Trace inspection enrichment (done)
+
+Migration 043 lands the side-table foundation; PR1 of three.
+
+- Migration 043: `estimation_trace_payloads(estimation_run_id,
+  step_n, full_output jsonb, captured_at)`, PK on the pair.
+  ON DELETE CASCADE so payloads track the parent run. RLS enabled,
+  no policies — service-role only; the frontend reads via the
+  bearer-gated endpoint below. 30-day retention documented in
+  CLAUDE.md (architectural rule #9 prose); no automated pruner,
+  manual SQL when the table grows.
+- `TraceRecorder.set_full_output(...)` + `iter_payloads()` +
+  top-level `flush_trace_payloads(conn, run_id, recorder)`. The
+  recorder accumulates `(step_n, full_output)` pairs in memory;
+  flush executes a single `executemany` INSERT after the parent
+  `estimation_runs` row is persisted. `ON CONFLICT DO NOTHING`
+  makes retry double-flush a no-op.
+- Wired into:
+  - `estimate_yield` (deterministic path): captures the full
+    `find_comparables` cohort and `analyze_distribution` result.
+  - `agent.run_agent_estimation`: captures every tool-call result
+    in the loop, plus the terminator input and unknown-tool
+    diagnostics. Exception paths leave the payload unset by
+    design (failed tool calls have nothing to drill into).
+  - All three persist sites: `create_estimation_run` success path,
+    `_persist_failed_run`, and `_run_agent_path` (both finalise
+    branches) call `flush_trace_payloads` after the row exists.
+- `GET /estimations/{id}/trace/{n}/payload` (bearer-gated) returns
+  `{step_n, full_output, captured_at}`, 404 when absent.
+- Frontend `Timeline.tsx`: `tool_call` step bodies render a
+  "Show full payload" expander that lazily calls the new
+  `useTracePayload(runId, stepN, enabled)` hook (added to
+  `frontend/src/lib/queries.ts`). `EstimationDetail` threads the
+  run id into `<Timeline runId={run.id} />`; previews and other
+  callers without a persisted run continue to render without the
+  expander.
+- Hermetic unit tests on `set_full_output` / `iter_payloads`:
+  computation/reasoning steps never produce payload rows;
+  numbering on payload rows lines up with the trace step `n`.
+
+Past-run drill-down is one-directional in time: the writer only
+captures payloads for runs executed *after* slice A shipped.
+Pre-existing `estimation_runs` rows lose the drill-down ability;
+the trace summary stays intact.
+
+#### Slice B: Feedback capture (next)
+
+#### Slice C: Refinement loop (after slice B)
+
+---
+
+#### Original phase brief (pre-slicing)
 
 **Trace inspection enrichment**
 

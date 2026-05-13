@@ -503,13 +503,20 @@ export const ping = async (): Promise<{ ok: boolean; count: number | null }> => 
 /* convention used by Supabase fetchers above.                                */
 /* -------------------------------------------------------------------------- */
 
-import { useMutation, type UseMutationResult } from '@tanstack/react-query';
+import {
+  useMutation,
+  useQuery,
+  type UseMutationResult,
+  type UseQueryResult,
+} from '@tanstack/react-query';
 import {
   ApiError,
   createEstimation,
   getEstimation,
+  getTracePayload,
   listEstimations,
   previewListingUrl,
+  type TracePayload,
 } from './api';
 import type {
   CreateEstimationIn,
@@ -525,9 +532,23 @@ export const estimationKeys = {
     ['estimations', 'detail', id] as const,
   preview: (url: string) =>
     ['estimations', 'preview', url] as const,
+  tracePayload: (runId: number, stepN: number) =>
+    ['estimations', 'detail', runId, 'trace', stepN, 'payload'] as const,
 };
 
 export const fetchEstimation = (id: number) => getEstimation(id);
+
+export const useTracePayload = (
+  runId: number,
+  stepN: number,
+  enabled: boolean,
+): UseQueryResult<TracePayload, ApiError> =>
+  useQuery<TracePayload, ApiError>({
+    queryKey: estimationKeys.tracePayload(runId, stepN),
+    queryFn: () => getTracePayload(runId, stepN),
+    enabled,
+    staleTime: Infinity,
+  });
 export const fetchEstimationsList = (params: EstimationListParams) =>
   listEstimations(params);
 export const submitEstimation = (input: CreateEstimationIn) =>
