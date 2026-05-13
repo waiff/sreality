@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 19:17 UTC_
+_Last refreshed: 2026-05-13 19:24 UTC_
 
 **Branch:** `claude/build-ai-feedback-loop-56uah`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 19:17 UTC_
 **Last 10 commits:**
 
 ```
+9dce66e roadmap: refresh auto-status block
+76850b0 manual rental estimates: table, API, agent tool, listing-detail panel
+10cfe87 Merge pull request #79 from waiff/claude/build-ai-feedback-loop-56uah
 d676069 phase-ai slice A: capture full tool-call payloads alongside trace
 694e80e migrations: add 043 estimation_trace_payloads side-table
-5215551 roadmap: refresh auto-status block
 2ecf104 Merge pull request #78 from waiff/claude/rental-estimates-agent-tools-Lompi
 cda35d1 merge: resolve ROADMAP auto-status conflict with origin/main
 ddd81bf roadmap: refresh auto-status block
 bb74bc4 Merge pull request #77 from waiff/claude/add-estimation-files-context-ugzqK
-a7fdba4 roadmap: refresh auto-status block
-fdb5c6b roadmap: scope manual rental estimates + deferred agent code-exec
-4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
+355e762 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -886,13 +886,15 @@ Shape locked with the operator:
   `notes` (≤4000 chars).
 
 Scope:
-- Migration 043: `manual_rental_estimates` (FK
+- Migration 046: `manual_rental_estimates` (FK
   `sreality_id`, the fields above, `created_at`, `updated_at`,
   `updated_by`) + `manual_rental_estimates_history` (append-only,
   `change_kind` ∈ `update / delete`) + BEFORE UPDATE / AFTER
   DELETE trigger. `manual_rental_estimates_public` view with
   anon select grant (same pattern as `listing_notes_public` in
-  migration 025).
+  migration 025). (Originally drafted as 043; renumbered after
+  main's Phase AI slice A claimed slot 043 with
+  `043_estimation_trace_payloads.sql`.)
 - API: new `api/manual_estimates.py` exposing CRUD over
   `/listings/{id}/manual_estimates` (GET + POST) and
   `/manual_estimates/{id}` (PATCH + DELETE). All bearer-gated
@@ -907,20 +909,19 @@ Scope:
   `api/agent.py:_build_tool_registry()` so the tool is callable
   by name from the agent loop. Provider-agnostic — no changes
   needed in `api/providers/`.
-- Migration 046: `UPDATE skills` for `rental_estimator_v1` *and*
+- Migration 047: `UPDATE skills` for `rental_estimator_v1` *and*
   `rental_estimator_full_v1` (the sibling skill added by main's
   PR #77 — both want the new tool). Appends
-  `get_manual_rental_estimates` to `allowed_tools` and inserts a
-  new "CONSULT MANUAL ESTIMATES" step into each system prompt
-  between "VERIFY A SUSPICIOUS COMPARABLE" and "WRITE 1-2
-  SENTENCES OF REASONING". The skill's prompt instructs the
-  agent: call the tool once before `record_estimate`; if the
-  point estimate diverges from any manual figure by more than
-  ~15%, name each manual figure and its `source_kind` in
-  `warnings`. Both on-disk `SKILL.md` files updated in the same
-  commit so the files and DB rows stay in sync. (Slot 046 is the
-  next free — main has claimed 044 `estimation_custom_inputs` and
-  045 `skill_attachment_tool` since this phase was scoped.)
+  `get_manual_rental_estimates` to `allowed_tools` (idempotent
+  guard via `not (allowed_tools @> ...)`), same shape as
+  migration 045's `read_floor_plan` add. The `system_prompt`
+  update that inserts the "CONSULT MANUAL ESTIMATES" step into
+  each skill's instructions is *not* part of this migration —
+  per migration 045's precedent, prompt edits are an operator
+  action via the Settings UI so we never overwrite hand-edits.
+  The on-disk `SKILL.md` files carry the inline numbered step
+  as canonical documentation. (Originally drafted as 046; bumped
+  alongside the 043 → 046 rename above.)
 - Frontend: `ManualEstimatesBlock` slotted into
   `frontend/src/pages/ListingDetail.tsx` after `CurationBlock`
   (manual estimates are operator-curated like tags/notes;
