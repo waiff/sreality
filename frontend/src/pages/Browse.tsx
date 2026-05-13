@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useMemo } from 'react';
+import { Suspense, lazy, useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
@@ -84,6 +84,31 @@ export default function Browse() {
     else sp.set('page', String(next));
     setSearchParams(sp, { replace: false });
   };
+
+  /* Hover-sync between cards / table / map. The set is ephemeral —
+   * lives only in component state, never in the URL. Hovering a single
+   * card or pin produces a one-element set; hovering a cluster on the
+   * map produces N elements (one per leaf) so the matching cards all
+   * highlight together. */
+  const [hoveredIds, setHoveredIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const setHovered = useCallback(
+    (ids: ReadonlyArray<number> | null) => {
+      setHoveredIds((prev) => {
+        if (ids == null || ids.length === 0) {
+          return prev.size === 0 ? prev : new Set();
+        }
+        // Avoid spurious re-renders if the same id is reported twice
+        // (maplibre emits mouseenter on every move within the layer).
+        if (prev.size === ids.length && ids.every((id) => prev.has(id))) {
+          return prev;
+        }
+        return new Set(ids);
+      });
+    },
+    [],
+  );
 
   /* Bounds round-trip through the URL via the existing `filters` shape
    * (see lib/filters.ts:MapBounds). The map calls this on each
@@ -191,6 +216,8 @@ export default function Browse() {
                 isLoading={cardsQuery.isLoading}
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
+                hoveredIds={hoveredIds}
+                onHover={setHovered}
                 onPage={setPage}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
                 onClearBounds={() => setBounds(null)}
@@ -204,6 +231,8 @@ export default function Browse() {
                     isLoading={mapQuery.isLoading}
                     bounds={filters.bounds}
                     onBoundsChange={setBounds}
+                    hoveredIds={hoveredIds}
+                    onHover={setHovered}
                   />
                 </Suspense>
               </div>
@@ -221,6 +250,8 @@ export default function Browse() {
                 sort={sort}
                 isLoading={tableQuery.isLoading}
                 hasFilters={!isDefault(filters)}
+                hoveredIds={hoveredIds}
+                onHover={setHovered}
                 onSort={setSort}
                 onPage={setPage}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
