@@ -5,17 +5,20 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 14:26 UTC_
+_Last refreshed: 2026-05-13 15:42 UTC_
 
-**Branch:** `claude/unified-browse-experience-Oz9DR`
+**Branch:** `claude/add-estimation-files-context-ugzqK`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 40 files, latest `041_district_canonical_label.sql`.
+**Migrations on disk:** 42 files, latest `043_skill_attachment_tool.sql`.
 
 **Last 10 commits:**
 
 ```
+43d5b2a estimations: operator-supplied instructions, context, and floor-plan attachments
+de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
+668a033 roadmap: add Phase U-Nav for unified browse → detail navigation
 46f7b5e Merge pull request #74 from waiff/claude/browse-listings-map-layout-PHwYj
 6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
 b2d94cb browse: cross-source hover sync between cards, table, and map
@@ -23,9 +26,6 @@ c1150cc Merge pull request #73 from waiff/claude/browse-listings-map-layout-PHwY
 0568357 roadmap: refresh auto-status block
 8b4a3e6 browse: raise cards carousel per-listing cap from 5 to 50
 7a65a34 Merge pull request #72 from waiff/claude/browse-listings-map-layout-PHwYj
-7a016d2 merge: resolve ROADMAP.md auto-status conflict with origin/main
-56e2d60 Merge pull request #70 from waiff/claude/fix-district-filter-KS8V7
-1a10607 test: assert canonical district label, add foreign + Praha fallback cases
 ```
 
 <!-- END AUTO-STATUS -->
