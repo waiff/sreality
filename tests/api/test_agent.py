@@ -375,6 +375,7 @@ def test_population_arg_threads_into_filters(monkeypatch):
     state = agent_mod._LoopState(  # type: ignore[attr-defined]
         conn=_FakeConn(),
         sreality_client=None,  # type: ignore[arg-type]
+        llm_client=None,  # type: ignore[arg-type]
         target=_target(),
         base_filters=ComparableFilters(radius_m=1000, max_age_days=180),
     )
