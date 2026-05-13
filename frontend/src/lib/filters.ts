@@ -4,7 +4,18 @@ export type TriState = 'any' | 'yes' | 'no';
 export type SeenWithin = '1d' | '7d' | '30d' | 'any';
 export type ListingStatus = 'active' | 'inactive' | 'any';
 
+/* The three category_main values surfaced as filters in the UI. The DB
+ * also stores 'pozemek' (land) and 'ostatni' (other), but the scrape /
+ * toolkit only target the apartments / houses / commercial trio. */
+export type CategoryMain = 'byt' | 'dum' | 'komercni';
+
+/* CHECK constraint on listings.category_type allows pronajem / prodej /
+ * drazba / podil; only the first two are user-facing in Browse. */
+export type CategoryType = 'pronajem' | 'prodej';
+
 export interface ListingFilters {
+  categoryMain: CategoryMain;
+  categoryType: CategoryType;
   districts: string[];
   dispositions: Disposition[];
   priceMin: number | null;
@@ -35,6 +46,8 @@ export interface ListingFilters {
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
+  categoryMain: 'byt',
+  categoryType: 'pronajem',
   districts: [],
   dispositions: [],
   priceMin: null,
@@ -77,6 +90,8 @@ const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
 const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
 const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
+const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = ['byt', 'dum', 'komercni'];
+const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = ['pronajem', 'prodej'];
 
 const splitCsv = (s: string | null): string[] =>
   s == null || s === '' ? [] : s.split(',').map(decodeURIComponent);
@@ -124,6 +139,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const [usableMin, usableMax] = parseRange(sp.get('usable'));
   const legacyAny: ListingStatus = sp.get('active') === '0' ? 'any' : 'active';
   return {
+    categoryMain: enumOr(sp.get('cat'), CATEGORY_MAIN_VALUES, 'byt'),
+    categoryType: enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
     districts: splitCsv(sp.get('districts')),
     dispositions,
     priceMin,
@@ -162,6 +179,8 @@ const parseIntList = (s: string | null): number[] => {
 
 export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   const sp = new URLSearchParams();
+  if (f.categoryMain !== 'byt') sp.set('cat', f.categoryMain);
+  if (f.categoryType !== 'pronajem') sp.set('deal', f.categoryType);
   if (f.districts.length) sp.set('districts', joinCsv(f.districts));
   if (f.dispositions.length) sp.set('disposition', f.dispositions.join(','));
   if (f.priceMin != null || f.priceMax != null) {
@@ -198,10 +217,25 @@ export const seenWithinToIso = (s: SeenWithin): string | null => {
   return new Date(Date.now() - days * 86_400_000).toISOString();
 };
 
+const CATEGORY_MAIN_PLURAL: Record<CategoryMain, string> = {
+  byt: 'apartments',
+  dum: 'houses',
+  komercni: 'commercial',
+};
+
+const CATEGORY_TYPE_LABEL: Record<CategoryType, string> = {
+  pronajem: 'for rent',
+  prodej: 'for sale',
+};
+
+export const categoryHeading = (f: ListingFilters): string =>
+  `${CATEGORY_MAIN_PLURAL[f.categoryMain]} ${CATEGORY_TYPE_LABEL[f.categoryType]}`;
+
 export const summarise = (f: ListingFilters, count: number | null): string => {
   const bits: string[] = [];
   bits.push(f.status === 'active' ? 'active' : f.status === 'inactive' ? 'inactive' : 'all');
-  bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} listings`);
+  bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} ${CATEGORY_MAIN_PLURAL[f.categoryMain]}`);
+  bits.push(CATEGORY_TYPE_LABEL[f.categoryType]);
   if (f.districts.length) {
     const shown = f.districts.slice(0, 3).join(', ');
     const extra = f.districts.length > 3 ? ` +${f.districts.length - 3}` : '';
@@ -218,6 +252,8 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
 };
 
 export const isDefault = (f: ListingFilters): boolean =>
+  f.categoryMain === 'byt' &&
+  f.categoryType === 'pronajem' &&
   f.districts.length === 0 &&
   f.dispositions.length === 0 &&
   f.priceMin == null &&
