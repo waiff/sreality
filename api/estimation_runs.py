@@ -387,8 +387,16 @@ def create_estimation_run(
             extra_warnings=[],
         )
 
-    target = _build_target(resolution.target_spec, resolution.input_sreality_id)
-    filters = _build_filters(body)
+    try:
+        target = _build_target(resolution.target_spec, resolution.input_sreality_id)
+        filters = _build_filters(body)
+    except Exception as exc:
+        LOG.warning("target/filters build failed: %s", exc)
+        return _persist_failed_run(
+            conn, body=body, resolution=resolution, recorder=TraceRecorder(),
+            error_msg=f"target build failed: {type(exc).__name__}: {exc}"[:1000],
+            extra_warnings=[],
+        )
 
     if body.mode == "agent":
         return _run_agent_path(
