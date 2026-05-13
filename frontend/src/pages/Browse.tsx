@@ -13,6 +13,7 @@ import {
   isDefault,
   DEFAULT_FILTERS,
   type ListingFilters,
+  type MapBounds,
 } from '@/lib/filters';
 import {
   fetchListingsForCards,
@@ -84,6 +85,26 @@ export default function Browse() {
     setSearchParams(sp, { replace: false });
   };
 
+  /* Bounds round-trip through the URL via the existing `filters` shape
+   * (see lib/filters.ts:MapBounds). The map calls this on each
+   * user-driven pan/zoom; we keep `replace: true` so a continuous
+   * gesture doesn't pile up history entries. Page resets to 1 because
+   * a viewport change means a fresh cohort. Other URL keys (tab,
+   * sort) are preserved by re-serialising the new filter shape on top
+   * of the current params.*/
+  const setBounds = useCallback(
+    (b: MapBounds | null) => {
+      const next: ListingFilters = { ...filters, bounds: b };
+      const sp = toSearchParams(next);
+      const tab = searchParams.get('tab');
+      const sortRaw = searchParams.get('sort');
+      if (tab) sp.set('tab', tab);
+      if (sortRaw) sp.set('sort', sortRaw);
+      setSearchParams(sp, { replace: true });
+    },
+    [filters, searchParams, setSearchParams],
+  );
+
   /* Map tab fetches two cohorts in parallel: every (geo-located) listing
    * for the map (capped at MAP_CAP), plus the paginated card slice for
    * the left column. Same filter set, different shapes. */
@@ -149,6 +170,7 @@ export default function Browse() {
               tabFromUrl === 'stats' ? statsQuery.isLoading :
               false
             }
+            onClearBounds={filters.bounds ? () => setBounds(null) : undefined}
           />
           <div className="mt-4">
             <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
@@ -168,8 +190,10 @@ export default function Browse() {
                 page={page}
                 isLoading={cardsQuery.isLoading}
                 hasFilters={!isDefault(filters)}
+                hasBounds={filters.bounds != null}
                 onPage={setPage}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
+                onClearBounds={() => setBounds(null)}
               />
               <div className="min-h-0 h-full">
                 <Suspense fallback={<MapSkeleton />}>
@@ -178,6 +202,8 @@ export default function Browse() {
                     total={mapQuery.data?.total ?? null}
                     capped={mapQuery.data?.capped ?? false}
                     isLoading={mapQuery.isLoading}
+                    bounds={filters.bounds}
+                    onBoundsChange={setBounds}
                   />
                 </Suspense>
               </div>
@@ -229,17 +255,34 @@ function FilterSummary({
   filters,
   count,
   loading,
+  onClearBounds,
 }: {
   filters: ListingFilters;
   count: number | null;
   loading: boolean;
+  onClearBounds?: () => void;
 }) {
   return (
     <div>
       <h1 className="text-2xl leading-tight">Browse</h1>
-      <p className="mt-1 text-sm text-[var(--color-ink-2)]">
-        {loading && count == null ? 'Loading…' : summarise(filters, count)}
-      </p>
+      <div className="mt-1 flex items-center gap-2 flex-wrap">
+        <p className="text-sm text-[var(--color-ink-2)]">
+          {loading && count == null ? 'Loading…' : summarise(filters, count)}
+        </p>
+        {onClearBounds && (
+          <button
+            type="button"
+            onClick={onClearBounds}
+            className="group inline-flex items-center gap-1 px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
+            title="Clear the map area filter and widen back to the full cohort"
+          >
+            <span>Map area applied</span>
+            <span aria-hidden className="opacity-60 group-hover:opacity-100">
+              ×
+            </span>
+          </button>
+        )}
+      </div>
     </div>
   );
 }

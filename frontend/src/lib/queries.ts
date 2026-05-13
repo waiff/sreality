@@ -17,7 +17,7 @@ import type {
  * the bottleneck is wire-bytes, not DOM. 50k features ≈ 0.3 MB gzipped. */
 export const MAP_CAP = 50_000;
 export const TABLE_PAGE_SIZE = 50;
-export const CARD_PAGE_SIZE = 20;
+export const CARD_PAGE_SIZE = 24;
 
 const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,area_m2,district,last_seen_at,is_active';
 const TABLE_COLS =
@@ -96,6 +96,12 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.usableAreaMin   != null) r = r.gte('usable_area',   f.usableAreaMin);
   if (f.usableAreaMax   != null) r = r.lte('usable_area',   f.usableAreaMax);
   if (f.parkingLotsMin  != null) r = r.gte('parking_lots',  f.parkingLotsMin);
+  if (f.bounds) {
+    r = r.gte('lng', f.bounds.west)
+         .lte('lng', f.bounds.east)
+         .gte('lat', f.bounds.south)
+         .lte('lat', f.bounds.north);
+  }
   return r as unknown as T;
 };
 
@@ -326,6 +332,10 @@ export const fetchBrowseStats = async (
     garage_filter:           triToBool(f.garage),
     category_sub_cb_filter:  f.categorySubCb,
     tag_ids:                 f.tags.length ? f.tags : null,
+    bbox_west:               f.bounds?.west  ?? null,
+    bbox_south:              f.bounds?.south ?? null,
+    bbox_east:               f.bounds?.east  ?? null,
+    bbox_north:              f.bounds?.north ?? null,
   });
   if (error) throw error;
   return data as BrowseStats;

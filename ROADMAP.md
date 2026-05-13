@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 12:09 UTC_
+_Last refreshed: 2026-05-13 12:11 UTC_
 
 **Branch:** `claude/listing-notification-feature-KGhck`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 38 files, latest `039_browse_stats_categories.sql`.
+**Migrations on disk:** 39 files, latest `040_browse_stats_bbox.sql`.
 
 **Last 10 commits:**
 
 ```
+53f03e0 roadmap: refresh auto-status block
 179246c roadmap: plan Dedup track (D1 strict + D2 fuzzy) and link to multi-portal + notifications
 70f38ff roadmap: plan Phase AI (feedback-driven skill refinement)
 a6b6008 roadmap: plan Phase U2.7 (new-listing notifications)
@@ -25,7 +26,6 @@ cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwY
 226df51 browse: sreality-style 3-column layout + category picker + map polish
 527f210 Merge pull request #63 from waiff/claude/estimation-price-by-condition-eLUE4
 4df43c6 merge: resolve ROADMAP.md auto-status conflict with origin/main
-4b19f37 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->

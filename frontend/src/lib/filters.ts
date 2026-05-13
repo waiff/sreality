@@ -13,6 +13,17 @@ export type CategoryMain = 'byt' | 'dum' | 'komercni';
  * drazba / podil; only the first two are user-facing in Browse. */
 export type CategoryType = 'pronajem' | 'prodej';
 
+/* Map-viewport rectangle. west < east, south < north, all WGS84
+ * degrees. Acts as an additional filter alongside the sidebar fields:
+ * cards / table / stats all narrow to listings whose (lng, lat) falls
+ * inside the rectangle. NULL = no map area applied. */
+export interface MapBounds {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+}
+
 export interface ListingFilters {
   categoryMain: CategoryMain;
   categoryType: CategoryType;
@@ -43,6 +54,7 @@ export interface ListingFilters {
    * every selected tag id. Stored as ids (not names) so renames /
    * recolour-by-delete-recreate stay queryable. */
   tags: number[];
+  bounds: MapBounds | null;
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -71,6 +83,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   usableAreaMax: null,
   parkingLotsMin: null,
   tags: [],
+  bounds: null,
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -164,8 +177,21 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     usableAreaMax: usableMax,
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
     tags: parseIntList(sp.get('tags')),
+    bounds: parseBounds(sp.get('bbox')),
   };
 };
+
+const parseBounds = (s: string | null): MapBounds | null => {
+  if (!s) return null;
+  const parts = s.split(',');
+  if (parts.length !== 4) return null;
+  const [w, sLat, e, n] = parts.map(Number);
+  if (![w, sLat, e, n].every((x) => Number.isFinite(x))) return null;
+  if (w >= e || sLat >= n) return null;
+  return { west: w, south: sLat, east: e, north: n };
+};
+
+const fmtBoundsCoord = (n: number): string => Number(n.toFixed(5)).toString();
 
 const parseIntList = (s: string | null): number[] => {
   if (!s) return [];
@@ -208,6 +234,13 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   }
   if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
   if (f.tags.length) sp.set('tags', f.tags.join(','));
+  if (f.bounds) {
+    const { west, south, east, north } = f.bounds;
+    sp.set(
+      'bbox',
+      `${fmtBoundsCoord(west)},${fmtBoundsCoord(south)},${fmtBoundsCoord(east)},${fmtBoundsCoord(north)}`,
+    );
+  }
   return sp;
 };
 
@@ -248,6 +281,7 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
     const human = f.seenWithin === '1d' ? '24 h' : f.seenWithin === '7d' ? '7 days' : '30 days';
     bits.push(`seen within ${human}`);
   }
+  if (f.bounds) bits.push('in this map area');
   return `Showing ${bits.join(' ')}`;
 };
 
@@ -276,4 +310,5 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.usableAreaMin == null &&
   f.usableAreaMax == null &&
   f.parkingLotsMin == null &&
-  f.tags.length === 0;
+  f.tags.length === 0 &&
+  f.bounds == null;

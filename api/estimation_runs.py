@@ -338,7 +338,7 @@ def create_estimation_run(
             extra_warnings=[],
         )
 
-    target = _build_target(resolution.target_spec)
+    target = _build_target(resolution.target_spec, resolution.input_sreality_id)
     filters = _build_filters(body)
 
     if body.mode == "agent":
@@ -632,16 +632,22 @@ def _persist_failed_run(
     return _fetch_run(conn, run_id) or {}
 
 
-def _build_target(spec: dict[str, Any] | None) -> TargetSpec:
+def _build_target(
+    spec: dict[str, Any] | None,
+    input_sreality_id: int | None = None,
+) -> TargetSpec:
     if spec is None:
         raise ValueError("target_spec is required to build a TargetSpec")
+    exclude_ids = list(spec.get("exclude_ids") or [])
+    if input_sreality_id is not None and input_sreality_id not in exclude_ids:
+        exclude_ids.append(int(input_sreality_id))
     return TargetSpec(
         lat=float(spec["lat"]),
         lng=float(spec["lng"]),
         area_m2=spec.get("area_m2"),
         disposition=spec.get("disposition"),
         floor=spec.get("floor"),
-        exclude_ids=list(spec.get("exclude_ids") or []),
+        exclude_ids=exclude_ids,
     )
 
 
