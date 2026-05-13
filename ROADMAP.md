@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:42 UTC_
+_Last refreshed: 2026-05-13 11:59 UTC_
 
-**Branch:** `claude/browse-listings-map-layout-PHwYj`
+**Branch:** `claude/fix-region-dropdown-blank-scLv5`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 11:42 UTC_
 **Last 10 commits:**
 
 ```
+e9a11ad Merge pull request #67 from waiff/claude/browse-listings-map-layout-PHwYj
+4b34040 merge: resolve ROADMAP.md auto-status conflict with origin/main
 a8cef98 roadmap: refresh auto-status block
 7750331 browse: map viewport acts as a filter + denser cards
+4dc921b Merge pull request #65 from waiff/claude/fix-agent-comparables-xeR9j
+67c2160 test: wrap fake estimate_yield return in {data, metadata} envelope
+b8dd611 Merge remote-tracking branch 'origin/main' into claude/fix-agent-comparables-xeR9j
+cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwYj
+930b3e5 estimations: exclude target listing from its own comparables + explicit rent/sale toggle
 1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
-6da728b roadmap: refresh auto-status block
-226df51 browse: sreality-style 3-column layout + category picker + map polish
-527f210 Merge pull request #63 from waiff/claude/estimation-price-by-condition-eLUE4
-4df43c6 merge: resolve ROADMAP.md auto-status conflict with origin/main
-4b19f37 roadmap: refresh auto-status block
-d0f5085 roadmap: refresh auto-status block
-715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
 ```
 
 <!-- END AUTO-STATUS -->
