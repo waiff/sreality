@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:54 UTC_
+_Last refreshed: 2026-05-13 12:02 UTC_
 
 **Branch:** `claude/browse-listings-map-layout-PHwYj`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-13 11:54 UTC_
 **Last 10 commits:**
 
 ```
+d1a938c roadmap: refresh auto-status block
+14d3a40 browse: recede inactive listing cards in the civic-archive language
 4b34040 merge: resolve ROADMAP.md auto-status conflict with origin/main
 a8cef98 roadmap: refresh auto-status block
 7750331 browse: map viewport acts as a filter + denser cards
@@ -24,8 +26,6 @@ a8cef98 roadmap: refresh auto-status block
 b8dd611 Merge remote-tracking branch 'origin/main' into claude/fix-agent-comparables-xeR9j
 cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwYj
 930b3e5 estimations: exclude target listing from its own comparables + explicit rent/sale toggle
-1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
-6da728b roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
