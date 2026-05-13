@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:59 UTC_
+_Last refreshed: 2026-05-13 12:04 UTC_
 
 **Branch:** `claude/fix-region-dropdown-blank-scLv5`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-13 11:59 UTC_
 **Last 10 commits:**
 
 ```
+e476903 roadmap: refresh auto-status block
+879aab3 fix: auto-reload on stale chunk after redeploy
 e9a11ad Merge pull request #67 from waiff/claude/browse-listings-map-layout-PHwYj
 4b34040 merge: resolve ROADMAP.md auto-status conflict with origin/main
 a8cef98 roadmap: refresh auto-status block
@@ -24,8 +26,6 @@ a8cef98 roadmap: refresh auto-status block
 67c2160 test: wrap fake estimate_yield return in {data, metadata} envelope
 b8dd611 Merge remote-tracking branch 'origin/main' into claude/fix-agent-comparables-xeR9j
 cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwYj
-930b3e5 estimations: exclude target listing from its own comparables + explicit rent/sale toggle
-1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
 ```
 
 <!-- END AUTO-STATUS -->
