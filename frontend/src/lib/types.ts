@@ -322,6 +322,12 @@ export interface EstimationRun {
    * input_sreality_id was set. Null on legacy runs and on runs
    * where no listing was resolved (spec-only inputs, parse failures). */
   subject_summary: SubjectSummary | null;
+  /* Migration 042 — operator-supplied free-text inputs. Both null on
+   * runs created before the column existed and on runs the operator
+   * didn't fill in. Immutable on a terminal run — editing them is
+   * a re-run. */
+  special_instructions: string | null;
+  contextual_text: string | null;
 }
 
 /* Filter half of the POST /estimations body — mirrors ComparableFilters
@@ -373,6 +379,11 @@ export interface CreateEstimationIn extends Partial<EstimationFilters> {
   expected_monthly_rent_czk?: number | null;
   parent_run_id?: number | null;
   rerun_reason?: string | null;
+  /* Migration 042 — operator-supplied free-text inputs persisted on the
+   * row and appended into the agent's first user message inside fenced
+   * <operator_instructions> / <contextual_text> sections. */
+  special_instructions?: string | null;
+  contextual_text?: string | null;
 }
 
 export interface EstimationListParams {
@@ -610,8 +621,31 @@ export interface BuildingRun {
   business_case: Record<string, unknown> | null;
   warnings: string[] | null;
   error_message: string | null;
+  /* Migration 042 — operator-supplied free-text inputs on the building
+   * row. The unit extractor consumes them directly in its vision payload;
+   * per-unit child estimations inherit them via the future B2 orchestrator. */
+  special_instructions: string | null;
+  contextual_text: string | null;
   /* Only present on GET /buildings/{id}, not on the list endpoint. */
   children?: BuildingChildRun[];
+  /* Migration 042 — operator-uploaded images (photos / floor plans /
+   * technical drawings). Only present on the detail endpoint. */
+  attachments?: BuildingAttachment[];
+}
+
+/* Migration 042 — one operator-uploaded image attached to a building_run. */
+export interface BuildingAttachment {
+  id: number;
+  building_run_id: number;
+  filename: string;
+  mime_type: 'image/png' | 'image/jpeg' | 'image/webp';
+  byte_size: number;
+  width_px: number | null;
+  height_px: number | null;
+  storage_key: string;
+  sha256_hex: string;
+  uploaded_by: EstimationSource | null;
+  created_at: string;
 }
 
 export interface CreateBuildingIn {
@@ -623,6 +657,13 @@ export interface CreateBuildingFromUrlIn {
   source: EstimationSource;
   url: string;
   force_refresh?: boolean;
+  special_instructions?: string | null;
+  contextual_text?: string | null;
+}
+
+export interface UpdateBuildingInputsIn {
+  special_instructions?: string | null;
+  contextual_text?: string | null;
 }
 
 export interface ConfirmBuildingUnitsIn {

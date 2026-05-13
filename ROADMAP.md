@@ -11,21 +11,21 @@ _Last refreshed: 2026-05-13 19:17 UTC_
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 41 files, latest `042_browse_stats_ppm2_box.sql`.
+**Migrations on disk:** 43 files, latest `045_skill_attachment_tool.sql`.
 
 **Last 10 commits:**
 
 ```
+ddd81bf roadmap: refresh auto-status block
 a7fdba4 roadmap: refresh auto-status block
 fdb5c6b roadmap: scope manual rental estimates + deferred agent code-exec
+abb5ccd merge: resolve ROADMAP auto-status conflict with origin/main
+4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
 1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
 bababba roadmap: refresh auto-status block
+43d5b2a estimations: operator-supplied instructions, context, and floor-plan attachments
 23fae19 merge: resolve ROADMAP.md auto-status conflict with origin/main
 f4830c2 browse: per-disposition ppm2 box plots, retire Region tab
-de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
-668a033 roadmap: add Phase U-Nav for unified browse → detail navigation
-46f7b5e Merge pull request #74 from waiff/claude/browse-listings-map-layout-PHwYj
-6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
 ```
 
 <!-- END AUTO-STATUS -->
@@ -907,17 +907,20 @@ Scope:
   `api/agent.py:_build_tool_registry()` so the tool is callable
   by name from the agent loop. Provider-agnostic — no changes
   needed in `api/providers/`.
-- Migration 044: `UPDATE skills` for `rental_estimator_v1` —
-  appends `get_manual_rental_estimates` to `allowed_tools` and
-  inserts a new "CONSULT MANUAL ESTIMATES" step into the
-  system prompt between "VERIFY A SUSPICIOUS COMPARABLE" and
-  "WRITE 1-2 SENTENCES OF REASONING". The skill's prompt
-  instructs the agent: call the tool once before
-  `record_estimate`; if the point estimate diverges from any
-  manual figure by more than ~15%, name each manual figure and
-  its `source_kind` in `warnings`. The on-disk
-  `skills/rental_estimator_v1/SKILL.md` is updated in the same
-  commit so the file and the DB row stay in sync.
+- Migration 046: `UPDATE skills` for `rental_estimator_v1` *and*
+  `rental_estimator_full_v1` (the sibling skill added by main's
+  PR #77 — both want the new tool). Appends
+  `get_manual_rental_estimates` to `allowed_tools` and inserts a
+  new "CONSULT MANUAL ESTIMATES" step into each system prompt
+  between "VERIFY A SUSPICIOUS COMPARABLE" and "WRITE 1-2
+  SENTENCES OF REASONING". The skill's prompt instructs the
+  agent: call the tool once before `record_estimate`; if the
+  point estimate diverges from any manual figure by more than
+  ~15%, name each manual figure and its `source_kind` in
+  `warnings`. Both on-disk `SKILL.md` files updated in the same
+  commit so the files and DB rows stay in sync. (Slot 046 is the
+  next free — main has claimed 044 `estimation_custom_inputs` and
+  045 `skill_attachment_tool` since this phase was scoped.)
 - Frontend: `ManualEstimatesBlock` slotted into
   `frontend/src/pages/ListingDetail.tsx` after `CurationBlock`
   (manual estimates are operator-curated like tags/notes;

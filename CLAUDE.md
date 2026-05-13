@@ -299,7 +299,7 @@ service that exposes it (`api/`). They do not apply to the scraper.
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval
    'X days'` (default 7).** Don't trust `is_active` alone — a listing not
    seen for 30 days is functionally inactive.
-5. **No writes from the toolkit, with five explicit exceptions.**
+5. **No writes from the toolkit, with six explicit exceptions.**
    Read-only by default. The exceptions are:
    - `verify_listing_freshness` (and `scraper.freshness.freshness_check`
      that it wraps), which exists so an agent can confirm a comparable
@@ -328,8 +328,17 @@ service that exposes it (`api/`). They do not apply to the scraper.
      canonical-ordered pair) on cache miss. Vision is materially more
      expensive than text, so caching matters more here than anywhere
      else in the toolkit.
+   - `read_floor_plan`, which writes a structured Claude-vision
+     analysis of one operator-supplied attachment (floor plan, drawing,
+     photo) to `building_attachment_analyses` (keyed on
+     `(attachment_id, model)`) on cache miss. Same rationale as
+     `compare_listing_images`: vision is expensive, the LLM is the
+     source of truth, the cache key includes the model so a bump
+     invalidates automatically. Only callable inside the building
+     flow; the agent handler in `api/agent.py` enforces that the
+     `attachment_id` belongs to the run's `building_run_id`.
    No other toolkit function may write. The API service should still
-   connect with a read-only role if Postgres permits; these five paths
+   connect with a read-only role if Postgres permits; these six paths
    then need a separately-elevated route. For now we ship with one
    role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always

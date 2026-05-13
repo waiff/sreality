@@ -10,12 +10,14 @@
  */
 
 import type {
+  BuildingAttachment,
   BuildingListResponse,
   BuildingRun,
   Collection,
   CollectionWithListings,
   ConfirmBuildingUnitsIn,
   CreateBuildingFromUrlIn,
+  UpdateBuildingInputsIn,
   CreateEstimationIn,
   EstimationListParams,
   EstimationListResponse,
@@ -244,6 +246,114 @@ export const confirmBuildingUnits = (
 
 export const reExtractBuilding = (id: number): Promise<BuildingRun> =>
   request<BuildingRun>(`/buildings/${id}/re_extract`, { method: 'POST' });
+
+export const updateBuildingInputs = (
+  id: number,
+  input: UpdateBuildingInputsIn,
+): Promise<BuildingRun> =>
+  request<BuildingRun>(`/buildings/${id}/inputs`, {
+    method: 'PATCH',
+    json: input,
+  });
+
+/* Multipart upload — bypasses the JSON helper. Each call uploads ONE
+ * file; the caller fans out for multi-file pickers. The server replies
+ * with the inserted BuildingAttachment row. */
+export const uploadBuildingAttachment = async (
+  buildingId: number,
+  file: File,
+): Promise<BuildingAttachment> => {
+  if (!BASE_URL) {
+    throw new ApiError(
+      'API base URL is not configured', 0,
+      { detail: 'VITE_API_BASE_URL is empty' },
+    );
+  }
+  const url = new URL(`${BASE_URL}/buildings/${buildingId}/attachments`);
+  url.searchParams.set('source', 'ui');
+  const form = new FormData();
+  form.append('file', file, file.name);
+  let res: Response;
+  try {
+    res = await fetch(url.toString(), {
+      method: 'POST',
+      body: form,
+      headers: {
+        Accept: 'application/json',
+        ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+      },
+    });
+  } catch (err) {
+    throw new ApiError(
+      err instanceof Error ? err.message : 'Network error', 0, null,
+    );
+  }
+  const text = await res.text();
+  let body: unknown = null;
+  if (text) {
+    try { body = JSON.parse(text); } catch { body = text; }
+  }
+  if (!res.ok) {
+    const detail =
+      body && typeof body === 'object' && body !== null && 'detail' in body
+        ? String((body as { detail: unknown }).detail)
+        : res.statusText || `HTTP ${res.status}`;
+    throw new ApiError(detail, res.status, body);
+  }
+  return body as BuildingAttachment;
+};
+
+export const listBuildingAttachments = (
+  buildingId: number,
+): Promise<{ data: BuildingAttachment[] }> =>
+  request<{ data: BuildingAttachment[] }>(
+    `/buildings/${buildingId}/attachments`,
+  );
+
+export const deleteBuildingAttachment = (
+  buildingId: number,
+  attachmentId: number,
+): Promise<{ ok: true }> =>
+  request<{ ok: true }>(
+    `/buildings/${buildingId}/attachments/${attachmentId}`,
+    { method: 'DELETE' },
+  );
+
+/* Build a fetch URL for one attachment's raw bytes. The route is
+ * bearer-gated, so callers that want to render the image in <img> tags
+ * must either fetch via this helper and convert to a blob URL, or
+ * include the token in a query param (we use the fetch + blob path,
+ * which keeps the token out of the URL). */
+export const buildingAttachmentRawUrl = (
+  buildingId: number,
+  attachmentId: number,
+): string => {
+  if (!BASE_URL) return '';
+  return `${BASE_URL}/buildings/${buildingId}/attachments/${attachmentId}/raw`;
+};
+
+export const fetchBuildingAttachmentBlob = async (
+  buildingId: number,
+  attachmentId: number,
+): Promise<Blob> => {
+  if (!BASE_URL) {
+    throw new ApiError('API base URL is not configured', 0, null);
+  }
+  const url = buildingAttachmentRawUrl(buildingId, attachmentId);
+  const res = await fetch(url, {
+    headers: {
+      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+    },
+  });
+  if (!res.ok) {
+    throw new ApiError(
+      `HTTP ${res.status} fetching attachment`,
+      res.status,
+      null,
+    );
+  }
+  return res.blob();
+};
 
 /* ----- admin / Settings page --------------------------------------------
  *
