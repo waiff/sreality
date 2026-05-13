@@ -229,9 +229,6 @@ def _run_full(
     refetch_budget = [max_refetches] if max_refetches is not None else [None]
 
     conn = None if dry_run else db.connect()
-    # Per-category seen_ids, captured during the walk so the
-    # mark_inactive step at the end can scope correctly.
-    walk_results: list[tuple[int, int, set[int]]] = []
 
     try:
         global_collected = 0
@@ -265,7 +262,16 @@ def _run_full(
                 cat_counts["new"], cat_counts["updated"],
                 cat_counts["unchanged"], cat_counts["errors"],
             )
-            walk_results.append((category_main, category_type, seen_ids))
+
+            # Commit inactive-marking per category, immediately after
+            # the walk that produced its seen_ids. If a later category
+            # crashes mid-walk, this category's marking still survives.
+            if conn is not None and limit is None:
+                inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
+                LOG.info(
+                    "INACTIVE cm=%s ct=%s marked=%d",
+                    cm_text, ct_text, inactive,
+                )
 
             if limit is not None and global_collected >= limit:
                 LOG.info(
@@ -277,22 +283,12 @@ def _run_full(
 
         LOG.info("INDEX total=%d pages=%d", total_index, total_pages)
 
-        if conn is not None:
-            if limit is None:
-                for cm, ct, seen_ids in walk_results:
-                    cm_text = parser.CATEGORY_MAIN[cm]
-                    ct_text = parser.CATEGORY_TYPE[ct]
-                    inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
-                    LOG.info(
-                        "INACTIVE cm=%s ct=%s marked=%d",
-                        cm_text, ct_text, inactive,
-                    )
-            else:
-                LOG.info(
-                    "INACTIVE skipped: --limit %d gives a partial index view "
-                    "(is_active=false inference requires a full walk)",
-                    limit,
-                )
+        if conn is not None and limit is not None:
+            LOG.info(
+                "INACTIVE skipped: --limit %d gives a partial index view "
+                "(is_active=false inference requires a full walk)",
+                limit,
+            )
     finally:
         if conn is not None:
             conn.close()

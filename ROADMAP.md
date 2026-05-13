@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 12:53 UTC_
+_Last refreshed: 2026-05-13 12:56 UTC_
 
 **Branch:** `claude/agent-tools-configuration-hcQQe`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 31 files, latest `031_estimation_subject_summary.sql`.
+**Migrations on disk:** 40 files, latest `041_district_canonical_label.sql`.
 
 **Last 10 commits:**
 
 ```
+bac38bf roadmap: refresh auto-status block
 ba1970b roadmap: refresh auto-status block
 7969cc7 agent: surface population in the initial user message
 eeaf863 agent: 180-day delisted-first cohort + skill import/export
@@ -25,7 +26,6 @@ eeaf863 agent: 180-day delisted-first cohort + skill import/export
 37e47cb roadmap: refresh auto-status block
 1bdeffd estimate: subject summary + comparables map popup
 7cda09e Merge pull request #48 from waiff/claude/fix-estimate-search-params-mv978
-ab6c923 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -220,9 +220,66 @@ Trace records `kind='reasoning'` per LLM turn.
 - Apartment rentals only (`byt` / `pronajem`). Multi-category
   defaults stay deferred to Phase 1.5b.
 
-## Next
+### Phase B0: Building decomposition — schema + scaffolding
+Persistence foundation + read endpoints for the building-paste flow.
+PR #59. Full description under "Building decomposition track" below.
+- Migration 035: `building_runs` parent table with full status
+  lifecycle CHECK (`pending` → `extracting` → `awaiting_input` →
+  `estimating` → `success` | `failed`); `business_case jsonb`
+  reserved for B3; `building_run_id` (FK,
+  `ON DELETE SET NULL`) + `building_unit_id` (text) columns on
+  `estimation_runs`. Architectural rule #13 added to CLAUDE.md.
+- `api/building_runs.py` (`create_building_run`, `get_building_run`,
+  `list_building_runs`) + Pydantic schemas (`CreateBuildingIn`,
+  `BuildingUnit`, `BuildingOut`). Minimal `POST /buildings` inserts
+  a `status='pending'` shell so the read path can be exercised
+  end-to-end before B1 lands; `GET /buildings`, `GET /buildings/{id}`
+  return rows with children surfaced via a side-query on
+  `estimation_runs`. All bearer-gated.
+- Frontend type stubs only in `frontend/src/lib/types.ts`
+  (`BuildingRun`, `BuildingUnit`, `BuildingStatus`); no pages or
+  components yet — those ship with B1.
 
 ## Next
+
+### Phase B1: Building decomposition — URL ingest + unit extractor + confirmation UI (active)
+
+Second slice of the building-paste flow. Builds on B0's persistence:
+operator pastes a `dum` (house) or `komercni` URL → backend parses
+via the existing dispatcher → an LLM-vision skill reads the
+description + floor plans + photos → proposes a unit list → the UI
+renders an editable confirmation step → operator confirms. End of B1
+the building is in `status='awaiting_input'` until the operator
+submits, then advances to `estimating`. B2 picks up the per-unit
+estimation fan-out from there.
+
+Full description (including the apartment-skill-reuse note on the
+B2 orchestrator step) under "Building decomposition track" below.
+
+Headline scope:
+- Migration 036: `building_unit_extractions` cache table
+  + `'extract_building_units'` value on `llm_calls.called_for`
+  + four `app_settings` rows for the new skill / prompt / model
+  (`llm_building_extractor_system_prompt`, `llm_building_extractor_model`,
+  `llm_building_extractor_max_images`, `building_default_estimator_skill`).
+- New toolkit function `toolkit.building_extraction.extract_building_units`
+  — write-allowed exception per toolkit rule #5; same cache pattern as
+  `summarize_listing` (keyed on `(sreality_id, snapshot_id)`).
+- New skill `building_unit_extractor_v1` (vision extractor, not an
+  estimator) — on-disk `skills/building_unit_extractor_v1/SKILL.md`
+  + migration seed `INSERT`. Allowed tools: `extract_building_units`
+  + `record_building_units` terminator. Distinct from the apartment
+  estimator skill — its job is structural extraction only.
+- `POST /buildings/from_url` replaces B0's minimal `POST /buildings`
+  as the operator-facing entry. Rejects `category_main='byt'` (those
+  go through `/estimations`).
+- `POST /buildings/{id}/confirm_units` accepts the operator-edited
+  unit list, validates, writes to `units`, advances status to
+  `estimating`. Idempotency via 409 on non-`awaiting_input` rows.
+- Frontend: new `kind` toggle on `NewEstimationModal` ("apartment" /
+  "building"), `BuildingUnitEditor` component for the review step,
+  new `/building/:id` page (initially read-only — full rollup view
+  ships with B2).
 
 ### Phase 7 slice 2: Async + full toolkit + UI mode toggle
 Builds on slice 1.
@@ -437,9 +494,14 @@ estimations using data that already exists in the database.
 ### Phase 2: Multi-portal ingestion (later, larger)
 Today's non-sreality flow is *parse on demand* via
 `source_dispatcher` (LLM call per URL, cached 7 days). To make
-bezrealitky / idnes / remax comparables show up in
-`find_comparables`, those portals need to land in the `listings`
-table itself. Scope:
+bezrealitky / idnes / remax / maxima comparables (and other portals
+as the operator opens them) show up in `find_comparables`, those
+portals need to land in the `listings` table itself. **Hard
+dependency: the Dedup track's Phase D1 must ship first.** Without
+strict cross-source dedup, multi-portal ingestion multiplies every
+listing by the number of portals it appears on, which breaks
+`find_comparables`, `browse_stats`, and the notification dispatch
+fan-out alike. Scope:
 - Per-source index walker analogous to `scraper/sreality_client.py`.
   Most of these portals don't expose a public JSON API, so HTML
   pagination / playwright will be in scope; bot-detection is more
@@ -447,7 +509,9 @@ table itself. Scope:
 - Reuse `parse_listing_url` for detail pages, with aggressive
   caching and a per-source rate limit.
 - New `listings` columns: `source` (default `'sreality'`),
-  `source_url`, `source_id_native`. New numbered migration.
+  `source_url`, `source_id_native`. New numbered migration. The
+  same migration that adds these columns is co-authored with
+  Phase D1's canonical shape — they touch the same surface.
 - Update `_shared_filter_where` so toolkit queries can filter by
   source.
 - Frontend Browse: source multi-toggle.
@@ -458,40 +522,845 @@ table itself. Scope:
   (Phase 7) opts cross-portal cohorts in once it can validate
   them.
 
+## Dedup + canonical listing track (parallel)
+
+Today the `listings` table is effectively a mirror of sreality.cz
+keyed on `sreality_id`. As multi-portal ingestion (Scraper Phase 2)
+brings bezrealitky / idnes / remax / maxima / etc. into the same
+table, "the same property" will start showing up multiple times —
+both within a single run (cross-portal collision) and across runs
+(taken down and relisted under a new broker after expiring). This
+track is the work to identify those duplicates and present one
+canonical listing per real-world property.
+
+**Directional architectural shift surfaced by the operator.** The
+`listings` table evolves from "mirror of sreality" to "mirror of
+every observed property across all sources, deduplicated."
+Architectural rules #1 (append-only migrations), #2 (snapshot on
+content change), and #3 (never delete listings) all carry over —
+applied at the canonical level rather than the per-source level.
+The migration is significant; this track plans the path but does
+not commit to it without an operator decision on the canonical
+shape (see D1 below).
+
+### Phase D1: Strict cross-source dedup (proposed)
+
+Catch the obvious duplicates: the same listing observed on two
+portals at once, or the same source-listing re-fetched under a
+slightly different URL. This is a precondition for Scraper Phase 2
+— without it, multi-portal ingestion multiplies every listing by
+the number of portals it appears on. Also a precondition for Phase
+U2.7's "notify once per real property" guarantee.
+
+**Canonical shape (operator decision required before this phase
+starts)**
+
+Two viable shapes. Both preserve all existing snapshot history and
+respect architectural rules #1 / #2 / #3.
+
+- **Shape A — single canonical table, per-source observations as
+  history.** Keep `listings` as the canonical row (one per real
+  property). Existing `sreality_id` becomes one of many possible
+  `source_id_native` values. New companion table
+  `listing_source_observations(listing_id, source,
+  source_id_native, source_url, first_seen_at, last_seen_at)`
+  records every source that has surfaced this listing. Existing
+  `listing_snapshots` gains a `source` column so per-source
+  content drift is still visible in the diff timeline. Lowest
+  migration cost; downstream queries (`find_comparables`,
+  `browse_stats`, RPCs, frontend) keep working with minimal
+  changes. **Recommended default.**
+- **Shape B — two-table model: `properties` + `listings`.** New
+  canonical `properties` table; existing `listings` becomes per-
+  source observations linked back via `property_id`. Cleaner
+  separation of concerns, but every downstream query has to learn
+  the join. Tens of files touch this; the visible payoff is small
+  if Shape A's denormalised approach already handles the same use
+  cases. Reopen when Shape A's limits show up in production.
+
+**Matcher (insert-time, has to be cheap)**
+
+- **Tier 1 — exact canonicalised URL.** Lower-case scheme + host,
+  strip query, strip trailing slash, sha256. Hash match against an
+  existing canonical row → append a new
+  `listing_source_observations` row and a snapshot if content
+  differs; do not insert a new canonical row.
+- **Tier 2 — (lat, lng, price_czk, area_m2) within tolerance.**
+  `ST_DWithin` within ~20 m, price within ±2%, area within
+  ±1 m². High precision; catches "same listing surfaced on two
+  portals simultaneously."
+- **Tier 3 — agent phone / email when exposed.** Same
+  (phone, area, district) triple within 30 days = likely the same
+  listing relisted by the same agent. Lower precision; auto-merge
+  gated on at least one more matching marker.
+- **Ambiguous tier.** Anything that matches at lower confidence
+  goes to a new `listing_duplicate_candidates` queue for operator
+  review. Default to "no merge" rather than "guess merge."
+
+**Migration scope**
+
+- New numbered migration co-authored with Scraper Phase 2's
+  `source` / `source_url` / `source_id_native` columns (single
+  migration touching the same surface).
+- Shape-A path: add `listing_source_observations` +
+  `listing_duplicate_candidates`; add `source` to
+  `listing_snapshots`. Backfill: every existing row gets one
+  `listing_source_observations` entry with
+  `source='sreality', source_id_native=sreality_id::text`. No
+  data loss.
+- `_shared_filter_where` learns to filter by source via the new
+  observations join (read path stays on `listings`).
+
+**Notification feature link (Phase U2.7)**
+
+Phase U2.7's `notification_dispatches` table currently keys on
+`sreality_id`. Once D1 ships the canonical id is the dedup key, so
+a single property surfaced on bezrealitky AND sreality fires one
+notification instead of two. The U2.7 schema gets a one-line
+update at D1 land time: `sreality_id` → `listing_id` referencing
+the canonical row. Same `(subscription_id, listing_id)` uniqueness
+guarantee, just at the right grain.
+
+### Phase D2: Fuzzy property identity (proposed)
+
+Catch the harder case: a listing taken down and relisted weeks
+later with different wording, different broker, possibly different
+photos. Markers per the operator's brief (everything else — price,
+broker, URL, listing copy — is allowed to vary):
+
+- **Address** (street name + house number when present; full
+  address is the highest-precision signal).
+- **City / district / cadastral area.**
+- **Floor** (when known).
+- **Disposition + area triangulation.** A 51 m² 1+1 and a 50 m²
+  2+kk are likely the same flat — relisted with a different
+  disposition label. Use a tight equivalence map across nearby
+  dispositions (`1+1 ≈ 2+kk`, `2+1 ≈ 3+kk`, etc.) combined with a
+  ±10% area band.
+- **Image similarity.** Two-tier to keep cost down:
+  - Cheap first pass: perceptual hash (`pHash` / `aHash`) on the
+    hero image via Pillow. Catches re-uploads of the same photo
+    with minor recompression / resizing.
+  - Vision tier for the ambiguous: reuse
+    `compare_listing_images` from Phase 6 (Claude vision).
+    Higher cost; only invoked when the cheap markers say "maybe."
+
+**Matcher (background sweep, NOT insert-time)**
+
+D1's matcher runs at insert time and has to be cheap. D2 is
+heavier (image fetches, sometimes vision calls); runs as a
+periodic background sweep over recently-inactive listings against
+currently-active listings, surfaces candidates, never auto-merges
+without operator review. Precision over recall.
+
+- New table `property_identity_candidates(left_listing_id,
+  right_listing_id, confidence, markers_matched jsonb,
+  suggested_at, status, reviewed_at, reviewed_action)` — append-
+  only audit of every candidate the sweep proposes. Status:
+  `proposed` → `merged` | `dismissed`. Operator reviews on a new
+  `/dedup/candidates` page (frontend).
+- On `merged`: the older listing's snapshots are re-pointed at the
+  canonical row, both `listing_source_observations` entries
+  collapse onto the canonical id. Architectural rule #3 (never
+  delete) holds — merged listings keep their history, the
+  canonical row just gains it.
+- Sweep cadence: weekly is plenty; relisted-after-expired patterns
+  unfold on a multi-week timescale, not minutes.
+
+**Address normalisation**
+
+Czech addresses arrive in a variety of formats (street + descriptive
+number + orientation number, street + house number, P.O. box). A
+normalisation helper lives in a new `toolkit/addresses.py` —
+canonicalises whitespace, strips diacritics for fuzzy comparison
+only (display form keeps them), parses out descriptive vs.
+orientation numbers, returns a stable comparison key. Hermetic
+tests against a fixture set of real Czech address strings.
+
+**Open questions (operator to decide before D2 starts)**
+
+- **Conservative vs. aggressive merging.** Default is conservative
+  (queue, operator approves). Aggressive auto-merge above a
+  confidence threshold is tempting for scale but bakes in
+  irreversible false positives.
+- **Image-tier model.** `compare_listing_images` is already there
+  but is materially expensive per pair (~$0.05). For D2's volume
+  a cheaper dedicated image-similarity model may be needed; pick
+  when the cohort size makes the bill visible. pHash alone may
+  cover most cases.
+- **What "merged" actually means in the UI.** Browse should show
+  one row per canonical property by default (default-on toggle to
+  "show all source observations" for power use); Listing Detail
+  shows all source observations on a tab. Confirm before
+  implementation.
+
+**Out of scope for D1 + D2**
+
+- Cross-property dedup beyond same-property identification (e.g.
+  identifying neighbouring units that are part of the same
+  building — that's the Building decomposition track's job).
+- Automatic re-merging when a previously-dismissed candidate
+  re-surfaces with new markers — manual re-trigger for now.
+- The Shape-B full architectural split (`properties` parent table
+  + per-source `listings` child). Reopen once Shape A's limits
+  show up in production.
+
 ## Operator workflow track (parallel)
 
 User-facing features that don't fit the analytical, estimation, UI,
 map, or scraper tracks. Operator-scoped (single shared identity, no
 per-user accounts — matches today's bearer-token model).
 
-### Phase U2.6: Collections + tags (next)
-Operator watchlists over listings, with freeform tags.
-- New numbered migration (e.g. `022_collections.sql`):
-  `collections(id uuid pk, name, description, color, created_at,
-  updated_at)`, `listing_collections(collection_id, sreality_id,
-  added_at, note, primary key (collection_id, sreality_id))`,
-  `listing_tags(sreality_id, tag, added_at, primary key
-  (sreality_id, tag))`. Tags are flat strings; collections are
-  named groups. A listing can be in many collections and have many
-  tags.
-- Public views (`collections_public`, `listing_collections_public`,
-  `listing_tags_public`) with SELECT to anon — read path matches
-  the rest of U1a.
-- **Write path through the FastAPI service**, never the browser
-  (CLAUDE.md territories rule). New endpoints, all bearer-gated:
-  `POST /collections`, `PATCH /collections/{id}`,
-  `DELETE /collections/{id}`,
-  `POST /collections/{id}/listings`,
-  `DELETE /collections/{id}/listings/{sreality_id}`,
-  `POST /listings/{sreality_id}/tags`,
-  `DELETE /listings/{sreality_id}/tags/{tag}`.
-- Frontend: `/collections` (list of collections with member counts),
-  `/collection/:id` (member listings table reusing Browse's table),
-  and on `/listing/:sreality_id` an "Add to collection" picker plus
-  a tag chip input with autocomplete over distinct existing tags.
-- Future hook (out of scope for this phase but the schema supports
-  it): the agent reads collections as seed examples — "estimate
-  this listing using only comparables from collection X."
+### Phase U2.6: Collections + tags + notes (done)
+Operator watchlists, freeform coloured tags, and per-listing journal
+notes — end-to-end.
+- Migrations 022 (`collections` + `collection_listings`), 023
+  (`listing_notes`), 024 (`tags` + `listing_tags`, palette pinned
+  to eight named colours by CHECK), 025 (`*_public` views +
+  `listings_with_tags(tag_ids)` RPC with AND-semantics, capped at
+  5000 rows).
+- API: `api/curation.py` exposes CRUD over `/collections`,
+  `/listings/{id}/notes`, and `/tags`; routes wired in `api/main.py`
+  around line 612+. All bearer-gated per CLAUDE.md toolkit rule #8.
+  Tag colour mirrored in `api/schemas.TagColor` (eight-name Literal).
+- Frontend:
+  - `/collections` index with inline new-collection form, listing
+    counts, soft-delete with confirm.
+  - `/collection/:id` detail with rename/description edit, delete,
+    and a slim member-listings table reusing the Browse/ListingTable
+    visual language (sreality_id link, district / disposition / area
+    / price / last seen / status / added_at + remove button).
+  - `ListingDetail` gains a `CurationBlock` sitting between
+    KeyFactsBlock and TimestampsBlock: every collection rendered as a
+    toggle (✓/+ chip), tag chips with an autocomplete picker that
+    can create a new tag inline (eight-colour palette), and a
+    collapsing notes journal (textarea + chronological list).
+  - Browse `Filters.tsx` Curation group exposes a tags facet —
+    AND-semantics, delegates to the `listings_with_tags` RPC.
+- New tokens: `--color-tag-{copper,sage,brick,ochre,slate,plum,teal,sand}`
+  + `-soft` pair, scoped at the bottom of `globals.css` per the
+  "new tokens by domain-name" rule; the four pre-existing semantic
+  colours alias their global token, the four new ones (slate, plum,
+  teal, sand) ship with new swatches and light/dark variants.
+- Future hook (out of scope, but the schema supports it): the agent
+  reads collections as seed examples — "estimate this listing using
+  only comparables from collection X."
+- Follow-ups landed:
+  - Migration 033 adds `tag_ids bigint[]` to `browse_stats` with the
+    same AND-semantics as `listings_with_tags`. The Browse Stats
+    tab now agrees with Map / Table when the operator filters by
+    tag.
+  - `PATCH /tags/{tag_id}` (`api/curation.update_tag` +
+    `api/schemas.UpdateTagIn`) supports in-place rename + recolour;
+    listing attachments are preserved because `listing_tags` joins
+    by `tag_id`, not by name. A shared `TagEditPopover` wires
+    rename / recolour / delete into both tag pickers — the
+    CurationBlock matches list and the Browse Filters "Add" rows.
+
+### Phase U2.7: New-listing notifications (proposed)
+
+Push the operator a notification (email first, other channels later)
+the moment a freshly scraped listing matches a preset filter. Bridges
+the gap between the scraper's append-only walk and a low-latency
+alert surface — today the operator only sees new listings by
+re-running Browse manually.
+
+Two cross-cutting pieces have to land together: a notification
+backend + UI for managing subscriptions, and a scraper cadence
+change so the underlying data refreshes more often than nightly.
+
+**Notification surface**
+
+- Migration: `notification_subscriptions` (one row per saved filter
+  spec, columns mirroring the Browse filter sidebar — district /
+  disposition / price range / area range / has-balcony / has-parking
+  / category_main / category_type / tag_ids, plus `is_active`,
+  `name`, `created_at`, `updated_at`). One operator identity today
+  so no `user_id` column yet — see open questions below.
+- Migration: `notification_dispatches(subscription_id, sreality_id,
+  dispatched_at, channel, status, error_message)` — append-only
+  audit + dedup guard so a (subscription, listing) pair never
+  re-fires even if the matcher re-runs. **Cross-link to Dedup
+  track Phase D1:** once D1 ships, the dedup key changes from
+  `sreality_id` to the canonical `listing_id`, so a property
+  surfaced on multiple portals fires one notification rather than
+  one-per-portal. This is a single-column rename on
+  `notification_dispatches`; no functional change to the dispatch
+  worker beyond reading from the canonical row.
+- API: new `/notifications/*` routes (CRUD on subscriptions, list of
+  recent dispatches, manual "test send" for a subscription). Bearer-
+  gated; browser writes flow through here, never direct Postgres.
+- Frontend `/notifications` page: list / create / edit / delete
+  subscriptions, reusing the Browse `Filters.tsx` components so the
+  filter spec stays canonical across surfaces. A "matches today"
+  counter per subscription drives intuition before the operator
+  enables alerts.
+- Listing Detail gets a "notify on listings like this" affordance
+  that pre-fills a new subscription from the listing's facets.
+
+**Dispatch worker**
+
+- New scheduled job (GitHub Actions cron, or Railway scheduled
+  function — pick alongside the cadence decision below). Every run:
+  1. Find listings inserted into `listings` since the previous
+     successful dispatch run. Driven by `listings.first_seen_at` (or
+     `created_at` if cleaner). Anti-join against
+     `notification_dispatches` to skip anything already fired.
+  2. For each active subscription, run the filter spec against that
+     window. Reuse `_shared_filter_where` so the matcher and Browse
+     can never disagree on what a filter means.
+  3. Fan out emails (one message per (subscription, listing) match,
+     or one digest per subscription per run — pick during scope
+     review). Write a row to `notification_dispatches` per send.
+- Email provider: one of SendGrid / Postmark / Mailgun / SES (see
+  open questions). Provider credentials are env-only, never
+  inlined into the browser bundle. Architectural rule #1 (append-
+  only migrations), #2 (snapshot-on-change), #3 (no deletes),
+  #4 (last_seen_at semantics) all preserved — this feature is
+  read-mostly over the listings tables and writes only to the new
+  notification tables.
+
+**Scraper cadence change (cross-cutting, required)**
+
+Current nightly cron surfaces new listings ~24h late, which makes
+the alert feature feel useless. Operator proposal: run the scraper
+every five minutes. Naive translation of the six-category nightly
+walk to a 5-min cron is too aggressive — 288 full runs/day would
+hammer sreality and blow the GitHub Actions minute budget. Two
+viable shapes to choose between:
+
+- **Shape A — light "new-listings probe":** a new entry point that
+  walks only the first 1-2 index pages per category sorted by
+  newest, no detail refetch of existing listings, no
+  `mark_inactive` call (architectural rule #3 already forbids
+  inferring inactivity from a partial walk — the existing
+  `mark_inactive` skip-when-`--limit` branch lights up here). The
+  full nightly walk stays untouched, preserving snapshot density
+  and inactive bookkeeping. Recommended default.
+- **Shape B — lower-footprint full walk on a tighter cron:** keep
+  one cron, drop per-run cost, accept that inactive inference still
+  only runs in the nightly job. Higher risk of rate-limiting and
+  minute-budget pressure; only worth doing if shape A leaves
+  meaningful new listings undetected.
+
+Both shapes preserve the snapshot-on-change discipline (rule #2)
+and the is_active-after-complete-walk rule (rule #3). Both reuse
+the existing `listing_fetch_failures` queue so a probe that fails
+to fetch a fresh listing doesn't drop it on the floor.
+
+**Open questions (operator to decide before B1-equivalent work
+starts)**
+
+- **Channels.** Start with email only, or include SMS / push from
+  the outset? Email-first is the assumption above.
+- **Email provider.** SendGrid, Postmark, Mailgun, or AWS SES?
+  Affects pricing model, env-var surface, and template tooling. No
+  current dependency, so this is a fresh pick — same discipline as
+  CLAUDE.md's "no new dependencies without justification" rule.
+- **Cadence.** Is 5 minutes the firm target, or is 15-30 minutes
+  acceptable? Lower cadence relaxes rate-limit and minute-budget
+  pressure. Affects shape A vs. shape B above.
+- **Per-user identity.** Today's model is one shared operator
+  (`API_TOKEN` bearer, shared `anon` key). Multi-recipient
+  notifications are the first real argument for opening per-user
+  accounts — explicitly out of scope today. Default for this phase:
+  stay single-operator, send all alerts to one configured address
+  in env. Reopen identity work as a separate phase if a second
+  recipient is needed.
+- **Digest vs. per-listing.** One email per match (chatty, fast) or
+  one digest per subscription per run (quieter, slight latency
+  cost)? Affects `notification_dispatches` shape — current schema
+  draft supports both.
+
+**Out of scope for this phase**
+
+- Per-user accounts / authentication (one shared operator stays the
+  identity model; see open question above).
+- SMS / push notifications (email-first).
+- "AI-curated" alerts where the Phase 7 agent picks listings the
+  operator might like — that's a later layer on top of this
+  scaffolding.
+- Re-notification on snapshot change (price drop, status change).
+  Listed as a "next" follow-up once new-listing alerts ship.
+
+## Building decomposition track (parallel)
+
+The "paste a whole-building listing" workflow. Operator drops a
+`rodinný dům` URL into the same paste field they use for apartments
+today; the system reads description + floor-plan images, proposes
+the apartment units inside the building (including potential ones
+like an unconverted attic), the operator confirms / edits the unit
+list and the per-unit condition, the agent fans out one rent + one
+sale estimate per unit, results are grouped and summed at the
+building level, and a spreadsheet-style business-case overlay
+computes the development P&L (acquisition + reno + new build + soft
+costs + VAT in/out + debt service → EBIT / EBT / MOIC / IRR /
+yield-on-cost).
+
+Reference business case: `model_Kralupska.xlsx` (operator-supplied,
+2026-05-12). Six blocks: Assumptions, Floor Schedule, Unit
+Schedule, Cost Stack (with VAT splits), Revenue & P&L, Returns.
+
+### Phase B0: Schema + scaffolding (done)
+
+Pure plumbing. No agent changes, no UI changes beyond type stubs.
+Shipped in PR #59.
+- Migration 035 (`035_building_runs.sql`): new `building_runs`
+  parent table; `building_run_id` (FK) + `building_unit_id` (text)
+  columns on `estimation_runs`. Status lifecycle: `pending` →
+  `extracting` → `awaiting_input` → `estimating` → `success` |
+  `failed`. The `awaiting_input` pause is the human-in-the-loop gate
+  that distinguishes the building flow from today's single-shot
+  estimation_runs flow. Per CLAUDE.md architectural rule #13.
+- `api/building_runs.py` module: `create_building_run`,
+  `get_building_run`, `list_building_runs`. Children are surfaced
+  on the detail response via a side-query on `estimation_runs`.
+- API endpoints: `POST /buildings` (minimal shell — `{source,
+  input_url?}` → `status='pending'`), `GET /buildings`,
+  `GET /buildings/{id}`. All bearer-gated.
+- Pydantic schemas: `CreateBuildingIn`, `BuildingUnit` (the JSONB
+  unit record schema, used by B1 onwards), `BuildingRunOut` shape
+  documented via `_BUILDING_COLUMNS`.
+- Frontend type stubs in `frontend/src/lib/types.ts` (`BuildingRun`,
+  `BuildingUnit`, `BuildingStatus`). No new pages or components.
+- Tests: hermetic CRUD tests in `tests/api/test_buildings.py`
+  modeled on the `_State`-style fakes from `test_estimations.py`.
+
+### Phase B1: URL ingest + unit extractor + confirmation UI (next — active)
+
+Builds on B0's persistence. The output of B1 is a `building_runs`
+row sitting in `status='awaiting_input'` (extractor ran,
+`units_proposal` populated, ready for the operator's review) which
+transitions to `estimating` on confirmation. Per-unit fan-out
+lands in B2; B1 stops at the human-in-the-loop gate.
+
+**Data + migration**
+
+- Migration 036 (`036_building_unit_extractions.sql`):
+  - New cache table `building_unit_extractions` keyed on
+    `(sreality_id, snapshot_id)` — same shape as `listing_summaries`
+    (migration 027): `extracted_at`, `model`, `units jsonb`,
+    `building jsonb`, `confidence text`, `warnings jsonb`,
+    `cost_usd numeric`. New snapshot auto-invalidates by virtue of
+    the PK including `snapshot_id`. RLS enabled, no policies (read
+    through API).
+  - `'extract_building_units'` added to `llm_calls.called_for`
+    CHECK constraint so the audit trail tags vision calls
+    consistently.
+  - Four `app_settings` seeds:
+    `llm_building_extractor_system_prompt` (the canonical prompt
+    body, mirrors the on-disk SKILL.md),
+    `llm_building_extractor_model` (`claude-sonnet-4-5` by default,
+    operator-tunable via `/settings`),
+    `llm_building_extractor_max_images` (default `8` — enough to
+    cover hero + floor plans + interior on a typical sreality `dum`
+    listing without ballooning the token bill), and
+    `building_default_estimator_skill` (default
+    `rental_estimator_v1`, used by the B2 orchestrator — see the
+    "apartment skill reuse" note on B2's orchestrator step).
+  - Every prior value preserved via the existing
+    `app_settings_history` trigger (migration 020).
+
+**Toolkit function**
+
+- `toolkit.building_extraction.extract_building_units(
+  sreality_id, snapshot_id, max_images=8, force_refresh=False) ->
+  envelope`. Write-allowed exception per CLAUDE.md toolkit rule #5
+  (LLM is the source of truth; cache locally so the
+  inevitable B1→B2 round-trip and any later re-extraction don't
+  re-bill). Same envelope contract as every other toolkit function
+  (`{data, metadata}`). The `data` payload is the structured unit
+  proposal:
+  ```python
+  {
+    "units": [
+      {"id": "u1", "floor": 1, "area_m2": 72, "disposition": "3+kk",
+       "condition": "good", "notes": "...", "is_potential": false},
+      ...
+    ],
+    "building": {"floor_count": 4, "year_built": 1932,
+                 "condition": "good", "total_area_m2": 320,
+                 "construction_type": "brick"},
+    "confidence": "high|medium|low",
+    "warnings": [...],
+  }
+  ```
+- Pulls description text from the latest snapshot's parsed fields
+  (already on `listing_snapshots.raw_json`) and up to `max_images`
+  images from R2 via boto3 `GetObject`, base64-encoded into the
+  Claude vision payload — same pattern as `compare_listing_images`
+  in `toolkit.image_similarity`.
+- Calls log to `llm_calls` with
+  `called_for='extract_building_units'`, the building_run_id (when
+  invoked through the API), token / cost columns populated.
+- Cohort floor: if the listing has no images in R2 (image-download
+  phase hasn't caught up yet, or `R2_*` env vars missing), the
+  function falls back to description-only and stamps
+  `confidence='low'` + a warning. Never crashes the building flow.
+
+**Skill — and why it is NOT the apartment estimator**
+
+- New skill `building_unit_extractor_v1`:
+  - On-disk seed: `skills/building_unit_extractor_v1/SKILL.md`
+    (canonical content + frontmatter, mirroring
+    `skills/rental_estimator_v1/SKILL.md`).
+  - Migration 036 seed `INSERT` into `skills` table (same pattern
+    as migration 029's `rental_estimator_v1` seed, migration 032's
+    `rental_estimator_full_v1` seed). Operator edits live values
+    via `/settings`; `skills_history` trigger preserves every
+    prior version (per Phase 7 slice 1).
+  - Allowed tools: `extract_building_units` (the toolkit wrapper
+    above) + `record_building_units` (the terminator — same shape
+    contract as `record_estimate`, validated server-side).
+  - Preferred model: anthropic = `claude-sonnet-4-5`, gemini =
+    `gemini-2.5-pro` (vision-capable on both providers).
+  - Limits: `max_iterations: 4`, `max_cost_usd: 0.30`,
+    `wall_clock_timeout_s: 90`. Lower than the estimator's caps
+    because extraction is a one-shot vision call, not an iterative
+    cohort search.
+  - System prompt teaches the model to: (a) read the description
+    text first to anchor on stated unit count + total area,
+    (b) cross-check against floor plans, (c) emit one entry per
+    discrete unit including potential ones (e.g. an unconverted
+    attic worth flagging `is_potential=true`), (d) populate
+    `condition` from the provided photos when the text is silent,
+    (e) terminate with `record_building_units`.
+  - **This is an extractor skill, not an estimator skill.** Per-unit
+    rent / sale estimation in B2 reuses the existing
+    `rental_estimator_v1` / `rental_estimator_full_v1` skill (see
+    the apartment-skill-reuse note on B2's orchestrator step) so
+    that an apartment estimated inside a building is computed
+    exactly the same way as a standalone apartment estimation, and
+    any improvement to the apartment estimator skill rolls into the
+    building flow automatically.
+
+**API endpoints**
+
+- `POST /buildings/from_url` — operator-facing entry, replaces
+  B0's minimal `POST /buildings` shell:
+  1. Routes the input URL through
+     `scraper.source_dispatcher.parse_listing_url` (reused as-is —
+     same cache, same per-source parsers, same audit trail in
+     `parsed_url_cache` and `llm_calls`).
+  2. Validates the parse: `category_main` must be `'dum'` or
+     `'komercni'`. A `byt` URL returns HTTP 400 with a hint to use
+     `/estimations` instead — apartments don't decompose.
+  3. Inserts `building_runs` row in `status='pending'` with all
+     `input_*` + `source_*` + `subject_summary` columns populated
+     from the parse output. (The `subject_summary.building` sub-
+     object will be overwritten by the extractor's `building`
+     field in step 5.)
+  4. Transitions `status` to `'extracting'` and runs the
+     extractor synchronously (v1; Phase 7 slice 2's async lifecycle
+     will retrofit polling later). On extractor failure, transitions
+     to `status='failed'` with `error_message` set; the row IS
+     the audit trail, same discipline as estimation_runs.
+  5. On success, writes the extractor output to `units_proposal`
+     (append-only after this point) and to `subject_summary` (which
+     keeps the operator-visible "what we know about the building"
+     blob in one place), transitions to `status='awaiting_input'`,
+     returns the row. Total latency ~10-30 s on a typical
+     `dum` listing — within the 90s skill timeout.
+- `POST /buildings/{id}/confirm_units` — the human-in-the-loop gate:
+  1. Accepts the operator-edited unit list (the
+     `record_building_units` envelope's `units` array). Rejects if
+     `status != 'awaiting_input'` (HTTP 409 — building already in
+     a later state).
+  2. Validates each entry's shape via the existing `BuildingUnit`
+     Pydantic schema from B0 (`id`, `floor`, `area_m2`,
+     `disposition`, `condition`, `notes`, `is_potential`).
+  3. Writes the confirmed list to `units` (mutable until estimation
+     starts in B2, after which B2 freezes it).
+  4. Transitions `status` to `'estimating'`. B2's orchestrator
+     picks up from there. For B1's scope we stop here — a building
+     in `estimating` with no child runs is a valid intermediate
+     state.
+- `POST /buildings/{id}/re_extract` — re-run the extractor against
+  the current snapshot (forces cache miss via `force_refresh=True`).
+  Only valid while the building is in `awaiting_input`; returns 409
+  otherwise. Useful when a new snapshot lands between paste and
+  confirmation and the operator wants the extractor to see it.
+- B0's old minimal `POST /buildings` is removed — every operator-
+  facing creation goes through `from_url` from B1 onward.
+
+**Frontend**
+
+- `NewEstimationModal` grows a `kind` toggle ("Apartment" /
+  "Building"), defaulting to apartment so existing flows stay
+  unchanged. Pasting a URL with `kind='building'` routes the
+  request to `/buildings/from_url` instead of `/estimations`.
+- Step 2 of the building flow renders a new `BuildingUnitEditor`
+  component: a table of unit rows (floor / area / disposition /
+  condition / notes / `is_potential` checkbox), add / remove
+  buttons, plus a building summary header (year built, floor count,
+  total m², construction type). Each editable field maps 1:1 to a
+  `BuildingUnit` field. Submitting POSTs to
+  `/buildings/{id}/confirm_units`.
+- New `/building/:id` route — initial read-only view of a building
+  row. For B1 it renders: subject summary block, current status
+  badge (with a CTA for `awaiting_input` rows that opens the
+  `BuildingUnitEditor` in confirm mode), units list (proposal or
+  confirmed), warnings block, link back to the source URL. The
+  full rollup view + per-unit estimate strips ship with B2.
+- The Estimations list page (`/estimations`) is unchanged — building
+  rows live on `/buildings` (a new list page) so the two
+  conceptually-different things don't blend. `/buildings` is a slim
+  table modeled on `/estimations` (source / status / created_at /
+  unit count / link). The shared `EstimationsListPage` filter +
+  pagination conventions apply.
+
+**Tests**
+
+- `tests/toolkit/test_building_extraction.py`: hermetic test that
+  stubs the Claude vision call with a saved fixture response and
+  exercises the cache hit / miss branches, plus the fallback path
+  when R2 is unreachable.
+- `tests/api/test_buildings_b1.py`: integration tests for
+  `POST /buildings/from_url` (parse success, `byt` rejection,
+  extractor failure, cache hit) and
+  `POST /buildings/{id}/confirm_units` (happy path, status guard,
+  schema validation). Modeled on the `_State` fakes from
+  `tests/api/test_estimations.py`; no real LLM, no real DB.
+- `tests/skills/test_building_unit_extractor_v1.py`: validates the
+  SKILL.md frontmatter + migration seed are in sync (same pattern
+  as the existing `rental_estimator_v1` test).
+- Frontend: `BuildingUnitEditor.test.tsx` snapshot + interaction
+  test for add / remove / edit / submit; `BuildingPage.test.tsx`
+  for the `awaiting_input` CTA branch.
+
+**Out of scope for B1 (deferred to B2 / later)**
+
+- Per-unit rent / sale estimation fan-out — that's the B2
+  orchestrator's job, which reuses the existing apartment
+  estimator skill (see B2 below).
+- Building rollup totals — same.
+- The Excel-style business case tab — B3.
+- Async / polling lifecycle — Phase 7 slice 2.
+- Multi-portal (bezrealitky / idnes / remax) building paste — the
+  source_dispatcher already routes those URLs, but per-source
+  building parsers may need extra fields beyond what the apartment
+  flow exercises; defer until a real bezrealitky `dum` URL surfaces
+  in operator testing.
+
+### Phase B2: Per-unit fan-out + building rollup view
+
+- **Orchestrator** in `api/building_runs.py` (or a new
+  `building_agent.py`): on `units` confirmation, INSERT one rent
+  + one sale `estimation_runs` row per unit, each linked back via
+  `building_run_id` + `building_unit_id`. Reuse the existing
+  agent-mode plumbing — the orchestrator is just a fan-out +
+  watcher, no new LLM loop.
+  - **Reuse the existing apartment estimator skill.** Each child
+    `estimation_runs` row submitted by the B2 orchestrator runs
+    under the operator's configured apartment estimator skill —
+    today `rental_estimator_v1` (slice 1) or
+    `rental_estimator_full_v1` (slice 1.5), sourced from
+    `app_settings.building_default_estimator_skill` (seeded by
+    migration 036 to `rental_estimator_v1`, operator-tunable via
+    `/settings`). The child rows pass `category_main='byt'`,
+    `category_type='pronajem'` for rent (and `'prodej'` for sale),
+    `area_m2` and `disposition` from the confirmed `units` entry,
+    and `lat`/`lng` from the parent building's parse output. This
+    is a deliberate design choice: an apartment unit inside a
+    building must be estimated exactly the same way as a
+    standalone apartment, so the two surfaces stay consistent and
+    any improvement to the apartment skill (better prompts,
+    additional tools, model upgrades) rolls into the building
+    flow automatically with zero per-flow work. Adding a separate
+    "building-apartment estimator" skill would duplicate prompt
+    engineering, drift over time, and silently produce different
+    numbers for the same unit depending on the surface — exactly
+    what we want to avoid. (Sale-side estimation reuses the same
+    discipline once a sale-specific skill exists; until then sale
+    children fall back to deterministic mode — see "out of scope"
+    below.)
+- **Rollup**: when all child runs reach a terminal status, write
+  summed `total_rent_p25/p50/p75_czk` +
+  `total_sale_p25/p50/p75_czk` to `building_runs`. P50 is straight
+  sum across units; P25 / P75 use the per-unit IQR endpoints
+  summed (matches how the operator reads the spreadsheet).
+- **Frontend**: extend `/building/:id` from B1's read-only view —
+  building subject summary at the top, units list with per-unit
+  estimate strips (reusing the `EstimationStrip` component from
+  `/estimation/:id`), rollup totals, link out to each child
+  estimation for detail.
+- **Out of scope for B2**: sale-side skill (rent reuse is the
+  minimum bar). The sale child rows in B2 run in deterministic
+  mode against the existing sale-estimation path until a
+  `sale_estimator_v1` skill ships in a later phase.
+
+### Phase B3: Business case tab
+
+- Storage: `building_runs.business_case` JSONB (column exists from
+  B0). Holds assumptions + floor schedule + unit-schedule overrides
+  + computed outputs. JSONB grain because the spreadsheet is
+  non-tabular and operator-tunable.
+- Math engine: `api/business_case.py` — pure-Python port of the
+  `model_Kralupska.xlsx` formulas (~30 lines of Excel logic).
+  Stdlib only. Inputs from the column above + the unit list +
+  the latest rollup totals; outputs EBIT / EBT / MOIC / IRR /
+  yield-on-cost + the per-row breakdowns.
+- API: `PUT /buildings/{id}/business_case` (idempotent save +
+  recompute); the GET returns the persisted state.
+- Frontend: an Excel-like grid as a new tab on the building page.
+  Option A: hand-rolled `<table>` + per-cell `<input>`, save-on-blur
+  to the PUT. Option B: an off-the-shelf grid (Handsontable
+  Community / `react-spreadsheet`) — needs operator approval for the
+  new dep. Default recommendation is A on the strength of "no new
+  deps without justification"; revisit if the hand-rolled grid
+  proves too rigid.
+
+## Skill refinement track (parallel)
+
+Closing the loop on the Phase 7 agent: today the operator can edit a
+skill's system prompt via `/settings`, but there is no structured way
+to learn from a specific estimation that went well or badly. This
+track adds (a) deeper trace inspection so the operator can actually
+see *why* the agent picked the comparables it picked, and (b) a
+feedback-driven prompt refinement loop where the operator's written
+critique of a specific run gets fed back into the skill that produced
+it.
+
+### Phase AI: Feedback-driven skill refinement (proposed)
+
+**Trace inspection enrichment**
+
+The existing trace already records every tool call's parameters and
+an `output_summary` per architectural rule #9 (capping row size at
+single-digit kilobytes regardless of cohort size). What's missing is
+the ability to drill from a tool call's row in the timeline into the
+full payload it returned — concretely, the operator wants to see
+"this `find_comparables_relaxed` call with these filters returned 42
+listings; the 8 that ended up in `comparables_used` were picked
+because of this reasoning step; here are the 34 that didn't make
+the cut and why."
+
+- Trace step rows in the UI already render `filters_used` from the
+  tool's metadata envelope (per toolkit rule #2). What they don't
+  render: the listings that came back from the call but weren't
+  selected. Two viable shapes:
+  - **Shape A — payload side-table.** New table
+    `estimation_trace_payloads(estimation_run_id, step_n,
+    full_output jsonb, captured_at)` written at trace-finalisation
+    time. Architectural rule #9 stays intact (the trace JSONB on
+    `estimation_runs` keeps only the summary); this is a separate,
+    lazily-loaded record. UI fetches `/estimations/{id}/trace/{n}/payload`
+    on click-to-expand. Recommended default.
+  - **Shape B — on-demand re-execution.** No new storage; the UI
+    re-runs the tool with the recorded params. Cheaper at write
+    time but breaks the freshness contract — the listings table
+    moves under the agent's feet, so the operator sees a different
+    cohort than the run actually used. Bad for the audit story.
+- The Timeline component (`frontend/src/components/Timeline.tsx`)
+  already dispatches on `step.kind`; this is a new render mode on
+  `tool_call` steps that exposes the expandable payload view +
+  per-listing "did this make `comparables_used`? if not, why?"
+  annotation.
+- The "why" annotation per non-selected listing comes from the
+  reasoning step that immediately follows the tool call (per the
+  Phase 7 slice 1 trace shape — reasoning kind is emitted per LLM
+  turn). The UI surfaces the relevant slice of that reasoning
+  alongside the listings table.
+
+**Feedback capture**
+
+- Migration: `estimation_feedback(id, estimation_run_id, feedback_text,
+  submitted_at, status, refinement_id)` — one row per operator
+  feedback submission, linked back to the run. `status` lifecycle:
+  `submitted` → `refining` → `proposed` | `applied` | `dismissed` |
+  `failed`. Append-only (architectural rule #1 spirit even though
+  this is operational data, not history).
+- API: `POST /estimations/{id}/feedback` accepts
+  `{feedback_text: str, kick_off_refinement: bool = true}` and
+  inserts a row. Bearer-gated. Defaults to immediately kicking off
+  the refinement loop so the operator gets a same-session proposal;
+  setting the flag false stores the feedback without spending LLM
+  credit.
+- Frontend: a "Provide feedback" button sits alongside the existing
+  "Re-run" button on `/estimation/:id`. Click opens a modal with a
+  textarea + submit. Past feedback for a run renders inline (one
+  block per submission, status badge, link to the proposed
+  refinement when applicable).
+
+**Refinement loop**
+
+- New skill `skill_refiner_v1` (on-disk seed
+  `skills/skill_refiner_v1/SKILL.md` + migration seed `INSERT`,
+  same pattern as `rental_estimator_v1` per Phase 7 slice 1). Input
+  context: the original skill (system prompt + allowed tools +
+  preferred model + limits, sourced fresh from the `skills` row at
+  refinement time), the full estimation trace including the new
+  trace payloads, and the operator's feedback text. Output: a
+  proposed updated `system_prompt` (and optionally an updated
+  `allowed_tools` whitelist when the feedback says "stop using
+  tool X" or "you should have used tool Y"), plus a one-paragraph
+  explanation of what the refiner changed and why.
+- Limits: `max_iterations: 2`, `max_cost_usd: 0.40`,
+  `wall_clock_timeout_s: 60`. The refiner is a single reasoning
+  pass over a fully-materialised context, not an iterative tool-
+  use loop, so limits sit lower than the estimator's.
+- Calls log to `llm_calls` with `called_for='refine_skill'` (new
+  value on the CHECK constraint via the same migration).
+
+**Apply vs. suggest — the safety-critical choice**
+
+- **Default: suggest-then-confirm.** The refiner writes the proposed
+  new prompt to a new staging table `skill_refinements(id, skill_id,
+  original_prompt, proposed_prompt, proposed_allowed_tools,
+  refiner_explanation, source_feedback_id, status, created_at,
+  applied_at)`. Status: `proposed` → `applied` | `dismissed`. The
+  operator reviews the diff on `/settings/skills/{name}/refinements`
+  and clicks Apply (which writes through `PUT /admin/skills/{name}`,
+  letting the existing `skills_history` trigger from migration 029
+  preserve the prior value automatically) or Dismiss.
+- **Optional: auto-apply.** Operator can flag a skill as
+  `auto_apply_refinements: true` via `/settings`. Useful for early
+  iteration when the operator wants tight loops; risky in the long
+  run because LLM-written prompt edits will drift the skill's
+  behaviour silently. Strongly recommend leaving this off in
+  production.
+- Either path goes through `skills_history` for full audit and
+  rollback, same discipline as `app_settings_history` (migration
+  020).
+
+**Open questions (operator to decide before implementation starts)**
+
+- **Payload retention.** How long do we keep `estimation_trace_payloads`
+  rows? Forever bloats the table (a single run's payload can be
+  hundreds of KB); 30 days mirrors `listing_freshness_checks` and
+  is the recommended default. Old rows just remove the
+  drill-down ability — the trace summary stays intact.
+- **Refinement scope.** Does the refiner update the *same* skill the
+  run used, or fork to a new `_v2`/`_vN` skill so the original stays
+  pristine for A/B comparison? Forking is heavier but matches how
+  the Phase 7 slice 2 A/B view assumes multiple skill variants.
+- **Allowed-tools edits.** Should the refiner be allowed to change
+  the tool whitelist, or only the system prompt? Prompt-only is
+  simpler and harder to break things with; tool-whitelist edits
+  unlock real behaviour change but need stricter validation
+  (refusing to whitelist a tool that doesn't exist, etc.).
+- **Feedback batching.** Apply each feedback submission individually
+  (chatty, fast iteration, more LLM cost), or accumulate N
+  submissions and refine once over the bundle (cheaper, slower
+  iteration)? Default: per-submission, behind the
+  `kick_off_refinement` flag so the operator can batch manually.
+- **Default model for the refiner.** A capable model (Claude Opus,
+  GPT-4o, Gemini Pro) is worth the cost here — it's writing prompts
+  that drive every subsequent estimation. Lock to a specific model
+  via `app_settings.llm_skill_refiner_model` so the operator can
+  swap without redeploying.
+
+**Out of scope for Phase AI**
+
+- Automated regression testing of refined skills (re-running the
+  refined skill against a fixture set of past estimations to check
+  for behaviour drift) — that's a follow-up phase once the basic
+  loop is in place.
+- Multi-operator feedback aggregation — today's single-operator
+  identity model applies (same as Phase U2.7).
+- Cross-skill refinement ("learning from the rental skill should
+  improve the sale skill") — out of scope; each skill is refined
+  in isolation against its own runs.
 
 ## Summarize track (parallel)
 

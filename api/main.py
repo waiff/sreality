@@ -20,6 +20,14 @@ from api import schemas as s
 from api import skills as skills_module
 from api.agent import AGENT_TOOLS
 from api.estimate_yield import estimate_yield
+from api.building_runs import (
+    confirm_units,
+    create_building_run,
+    create_building_run_from_url,
+    get_building_run,
+    list_building_runs,
+    re_extract,
+)
 from api.estimation_runs import (
     create_estimation_run,
     get_estimation_run,
@@ -556,6 +564,80 @@ def list_estimations(
     )
 
 
+@app.post("/buildings")
+def post_buildings(
+    body: s.CreateBuildingIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return create_building_run(conn, body)
+
+
+@app.post("/buildings/from_url")
+def post_buildings_from_url(
+    body: s.CreateBuildingFromUrlIn,
+    conn: Any = Depends(deps.get_db_conn),
+    sreality_client: Any = Depends(deps.get_sreality_client),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return create_building_run_from_url(
+        conn, sreality_client, llm_client, body,
+    )
+
+
+@app.post("/buildings/{building_id}/confirm_units")
+def post_buildings_confirm_units(
+    building_id: int,
+    body: s.ConfirmBuildingUnitsIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return confirm_units(conn, building_id, body)
+
+
+@app.post("/buildings/{building_id}/re_extract")
+def post_buildings_re_extract(
+    building_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return re_extract(conn, llm_client, building_id)
+
+
+@app.get("/buildings")
+def get_buildings(
+    source: str | None = None,
+    status: s.BuildingStatus | None = None,
+    sreality_id: int | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return list_building_runs(
+        conn,
+        source=source,
+        status=status,
+        sreality_id=sreality_id,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/buildings/{building_id}")
+def get_building(
+    building_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    row = get_building_run(conn, building_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="building run not found")
+    return row
+
+
 @app.post("/estimate_yield")
 def post_estimate_yield(
     body: s.EstimateYieldIn,
@@ -717,6 +799,16 @@ def post_tag(
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return curation.create_tag(conn, body)
+
+
+@app.patch("/tags/{tag_id}")
+def patch_tag(
+    tag_id: int,
+    body: s.UpdateTagIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return curation.update_tag(conn, tag_id, body)
 
 
 @app.delete("/tags/{tag_id}")

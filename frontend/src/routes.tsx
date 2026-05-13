@@ -4,12 +4,14 @@ import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
 import Region from './pages/Region';
 import Health from './pages/Health';
-import Estimate from './pages/Estimate';
+import BuildingDetail from './pages/BuildingDetail';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
+import Collections from './pages/Collections';
+import CollectionDetail from './pages/CollectionDetail';
 import Settings from './pages/Settings';
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
-// once design is approved and the indicator is in real use in EstimateForm.
+// once design is approved and the indicator is in real use.
 import DevConfidencePreview from './pages/DevConfidencePreview';
 
 export const routes: RouteObject[] = [
@@ -23,9 +25,12 @@ export const routes: RouteObject[] = [
       { path: 'listing/:sreality_id', element: <ListingDetail /> },
       { path: 'region', element: <Region /> },
       { path: 'health', element: <Health /> },
-      { path: 'estimate', element: <Estimate /> },
+      { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList /> },
       { path: 'estimation/:id', element: <EstimationDetail /> },
+      { path: 'building/:id', element: <BuildingDetail /> },
+      { path: 'collections', element: <Collections /> },
+      { path: 'collection/:id', element: <CollectionDetail /> },
       { path: 'settings', element: <Settings /> },
       { path: 'dev/confidence-indicator', element: <DevConfidencePreview /> },
       { path: '*', element: <NotFound /> },

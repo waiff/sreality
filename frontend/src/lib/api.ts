@@ -10,14 +10,22 @@
  */
 
 import type {
+  BuildingListResponse,
+  BuildingRun,
+  Collection,
+  CollectionWithListings,
+  ConfirmBuildingUnitsIn,
+  CreateBuildingFromUrlIn,
   CreateEstimationIn,
   EstimationListParams,
   EstimationListResponse,
   EstimationRun,
   ListingSummaryBatchRow,
+  Note,
   ParseResult,
-  PreviewResponse,
   SourceKind,
+  Tag,
+  TagColor,
 } from './types';
 
 /* Sources the backend allowlists for high-confidence parsing.
@@ -163,14 +171,6 @@ export const apiPost = <T>(
 
 /* ----- estimations ------------------------------------------------------- */
 
-// TODO(estimation-5 Part B): delete `previewListing` + the
-// `fetchEstimationPreview` re-export in lib/queries.ts once
-// UrlScrapeStep.tsx is migrated to previewListingUrl + useUrlPreview.
-// The new POST /estimations/preview routes sreality through the same
-// dispatcher, so the legacy GET endpoint becomes dead code at that point.
-export const previewListing = (url: string): Promise<PreviewResponse> =>
-  request<PreviewResponse>('/estimations/preview', { query: { url } });
-
 /* POST /estimations/preview — generic URL parser (sreality fast path
  * + LLM-driven per-source parser for everything else, dispatched on
  * the backend). When force_refresh is true the 7-day URL cache is
@@ -212,6 +212,38 @@ export const fetchListingSummaries = (
     method: 'POST',
     json: { items },
   });
+
+/* ----- buildings (Phase B1) ---------------------------------------------- */
+
+export const createBuildingFromUrl = (
+  input: CreateBuildingFromUrlIn,
+): Promise<BuildingRun> =>
+  request<BuildingRun>('/buildings/from_url', {
+    method: 'POST',
+    json: input,
+  });
+
+export const getBuilding = (id: number): Promise<BuildingRun> =>
+  request<BuildingRun>(`/buildings/${id}`);
+
+export const listBuildings = (
+  params: { source?: string; status?: string; limit?: number; offset?: number } = {},
+): Promise<BuildingListResponse> =>
+  request<BuildingListResponse>('/buildings', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const confirmBuildingUnits = (
+  id: number,
+  input: ConfirmBuildingUnitsIn,
+): Promise<BuildingRun> =>
+  request<BuildingRun>(`/buildings/${id}/confirm_units`, {
+    method: 'POST',
+    json: input,
+  });
+
+export const reExtractBuilding = (id: number): Promise<BuildingRun> =>
+  request<BuildingRun>(`/buildings/${id}/re_extract`, { method: 'POST' });
 
 /* ----- admin / Settings page --------------------------------------------
  *
@@ -331,3 +363,104 @@ export const updateAppSetting = (
 
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
+
+/* ----- curation (U2.6) ---------------------------------------------------
+ *
+ * Collections, tags, and notes. Reads of `which tags / which collections
+ * does listing X belong to` go through the *_public Supabase views (see
+ * lib/queries.ts) — there is no per-listing GET on the API. Everything
+ * else (list-by-domain, create, update, delete, attach, detach) goes
+ * through the bearer-gated FastAPI endpoints wrapped below.
+ */
+
+/* Collections */
+
+export const listCollections = (): Promise<{ data: Collection[]; total: number }> =>
+  request<{ data: Collection[]; total: number }>('/collections');
+
+export const getCollection = (id: number): Promise<CollectionWithListings> =>
+  request<CollectionWithListings>(`/collections/${id}`);
+
+export const createCollection = (input: {
+  name: string;
+  description?: string | null;
+}): Promise<Collection> =>
+  request<Collection>('/collections', { method: 'POST', json: input });
+
+export const updateCollection = (
+  id: number,
+  input: { name?: string | null; description?: string | null },
+): Promise<Collection> =>
+  request<Collection>(`/collections/${id}`, { method: 'PATCH', json: input });
+
+export const deleteCollection = (id: number): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(`/collections/${id}`, { method: 'DELETE' });
+
+export const addListingsToCollection = (
+  id: number,
+  sreality_ids: number[],
+): Promise<{ added: number; skipped: number }> =>
+  request<{ added: number; skipped: number }>(`/collections/${id}/listings`, {
+    method: 'POST',
+    json: { sreality_ids },
+  });
+
+export const removeListingFromCollection = (
+  id: number,
+  sreality_id: number,
+): Promise<{ removed: boolean }> =>
+  request<{ removed: boolean }>(
+    `/collections/${id}/listings/${sreality_id}`,
+    { method: 'DELETE' },
+  );
+
+/* Tags */
+
+export const listTags = (): Promise<{ data: Tag[] }> =>
+  request<{ data: Tag[] }>('/tags');
+
+export const createTag = (input: { name: string; color: TagColor }): Promise<Tag> =>
+  request<Tag>('/tags', { method: 'POST', json: input });
+
+export const updateTag = (
+  id: number,
+  patch: { name?: string | null; color?: TagColor | null },
+): Promise<Tag> =>
+  request<Tag>(`/tags/${id}`, { method: 'PATCH', json: patch });
+
+export const deleteTag = (id: number): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(`/tags/${id}`, { method: 'DELETE' });
+
+export const attachTag = (
+  sreality_id: number,
+  tag_id: number,
+): Promise<{ attached: boolean }> =>
+  request<{ attached: boolean }>(`/listings/${sreality_id}/tags`, {
+    method: 'POST',
+    json: { tag_id },
+  });
+
+export const detachTag = (
+  sreality_id: number,
+  tag_id: number,
+): Promise<{ detached: boolean }> =>
+  request<{ detached: boolean }>(
+    `/listings/${sreality_id}/tags/${tag_id}`,
+    { method: 'DELETE' },
+  );
+
+/* Notes (per-listing journal) */
+
+export const listListingNotes = (
+  sreality_id: number,
+): Promise<{ data: Note[] }> =>
+  request<{ data: Note[] }>(`/listings/${sreality_id}/notes`);
+
+export const createListingNote = (
+  sreality_id: number,
+  body: string,
+): Promise<Note> =>
+  request<Note>(`/listings/${sreality_id}/notes`, {
+    method: 'POST',
+    json: { body },
+  });

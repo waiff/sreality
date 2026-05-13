@@ -18,6 +18,8 @@ import type {
   EstimationSource,
   EstimationStatus,
 } from '@/lib/types';
+import { ControlGroup } from '@/components/controls';
+import { useNewEstimationModal } from '@/components/NewEstimationModal';
 
 const PAGE_SIZE = 50;
 
@@ -103,6 +105,7 @@ export default function EstimationList() {
 /* -------------------------------------------------------------------------- */
 
 function Header() {
+  const { open } = useNewEstimationModal();
   return (
     <header className="flex items-end justify-between gap-6">
       <div>
@@ -119,12 +122,13 @@ function Header() {
           Every estimation — from this UI, the API, or ClickUp — lands here.
         </p>
       </div>
-      <Link
-        to="/estimate"
+      <button
+        type="button"
+        onClick={open}
         className="shrink-0 inline-flex items-center gap-2 px-4 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
       >
         <span>+ New estimation</span>
-      </Link>
+      </button>
     </header>
   );
 }
@@ -145,14 +149,16 @@ function FilterBar({
   onStatus: (v: string | null) => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-      <FilterGroup label="Source" value={source} options={SOURCES} onChange={onSource} />
-      <FilterGroup label="Status" value={status} options={STATUSES} onChange={onStatus} />
-    </div>
+    <ControlGroup title="Filter runs">
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+        <SegmentedFilter label="Source" value={source} options={SOURCES} onChange={onSource} />
+        <SegmentedFilter label="Status" value={status} options={STATUSES} onChange={onStatus} />
+      </div>
+    </ControlGroup>
   );
 }
 
-function FilterGroup<T extends string>({
+function SegmentedFilter<T extends string>({
   label,
   value,
   options,
@@ -478,6 +484,7 @@ function PageBtn({
 }
 
 function EmptyState({ filtered }: { filtered: boolean }) {
+  const { open } = useNewEstimationModal();
   return (
     <div className="px-6 py-16 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)]">
       <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
@@ -488,12 +495,13 @@ function EmptyState({ filtered }: { filtered: boolean }) {
           ? 'No runs match these filters.'
           : 'Past runs will appear here once any user, the API, or ClickUp triggers one.'}
       </p>
-      <Link
-        to="/estimate"
+      <button
+        type="button"
+        onClick={open}
         className="mt-4 inline-block text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
       >
         Start an estimation →
-      </Link>
+      </button>
     </div>
   );
 }

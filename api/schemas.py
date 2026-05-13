@@ -403,5 +403,77 @@ class CreateTagIn(BaseModel):
     color: TagColor
 
 
+class UpdateTagIn(BaseModel):
+    name:  str | None = Field(default=None, min_length=1, max_length=50)
+    color: TagColor | None = None
+
+
 class AttachTagIn(BaseModel):
     tag_id: int
+
+
+# --- buildings ------------------------------------------------------------
+# Phase B0 of the building-decomposition track. See ROADMAP.md
+# "Building decomposition track" and CLAUDE.md architectural rule #13.
+# B0 ships schemas + read endpoints only; B1 adds URL ingest + the
+# extractor; B2 fans out per-unit estimations; B3 layers the
+# business case.
+
+BuildingStatus = Literal[
+    "pending", "extracting", "awaiting_input",
+    "estimating", "success", "failed",
+]
+
+BuildingUnitSource = Literal[
+    "description", "floor_plan", "both", "user_added",
+]
+
+
+class BuildingUnit(BaseModel):
+    """One apartment unit within a building.
+
+    Lives inside `building_runs.units_proposal` (agent output) and
+    `building_runs.units` (operator-confirmed) as a JSONB array entry.
+    `unit_id` is a stable string ('u1', 'u2', ...) assigned by the
+    extractor (B1) and preserved across edits so child estimations
+    stay linked to the same conceptual unit.
+    """
+    unit_id: str = Field(min_length=1, max_length=50)
+    label: str | None = None
+    floor: str | None = None
+    area_m2: float | None = None
+    disposition: str | None = None
+    condition: str | None = None
+    is_potential: bool = False
+    source: BuildingUnitSource | None = None
+    notes: str | None = None
+
+
+class CreateBuildingIn(BaseModel):
+    """Minimal building-row creation for B0.
+
+    Inserts a `status='pending'` shell so the read endpoints can be
+    exercised end-to-end. B1 replaces this with `POST /buildings/from_url`
+    that parses the URL, fills `input_*`/`source_*`, and kicks off the
+    extractor synchronously.
+    """
+    source: Literal["ui", "api", "clickup"] = "api"
+    input_url: str | None = None
+
+
+class CreateBuildingFromUrlIn(BaseModel):
+    """Phase B1 paste-a-building entry.
+
+    Routes the URL through scraper.source_dispatcher (the existing
+    per-source parser fleet), rejects category_main='byt' (apartments
+    don't decompose), then runs the building-unit extractor
+    synchronously and persists the row in `status='awaiting_input'`.
+    """
+    source: Literal["ui", "api", "clickup"] = "api"
+    url: str = Field(min_length=1)
+    force_refresh: bool = False
+
+
+class ConfirmBuildingUnitsIn(BaseModel):
+    """Operator-confirmed unit list. Transitions awaiting_input -> estimating."""
+    units: list[BuildingUnit] = Field(min_length=1, max_length=30)

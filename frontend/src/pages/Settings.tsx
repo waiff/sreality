@@ -30,6 +30,8 @@ import {
   type SkillUpdate,
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
+import { useTheme, type ThemeMode } from '@/lib/theme';
+import { PickButton } from '@/components/controls';
 
 export default function Settings() {
   return (
@@ -59,7 +61,77 @@ export default function Settings() {
         </p>
         <AppSettingsSection />
       </section>
+
+      <section className="mt-10">
+        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
+          Appearance
+        </h2>
+        <ThemeToggle />
+      </section>
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Appearance                                                            */
+/* -------------------------------------------------------------------- */
+
+const THEME_OPTS: ReadonlyArray<{
+  value: ThemeMode;
+  label: string;
+  icon: 'sun' | 'moon' | 'system';
+}> = [
+  { value: 'light',  label: 'Light',  icon: 'sun'    },
+  { value: 'dark',   label: 'Dark',   icon: 'moon'   },
+  { value: 'system', label: 'System', icon: 'system' },
+];
+
+function ThemeToggle() {
+  const [mode, setMode] = useTheme();
+  return (
+    <div>
+      <div className="inline-flex gap-1.5">
+        {THEME_OPTS.map((opt) => (
+          <PickButton
+            key={opt.value}
+            on={mode === opt.value}
+            onClick={() => setMode(opt.value)}
+            className="inline-flex items-center gap-1.5 px-3"
+          >
+            <ThemeGlyph kind={opt.icon} />
+            <span>{opt.label}</span>
+          </PickButton>
+        ))}
+      </div>
+      <p className="text-xs text-[var(--color-ink-3)] mt-2.5">
+        Light is the default. System follows your OS preference.
+      </p>
+    </div>
+  );
+}
+
+function ThemeGlyph({ kind }: { kind: 'sun' | 'moon' | 'system' }) {
+  if (kind === 'sun') {
+    return (
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+        <circle cx="8" cy="8" r="2.6" />
+        <path d="M8 1.5v1.4M8 13.1v1.4M14.5 8h-1.4M2.9 8H1.5M12.6 3.4l-1 1M4.4 11.6l-1 1M12.6 12.6l-1-1M4.4 4.4l-1-1" />
+      </svg>
+    );
+  }
+  if (kind === 'moon') {
+    return (
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+        <path d="M13.2 9.6A5.2 5.2 0 0 1 6.4 2.8a5.4 5.4 0 1 0 6.8 6.8Z" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4">
+      <circle cx="8" cy="8" r="5.4" />
+      <path d="M8 2.6v10.8" />
+      <path d="M8 2.6a5.4 5.4 0 0 1 0 10.8Z" fill="currentColor" stroke="none" />
+    </svg>
   );
 }
 

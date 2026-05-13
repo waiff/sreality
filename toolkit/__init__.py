@@ -47,6 +47,7 @@ def _max_last_seen(listings: list[dict[str, Any]]) -> str | None:
 
 
 from toolkit.amenities import find_anchor_amenities  # noqa: E402
+from toolkit.building_extraction import extract_building_units  # noqa: E402
 from toolkit.clustering import cluster_comparables  # noqa: E402
 from toolkit.comparables import (  # noqa: E402
     ComparableFilters,
@@ -85,6 +86,7 @@ __all__ = [
     "compute_market_velocity",
     "compute_walkability",
     "describe_neighborhood",
+    "extract_building_units",
     "find_anchor_amenities",
     "find_comparables",
     "find_comparables_along_axis",

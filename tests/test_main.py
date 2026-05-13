@@ -130,3 +130,42 @@ def test_dry_run_never_calls_mark_inactive(patched_db, monkeypatch):
     rc = scraper_main._run_full(limit=None, dry_run=True)
     assert rc == 0
     assert patched_db["mark_inactive"] == []
+
+
+def test_run_full_preserves_mark_inactive_for_earlier_categories_when_later_walk_crashes(
+    patched_db, monkeypatch
+):
+    """Regression: a later category crashing mid-walk must NOT discard the
+    mark_inactive work for categories that already walked successfully.
+
+    Previously mark_inactive ran in a single post-loop block, so any
+    exception inside the per-category loop dropped the marking step for
+    every category — including the ones that walked cleanly. The fix
+    moves mark_inactive into the per-category body so each category's
+    marking commits before the next walk starts.
+    """
+    # CATEGORIES order: (1,2) byt/pronajem, (1,1) byt/prodej,
+    # (2,2) dum/pronajem, ... — make the 3rd one raise during iteration.
+    def crashing_iter_index(self):
+        if (self.category_main, self.category_type) == (2, 2):
+            yield {"hash_id": 99999, "price_czk": {"value_raw": 1}}
+            raise RuntimeError("simulated outage mid-iteration")
+        base = self.category_main * 10000 + self.category_type * 1000
+        for i in range(_FakeClient.total_entries):
+            yield {
+                "hash_id": base + i,
+                "price_czk": {"value_raw": 10000 + i},
+            }
+
+    monkeypatch.setattr(_FakeClient, "iter_index", crashing_iter_index)
+
+    with pytest.raises(RuntimeError):
+        scraper_main._run_full(limit=None, dry_run=False)
+
+    marked = {(cm, ct) for cm, ct, _ in patched_db["mark_inactive"]}
+    assert ("byt", "pronajem") in marked
+    assert ("byt", "prodej") in marked
+    assert ("dum", "pronajem") not in marked
+    assert ("dum", "prodej") not in marked
+    assert ("komercni", "pronajem") not in marked
+    assert ("komercni", "prodej") not in marked

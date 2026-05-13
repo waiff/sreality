@@ -4,7 +4,29 @@ export type TriState = 'any' | 'yes' | 'no';
 export type SeenWithin = '1d' | '7d' | '30d' | 'any';
 export type ListingStatus = 'active' | 'inactive' | 'any';
 
+/* The three category_main values surfaced as filters in the UI. The DB
+ * also stores 'pozemek' (land) and 'ostatni' (other), but the scrape /
+ * toolkit only target the apartments / houses / commercial trio. */
+export type CategoryMain = 'byt' | 'dum' | 'komercni';
+
+/* CHECK constraint on listings.category_type allows pronajem / prodej /
+ * drazba / podil; only the first two are user-facing in Browse. */
+export type CategoryType = 'pronajem' | 'prodej';
+
+/* Map-viewport rectangle. west < east, south < north, all WGS84
+ * degrees. Acts as an additional filter alongside the sidebar fields:
+ * cards / table / stats all narrow to listings whose (lng, lat) falls
+ * inside the rectangle. NULL = no map area applied. */
+export interface MapBounds {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+}
+
 export interface ListingFilters {
+  categoryMain: CategoryMain;
+  categoryType: CategoryType;
   districts: string[];
   dispositions: Disposition[];
   priceMin: number | null;
@@ -28,9 +50,16 @@ export interface ListingFilters {
   usableAreaMin: number | null;
   usableAreaMax: number | null;
   parkingLotsMin: number | null;
+  /* Migration 025 — operator tags. AND-semantics: a listing must carry
+   * every selected tag id. Stored as ids (not names) so renames /
+   * recolour-by-delete-recreate stay queryable. */
+  tags: number[];
+  bounds: MapBounds | null;
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
+  categoryMain: 'byt',
+  categoryType: 'pronajem',
   districts: [],
   dispositions: [],
   priceMin: null,
@@ -53,6 +82,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   usableAreaMin: null,
   usableAreaMax: null,
   parkingLotsMin: null,
+  tags: [],
+  bounds: null,
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -72,6 +103,8 @@ const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
 const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
 const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
+const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = ['byt', 'dum', 'komercni'];
+const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = ['pronajem', 'prodej'];
 
 const splitCsv = (s: string | null): string[] =>
   s == null || s === '' ? [] : s.split(',').map(decodeURIComponent);
@@ -119,6 +152,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const [usableMin, usableMax] = parseRange(sp.get('usable'));
   const legacyAny: ListingStatus = sp.get('active') === '0' ? 'any' : 'active';
   return {
+    categoryMain: enumOr(sp.get('cat'), CATEGORY_MAIN_VALUES, 'byt'),
+    categoryType: enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
     districts: splitCsv(sp.get('districts')),
     dispositions,
     priceMin,
@@ -141,11 +176,37 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     usableAreaMin: usableMin,
     usableAreaMax: usableMax,
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
+    tags: parseIntList(sp.get('tags')),
+    bounds: parseBounds(sp.get('bbox')),
   };
+};
+
+const parseBounds = (s: string | null): MapBounds | null => {
+  if (!s) return null;
+  const parts = s.split(',');
+  if (parts.length !== 4) return null;
+  const [w, sLat, e, n] = parts.map(Number);
+  if (![w, sLat, e, n].every((x) => Number.isFinite(x))) return null;
+  if (w >= e || sLat >= n) return null;
+  return { west: w, south: sLat, east: e, north: n };
+};
+
+const fmtBoundsCoord = (n: number): string => Number(n.toFixed(5)).toString();
+
+const parseIntList = (s: string | null): number[] => {
+  if (!s) return [];
+  const out: number[] = [];
+  for (const part of s.split(',')) {
+    const n = Number(part);
+    if (Number.isInteger(n) && n > 0) out.push(n);
+  }
+  return out;
 };
 
 export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   const sp = new URLSearchParams();
+  if (f.categoryMain !== 'byt') sp.set('cat', f.categoryMain);
+  if (f.categoryType !== 'pronajem') sp.set('deal', f.categoryType);
   if (f.districts.length) sp.set('districts', joinCsv(f.districts));
   if (f.dispositions.length) sp.set('disposition', f.dispositions.join(','));
   if (f.priceMin != null || f.priceMax != null) {
@@ -172,6 +233,14 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
     sp.set('usable', `${f.usableAreaMin ?? ''}-${f.usableAreaMax ?? ''}`);
   }
   if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
+  if (f.tags.length) sp.set('tags', f.tags.join(','));
+  if (f.bounds) {
+    const { west, south, east, north } = f.bounds;
+    sp.set(
+      'bbox',
+      `${fmtBoundsCoord(west)},${fmtBoundsCoord(south)},${fmtBoundsCoord(east)},${fmtBoundsCoord(north)}`,
+    );
+  }
   return sp;
 };
 
@@ -181,10 +250,25 @@ export const seenWithinToIso = (s: SeenWithin): string | null => {
   return new Date(Date.now() - days * 86_400_000).toISOString();
 };
 
+const CATEGORY_MAIN_PLURAL: Record<CategoryMain, string> = {
+  byt: 'apartments',
+  dum: 'houses',
+  komercni: 'commercial',
+};
+
+const CATEGORY_TYPE_LABEL: Record<CategoryType, string> = {
+  pronajem: 'for rent',
+  prodej: 'for sale',
+};
+
+export const categoryHeading = (f: ListingFilters): string =>
+  `${CATEGORY_MAIN_PLURAL[f.categoryMain]} ${CATEGORY_TYPE_LABEL[f.categoryType]}`;
+
 export const summarise = (f: ListingFilters, count: number | null): string => {
   const bits: string[] = [];
   bits.push(f.status === 'active' ? 'active' : f.status === 'inactive' ? 'inactive' : 'all');
-  bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} listings`);
+  bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} ${CATEGORY_MAIN_PLURAL[f.categoryMain]}`);
+  bits.push(CATEGORY_TYPE_LABEL[f.categoryType]);
   if (f.districts.length) {
     const shown = f.districts.slice(0, 3).join(', ');
     const extra = f.districts.length > 3 ? ` +${f.districts.length - 3}` : '';
@@ -197,10 +281,13 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
     const human = f.seenWithin === '1d' ? '24 h' : f.seenWithin === '7d' ? '7 days' : '30 days';
     bits.push(`seen within ${human}`);
   }
+  if (f.bounds) bits.push('in this map area');
   return `Showing ${bits.join(' ')}`;
 };
 
 export const isDefault = (f: ListingFilters): boolean =>
+  f.categoryMain === 'byt' &&
+  f.categoryType === 'pronajem' &&
   f.districts.length === 0 &&
   f.dispositions.length === 0 &&
   f.priceMin == null &&
@@ -222,4 +309,6 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.estateAreaMax == null &&
   f.usableAreaMin == null &&
   f.usableAreaMax == null &&
-  f.parkingLotsMin == null;
+  f.parkingLotsMin == null &&
+  f.tags.length === 0 &&
+  f.bounds == null;

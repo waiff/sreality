@@ -18,15 +18,19 @@ import {
 import { ApiError, fetchListingSummaries } from '@/lib/api';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
+import { PickButton } from '@/components/controls';
 import type {
   ComparableUsed,
   Confidence,
   CreateEstimationIn,
+  Disposition,
+  EstimationProvider,
   EstimationRun,
   EstimationSource,
   ImagePublic,
   ListingPublic,
   ListingSummaryBatchRow,
+  Population,
   SubjectSummary,
   TargetSpecIn,
 } from '@/lib/types';
@@ -50,8 +54,9 @@ export default function EstimationDetail() {
     staleTime: 60_000,
   });
 
-  const rerunMut = useMutation<EstimationRun, ApiError, EstimationRun>({
-    mutationFn: (run) => submitEstimation(buildRerunPayload(run)),
+  const rerunMut = useMutation<EstimationRun, ApiError, RerunInput>({
+    mutationFn: ({ run, overrides }) =>
+      submitEstimation(buildRerunPayload(run, overrides)),
     onSuccess: (run) => navigate(`/estimation/${run.id}`),
   });
 
@@ -134,7 +139,7 @@ export default function EstimationDetail() {
       <Hairline />
       <RerunBlock
         run={run}
-        onRerun={() => rerunMut.mutate(run)}
+        onRerun={(overrides) => rerunMut.mutate({ run, overrides })}
         pending={rerunMut.isPending}
         error={rerunMut.error}
       />
@@ -735,6 +740,64 @@ function Th({ align, children }: { align: 'left' | 'right'; children: React.Reac
 /* Re-run                                                                     */
 /* -------------------------------------------------------------------------- */
 
+/* The "Adjust & re-run" panel — collapsed by default. The fast path
+ * (re-run unchanged) lives on the same row as the expander; expanding
+ * reveals the editable spec form pre-filled from the run. Only the
+ * fields a sane re-run actually flips are exposed; building/amenity
+ * attributes belong to the listing scrape, not the run, and aren't
+ * something the operator can override here. */
+
+type RerunOverrides = {
+  spec?: TargetSpecIn;
+  estimate_kind?: 'rent' | 'sale';
+  provider?: EstimationProvider;
+  population?: Population;
+  purchase_price_czk?: number | null;
+  expected_monthly_rent_czk?: number | null;
+};
+
+interface RerunInput {
+  run: EstimationRun;
+  overrides?: RerunOverrides;
+}
+
+const DISPOSITIONS: ReadonlyArray<Disposition> = [
+  '1+kk', '1+1',
+  '2+kk', '2+1',
+  '3+kk', '3+1',
+  '4+kk', '4+1',
+  '5+kk', '5+1',
+];
+
+interface AdjustState {
+  lat: number | null;
+  lng: number | null;
+  area_m2: number | null;
+  disposition: Disposition | null;
+  floor: number | null;
+  estimate_kind: 'rent' | 'sale';
+  provider: EstimationProvider;
+  population: Population;
+  purchase_price_czk: number | null;
+  expected_monthly_rent_czk: number | null;
+}
+
+function adjustStateFromRun(run: EstimationRun): AdjustState {
+  const spec = run.input_spec;
+  return {
+    lat: spec?.lat ?? null,
+    lng: spec?.lng ?? null,
+    area_m2: spec?.area_m2 ?? null,
+    disposition: spec?.disposition ?? null,
+    floor: spec?.floor ?? null,
+    estimate_kind: run.estimate_kind ?? 'rent',
+    provider: 'anthropic',
+    population: 'active',
+    purchase_price_czk: run.input_purchase_price_czk,
+    expected_monthly_rent_czk: null,
+  };
+}
+
 function RerunBlock({
   run,
   onRerun,
@@ -742,23 +805,54 @@ function RerunBlock({
   error,
 }: {
   run: EstimationRun;
-  onRerun: () => void;
+  onRerun: (overrides?: RerunOverrides) => void;
   pending: boolean;
   error: ApiError | null;
 }) {
   const canRerun = run.input_url != null || run.input_spec != null;
+  const [expanded, setExpanded] = useState(false);
+  const [state, setState] = useState<AdjustState>(() => adjustStateFromRun(run));
+
+  const valid =
+    state.lat != null && Number.isFinite(state.lat) &&
+    state.lng != null && Number.isFinite(state.lng) &&
+    state.area_m2 != null && state.area_m2 > 0 &&
+    state.disposition != null;
+
+  const submitWithEdits = () => {
+    const overrides: RerunOverrides = {
+      spec: {
+        lat: state.lat as number,
+        lng: state.lng as number,
+        area_m2: state.area_m2,
+        disposition: state.disposition,
+        floor: state.floor,
+        exclude_ids: run.input_spec?.exclude_ids ?? [],
+      },
+      estimate_kind: state.estimate_kind,
+      provider: state.provider,
+      population: state.population,
+      purchase_price_czk:
+        state.estimate_kind === 'rent' ? state.purchase_price_czk : null,
+      expected_monthly_rent_czk:
+        state.estimate_kind === 'sale' ? state.expected_monthly_rent_czk : null,
+    };
+    onRerun(overrides);
+  };
+
   return (
     <div>
       <SectionLabel>Re-run</SectionLabel>
       <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
-        Re-runs use the same inputs as this run and link back via parent_run_id.
-        The original record is immutable.
+        Re-runs link back via parent_run_id. The original record is immutable.
+        Adjust to fix a wrong scrape or try different agent settings.
       </p>
-      <div className="mt-3 flex items-center gap-3">
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"
           disabled={!canRerun || pending}
-          onClick={onRerun}
+          onClick={() => onRerun()}
           className={[
             'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
             !canRerun || pending
@@ -768,12 +862,36 @@ function RerunBlock({
         >
           {pending ? 'Re-running…' : 'Re-run with same inputs'}
         </button>
+
+        {canRerun && run.input_spec && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-[var(--radius-sm)] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+          >
+            <span>Adjust inputs</span>
+            <Chevron open={expanded} />
+          </button>
+        )}
+
         {!canRerun && (
           <span className="text-[0.78rem] text-[var(--color-ink-3)]">
             Original inputs unavailable.
           </span>
         )}
       </div>
+
+      {expanded && run.input_spec && (
+        <AdjustPanel
+          state={state}
+          onChange={setState}
+          valid={valid}
+          pending={pending}
+          onSubmit={submitWithEdits}
+        />
+      )}
+
       {error && (
         <p className="mt-2 text-[0.78rem] text-[var(--color-brick)]">
           {error.message || `Re-run failed (HTTP ${error.status}).`}
@@ -783,14 +901,322 @@ function RerunBlock({
   );
 }
 
-function buildRerunPayload(run: EstimationRun): CreateEstimationIn {
+function AdjustPanel({
+  state,
+  onChange,
+  valid,
+  pending,
+  onSubmit,
+}: {
+  state: AdjustState;
+  onChange: (next: AdjustState) => void;
+  valid: boolean;
+  pending: boolean;
+  onSubmit: () => void;
+}) {
+  const set = <K extends keyof AdjustState>(key: K, value: AdjustState[K]) =>
+    onChange({ ...state, [key]: value });
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (valid && !pending) onSubmit();
+      }}
+      className="mt-4 px-4 py-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] space-y-5"
+    >
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <NumField
+          label="Latitude"
+          required
+          value={state.lat}
+          step="0.000001"
+          placeholder="50.0875"
+          onChange={(v) => set('lat', v)}
+        />
+        <NumField
+          label="Longitude"
+          required
+          value={state.lng}
+          step="0.000001"
+          placeholder="14.4205"
+          onChange={(v) => set('lng', v)}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <NumField
+          label="Area"
+          required
+          value={state.area_m2}
+          step="0.1"
+          placeholder="50"
+          suffix="m²"
+          onChange={(v) => set('area_m2', v)}
+        />
+        <NumField
+          label="Floor"
+          value={state.floor}
+          step="1"
+          placeholder="—"
+          onChange={(v) => set('floor', v != null ? Math.round(v) : null)}
+        />
+      </div>
+
+      <div>
+        <FieldLabel required>Disposition</FieldLabel>
+        <div className="mt-1.5 grid grid-cols-5 gap-1.5">
+          {DISPOSITIONS.map((d) => (
+            <PickButton
+              key={d}
+              on={state.disposition === d}
+              onClick={() =>
+                set('disposition', state.disposition === d ? null : d)
+              }
+              variant="solid"
+              className="font-mono tabular-nums"
+            >
+              {d}
+            </PickButton>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <FieldLabel>Estimate kind</FieldLabel>
+        <SegRow
+          options={[
+            { value: 'rent', label: 'Rent (monthly)' },
+            { value: 'sale', label: 'Sale price' },
+          ]}
+          value={state.estimate_kind}
+          onChange={(v) => set('estimate_kind', v)}
+        />
+      </div>
+
+      {state.estimate_kind === 'rent' && (
+        <>
+          <div>
+            <FieldLabel>Model provider</FieldLabel>
+            <SegRow
+              options={[
+                { value: 'anthropic', label: 'Claude' },
+                { value: 'gemini', label: 'Gemini' },
+              ]}
+              value={state.provider}
+              onChange={(v) => set('provider', v)}
+            />
+          </div>
+          <div>
+            <FieldLabel>Comparable population</FieldLabel>
+            <SegRow
+              options={[
+                { value: 'active', label: 'Active' },
+                { value: 'delisted', label: 'Delisted' },
+                { value: 'all', label: 'Both' },
+              ]}
+              value={state.population}
+              onChange={(v) => set('population', v)}
+            />
+          </div>
+        </>
+      )}
+
+      {state.estimate_kind === 'rent' ? (
+        <NumField
+          label="Purchase price"
+          value={state.purchase_price_czk}
+          step="100000"
+          placeholder="—"
+          suffix="Kč"
+          onChange={(v) =>
+            set('purchase_price_czk', v != null ? Math.round(v) : null)
+          }
+          hint="Optional. Adds gross yield % to the result."
+        />
+      ) : (
+        <NumField
+          label="Expected monthly rent"
+          value={state.expected_monthly_rent_czk}
+          step="500"
+          placeholder="—"
+          suffix="Kč/mo"
+          onChange={(v) =>
+            set('expected_monthly_rent_czk', v != null ? Math.round(v) : null)
+          }
+          hint="Optional. Adds reverse gross yield % to the result."
+        />
+      )}
+
+      <div className="flex items-center gap-3 pt-1">
+        <button
+          type="submit"
+          disabled={!valid || pending}
+          className={[
+            'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
+            !valid || pending
+              ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
+              : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
+          ].join(' ')}
+        >
+          {pending ? 'Re-running…' : 'Re-run with edits'}
+        </button>
+        {!valid && (
+          <span className="text-[0.78rem] text-[var(--color-ink-3)]">
+            Latitude, longitude, area, and disposition are required.
+          </span>
+        )}
+      </div>
+    </form>
+  );
+}
+
+function NumField({
+  label,
+  value,
+  step,
+  placeholder,
+  suffix,
+  required,
+  hint,
+  onChange,
+}: {
+  label: string;
+  value: number | null;
+  step?: string;
+  placeholder?: string;
+  suffix?: string;
+  required?: boolean;
+  hint?: string;
+  onChange: (v: number | null) => void;
+}) {
+  return (
+    <div>
+      <FieldLabel required={required}>{label}</FieldLabel>
+      <div className="mt-1.5 flex items-stretch gap-2 min-w-0">
+        <input
+          type="text"
+          inputMode="decimal"
+          value={value == null ? '' : String(value)}
+          placeholder={placeholder}
+          step={step}
+          onChange={(e) => {
+            const raw = e.target.value.trim().replace(',', '.');
+            if (raw === '') return onChange(null);
+            const n = Number(raw);
+            if (Number.isFinite(n)) onChange(n);
+          }}
+          className="flex-1 min-w-0 px-3 py-2 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+        />
+        {suffix && (
+          <span className="self-center text-[0.78rem] tracking-wide text-[var(--color-ink-3)]">
+            {suffix}
+          </span>
+        )}
+      </div>
+      {hint && (
+        <p className="mt-1.5 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+          {hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function FieldLabel({
+  required,
+  children,
+}: {
+  required?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+      {children}
+      {required && <span className="ml-1 text-[var(--color-ink-4)]">·</span>}
+    </p>
+  );
+}
+
+function SegRow<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: ReadonlyArray<{ value: T; label: string }>;
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div
+      className="mt-1.5 grid gap-1"
+      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+    >
+      {options.map((opt) => (
+        <PickButton
+          key={opt.value}
+          on={value === opt.value}
+          onClick={() => onChange(opt.value)}
+        >
+          {opt.label}
+        </PickButton>
+      ))}
+    </div>
+  );
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="10" height="10" viewBox="0 0 10 10" aria-hidden
+      style={{
+        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+        transition: 'transform 120ms ease',
+      }}
+    >
+      <polyline
+        points="1.5,3.5 5,7 8.5,3.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        fill="none"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function buildRerunPayload(
+  run: EstimationRun,
+  overrides?: RerunOverrides,
+): CreateEstimationIn {
+  const estimateKind =
+    overrides?.estimate_kind ?? run.estimate_kind ?? 'rent';
+  const mode = estimateKind === 'rent' ? 'agent' : 'deterministic';
+  const purchasePrice =
+    overrides?.purchase_price_czk !== undefined
+      ? overrides.purchase_price_czk
+      : run.input_purchase_price_czk;
+  const expectedRent =
+    overrides?.expected_monthly_rent_czk !== undefined
+      ? overrides.expected_monthly_rent_czk
+      : null;
+
   const base: CreateEstimationIn = {
     source: 'ui',
-    estimate_kind: run.estimate_kind ?? 'rent',
+    mode,
+    estimate_kind: estimateKind,
     parent_run_id: run.id,
-    rerun_reason: 'manual',
-    purchase_price_czk: run.input_purchase_price_czk,
+    rerun_reason: overrides ? 'adjust' : 'manual',
+    purchase_price_czk: purchasePrice,
+    expected_monthly_rent_czk: expectedRent,
+    ...(overrides?.provider ? { provider: overrides.provider } : {}),
+    ...(overrides?.population ? { population: overrides.population } : {}),
   };
+
+  if (overrides?.spec) {
+    return { ...base, spec: overrides.spec };
+  }
   if (run.input_url) {
     return { ...base, url: run.input_url };
   }

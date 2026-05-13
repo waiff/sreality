@@ -407,56 +407,12 @@ export interface EstimationListResponse {
   offset: number;
 }
 
-/* GET /estimations/preview response. The `spec` field is shaped so it
- * can be POSTed back to /estimations as `spec` verbatim. The `listing`
- * block is informational + drives filter pre-fill. */
-export interface PreviewListing {
-  price_czk: number | null;
-  price_unit: string | null;
-  category_main: string | null;
-  category_type: string | null;
-  locality: string | null;
-  district: string | null;
-  locality_district_id: number | null;
-  locality_region_id: number | null;
-  total_floors: number | null;
-  has_balcony: boolean | null;
-  has_lift: boolean | null;
-  has_parking: boolean | null;
-  building_type: string | null;
-  condition: string | null;
-  energy_rating: string | null;
-  /* Migration 022 — see ListingPublic. Set on the preview shape so
-   * the spec-review step can pre-fill the new editable rows. */
-  estate_area: number | null;
-  usable_area: number | null;
-  garden_area: number | null;
-  category_sub_cb: number | null;
-  furnished: Furnished | null;
-  terrace: boolean | null;
-  cellar: boolean | null;
-  garage: boolean | null;
-  parking_lots: number | null;
-  ownership: Ownership | null;
-  image_count: number;
-}
-
-export interface PreviewResponse {
-  url: string;
-  sreality_id: number;
-  in_database: boolean;
-  fetched_at: string;
-  spec: TargetSpecIn;
-  listing: PreviewListing;
-}
-
 /* POST /estimations/preview response (estimation-4). Routes any URL
  * through the source-kind dispatcher: sreality fast-path or LLM-driven
  * per-source parser. The `spec` block is the same TargetSpecIn shape
  * that gets POSTed back to /estimations. The `listing` block is the
- * informational sidecar (same shape as PreviewListing minus image_count
- * which is sreality-specific). Provenance fields document where the
- * data came from and how confident the parser was. */
+ * informational sidecar. Provenance fields document where the data
+ * came from and how confident the parser was. */
 export interface ParseListing {
   price_czk: number | null;
   price_unit: string | null;
@@ -504,4 +460,194 @@ export interface ParseResult {
   from_cache: boolean;
   cost_usd: number | null;
   sreality_id: number | null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Curation (U2.6). Wire shapes mirror api/curation.py and migrations 022-025. */
+/* -------------------------------------------------------------------------- */
+
+/* Mirrors the 024 CHECK constraint + api/schemas.TagColor. Adding a new
+ * colour requires a migration + a globals.css token + a bump here. */
+export type TagColor =
+  | 'copper' | 'sage' | 'brick' | 'ochre'
+  | 'slate'  | 'plum' | 'teal'  | 'sand';
+
+export const TAG_COLORS: ReadonlyArray<TagColor> = [
+  'copper', 'sage', 'brick', 'ochre',
+  'slate',  'plum', 'teal',  'sand',
+];
+
+export interface Collection {
+  id: number;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+  listing_count: number;
+}
+
+export interface Tag {
+  id: number;
+  name: string;
+  color: TagColor;
+  created_at: string;
+  listing_count: number;
+}
+
+export interface Note {
+  id: number;
+  sreality_id: number;
+  body: string;
+  created_at: string;
+}
+
+/* GET /collections/{id} embeds a slimmer listing projection than
+ * ListingPublic — see api/curation.get_collection. Renderers expand
+ * with fetchListingsByIds() when more detail is needed. */
+export interface CollectionListingRow {
+  sreality_id: number;
+  district: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  price_czk: number | null;
+  last_seen_at: string;
+  is_active: boolean;
+  added_at: string;
+}
+
+export interface CollectionWithListings {
+  collection: Collection;
+  listings: CollectionListingRow[];
+}
+
+/* --------------------------------------------------------------------
+ * Buildings (Phase B0)
+ *
+ * Type stubs for the building-decomposition flow. B0 ships persistence
+ * + read endpoints only; B1 adds the URL ingest + the agent extractor
+ * and a `/building/:id` page that consumes these types.
+ * ------------------------------------------------------------------ */
+
+export type BuildingStatus =
+  | 'pending'
+  | 'extracting'
+  | 'awaiting_input'
+  | 'estimating'
+  | 'success'
+  | 'failed';
+
+export type BuildingUnitSource =
+  | 'description'
+  | 'floor_plan'
+  | 'both'
+  | 'user_added';
+
+export interface BuildingUnit {
+  unit_id: string;
+  label: string | null;
+  floor: string | null;
+  area_m2: number | null;
+  disposition: string | null;
+  condition: string | null;
+  is_potential: boolean;
+  source: BuildingUnitSource | null;
+  notes: string | null;
+}
+
+/* What the extractor returns (B1). Stored as-is on
+ * building_runs.units_proposal; the operator-confirmed array lands on
+ * building_runs.units. */
+export interface BuildingSummary {
+  floor_count: number | null;
+  has_attic: boolean | null;
+  year_built: number | null;
+  construction_type:
+    | 'cihla' | 'panel' | 'skelet' | 'drevostavba' | 'smiseny' | 'unknown'
+    | null;
+  total_area_m2: number | null;
+  condition:
+    | 'novostavba' | 'po_rekonstrukci' | 'velmi_dobry' | 'dobry'
+    | 'pred_rekonstrukci' | 'k_demolici' | 'unknown'
+    | null;
+  notes: string | null;
+}
+
+export interface BuildingUnitsProposal {
+  units: BuildingUnit[];
+  building: BuildingSummary;
+  confidence: 'high' | 'medium' | 'low';
+  warnings: string[];
+  n_images: number;
+  model: string;
+  cost_usd: number | null;
+  snapshot_id: number;
+}
+
+/* Embedded child-estimation projection on GET /buildings/{id}.
+ * Slimmer than EstimationRun — full detail lives at /estimation/:id. */
+export interface BuildingChildRun {
+  id: number;
+  created_at: string;
+  status: EstimationStatus;
+  estimate_kind: 'rent' | 'sale' | null;
+  building_unit_id: string | null;
+  estimated_monthly_rent_czk: number | null;
+  rent_p25_czk: number | null;
+  rent_p75_czk: number | null;
+  estimated_sale_price_czk: number | null;
+  sale_p25_czk: number | null;
+  sale_p75_czk: number | null;
+  confidence: Confidence | null;
+  error_message: string | null;
+}
+
+export interface BuildingRun {
+  id: number;
+  created_at: string;
+  source: EstimationSource;
+  status: BuildingStatus;
+  input_url: string | null;
+  input_sreality_id: number | null;
+  input_spec: TargetSpecIn | null;
+  source_kind: SourceKind | null;
+  parse_confidence: Confidence | null;
+  parse_confidence_per_field: Record<string, Confidence> | null;
+  source_html: string | null;
+  subject_summary: SubjectSummary | null;
+  units_proposal: BuildingUnitsProposal | null;
+  units: BuildingUnit[] | null;
+  total_rent_p25_czk: number | null;
+  total_rent_p50_czk: number | null;
+  total_rent_p75_czk: number | null;
+  total_sale_p25_czk: number | null;
+  total_sale_p50_czk: number | null;
+  total_sale_p75_czk: number | null;
+  /* Phase B3 — operator-tunable spreadsheet inputs + cached outputs. */
+  business_case: Record<string, unknown> | null;
+  warnings: string[] | null;
+  error_message: string | null;
+  /* Only present on GET /buildings/{id}, not on the list endpoint. */
+  children?: BuildingChildRun[];
+}
+
+export interface CreateBuildingIn {
+  source: EstimationSource;
+  input_url?: string | null;
+}
+
+export interface CreateBuildingFromUrlIn {
+  source: EstimationSource;
+  url: string;
+  force_refresh?: boolean;
+}
+
+export interface ConfirmBuildingUnitsIn {
+  units: BuildingUnit[];
+}
+
+export interface BuildingListResponse {
+  data: BuildingRun[];
+  total: number;
+  limit: number;
+  offset: number;
 }

@@ -1,19 +1,40 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import type { MapRow } from '@/lib/queries';
+import type { MapBounds } from '@/lib/filters';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 
 const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 9.5 };
+/* Below this zoom only the round point dot is shown; at and above it
+ * each listing's price label is also drawn. Tuned so the labels appear
+ * roughly when a single city block is on screen — close enough that the
+ * labels don't pile up but far enough to still see a neighbourhood. */
+const PRICE_LABEL_MIN_ZOOM = 13;
 
-type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapRow>;
+const czPriceCompact = new Intl.NumberFormat('cs-CZ', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
+
+/* Pre-formats a compact Kč price into the GeoJSON feature properties so
+ * the map symbol layer can use it directly via ['get', 'price_label'].
+ * Listings without a price are blanked rather than dropped — the dot
+ * still anchors them on the map. */
+const formatPriceLabel = (n: number | null): string => {
+  if (n == null) return '';
+  return `${czPriceCompact.format(n)} Kč`;
+};
+
+type MapFeatureProps = MapRow & { price_label: string };
+type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapFeatureProps>;
 
 const toFeatureCollection = (rows: MapRow[]): FC => ({
   type: 'FeatureCollection',
   features: rows.map((r) => ({
     type: 'Feature',
     geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
-    properties: r,
+    properties: { ...r, price_label: formatPriceLabel(r.price_czk) },
   })),
 });
 
@@ -22,13 +43,43 @@ interface Props {
   total: number | null;
   capped: boolean;
   isLoading: boolean;
+  /* Bounds the URL says the map should be showing. The map applies it
+   * once on mount and then ignores future updates — it's the source
+   * of truth for its own viewport. */
+  bounds: MapBounds | null;
+  /* Fires on user-driven pan/zoom (we ignore programmatic moves).
+   * `null` means "the operator cleared the map area" (Reset-view). */
+  onBoundsChange?: (b: MapBounds | null) => void;
 }
 
-export default function ListingMap({ rows, total, capped, isLoading }: Props) {
+export default function ListingMap({
+  rows,
+  total,
+  capped,
+  isLoading,
+  bounds,
+  onBoundsChange,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const [ready, setReady] = useState(false);
+  /* The map fits to results exactly once — the first time a non-empty
+   * row set arrives after the map is ready. Subsequent filter changes
+   * never re-zoom, so the operator stays anchored on whatever area
+   * they're examining. The Reset-view control offers an explicit
+   * opt-in if they want to widen back to the full cohort. */
+  const didInitialFitRef = useRef(false);
+  /* Latest onBoundsChange handler stashed in a ref so the maplibre
+   * `moveend` listener (registered once at mount time) always reads
+   * the current callback without needing to rebind. */
+  const onBoundsChangeRef = useRef(onBoundsChange);
+  onBoundsChangeRef.current = onBoundsChange;
+  /* Initial bbox from URL captured once at mount time — applying it
+   * on the load event is what restores a shared link's exact viewport.
+   * Reading the live `bounds` prop instead would refit every time the
+   * URL changes (i.e. every pan), which defeats the point. */
+  const initialBoundsRef = useRef<MapBounds | null>(bounds);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -109,6 +160,38 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
         },
       });
 
+      /* Zoomed-in price labels. Drawn on top of the dot so the dot
+       * stays the click target; the symbol layer is non-interactive.
+       * `text-allow-overlap: false` plus the small padding lets MapLibre
+       * thin out collisions automatically when listings stack. */
+      map.addLayer({
+        id: 'point-price',
+        type: 'symbol',
+        source: 'listings',
+        filter: ['all', ['!', ['has', 'point_count']], ['!=', ['get', 'price_label'], '']],
+        minzoom: PRICE_LABEL_MIN_ZOOM,
+        layout: {
+          'text-field': ['get', 'price_label'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 11,
+          'text-offset': [0, 0.9],
+          'text-anchor': 'top',
+          'text-padding': 2,
+          'text-allow-overlap': false,
+          'text-ignore-placement': false,
+        },
+        paint: {
+          'text-color': '#2f5750',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.4,
+          'text-halo-blur': 0.2,
+          'text-opacity': [
+            'case',
+            ['get', 'is_active'], 1, 0.6,
+          ],
+        },
+      });
+
       map.on('click', 'clusters', (e) => {
         const features = map.queryRenderedFeatures(e.point, { layers: ['clusters'] });
         const clusterId = features[0]?.properties?.cluster_id;
@@ -146,6 +229,38 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
       });
 
       setReady(true);
+
+      /* Restore the exact viewport captured in the URL on mount.
+       * Marks the initial-fit ref so the rows effect doesn't fight us
+       * with its own fitBounds. */
+      const initial = initialBoundsRef.current;
+      if (initial) {
+        map.fitBounds(
+          [
+            [initial.west, initial.south],
+            [initial.east, initial.north],
+          ],
+          { padding: 0, duration: 0 },
+        );
+        didInitialFitRef.current = true;
+      }
+    });
+
+    /* Only user-driven moveends propagate to the URL. Programmatic
+     * fitBounds / easeTo calls produce events with `originalEvent ===
+     * undefined`, which we skip — otherwise the initial-fit refit and
+     * the Reset-view animation would both write to the URL. */
+    map.on('moveend', (e) => {
+      if (e.originalEvent == null) return;
+      const cb = onBoundsChangeRef.current;
+      if (!cb) return;
+      const b = map.getBounds();
+      cb({
+        west:  b.getWest(),
+        south: b.getSouth(),
+        east:  b.getEast(),
+        north: b.getNorth(),
+      });
     });
 
     return () => {
@@ -156,6 +271,8 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
   }, []);
 
   // Push fresh rows to the source whenever the filter result changes.
+  // Only the very first non-empty result gets a fitBounds call; after
+  // that, the user's pan/zoom is preserved across filter edits.
   useEffect(() => {
     if (!ready || !mapRef.current) return;
     const src = mapRef.current.getSource('listings') as GeoJSONSource | undefined;
@@ -163,7 +280,7 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
     const fc = toFeatureCollection(rows);
     src.setData(fc);
 
-    if (rows.length === 0) return;
+    if (rows.length === 0 || didInitialFitRef.current) return;
     const bounds = new maplibregl.LngLatBounds();
     for (const r of rows) bounds.extend([r.lng, r.lat]);
     mapRef.current.fitBounds(bounds, {
@@ -171,10 +288,22 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
       maxZoom: 14,
       duration: 700,
     });
+    didInitialFitRef.current = true;
   }, [rows, ready]);
 
+  /* Reset-view clears the bbox URL param, which triggers the parent
+   * to refetch the unbounded cohort. Once those rows arrive the
+   * rows-effect below will refit because we also reset
+   * didInitialFitRef. The actual map zoom happens reactively, not
+   * imperatively, so the operator only ever sees one animation. */
+  const resetView = () => {
+    if (!mapRef.current) return;
+    onBoundsChange?.(null);
+    didInitialFitRef.current = false;
+  };
+
   return (
-    <div className="relative h-[calc(100dvh-16rem)] min-h-[480px] rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
+    <div className="relative h-full min-h-[480px] rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
       <div
         ref={containerRef}
         className="absolute inset-0"
@@ -193,6 +322,16 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
             </span>
           )}
         </Pill>
+        {bounds && (
+          <button
+            type="button"
+            onClick={resetView}
+            className="pointer-events-auto inline-flex items-center gap-1 px-2 py-1 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] transition-colors"
+            title="Clear the map area filter"
+          >
+            Show all
+          </button>
+        )}
       </div>
     </div>
   );
