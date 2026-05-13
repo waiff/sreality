@@ -611,4 +611,6 @@ export const curationKeys = {
     ['curation', 'listing-collections', sreality_id] as const,
   listingNotes: (sreality_id: number) =>
     ['curation', 'listing-notes', sreality_id] as const,
+  manualEstimates: (sreality_id: number) =>
+    ['curation', 'manual-estimates', sreality_id] as const,
 };

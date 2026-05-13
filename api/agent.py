@@ -42,6 +42,7 @@ from toolkit import (
     find_comparables_along_axis,
     find_comparables_relaxed,
     find_distribution_outliers,
+    get_manual_rental_estimates,
     read_floor_plan,
     summarize_listing,
     verify_listing_freshness,
@@ -349,6 +350,27 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                 "required": ["sreality_id_a", "sreality_id_b"],
             },
             handler=_handle_compare_listing_images,
+        ),
+        "get_manual_rental_estimates": _ToolDef(
+            name="get_manual_rental_estimates",
+            description=(
+                "Fetch operator-recorded manual rental estimates "
+                "attached to a listing. Returns 0+ point estimates; "
+                "each row has rent_czk (monthly), author, source_kind "
+                "(broker / gut / external_comp / portfolio / other), "
+                "optional notes, and timestamps. Manual estimates are "
+                "operator judgement, not comparables — use them to "
+                "reconcile against your distribution, never to "
+                "replace it. Returns an empty list if none exist."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "sreality_id": {"type": "integer"},
+                },
+                "required": ["sreality_id"],
+            },
+            handler=_handle_get_manual_rental_estimates,
         ),
         "read_floor_plan": _ToolDef(
             name="read_floor_plan",
@@ -739,6 +761,12 @@ def _handle_verify_listing_freshness(
         int(args["sreality_id"]),
         int(args.get("max_age_hours", 24)),
     )
+
+
+def _handle_get_manual_rental_estimates(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    return get_manual_rental_estimates(state.conn, int(args["sreality_id"]))
 
 
 def _handle_compute_market_velocity(
