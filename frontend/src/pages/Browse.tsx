@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
+import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
 import {
   fromSearchParams,
@@ -14,6 +15,7 @@ import {
   type ListingFilters,
 } from '@/lib/filters';
 import {
+  fetchListingsForCards,
   fetchListingsForMap,
   fetchListingsForTable,
   fetchBrowseStats,
@@ -21,6 +23,7 @@ import {
   sortToParam,
   DEFAULT_SORT,
   type BrowseStats,
+  type CardsResult,
   type MapResult,
   type SortField,
   type SortSpec,
@@ -58,6 +61,7 @@ export default function Browse() {
     const sp = new URLSearchParams(searchParams);
     if (next === 'map') sp.delete('tab');
     else sp.set('tab', next);
+    sp.delete('page');
     setSearchParams(sp, { replace: true });
   };
 
@@ -80,9 +84,19 @@ export default function Browse() {
     setSearchParams(sp, { replace: false });
   };
 
+  /* Map tab fetches two cohorts in parallel: every (geo-located) listing
+   * for the map (capped at MAP_CAP), plus the paginated card slice for
+   * the left column. Same filter set, different shapes. */
   const mapQuery = useQuery<MapResult, Error>({
     queryKey: ['map', filters],
     queryFn: () => fetchListingsForMap(filters),
+    placeholderData: (prev) => prev,
+    enabled: tabFromUrl === 'map',
+  });
+
+  const cardsQuery = useQuery<CardsResult, Error>({
+    queryKey: ['cards', filters, page],
+    queryFn: () => fetchListingsForCards(filters, page),
     placeholderData: (prev) => prev,
     enabled: tabFromUrl === 'map',
   });
@@ -109,13 +123,13 @@ export default function Browse() {
         : mapQuery.data?.total ?? null;
 
   const tabs: ReadonlyArray<Tab<TabKey>> = [
-    { key: 'map',   label: 'Map',   badge: totalForBadge != null ? totalForBadge.toLocaleString('cs-CZ') : undefined },
+    { key: 'map',   label: 'Listings', badge: totalForBadge != null ? totalForBadge.toLocaleString('cs-CZ') : undefined },
     { key: 'table', label: 'Table' },
     { key: 'stats', label: 'Stats' },
   ];
 
   const activeError =
-    tabFromUrl === 'map'   ? mapQuery.error   :
+    tabFromUrl === 'map'   ? mapQuery.error ?? cardsQuery.error :
     tabFromUrl === 'table' ? tableQuery.error :
     tabFromUrl === 'stats' ? statsQuery.error :
     null;
@@ -124,56 +138,83 @@ export default function Browse() {
     <div className="flex">
       <FilterSidebar filters={filters} onChange={setFilters} />
 
-      <div className="flex-1 min-w-0 px-6 pt-5 pb-8">
-        <FilterSummary
-          filters={filters}
-          count={totalForBadge}
-          loading={
-            tabFromUrl === 'map'   ? mapQuery.isLoading   :
-            tabFromUrl === 'table' ? tableQuery.isLoading :
-            tabFromUrl === 'stats' ? statsQuery.isLoading :
-            false
-          }
-        />
-
-        <div className="mt-4">
-          <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
+      <div className="flex-1 min-w-0 flex flex-col">
+        <div className="px-6 pt-5">
+          <FilterSummary
+            filters={filters}
+            count={totalForBadge}
+            loading={
+              tabFromUrl === 'map'   ? mapQuery.isLoading || cardsQuery.isLoading :
+              tabFromUrl === 'table' ? tableQuery.isLoading :
+              tabFromUrl === 'stats' ? statsQuery.isLoading :
+              false
+            }
+          />
+          <div className="mt-4">
+            <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
+          </div>
         </div>
 
-        <div className="mt-5">
-          {tabFromUrl === 'map' && (
-            <Suspense fallback={<MapSkeleton />}>
-              <ListingMap
-                rows={mapQuery.data?.rows ?? []}
-                total={mapQuery.data?.total ?? null}
-                capped={mapQuery.data?.capped ?? false}
-                isLoading={mapQuery.isLoading}
+        {tabFromUrl === 'map' && (
+          <div className="px-6 pt-5 pb-6 flex-1 min-h-0">
+            {/* 3-column inner layout: cards (left) | map (right). The
+              * outer FilterSidebar is column 1. Heights are pinned so
+              * each column scrolls independently — the map stays put
+              * while the cards list scrolls. */}
+            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(360px,42%)] gap-5 h-[calc(100dvh-12rem)] min-h-[560px]">
+              <ListingCards
+                rows={cardsQuery.data?.rows ?? null}
+                total={cardsQuery.data?.total ?? null}
+                page={page}
+                isLoading={cardsQuery.isLoading}
+                hasFilters={!isDefault(filters)}
+                onPage={setPage}
+                onClearFilters={() => setFilters(DEFAULT_FILTERS)}
               />
-            </Suspense>
-          )}
-          {tabFromUrl === 'table' && (
-            <ListingTable
-              rows={tableQuery.data?.rows ?? null}
-              total={tableQuery.data?.total ?? null}
-              page={page}
-              sort={sort}
-              isLoading={tableQuery.isLoading}
-              hasFilters={!isDefault(filters)}
-              onSort={setSort}
-              onPage={setPage}
-              onClearFilters={() => setFilters(DEFAULT_FILTERS)}
-            />
-          )}
-          {tabFromUrl === 'stats' && (
-            <BrowseStatsView
-              stats={statsQuery.data ?? null}
-              isLoading={statsQuery.isLoading}
-              isEmpty={!statsQuery.isLoading && (statsQuery.data?.total ?? 0) === 0}
-            />
-          )}
-        </div>
+              <div className="min-h-0 h-full">
+                <Suspense fallback={<MapSkeleton />}>
+                  <ListingMap
+                    rows={mapQuery.data?.rows ?? []}
+                    total={mapQuery.data?.total ?? null}
+                    capped={mapQuery.data?.capped ?? false}
+                    isLoading={mapQuery.isLoading}
+                  />
+                </Suspense>
+              </div>
+            </div>
+          </div>
+        )}
 
-        {activeError && <ErrorBanner error={activeError} />}
+        {tabFromUrl !== 'map' && (
+          <div className="px-6 pt-5 pb-8">
+            {tabFromUrl === 'table' && (
+              <ListingTable
+                rows={tableQuery.data?.rows ?? null}
+                total={tableQuery.data?.total ?? null}
+                page={page}
+                sort={sort}
+                isLoading={tableQuery.isLoading}
+                hasFilters={!isDefault(filters)}
+                onSort={setSort}
+                onPage={setPage}
+                onClearFilters={() => setFilters(DEFAULT_FILTERS)}
+              />
+            )}
+            {tabFromUrl === 'stats' && (
+              <BrowseStatsView
+                stats={statsQuery.data ?? null}
+                isLoading={statsQuery.isLoading}
+                isEmpty={!statsQuery.isLoading && (statsQuery.data?.total ?? 0) === 0}
+              />
+            )}
+          </div>
+        )}
+
+        {activeError && (
+          <div className="px-6 pb-6">
+            <ErrorBanner error={activeError} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -205,7 +246,7 @@ function FilterSummary({
 
 function MapSkeleton() {
   return (
-    <div className="h-[calc(100dvh-16rem)] min-h-[480px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] flex items-center justify-center">
+    <div className="h-full min-h-[480px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] flex items-center justify-center">
       <p className="text-sm text-[var(--color-ink-3)] tracking-wide">Loading map…</p>
     </div>
   );

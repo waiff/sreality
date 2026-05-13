@@ -14,6 +14,8 @@ import {
   type ListingFilters,
   type ListingStatus,
   type SeenWithin,
+  type CategoryMain,
+  type CategoryType,
   PRICE_BOUNDS,
   AREA_BOUNDS,
   ESTATE_AREA_BOUNDS,
@@ -58,6 +60,17 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
       </div>
 
       <div className="px-5 py-5 space-y-9">
+        <ControlGroup title="Category">
+          <CategoryMainPicker
+            value={filters.categoryMain}
+            onChange={(v) => set('categoryMain', v)}
+          />
+          <CategoryTypePicker
+            value={filters.categoryType}
+            onChange={(v) => set('categoryType', v)}
+          />
+        </ControlGroup>
+
         <ControlGroup title="Where">
           <DistrictPicker
             value={filters.districts}
@@ -328,6 +341,73 @@ function FilterTagAddButton({
         />
       </span>
     </span>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Category pickers — top-of-sidebar mode switch. CategoryMain narrows to one  */
+/* of byt / dum / komercni; CategoryType to pronajem / prodej. Solid-variant   */
+/* PickButtons because these define the cohort everything else filters within. */
+/* -------------------------------------------------------------------------- */
+
+const CATEGORY_MAIN_OPTS: ReadonlyArray<{ value: CategoryMain; label: string }> = [
+  { value: 'byt',      label: 'Byty' },
+  { value: 'dum',      label: 'Domy' },
+  { value: 'komercni', label: 'Komerční' },
+];
+
+const CATEGORY_TYPE_OPTS: ReadonlyArray<{ value: CategoryType; label: string }> = [
+  { value: 'pronajem', label: 'Pronájem' },
+  { value: 'prodej',   label: 'Prodej'   },
+];
+
+function CategoryMainPicker({
+  value,
+  onChange,
+}: {
+  value: CategoryMain;
+  onChange: (v: CategoryMain) => void;
+}) {
+  return (
+    <Section label="Type">
+      <div className="grid grid-cols-3 gap-1">
+        {CATEGORY_MAIN_OPTS.map((opt) => (
+          <PickButton
+            key={opt.value}
+            on={value === opt.value}
+            onClick={() => onChange(opt.value)}
+            variant="solid"
+          >
+            {opt.label}
+          </PickButton>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+function CategoryTypePicker({
+  value,
+  onChange,
+}: {
+  value: CategoryType;
+  onChange: (v: CategoryType) => void;
+}) {
+  return (
+    <Section label="Listing for">
+      <div className="grid grid-cols-2 gap-1">
+        {CATEGORY_TYPE_OPTS.map((opt) => (
+          <PickButton
+            key={opt.value}
+            on={value === opt.value}
+            onClick={() => onChange(opt.value)}
+            variant="solid"
+          >
+            {opt.label}
+          </PickButton>
+        ))}
+      </div>
+    </Section>
   );
 }
 

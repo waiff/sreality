@@ -5,15 +5,35 @@ import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 
 const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 9.5 };
+/* Below this zoom only the round point dot is shown; at and above it
+ * each listing's price label is also drawn. Tuned so the labels appear
+ * roughly when a single city block is on screen — close enough that the
+ * labels don't pile up but far enough to still see a neighbourhood. */
+const PRICE_LABEL_MIN_ZOOM = 13;
 
-type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapRow>;
+const czPriceCompact = new Intl.NumberFormat('cs-CZ', {
+  notation: 'compact',
+  maximumFractionDigits: 1,
+});
+
+/* Pre-formats a compact Kč price into the GeoJSON feature properties so
+ * the map symbol layer can use it directly via ['get', 'price_label'].
+ * Listings without a price are blanked rather than dropped — the dot
+ * still anchors them on the map. */
+const formatPriceLabel = (n: number | null): string => {
+  if (n == null) return '';
+  return `${czPriceCompact.format(n)} Kč`;
+};
+
+type MapFeatureProps = MapRow & { price_label: string };
+type FC = GeoJSON.FeatureCollection<GeoJSON.Point, MapFeatureProps>;
 
 const toFeatureCollection = (rows: MapRow[]): FC => ({
   type: 'FeatureCollection',
   features: rows.map((r) => ({
     type: 'Feature',
     geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
-    properties: r,
+    properties: { ...r, price_label: formatPriceLabel(r.price_czk) },
   })),
 });
 
@@ -29,6 +49,12 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const [ready, setReady] = useState(false);
+  /* The map fits to results exactly once — the first time a non-empty
+   * row set arrives after the map is ready. Subsequent filter changes
+   * never re-zoom, so the operator stays anchored on whatever area
+   * they're examining. The Reset-view control offers an explicit
+   * opt-in if they want to recenter. */
+  const didInitialFitRef = useRef(false);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -109,6 +135,38 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
         },
       });
 
+      /* Zoomed-in price labels. Drawn on top of the dot so the dot
+       * stays the click target; the symbol layer is non-interactive.
+       * `text-allow-overlap: false` plus the small padding lets MapLibre
+       * thin out collisions automatically when listings stack. */
+      map.addLayer({
+        id: 'point-price',
+        type: 'symbol',
+        source: 'listings',
+        filter: ['all', ['!', ['has', 'point_count']], ['!=', ['get', 'price_label'], '']],
+        minzoom: PRICE_LABEL_MIN_ZOOM,
+        layout: {
+          'text-field': ['get', 'price_label'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': 11,
+          'text-offset': [0, 0.9],
+          'text-anchor': 'top',
+          'text-padding': 2,
+          'text-allow-overlap': false,
+          'text-ignore-placement': false,
+        },
+        paint: {
+          'text-color': '#2f5750',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.4,
+          'text-halo-blur': 0.2,
+          'text-opacity': [
+            'case',
+            ['get', 'is_active'], 1, 0.6,
+          ],
+        },
+      });
+
       map.on('click', 'clusters', (e) => {
         const features = map.queryRenderedFeatures(e.point, { layers: ['clusters'] });
         const clusterId = features[0]?.properties?.cluster_id;
@@ -156,6 +214,8 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
   }, []);
 
   // Push fresh rows to the source whenever the filter result changes.
+  // Only the very first non-empty result gets a fitBounds call; after
+  // that, the user's pan/zoom is preserved across filter edits.
   useEffect(() => {
     if (!ready || !mapRef.current) return;
     const src = mapRef.current.getSource('listings') as GeoJSONSource | undefined;
@@ -163,7 +223,7 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
     const fc = toFeatureCollection(rows);
     src.setData(fc);
 
-    if (rows.length === 0) return;
+    if (rows.length === 0 || didInitialFitRef.current) return;
     const bounds = new maplibregl.LngLatBounds();
     for (const r of rows) bounds.extend([r.lng, r.lat]);
     mapRef.current.fitBounds(bounds, {
@@ -171,10 +231,22 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
       maxZoom: 14,
       duration: 700,
     });
+    didInitialFitRef.current = true;
   }, [rows, ready]);
 
+  const resetView = () => {
+    if (!mapRef.current) return;
+    if (rows.length === 0) {
+      mapRef.current.easeTo({ center: [PRAGUE.lng, PRAGUE.lat], zoom: PRAGUE.zoom, duration: 500 });
+      return;
+    }
+    const bounds = new maplibregl.LngLatBounds();
+    for (const r of rows) bounds.extend([r.lng, r.lat]);
+    mapRef.current.fitBounds(bounds, { padding: 56, maxZoom: 14, duration: 500 });
+  };
+
   return (
-    <div className="relative h-[calc(100dvh-16rem)] min-h-[480px] rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
+    <div className="relative h-full min-h-[480px] rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
       <div
         ref={containerRef}
         className="absolute inset-0"
@@ -193,6 +265,14 @@ export default function ListingMap({ rows, total, capped, isLoading }: Props) {
             </span>
           )}
         </Pill>
+        <button
+          type="button"
+          onClick={resetView}
+          className="pointer-events-auto inline-flex items-center gap-1 px-2 py-1 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] transition-colors"
+          title="Recenter map on current results"
+        >
+          Reset view
+        </button>
       </div>
     </div>
   );

@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 10:20 UTC_
+_Last refreshed: 2026-05-13 11:01 UTC_
 
-**Branch:** `claude/estimation-price-by-condition-eLUE4`
+**Branch:** `claude/browse-listings-map-layout-PHwYj`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 37 files, latest `038_skill_rental_estimator_condition_scenarios.sql`.
+**Migrations on disk:** 38 files, latest `039_browse_stats_categories.sql`.
 
 **Last 10 commits:**
 
 ```
-4b19f37 roadmap: refresh auto-status block
-d0f5085 roadmap: refresh auto-status block
-715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
-b0495c8 estimation: add condition-scenario columns to estimation_runs (migration not yet applied)
-9bb5297 roadmap: refresh auto-status block
+6da728b roadmap: refresh auto-status block
+226df51 browse: sreality-style 3-column layout + category picker + map polish
+afb9600 Merge pull request #62 from waiff/claude/plan-phase-b2-U4ULP
+5457710 roadmap: refresh auto-status block
+8ab4982 roadmap: refresh auto-status block
+edcf0c3 roadmap: plan Phase B2 (per-unit fan-out + building rollup view)
 59e9263 Merge pull request #61 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
 038193e building: Phase B1 — URL ingest + unit extractor + confirmation UI
 fbc584d Merge pull request #60 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
 fbf8dc3 roadmap: plan Phase B1 (URL ingest + unit extractor + confirmation UI)
-c028816 Merge pull request #59 from waiff/claude/add-building-paste-feature-NmQIy
 ```
 
 <!-- END AUTO-STATUS -->

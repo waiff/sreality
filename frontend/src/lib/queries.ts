@@ -17,11 +17,15 @@ import type {
  * the bottleneck is wire-bytes, not DOM. 50k features ≈ 0.3 MB gzipped. */
 export const MAP_CAP = 50_000;
 export const TABLE_PAGE_SIZE = 50;
+export const CARD_PAGE_SIZE = 20;
 
 const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,area_m2,district,last_seen_at,is_active';
 const TABLE_COLS =
   'sreality_id,district,disposition,area_m2,price_czk,last_seen_at,is_active,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb';
+const CARD_COLS =
+  'sreality_id,district,locality,disposition,area_m2,price_czk,last_seen_at,is_active,' +
+  'category_main,category_type';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -70,6 +74,8 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   else if (f.status === 'inactive') r = r.eq('is_active', false);
   const since = seenWithinToIso(f.seenWithin);
   if (since) r = r.gte('last_seen_at', since);
+  r = r.eq('category_main', f.categoryMain);
+  r = r.eq('category_type', f.categoryType);
   if (f.districts.length) r = r.in('district', f.districts);
   if (f.dispositions.length) r = r.in('disposition', f.dispositions);
   if (f.priceMin != null) r = r.gte('price_czk', f.priceMin);
@@ -204,6 +210,78 @@ export const fetchListingsForTable = async (
   };
 };
 
+/* -------------------------------------------------------------------------- */
+/* Cards (sreality-style image-first list). Same filter chain as table, plus  */
+/* a batched image lookup for the first photo per visible listing. Sorted by  */
+/* last_seen_at desc — the cards lane is for "what's new", not for arbitrary  */
+/* re-sorting (that's the Table tab's job).                                   */
+/* -------------------------------------------------------------------------- */
+
+export interface CardRow {
+  sreality_id: number;
+  district: string | null;
+  locality: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  price_czk: number | null;
+  last_seen_at: string;
+  is_active: boolean;
+  category_main: string | null;
+  category_type: string | null;
+  image_url: string | null;
+}
+
+export interface CardsResult {
+  rows: CardRow[];
+  total: number | null;
+}
+
+const R2_BASE = (import.meta.env.VITE_R2_PUBLIC_BASE as string | undefined) ?? undefined;
+
+const pickImageUrl = (img: {
+  sreality_url: string;
+  storage_path: string | null;
+}): string => {
+  if (R2_BASE && img.storage_path) {
+    return `${R2_BASE.replace(/\/$/, '')}/${img.storage_path}`;
+  }
+  return img.sreality_url;
+};
+
+export const fetchListingsForCards = async (
+  f: ListingFilters,
+  page: number,
+): Promise<CardsResult> => {
+  const tagIds = await resolveTagPrefilter(f);
+  if (tagIds != null && tagIds.length === 0) {
+    return { rows: [], total: 0 };
+  }
+  const from = (page - 1) * CARD_PAGE_SIZE;
+  const to = from + CARD_PAGE_SIZE - 1;
+  const base = supabase
+    .from('listings_public')
+    .select(CARD_COLS, { count: 'exact' });
+  const filtered = applyFilters(base, f);
+  const scoped = tagIds != null ? filtered.in('sreality_id', tagIds) : filtered;
+  const sorted = scoped.order('last_seen_at', { ascending: false, nullsFirst: false });
+  const { data, count, error } = await sorted.range(from, to);
+  if (error) throw error;
+  const baseRows = (data ?? []) as unknown as Omit<CardRow, 'image_url'>[];
+  if (baseRows.length === 0) return { rows: [], total: count ?? 0 };
+  const images = await fetchImagesByListingIds(
+    baseRows.map((r) => r.sreality_id),
+    1,
+  );
+  const rows: CardRow[] = baseRows.map((r) => {
+    const first = images.get(r.sreality_id)?.[0];
+    return {
+      ...r,
+      image_url: first ? pickImageUrl(first) : null,
+    };
+  });
+  return { rows, total: count ?? null };
+};
+
 
 export interface DistrictFacet {
   district: string;
@@ -228,6 +306,8 @@ export const fetchBrowseStats = async (
     t === 'any' ? null : t === 'yes';
 
   const { data, error } = await supabase.rpc('browse_stats', {
+    category_main_filter:    f.categoryMain,
+    category_type_filter:    f.categoryType,
     districts_filter:        f.districts.length ? f.districts : null,
     dispositions_filter:     f.dispositions.length ? f.dispositions : null,
     price_min_filter:        f.priceMin,
