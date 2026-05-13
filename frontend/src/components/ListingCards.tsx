@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { CARD_PAGE_SIZE, type CardRow } from '@/lib/queries';
-import { fmtArea, fmtCzk, fmtPricePerM2, fmtRelative } from '@/lib/format';
+import { fmtArea, fmtCzk, fmtPricePerM2 } from '@/lib/format';
 
 interface Props {
   rows: CardRow[] | null;
@@ -8,8 +8,12 @@ interface Props {
   page: number;
   isLoading: boolean;
   hasFilters: boolean;
+  /* Truthy whenever the operator has narrowed by map area. Drives the
+   * "0 in this map area — Show all" empty state. */
+  hasBounds: boolean;
   onPage: (page: number) => void;
   onClearFilters: () => void;
+  onClearBounds: () => void;
 }
 
 export default function ListingCards({
@@ -18,8 +22,10 @@ export default function ListingCards({
   page,
   isLoading,
   hasFilters,
+  hasBounds,
   onPage,
   onClearFilters,
+  onClearBounds,
 }: Props) {
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && rows != null && rows.length === 0;
@@ -49,11 +55,13 @@ export default function ListingCards({
         {isEmpty && (
           <EmptyState
             hasFilters={hasFilters}
+            hasBounds={hasBounds}
             onClearFilters={onClearFilters}
+            onClearBounds={onClearBounds}
           />
         )}
         {!showSkeleton && rows && rows.length > 0 && (
-          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <ul className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
             {rows.map((r) => (
               <li key={r.sreality_id}>
                 <Card r={r} />
@@ -74,13 +82,13 @@ function Card({ r }: { r: CardRow }) {
   const title = formatTitle(r);
   const place = [r.locality, r.district].filter(Boolean).join(', ');
   const isRent = r.category_type === 'pronajem';
-  const priceSuffix = isRent && r.price_czk != null ? ' / měsíc' : '';
+  const priceSuffix = isRent && r.price_czk != null ? ' /měs' : '';
   return (
     <Link
       to={`/listing/${r.sreality_id}`}
-      className="group block rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] hover:border-[var(--color-rule-strong)] transition-colors overflow-hidden"
+      className="group block rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] hover:border-[var(--color-rule-strong)] transition-colors overflow-hidden"
     >
-      <div className="aspect-[4/3] bg-[var(--color-inset)] overflow-hidden relative">
+      <div className="aspect-[5/4] bg-[var(--color-inset)] overflow-hidden relative">
         {r.image_url ? (
           <img
             src={r.image_url}
@@ -92,37 +100,34 @@ function Card({ r }: { r: CardRow }) {
             }}
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center text-[0.7rem] tracking-wider uppercase text-[var(--color-ink-4)]">
+          <div className="w-full h-full flex items-center justify-center text-[0.6rem] tracking-wider uppercase text-[var(--color-ink-4)]">
             no image
           </div>
         )}
         {!r.is_active && (
-          <span className="absolute top-2 left-2 px-1.5 py-0.5 text-[0.65rem] tracking-wider uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/95 border border-[var(--color-rule)] text-[var(--color-ink-3)]">
+          <span className="absolute top-1 left-1 px-1 py-0.5 text-[0.6rem] tracking-wider uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/95 border border-[var(--color-rule)] text-[var(--color-ink-3)]">
             inactive
           </span>
         )}
       </div>
-      <div className="p-3">
-        <h3 className="text-sm leading-snug text-[var(--color-ink)] line-clamp-2">
+      <div className="p-2">
+        <h3 className="text-[0.78rem] leading-snug text-[var(--color-ink)] line-clamp-2">
           {title}
         </h3>
         {place && (
-          <p className="mt-0.5 text-[0.75rem] text-[var(--color-ink-3)] truncate">
+          <p className="mt-0.5 text-[0.68rem] text-[var(--color-ink-3)] truncate">
             {place}
           </p>
         )}
-        <div className="mt-2 flex items-baseline justify-between gap-2">
-          <p className="text-sm font-medium text-[var(--color-ink)] tabular-nums">
+        <div className="mt-1 flex items-baseline justify-between gap-1">
+          <p className="text-[0.78rem] font-medium text-[var(--color-ink)] tabular-nums">
             {fmtCzk(r.price_czk)}
-            <span className="text-[var(--color-ink-3)] text-xs">{priceSuffix}</span>
+            <span className="text-[var(--color-ink-3)] text-[0.65rem]">{priceSuffix}</span>
           </p>
-          <p className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+          <p className="text-[0.62rem] text-[var(--color-ink-4)] tabular-nums whitespace-nowrap">
             {fmtPricePerM2(r.price_czk, r.area_m2)}
           </p>
         </div>
-        <p className="mt-0.5 text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-          last seen {fmtRelative(r.last_seen_at)}
-        </p>
       </div>
     </Link>
   );
@@ -193,14 +198,17 @@ function PagerButton({
 
 function SkeletonGrid() {
   return (
-    <ul className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <li key={i} className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
-          <div className="aspect-[4/3] bg-[var(--color-inset)] animate-pulse" />
-          <div className="p-3 space-y-2">
-            <div className="h-3.5 w-3/4 bg-[var(--color-inset)] rounded animate-pulse" />
-            <div className="h-3 w-1/2 bg-[var(--color-inset)] rounded animate-pulse" />
-            <div className="h-3.5 w-1/3 bg-[var(--color-inset)] rounded animate-pulse" />
+    <ul className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
+      {Array.from({ length: 8 }).map((_, i) => (
+        <li
+          key={i}
+          className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden"
+        >
+          <div className="aspect-[5/4] bg-[var(--color-inset)] animate-pulse" />
+          <div className="p-2 space-y-1.5">
+            <div className="h-3 w-3/4 bg-[var(--color-inset)] rounded animate-pulse" />
+            <div className="h-2.5 w-1/2 bg-[var(--color-inset)] rounded animate-pulse" />
+            <div className="h-3 w-1/3 bg-[var(--color-inset)] rounded animate-pulse" />
           </div>
         </li>
       ))}
@@ -210,23 +218,41 @@ function SkeletonGrid() {
 
 function EmptyState({
   hasFilters,
+  hasBounds,
   onClearFilters,
+  onClearBounds,
 }: {
   hasFilters: boolean;
+  hasBounds: boolean;
   onClearFilters: () => void;
+  onClearBounds: () => void;
 }) {
+  const message = hasBounds
+    ? 'No listings in this map area.'
+    : 'No listings match these filters.';
   return (
     <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--color-rule)] bg-[var(--color-paper-2)] p-8 text-center">
-      <p className="text-sm text-[var(--color-ink-2)]">No listings match these filters.</p>
-      {hasFilters && (
-        <button
-          type="button"
-          onClick={onClearFilters}
-          className="mt-3 text-[0.75rem] tracking-wide uppercase text-[var(--color-copper)] hover:underline"
-        >
-          Clear filters
-        </button>
-      )}
+      <p className="text-sm text-[var(--color-ink-2)]">{message}</p>
+      <div className="mt-3 flex items-center justify-center gap-3">
+        {hasBounds && (
+          <button
+            type="button"
+            onClick={onClearBounds}
+            className="text-[0.75rem] tracking-wide uppercase text-[var(--color-copper)] hover:underline"
+          >
+            Show all
+          </button>
+        )}
+        {hasFilters && (
+          <button
+            type="button"
+            onClick={onClearFilters}
+            className="text-[0.75rem] tracking-wide uppercase text-[var(--color-copper)] hover:underline"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
     </div>
   );
 }
