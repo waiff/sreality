@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 13:11 UTC_
+_Last refreshed: 2026-05-13 14:26 UTC_
 
-**Branch:** `claude/browse-listings-map-layout-PHwYj`
+**Branch:** `claude/unified-browse-experience-Oz9DR`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 13:11 UTC_
 **Last 10 commits:**
 
 ```
+46f7b5e Merge pull request #74 from waiff/claude/browse-listings-map-layout-PHwYj
+6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
+b2d94cb browse: cross-source hover sync between cards, table, and map
+c1150cc Merge pull request #73 from waiff/claude/browse-listings-map-layout-PHwYj
+0568357 roadmap: refresh auto-status block
 8b4a3e6 browse: raise cards carousel per-listing cap from 5 to 50
+7a65a34 Merge pull request #72 from waiff/claude/browse-listings-map-layout-PHwYj
 7a016d2 merge: resolve ROADMAP.md auto-status conflict with origin/main
 56e2d60 Merge pull request #70 from waiff/claude/fix-district-filter-KS8V7
 1a10607 test: assert canonical district label, add foreign + Praha fallback cases
-3474ac3 Merge pull request #66 from waiff/claude/listing-notification-feature-KGhck
-0ca1e6c Merge remote-tracking branch 'origin/main' into claude/listing-notification-feature-KGhck
-51cb38d Merge pull request #69 from waiff/claude/fix-inactive-listings-marking-3Cjz4
-760ca5a scraper: canonical district labels from locality_district_id
-090c2bf Merge remote-tracking branch 'origin/main' into claude/fix-inactive-listings-marking-3Cjz4
-84ed10b roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -431,6 +431,75 @@ End-to-end browser flow over the U1b backend.
 bearer-token-gated FastAPI service to refresh a listing on demand.
 The audit log table (`listing_freshness_checks`) already exists from
 Phase 2.5; the remaining work is the UI button + API call.
+
+### Phase U-Nav: Unified browse → detail navigation (next)
+
+Today the top nav exposes `Listing` and (historically) `Estimate` as
+top-level destinations. That conflates two distinct UX roles:
+**list pages** (Browse, Estimations, Collections) are entry points,
+**detail pages** (Listing, Estimation, Building, Collection item) are
+drill-downs from those lists. The standalone `/listing` entry with no
+id resolves to an empty shell and the entry only exists to satisfy
+the menu link — a tell that the IA is wrong. This phase collapses
+detail pages back into their parent flows and adds an explicit
+"where am I, how do I get back" affordance.
+
+**Scope:**
+- **Remove from menu:** `Listing` link (currently `frontend/src/components/Shell.tsx:10`)
+  and the `path: 'listing'` (no-id) route in `frontend/src/routes.tsx`.
+  `Estimate` is already gone — the modal-trigger CTA in the top bar
+  replaces it. Menu becomes: Browse, Region, Estimations, Collections,
+  Health.
+- **Detail pages stay reachable only via drill-down** from their
+  parent list. `/listing/:sreality_id`, `/estimation/:id`,
+  `/building/:id`, `/collection/:id` are unchanged as URLs; they
+  just no longer have a nav entry.
+- **Breadcrumbs + back affordance** on every detail page. Renders the
+  parent context (e.g. "Browse / Praha 6 — 2+kk apartments / Listing
+  detail") and preserves the parent's filter/sort/page state on
+  click. Mechanism: when a list-page link navigates to a detail, it
+  stashes the current URL (with all query params) into router
+  state; the breadcrumb's "back" link reads from that state and
+  falls back to the bare list URL if state is missing
+  (deep-link / refresh case).
+- **URL hierarchy** — pick one of the patterns below during the
+  design kickoff. Not a foregone conclusion which is right for this
+  app; documenting the trade-offs so the operator can choose.
+
+**Proposed UX patterns (to discuss before any code lands):**
+
+1. **Breadcrumb + flat URLs (recommended starting point).**
+   Keep today's flat routes (`/browse`, `/listing/:id`) and add a
+   breadcrumb strip + a sticky "← Back to results" link that
+   restores the parent's filter state from router state. Pattern
+   used by Airbnb, Zillow, GitHub's issue/PR detail pages.
+   Cheap to ship, no migration of bookmarked URLs, breadcrumb
+   degrades gracefully on deep-link / refresh (still shows
+   "Browse" as parent, just without the specific filter context).
+2. **Nested URLs reflecting drill-down.**
+   `/browse/listing/:sreality_id`, `/estimations/:id`. The URL is
+   the breadcrumb — back button = strip last segment. Pattern used
+   by Linear, Notion, most file-tree UIs. Stronger sense of
+   hierarchy; downside is the same listing reached from Collections
+   would live at `/collections/:cid/listing/:sreality_id`, forcing
+   either route duplication or a canonical-detail-URL convention.
+   Bookmark migration needed (redirects from `/listing/:id`).
+3. **Detail-as-overlay (modal / side sheet).**
+   Clicking a listing in the Browse table opens an overlay over the
+   filtered list rather than navigating away. Pattern used by Gmail,
+   Linear's command-K previews, Booking.com's room picker. Best
+   when users browse → preview → browse repeatedly. Trade-off: the
+   detail loses real-estate, deep-linking requires a parallel
+   full-page route anyway, and the snapshot timeline (the product's
+   signature element) wants the full page.
+
+Realistic combo: pattern 1 across the board, with pattern 3 as a
+future enhancement on Browse → Listing once the breadcrumb is in
+place and we know which detail interactions stay shallow.
+
+**Out of scope for this phase:** changing the snapshot timeline,
+adding new detail-page content, restyling list pages. Pure IA +
+navigation work.
 
 ### Phase U3: Toolkit-backed views (later)
 Surfacing `describe_neighborhood`, `find_distribution_outliers`, and
