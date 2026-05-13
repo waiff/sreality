@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 08:31 UTC_
+_Last refreshed: 2026-05-13 10:20 UTC_
 
-**Branch:** `claude/plan-phase-b2-U4ULP`
+**Branch:** `claude/estimation-price-by-condition-eLUE4`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 35 files, latest `036_building_unit_extractor.sql`.
+**Migrations on disk:** 37 files, latest `038_skill_rental_estimator_condition_scenarios.sql`.
 
 **Last 10 commits:**
 
 ```
-8ab4982 roadmap: refresh auto-status block
-edcf0c3 roadmap: plan Phase B2 (per-unit fan-out + building rollup view)
+4b19f37 roadmap: refresh auto-status block
+d0f5085 roadmap: refresh auto-status block
+715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
+b0495c8 estimation: add condition-scenario columns to estimation_runs (migration not yet applied)
+9bb5297 roadmap: refresh auto-status block
 59e9263 Merge pull request #61 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
 038193e building: Phase B1 — URL ingest + unit extractor + confirmation UI
 fbc584d Merge pull request #60 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
 fbf8dc3 roadmap: plan Phase B1 (URL ingest + unit extractor + confirmation UI)
 c028816 Merge pull request #59 from waiff/claude/add-building-paste-feature-NmQIy
-6b95c75 roadmap: refresh auto-status block
-182fc2a building: renumber 034 -> 035 + apply migration
-40ad67d building: Phase B0 schema + scaffolding (migration not yet applied)
 ```
 
 <!-- END AUTO-STATUS -->
@@ -240,78 +240,46 @@ PR #59. Full description under "Building decomposition track" below.
   (`BuildingRun`, `BuildingUnit`, `BuildingStatus`); no pages or
   components yet — those ship with B1.
 
-### Phase B1: Building decomposition — URL ingest + unit extractor + confirmation UI
-Second slice. PR #61. Full description under "Building decomposition
-track" below.
-- Migration 036: `building_unit_extractions` cache table
-  + `'extract_building_units'` value on `llm_calls.called_for`
-  + four `app_settings` seeds (`llm_building_extractor_system_prompt`,
-  `llm_building_extractor_model`, `llm_building_extractor_max_images`,
-  `building_default_estimator_skill`).
-- `toolkit.building_extraction.extract_building_units` (write-allowed
-  exception per toolkit rule #5; cached on
-  `(sreality_id, snapshot_id)`, same pattern as `summarize_listing`).
-- On-disk `skills/building_unit_extractor_v1/SKILL.md` documents the
-  extractor contract; no `skills` row seeded (B1 is a single-shot
-  vision call, so `skills.limits` would have no runtime meaning —
-  prompt + model + image cap live in `app_settings` instead).
-- `POST /buildings/from_url` (replaces B0's `POST /buildings` shell),
-  `POST /buildings/{id}/confirm_units` (`awaiting_input → estimating`),
-  `POST /buildings/{id}/re_extract` (force-refresh while in
-  `awaiting_input`). All bearer-gated.
-- Frontend: `kind` toggle on `NewEstimationModal`, `BuildingUnitEditor`
-  component, `/building/:id` page (subject + warnings + unit
-  proposal/confirmation + re-extract control). Per-unit estimate
-  strips + rollup totals land with B2.
-
 ## Next
 
-### Phase B2: Building decomposition — per-unit fan-out + rollup view (active)
+### Phase B1: Building decomposition — URL ingest + unit extractor + confirmation UI (active)
 
-Third slice of the building-paste flow. Builds on B1's confirmation
-gate: when the operator confirms the unit list, the system fans out
-one rent + one sale `estimation_runs` row per unit, watches them to
-terminal status, sums P25/P50/P75 into the `total_*` rollup columns
-on `building_runs`, and renders the rollup + per-unit estimate
-strips on `/building/:id`. End of B2 a confirmed building reaches
-`status='success'` (or `'failed'` if every child failed) with totals
-visible in the UI.
+Second slice of the building-paste flow. Builds on B0's persistence:
+operator pastes a `dum` (house) or `komercni` URL → backend parses
+via the existing dispatcher → an LLM-vision skill reads the
+description + floor plans + photos → proposes a unit list → the UI
+renders an editable confirmation step → operator confirms. End of B1
+the building is in `status='awaiting_input'` until the operator
+submits, then advances to `estimating`. B2 picks up the per-unit
+estimation fan-out from there.
 
-Full description (including the no-new-migration justification, the
-background-thread orchestrator pattern, the rent-agent / sale-
-deterministic split, and the idempotent retry endpoint) under
-"Building decomposition track" below.
+Full description (including the apartment-skill-reuse note on the
+B2 orchestrator step) under "Building decomposition track" below.
 
 Headline scope:
-- **No new migration.** Migration 035 already shipped the
-  `total_rent_p{25,50,75}_czk` + `total_sale_p{25,50,75}_czk` columns
-  on `building_runs` and the `building_run_id` / `building_unit_id`
-  columns on `estimation_runs`.
-- Orchestrator in `api/building_runs.py` (or a new
-  `api/building_agent.py`): `POST /buildings/{id}/run_estimations`
-  is the idempotent fan-out / retry endpoint; `confirm_units` calls
-  it once on success. Background thread iterates pending children,
-  reuses the existing `create_estimation_run` machinery
-  in-process — rent children run in `mode='agent'` against
-  `app_settings.building_default_estimator_skill`, sale children
-  run in `mode='deterministic'` (sale skill deferred to a later
-  phase).
-- Rollup writer fires after every child terminates; on the last
-  terminal child it persists summed P25/P50/P75 to `building_runs`
-  and transitions `status` to `success` or `failed`. Partial
-  failure (some children OK, some failed) lands in `success` with
-  a warning noting which units are missing a kind.
-- `POST /buildings/{id}/children/{run_id}/rerun` — convenience
-  re-run of a single child estimation. Inserts a new
-  `estimation_runs` row with `parent_run_id=run_id` and the same
-  `building_run_id` + `building_unit_id`.
-- Frontend: extend `/building/:id` from B1's read-only view —
-  `BuildingRollup` strip at the top (total rent + total sale
-  ranges, copper P50 emphasis), per-unit `UnitEstimateStrip` rows
-  reusing the visual language of `EstimationStrip`, link out to
-  each child `/estimation/:id`, polling while `status='estimating'`
-  or any child is non-terminal, manual "Run estimations" CTA that
-  doubles as the recovery / retry button.
+- Migration 036: `building_unit_extractions` cache table
+  + `'extract_building_units'` value on `llm_calls.called_for`
+  + four `app_settings` rows for the new skill / prompt / model
+  (`llm_building_extractor_system_prompt`, `llm_building_extractor_model`,
+  `llm_building_extractor_max_images`, `building_default_estimator_skill`).
+- New toolkit function `toolkit.building_extraction.extract_building_units`
+  — write-allowed exception per toolkit rule #5; same cache pattern as
+  `summarize_listing` (keyed on `(sreality_id, snapshot_id)`).
+- New skill `building_unit_extractor_v1` (vision extractor, not an
+  estimator) — on-disk `skills/building_unit_extractor_v1/SKILL.md`
+  + migration seed `INSERT`. Allowed tools: `extract_building_units`
+  + `record_building_units` terminator. Distinct from the apartment
+  estimator skill — its job is structural extraction only.
+- `POST /buildings/from_url` replaces B0's minimal `POST /buildings`
+  as the operator-facing entry. Rejects `category_main='byt'` (those
+  go through `/estimations`).
+- `POST /buildings/{id}/confirm_units` accepts the operator-edited
+  unit list, validates, writes to `units`, advances status to
+  `estimating`. Idempotency via 409 on non-`awaiting_input` rows.
+- Frontend: new `kind` toggle on `NewEstimationModal` ("apartment" /
+  "building"), `BuildingUnitEditor` component for the review step,
+  new `/building/:id` page (initially read-only — full rollup view
+  ships with B2).
 
 ### Phase 7 slice 2: Async + full toolkit + UI mode toggle
 Builds on slice 1.
@@ -642,7 +610,7 @@ Shipped in PR #59.
 - Tests: hermetic CRUD tests in `tests/api/test_buildings.py`
   modeled on the `_State`-style fakes from `test_estimations.py`.
 
-### Phase B1: URL ingest + unit extractor + confirmation UI (done)
+### Phase B1: URL ingest + unit extractor + confirmation UI (next — active)
 
 Builds on B0's persistence. The output of B1 is a `building_runs`
 row sitting in `status='awaiting_input'` (extractor ran,
@@ -858,298 +826,52 @@ lands in B2; B1 stops at the human-in-the-loop gate.
   flow exercises; defer until a real bezrealitky `dum` URL surfaces
   in operator testing.
 
-### Phase B2: Per-unit fan-out + building rollup view (next — active)
+### Phase B2: Per-unit fan-out + building rollup view
 
-Builds on B1's confirmation gate. The output of B2 is a
-`building_runs` row in `status='success'` (or `'failed'` if no
-child completed) with `total_rent_p{25,50,75}_czk` +
-`total_sale_p{25,50,75}_czk` populated and one rent + one sale
-child `estimation_runs` row per unit. The full rollup +
-per-unit estimate strips are visible on `/building/:id`. The
-business case overlay stays out of scope until B3.
-
-**Data + migration**
-
-- **No new migration.** Migration 035 (B0) already shipped every
-  column B2 needs:
-  - `building_runs.total_rent_p25/p50/p75_czk`,
-    `total_sale_p25/p50/p75_czk` for the rollup writer.
-  - `estimation_runs.building_run_id` (FK, `ON DELETE SET NULL`)
-    + `estimation_runs.building_unit_id` (text) for the child
-    linkage.
-- The orchestrator does not mutate `building_runs.units` after
-  kickoff — that frozen-list contract was set in B0 and B1 and
-  carries forward.
-- `app_settings.building_default_estimator_skill` (seeded by
-  migration 036 to `'rental_estimator_v1'`) is the operator-tunable
-  knob that selects which apartment skill drives rent children.
-  Already in place; B2 only reads it.
-
-**Orchestrator (`api/building_runs.py` or new
-`api/building_agent.py`)**
-
-- Triggered by `POST /buildings/{id}/run_estimations` — the
-  idempotent fan-out / retry endpoint. `confirm_units` (from B1)
-  is amended to call it once on its way out so the happy path is
-  one operator click. The frontend's "Run estimations" CTA on
-  `/building/:id` calls the same endpoint and is the recovery
-  control if the worker dies mid-fan-out.
-- Algorithm (idempotent):
-  1. Load the row; require `status ∈ {estimating, success,
-     failed}`. A still-`awaiting_input` row returns HTTP 409.
-  2. For every unit in `units`, ensure exactly one `rent`-kind
-     and one `sale`-kind child exists. Missing children are
-     INSERTed as `mode='agent' / status='running'` for rent and
-     `mode='deterministic' / status='running'` for sale, with
-     `building_run_id` + `building_unit_id` set up front so the
-     side-query in `GET /buildings/{id}` picks them up immediately.
-     Children already in `success` are left alone; `failed` children
-     are NOT auto-replayed (the operator decides per-child re-run
-     via the new `/children/{run_id}/rerun` endpoint below).
-  3. Hand the list of newly-INSERTed child IDs to a background
-     worker (`threading.Thread(daemon=True)`) and return the
-     row immediately. The HTTP response carries the latest
-     `children` projection; the UI polls from there.
-- Background worker:
-  - Iterates children sequentially. Parallelism is deferred until
-    Phase 7 slice 2's async lifecycle lands; sequential keeps the
-    LLM-cost story bounded and avoids a multi-worker race on the
-    rollup write.
-  - For each rent child: builds an internal `CreateEstimationIn`
-    body with `mode='agent'`,
-    `skill=app_settings.building_default_estimator_skill`
-    (re-read per child so a mid-fan-out edit takes effect from
-    the next unit on),
-    `provider='anthropic'`, `estimate_kind='rent'`,
-    `category_main='byt'`, `category_type='pronajem'`, plus the
-    per-unit target (see "Per-child target construction" below),
-    then calls `create_estimation_run` directly (in-process, not
-    via HTTP). The function already writes a fresh
-    `estimation_runs` row, so the orchestrator deletes its
-    pre-INSERTed shell first via the existing `id` it stamped
-    OR — simpler — passes through a `pre_inserted_run_id` arg
-    that `_run_agent_path` honours. Implementation choice
-    deferred to the writer; both shapes preserve the
-    `building_run_id` linkage.
-  - For each sale child: same shape but `mode='deterministic'`,
-    `estimate_kind='sale'`, `category_type='prodej'`. Sale stays
-    deterministic until a `sale_estimator_v1` skill ships (see
-    "Out of scope" below). Deterministic is the slice-1
-    `estimate_yield` path, which already supports
-    `estimate_kind='sale'` via migration 030.
-  - After each child terminates, the worker re-fetches the
-    parent's children list, checks for all-terminal, and on the
-    last terminal child calls the rollup writer (described
-    below). Any worker exception is logged + the child is
-    marked `failed` with `error_message`; the loop continues to
-    the next child so one bad unit can't sink the run.
-
-**Per-child target construction**
-
-- `lat` / `lng` from `building.subject_summary.fields` (populated
-  by B1's URL-parse step).
-- `area_m2` from the confirmed `BuildingUnit.area_m2`. When
-  `None`, the orchestrator falls back to
-  `subject_summary.fields.usable_area / len(units)` (the same
-  proportional fallback the extractor uses) and adds a warning
-  to the parent's `warnings` array.
-- `disposition` from `BuildingUnit.disposition` (may be `None` —
-  the agent skill widens automatically).
-- `floor` from `BuildingUnit.floor` parsed as int when numeric
-  ("ground" / "attic" stay `None` — `floor_band` is not set on
-  those children).
-- `condition_match` derived from `BuildingUnit.condition` as a
-  one-element list when set; omitted otherwise.
-- `exclude_ids` always includes the parent building's
-  `input_sreality_id` so the building itself never appears in
-  its own comparable pool.
-
-**Rollup math**
-
-- `total_rent_p50_czk = sum(child.estimated_monthly_rent_czk
-  for child in rent_children if status='success')`. P25 / P75
-  use the per-child IQR endpoints summed, matching how the
-  operator reads the spreadsheet (the per-unit IQRs are not
-  joint-distributed, but for an operator-facing rollup a sum of
-  endpoints is the agreed convention).
-- `total_sale_*` totals follow the same shape over
-  `child.estimated_sale_price_czk` / `sale_p{25,75}_czk` on
-  sale children.
-- A unit whose rent child failed or whose sale child failed
-  contributes 0 to that kind's total and the writer appends a
-  warning `"unit u3 missing rent estimate"` to the parent's
-  `warnings` array.
-- Terminal status:
-  - `success` if at least one child of any kind reached
-    `status='success'`. A partial-success building shows totals
-    + warnings; this matches the operator's "show me whatever
-    you've got, flag what's missing" preference set in earlier
-    phases.
-  - `failed` if every child failed. The first child's
-    `error_message` is copied to `building_runs.error_message`
-    (truncated 1000 chars).
-
-**API endpoints**
-
-- `POST /buildings/{id}/run_estimations` — idempotent fan-out
-  described above. Returns the building row + children list.
-- `POST /buildings/{id}/children/{run_id}/rerun` — convenience
-  re-run of a single child. Inserts a new `estimation_runs` row
-  with `parent_run_id=run_id`, the same `building_run_id` +
-  `building_unit_id`, and the kind/skill/mode replayed from the
-  original child. The rollup writer treats the rerun as the
-  authoritative row for that (unit, kind) pair via "latest
-  success per (unit, kind)" selection.
-- `confirm_units` (existing from B1) is amended to call
-  `run_estimations` at the end on a best-effort basis: scheduling
-  failure does not block the status transition (the operator
-  can retry via the CTA).
-- `GET /buildings/{id}` (existing from B0): no shape change.
-  `_BUILDING_COLUMNS` already includes the rollup columns;
-  `_CHILD_COLUMNS` already projects the per-child estimate
-  ranges + status + error_message. B2 just populates the
-  previously-`NULL` cells.
-
-**Skill reuse — and why it is NOT a new skill**
-
-- Rent children run under
-  `app_settings.building_default_estimator_skill` (operator-
-  tunable, seeded to `rental_estimator_v1` by migration 036).
-  This makes an apartment-inside-a-building estimated by exactly
-  the same plumbing as a standalone apartment, so improvements
-  to the apartment skill (better prompts, additional tools,
-  model upgrades) roll into both surfaces in lockstep with zero
-  per-flow work. The full rationale is recorded in CLAUDE.md
-  architectural rule #13.
-- Sale children stay in deterministic mode against
-  `toolkit.estimate_yield` until a `sale_estimator_v1` skill
-  ships. Adding a parallel `building_default_sale_estimator_skill`
-  app_settings row + plumbing is a one-line change when that
-  skill lands; B2 deliberately defers it.
-
-**Frontend (`/building/:id` expansion + new components)**
-
-- `BuildingRollup` (new component): top strip showing total
-  monthly rent range (P25 — **P50** — P75 with copper emphasis
-  on P50, matching `EstimationStrip`'s visual language) and
-  total sale range below. Falls back to a "Estimating…" placeholder
-  while any child is non-terminal.
-- `UnitEstimateStrip` (new component, one per confirmed unit):
-  reuses `EstimationStrip`'s typography + token palette. Shows
-  rent range + sale range + confidence pill per kind, with the
-  unit's id / label / floor / area / disposition / condition as
-  a leading header row. Each strip links to its rent child and
-  sale child `/estimation/:id` for full trace.
-- Auto-polling: `BuildingDetail` page polls `GET /buildings/{id}`
-  every 5 s while `status='estimating'` or any child is in
-  `pending` / `running`. Stops on all-terminal. Same pattern as
-  the existing `EstimationDetail` agent-mode poller from Phase 7
-  slice 1.
-- CTA changes:
-  - On `status='awaiting_input'`: unchanged from B1 (the
-    confirm-mode `BuildingUnitEditor` + "Re-extract" link).
-  - On `status='estimating'` with all children present: read-only
-    units list + `BuildingRollup` (still loading) + per-unit
-    strips (still loading).
-  - On `status='success'` / `'failed'` with missing children:
-    "Run estimations" CTA appears and calls `run_estimations`
-    (the same idempotent endpoint). This doubles as the recovery
-    control if a Railway dyno restarts mid-fan-out and leaves
-    children in `running`.
-  - Per-child rerun is a small "↻" button on each
-    `UnitEstimateStrip` row.
-- The `BuildingUnitEditor` from B1 is unchanged. The
-  `ReadOnlyUnits` rendering inside `BuildingDetail.tsx` is
-  retired — its rows are now hosted inside `UnitEstimateStrip`
-  so each unit shows its estimate inline rather than as a
-  separate block.
-
-**Tests**
-
-- `tests/api/test_buildings_b2.py`:
-  - `run_estimations` happy path — confirmed building with 2
-    units → 4 children created (2 rent agent, 2 sale
-    deterministic), rollup totals match summed P25/P50/P75.
-  - Idempotency — second call with everything in `success` is
-    a no-op (returns the same row, no new child rows inserted).
-  - Partial-failure rollup — 1 of 4 children failed → building
-    lands in `status='success'` with a warning naming the
-    missing (unit, kind) pair, totals exclude that unit's kind.
-  - Total-failure rollup — every child failed → building lands
-    in `status='failed'` with the first child's error_message
-    copied to `building_runs.error_message`.
-  - Child rerun — `POST /buildings/{id}/children/{run_id}/rerun`
-    creates a new `estimation_runs` row with `parent_run_id`
-    set + same `building_unit_id`; the new row is the one used
-    by the rollup ("latest success per (unit, kind)").
-  - All tests modelled on the `_State`-style fakes from
-    `tests/api/test_buildings_b1.py` + `test_estimations.py`;
-    no real LLM, no real DB, the worker runs inline by stubbing
-    `threading.Thread` with a synchronous shim.
-- `tests/toolkit/test_building_rollup.py` — pure-function tests
-  for the rollup math: P25/P50/P75 sums, missing children,
-  rerun "latest success" selection, partial-/total-failure
-  shapes.
-- Frontend:
-  - `BuildingRollup.test.tsx` — snapshot of populated state,
-    loading state, partial-success state.
-  - `UnitEstimateStrip.test.tsx` — rent/sale ranges, missing
-    kind, failed kind with `error_message`, rerun button click.
-  - `BuildingPage.test.tsx` — extended for the polling
-    expansion: starts a query, advances fake timers, asserts
-    the polling stops when all children terminal.
-
-**Trace + cost surfacing**
-
-- Each child estimation writes its own trace + cost via the
-  existing `/estimations` machinery — B2 introduces no new
-  trace format. Drilling into any `/estimation/:id` from a
-  `UnitEstimateStrip` shows the per-child trace exactly as it
-  would for a standalone estimation.
-- Per-building LLM cost = `sum(llm_calls.cost_usd) WHERE
-  estimation_run_id IN child_ids`. The detail view can render
-  this as a single number (one SQL query the API layer adds to
-  `GET /buildings/{id}` when implementation lands). The daily
-  soft-warning at `LLM_DAILY_COST_WARN_USD` (default $5) already
-  covers this surface — no new warning machinery.
-
-**Out of scope for B2 (deferred)**
-
-- **Sale-side skill.** Sale children stay deterministic. A future
-  `sale_estimator_v1` skill (with a parallel
-  `building_default_sale_estimator_skill` app_settings row) is
-  the planned upgrade.
-- **Async durable queue.** Phase 7 slice 2's async lifecycle will
-  replace the daemon-thread orchestrator with a proper job table +
-  worker. Until then, a Railway dyno restart mid-fan-out leaves
-  the affected children in `running`; the "Run estimations" CTA
-  is the operator's recovery click.
-- **Business case overlay.** B3.
-- **Multi-portal building paste rollup.** Same caveat as B1 —
-  bezrealitky / idnes / remax URLs route through the dispatcher
-  but per-source `dum` parsers may not yet populate enough fields
-  for the orchestrator's target construction. Defer until a real
-  non-sreality building URL surfaces in operator testing.
-- **Concurrent worker (multi-child parallelism).** Sequential
-  fan-out is the slice 1 contract; the cost model + the
-  in-process worker pattern do not yet justify parallelism.
-
-**Open question / risks**
-
-- *Risk — dyno restart mid-fan-out.* The background thread is
-  in-process. A restart leaves children in `running`. Mitigation:
-  the "Run estimations" CTA is idempotent and re-INSERTs only
-  missing children, so the recovery path is a single click. Phase
-  7 slice 2 supersedes this with a durable queue.
-- *Risk — cost.* 2 estimations per unit × ~$0.05–$0.10 per agent
-  run × ~5 units ≈ $1–$3 per building. The $5 daily soft-warning
-  already covers this surface; document but don't gate.
-- *Open question — rent fallback when no skill is configured.*
-  If `building_default_estimator_skill` resolves to an unknown
-  name at runtime, the orchestrator falls back to deterministic
-  rent (same path as sale) and adds a warning. Final shape
-  confirmed at implementation time; documented here so the
-  reviewer can flag if a different fallback is preferred.
+- **Orchestrator** in `api/building_runs.py` (or a new
+  `building_agent.py`): on `units` confirmation, INSERT one rent
+  + one sale `estimation_runs` row per unit, each linked back via
+  `building_run_id` + `building_unit_id`. Reuse the existing
+  agent-mode plumbing — the orchestrator is just a fan-out +
+  watcher, no new LLM loop.
+  - **Reuse the existing apartment estimator skill.** Each child
+    `estimation_runs` row submitted by the B2 orchestrator runs
+    under the operator's configured apartment estimator skill —
+    today `rental_estimator_v1` (slice 1) or
+    `rental_estimator_full_v1` (slice 1.5), sourced from
+    `app_settings.building_default_estimator_skill` (seeded by
+    migration 036 to `rental_estimator_v1`, operator-tunable via
+    `/settings`). The child rows pass `category_main='byt'`,
+    `category_type='pronajem'` for rent (and `'prodej'` for sale),
+    `area_m2` and `disposition` from the confirmed `units` entry,
+    and `lat`/`lng` from the parent building's parse output. This
+    is a deliberate design choice: an apartment unit inside a
+    building must be estimated exactly the same way as a
+    standalone apartment, so the two surfaces stay consistent and
+    any improvement to the apartment skill (better prompts,
+    additional tools, model upgrades) rolls into the building
+    flow automatically with zero per-flow work. Adding a separate
+    "building-apartment estimator" skill would duplicate prompt
+    engineering, drift over time, and silently produce different
+    numbers for the same unit depending on the surface — exactly
+    what we want to avoid. (Sale-side estimation reuses the same
+    discipline once a sale-specific skill exists; until then sale
+    children fall back to deterministic mode — see "out of scope"
+    below.)
+- **Rollup**: when all child runs reach a terminal status, write
+  summed `total_rent_p25/p50/p75_czk` +
+  `total_sale_p25/p50/p75_czk` to `building_runs`. P50 is straight
+  sum across units; P25 / P75 use the per-unit IQR endpoints
+  summed (matches how the operator reads the spreadsheet).
+- **Frontend**: extend `/building/:id` from B1's read-only view —
+  building subject summary at the top, units list with per-unit
+  estimate strips (reusing the `EstimationStrip` component from
+  `/estimation/:id`), rollup totals, link out to each child
+  estimation for detail.
+- **Out of scope for B2**: sale-side skill (rent reuse is the
+  minimum bar). The sale child rows in B2 run in deterministic
+  mode against the existing sale-estimation path until a
+  `sale_estimator_v1` skill ships in a later phase.
 
 ### Phase B3: Business case tab
 
