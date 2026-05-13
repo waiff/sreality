@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:20 UTC_
+_Last refreshed: 2026-05-13 11:36 UTC_
 
 **Branch:** `claude/listing-notification-feature-KGhck`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-13 11:20 UTC_
 **Last 10 commits:**
 
 ```
+70f38ff roadmap: plan Phase AI (feedback-driven skill refinement)
 a6b6008 roadmap: plan Phase U2.7 (new-listing notifications)
 cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwYj
 1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
@@ -25,7 +26,6 @@ cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwY
 4df43c6 merge: resolve ROADMAP.md auto-status conflict with origin/main
 4b19f37 roadmap: refresh auto-status block
 d0f5085 roadmap: refresh auto-status block
-715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
 ```
 
 <!-- END AUTO-STATUS -->
@@ -494,9 +494,14 @@ estimations using data that already exists in the database.
 ### Phase 2: Multi-portal ingestion (later, larger)
 Today's non-sreality flow is *parse on demand* via
 `source_dispatcher` (LLM call per URL, cached 7 days). To make
-bezrealitky / idnes / remax comparables show up in
-`find_comparables`, those portals need to land in the `listings`
-table itself. Scope:
+bezrealitky / idnes / remax / maxima comparables (and other portals
+as the operator opens them) show up in `find_comparables`, those
+portals need to land in the `listings` table itself. **Hard
+dependency: the Dedup track's Phase D1 must ship first.** Without
+strict cross-source dedup, multi-portal ingestion multiplies every
+listing by the number of portals it appears on, which breaks
+`find_comparables`, `browse_stats`, and the notification dispatch
+fan-out alike. Scope:
 - Per-source index walker analogous to `scraper/sreality_client.py`.
   Most of these portals don't expose a public JSON API, so HTML
   pagination / playwright will be in scope; bot-detection is more
@@ -504,7 +509,9 @@ table itself. Scope:
 - Reuse `parse_listing_url` for detail pages, with aggressive
   caching and a per-source rate limit.
 - New `listings` columns: `source` (default `'sreality'`),
-  `source_url`, `source_id_native`. New numbered migration.
+  `source_url`, `source_id_native`. New numbered migration. The
+  same migration that adds these columns is co-authored with
+  Phase D1's canonical shape — they touch the same surface.
 - Update `_shared_filter_where` so toolkit queries can filter by
   source.
 - Frontend Browse: source multi-toggle.
@@ -514,6 +521,189 @@ table itself. Scope:
   validation matures? Default recommendation is the latter; agent
   (Phase 7) opts cross-portal cohorts in once it can validate
   them.
+
+## Dedup + canonical listing track (parallel)
+
+Today the `listings` table is effectively a mirror of sreality.cz
+keyed on `sreality_id`. As multi-portal ingestion (Scraper Phase 2)
+brings bezrealitky / idnes / remax / maxima / etc. into the same
+table, "the same property" will start showing up multiple times —
+both within a single run (cross-portal collision) and across runs
+(taken down and relisted under a new broker after expiring). This
+track is the work to identify those duplicates and present one
+canonical listing per real-world property.
+
+**Directional architectural shift surfaced by the operator.** The
+`listings` table evolves from "mirror of sreality" to "mirror of
+every observed property across all sources, deduplicated."
+Architectural rules #1 (append-only migrations), #2 (snapshot on
+content change), and #3 (never delete listings) all carry over —
+applied at the canonical level rather than the per-source level.
+The migration is significant; this track plans the path but does
+not commit to it without an operator decision on the canonical
+shape (see D1 below).
+
+### Phase D1: Strict cross-source dedup (proposed)
+
+Catch the obvious duplicates: the same listing observed on two
+portals at once, or the same source-listing re-fetched under a
+slightly different URL. This is a precondition for Scraper Phase 2
+— without it, multi-portal ingestion multiplies every listing by
+the number of portals it appears on. Also a precondition for Phase
+U2.7's "notify once per real property" guarantee.
+
+**Canonical shape (operator decision required before this phase
+starts)**
+
+Two viable shapes. Both preserve all existing snapshot history and
+respect architectural rules #1 / #2 / #3.
+
+- **Shape A — single canonical table, per-source observations as
+  history.** Keep `listings` as the canonical row (one per real
+  property). Existing `sreality_id` becomes one of many possible
+  `source_id_native` values. New companion table
+  `listing_source_observations(listing_id, source,
+  source_id_native, source_url, first_seen_at, last_seen_at)`
+  records every source that has surfaced this listing. Existing
+  `listing_snapshots` gains a `source` column so per-source
+  content drift is still visible in the diff timeline. Lowest
+  migration cost; downstream queries (`find_comparables`,
+  `browse_stats`, RPCs, frontend) keep working with minimal
+  changes. **Recommended default.**
+- **Shape B — two-table model: `properties` + `listings`.** New
+  canonical `properties` table; existing `listings` becomes per-
+  source observations linked back via `property_id`. Cleaner
+  separation of concerns, but every downstream query has to learn
+  the join. Tens of files touch this; the visible payoff is small
+  if Shape A's denormalised approach already handles the same use
+  cases. Reopen when Shape A's limits show up in production.
+
+**Matcher (insert-time, has to be cheap)**
+
+- **Tier 1 — exact canonicalised URL.** Lower-case scheme + host,
+  strip query, strip trailing slash, sha256. Hash match against an
+  existing canonical row → append a new
+  `listing_source_observations` row and a snapshot if content
+  differs; do not insert a new canonical row.
+- **Tier 2 — (lat, lng, price_czk, area_m2) within tolerance.**
+  `ST_DWithin` within ~20 m, price within ±2%, area within
+  ±1 m². High precision; catches "same listing surfaced on two
+  portals simultaneously."
+- **Tier 3 — agent phone / email when exposed.** Same
+  (phone, area, district) triple within 30 days = likely the same
+  listing relisted by the same agent. Lower precision; auto-merge
+  gated on at least one more matching marker.
+- **Ambiguous tier.** Anything that matches at lower confidence
+  goes to a new `listing_duplicate_candidates` queue for operator
+  review. Default to "no merge" rather than "guess merge."
+
+**Migration scope**
+
+- New numbered migration co-authored with Scraper Phase 2's
+  `source` / `source_url` / `source_id_native` columns (single
+  migration touching the same surface).
+- Shape-A path: add `listing_source_observations` +
+  `listing_duplicate_candidates`; add `source` to
+  `listing_snapshots`. Backfill: every existing row gets one
+  `listing_source_observations` entry with
+  `source='sreality', source_id_native=sreality_id::text`. No
+  data loss.
+- `_shared_filter_where` learns to filter by source via the new
+  observations join (read path stays on `listings`).
+
+**Notification feature link (Phase U2.7)**
+
+Phase U2.7's `notification_dispatches` table currently keys on
+`sreality_id`. Once D1 ships the canonical id is the dedup key, so
+a single property surfaced on bezrealitky AND sreality fires one
+notification instead of two. The U2.7 schema gets a one-line
+update at D1 land time: `sreality_id` → `listing_id` referencing
+the canonical row. Same `(subscription_id, listing_id)` uniqueness
+guarantee, just at the right grain.
+
+### Phase D2: Fuzzy property identity (proposed)
+
+Catch the harder case: a listing taken down and relisted weeks
+later with different wording, different broker, possibly different
+photos. Markers per the operator's brief (everything else — price,
+broker, URL, listing copy — is allowed to vary):
+
+- **Address** (street name + house number when present; full
+  address is the highest-precision signal).
+- **City / district / cadastral area.**
+- **Floor** (when known).
+- **Disposition + area triangulation.** A 51 m² 1+1 and a 50 m²
+  2+kk are likely the same flat — relisted with a different
+  disposition label. Use a tight equivalence map across nearby
+  dispositions (`1+1 ≈ 2+kk`, `2+1 ≈ 3+kk`, etc.) combined with a
+  ±10% area band.
+- **Image similarity.** Two-tier to keep cost down:
+  - Cheap first pass: perceptual hash (`pHash` / `aHash`) on the
+    hero image via Pillow. Catches re-uploads of the same photo
+    with minor recompression / resizing.
+  - Vision tier for the ambiguous: reuse
+    `compare_listing_images` from Phase 6 (Claude vision).
+    Higher cost; only invoked when the cheap markers say "maybe."
+
+**Matcher (background sweep, NOT insert-time)**
+
+D1's matcher runs at insert time and has to be cheap. D2 is
+heavier (image fetches, sometimes vision calls); runs as a
+periodic background sweep over recently-inactive listings against
+currently-active listings, surfaces candidates, never auto-merges
+without operator review. Precision over recall.
+
+- New table `property_identity_candidates(left_listing_id,
+  right_listing_id, confidence, markers_matched jsonb,
+  suggested_at, status, reviewed_at, reviewed_action)` — append-
+  only audit of every candidate the sweep proposes. Status:
+  `proposed` → `merged` | `dismissed`. Operator reviews on a new
+  `/dedup/candidates` page (frontend).
+- On `merged`: the older listing's snapshots are re-pointed at the
+  canonical row, both `listing_source_observations` entries
+  collapse onto the canonical id. Architectural rule #3 (never
+  delete) holds — merged listings keep their history, the
+  canonical row just gains it.
+- Sweep cadence: weekly is plenty; relisted-after-expired patterns
+  unfold on a multi-week timescale, not minutes.
+
+**Address normalisation**
+
+Czech addresses arrive in a variety of formats (street + descriptive
+number + orientation number, street + house number, P.O. box). A
+normalisation helper lives in a new `toolkit/addresses.py` —
+canonicalises whitespace, strips diacritics for fuzzy comparison
+only (display form keeps them), parses out descriptive vs.
+orientation numbers, returns a stable comparison key. Hermetic
+tests against a fixture set of real Czech address strings.
+
+**Open questions (operator to decide before D2 starts)**
+
+- **Conservative vs. aggressive merging.** Default is conservative
+  (queue, operator approves). Aggressive auto-merge above a
+  confidence threshold is tempting for scale but bakes in
+  irreversible false positives.
+- **Image-tier model.** `compare_listing_images` is already there
+  but is materially expensive per pair (~$0.05). For D2's volume
+  a cheaper dedicated image-similarity model may be needed; pick
+  when the cohort size makes the bill visible. pHash alone may
+  cover most cases.
+- **What "merged" actually means in the UI.** Browse should show
+  one row per canonical property by default (default-on toggle to
+  "show all source observations" for power use); Listing Detail
+  shows all source observations on a tab. Confirm before
+  implementation.
+
+**Out of scope for D1 + D2**
+
+- Cross-property dedup beyond same-property identification (e.g.
+  identifying neighbouring units that are part of the same
+  building — that's the Building decomposition track's job).
+- Automatic re-merging when a previously-dismissed candidate
+  re-surfaces with new markers — manual re-trigger for now.
+- The Shape-B full architectural split (`properties` parent table
+  + per-source `listings` child). Reopen once Shape A's limits
+  show up in production.
 
 ## Operator workflow track (parallel)
 
@@ -590,7 +780,13 @@ change so the underlying data refreshes more often than nightly.
 - Migration: `notification_dispatches(subscription_id, sreality_id,
   dispatched_at, channel, status, error_message)` — append-only
   audit + dedup guard so a (subscription, listing) pair never
-  re-fires even if the matcher re-runs.
+  re-fires even if the matcher re-runs. **Cross-link to Dedup
+  track Phase D1:** once D1 ships, the dedup key changes from
+  `sreality_id` to the canonical `listing_id`, so a property
+  surfaced on multiple portals fires one notification rather than
+  one-per-portal. This is a single-column rename on
+  `notification_dispatches`; no functional change to the dispatch
+  worker beyond reading from the canonical row.
 - API: new `/notifications/*` routes (CRUD on subscriptions, list of
   recent dispatches, manual "test send" for a subscription). Bearer-
   gated; browser writes flow through here, never direct Postgres.
