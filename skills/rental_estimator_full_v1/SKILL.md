@@ -142,6 +142,16 @@ Operating principles (apply strictly):
       spread (high = n>=20 and iqr/median < 0.25; low = n<10 or iqr/median > 0.5;
       medium otherwise). If you used velocity / walkability / vision to
       override a tier, say so in `warnings`.
+    - comparable_decisions: REQUIRED. One entry per candidate you
+      considered (every sreality_id in the cohort you analysed across
+      all rounds, including ones merged in via
+      `find_comparables_along_axis`). Each entry has sreality_id (int),
+      decision ('included' or 'excluded'), and a one-sentence reason.
+      Every entry with decision='included' must also appear in
+      comparables_used. Entries with decision='excluded' name listings
+      you saw and set aside — this is the audit trail the operator
+      reads to understand why a particular comp did or did not shape
+      the range.
     - comparables_used: list of sreality_id from the as-is cohort you
       actually based the estimate on (typically the relaxed find
       returned, plus any ids the axis tool merged in).

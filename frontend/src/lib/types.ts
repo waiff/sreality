@@ -200,6 +200,19 @@ export interface ComparableUsed {
   snapshot_date: string | null;
   data_age_days: number | null;
   verified_during_estimate: boolean;
+  /* Migration 046 — per-comparable inclusion reason emitted by the
+   * agent in record_estimate.comparable_decisions. Null on
+   * deterministic runs and on agent runs predating migration 046. */
+  reason?: string | null;
+}
+
+/* Migration 046 — listings the agent considered and chose not to
+ * include in the cohort. Mirrors comparables_used but with only the
+ * id + a one-sentence reason. Null when the agent didn't emit
+ * comparable_decisions (legacy rows or deterministic runs). */
+export interface ComparableExcluded {
+  sreality_id: number;
+  reason: string;
 }
 
 /* Output of toolkit/summaries.py:summarize_listing — the five legacy
@@ -297,6 +310,10 @@ export interface EstimationRun {
   gross_yield_pct: number | null;
   confidence: Confidence | null;
   comparables_used: ComparableUsed[] | null;
+  /* Migration 046 — agent's per-listing decision log for candidates
+   * not included in comparables_used. Null on deterministic runs and
+   * on agent runs predating the migration. */
+  comparables_excluded: ComparableExcluded[] | null;
   trace: Trace | null;
   warnings: string[] | null;
   error_message: string | null;

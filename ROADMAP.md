@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 19:17 UTC_
+_Last refreshed: 2026-05-13 20:58 UTC_
 
 **Branch:** `claude/build-ai-feedback-loop-56uah`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 19:17 UTC_
 **Last 10 commits:**
 
 ```
+72c764c Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
 d676069 phase-ai slice A: capture full tool-call payloads alongside trace
-694e80e migrations: add 043 estimation_trace_payloads side-table
-5215551 roadmap: refresh auto-status block
 2ecf104 Merge pull request #78 from waiff/claude/rental-estimates-agent-tools-Lompi
 cda35d1 merge: resolve ROADMAP auto-status conflict with origin/main
 ddd81bf roadmap: refresh auto-status block
 bb74bc4 Merge pull request #77 from waiff/claude/add-estimation-files-context-ugzqK
+355e762 roadmap: refresh auto-status block
 a7fdba4 roadmap: refresh auto-status block
-fdb5c6b roadmap: scope manual rental estimates + deferred agent code-exec
-4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
+694e80e migrations: add 043 estimation_trace_payloads side-table
+5215551 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1454,6 +1454,40 @@ Past-run drill-down is one-directional in time: the writer only
 captures payloads for runs executed *after* slice A shipped.
 Pre-existing `estimation_runs` rows lose the drill-down ability;
 the trace summary stays intact.
+
+#### Slice A.1: Audit follow-ups (done)
+
+Operator-driven adjustments to the trace surface uncovered the
+moment slice A landed on /estimation/17:
+
+- Migration 046 — `estimation_runs.comparables_excluded jsonb` and
+  a string-replace UPDATE on both rental skill prompts inserting a
+  required `comparable_decisions` bullet on the `record_estimate`
+  arguments list. Applied via MCP; `skills_history` preserves the
+  prior prompts.
+- `record_estimate` schema (api/agent.py) accepts
+  `comparable_decisions: [{sreality_id, decision, reason}]`. The
+  agent's terminator step now records `n_comparables_included` /
+  `n_comparables_excluded` in its bounded summary; the full
+  decisions list lives in the slice A side-table.
+- `_finalise` joins inclusion reasons onto each `comparables_used`
+  entry (new optional `reason` field) and emits a parallel
+  `comparables_excluded` list — both persisted on the run row.
+- Agent loop emits a `skill_choice` computation step before the
+  first LLM turn recording skill name, description, provider,
+  model, limits, and tool whitelist — answers "why was this skill
+  used" in the audit.
+- Agent summary line wording: `after N iters` → `after N LLM
+  turns` for clarity about what the counter represents.
+- Frontend: `ComparableUsed.reason` + new `ComparableExcluded`
+  type, "Why kept" column on the comparables table, "Considered
+  and set aside" panel below it, and Mode / Skill / Model rows in
+  the Inputs recap (pulled from the trace's `skill_choice` step).
+- Hermetic tests on `_normalise_decisions` (malformed entries
+  dropped, not raised) and on the agent trace shape (skill_choice
+  always first).
+
+These were follow-ups, not new slices — same PR.
 
 #### Slice B: Feedback capture (next)
 

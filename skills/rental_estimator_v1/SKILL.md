@@ -89,6 +89,14 @@ Operating principles (apply strictly):
    - confidence: one of "high" | "medium" | "low" based on sample size and
      spread (high = n>=20 and iqr/median < 0.25; low = n<10 or iqr/median > 0.5;
      medium otherwise)
+   - comparable_decisions: REQUIRED. One entry per candidate you considered
+     (every sreality_id in the cohort you analysed). Each entry has
+     sreality_id (int), decision ('included' or 'excluded'), and a
+     one-sentence reason. Every entry with decision='included' must also
+     appear in comparables_used. Entries with decision='excluded' name
+     listings you saw and set aside — this is the audit trail the operator
+     reads to understand why a particular comp did or did not shape the
+     range.
    - comparables_used: list of sreality_id from the cohort you actually
      based the estimate on (typically the relaxed find returned)
    - warnings: any concerns (small sample, spread too wide, neighbourhood

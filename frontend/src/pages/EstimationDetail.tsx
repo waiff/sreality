@@ -20,6 +20,7 @@ import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
 import { PickButton } from '@/components/controls';
 import type {
+  ComparableExcluded,
   ComparableUsed,
   Confidence,
   CreateEstimationIn,
@@ -391,6 +392,20 @@ function InputRecap({ run }: { run: EstimationRun }) {
     facts.push(['Purchase price', fmtCzk(run.input_purchase_price_czk)]);
   }
 
+  // Agent-mode runs record the skill choice as the first
+  // computation step of the trace. Pulling skill / model / provider
+  // out of it answers "why this skill" — the row is the audit
+  // truth, and the Timeline below renders the full details on
+  // expand.
+  const skillChoice = pickSkillChoiceFromTrace(run);
+  if (skillChoice) {
+    facts.push(['Mode', run.mode]);
+    facts.push(['Skill', skillChoice.skill_name]);
+    facts.push(['Model', `${skillChoice.provider} / ${skillChoice.model}`]);
+  } else if (run.mode) {
+    facts.push(['Mode', run.mode]);
+  }
+
   return (
     <div>
       <SectionLabel>Inputs</SectionLabel>
@@ -439,6 +454,34 @@ function InputRecap({ run }: { run: EstimationRun }) {
       )}
     </div>
   );
+}
+
+interface SkillChoiceSummary {
+  skill_name: string;
+  provider: string;
+  model: string;
+}
+
+function pickSkillChoiceFromTrace(run: EstimationRun): SkillChoiceSummary | null {
+  const steps = run.trace?.steps ?? [];
+  for (const step of steps) {
+    if (step.kind !== 'computation') continue;
+    const label = (step as { label?: unknown }).label;
+    if (label !== 'skill_choice') continue;
+    const out = (step.output_summary ?? {}) as Record<string, unknown>;
+    const skill_name = out.skill_name;
+    const provider = out.provider;
+    const model = out.model;
+    if (
+      typeof skill_name === 'string' &&
+      typeof provider === 'string' &&
+      typeof model === 'string'
+    ) {
+      return { skill_name, provider, model };
+    }
+    return null;
+  }
+  return null;
 }
 
 function Fact({ label, value }: { label: string; value: string | null }) {
@@ -656,6 +699,7 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
               <Th align="right">Area</Th>
               <Th align="left">Disp.</Th>
               <Th align="left">Summary</Th>
+              <Th align="left">Why kept</Th>
               <Th align="right">Age</Th>
             </tr>
           </thead>
@@ -674,6 +718,8 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
           </tbody>
         </table>
       </div>
+
+      <ExcludedComparables excluded={run.comparables_excluded} />
 
       {activeId != null && activeListing && (
         <Suspense fallback={null}>
@@ -752,6 +798,11 @@ function ComparableRow({
       <td className="px-3 py-2 align-middle text-[0.82rem] text-[var(--color-ink-2)]">
         <span className="line-clamp-2 leading-snug">{locText}</span>
       </td>
+      <td className="px-3 py-2 align-middle text-[0.82rem] text-[var(--color-ink-2)]">
+        {comp.reason
+          ? <span className="line-clamp-2 leading-snug italic">{comp.reason}</span>
+          : <span className="text-[var(--color-ink-4)]">—</span>}
+      </td>
       <td className="px-3 py-2 align-middle text-right font-mono tabular-nums text-[var(--color-ink-3)] text-[0.78rem]">
         {comp.data_age_days != null ? `${comp.data_age_days} d` : '—'}
         {comp.verified_during_estimate && (
@@ -759,6 +810,42 @@ function ComparableRow({
         )}
       </td>
     </tr>
+  );
+}
+
+function ExcludedComparables({
+  excluded,
+}: {
+  excluded: ComparableExcluded[] | null;
+}) {
+  if (!excluded || excluded.length === 0) return null;
+  return (
+    <div className="mt-6">
+      <div className="flex items-baseline justify-between">
+        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          Considered and set aside
+        </p>
+        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
+          {excluded.length}
+        </p>
+      </div>
+      <ul className="mt-3 space-y-1.5">
+        {excluded.map((row) => (
+          <li
+            key={row.sreality_id}
+            className="flex items-baseline gap-3 text-[0.82rem] text-[var(--color-ink-2)] px-3 py-1.5 rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)]"
+          >
+            <Link
+              to={`/listing/${row.sreality_id}`}
+              className="shrink-0 font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
+            >
+              {row.sreality_id}
+            </Link>
+            <span className="italic leading-snug">{row.reason}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
