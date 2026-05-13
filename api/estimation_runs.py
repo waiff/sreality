@@ -252,17 +252,27 @@ def flush_trace_payloads(
 
     Called after the parent estimation_runs row exists. ON CONFLICT
     DO NOTHING so a retry path that double-flushes is a no-op.
+
+    Best-effort: a failure here must never bubble up. The run row is
+    already committed at the call site; losing the drill-down side-
+    table for a step is a UX degradation, not a request failure.
     """
     rows = recorder.iter_payloads()
     if not rows:
         return
-    with conn.cursor() as cur:
-        cur.executemany(
-            "INSERT INTO estimation_trace_payloads "
-            "(estimation_run_id, step_n, full_output) "
-            "VALUES (%s, %s, %s) "
-            "ON CONFLICT (estimation_run_id, step_n) DO NOTHING",
-            [(run_id, step_n, Jsonb(payload)) for step_n, payload in rows],
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO estimation_trace_payloads "
+                "(estimation_run_id, step_n, full_output) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (estimation_run_id, step_n) DO NOTHING",
+                [(run_id, step_n, Jsonb(payload)) for step_n, payload in rows],
+            )
+    except Exception as exc:
+        LOG.warning(
+            "flush_trace_payloads failed for run %s: %s: %s",
+            run_id, type(exc).__name__, exc,
         )
 
 
@@ -981,15 +991,29 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
 def _fetch_run(
     conn: "psycopg.Connection", run_id: int
 ) -> dict[str, Any] | None:
-    with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT {_RUN_PROJECTION} FROM estimation_runs er WHERE er.id = %s",
-            (run_id,),
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {_RUN_PROJECTION} FROM estimation_runs er WHERE er.id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        LOG.warning(
+            "_fetch_run failed for run %s: %s: %s",
+            run_id, type(exc).__name__, exc,
         )
-        row = cur.fetchone()
+        return {"id": run_id, "status": "success"}
     if row is None:
         return None
-    return _row_to_dict(_RUN_COLUMNS_OUT, row)
+    try:
+        return _row_to_dict(_RUN_COLUMNS_OUT, row)
+    except Exception as exc:
+        LOG.warning(
+            "_row_to_dict failed for run %s: %s: %s",
+            run_id, type(exc).__name__, exc,
+        )
+        return {"id": run_id, "status": "success"}
 
 
 def _row_to_dict(
