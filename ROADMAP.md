@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 19:06 UTC_
+_Last refreshed: 2026-05-13 19:26 UTC_
 
 **Branch:** `claude/add-estimation-files-context-ugzqK`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-13 19:06 UTC_
 **Last 10 commits:**
 
 ```
+355e762 roadmap: refresh auto-status block
 abb5ccd merge: resolve ROADMAP auto-status conflict with origin/main
 4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
 1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
@@ -25,7 +26,6 @@ bababba roadmap: refresh auto-status block
 f4830c2 browse: per-disposition ppm2 box plots, retire Region tab
 43d5b2a estimations: operator-supplied instructions, context, and floor-plan attachments
 de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
-668a033 roadmap: add Phase U-Nav for unified browse → detail navigation
 ```
 
 <!-- END AUTO-STATUS -->
