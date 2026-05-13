@@ -55,7 +55,34 @@ def test_locality(sample):
 
 
 def test_district(sample):
-    assert parse_listing(sample)["district"] == "Olomouc - Slavonín"
+    # locality_district_id=42 -> canonical "okres Olomouc" (migration 041
+    # lookup). The pre-041 implementation sliced the last comma segment
+    # of the locality string, which conflated districts with sub-city
+    # neighbourhoods like "Olomouc - Slavonín" and broke filtering.
+    assert parse_listing(sample)["district"] == "okres Olomouc"
+
+
+def test_district_falls_back_for_foreign_listings():
+    # locality_district_id=-1 is sreality's sentinel for foreign listings;
+    # the canonical lookup has no entry, so _district falls back to the
+    # trailing-locality-segment heuristic so the country name still surfaces.
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {"locality_district_id": -1},
+        "locality": {"value": "Toskánsko, Itálie"},
+    }
+    assert parse_listing(raw)["district"] == "Itálie"
+
+
+def test_district_collapses_praha_subdistricts():
+    # All 22 Praha N IDs (5001..5022) collapse to a single "Praha" label
+    # so the Browse District chip shows one entry for the whole city.
+    raw = {
+        "_links": {"self": {"href": "/cs/v2/estates/1"}},
+        "recommendations_data": {"locality_district_id": 5003},
+        "locality": {"value": "Žižkov, Praha 3"},
+    }
+    assert parse_listing(raw)["district"] == "Praha"
 
 
 def test_locality_ids(sample):
