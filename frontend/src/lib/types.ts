@@ -554,6 +554,35 @@ export interface BuildingUnit {
   notes: string | null;
 }
 
+/* What the extractor returns (B1). Stored as-is on
+ * building_runs.units_proposal; the operator-confirmed array lands on
+ * building_runs.units. */
+export interface BuildingSummary {
+  floor_count: number | null;
+  has_attic: boolean | null;
+  year_built: number | null;
+  construction_type:
+    | 'cihla' | 'panel' | 'skelet' | 'drevostavba' | 'smiseny' | 'unknown'
+    | null;
+  total_area_m2: number | null;
+  condition:
+    | 'novostavba' | 'po_rekonstrukci' | 'velmi_dobry' | 'dobry'
+    | 'pred_rekonstrukci' | 'k_demolici' | 'unknown'
+    | null;
+  notes: string | null;
+}
+
+export interface BuildingUnitsProposal {
+  units: BuildingUnit[];
+  building: BuildingSummary;
+  confidence: 'high' | 'medium' | 'low';
+  warnings: string[];
+  n_images: number;
+  model: string;
+  cost_usd: number | null;
+  snapshot_id: number;
+}
+
 /* Embedded child-estimation projection on GET /buildings/{id}.
  * Slimmer than EstimationRun — full detail lives at /estimation/:id. */
 export interface BuildingChildRun {
@@ -585,7 +614,7 @@ export interface BuildingRun {
   parse_confidence_per_field: Record<string, Confidence> | null;
   source_html: string | null;
   subject_summary: SubjectSummary | null;
-  units_proposal: BuildingUnit[] | null;
+  units_proposal: BuildingUnitsProposal | null;
   units: BuildingUnit[] | null;
   total_rent_p25_czk: number | null;
   total_rent_p50_czk: number | null;
@@ -604,6 +633,16 @@ export interface BuildingRun {
 export interface CreateBuildingIn {
   source: EstimationSource;
   input_url?: string | null;
+}
+
+export interface CreateBuildingFromUrlIn {
+  source: EstimationSource;
+  url: string;
+  force_refresh?: boolean;
+}
+
+export interface ConfirmBuildingUnitsIn {
+  units: BuildingUnit[];
 }
 
 export interface BuildingListResponse {

@@ -1,16 +1,18 @@
-/* Compact popup for kicking off a new estimation.
+/* Compact popup for kicking off a new estimation OR a new building decomposition.
  *
- * Operator pastes a listing URL → we call POST /estimations/preview to
- * extract the spec → we POST /estimations immediately with the scraped
- * spec (no review) → navigate to /estimation/:id. Any fine-tuning of
- * the spec or filters happens on the detail page's "Adjust & re-run"
- * panel. The pop-up therefore only carries the minimum a sane default
- * estimation needs.
+ * Apartment kind (default):
+ *   Paste a listing URL → POST /estimations/preview to extract spec →
+ *   POST /estimations to start the run → navigate to /estimation/:id.
  *
- * Estimate kind (rent vs sale) is auto-detected from the preview's
- * category_type (pronájem / prodej) so the popup itself stays
- * single-field. Provider and population fall back to the same
- * defaults the form used to ship with (Claude + active-only).
+ * Building kind (Phase B1):
+ *   Paste a `dum` / `komercni` URL → POST /buildings/from_url runs the
+ *   extractor synchronously → navigate to /building/:id where the
+ *   operator reviews the unit proposal and confirms.
+ *
+ * Estimate kind (rent vs sale) for the apartment path is auto-detected
+ * from the preview's category_type (pronájem / prodej). Provider and
+ * population fall back to the same defaults the form used to ship with
+ * (Claude + active-only).
  */
 
 import {
@@ -24,9 +26,14 @@ import {
 } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
-import { ApiError, previewListingUrl } from '@/lib/api';
+import {
+  ApiError,
+  createBuildingFromUrl,
+  previewListingUrl,
+} from '@/lib/api';
 import { submitEstimation } from '@/lib/queries';
 import type {
+  BuildingRun,
   CreateEstimationIn,
   EstimationRun,
   ParseResult,
@@ -75,7 +82,10 @@ export function NewEstimationProvider({ children }: { children: ReactNode }) {
 /* Modal                                                                      */
 /* -------------------------------------------------------------------------- */
 
+type Kind = 'apartment' | 'building';
+
 function NewEstimationModal({ onClose }: { onClose: () => void }) {
+  const [kind, setKind] = useState<Kind>('apartment');
   const [url, setUrl] = useState('');
   const navigate = useNavigate();
 
@@ -83,23 +93,37 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
     mutationFn: (url) => previewListingUrl(url),
   });
   const submitMut = useMutation<EstimationRun, ApiError, ParseResult>({
-    mutationFn: (preview) => submitEstimation(buildPayload(preview)),
+    mutationFn: (preview) => submitEstimation(buildEstimationPayload(preview)),
     onSuccess: (run) => {
       onClose();
       navigate(`/estimation/${run.id}`);
     },
   });
+  const buildingMut = useMutation<BuildingRun, ApiError, string>({
+    mutationFn: (url) =>
+      createBuildingFromUrl({ source: 'ui', url }),
+    onSuccess: (run) => {
+      onClose();
+      navigate(`/building/${run.id}`);
+    },
+  });
 
-  const pending = previewMut.isPending || submitMut.isPending;
-  const error = previewMut.error || submitMut.error;
+  const pending =
+    previewMut.isPending || submitMut.isPending || buildingMut.isPending;
+  const error =
+    previewMut.error || submitMut.error || buildingMut.error;
 
   const submit = useCallback(() => {
     const trimmed = url.trim();
     if (!trimmed || pending) return;
+    if (kind === 'building') {
+      buildingMut.mutate(trimmed);
+      return;
+    }
     previewMut.mutate(trimmed, {
       onSuccess: (preview) => submitMut.mutate(preview),
     });
-  }, [url, pending, previewMut, submitMut]);
+  }, [url, kind, pending, previewMut, submitMut, buildingMut]);
 
   // Esc closes; Enter submits when the input is focused.
   useEffect(() => {
@@ -110,6 +134,26 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose, pending]);
+
+  const title =
+    kind === 'building' ? 'Which building?' : 'Where is the listing?';
+  const placeholder =
+    kind === 'building'
+      ? 'https://www.sreality.cz/detail/prodej/dum/…'
+      : 'https://www.sreality.cz/detail/…';
+  const helpCopy =
+    kind === 'building'
+      ? 'We read description + floor plans + photos, propose the apartment units, and open the building for your review.'
+      : 'We scrape the listing, kick off the estimate, and open the run. You can adjust the spec and re-run from the detail page.';
+  const submitLabel = pending
+    ? previewMut.isPending
+      ? 'Scraping…'
+      : buildingMut.isPending
+        ? 'Extracting units…'
+        : 'Submitting…'
+    : kind === 'building'
+      ? 'Decompose'
+      : 'Estimate';
 
   return (
     <div
@@ -125,14 +169,14 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
         <header className="flex items-baseline justify-between gap-4 px-6 pt-5 pb-3">
           <div>
             <p className="text-[0.65rem] tracking-[0.22em] uppercase text-[var(--color-ink-3)]">
-              New estimation
+              New {kind === 'building' ? 'building' : 'estimation'}
             </p>
             <h2
               id="new-estimation-title"
               className="mt-1 text-[1.35rem] leading-tight"
               style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
             >
-              Where is the listing?
+              {title}
             </h2>
           </div>
           <button
@@ -147,9 +191,11 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
         </header>
 
         <div className="px-6 pb-6">
+          <KindToggle kind={kind} setKind={setKind} disabled={pending} />
+
           <label
             htmlFor="new-estimation-url"
-            className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+            className="mt-4 block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
           >
             Listing URL
           </label>
@@ -167,7 +213,7 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
                   submit();
                 }
               }}
-              placeholder="https://www.sreality.cz/detail/…"
+              placeholder={placeholder}
               disabled={pending}
               className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
             />
@@ -182,15 +228,14 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
                   : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
               ].join(' ')}
             >
-              {pending ? <Spinner label={previewMut.isPending ? 'Scraping…' : 'Submitting…'} /> : 'Estimate'}
+              {pending ? <Spinner label={submitLabel} /> : submitLabel}
             </button>
           </div>
 
-          {error && <ErrorBlock error={error} />}
+          {error && <ErrorBlock error={error} kind={kind} />}
 
           <p className="mt-4 text-[0.75rem] text-[var(--color-ink-3)] leading-relaxed">
-            We scrape the listing, kick off the estimate, and open the run.
-            You can adjust the spec and re-run from the detail page.
+            {helpCopy}
           </p>
         </div>
       </div>
@@ -199,10 +244,78 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Kind toggle                                                                */
+/* -------------------------------------------------------------------------- */
+
+function KindToggle({
+  kind, setKind, disabled,
+}: {
+  kind: Kind;
+  setKind: (k: Kind) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="What are you pasting?"
+      className="flex items-stretch gap-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)] overflow-hidden bg-[var(--color-inset)]"
+    >
+      <KindButton
+        active={kind === 'apartment'}
+        onClick={() => setKind('apartment')}
+        disabled={disabled}
+        label="Apartment"
+        sub="One flat → rent / sale estimate"
+      />
+      <KindButton
+        active={kind === 'building'}
+        onClick={() => setKind('building')}
+        disabled={disabled}
+        label="Building"
+        sub="Decompose → estimate per unit"
+      />
+    </div>
+  );
+}
+
+function KindButton({
+  active, onClick, disabled, label, sub,
+}: {
+  active: boolean;
+  onClick: () => void;
+  disabled: boolean;
+  label: string;
+  sub: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      onClick={onClick}
+      disabled={disabled}
+      className={[
+        'flex-1 px-3 py-2 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+        active
+          ? 'bg-[var(--color-paper)] text-[var(--color-ink)]'
+          : 'bg-transparent text-[var(--color-ink-3)] hover:text-[var(--color-ink)]',
+      ].join(' ')}
+    >
+      <span className="block text-[0.8rem]" style={{ fontWeight: active ? 600 : 500 }}>
+        {label}
+      </span>
+      <span className="block text-[0.7rem] mt-0.5 text-[var(--color-ink-3)]">
+        {sub}
+      </span>
+    </button>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function buildPayload(preview: ParseResult): CreateEstimationIn {
+function buildEstimationPayload(preview: ParseResult): CreateEstimationIn {
   const kind = previewToEstimateKind(preview);
   const mode = kind === 'rent' ? 'agent' : 'deterministic';
   return {
@@ -260,9 +373,12 @@ function CloseGlyph() {
   );
 }
 
-function ErrorBlock({ error }: { error: ApiError }) {
+function ErrorBlock({ error, kind }: { error: ApiError; kind: Kind }) {
   const headline = (() => {
     if (error.status === 400) {
+      if (kind === 'building') {
+        return error.message || "That URL isn't a building listing.";
+      }
       return "That URL doesn't look like a supported listing page.";
     }
     if (error.status === 401) {
