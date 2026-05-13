@@ -536,17 +536,20 @@ def run_agent_estimation(
                 ))
                 with recorder.tool_call(tc.name, tc.input) as h:
                     h.set_summary({"error": "unknown_tool"})
+                    h.set_full_output({"error": "unknown_tool", "input": tc.input})
                 continue
             if tool_def.is_terminator:
                 state.final_call = tc.input
                 with recorder.tool_call(tc.name, tc.input) as h:
                     h.set_summary(_terminator_summary(tc.input))
+                    h.set_full_output({"terminator_input": tc.input})
                 stop_reason = "record_estimate"
                 break
             try:
                 with recorder.tool_call(tc.name, tc.input) as h:
                     result = _dispatch_tool(tool_def, tc.input, state)
                     h.set_summary(_tool_summary(tc.name, result))
+                    h.set_full_output(result)
                 results.append(ToolResultBlock(
                     tool_use_id=tc.id,
                     content=_format_tool_result(tc.name, result),

@@ -5,17 +5,19 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 18:06 UTC_
+_Last refreshed: 2026-05-13 19:16 UTC_
 
 **Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 41 files, latest `042_browse_stats_ppm2_box.sql`.
+**Migrations on disk:** 42 files, latest `043_estimation_trace_payloads.sql`.
 
 **Last 10 commits:**
 
 ```
+694e80e migrations: add 043 estimation_trace_payloads side-table
+5215551 roadmap: refresh auto-status block
 1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
 bababba roadmap: refresh auto-status block
 23fae19 merge: resolve ROADMAP.md auto-status conflict with origin/main
@@ -24,8 +26,6 @@ de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
 668a033 roadmap: add Phase U-Nav for unified browse → detail navigation
 46f7b5e Merge pull request #74 from waiff/claude/browse-listings-map-layout-PHwYj
 6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
-b2d94cb browse: cross-source hover sync between cards, table, and map
-c1150cc Merge pull request #73 from waiff/claude/browse-listings-map-layout-PHwYj
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1290,7 +1290,66 @@ feedback-driven prompt refinement loop where the operator's written
 critique of a specific run gets fed back into the skill that produced
 it.
 
-### Phase AI: Feedback-driven skill refinement (proposed)
+### Phase AI: Feedback-driven skill refinement (active)
+
+Sliced into three independent PRs along the data-flow boundary:
+slice A captures full tool-call payloads alongside the existing
+bounded trace; slice B adds operator feedback capture; slice C
+drives the actual refiner skill. Each slice is independently
+useful.
+
+#### Slice A: Trace inspection enrichment (done)
+
+Migration 043 lands the side-table foundation; PR1 of three.
+
+- Migration 043: `estimation_trace_payloads(estimation_run_id,
+  step_n, full_output jsonb, captured_at)`, PK on the pair.
+  ON DELETE CASCADE so payloads track the parent run. RLS enabled,
+  no policies — service-role only; the frontend reads via the
+  bearer-gated endpoint below. 30-day retention documented in
+  CLAUDE.md (architectural rule #9 prose); no automated pruner,
+  manual SQL when the table grows.
+- `TraceRecorder.set_full_output(...)` + `iter_payloads()` +
+  top-level `flush_trace_payloads(conn, run_id, recorder)`. The
+  recorder accumulates `(step_n, full_output)` pairs in memory;
+  flush executes a single `executemany` INSERT after the parent
+  `estimation_runs` row is persisted. `ON CONFLICT DO NOTHING`
+  makes retry double-flush a no-op.
+- Wired into:
+  - `estimate_yield` (deterministic path): captures the full
+    `find_comparables` cohort and `analyze_distribution` result.
+  - `agent.run_agent_estimation`: captures every tool-call result
+    in the loop, plus the terminator input and unknown-tool
+    diagnostics. Exception paths leave the payload unset by
+    design (failed tool calls have nothing to drill into).
+  - All three persist sites: `create_estimation_run` success path,
+    `_persist_failed_run`, and `_run_agent_path` (both finalise
+    branches) call `flush_trace_payloads` after the row exists.
+- `GET /estimations/{id}/trace/{n}/payload` (bearer-gated) returns
+  `{step_n, full_output, captured_at}`, 404 when absent.
+- Frontend `Timeline.tsx`: `tool_call` step bodies render a
+  "Show full payload" expander that lazily calls the new
+  `useTracePayload(runId, stepN, enabled)` hook (added to
+  `frontend/src/lib/queries.ts`). `EstimationDetail` threads the
+  run id into `<Timeline runId={run.id} />`; previews and other
+  callers without a persisted run continue to render without the
+  expander.
+- Hermetic unit tests on `set_full_output` / `iter_payloads`:
+  computation/reasoning steps never produce payload rows;
+  numbering on payload rows lines up with the trace step `n`.
+
+Past-run drill-down is one-directional in time: the writer only
+captures payloads for runs executed *after* slice A shipped.
+Pre-existing `estimation_runs` rows lose the drill-down ability;
+the trace summary stays intact.
+
+#### Slice B: Feedback capture (next)
+
+#### Slice C: Refinement loop (after slice B)
+
+---
+
+#### Original phase brief (pre-slicing)
 
 **Trace inspection enrichment**
 

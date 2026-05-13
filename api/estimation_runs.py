@@ -78,11 +78,23 @@ def _default_max_age_days(estimate_kind: str) -> int:
 class StepHandle:
     """Returned by recorder context managers; caller sets the summary."""
 
+    _UNSET = object()
+
     def __init__(self) -> None:
         self.summary: dict[str, Any] = {}
+        self.full_output: Any = StepHandle._UNSET
 
     def set_summary(self, summary: dict[str, Any]) -> None:
         self.summary = summary
+
+    def set_full_output(self, full_output: Any) -> None:
+        """Capture the unbounded tool output for the trace_payloads side-table.
+
+        Trace JSONB stores only `output_summary` per architectural rule #9;
+        full payloads land in `estimation_trace_payloads` keyed on
+        (estimation_run_id, step_n) for click-to-expand drill-down.
+        """
+        self.full_output = full_output
 
 
 class TraceRecorder:
@@ -90,6 +102,7 @@ class TraceRecorder:
 
     def __init__(self) -> None:
         self._steps: list[dict[str, Any]] = []
+        self._payloads: list[tuple[int, Any]] = []
         self._n = 0
 
     @contextlib.contextmanager
@@ -158,6 +171,10 @@ class TraceRecorder:
             "steps": list(self._steps),
         }
 
+    def iter_payloads(self) -> list[tuple[int, Any]]:
+        """Return the (step_n, full_output) pairs captured during the run."""
+        return list(self._payloads)
+
     def _append(
         self,
         *,
@@ -177,10 +194,15 @@ class TraceRecorder:
             "output_summary": handle.summary,
         }
         self._steps.append(step)
+        if handle.full_output is not StepHandle._UNSET:
+            self._payloads.append((self._n, handle.full_output))
 
 
 class _NullStepHandle:
     def set_summary(self, summary: dict[str, Any]) -> None:
+        return None
+
+    def set_full_output(self, full_output: Any) -> None:
         return None
 
 
@@ -213,9 +235,35 @@ class _NullTraceRecorder:
             "steps": [],
         }
 
+    def iter_payloads(self) -> list[tuple[int, Any]]:
+        return []
+
 
 _NULL_HANDLE = _NullStepHandle()
 NULL_RECORDER: Any = _NullTraceRecorder()
+
+
+def flush_trace_payloads(
+    conn: "psycopg.Connection",
+    run_id: int,
+    recorder: TraceRecorder,
+) -> None:
+    """Persist the recorder's accumulated tool-call full outputs.
+
+    Called after the parent estimation_runs row exists. ON CONFLICT
+    DO NOTHING so a retry path that double-flushes is a no-op.
+    """
+    rows = recorder.iter_payloads()
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO estimation_trace_payloads "
+            "(estimation_run_id, step_n, full_output) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (estimation_run_id, step_n) DO NOTHING",
+            [(run_id, step_n, Jsonb(payload)) for step_n, payload in rows],
+        )
 
 
 def _ms_since(mono_start: float) -> int:
@@ -402,6 +450,7 @@ def create_estimation_run(
         source_html=resolution.source_html,
         subject_summary=subject_summary,
     )
+    flush_trace_payloads(conn, run_id, recorder)
     return _fetch_run(conn, run_id) or {}
 
 
@@ -409,6 +458,35 @@ def get_estimation_run(
     conn: "psycopg.Connection", run_id: int
 ) -> dict[str, Any] | None:
     return _fetch_run(conn, run_id)
+
+
+def get_trace_payload(
+    conn: "psycopg.Connection", run_id: int, step_n: int,
+) -> dict[str, Any] | None:
+    """Fetch one estimation_trace_payloads row, or None if absent.
+
+    Returns `{step_n, full_output, captured_at}`. Drives the
+    click-to-expand drill-down on tool_call steps in the timeline.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT step_n, full_output, captured_at "
+            "FROM estimation_trace_payloads "
+            "WHERE estimation_run_id = %s AND step_n = %s",
+            (run_id, step_n),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "step_n": row[0],
+        "full_output": row[1],
+        "captured_at": (
+            row[2].isoformat(timespec="milliseconds")
+            if row[2] is not None
+            else None
+        ),
+    }
 
 
 def list_estimation_runs(
@@ -629,6 +707,7 @@ def _persist_failed_run(
         source_html=resolution.source_html,
         subject_summary=None,
     )
+    flush_trace_payloads(conn, run_id, recorder)
     return _fetch_run(conn, run_id) or {}
 
 
@@ -801,6 +880,7 @@ def _run_agent_path(
             warnings=list(resolution.parse_warnings) or None,
             error_message=f"{type(exc).__name__}: {exc}"[:1000],
         )
+        flush_trace_payloads(conn, run_id, recorder)
         return _fetch_run(conn, run_id) or {}
 
     d = agent_result.data
@@ -834,6 +914,7 @@ def _run_agent_path(
         error_message=err,
         subject_summary=subject_summary,
     )
+    flush_trace_payloads(conn, run_id, recorder)
     return _fetch_run(conn, run_id) or {}
 
 

@@ -339,3 +339,54 @@ def test_reasoning_step_shape():
     assert "label" not in step
     assert step["output_summary"]["tool_calls_queued"] == ["find_comparables_relaxed"]
     assert step["output_summary"]["provider"] == "anthropic"
+
+
+# ---------------------------------------------------------------------------
+# TraceRecorder.set_full_output() / iter_payloads()
+# ---------------------------------------------------------------------------
+
+def test_recorder_captures_full_output_only_when_set():
+    """Only steps that explicitly call set_full_output produce a payload row.
+
+    Architectural rule #9: the trace JSONB always stores output_summary
+    (bounded) per step. The side-table only gets entries the caller
+    opts into via set_full_output. Computations and reasoning steps
+    aren't expected to populate the side-table.
+    """
+    recorder = TraceRecorder()
+    with recorder.tool_call("find_comparables", {"radius_m": 1000}) as h:
+        h.set_summary({"result_count": 12})
+        h.set_full_output({"data": {"listings": [{"sreality_id": 1}]}})
+    with recorder.computation("scale") as h:
+        h.set_summary({"estimated": 30000})
+    with recorder.reasoning() as h:
+        h.set_summary({"text": "tight cohort", "tool_calls_queued": []})
+
+    trace = recorder.to_dict("ok")
+    # All three steps are still in the trace with bounded summaries.
+    assert [s["kind"] for s in trace["steps"]] == [
+        "tool_call", "computation", "reasoning",
+    ]
+    # Only the one step that set_full_output is in the payloads list.
+    payloads = recorder.iter_payloads()
+    assert len(payloads) == 1
+    step_n, payload = payloads[0]
+    assert step_n == 1
+    assert payload["data"]["listings"][0]["sreality_id"] == 1
+
+
+def test_recorder_payload_step_numbers_match_trace_steps():
+    """The (step_n, payload) pairs line up with the trace's step `n`."""
+    recorder = TraceRecorder()
+    with recorder.tool_call("a", {}) as h:
+        h.set_full_output({"a": 1})
+    with recorder.tool_call("b", {}) as h:
+        # No full_output → no payload row.
+        h.set_summary({"x": 2})
+    with recorder.tool_call("c", {}) as h:
+        h.set_full_output({"c": 3})
+
+    payloads = recorder.iter_payloads()
+    assert [p[0] for p in payloads] == [1, 3]
+    assert payloads[0][1] == {"a": 1}
+    assert payloads[1][1] == {"c": 3}
