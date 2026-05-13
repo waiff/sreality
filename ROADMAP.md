@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 07:41 UTC_
+_Last refreshed: 2026-05-13 08:25 UTC_
 
 **Branch:** `claude/plan-phase-b2-U4ULP`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-13 07:41 UTC_
 **Last 10 commits:**
 
 ```
+edcf0c3 roadmap: plan Phase B2 (per-unit fan-out + building rollup view)
 59e9263 Merge pull request #61 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
 038193e building: Phase B1 — URL ingest + unit extractor + confirmation UI
 fbc584d Merge pull request #60 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
@@ -25,7 +26,6 @@ c028816 Merge pull request #59 from waiff/claude/add-building-paste-feature-NmQI
 182fc2a building: renumber 034 -> 035 + apply migration
 40ad67d building: Phase B0 schema + scaffolding (migration not yet applied)
 d2a2e30 roadmap: refresh auto-status block
-d6396fe Merge pull request #57 from waiff/claude/review-roadmap-scope-BHt5w
 ```
 
 <!-- END AUTO-STATUS -->
