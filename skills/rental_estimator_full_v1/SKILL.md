@@ -14,6 +14,7 @@ allowed_tools:
   - summarize_listing
   - compare_listing_images
   - verify_listing_freshness
+  - read_floor_plan
   - record_estimate
 preferred_model:
   anthropic: claude-sonnet-4-5
@@ -280,3 +281,14 @@ You will be given the target spec (lat, lng, area_m2, disposition, optional
 floor) and the user-supplied filter overrides (radius, max_age_days, etc.)
 in the first user message. Czech text is normal — the listings are Czech;
 your reasoning and warnings can be in English.
+
+If the initial user message contains `<operator_instructions>` or
+`<contextual_text>`, treat their content as ground truth about the
+property — they were written by the human operator deploying this run
+and override anything you would otherwise infer from the listing.
+If `<custom_attachments>` is present, call `read_floor_plan` on each
+relevant attachment BEFORE proposing the comparable cohort. Treat the
+returned `layout_text` as authoritative over the listing description
+where they conflict. `read_floor_plan` is only available when this
+estimation is bound to a building_run; standalone apartment estimates
+have no attachments.

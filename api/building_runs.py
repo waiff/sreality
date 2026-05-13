@@ -58,7 +58,13 @@ _BUILDING_COLUMNS: tuple[str, ...] = (
     "total_sale_p25_czk", "total_sale_p50_czk", "total_sale_p75_czk",
     "business_case",
     "warnings", "error_message",
+    "special_instructions", "contextual_text",
 )
+
+# Statuses where the operator may still mutate text inputs + attachments.
+# Once estimation starts (status='estimating' / 'success' / 'failed') the
+# inputs are frozen for audit; a re-run is the only way to change them.
+EDITABLE_INPUTS_STATUSES = frozenset({"pending", "extracting", "awaiting_input"})
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
     c for c in _BUILDING_COLUMNS if c not in ("id", "created_at")
@@ -111,6 +117,8 @@ def create_building_run(
         business_case=None,
         warnings=None,
         error_message=None,
+        special_instructions=None,
+        contextual_text=None,
     )
     return _fetch_building(conn, building_id) or {}
 
@@ -194,6 +202,8 @@ def create_building_run_from_url(
         business_case=None,
         warnings=list(result.warnings) or None,
         error_message=None,
+        special_instructions=body.special_instructions,
+        contextual_text=body.contextual_text,
     )
 
     if result.sreality_id is None:
@@ -208,12 +218,16 @@ def create_building_run_from_url(
         return _fetch_building(conn, building_id) or {}
 
     _update_building_fields(conn, building_id, status="extracting")
+    attachments = _fetch_attachments(conn, building_id)
 
     try:
         envelope = building_extraction.extract_building_units(
             conn,
             llm_client,
             sreality_id=result.sreality_id,
+            special_instructions=body.special_instructions,
+            contextual_text=body.contextual_text,
+            attachments=attachments or None,
         )
     except BuildingExtractionError as exc:
         LOG.warning(
@@ -324,12 +338,16 @@ def re_extract(
         )
 
     _update_building_fields(conn, building_id, status="extracting")
+    attachments = _fetch_attachments(conn, building_id)
     try:
         envelope = building_extraction.extract_building_units(
             conn,
             llm_client,
             sreality_id=int(sreality_id),
             force_refresh=True,
+            special_instructions=row.get("special_instructions"),
+            contextual_text=row.get("contextual_text"),
+            attachments=attachments or None,
         )
     except BuildingExtractionError as exc:
         LOG.warning(
@@ -371,6 +389,61 @@ def get_building_run(
     if row is None:
         return None
     row["children"] = _fetch_children(conn, building_id)
+    row["attachments"] = _fetch_attachments(conn, building_id)
+    return row
+
+
+def update_building_inputs(
+    conn: "psycopg.Connection",
+    building_id: int,
+    body: s.UpdateBuildingInputsIn,
+) -> dict[str, Any]:
+    """Patch operator-supplied text inputs on an editable building_run."""
+    row = _fetch_building(conn, building_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="building run not found")
+    if row["status"] not in EDITABLE_INPUTS_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"building is in status={row['status']!r}; operator inputs "
+                "can only be edited while status is in "
+                f"{sorted(EDITABLE_INPUTS_STATUSES)}"
+            ),
+        )
+    _update_building_fields(
+        conn, building_id,
+        special_instructions=body.special_instructions,
+        contextual_text=body.contextual_text,
+    )
+    return get_building_run(conn, building_id) or {}
+
+
+def _fetch_attachments(
+    conn: "psycopg.Connection", building_id: int,
+) -> list[dict[str, Any]]:
+    from api.attachments import list_attachments
+    return list_attachments(conn, building_id)
+
+
+def assert_editable_for_attachments(
+    conn: "psycopg.Connection", building_id: int,
+) -> dict[str, Any]:
+    """Raise 404 / 409 unless the building is in a status that allows
+    attachment mutations. Returns the row on success.
+    """
+    row = _fetch_building(conn, building_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="building run not found")
+    if row["status"] not in EDITABLE_INPUTS_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"building is in status={row['status']!r}; attachments can "
+                "only be added or removed while status is in "
+                f"{sorted(EDITABLE_INPUTS_STATUSES)}"
+            ),
+        )
     return row
 
 

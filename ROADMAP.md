@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 15:43 UTC_
+_Last refreshed: 2026-05-13 19:06 UTC_
 
-**Branch:** `claude/move-stats-to-browse-hIxsP`
+**Branch:** `claude/add-estimation-files-context-ugzqK`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 41 files, latest `042_browse_stats_ppm2_box.sql`.
+**Migrations on disk:** 43 files, latest `045_skill_attachment_tool.sql`.
 
 **Last 10 commits:**
 
 ```
+abb5ccd merge: resolve ROADMAP auto-status conflict with origin/main
+4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
+1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
+bababba roadmap: refresh auto-status block
+60d2809 roadmap: refresh auto-status block
 23fae19 merge: resolve ROADMAP.md auto-status conflict with origin/main
 f4830c2 browse: per-disposition ppm2 box plots, retire Region tab
+43d5b2a estimations: operator-supplied instructions, context, and floor-plan attachments
 de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
 668a033 roadmap: add Phase U-Nav for unified browse → detail navigation
-46f7b5e Merge pull request #74 from waiff/claude/browse-listings-map-layout-PHwYj
-6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
-b2d94cb browse: cross-source hover sync between cards, table, and map
-c1150cc Merge pull request #73 from waiff/claude/browse-listings-map-layout-PHwYj
-0568357 roadmap: refresh auto-status block
-8b4a3e6 browse: raise cards carousel per-listing cap from 5 to 50
 ```
 
 <!-- END AUTO-STATUS -->
