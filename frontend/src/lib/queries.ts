@@ -234,7 +234,10 @@ export interface CardRow {
   is_active: boolean;
   category_main: string | null;
   category_type: string | null;
-  image_url: string | null;
+  /* Up to 5 image URLs in source-sequence order. Empty when the
+   * listing has no photos yet. The card uses index 0 by default and
+   * the carousel chevrons step through the remaining entries. */
+  image_urls: string[];
 }
 
 export interface CardsResult {
@@ -272,17 +275,17 @@ export const fetchListingsForCards = async (
   const sorted = scoped.order('last_seen_at', { ascending: false, nullsFirst: false });
   const { data, count, error } = await sorted.range(from, to);
   if (error) throw error;
-  const baseRows = (data ?? []) as unknown as Omit<CardRow, 'image_url'>[];
+  const baseRows = (data ?? []) as unknown as Omit<CardRow, 'image_urls'>[];
   if (baseRows.length === 0) return { rows: [], total: count ?? 0 };
   const images = await fetchImagesByListingIds(
     baseRows.map((r) => r.sreality_id),
-    1,
+    5,
   );
   const rows: CardRow[] = baseRows.map((r) => {
-    const first = images.get(r.sreality_id)?.[0];
+    const imgs = images.get(r.sreality_id) ?? [];
     return {
       ...r,
-      image_url: first ? pickImageUrl(first) : null,
+      image_urls: imgs.map(pickImageUrl),
     };
   });
   return { rows, total: count ?? null };

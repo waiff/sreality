@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 12:43 UTC_
+_Last refreshed: 2026-05-13 12:55 UTC_
 
-**Branch:** `claude/listing-notification-feature-KGhck`
+**Branch:** `claude/browse-listings-map-layout-PHwYj`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 39 files, latest `040_browse_stats_bbox.sql`.
+**Migrations on disk:** 40 files, latest `041_district_canonical_label.sql`.
 
 **Last 10 commits:**
 
 ```
-a5b6668 Merge remote-tracking branch 'origin/main' into claude/listing-notification-feature-KGhck
-53f03e0 roadmap: refresh auto-status block
-e9a11ad Merge pull request #67 from waiff/claude/browse-listings-map-layout-PHwYj
+1d4cbfb roadmap: refresh auto-status block
+7dec0d6 browse: photo carousel on listing cards
+d1a938c roadmap: refresh auto-status block
+14d3a40 browse: recede inactive listing cards in the civic-archive language
 4b34040 merge: resolve ROADMAP.md auto-status conflict with origin/main
-179246c roadmap: plan Dedup track (D1 strict + D2 fuzzy) and link to multi-portal + notifications
 a8cef98 roadmap: refresh auto-status block
 7750331 browse: map viewport acts as a filter + denser cards
-70f38ff roadmap: plan Phase AI (feedback-driven skill refinement)
 4dc921b Merge pull request #65 from waiff/claude/fix-agent-comparables-xeR9j
-a6b6008 roadmap: plan Phase U2.7 (new-listing notifications)
+67c2160 test: wrap fake estimate_yield return in {data, metadata} envelope
+b8dd611 Merge remote-tracking branch 'origin/main' into claude/fix-agent-comparables-xeR9j
 ```
 
 <!-- END AUTO-STATUS -->
