@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:21 UTC_
+_Last refreshed: 2026-05-13 11:36 UTC_
 
 **Branch:** `claude/browse-listings-map-layout-PHwYj`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 38 files, latest `039_browse_stats_categories.sql`.
+**Migrations on disk:** 39 files, latest `040_browse_stats_bbox.sql`.
 
 **Last 10 commits:**
 
 ```
+7750331 browse: map viewport acts as a filter + denser cards
 1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
 6da728b roadmap: refresh auto-status block
 226df51 browse: sreality-style 3-column layout + category picker + map polish
@@ -25,7 +26,6 @@ _Last refreshed: 2026-05-13 11:21 UTC_
 d0f5085 roadmap: refresh auto-status block
 715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
 b0495c8 estimation: add condition-scenario columns to estimation_runs (migration not yet applied)
-9bb5297 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
