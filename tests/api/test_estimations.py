@@ -223,6 +223,44 @@ def test_post_with_url_calls_url_parser(client, monkeypatch):
     assert "lon" not in body["input_spec"]
 
 
+def test_post_with_sreality_url_excludes_target_from_comparables(
+    client, monkeypatch,
+):
+    """Target listing's own sreality_id is auto-injected into
+    target.exclude_ids so an estimate can never quote the target as
+    its own comparable.
+    """
+    _patch_persistence(monkeypatch)
+    _patch_url_parser(monkeypatch, sreality_id=2836292428)
+
+    captured: dict[str, Any] = {}
+
+    def fake(conn, target, filters, purchase_price_czk=None, *,
+             estimate_kind="rent", expected_monthly_rent_czk=None,
+             trace_recorder=None):
+        captured["exclude_ids"] = list(target.exclude_ids)
+        return {
+            "data": {
+                "estimate_kind": "rent",
+                "estimated_monthly_rent_czk": 20000,
+                "rent_p25_czk": 19000, "rent_p75_czk": 21000,
+                "estimated_sale_price_czk": None,
+                "sale_p25_czk": None, "sale_p75_czk": None,
+                "gross_yield_pct": None, "confidence": "medium",
+                "sample_size": 5, "comparables_used": [], "warnings": [],
+            },
+            "metadata": {"tool": "estimate_yield"},
+        }
+    monkeypatch.setattr(ey, "estimate_yield", fake)
+
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.sreality.cz/detail/.../2836292428"},
+    )
+    assert res.status_code == 200
+    assert 2836292428 in captured["exclude_ids"]
+
+
 def test_post_with_url_and_spec_overrides_merges(client, monkeypatch):
     state = _patch_persistence(monkeypatch)
     _patch_estimate(monkeypatch)

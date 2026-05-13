@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 11:36 UTC_
+_Last refreshed: 2026-05-13 11:42 UTC_
 
 **Branch:** `claude/browse-listings-map-layout-PHwYj`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-13 11:36 UTC_
 **Last 10 commits:**
 
 ```
+a8cef98 roadmap: refresh auto-status block
 7750331 browse: map viewport acts as a filter + denser cards
 1e4fd64 merge: resolve ROADMAP + renumber 037 -> 039
 6da728b roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ _Last refreshed: 2026-05-13 11:36 UTC_
 4b19f37 roadmap: refresh auto-status block
 d0f5085 roadmap: refresh auto-status block
 715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
-b0495c8 estimation: add condition-scenario columns to estimation_runs (migration not yet applied)
 ```
 
 <!-- END AUTO-STATUS -->
