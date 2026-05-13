@@ -459,3 +459,21 @@ class CreateBuildingIn(BaseModel):
     """
     source: Literal["ui", "api", "clickup"] = "api"
     input_url: str | None = None
+
+
+class CreateBuildingFromUrlIn(BaseModel):
+    """Phase B1 paste-a-building entry.
+
+    Routes the URL through scraper.source_dispatcher (the existing
+    per-source parser fleet), rejects category_main='byt' (apartments
+    don't decompose), then runs the building-unit extractor
+    synchronously and persists the row in `status='awaiting_input'`.
+    """
+    source: Literal["ui", "api", "clickup"] = "api"
+    url: str = Field(min_length=1)
+    force_refresh: bool = False
+
+
+class ConfirmBuildingUnitsIn(BaseModel):
+    """Operator-confirmed unit list. Transitions awaiting_input -> estimating."""
+    units: list[BuildingUnit] = Field(min_length=1, max_length=30)

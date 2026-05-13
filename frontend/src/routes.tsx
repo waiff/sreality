@@ -4,6 +4,7 @@ import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
 import Region from './pages/Region';
 import Health from './pages/Health';
+import BuildingDetail from './pages/BuildingDetail';
 import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
 import Collections from './pages/Collections';
@@ -27,6 +28,7 @@ export const routes: RouteObject[] = [
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList /> },
       { path: 'estimation/:id', element: <EstimationDetail /> },
+      { path: 'building/:id', element: <BuildingDetail /> },
       { path: 'collections', element: <Collections /> },
       { path: 'collection/:id', element: <CollectionDetail /> },
       { path: 'settings', element: <Settings /> },

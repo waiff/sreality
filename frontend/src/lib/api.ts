@@ -10,8 +10,12 @@
  */
 
 import type {
+  BuildingListResponse,
+  BuildingRun,
   Collection,
   CollectionWithListings,
+  ConfirmBuildingUnitsIn,
+  CreateBuildingFromUrlIn,
   CreateEstimationIn,
   EstimationListParams,
   EstimationListResponse,
@@ -208,6 +212,38 @@ export const fetchListingSummaries = (
     method: 'POST',
     json: { items },
   });
+
+/* ----- buildings (Phase B1) ---------------------------------------------- */
+
+export const createBuildingFromUrl = (
+  input: CreateBuildingFromUrlIn,
+): Promise<BuildingRun> =>
+  request<BuildingRun>('/buildings/from_url', {
+    method: 'POST',
+    json: input,
+  });
+
+export const getBuilding = (id: number): Promise<BuildingRun> =>
+  request<BuildingRun>(`/buildings/${id}`);
+
+export const listBuildings = (
+  params: { source?: string; status?: string; limit?: number; offset?: number } = {},
+): Promise<BuildingListResponse> =>
+  request<BuildingListResponse>('/buildings', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const confirmBuildingUnits = (
+  id: number,
+  input: ConfirmBuildingUnitsIn,
+): Promise<BuildingRun> =>
+  request<BuildingRun>(`/buildings/${id}/confirm_units`, {
+    method: 'POST',
+    json: input,
+  });
+
+export const reExtractBuilding = (id: number): Promise<BuildingRun> =>
+  request<BuildingRun>(`/buildings/${id}/re_extract`, { method: 'POST' });
 
 /* ----- admin / Settings page --------------------------------------------
  *

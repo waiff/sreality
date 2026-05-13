@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-12 21:31 UTC_
+_Last refreshed: 2026-05-13 07:34 UTC_
 
 **Branch:** `claude/plan-phase-b1-skill-reuse-VrgpZ`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 34 files, latest `035_building_runs.sql`.
+**Migrations on disk:** 35 files, latest `036_building_unit_extractor.sql`.
 
 **Last 10 commits:**
 
 ```
+fbf8dc3 roadmap: plan Phase B1 (URL ingest + unit extractor + confirmation UI)
 c028816 Merge pull request #59 from waiff/claude/add-building-paste-feature-NmQIy
 6b95c75 roadmap: refresh auto-status block
 182fc2a building: renumber 034 -> 035 + apply migration
@@ -25,7 +26,6 @@ d6396fe Merge pull request #57 from waiff/claude/review-roadmap-scope-BHt5w
 f8cebc0 curation: tag rename/recolour + browse_stats tag_ids
 9e8574c roadmap: refresh auto-status block
 71582f7 frontend: U2.6 curation UI (collections, tags, notes)
-c96af29 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
