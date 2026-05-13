@@ -6,12 +6,14 @@ response shaping; the agent layer consumes the dicts directly.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import timedelta
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from api import curation
 from api import manual_estimates as me
@@ -78,6 +80,15 @@ if _cors_origins:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "JSONResponse":
+    logging.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
     )
 
 # Skill validation needs to know the registered agent tools and the
