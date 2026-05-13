@@ -22,10 +22,11 @@ import {
   updateBuildingInputs,
   uploadBuildingAttachment,
 } from '@/lib/api';
-import { fmtAbsolute, fmtArea } from '@/lib/format';
+import { fmtAbsolute, fmtArea, fmtCzk } from '@/lib/format';
 import BuildingUnitEditor from '@/components/BuildingUnitEditor';
 import type {
   BuildingAttachment,
+  BuildingChildRun,
   BuildingRun,
   BuildingStatus,
   BuildingUnit,
@@ -106,6 +107,14 @@ export default function BuildingDetail() {
         <BuildingUnitEditor building={b} onConfirmed={onConfirmed} />
       ) : (
         <ReadOnlyUnits building={b} />
+      )}
+
+      {(b.status === 'estimating' || b.status === 'success' || b.status === 'failed') && (
+        <PerUnitEstimates building={b} />
+      )}
+
+      {(b.status === 'success' || b.status === 'estimating') && (
+        <RollupTotals building={b} />
       )}
 
       {b.status === 'failed' && b.error_message && (
@@ -627,6 +636,165 @@ function AttachmentCard({
         )}
       </div>
     </li>
+  );
+}
+
+/* ---------- per-unit child estimations (B2) ---------- */
+
+function PerUnitEstimates({ building }: { building: BuildingRun }) {
+  const children = building.children ?? [];
+  const units = building.units ?? [];
+
+  if (children.length === 0 && building.status === 'estimating') {
+    return (
+      <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5">
+        <p className="text-[0.85rem] text-[var(--color-ink-3)]">
+          Per-unit estimations are running…
+        </p>
+      </section>
+    );
+  }
+  if (children.length === 0) return null;
+
+  const unitById = new Map(units.map((u) => [u.unit_id, u] as const));
+
+  return (
+    <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)]">
+      <header className="px-5 py-3 border-b border-[var(--color-rule)] flex items-baseline justify-between gap-4">
+        <h2 className="text-[0.85rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Per-unit estimates
+        </h2>
+        <span className="text-[0.7rem] text-[var(--color-ink-3)]">
+          {children.length}
+        </span>
+      </header>
+      <ul className="divide-y divide-[var(--color-rule)]">
+        {children.map((child) => (
+          <ChildEstimateRow
+            key={child.id}
+            child={child}
+            unit={child.building_unit_id ? unitById.get(child.building_unit_id) ?? null : null}
+          />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ChildEstimateRow({
+  child, unit,
+}: {
+  child: BuildingChildRun;
+  unit: BuildingUnit | null;
+}) {
+  const label =
+    unit?.label ||
+    (unit?.disposition && unit?.floor ? `${unit.disposition} · ${unit.floor}` : null) ||
+    child.building_unit_id ||
+    `run #${child.id}`;
+  return (
+    <li className="px-5 py-3 flex items-center justify-between gap-4">
+      <div className="min-w-0 flex-1">
+        <Link
+          to={`/estimation/${child.id}`}
+          className="text-[0.9rem] text-[var(--color-ink)] hover:text-[var(--color-copper)]"
+        >
+          {label}
+        </Link>
+        {unit?.area_m2 != null && (
+          <span className="ml-2 text-[0.78rem] text-[var(--color-ink-3)]">
+            {fmtArea(unit.area_m2)}
+          </span>
+        )}
+        {unit?.is_potential && (
+          <span className="ml-2 text-[0.7rem] uppercase tracking-[0.15em] text-[var(--color-copper)]">
+            potential
+          </span>
+        )}
+      </div>
+      <ChildRentReadout child={child} />
+      <ChildStatusBadge status={child.status} />
+    </li>
+  );
+}
+
+function ChildRentReadout({ child }: { child: BuildingChildRun }) {
+  if (child.status === 'success') {
+    const median = child.estimated_monthly_rent_czk;
+    const p25 = child.rent_p25_czk;
+    const p75 = child.rent_p75_czk;
+    if (median == null) {
+      return <span className="text-[0.78rem] text-[var(--color-ink-3)]">no estimate</span>;
+    }
+    return (
+      <div className="text-right tabular-nums">
+        <span className="text-[0.9rem] text-[var(--color-ink)]">
+          {fmtCzk(median)}<span className="text-[var(--color-ink-3)]">/mo</span>
+        </span>
+        {p25 != null && p75 != null && (
+          <p className="text-[0.7rem] text-[var(--color-ink-3)]">
+            {fmtCzk(p25)} – {fmtCzk(p75)}
+          </p>
+        )}
+      </div>
+    );
+  }
+  if (child.status === 'failed') {
+    return (
+      <span
+        className="text-[0.78rem] text-[var(--color-brick)] max-w-[18rem] truncate"
+        title={child.error_message ?? undefined}
+      >
+        {child.error_message ?? 'failed'}
+      </span>
+    );
+  }
+  return (
+    <span className="text-[0.78rem] text-[var(--color-ink-3)]">running…</span>
+  );
+}
+
+function ChildStatusBadge({ status }: { status: BuildingChildRun['status'] }) {
+  const styles: Record<BuildingChildRun['status'], string> = {
+    pending: 'text-[var(--color-ink-3)]',
+    running: 'text-[var(--color-ink-3)]',
+    success: 'text-[var(--color-ink-2)]',
+    failed: 'text-[var(--color-brick)]',
+  };
+  return (
+    <span className={`text-[0.7rem] tracking-[0.15em] uppercase ${styles[status]}`}>
+      {status}
+    </span>
+  );
+}
+
+/* ---------- rollup totals (B2) ---------- */
+
+function RollupTotals({ building }: { building: BuildingRun }) {
+  const p25 = building.total_rent_p25_czk;
+  const p50 = building.total_rent_p50_czk;
+  const p75 = building.total_rent_p75_czk;
+  if (p25 == null && p50 == null && p75 == null) return null;
+  return (
+    <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5">
+      <header className="flex items-baseline justify-between gap-4">
+        <h2 className="text-[0.85rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Building total — monthly rent
+        </h2>
+        <span className="text-[0.7rem] text-[var(--color-ink-3)]">
+          sum of per-unit medians
+        </span>
+      </header>
+      <p className="mt-3 text-2xl tabular-nums" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+        {p50 != null ? fmtCzk(p50) : '—'}
+        <span className="text-[var(--color-ink-3)] text-base ml-1">/mo</span>
+      </p>
+      {p25 != null && p75 != null && (
+        <p className="mt-1 text-[0.85rem] text-[var(--color-ink-3)] tabular-nums">
+          {fmtCzk(p25)} – {fmtCzk(p75)} (sum of per-unit IQR endpoints)
+        </p>
+      )}
+    </section>
   );
 }
 

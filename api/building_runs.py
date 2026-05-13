@@ -279,14 +279,24 @@ def create_building_run_from_url(
 
 def confirm_units(
     conn: "psycopg.Connection",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
     building_id: int,
     body: s.ConfirmBuildingUnitsIn,
 ) -> dict[str, Any]:
-    """Operator confirmation gate: awaiting_input -> estimating.
+    """Operator confirmation gate: awaiting_input -> estimating -> success/failed.
 
-    Rejects 409 if the row is not in awaiting_input — B2's
-    orchestrator owns the row from there on.
+    Rejects 409 if the row is not in awaiting_input. Synchronously
+    runs the B2 fan-out: one rent estimation per confirmed unit under
+    the apartment estimator skill (sourced from
+    `app_settings.building_default_estimator_skill`), with the
+    parent's operator inputs + attachments threaded through. Rollup
+    + final status are written inside the orchestrator. The
+    response carries the terminal building_runs row including
+    `children` + `attachments`.
     """
+    from api.building_orchestrator import fan_out_unit_estimations
+
     row = _fetch_building(conn, building_id)
     if row is None:
         raise HTTPException(status_code=404, detail="building run not found")
@@ -305,7 +315,20 @@ def confirm_units(
         status="estimating",
         units=units,
     )
-    return _fetch_building(conn, building_id) or {}
+    try:
+        fan_out_unit_estimations(
+            conn, sreality_client, llm_client, building_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOG.exception(
+            "building_runs[%s] fan-out raised at top level", building_id,
+        )
+        _update_building_fields(
+            conn, building_id,
+            status="failed",
+            error_message=f"fan-out aborted: {type(exc).__name__}: {exc}"[:1000],
+        )
+    return get_building_run(conn, building_id) or {}
 
 
 def re_extract(

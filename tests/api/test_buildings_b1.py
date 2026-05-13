@@ -285,6 +285,14 @@ def test_confirm_units_happy_path(client, monkeypatch):
     }
     state.next_id = 2
 
+    # Stub out the B2 orchestrator so this test stays focused on the
+    # confirm-units gate. The orchestrator has its own test below.
+    from api import building_orchestrator as bo_mod
+    monkeypatch.setattr(
+        bo_mod, "fan_out_unit_estimations",
+        lambda *a, **kw: None,
+    )
+
     units = [
         {
             "unit_id": "u1", "label": "flat 1", "floor": "1",

@@ -238,6 +238,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "source_html",
     "subject_summary",
     "special_instructions", "contextual_text",
+    "building_run_id", "building_unit_id",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -874,6 +875,12 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
     ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])
+    # Default-fill any insert column the caller didn't supply. Keeps
+    # existing standalone-estimation callers from having to enumerate
+    # every nullable column when new ones land (e.g. building_run_id
+    # and building_unit_id added by Phase B2).
+    for col in _INSERT_COLUMNS:
+        fields.setdefault(col, None)
     cols = list(_INSERT_COLUMNS)
     cols_sql = ", ".join(cols)
     placeholders = ", ".join(f"%({c})s" for c in cols)
