@@ -86,9 +86,15 @@ if _cors_origins:
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "JSONResponse":
     logging.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    origin = request.headers.get("origin")
+    headers: dict[str, str] = {}
+    if origin and origin in _cors_origins:
+        headers["access-control-allow-origin"] = origin
+        headers["vary"] = "Origin"
     return JSONResponse(
         status_code=500,
         content={"detail": f"{type(exc).__name__}: {exc}"},
+        headers=headers,
     )
 
 # Skill validation needs to know the registered agent tools and the
