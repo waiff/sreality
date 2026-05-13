@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { BrowseStats } from '@/lib/queries';
 import { fmtCount, fmtCzk } from '@/lib/format';
+import DispositionBoxPlots from '@/components/region/DispositionBoxPlots';
 
 interface Props {
   stats: BrowseStats | null;
@@ -44,6 +45,22 @@ export default function BrowseStatsView({ stats, isLoading, isEmpty }: Props) {
         <DispositionBars
           rows={stats.dispositions}
           totalForShare={stats.total}
+        />
+      </Card>
+
+      <Card label="Price per m² · by disposition">
+        <p className="-mt-1 mb-3 text-[0.75rem] text-[var(--color-ink-3)]">
+          Tukey 1.5×IQR whiskers clipped to min/max. Median in copper. Hover a box for the full numeric breakdown.
+        </p>
+        <DispositionBoxPlots
+          rows={stats.dispositions.map((r) => ({
+            disposition: r.disposition,
+            n: r.n,
+            median_price: null,
+            median_ppm2: null,
+            median_area: null,
+            ppm2_box: r.ppm2_box,
+          }))}
         />
       </Card>
     </div>

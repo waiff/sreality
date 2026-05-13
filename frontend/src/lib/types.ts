@@ -84,7 +84,8 @@ export interface ImagePublic {
   storage_path: string | null;
 }
 
-/* Region page payloads — shape mirrors migration 012 RPCs. */
+/* Distributional shapes — used by EstimationDetail's RangeStrip and by
+ * the per-disposition Kč/m² box plots on Browse > Stats. */
 
 export interface PercentileTriple {
   p25: number;
@@ -108,23 +109,6 @@ export interface RegionDispositionRow {
   median_ppm2: number | null;
   median_area: number | null;
   ppm2_box: Ppm2Box | null;
-}
-
-export interface RegionStats {
-  total_active: number;
-  total_ever: number;
-  last_new_first_seen: string | null;
-  price: PercentileTriple | null;
-  ppm2: PercentileTriple | null;
-  dispositions: RegionDispositionRow[];
-  tom_median_days: number | null;
-  tom_n: number;
-}
-
-export interface ActiveByDayRow {
-  day: string;
-  active: number;
-  new: number;
 }
 
 /* Health dashboard payload — shape mirrors migration 013 health_summary RPC. */

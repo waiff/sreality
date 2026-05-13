@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 13:11 UTC_
+_Last refreshed: 2026-05-13 15:22 UTC_
 
-**Branch:** `claude/browse-listings-map-layout-PHwYj`
+**Branch:** `claude/move-stats-to-browse-hIxsP`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 40 files, latest `041_district_canonical_label.sql`.
+**Migrations on disk:** 41 files, latest `042_browse_stats_ppm2_box.sql`.
 
 **Last 10 commits:**
 
 ```
+46f7b5e Merge pull request #74 from waiff/claude/browse-listings-map-layout-PHwYj
+6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
+b2d94cb browse: cross-source hover sync between cards, table, and map
+c1150cc Merge pull request #73 from waiff/claude/browse-listings-map-layout-PHwYj
+0568357 roadmap: refresh auto-status block
 8b4a3e6 browse: raise cards carousel per-listing cap from 5 to 50
+7a65a34 Merge pull request #72 from waiff/claude/browse-listings-map-layout-PHwYj
 7a016d2 merge: resolve ROADMAP.md auto-status conflict with origin/main
 56e2d60 Merge pull request #70 from waiff/claude/fix-district-filter-KS8V7
 1a10607 test: assert canonical district label, add foreign + Praha fallback cases
-3474ac3 Merge pull request #66 from waiff/claude/listing-notification-feature-KGhck
-0ca1e6c Merge remote-tracking branch 'origin/main' into claude/listing-notification-feature-KGhck
-51cb38d Merge pull request #69 from waiff/claude/fix-inactive-listings-marking-3Cjz4
-760ca5a scraper: canonical district labels from locality_district_id
-090c2bf Merge remote-tracking branch 'origin/main' into claude/fix-inactive-listings-marking-3Cjz4
-84ed10b roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
