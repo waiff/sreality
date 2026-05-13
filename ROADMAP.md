@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 12:18 UTC_
+_Last refreshed: 2026-05-13 12:43 UTC_
 
-**Branch:** `claude/fix-inactive-listings-marking-3Cjz4`
+**Branch:** `claude/listing-notification-feature-KGhck`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-13 12:18 UTC_
 **Last 10 commits:**
 
 ```
-84ed10b roadmap: refresh auto-status block
-56f1a51 scraper: mark inactive per-category so partial runs persist marking
+a5b6668 Merge remote-tracking branch 'origin/main' into claude/listing-notification-feature-KGhck
+53f03e0 roadmap: refresh auto-status block
 e9a11ad Merge pull request #67 from waiff/claude/browse-listings-map-layout-PHwYj
 4b34040 merge: resolve ROADMAP.md auto-status conflict with origin/main
+179246c roadmap: plan Dedup track (D1 strict + D2 fuzzy) and link to multi-portal + notifications
 a8cef98 roadmap: refresh auto-status block
 7750331 browse: map viewport acts as a filter + denser cards
+70f38ff roadmap: plan Phase AI (feedback-driven skill refinement)
 4dc921b Merge pull request #65 from waiff/claude/fix-agent-comparables-xeR9j
-67c2160 test: wrap fake estimate_yield return in {data, metadata} envelope
-b8dd611 Merge remote-tracking branch 'origin/main' into claude/fix-agent-comparables-xeR9j
-cfbbc59 Merge pull request #64 from waiff/claude/browse-listings-map-layout-PHwYj
+a6b6008 roadmap: plan Phase U2.7 (new-listing notifications)
 ```
 
 <!-- END AUTO-STATUS -->
@@ -494,9 +494,14 @@ estimations using data that already exists in the database.
 ### Phase 2: Multi-portal ingestion (later, larger)
 Today's non-sreality flow is *parse on demand* via
 `source_dispatcher` (LLM call per URL, cached 7 days). To make
-bezrealitky / idnes / remax comparables show up in
-`find_comparables`, those portals need to land in the `listings`
-table itself. Scope:
+bezrealitky / idnes / remax / maxima comparables (and other portals
+as the operator opens them) show up in `find_comparables`, those
+portals need to land in the `listings` table itself. **Hard
+dependency: the Dedup track's Phase D1 must ship first.** Without
+strict cross-source dedup, multi-portal ingestion multiplies every
+listing by the number of portals it appears on, which breaks
+`find_comparables`, `browse_stats`, and the notification dispatch
+fan-out alike. Scope:
 - Per-source index walker analogous to `scraper/sreality_client.py`.
   Most of these portals don't expose a public JSON API, so HTML
   pagination / playwright will be in scope; bot-detection is more
@@ -504,7 +509,9 @@ table itself. Scope:
 - Reuse `parse_listing_url` for detail pages, with aggressive
   caching and a per-source rate limit.
 - New `listings` columns: `source` (default `'sreality'`),
-  `source_url`, `source_id_native`. New numbered migration.
+  `source_url`, `source_id_native`. New numbered migration. The
+  same migration that adds these columns is co-authored with
+  Phase D1's canonical shape — they touch the same surface.
 - Update `_shared_filter_where` so toolkit queries can filter by
   source.
 - Frontend Browse: source multi-toggle.
@@ -514,6 +521,189 @@ table itself. Scope:
   validation matures? Default recommendation is the latter; agent
   (Phase 7) opts cross-portal cohorts in once it can validate
   them.
+
+## Dedup + canonical listing track (parallel)
+
+Today the `listings` table is effectively a mirror of sreality.cz
+keyed on `sreality_id`. As multi-portal ingestion (Scraper Phase 2)
+brings bezrealitky / idnes / remax / maxima / etc. into the same
+table, "the same property" will start showing up multiple times —
+both within a single run (cross-portal collision) and across runs
+(taken down and relisted under a new broker after expiring). This
+track is the work to identify those duplicates and present one
+canonical listing per real-world property.
+
+**Directional architectural shift surfaced by the operator.** The
+`listings` table evolves from "mirror of sreality" to "mirror of
+every observed property across all sources, deduplicated."
+Architectural rules #1 (append-only migrations), #2 (snapshot on
+content change), and #3 (never delete listings) all carry over —
+applied at the canonical level rather than the per-source level.
+The migration is significant; this track plans the path but does
+not commit to it without an operator decision on the canonical
+shape (see D1 below).
+
+### Phase D1: Strict cross-source dedup (proposed)
+
+Catch the obvious duplicates: the same listing observed on two
+portals at once, or the same source-listing re-fetched under a
+slightly different URL. This is a precondition for Scraper Phase 2
+— without it, multi-portal ingestion multiplies every listing by
+the number of portals it appears on. Also a precondition for Phase
+U2.7's "notify once per real property" guarantee.
+
+**Canonical shape (operator decision required before this phase
+starts)**
+
+Two viable shapes. Both preserve all existing snapshot history and
+respect architectural rules #1 / #2 / #3.
+
+- **Shape A — single canonical table, per-source observations as
+  history.** Keep `listings` as the canonical row (one per real
+  property). Existing `sreality_id` becomes one of many possible
+  `source_id_native` values. New companion table
+  `listing_source_observations(listing_id, source,
+  source_id_native, source_url, first_seen_at, last_seen_at)`
+  records every source that has surfaced this listing. Existing
+  `listing_snapshots` gains a `source` column so per-source
+  content drift is still visible in the diff timeline. Lowest
+  migration cost; downstream queries (`find_comparables`,
+  `browse_stats`, RPCs, frontend) keep working with minimal
+  changes. **Recommended default.**
+- **Shape B — two-table model: `properties` + `listings`.** New
+  canonical `properties` table; existing `listings` becomes per-
+  source observations linked back via `property_id`. Cleaner
+  separation of concerns, but every downstream query has to learn
+  the join. Tens of files touch this; the visible payoff is small
+  if Shape A's denormalised approach already handles the same use
+  cases. Reopen when Shape A's limits show up in production.
+
+**Matcher (insert-time, has to be cheap)**
+
+- **Tier 1 — exact canonicalised URL.** Lower-case scheme + host,
+  strip query, strip trailing slash, sha256. Hash match against an
+  existing canonical row → append a new
+  `listing_source_observations` row and a snapshot if content
+  differs; do not insert a new canonical row.
+- **Tier 2 — (lat, lng, price_czk, area_m2) within tolerance.**
+  `ST_DWithin` within ~20 m, price within ±2%, area within
+  ±1 m². High precision; catches "same listing surfaced on two
+  portals simultaneously."
+- **Tier 3 — agent phone / email when exposed.** Same
+  (phone, area, district) triple within 30 days = likely the same
+  listing relisted by the same agent. Lower precision; auto-merge
+  gated on at least one more matching marker.
+- **Ambiguous tier.** Anything that matches at lower confidence
+  goes to a new `listing_duplicate_candidates` queue for operator
+  review. Default to "no merge" rather than "guess merge."
+
+**Migration scope**
+
+- New numbered migration co-authored with Scraper Phase 2's
+  `source` / `source_url` / `source_id_native` columns (single
+  migration touching the same surface).
+- Shape-A path: add `listing_source_observations` +
+  `listing_duplicate_candidates`; add `source` to
+  `listing_snapshots`. Backfill: every existing row gets one
+  `listing_source_observations` entry with
+  `source='sreality', source_id_native=sreality_id::text`. No
+  data loss.
+- `_shared_filter_where` learns to filter by source via the new
+  observations join (read path stays on `listings`).
+
+**Notification feature link (Phase U2.7)**
+
+Phase U2.7's `notification_dispatches` table currently keys on
+`sreality_id`. Once D1 ships the canonical id is the dedup key, so
+a single property surfaced on bezrealitky AND sreality fires one
+notification instead of two. The U2.7 schema gets a one-line
+update at D1 land time: `sreality_id` → `listing_id` referencing
+the canonical row. Same `(subscription_id, listing_id)` uniqueness
+guarantee, just at the right grain.
+
+### Phase D2: Fuzzy property identity (proposed)
+
+Catch the harder case: a listing taken down and relisted weeks
+later with different wording, different broker, possibly different
+photos. Markers per the operator's brief (everything else — price,
+broker, URL, listing copy — is allowed to vary):
+
+- **Address** (street name + house number when present; full
+  address is the highest-precision signal).
+- **City / district / cadastral area.**
+- **Floor** (when known).
+- **Disposition + area triangulation.** A 51 m² 1+1 and a 50 m²
+  2+kk are likely the same flat — relisted with a different
+  disposition label. Use a tight equivalence map across nearby
+  dispositions (`1+1 ≈ 2+kk`, `2+1 ≈ 3+kk`, etc.) combined with a
+  ±10% area band.
+- **Image similarity.** Two-tier to keep cost down:
+  - Cheap first pass: perceptual hash (`pHash` / `aHash`) on the
+    hero image via Pillow. Catches re-uploads of the same photo
+    with minor recompression / resizing.
+  - Vision tier for the ambiguous: reuse
+    `compare_listing_images` from Phase 6 (Claude vision).
+    Higher cost; only invoked when the cheap markers say "maybe."
+
+**Matcher (background sweep, NOT insert-time)**
+
+D1's matcher runs at insert time and has to be cheap. D2 is
+heavier (image fetches, sometimes vision calls); runs as a
+periodic background sweep over recently-inactive listings against
+currently-active listings, surfaces candidates, never auto-merges
+without operator review. Precision over recall.
+
+- New table `property_identity_candidates(left_listing_id,
+  right_listing_id, confidence, markers_matched jsonb,
+  suggested_at, status, reviewed_at, reviewed_action)` — append-
+  only audit of every candidate the sweep proposes. Status:
+  `proposed` → `merged` | `dismissed`. Operator reviews on a new
+  `/dedup/candidates` page (frontend).
+- On `merged`: the older listing's snapshots are re-pointed at the
+  canonical row, both `listing_source_observations` entries
+  collapse onto the canonical id. Architectural rule #3 (never
+  delete) holds — merged listings keep their history, the
+  canonical row just gains it.
+- Sweep cadence: weekly is plenty; relisted-after-expired patterns
+  unfold on a multi-week timescale, not minutes.
+
+**Address normalisation**
+
+Czech addresses arrive in a variety of formats (street + descriptive
+number + orientation number, street + house number, P.O. box). A
+normalisation helper lives in a new `toolkit/addresses.py` —
+canonicalises whitespace, strips diacritics for fuzzy comparison
+only (display form keeps them), parses out descriptive vs.
+orientation numbers, returns a stable comparison key. Hermetic
+tests against a fixture set of real Czech address strings.
+
+**Open questions (operator to decide before D2 starts)**
+
+- **Conservative vs. aggressive merging.** Default is conservative
+  (queue, operator approves). Aggressive auto-merge above a
+  confidence threshold is tempting for scale but bakes in
+  irreversible false positives.
+- **Image-tier model.** `compare_listing_images` is already there
+  but is materially expensive per pair (~$0.05). For D2's volume
+  a cheaper dedicated image-similarity model may be needed; pick
+  when the cohort size makes the bill visible. pHash alone may
+  cover most cases.
+- **What "merged" actually means in the UI.** Browse should show
+  one row per canonical property by default (default-on toggle to
+  "show all source observations" for power use); Listing Detail
+  shows all source observations on a tab. Confirm before
+  implementation.
+
+**Out of scope for D1 + D2**
+
+- Cross-property dedup beyond same-property identification (e.g.
+  identifying neighbouring units that are part of the same
+  building — that's the Building decomposition track's job).
+- Automatic re-merging when a previously-dismissed candidate
+  re-surfaces with new markers — manual re-trigger for now.
+- The Shape-B full architectural split (`properties` parent table
+  + per-source `listings` child). Reopen once Shape A's limits
+  show up in production.
 
 ## Operator workflow track (parallel)
 
@@ -566,6 +756,132 @@ notes — end-to-end.
     by `tag_id`, not by name. A shared `TagEditPopover` wires
     rename / recolour / delete into both tag pickers — the
     CurationBlock matches list and the Browse Filters "Add" rows.
+
+### Phase U2.7: New-listing notifications (proposed)
+
+Push the operator a notification (email first, other channels later)
+the moment a freshly scraped listing matches a preset filter. Bridges
+the gap between the scraper's append-only walk and a low-latency
+alert surface — today the operator only sees new listings by
+re-running Browse manually.
+
+Two cross-cutting pieces have to land together: a notification
+backend + UI for managing subscriptions, and a scraper cadence
+change so the underlying data refreshes more often than nightly.
+
+**Notification surface**
+
+- Migration: `notification_subscriptions` (one row per saved filter
+  spec, columns mirroring the Browse filter sidebar — district /
+  disposition / price range / area range / has-balcony / has-parking
+  / category_main / category_type / tag_ids, plus `is_active`,
+  `name`, `created_at`, `updated_at`). One operator identity today
+  so no `user_id` column yet — see open questions below.
+- Migration: `notification_dispatches(subscription_id, sreality_id,
+  dispatched_at, channel, status, error_message)` — append-only
+  audit + dedup guard so a (subscription, listing) pair never
+  re-fires even if the matcher re-runs. **Cross-link to Dedup
+  track Phase D1:** once D1 ships, the dedup key changes from
+  `sreality_id` to the canonical `listing_id`, so a property
+  surfaced on multiple portals fires one notification rather than
+  one-per-portal. This is a single-column rename on
+  `notification_dispatches`; no functional change to the dispatch
+  worker beyond reading from the canonical row.
+- API: new `/notifications/*` routes (CRUD on subscriptions, list of
+  recent dispatches, manual "test send" for a subscription). Bearer-
+  gated; browser writes flow through here, never direct Postgres.
+- Frontend `/notifications` page: list / create / edit / delete
+  subscriptions, reusing the Browse `Filters.tsx` components so the
+  filter spec stays canonical across surfaces. A "matches today"
+  counter per subscription drives intuition before the operator
+  enables alerts.
+- Listing Detail gets a "notify on listings like this" affordance
+  that pre-fills a new subscription from the listing's facets.
+
+**Dispatch worker**
+
+- New scheduled job (GitHub Actions cron, or Railway scheduled
+  function — pick alongside the cadence decision below). Every run:
+  1. Find listings inserted into `listings` since the previous
+     successful dispatch run. Driven by `listings.first_seen_at` (or
+     `created_at` if cleaner). Anti-join against
+     `notification_dispatches` to skip anything already fired.
+  2. For each active subscription, run the filter spec against that
+     window. Reuse `_shared_filter_where` so the matcher and Browse
+     can never disagree on what a filter means.
+  3. Fan out emails (one message per (subscription, listing) match,
+     or one digest per subscription per run — pick during scope
+     review). Write a row to `notification_dispatches` per send.
+- Email provider: one of SendGrid / Postmark / Mailgun / SES (see
+  open questions). Provider credentials are env-only, never
+  inlined into the browser bundle. Architectural rule #1 (append-
+  only migrations), #2 (snapshot-on-change), #3 (no deletes),
+  #4 (last_seen_at semantics) all preserved — this feature is
+  read-mostly over the listings tables and writes only to the new
+  notification tables.
+
+**Scraper cadence change (cross-cutting, required)**
+
+Current nightly cron surfaces new listings ~24h late, which makes
+the alert feature feel useless. Operator proposal: run the scraper
+every five minutes. Naive translation of the six-category nightly
+walk to a 5-min cron is too aggressive — 288 full runs/day would
+hammer sreality and blow the GitHub Actions minute budget. Two
+viable shapes to choose between:
+
+- **Shape A — light "new-listings probe":** a new entry point that
+  walks only the first 1-2 index pages per category sorted by
+  newest, no detail refetch of existing listings, no
+  `mark_inactive` call (architectural rule #3 already forbids
+  inferring inactivity from a partial walk — the existing
+  `mark_inactive` skip-when-`--limit` branch lights up here). The
+  full nightly walk stays untouched, preserving snapshot density
+  and inactive bookkeeping. Recommended default.
+- **Shape B — lower-footprint full walk on a tighter cron:** keep
+  one cron, drop per-run cost, accept that inactive inference still
+  only runs in the nightly job. Higher risk of rate-limiting and
+  minute-budget pressure; only worth doing if shape A leaves
+  meaningful new listings undetected.
+
+Both shapes preserve the snapshot-on-change discipline (rule #2)
+and the is_active-after-complete-walk rule (rule #3). Both reuse
+the existing `listing_fetch_failures` queue so a probe that fails
+to fetch a fresh listing doesn't drop it on the floor.
+
+**Open questions (operator to decide before B1-equivalent work
+starts)**
+
+- **Channels.** Start with email only, or include SMS / push from
+  the outset? Email-first is the assumption above.
+- **Email provider.** SendGrid, Postmark, Mailgun, or AWS SES?
+  Affects pricing model, env-var surface, and template tooling. No
+  current dependency, so this is a fresh pick — same discipline as
+  CLAUDE.md's "no new dependencies without justification" rule.
+- **Cadence.** Is 5 minutes the firm target, or is 15-30 minutes
+  acceptable? Lower cadence relaxes rate-limit and minute-budget
+  pressure. Affects shape A vs. shape B above.
+- **Per-user identity.** Today's model is one shared operator
+  (`API_TOKEN` bearer, shared `anon` key). Multi-recipient
+  notifications are the first real argument for opening per-user
+  accounts — explicitly out of scope today. Default for this phase:
+  stay single-operator, send all alerts to one configured address
+  in env. Reopen identity work as a separate phase if a second
+  recipient is needed.
+- **Digest vs. per-listing.** One email per match (chatty, fast) or
+  one digest per subscription per run (quieter, slight latency
+  cost)? Affects `notification_dispatches` shape — current schema
+  draft supports both.
+
+**Out of scope for this phase**
+
+- Per-user accounts / authentication (one shared operator stays the
+  identity model; see open question above).
+- SMS / push notifications (email-first).
+- "AI-curated" alerts where the Phase 7 agent picks listings the
+  operator might like — that's a later layer on top of this
+  scaffolding.
+- Re-notification on snapshot change (price drop, status change).
+  Listed as a "next" follow-up once new-listing alerts ship.
 
 ## Building decomposition track (parallel)
 
@@ -893,6 +1209,158 @@ lands in B2; B1 stops at the human-in-the-loop gate.
   new dep. Default recommendation is A on the strength of "no new
   deps without justification"; revisit if the hand-rolled grid
   proves too rigid.
+
+## Skill refinement track (parallel)
+
+Closing the loop on the Phase 7 agent: today the operator can edit a
+skill's system prompt via `/settings`, but there is no structured way
+to learn from a specific estimation that went well or badly. This
+track adds (a) deeper trace inspection so the operator can actually
+see *why* the agent picked the comparables it picked, and (b) a
+feedback-driven prompt refinement loop where the operator's written
+critique of a specific run gets fed back into the skill that produced
+it.
+
+### Phase AI: Feedback-driven skill refinement (proposed)
+
+**Trace inspection enrichment**
+
+The existing trace already records every tool call's parameters and
+an `output_summary` per architectural rule #9 (capping row size at
+single-digit kilobytes regardless of cohort size). What's missing is
+the ability to drill from a tool call's row in the timeline into the
+full payload it returned — concretely, the operator wants to see
+"this `find_comparables_relaxed` call with these filters returned 42
+listings; the 8 that ended up in `comparables_used` were picked
+because of this reasoning step; here are the 34 that didn't make
+the cut and why."
+
+- Trace step rows in the UI already render `filters_used` from the
+  tool's metadata envelope (per toolkit rule #2). What they don't
+  render: the listings that came back from the call but weren't
+  selected. Two viable shapes:
+  - **Shape A — payload side-table.** New table
+    `estimation_trace_payloads(estimation_run_id, step_n,
+    full_output jsonb, captured_at)` written at trace-finalisation
+    time. Architectural rule #9 stays intact (the trace JSONB on
+    `estimation_runs` keeps only the summary); this is a separate,
+    lazily-loaded record. UI fetches `/estimations/{id}/trace/{n}/payload`
+    on click-to-expand. Recommended default.
+  - **Shape B — on-demand re-execution.** No new storage; the UI
+    re-runs the tool with the recorded params. Cheaper at write
+    time but breaks the freshness contract — the listings table
+    moves under the agent's feet, so the operator sees a different
+    cohort than the run actually used. Bad for the audit story.
+- The Timeline component (`frontend/src/components/Timeline.tsx`)
+  already dispatches on `step.kind`; this is a new render mode on
+  `tool_call` steps that exposes the expandable payload view +
+  per-listing "did this make `comparables_used`? if not, why?"
+  annotation.
+- The "why" annotation per non-selected listing comes from the
+  reasoning step that immediately follows the tool call (per the
+  Phase 7 slice 1 trace shape — reasoning kind is emitted per LLM
+  turn). The UI surfaces the relevant slice of that reasoning
+  alongside the listings table.
+
+**Feedback capture**
+
+- Migration: `estimation_feedback(id, estimation_run_id, feedback_text,
+  submitted_at, status, refinement_id)` — one row per operator
+  feedback submission, linked back to the run. `status` lifecycle:
+  `submitted` → `refining` → `proposed` | `applied` | `dismissed` |
+  `failed`. Append-only (architectural rule #1 spirit even though
+  this is operational data, not history).
+- API: `POST /estimations/{id}/feedback` accepts
+  `{feedback_text: str, kick_off_refinement: bool = true}` and
+  inserts a row. Bearer-gated. Defaults to immediately kicking off
+  the refinement loop so the operator gets a same-session proposal;
+  setting the flag false stores the feedback without spending LLM
+  credit.
+- Frontend: a "Provide feedback" button sits alongside the existing
+  "Re-run" button on `/estimation/:id`. Click opens a modal with a
+  textarea + submit. Past feedback for a run renders inline (one
+  block per submission, status badge, link to the proposed
+  refinement when applicable).
+
+**Refinement loop**
+
+- New skill `skill_refiner_v1` (on-disk seed
+  `skills/skill_refiner_v1/SKILL.md` + migration seed `INSERT`,
+  same pattern as `rental_estimator_v1` per Phase 7 slice 1). Input
+  context: the original skill (system prompt + allowed tools +
+  preferred model + limits, sourced fresh from the `skills` row at
+  refinement time), the full estimation trace including the new
+  trace payloads, and the operator's feedback text. Output: a
+  proposed updated `system_prompt` (and optionally an updated
+  `allowed_tools` whitelist when the feedback says "stop using
+  tool X" or "you should have used tool Y"), plus a one-paragraph
+  explanation of what the refiner changed and why.
+- Limits: `max_iterations: 2`, `max_cost_usd: 0.40`,
+  `wall_clock_timeout_s: 60`. The refiner is a single reasoning
+  pass over a fully-materialised context, not an iterative tool-
+  use loop, so limits sit lower than the estimator's.
+- Calls log to `llm_calls` with `called_for='refine_skill'` (new
+  value on the CHECK constraint via the same migration).
+
+**Apply vs. suggest — the safety-critical choice**
+
+- **Default: suggest-then-confirm.** The refiner writes the proposed
+  new prompt to a new staging table `skill_refinements(id, skill_id,
+  original_prompt, proposed_prompt, proposed_allowed_tools,
+  refiner_explanation, source_feedback_id, status, created_at,
+  applied_at)`. Status: `proposed` → `applied` | `dismissed`. The
+  operator reviews the diff on `/settings/skills/{name}/refinements`
+  and clicks Apply (which writes through `PUT /admin/skills/{name}`,
+  letting the existing `skills_history` trigger from migration 029
+  preserve the prior value automatically) or Dismiss.
+- **Optional: auto-apply.** Operator can flag a skill as
+  `auto_apply_refinements: true` via `/settings`. Useful for early
+  iteration when the operator wants tight loops; risky in the long
+  run because LLM-written prompt edits will drift the skill's
+  behaviour silently. Strongly recommend leaving this off in
+  production.
+- Either path goes through `skills_history` for full audit and
+  rollback, same discipline as `app_settings_history` (migration
+  020).
+
+**Open questions (operator to decide before implementation starts)**
+
+- **Payload retention.** How long do we keep `estimation_trace_payloads`
+  rows? Forever bloats the table (a single run's payload can be
+  hundreds of KB); 30 days mirrors `listing_freshness_checks` and
+  is the recommended default. Old rows just remove the
+  drill-down ability — the trace summary stays intact.
+- **Refinement scope.** Does the refiner update the *same* skill the
+  run used, or fork to a new `_v2`/`_vN` skill so the original stays
+  pristine for A/B comparison? Forking is heavier but matches how
+  the Phase 7 slice 2 A/B view assumes multiple skill variants.
+- **Allowed-tools edits.** Should the refiner be allowed to change
+  the tool whitelist, or only the system prompt? Prompt-only is
+  simpler and harder to break things with; tool-whitelist edits
+  unlock real behaviour change but need stricter validation
+  (refusing to whitelist a tool that doesn't exist, etc.).
+- **Feedback batching.** Apply each feedback submission individually
+  (chatty, fast iteration, more LLM cost), or accumulate N
+  submissions and refine once over the bundle (cheaper, slower
+  iteration)? Default: per-submission, behind the
+  `kick_off_refinement` flag so the operator can batch manually.
+- **Default model for the refiner.** A capable model (Claude Opus,
+  GPT-4o, Gemini Pro) is worth the cost here — it's writing prompts
+  that drive every subsequent estimation. Lock to a specific model
+  via `app_settings.llm_skill_refiner_model` so the operator can
+  swap without redeploying.
+
+**Out of scope for Phase AI**
+
+- Automated regression testing of refined skills (re-running the
+  refined skill against a fixture set of past estimations to check
+  for behaviour drift) — that's a follow-up phase once the basic
+  loop is in place.
+- Multi-operator feedback aggregation — today's single-operator
+  identity model applies (same as Phase U2.7).
+- Cross-skill refinement ("learning from the rental skill should
+  improve the sale skill") — out of scope; each skill is refined
+  in isolation against its own runs.
 
 ## Summarize track (parallel)
 
