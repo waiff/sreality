@@ -31,6 +31,8 @@ from api.building_runs import (
     update_building_inputs,
 )
 from api import attachments as attachments_module
+from api import feedback as feedback_module
+from api import refiner as refiner_module
 from api.estimation_runs import (
     create_estimation_run,
     get_estimation_run,
@@ -560,6 +562,63 @@ def get_estimation_trace_payload(
     return payload
 
 
+@app.get("/estimations/{run_id}/feedback")
+def list_estimation_feedback(
+    run_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    if get_estimation_run(conn, run_id) is None:
+        raise HTTPException(status_code=404, detail="estimation run not found")
+    return {"data": feedback_module.list_feedback_for_run(conn, run_id)}
+
+
+@app.post("/estimations/{run_id}/feedback")
+def post_estimation_feedback(
+    run_id: int,
+    body: s.CreateFeedbackIn,
+    conn: Any = Depends(deps.get_db_conn),
+    llm_client: Any = Depends(deps.get_llm_client),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Persist operator feedback on a run.
+
+    When `kick_off_refinement=true` we fire the slice C refiner
+    synchronously and return the resulting (feedback, refinement)
+    pair; otherwise the row sits in `submitted` for a later batch
+    run. Refiner failures persist as `status='failed'` on the
+    feedback row — the operator still sees their note in the UI.
+    """
+    run = get_estimation_run(conn, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="estimation run not found")
+
+    initial_status = "refining" if body.kick_off_refinement else "submitted"
+    row = feedback_module.insert_feedback(
+        conn,
+        estimation_run_id=run_id,
+        feedback_text=body.feedback_text,
+        initial_status=initial_status,
+    )
+
+    refinement: dict[str, Any] | None = None
+    if body.kick_off_refinement:
+        from api.refiner import run_refinement
+        refinement, terminal_status = run_refinement(
+            conn, llm_client, feedback=row, run=run,
+        )
+        feedback_module.update_feedback_status(
+            conn,
+            row["id"],
+            status=terminal_status,
+            refinement_id=refinement["id"] if refinement else None,
+        )
+        row["status"] = terminal_status
+        if refinement:
+            row["refinement_id"] = refinement["id"]
+    return {"feedback": row, "refinement": refinement}
+
+
 @app.get("/estimations")
 def list_estimations(
     source: str | None = None,
@@ -928,6 +987,44 @@ def delete_listing_tag(
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return curation.detach_tag(conn, sreality_id, tag_id)
+
+
+# --- Skill refinements (Phase AI slice C) ---------------------------------
+
+@app.get("/skill-refinements/{refinement_id}")
+def get_skill_refinement(
+    refinement_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    row = refiner_module.get_refinement(conn, refinement_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail="skill refinement not found",
+        )
+    return row
+
+
+@app.post("/skill-refinements/{refinement_id}/decision")
+def decide_skill_refinement(
+    refinement_id: int,
+    body: s.RefinementDecisionIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Apply or dismiss a proposed refinement.
+
+    Applying writes through `skills.update_skill`, which triggers
+    the `skills_history` trigger from migration 029, so the prior
+    prompt is preserved automatically. Dismiss is a status-only
+    flip on the refinement and its parent feedback row.
+    """
+    try:
+        if body.decision == "apply":
+            return refiner_module.apply_refinement(conn, refinement_id)
+        return refiner_module.dismiss_refinement(conn, refinement_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _build_comparables_inputs(

@@ -510,3 +510,30 @@ class BuildingAttachmentOut(BaseModel):
 class ConfirmBuildingUnitsIn(BaseModel):
     """Operator-confirmed unit list. Transitions awaiting_input -> estimating."""
     units: list[BuildingUnit] = Field(min_length=1, max_length=30)
+
+
+# --- Feedback (Phase AI slice B) ------------------------------------------
+
+class CreateFeedbackIn(BaseModel):
+    """Operator note on one estimation run.
+
+    `kick_off_refinement` flips on the slice C refiner the moment the
+    feedback lands, so the operator gets a same-session prompt
+    proposal. Set false to stash feedback without spending LLM credit.
+    """
+    feedback_text:        str = Field(min_length=1, max_length=4000)
+    kick_off_refinement:  bool = True
+
+
+# --- Skill refinements (Phase AI slice C) ---------------------------------
+
+FeedbackStatus = Literal[
+    "submitted", "refining", "proposed", "applied", "dismissed", "failed",
+]
+
+RefinementStatus = Literal["proposed", "applied", "dismissed"]
+
+
+class RefinementDecisionIn(BaseModel):
+    """Operator decides what to do with a proposed skill refinement."""
+    decision: Literal["apply", "dismiss"]

@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 20:58 UTC_
+_Last refreshed: 2026-05-13 22:03 UTC_
 
 **Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 44 files, latest `045_skill_attachment_tool.sql`.
+**Migrations on disk:** 45 files, latest `046_comparable_decisions.sql`.
 
 **Last 10 commits:**
 
 ```
+ce205a3 phase-ai slice A.1: audit follow-ups — skill choice, decision reasons, wording
 72c764c Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
 d676069 phase-ai slice A: capture full tool-call payloads alongside trace
 2ecf104 Merge pull request #78 from waiff/claude/rental-estimates-agent-tools-Lompi
@@ -25,7 +26,6 @@ bb74bc4 Merge pull request #77 from waiff/claude/add-estimation-files-context-ug
 355e762 roadmap: refresh auto-status block
 a7fdba4 roadmap: refresh auto-status block
 694e80e migrations: add 043 estimation_trace_payloads side-table
-5215551 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1489,9 +1489,85 @@ moment slice A landed on /estimation/17:
 
 These were follow-ups, not new slices — same PR.
 
-#### Slice B: Feedback capture (next)
+#### Slice B: Feedback capture (done)
 
-#### Slice C: Refinement loop (after slice B)
+Migration 047 + the API surface land the operator's free-text
+feedback as a first-class object linked back to the run:
+
+- Migration 047 (applied via MCP): `estimation_feedback(id,
+  estimation_run_id, feedback_text, submitted_at, status,
+  refinement_id)` with a CHECK enum on `status` covering the full
+  lifecycle (`submitted | refining | proposed | applied |
+  dismissed | failed`). FK on the run cascades; RLS enabled, no
+  policies — service-role only.
+- `api/feedback.py` insert/get/list/update-status helpers (mirrors
+  the small storage modules elsewhere in `api/`).
+- `POST /estimations/{id}/feedback` accepts
+  `{feedback_text, kick_off_refinement=true}` and either stashes
+  the row (`status='submitted'`) or fires slice C inline
+  (`status='refining'` → terminal status set by the refiner).
+  `GET /estimations/{id}/feedback` returns the run's history,
+  newest first.
+- Frontend `FeedbackBlock` on `/estimation/:id`: composer with
+  textarea + "Run the refiner now" checkbox, history list with a
+  per-row status badge (FeedbackStatus), and per-row "View
+  proposed change" expander that lazy-loads the slice C
+  refinement.
+
+#### Slice C: Refinement loop (done)
+
+Same-skill, suggest-then-confirm. Prompt-only edits (operator's
+choices in the slice-B/C kickoff).
+
+- Migration 048 (applied via MCP):
+  - `skill_refinements(id, skill_name FK skills, original_prompt,
+    proposed_prompt, refiner_explanation, source_feedback_id FK
+    estimation_feedback, status, created_at, applied_at)` —
+    proposal lifecycle is `proposed → applied | dismissed`.
+  - FK from `estimation_feedback.refinement_id` →
+    `skill_refinements(id)`, `ON DELETE SET NULL`.
+  - `llm_calls.called_for` CHECK extended with `refine_skill`.
+  - `app_settings.llm_skill_refiner_system_prompt` +
+    `llm_skill_refiner_model` seeds (operator can edit live).
+  - `skills.skill_refiner_v1` seed row with prompt-only tool
+    whitelist (`["record_skill_refinement"]`) and tight limits
+    (`max_iterations=2`, `max_cost_usd=0.40`,
+    `wall_clock_timeout_s=60`).
+- `skills/skill_refiner_v1/SKILL.md` canonical docs.
+- `api/refiner.py` — single-pass LLM call, parses the run's
+  `skill_choice` trace step to discover which skill produced it
+  (deterministic / pre-slice-A.1 runs report a soft 'failed'
+  status), assembles the refiner user message from the original
+  prompt + feedback + compacted trace, calls
+  `LLMClient.call(called_for='refine_skill')`, and persists the
+  proposal. Helpers `apply_refinement` / `dismiss_refinement` flip
+  both the refinement and its parent feedback row; applying goes
+  through `skills.update_skill` so the existing `skills_history`
+  trigger from migration 029 preserves the prior prompt.
+- `GET /skill-refinements/{id}` and
+  `POST /skill-refinements/{id}/decision` (apply | dismiss),
+  bearer-gated.
+- Frontend: `RefinementProposal` renders the refiner's explanation,
+  a line-based prompt diff (green = added, red = removed), and
+  Apply / Dismiss buttons when the proposal is still in `proposed`
+  state. Diff is computed client-side from `original_prompt` and
+  `proposed_prompt`.
+- Hermetic tests (`tests/api/test_refiner.py`) cover the pure
+  helpers: `_pick_skill_name_from_run`,
+  `_build_refiner_user_message`, `_compact_steps`.
+
+**Caveats:**
+
+- Refiner can only act on agent-mode runs (deterministic runs
+  have no skill to refine). The lifecycle handles this by setting
+  the feedback's status to `failed` and never producing a
+  refinement row.
+- Past-run feedback works if the run has a `skill_choice` step in
+  its trace (i.e. ran under slice A.1 or later). Older agent runs
+  return `failed` with the same handling.
+- `auto_apply_refinements` flag is intentionally NOT implemented —
+  operator chose suggest-then-confirm; auto-apply can be a Phase
+  AI follow-up if same-session iteration feels slow.
 
 ---
 

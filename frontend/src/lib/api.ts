@@ -19,12 +19,14 @@ import type {
   CreateBuildingFromUrlIn,
   UpdateBuildingInputsIn,
   CreateEstimationIn,
+  EstimationFeedback,
   EstimationListParams,
   EstimationListResponse,
   EstimationRun,
   ListingSummaryBatchRow,
   Note,
   ParseResult,
+  SkillRefinement,
   SourceKind,
   Tag,
   TagColor,
@@ -206,6 +208,46 @@ export const getTracePayload = (
   stepN: number,
 ): Promise<TracePayload> =>
   request<TracePayload>(`/estimations/${runId}/trace/${stepN}/payload`);
+
+/* Phase AI slice B — feedback capture. POST inserts a new
+ * `estimation_feedback` row and (default) fires the slice C
+ * refiner inline; the response carries the (feedback, refinement)
+ * pair so the UI can show the proposed prompt without a second
+ * round-trip. */
+export interface CreateFeedbackIn {
+  feedback_text: string;
+  kick_off_refinement?: boolean;
+}
+
+export interface FeedbackResponse {
+  feedback: EstimationFeedback;
+  refinement: SkillRefinement | null;
+}
+
+export const listEstimationFeedback = (
+  runId: number,
+): Promise<{ data: EstimationFeedback[] }> =>
+  request<{ data: EstimationFeedback[] }>(
+    `/estimations/${runId}/feedback`,
+  );
+
+export const submitEstimationFeedback = (
+  runId: number,
+  input: CreateFeedbackIn,
+): Promise<FeedbackResponse> =>
+  request<FeedbackResponse>(`/estimations/${runId}/feedback`, {
+    method: 'POST',
+    json: input,
+  });
+
+export const decideRefinement = (
+  refinementId: number,
+  decision: 'apply' | 'dismiss',
+): Promise<SkillRefinement> =>
+  request<SkillRefinement>(`/skill-refinements/${refinementId}/decision`, {
+    method: 'POST',
+    json: { decision },
+  });
 
 export const listEstimations = (
   params: EstimationListParams = {},

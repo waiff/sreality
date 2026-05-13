@@ -1,6 +1,6 @@
 import { Suspense, lazy, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchEstimation,
@@ -15,7 +15,14 @@ import {
   fmtPricePerM2,
   fmtRelative,
 } from '@/lib/format';
-import { ApiError, fetchListingSummaries } from '@/lib/api';
+import {
+  ApiError,
+  decideRefinement,
+  fetchListingSummaries,
+  listEstimationFeedback,
+  submitEstimationFeedback,
+  type FeedbackResponse,
+} from '@/lib/api';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
 import { PickButton } from '@/components/controls';
@@ -25,13 +32,16 @@ import type {
   Confidence,
   CreateEstimationIn,
   Disposition,
+  EstimationFeedback,
   EstimationProvider,
   EstimationRun,
   EstimationSource,
+  FeedbackStatus,
   ImagePublic,
   ListingPublic,
   ListingSummaryBatchRow,
   Population,
+  SkillRefinement,
   SubjectSummary,
   TargetSpecIn,
 } from '@/lib/types';
@@ -151,6 +161,9 @@ export default function EstimationDetail() {
         pending={rerunMut.isPending}
         error={rerunMut.error}
       />
+
+      <Hairline />
+      <FeedbackBlock runId={run.id} />
     </Page>
   );
 }
@@ -1317,6 +1330,460 @@ function Chevron({ open }: { open: boolean }) {
       />
     </svg>
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Feedback (Phase AI slice B + C)                                            */
+/* -------------------------------------------------------------------------- */
+
+const feedbackKeys = {
+  list: (runId: number) =>
+    ['estimations', 'detail', runId, 'feedback'] as const,
+};
+
+function FeedbackBlock({ runId }: { runId: number }) {
+  const qc = useQueryClient();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const listQ = useQuery<{ data: EstimationFeedback[] }, ApiError>({
+    queryKey: feedbackKeys.list(runId),
+    queryFn: () => listEstimationFeedback(runId),
+    staleTime: 30_000,
+  });
+
+  const submitMut = useMutation<
+    FeedbackResponse,
+    ApiError,
+    { text: string; kickOff: boolean }
+  >({
+    mutationFn: ({ text, kickOff }) =>
+      submitEstimationFeedback(runId, {
+        feedback_text: text,
+        kick_off_refinement: kickOff,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: feedbackKeys.list(runId) });
+      setDrawerOpen(false);
+    },
+  });
+
+  const decideMut = useMutation<
+    SkillRefinement,
+    ApiError,
+    { refinementId: number; decision: 'apply' | 'dismiss' }
+  >({
+    mutationFn: ({ refinementId, decision }) =>
+      decideRefinement(refinementId, decision),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: feedbackKeys.list(runId) });
+    },
+  });
+
+  const rows = listQ.data?.data ?? [];
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-4">
+        <SectionLabel>Feedback</SectionLabel>
+        <button
+          type="button"
+          onClick={() => setDrawerOpen((v) => !v)}
+          aria-expanded={drawerOpen}
+          className="text-[0.78rem] tracking-wide text-[var(--color-copper)] hover:text-[var(--color-copper-2)] underline-offset-2 hover:underline"
+        >
+          {drawerOpen ? 'Cancel' : 'Provide feedback'}
+        </button>
+      </div>
+
+      <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
+        Tell the skill what it got wrong. The refiner reads your note
+        plus this run's trace and proposes an updated system prompt
+        for the skill that produced this estimate.
+      </p>
+
+      {drawerOpen && (
+        <FeedbackComposer
+          pending={submitMut.isPending}
+          error={submitMut.error}
+          onSubmit={(text, kickOff) =>
+            submitMut.mutate({ text, kickOff })
+          }
+        />
+      )}
+
+      <FeedbackHistory
+        rows={rows}
+        loading={listQ.isLoading}
+        decidePending={decideMut.isPending}
+        onDecide={(refinementId, decision) =>
+          decideMut.mutate({ refinementId, decision })
+        }
+        decideError={decideMut.error}
+      />
+    </div>
+  );
+}
+
+function FeedbackComposer({
+  pending,
+  error,
+  onSubmit,
+}: {
+  pending: boolean;
+  error: ApiError | null;
+  onSubmit: (text: string, kickOff: boolean) => void;
+}) {
+  const [text, setText] = useState('');
+  const [kickOff, setKickOff] = useState(true);
+  const valid = text.trim().length > 0;
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (valid && !pending) onSubmit(text.trim(), kickOff);
+      }}
+      className="mt-4 px-4 py-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] space-y-4"
+    >
+      <div>
+        <FieldLabel required>What did the skill get wrong on this run?</FieldLabel>
+        <textarea
+          rows={4}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          maxLength={4000}
+          placeholder="e.g. The cohort was too broad — it kept three 4+kk listings even though the target is 2+kk. Tighten the disposition match before relaxing it."
+          className="mt-1.5 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+        />
+        <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+          {text.length} / 4000
+        </p>
+      </div>
+
+      <label className="flex items-baseline gap-2 text-[0.82rem] text-[var(--color-ink-2)]">
+        <input
+          type="checkbox"
+          checked={kickOff}
+          onChange={(e) => setKickOff(e.target.checked)}
+        />
+        <span>
+          Run the refiner now (costs ~$0.05). Uncheck to stash the
+          feedback for a later batch.
+        </span>
+      </label>
+
+      {error && (
+        <p className="text-[0.78rem] text-[var(--color-brick)]">
+          {error.message || `Submit failed (HTTP ${error.status}).`}
+        </p>
+      )}
+
+      <div className="flex items-center gap-3">
+        <button
+          type="submit"
+          disabled={!valid || pending}
+          className={[
+            'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
+            !valid || pending
+              ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
+              : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
+          ].join(' ')}
+        >
+          {pending
+            ? kickOff
+              ? 'Refining…'
+              : 'Saving…'
+            : kickOff
+              ? 'Submit and refine'
+              : 'Save without refining'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function FeedbackHistory({
+  rows,
+  loading,
+  decidePending,
+  onDecide,
+  decideError,
+}: {
+  rows: EstimationFeedback[];
+  loading: boolean;
+  decidePending: boolean;
+  onDecide: (refinementId: number, decision: 'apply' | 'dismiss') => void;
+  decideError: ApiError | null;
+}) {
+  if (loading) {
+    return (
+      <p className="mt-4 text-[0.78rem] text-[var(--color-ink-4)] italic">
+        Loading feedback…
+      </p>
+    );
+  }
+  if (rows.length === 0) {
+    return (
+      <p className="mt-4 text-[0.78rem] text-[var(--color-ink-4)] italic">
+        No feedback on this run yet.
+      </p>
+    );
+  }
+  return (
+    <ul className="mt-4 space-y-3">
+      {rows.map((row) => (
+        <FeedbackRow
+          key={row.id}
+          row={row}
+          decidePending={decidePending}
+          onDecide={onDecide}
+          decideError={decideError}
+        />
+      ))}
+    </ul>
+  );
+}
+
+function FeedbackRow({
+  row,
+  decidePending,
+  onDecide,
+  decideError,
+}: {
+  row: EstimationFeedback;
+  decidePending: boolean;
+  onDecide: (refinementId: number, decision: 'apply' | 'dismiss') => void;
+  decideError: ApiError | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const refinementQ = useQuery<SkillRefinement, ApiError>({
+    queryKey: ['skill-refinement', row.refinement_id],
+    queryFn: () =>
+      fetchSkillRefinement(row.refinement_id as number),
+    enabled: row.refinement_id != null && expanded,
+    staleTime: 30_000,
+  });
+
+  return (
+    <li className="px-4 py-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <FeedbackStatusBadge status={row.status} />
+        <span
+          className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)]"
+          title={fmtAbsolute(row.submitted_at)}
+        >
+          {fmtRelative(row.submitted_at)}
+        </span>
+      </div>
+      <p className="mt-2 text-[0.85rem] text-[var(--color-ink-2)] leading-relaxed whitespace-pre-wrap">
+        {row.feedback_text}
+      </p>
+      {row.refinement_id != null && (
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            aria-expanded={expanded}
+            className="text-[0.78rem] tracking-wide text-[var(--color-copper)] hover:text-[var(--color-copper-2)] underline-offset-2 hover:underline"
+          >
+            {expanded ? 'Hide proposal' : 'View proposed change'}
+          </button>
+          {expanded && (
+            <RefinementProposal
+              query={refinementQ}
+              feedbackStatus={row.status}
+              decidePending={decidePending}
+              onDecide={onDecide}
+              decideError={decideError}
+            />
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+function FeedbackStatusBadge({ status }: { status: FeedbackStatus }) {
+  const tone =
+    status === 'applied'
+      ? 'bg-[var(--color-sage-soft)] text-[var(--color-sage)] border-[var(--color-sage)]/25'
+      : status === 'failed'
+        ? 'bg-[var(--color-brick-soft)] text-[var(--color-brick)] border-[var(--color-brick)]/25'
+        : status === 'dismissed'
+          ? 'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule-strong)]'
+          : status === 'proposed'
+            ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]/25'
+            : 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)] border-[var(--color-ochre)]/25';
+  return (
+    <span
+      className={[
+        'inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.16em] uppercase rounded-[var(--radius-xs)] border font-medium',
+        tone,
+      ].join(' ')}
+    >
+      {status}
+    </span>
+  );
+}
+
+function RefinementProposal({
+  query,
+  feedbackStatus,
+  decidePending,
+  onDecide,
+  decideError,
+}: {
+  query: ReturnType<typeof useQuery<SkillRefinement, ApiError>>;
+  feedbackStatus: FeedbackStatus;
+  decidePending: boolean;
+  onDecide: (refinementId: number, decision: 'apply' | 'dismiss') => void;
+  decideError: ApiError | null;
+}) {
+  if (query.isLoading) {
+    return (
+      <p className="mt-2 text-[0.78rem] text-[var(--color-ink-4)] italic">
+        Loading proposal…
+      </p>
+    );
+  }
+  if (query.error) {
+    return (
+      <p className="mt-2 text-[0.78rem] text-[var(--color-brick)]">
+        Could not load proposal: {query.error.message}
+      </p>
+    );
+  }
+  const r = query.data;
+  if (!r) return null;
+
+  return (
+    <div className="mt-3 space-y-3">
+      <div>
+        <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
+          Refiner explanation
+        </p>
+        <p className="mt-1 text-[0.85rem] text-[var(--color-ink-2)] leading-relaxed italic">
+          {r.refiner_explanation}
+        </p>
+      </div>
+      <div>
+        <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
+          Skill: {r.skill_name} · status: {r.status}
+        </p>
+      </div>
+      <PromptDiff before={r.original_prompt} after={r.proposed_prompt} />
+
+      {r.status === 'proposed' && feedbackStatus !== 'applied' && (
+        <div className="flex items-center gap-3 pt-1">
+          <button
+            type="button"
+            disabled={decidePending}
+            onClick={() => onDecide(r.id, 'apply')}
+            className={[
+              'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
+              decidePending
+                ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
+                : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
+            ].join(' ')}
+          >
+            {decidePending ? 'Working…' : 'Apply to skill'}
+          </button>
+          <button
+            type="button"
+            disabled={decidePending}
+            onClick={() => onDecide(r.id, 'dismiss')}
+            className="px-3 py-2 text-sm rounded-[var(--radius-sm)] text-[var(--color-ink-3)] hover:text-[var(--color-brick)] transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {decideError && (
+        <p className="text-[0.78rem] text-[var(--color-brick)]">
+          Decision failed: {decideError.message}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PromptDiff({ before, after }: { before: string; after: string }) {
+  const lines = useMemo(() => computeLineDiff(before, after), [before, after]);
+  return (
+    <div className="rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-inset)] overflow-x-auto max-h-[28rem] overflow-y-auto">
+      <pre className="font-mono text-[0.72rem] leading-snug whitespace-pre">
+        {lines.map((l, i) => (
+          <span
+            key={i}
+            className={
+              l.kind === 'add'
+                ? 'block bg-[var(--color-sage-soft)] text-[var(--color-sage)] px-2'
+                : l.kind === 'del'
+                  ? 'block bg-[var(--color-brick-soft)] text-[var(--color-brick)] px-2'
+                  : 'block text-[var(--color-ink-2)] px-2'
+            }
+          >
+            {l.kind === 'add' ? '+ ' : l.kind === 'del' ? '- ' : '  '}
+            {l.text}
+          </span>
+        ))}
+      </pre>
+    </div>
+  );
+}
+
+/**
+ * Cheap line-based diff. Not LCS — we just emit deletions of lines
+ * absent from `after` and additions of lines absent from `before`,
+ * preserving order from the original. Good enough for prompt diffs
+ * where the operator mostly wants to see what was inserted /
+ * removed, not full unified-diff hunks.
+ */
+function computeLineDiff(
+  before: string,
+  after: string,
+): Array<{ kind: 'add' | 'del' | 'ctx'; text: string }> {
+  const beforeLines = before.split('\n');
+  const afterLines = after.split('\n');
+  const beforeSet = new Set(beforeLines);
+  const afterSet = new Set(afterLines);
+  const out: Array<{ kind: 'add' | 'del' | 'ctx'; text: string }> = [];
+  let i = 0;
+  let j = 0;
+  while (i < beforeLines.length || j < afterLines.length) {
+    const a = i < beforeLines.length ? beforeLines[i] : null;
+    const b = j < afterLines.length ? afterLines[j] : null;
+    if (a === b) {
+      out.push({ kind: 'ctx', text: a ?? '' });
+      i++;
+      j++;
+      continue;
+    }
+    if (a != null && !afterSet.has(a)) {
+      out.push({ kind: 'del', text: a });
+      i++;
+      continue;
+    }
+    if (b != null && !beforeSet.has(b)) {
+      out.push({ kind: 'add', text: b });
+      j++;
+      continue;
+    }
+    if (a != null) {
+      out.push({ kind: 'ctx', text: a });
+      i++;
+    }
+    if (b != null) {
+      out.push({ kind: 'ctx', text: b });
+      j++;
+    }
+  }
+  return out;
+}
+
+async function fetchSkillRefinement(id: number): Promise<SkillRefinement> {
+  const { apiGet } = await import('@/lib/api');
+  return apiGet<SkillRefinement>(`/skill-refinements/${id}`);
 }
 
 function buildRerunPayload(

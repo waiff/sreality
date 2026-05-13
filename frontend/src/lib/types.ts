@@ -347,6 +347,44 @@ export interface EstimationRun {
   contextual_text: string | null;
 }
 
+/* Phase AI slice B — one row per operator feedback submission on
+ * an estimation run. Status walks the lifecycle in migration 047:
+ * submitted -> refining -> proposed -> applied | dismissed | failed.
+ * `refinement_id` is null until slice C's refiner produces a draft. */
+export type FeedbackStatus =
+  | 'submitted'
+  | 'refining'
+  | 'proposed'
+  | 'applied'
+  | 'dismissed'
+  | 'failed';
+
+export interface EstimationFeedback {
+  id: number;
+  estimation_run_id: number;
+  feedback_text: string;
+  submitted_at: string;
+  status: FeedbackStatus;
+  refinement_id: number | null;
+}
+
+/* Phase AI slice C — refiner-proposed prompt edit pending operator
+ * approval. The diff between `original_prompt` and `proposed_prompt`
+ * is what gets rendered for review. */
+export type RefinementStatus = 'proposed' | 'applied' | 'dismissed';
+
+export interface SkillRefinement {
+  id: number;
+  skill_name: string;
+  original_prompt: string;
+  proposed_prompt: string;
+  refiner_explanation: string;
+  source_feedback_id: number;
+  status: RefinementStatus;
+  created_at: string;
+  applied_at: string | null;
+}
+
 /* Filter half of the POST /estimations body — mirrors ComparableFilters
  * via api/schemas.CreateEstimationIn. Only fields the UI actually exposes.
  *
