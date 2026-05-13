@@ -33,6 +33,10 @@ const toFeatureCollection = (rows: MapRow[]): FC => ({
   type: 'FeatureCollection',
   features: rows.map((r) => ({
     type: 'Feature',
+    /* Stable feature id lets maplibre's setFeatureState target this
+     * point even after the source data is replaced — that's what
+     * powers the cross-source hover highlight (cards / table → map). */
+    id: r.sreality_id,
     geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
     properties: { ...r, price_label: formatPriceLabel(r.price_czk) },
   })),
@@ -50,6 +54,11 @@ interface Props {
   /* Fires on user-driven pan/zoom (we ignore programmatic moves).
    * `null` means "the operator cleared the map area" (Reset-view). */
   onBoundsChange?: (b: MapBounds | null) => void;
+  /* Cross-source hover sync. Listings whose ids appear here render
+   * with the highlight paint expressions; the map pushes its own
+   * mouseenter/mouseleave events outward through onHover. */
+  hoveredIds: ReadonlySet<number>;
+  onHover: (ids: ReadonlyArray<number> | null) => void;
 }
 
 export default function ListingMap({
@@ -59,6 +68,8 @@ export default function ListingMap({
   isLoading,
   bounds,
   onBoundsChange,
+  hoveredIds,
+  onHover,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -75,6 +86,14 @@ export default function ListingMap({
    * the current callback without needing to rebind. */
   const onBoundsChangeRef = useRef(onBoundsChange);
   onBoundsChangeRef.current = onBoundsChange;
+  /* Same ref trick for the hover emitter — the maplibre listeners
+   * are registered once at mount and must keep reading the latest
+   * callback without rebinding. */
+  const onHoverRef = useRef(onHover);
+  onHoverRef.current = onHover;
+  /* Tracks which feature ids currently carry feature-state.hovered =
+   * true so we know which to clear before applying the next set. */
+  const styledIdsRef = useRef<Set<number>>(new Set());
   /* Initial bbox from URL captured once at mount time — applying it
    * on the load event is what restores a shared link's exact viewport.
    * Reading the live `bounds` prop instead would refit every time the
@@ -149,10 +168,26 @@ export default function ListingMap({
         source: 'listings',
         filter: ['!', ['has', 'point_count']],
         paint: {
-          'circle-radius': 5,
+          /* feature-state.hovered drives the bumped radius / ochre
+           * stroke. Same paint values as the resting dot otherwise —
+           * the highlight reads as "selected", not "different kind
+           * of pin". */
+          'circle-radius': [
+            'case',
+            ['boolean', ['feature-state', 'hovered'], false], 8,
+            5,
+          ],
           'circle-color': '#3c6e63',
-          'circle-stroke-color': '#ffffff',
-          'circle-stroke-width': 1.5,
+          'circle-stroke-color': [
+            'case',
+            ['boolean', ['feature-state', 'hovered'], false], '#b58438',
+            '#ffffff',
+          ],
+          'circle-stroke-width': [
+            'case',
+            ['boolean', ['feature-state', 'hovered'], false], 3,
+            1.5,
+          ],
           'circle-opacity': [
             'case',
             ['get', 'is_active'], 1, 0.55,
@@ -207,10 +242,39 @@ export default function ListingMap({
         });
       });
 
-      map.on('mouseenter', 'clusters', () => (map.getCanvas().style.cursor = 'pointer'));
-      map.on('mouseleave', 'clusters', () => (map.getCanvas().style.cursor = ''));
-      map.on('mouseenter', 'point',    () => (map.getCanvas().style.cursor = 'pointer'));
-      map.on('mouseleave', 'point',    () => (map.getCanvas().style.cursor = ''));
+      map.on('mouseenter', 'clusters', (e) => {
+        map.getCanvas().style.cursor = 'pointer';
+        const f = e.features?.[0];
+        const clusterId = f?.properties?.cluster_id as number | undefined;
+        if (clusterId == null) return;
+        /* Resolve every listing inside the cluster so all matching
+         * cards / rows light up together — the "if there's still a
+         * group at this zoom, highlight them all" requirement. */
+        const src = map.getSource('listings') as GeoJSONSource;
+        const pointCount = (f?.properties?.point_count as number | undefined) ?? 100;
+        src.getClusterLeaves(clusterId, pointCount, 0)
+          .then((leaves) => {
+            const ids = leaves
+              .map((leaf) => leaf.properties?.sreality_id as number | undefined)
+              .filter((x): x is number => typeof x === 'number');
+            onHoverRef.current?.(ids);
+          })
+          .catch(() => { /* swallow — leaves load may race with unmount */ });
+      });
+      map.on('mouseleave', 'clusters', () => {
+        map.getCanvas().style.cursor = '';
+        onHoverRef.current?.(null);
+      });
+      map.on('mouseenter', 'point', (e) => {
+        map.getCanvas().style.cursor = 'pointer';
+        const f = e.features?.[0];
+        const id = f?.id as number | undefined;
+        if (typeof id === 'number') onHoverRef.current?.([id]);
+      });
+      map.on('mouseleave', 'point', () => {
+        map.getCanvas().style.cursor = '';
+        onHoverRef.current?.(null);
+      });
 
       map.on('click', 'point', (e) => {
         const f = e.features?.[0];
@@ -290,6 +354,27 @@ export default function ListingMap({
     });
     didInitialFitRef.current = true;
   }, [rows, ready]);
+
+  /* Project the shared hoveredIds set onto maplibre's feature-state
+   * so the paint expressions on the 'point' layer light up. Clearing
+   * the previous set before applying the new one keeps the styled
+   * features in sync without scanning the whole source. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const prev = styledIdsRef.current;
+    for (const id of prev) {
+      if (!hoveredIds.has(id)) {
+        map.setFeatureState({ source: 'listings', id }, { hovered: false });
+      }
+    }
+    for (const id of hoveredIds) {
+      if (!prev.has(id)) {
+        map.setFeatureState({ source: 'listings', id }, { hovered: true });
+      }
+    }
+    styledIdsRef.current = new Set(hoveredIds);
+  }, [hoveredIds, ready, rows]);
 
   /* Reset-view clears the bbox URL param, which triggers the parent
    * to refetch the unbounded cohort. Once those rows arrive the

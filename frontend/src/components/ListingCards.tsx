@@ -12,6 +12,12 @@ interface Props {
   /* Truthy whenever the operator has narrowed by map area. Drives the
    * "0 in this map area — Show all" empty state. */
   hasBounds: boolean;
+  /* Hover-sync set: when a sreality_id appears here (because the
+   * user is hovering the matching pin on the map, or the matching row
+   * in the table), the card lights up. Cards push their own hover
+   * state outward via onHover. */
+  hoveredIds: ReadonlySet<number>;
+  onHover: (ids: ReadonlyArray<number> | null) => void;
   onPage: (page: number) => void;
   onClearFilters: () => void;
   onClearBounds: () => void;
@@ -24,6 +30,8 @@ export default function ListingCards({
   isLoading,
   hasFilters,
   hasBounds,
+  hoveredIds,
+  onHover,
   onPage,
   onClearFilters,
   onClearBounds,
@@ -65,7 +73,11 @@ export default function ListingCards({
           <ul className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
             {rows.map((r) => (
               <li key={r.sreality_id}>
-                <Card r={r} />
+                <Card
+                  r={r}
+                  hovered={hoveredIds.has(r.sreality_id)}
+                  onHover={onHover}
+                />
               </li>
             ))}
           </ul>
@@ -79,7 +91,15 @@ export default function ListingCards({
   );
 }
 
-function Card({ r }: { r: CardRow }) {
+function Card({
+  r,
+  hovered,
+  onHover,
+}: {
+  r: CardRow;
+  hovered: boolean;
+  onHover: (ids: ReadonlyArray<number> | null) => void;
+}) {
   const title = formatTitle(r);
   const place = [r.locality, r.district].filter(Boolean).join(', ');
   const isRent = r.category_type === 'pronajem';
@@ -90,9 +110,11 @@ function Card({ r }: { r: CardRow }) {
    * rather than archived). Surface drops to --color-inset, matching
    * "filed away" in the paper / archive language; image gets a
    * gentle desaturation so it still reads as a photo. */
-  const surface = inactive
-    ? 'bg-[var(--color-inset)] border-[var(--color-rule-soft)] hover:border-[var(--color-rule)]'
-    : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
+  const surface = hovered
+    ? 'bg-[var(--color-paper-2)] border-[var(--color-copper)]'
+    : inactive
+      ? 'bg-[var(--color-inset)] border-[var(--color-rule-soft)] hover:border-[var(--color-rule)]'
+      : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
   const titleColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   const priceColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   const imageFilter = inactive
@@ -119,6 +141,8 @@ function Card({ r }: { r: CardRow }) {
   return (
     <Link
       to={`/listing/${r.sreality_id}`}
+      onMouseEnter={() => onHover([r.sreality_id])}
+      onMouseLeave={() => onHover(null)}
       className={[
         'group block rounded-[var(--radius-sm)] border transition-colors overflow-hidden',
         surface,

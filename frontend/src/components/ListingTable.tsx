@@ -40,6 +40,8 @@ interface Props {
   sort: SortSpec;
   isLoading: boolean;
   hasFilters: boolean;
+  hoveredIds: ReadonlySet<number>;
+  onHover: (ids: ReadonlyArray<number> | null) => void;
   onSort: (field: SortField) => void;
   onPage: (page: number) => void;
   onClearFilters: () => void;
@@ -52,6 +54,8 @@ export default function ListingTable({
   sort,
   isLoading,
   hasFilters,
+  hoveredIds,
+  onHover,
   onSort,
   onPage,
   onClearFilters,
@@ -83,7 +87,14 @@ export default function ListingTable({
           <tbody>
             {showSkeleton && <SkeletonRows />}
             {isEmpty && <EmptyRow hasFilters={hasFilters} onClear={onClearFilters} />}
-            {!showSkeleton && rows?.map((r) => <Row key={r.sreality_id} row={r} />)}
+            {!showSkeleton && rows?.map((r) => (
+              <Row
+                key={r.sreality_id}
+                row={r}
+                hovered={hoveredIds.has(r.sreality_id)}
+                onHover={onHover}
+              />
+            ))}
           </tbody>
         </table>
       </div>
@@ -159,9 +170,31 @@ function SortIndicator({ active, direction }: { active: boolean; direction: 'asc
 
 /* -------------------------------------------------------------------------- */
 
-function Row({ row }: { row: TableRow }) {
+function Row({
+  row,
+  hovered,
+  onHover,
+}: {
+  row: TableRow;
+  hovered: boolean;
+  onHover: (ids: ReadonlyArray<number> | null) => void;
+}) {
+  /* Cross-source hover: own mouseenter sets the shared id; the same
+   * highlight also fires when the matching pin is hovered on the map.
+   * Background is the same copper-soft tint either way — the eye
+   * doesn't need to distinguish "I hovered this" from "the map
+   * surfaced this", just "these belong together". */
   return (
-    <tr className="border-b border-[var(--color-rule-soft)] hover:bg-[var(--color-copper-soft)]/40 transition-colors">
+    <tr
+      onMouseEnter={() => onHover([row.sreality_id])}
+      onMouseLeave={() => onHover(null)}
+      className={[
+        'border-b border-[var(--color-rule-soft)] transition-colors',
+        hovered
+          ? 'bg-[var(--color-copper-soft)]'
+          : 'hover:bg-[var(--color-copper-soft)]/40',
+      ].join(' ')}
+    >
       <td className="px-4 py-2.5 align-middle">
         <Link
           to={`/listing/${row.sreality_id}`}
