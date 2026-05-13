@@ -9,10 +9,11 @@
  *   extractor synchronously → navigate to /building/:id where the
  *   operator reviews the unit proposal and confirms.
  *
- * Estimate kind (rent vs sale) for the apartment path is auto-detected
- * from the preview's category_type (pronájem / prodej). Provider and
- * population fall back to the same defaults the form used to ship with
- * (Claude + active-only).
+ * Estimate kind (rent vs sale) for the apartment path is operator-
+ * chosen via a segmented control, defaulted to rent. The toggle always
+ * wins — pasting a `prodej` URL while the toggle is on Rent still
+ * submits a rent estimate. Provider and population fall back to the
+ * same defaults the form used to ship with (Claude + active-only).
  */
 
 import {
@@ -83,9 +84,11 @@ export function NewEstimationProvider({ children }: { children: ReactNode }) {
 /* -------------------------------------------------------------------------- */
 
 type Kind = 'apartment' | 'building';
+type EstimateKind = 'rent' | 'sale';
 
 function NewEstimationModal({ onClose }: { onClose: () => void }) {
   const [kind, setKind] = useState<Kind>('apartment');
+  const [estimateKind, setEstimateKind] = useState<EstimateKind>('rent');
   const [url, setUrl] = useState('');
   const navigate = useNavigate();
 
@@ -93,7 +96,8 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
     mutationFn: (url) => previewListingUrl(url),
   });
   const submitMut = useMutation<EstimationRun, ApiError, ParseResult>({
-    mutationFn: (preview) => submitEstimation(buildEstimationPayload(preview)),
+    mutationFn: (preview) =>
+      submitEstimation(buildEstimationPayload(preview, estimateKind)),
     onSuccess: (run) => {
       onClose();
       navigate(`/estimation/${run.id}`);
@@ -193,6 +197,14 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
         <div className="px-6 pb-6">
           <KindToggle kind={kind} setKind={setKind} disabled={pending} />
 
+          {kind === 'apartment' && (
+            <EstimateKindToggle
+              estimateKind={estimateKind}
+              setEstimateKind={setEstimateKind}
+              disabled={pending}
+            />
+          )}
+
           <label
             htmlFor="new-estimation-url"
             className="mt-4 block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
@@ -278,6 +290,68 @@ function KindToggle({
   );
 }
 
+function EstimateKindToggle({
+  estimateKind, setEstimateKind, disabled,
+}: {
+  estimateKind: EstimateKind;
+  setEstimateKind: (k: EstimateKind) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="mt-3">
+      <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        Estimate
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Estimate rent or sale price"
+        className="mt-2 inline-flex items-stretch gap-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)] overflow-hidden bg-[var(--color-inset)]"
+      >
+        <EstimateKindButton
+          active={estimateKind === 'rent'}
+          onClick={() => setEstimateKind('rent')}
+          disabled={disabled}
+          label="Rent"
+        />
+        <EstimateKindButton
+          active={estimateKind === 'sale'}
+          onClick={() => setEstimateKind('sale')}
+          disabled={disabled}
+          label="Sale"
+        />
+      </div>
+    </div>
+  );
+}
+
+function EstimateKindButton({
+  active, onClick, disabled, label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  disabled: boolean;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={active}
+      onClick={onClick}
+      disabled={disabled}
+      className={[
+        'px-4 py-1.5 text-[0.8rem] transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
+        active
+          ? 'bg-[var(--color-paper)] text-[var(--color-ink)]'
+          : 'bg-transparent text-[var(--color-ink-3)] hover:text-[var(--color-ink)]',
+      ].join(' ')}
+      style={{ fontWeight: active ? 600 : 500 }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function KindButton({
   active, onClick, disabled, label, sub,
 }: {
@@ -315,23 +389,19 @@ function KindButton({
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-function buildEstimationPayload(preview: ParseResult): CreateEstimationIn {
-  const kind = previewToEstimateKind(preview);
-  const mode = kind === 'rent' ? 'agent' : 'deterministic';
+function buildEstimationPayload(
+  preview: ParseResult,
+  estimateKind: EstimateKind,
+): CreateEstimationIn {
+  const mode = estimateKind === 'rent' ? 'agent' : 'deterministic';
   return {
     source: 'ui',
     mode,
     provider: 'anthropic',
     population: 'active',
-    estimate_kind: kind,
+    estimate_kind: estimateKind,
     url: preview.source_url,
   };
-}
-
-function previewToEstimateKind(preview: ParseResult): 'rent' | 'sale' {
-  const ct = preview.listing.category_type?.toLowerCase() ?? null;
-  if (ct === 'prodej' || ct === 'sale') return 'sale';
-  return 'rent';
 }
 
 function Spinner({ label }: { label: string }) {
