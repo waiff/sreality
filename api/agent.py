@@ -42,6 +42,7 @@ from toolkit import (
     find_comparables_along_axis,
     find_comparables_relaxed,
     find_distribution_outliers,
+    read_floor_plan,
     summarize_listing,
     verify_listing_freshness,
 )
@@ -349,6 +350,30 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             },
             handler=_handle_compare_listing_images,
         ),
+        "read_floor_plan": _ToolDef(
+            name="read_floor_plan",
+            description=(
+                "Read one operator-supplied attachment (floor plan, "
+                "drawing, or photo) for the current building_run via "
+                "Claude vision. Returns structured headline + room list "
+                "+ layout description so the agent can reason about "
+                "unit boundaries the listing didn't disclose. Only "
+                "valid in a building flow — apartment estimations have "
+                "no attachments. Cached per (attachment_id, model); "
+                "repeat calls within a session are free. The available "
+                "attachment_ids are listed in the initial user message "
+                "under <custom_attachments>."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "attachment_id": {"type": "integer"},
+                    "force_refresh": {"type": "boolean"},
+                },
+                "required": ["attachment_id"],
+            },
+            handler=_handle_read_floor_plan,
+        ),
         "record_estimate": _ToolDef(
             name="record_estimate",
             description=(
@@ -417,6 +442,13 @@ class _LoopState:
     # selection round can attribute "why the agent chose these
     # filters this round" to the immediately preceding reasoning turn.
     last_reasoning: str = ""
+    # Building-flow context: set when the agent is invoked as part of
+    # a per-unit child estimation off a building_runs row. Scopes
+    # read_floor_plan to attachments that belong to this run.
+    building_run_id: int | None = None
+    # The estimation_runs.id currently driving the loop; passed through
+    # to vision tools so their llm_calls rows attribute correctly.
+    estimation_run_id: int | None = None
 
 
 # --- entrypoint -----------------------------------------------------------
@@ -433,6 +465,10 @@ def run_agent_estimation(
     provider: str,
     recorder: "TraceRecorder",
     estimation_run_id: int,
+    special_instructions: str | None = None,
+    contextual_text: str | None = None,
+    building_run_id: int | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> AgentResult:
     """Drive the agent loop. Returns AgentResult with `metadata.stop_reason`.
 
@@ -448,6 +484,8 @@ def run_agent_estimation(
         llm_client=llm_client,
         target=target,
         base_filters=filters,
+        building_run_id=building_run_id,
+        estimation_run_id=estimation_run_id,
     )
 
     # Filter the tool registry to the skill's whitelist.
@@ -465,6 +503,9 @@ def run_agent_estimation(
     messages: list[Message] = [
         Message(role="user", content=[TextBlock(text=_initial_user_message(
             target, filters, purchase_price_czk,
+            special_instructions=special_instructions,
+            contextual_text=contextual_text,
+            attachments=attachments,
         ))])
     ]
 
@@ -789,6 +830,32 @@ def _handle_summarize_listing(
     )
 
 
+def _handle_read_floor_plan(
+    args: dict[str, Any], state: _LoopState,
+) -> dict[str, Any]:
+    if state.building_run_id is None:
+        raise ValueError(
+            "read_floor_plan is only valid in a building flow; this "
+            "estimation has no building_run_id set"
+        )
+    attachment_id = int(args["attachment_id"])
+    from api.attachments import fetch_attachment
+    row = fetch_attachment(state.conn, attachment_id)
+    if row is None:
+        raise ValueError(f"attachment_id={attachment_id} not found")
+    if row["building_run_id"] != state.building_run_id:
+        raise ValueError(
+            f"attachment_id={attachment_id} does not belong to the "
+            f"current building_run"
+        )
+    return read_floor_plan(
+        state.conn, state.llm_client,
+        attachment_id=attachment_id,
+        force_refresh=bool(args.get("force_refresh", False)),
+        estimation_run_id=state.estimation_run_id,
+    )
+
+
 def _handle_compare_listing_images(
     args: dict[str, Any], state: _LoopState,
 ) -> dict[str, Any]:
@@ -905,6 +972,17 @@ def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
             "overall_similarity": comp.get("overall_similarity"),
             "cache_hit": data.get("cache_hit"),
         }
+    if name == "read_floor_plan":
+        return {
+            "attachment_id": data.get("attachment_id"),
+            "filename": data.get("filename"),
+            "image_kind": data.get("image_kind"),
+            "headline": data.get("headline"),
+            "n_rooms": len(data.get("rooms") or []),
+            "total_area_m2": data.get("total_area_m2"),
+            "confidence": data.get("confidence"),
+            "cache_hit": data.get("cache_hit"),
+        }
     return {"keys": list(data.keys())[:6]}
 
 
@@ -1007,6 +1085,10 @@ def _initial_user_message(
     target: TargetSpec,
     filters: ComparableFilters,
     purchase_price_czk: int | None,
+    *,
+    special_instructions: str | None = None,
+    contextual_text: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     payload = {
         "target": {
@@ -1024,12 +1106,39 @@ def _initial_user_message(
         },
         "purchase_price_czk": purchase_price_czk,
     }
-    return (
+    body = (
         "Estimate the monthly rent (CZK) for the following target. "
         "Follow your operating principles. The first tool call should "
         "be find_comparables_relaxed.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
+    if special_instructions and special_instructions.strip():
+        body += (
+            "\n\n<operator_instructions>\n"
+            + special_instructions.strip()
+            + "\n</operator_instructions>"
+        )
+    if contextual_text and contextual_text.strip():
+        body += (
+            "\n\n<contextual_text>\n"
+            + contextual_text.strip()
+            + "\n</contextual_text>"
+        )
+    if attachments:
+        listing = "\n".join(
+            f"- id={a['id']} filename={a.get('filename')!r} "
+            f"mime={a.get('mime_type')}"
+            for a in attachments
+        )
+        body += (
+            "\n\n<custom_attachments>\n"
+            "Operator-supplied images on this building_run. Call "
+            "read_floor_plan(attachment_id=...) on any that look "
+            "relevant to the layout BEFORE other tools.\n"
+            + listing
+            + "\n</custom_attachments>"
+        )
+    return body
 
 
 def _truncate(text: str, max_chars: int) -> str:

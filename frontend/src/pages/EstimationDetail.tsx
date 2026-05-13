@@ -124,6 +124,13 @@ export default function EstimationDetail() {
       <InputRecap run={run} />
       <Hairline />
 
+      {(run.special_instructions || run.contextual_text) && (
+        <>
+          <OperatorInputsPanel run={run} />
+          <Hairline />
+        </>
+      )}
+
       <SectionLabel>Trace</SectionLabel>
       <div className="mt-4">
         <Timeline trace={run.trace} runId={run.id} />
@@ -448,6 +455,45 @@ function Fact({ label, value }: { label: string; value: string | null }) {
       >
         {value ?? '—'}
       </dd>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Operator inputs panel — read-only display of special_instructions /        */
+/* contextual_text on a terminal run. Immutable here; mutation happens by     */
+/* re-run from RerunBlock, which carries the inputs forward by default.       */
+/* -------------------------------------------------------------------------- */
+
+function OperatorInputsPanel({ run }: { run: EstimationRun }) {
+  const hasInstr = !!run.special_instructions;
+  const hasCtx = !!run.contextual_text;
+  if (!hasInstr && !hasCtx) return null;
+  return (
+    <div className="mt-6">
+      <SectionLabel>Operator context</SectionLabel>
+      <div className="mt-3 space-y-3">
+        {hasInstr && (
+          <div>
+            <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+              Special instructions
+            </p>
+            <pre className="mt-1 whitespace-pre-wrap text-[0.85rem] leading-relaxed font-sans text-[var(--color-ink)]">
+              {run.special_instructions}
+            </pre>
+          </div>
+        )}
+        {hasCtx && (
+          <div>
+            <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+              Property context
+            </p>
+            <pre className="mt-1 whitespace-pre-wrap text-[0.85rem] leading-relaxed font-sans text-[var(--color-ink)]">
+              {run.contextual_text}
+            </pre>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1210,6 +1256,10 @@ function buildRerunPayload(
     rerun_reason: overrides ? 'adjust' : 'manual',
     purchase_price_czk: purchasePrice,
     expected_monthly_rent_czk: expectedRent,
+    /* Carry operator inputs forward on a re-run. The new row stores its
+     * own copy; the original stays untouched (audit invariant). */
+    special_instructions: run.special_instructions ?? null,
+    contextual_text: run.contextual_text ?? null,
     ...(overrides?.provider ? { provider: overrides.provider } : {}),
     ...(overrides?.population ? { population: overrides.population } : {}),
   };

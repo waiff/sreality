@@ -56,6 +56,7 @@ from toolkit.comparables import (  # noqa: E402
     find_comparables_relaxed,
 )
 from toolkit.distribution import analyze_distribution  # noqa: E402
+from toolkit.floor_plan import read_floor_plan  # noqa: E402
 from toolkit.freshness import verify_listing_freshness  # noqa: E402
 from toolkit.image_similarity import compare_listing_images  # noqa: E402
 from toolkit.neighborhoods import describe_neighborhood  # noqa: E402
@@ -92,6 +93,7 @@ __all__ = [
     "find_comparables_along_axis",
     "find_comparables_relaxed",
     "find_distribution_outliers",
+    "read_floor_plan",
     "summarize_listing",
     "verify_listing_freshness",
 ]

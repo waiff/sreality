@@ -21,6 +21,9 @@ api = [
   # Gemini backend for the reasoning agent (api/providers/gemini.py).
   # `google-generativeai` is deprecated; google-genai is the current SDK.
   "google-genai>=0.3",
+  # Required by FastAPI's UploadFile / File() — used by the
+  # /buildings/{id}/attachments endpoint for operator-supplied images.
+  "python-multipart>=0.0.9",
 ]
 # Used only by scripts/ingest_boundaries.py; kept out of the default
 # install so the scraper / API images stay slim. Pure-Python combo

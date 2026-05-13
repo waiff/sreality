@@ -65,6 +65,7 @@ def _patch_persistence(monkeypatch) -> _State:
                     "total_sale_p75_czk",
                     "business_case",
                     "warnings", "error_message",
+                    "special_instructions", "contextual_text",
                 )
             },
         }
@@ -72,9 +73,13 @@ def _patch_persistence(monkeypatch) -> _State:
     def fake_children(conn, building_id: int) -> list[dict[str, Any]]:
         return list(state.children.get(building_id, []))
 
+    def fake_attachments(conn, building_id: int) -> list[dict[str, Any]]:
+        return []
+
     monkeypatch.setattr(br, "_insert_building", fake_insert)
     monkeypatch.setattr(br, "_fetch_building", fake_fetch)
     monkeypatch.setattr(br, "_fetch_children", fake_children)
+    monkeypatch.setattr(br, "_fetch_attachments", fake_attachments)
     return state
 
 

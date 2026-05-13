@@ -10,7 +10,7 @@ import os
 from datetime import timedelta
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from api import curation
@@ -21,13 +21,16 @@ from api import skills as skills_module
 from api.agent import AGENT_TOOLS
 from api.estimate_yield import estimate_yield
 from api.building_runs import (
+    assert_editable_for_attachments,
     confirm_units,
     create_building_run,
     create_building_run_from_url,
     get_building_run,
     list_building_runs,
     re_extract,
+    update_building_inputs,
 )
+from api import attachments as attachments_module
 from api.estimation_runs import (
     create_estimation_run,
     get_estimation_run,
@@ -653,6 +656,76 @@ def get_building(
     if row is None:
         raise HTTPException(status_code=404, detail="building run not found")
     return row
+
+
+@app.patch("/buildings/{building_id}/inputs")
+def patch_building_inputs(
+    building_id: int,
+    body: s.UpdateBuildingInputsIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return update_building_inputs(conn, building_id, body)
+
+
+@app.post("/buildings/{building_id}/attachments")
+def post_building_attachment(
+    building_id: int,
+    file: UploadFile = File(...),
+    source: str = "ui",
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    row = assert_editable_for_attachments(conn, building_id)
+    uploaded_by = source if source in ("ui", "api", "clickup") else None
+    return attachments_module.insert_attachment(
+        conn,
+        building_run_id=row["id"],
+        file=file,
+        uploaded_by=uploaded_by,
+    )
+
+
+@app.get("/buildings/{building_id}/attachments")
+def list_building_attachments(
+    building_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    # 404 if the parent doesn't exist; otherwise return rows (may be empty).
+    if get_building_run(conn, building_id) is None:
+        raise HTTPException(status_code=404, detail="building run not found")
+    return {"data": attachments_module.list_attachments(conn, building_id)}
+
+
+@app.delete("/buildings/{building_id}/attachments/{attachment_id}")
+def delete_building_attachment(
+    building_id: int,
+    attachment_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    assert_editable_for_attachments(conn, building_id)
+    attachments_module.delete_attachment(conn, building_id, attachment_id)
+    return {"ok": True}
+
+
+@app.get("/buildings/{building_id}/attachments/{attachment_id}/raw")
+def get_building_attachment_raw(
+    building_id: int,
+    attachment_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> Response:
+    """Bearer-gated thumbnail proxy. The frontend uses this to render
+    attachment previews without exposing R2 credentials."""
+    row = attachments_module.fetch_attachment(conn, attachment_id)
+    if row is None or row["building_run_id"] != building_id:
+        raise HTTPException(status_code=404, detail="attachment not found")
+    data, mime, _filename = attachments_module.download_attachment_bytes(
+        conn, attachment_id,
+    )
+    return Response(content=data, media_type=mime)
 
 
 @app.post("/estimate_yield")

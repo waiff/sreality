@@ -291,6 +291,9 @@ class CreateEstimationIn(BaseModel):
     parent_run_id: int | None = None
     rerun_reason: str | None = None
 
+    special_instructions: str | None = Field(default=None, max_length=10_000)
+    contextual_text: str | None = Field(default=None, max_length=20_000)
+
     @model_validator(mode="after")
     def _apply_kind_defaults(self) -> "CreateEstimationIn":
         if (self.url is None) == (self.spec is None):
@@ -472,6 +475,36 @@ class CreateBuildingFromUrlIn(BaseModel):
     source: Literal["ui", "api", "clickup"] = "api"
     url: str = Field(min_length=1)
     force_refresh: bool = False
+
+    special_instructions: str | None = Field(default=None, max_length=10_000)
+    contextual_text: str | None = Field(default=None, max_length=20_000)
+
+
+class UpdateBuildingInputsIn(BaseModel):
+    """Patch operator-supplied text on a building_runs row.
+
+    Allowed only while the row is editable (status in
+    pending / extracting / awaiting_input). Once estimation starts the
+    inputs are frozen for audit. Use only to correct text inputs;
+    attachments have their own endpoints.
+    """
+    special_instructions: str | None = Field(default=None, max_length=10_000)
+    contextual_text: str | None = Field(default=None, max_length=20_000)
+
+
+class BuildingAttachmentOut(BaseModel):
+    """One operator-supplied attachment row on a building_run."""
+    id: int
+    building_run_id: int
+    filename: str
+    mime_type: str
+    byte_size: int
+    width_px: int | None = None
+    height_px: int | None = None
+    storage_key: str
+    sha256_hex: str
+    uploaded_by: str | None = None
+    created_at: str
 
 
 class ConfirmBuildingUnitsIn(BaseModel):
