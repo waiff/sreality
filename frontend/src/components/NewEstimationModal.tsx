@@ -31,6 +31,8 @@ import {
   ApiError,
   createBuildingFromUrl,
   previewListingUrl,
+  reExtractBuilding,
+  uploadBuildingAttachment,
 } from '@/lib/api';
 import { submitEstimation } from '@/lib/queries';
 import type {
@@ -39,6 +41,10 @@ import type {
   EstimationRun,
   ParseResult,
 } from '@/lib/types';
+
+const ATTACHMENT_MIME = ['image/png', 'image/jpeg', 'image/webp'];
+const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+const ATTACHMENT_MAX_FILES = 20;
 
 /* -------------------------------------------------------------------------- */
 /* Context — wires the CTA button (Shell) and the "+ New estimation"          */
@@ -90,6 +96,13 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
   const [kind, setKind] = useState<Kind>('apartment');
   const [estimateKind, setEstimateKind] = useState<EstimateKind>('rent');
   const [url, setUrl] = useState('');
+  const [specialInstructions, setSpecialInstructions] = useState('');
+  const [contextualText, setContextualText] = useState('');
+  const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [uploadStage, setUploadStage] = useState<
+    { done: number; total: number } | null
+  >(null);
   const navigate = useNavigate();
 
   const previewMut = useMutation<ParseResult, ApiError, string>({
@@ -97,15 +110,37 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
   });
   const submitMut = useMutation<EstimationRun, ApiError, ParseResult>({
     mutationFn: (preview) =>
-      submitEstimation(buildEstimationPayload(preview, estimateKind)),
+      submitEstimation(
+        buildEstimationPayload(
+          preview, estimateKind, specialInstructions, contextualText,
+        ),
+      ),
     onSuccess: (run) => {
       onClose();
       navigate(`/estimation/${run.id}`);
     },
   });
   const buildingMut = useMutation<BuildingRun, ApiError, string>({
-    mutationFn: (url) =>
-      createBuildingFromUrl({ source: 'ui', url }),
+    mutationFn: async (url) => {
+      const run = await createBuildingFromUrl({
+        source: 'ui',
+        url,
+        special_instructions: specialInstructions.trim() || null,
+        contextual_text: contextualText.trim() || null,
+      });
+      if (attachmentFiles.length > 0) {
+        setUploadStage({ done: 0, total: attachmentFiles.length });
+        for (let i = 0; i < attachmentFiles.length; i++) {
+          await uploadBuildingAttachment(run.id, attachmentFiles[i]);
+          setUploadStage({ done: i + 1, total: attachmentFiles.length });
+        }
+        // Re-extract so the operator-uploaded images become part of the
+        // unit proposal. The extractor cache misses on any run with
+        // attachments, so this is real work, not a no-op.
+        await reExtractBuilding(run.id);
+      }
+      return run;
+    },
     onSuccess: (run) => {
       onClose();
       navigate(`/building/${run.id}`);
@@ -128,6 +163,46 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
       onSuccess: (preview) => submitMut.mutate(preview),
     });
   }, [url, kind, pending, previewMut, submitMut, buildingMut]);
+
+  const onAttachmentsPicked = useCallback(
+    (picked: FileList | null) => {
+      if (!picked || picked.length === 0) return;
+      setAttachmentError(null);
+      const next = [...attachmentFiles];
+      for (const f of Array.from(picked)) {
+        if (!ATTACHMENT_MIME.includes(f.type)) {
+          setAttachmentError(
+            `"${f.name}" is ${f.type || 'an unknown type'}. ` +
+            'Allowed: PNG, JPEG, WebP.',
+          );
+          continue;
+        }
+        if (f.size > ATTACHMENT_MAX_BYTES) {
+          setAttachmentError(
+            `"${f.name}" is ${(f.size / 1024 / 1024).toFixed(1)} MB. ` +
+            'Max is 25 MB per file.',
+          );
+          continue;
+        }
+        if (next.length >= ATTACHMENT_MAX_FILES) {
+          setAttachmentError(
+            `Cap is ${ATTACHMENT_MAX_FILES} files per building.`,
+          );
+          break;
+        }
+        if (next.some((x) => x.name === f.name && x.size === f.size)) {
+          continue;
+        }
+        next.push(f);
+      }
+      setAttachmentFiles(next);
+    },
+    [attachmentFiles],
+  );
+
+  const removeAttachment = useCallback((idx: number) => {
+    setAttachmentFiles((files) => files.filter((_, i) => i !== idx));
+  }, []);
 
   // Esc closes; Enter submits when the input is focused.
   useEffect(() => {
@@ -153,7 +228,9 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
     ? previewMut.isPending
       ? 'Scraping…'
       : buildingMut.isPending
-        ? 'Extracting units…'
+        ? uploadStage
+          ? `Uploading ${uploadStage.done}/${uploadStage.total}…`
+          : 'Extracting units…'
         : 'Submitting…'
     : kind === 'building'
       ? 'Decompose'
@@ -246,12 +323,165 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
 
           {error && <ErrorBlock error={error} kind={kind} />}
 
+          <OperatorInputs
+            specialInstructions={specialInstructions}
+            setSpecialInstructions={setSpecialInstructions}
+            contextualText={contextualText}
+            setContextualText={setContextualText}
+            disabled={pending}
+            allowAttachments={kind === 'building'}
+            attachments={attachmentFiles}
+            attachmentError={attachmentError}
+            onAttachmentsPicked={onAttachmentsPicked}
+            onRemoveAttachment={removeAttachment}
+          />
+
           <p className="mt-4 text-[0.75rem] text-[var(--color-ink-3)] leading-relaxed">
             {helpCopy}
           </p>
         </div>
       </div>
     </div>
+  );
+}
+
+function OperatorInputs({
+  specialInstructions,
+  setSpecialInstructions,
+  contextualText,
+  setContextualText,
+  disabled,
+  allowAttachments,
+  attachments,
+  attachmentError,
+  onAttachmentsPicked,
+  onRemoveAttachment,
+}: {
+  specialInstructions: string;
+  setSpecialInstructions: (v: string) => void;
+  contextualText: string;
+  setContextualText: (v: string) => void;
+  disabled: boolean;
+  allowAttachments: boolean;
+  attachments: File[];
+  attachmentError: string | null;
+  onAttachmentsPicked: (files: FileList | null) => void;
+  onRemoveAttachment: (idx: number) => void;
+}) {
+  return (
+    <details
+      className="mt-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)]"
+    >
+      <summary
+        className="cursor-pointer select-none px-3 py-2 text-[0.72rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+      >
+        Operator context
+        {(specialInstructions || contextualText || attachments.length > 0) && (
+          <span className="ml-2 text-[var(--color-copper)] normal-case tracking-normal text-[0.7rem]">
+            {[
+              specialInstructions && 'instructions',
+              contextualText && 'context',
+              attachments.length > 0 && `${attachments.length} file${attachments.length === 1 ? '' : 's'}`,
+            ].filter(Boolean).join(' · ')}
+          </span>
+        )}
+      </summary>
+      <div className="px-3 pb-3 pt-1 space-y-3">
+        <div>
+          <label
+            htmlFor="new-est-instructions"
+            className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+          >
+            Special instructions
+          </label>
+          <textarea
+            id="new-est-instructions"
+            value={specialInstructions}
+            onChange={(e) => setSpecialInstructions(e.target.value)}
+            disabled={disabled}
+            rows={2}
+            maxLength={10_000}
+            placeholder="e.g. Use a 1500m radius. Weight comparables in the same block heavier."
+            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+          />
+          <p className="mt-1 text-[0.7rem] text-[var(--color-ink-3)]">
+            Wrapped in &lt;operator_instructions&gt; in the agent's prompt.
+          </p>
+        </div>
+        <div>
+          <label
+            htmlFor="new-est-context"
+            className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+          >
+            Property context
+          </label>
+          <textarea
+            id="new-est-context"
+            value={contextualText}
+            onChange={(e) => setContextualText(e.target.value)}
+            disabled={disabled}
+            rows={3}
+            maxLength={20_000}
+            placeholder="Anything the listing doesn't say: legal status, recent renovations, neighbours, planning, etc."
+            className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+          />
+        </div>
+        {allowAttachments && (
+          <div>
+            <label className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+              Attachments — floor plans, photos, drawings
+            </label>
+            <input
+              type="file"
+              multiple
+              accept={ATTACHMENT_MIME.join(',')}
+              disabled={disabled}
+              onChange={(e) => {
+                onAttachmentsPicked(e.target.files);
+                e.target.value = '';
+              }}
+              className="mt-1 block w-full text-[0.78rem] text-[var(--color-ink-2)] file:mr-2 file:rounded-[var(--radius-sm)] file:border file:border-[var(--color-rule)] file:bg-[var(--color-inset)] file:text-[var(--color-ink)] file:px-3 file:py-1.5 file:text-[0.78rem] file:cursor-pointer hover:file:bg-[var(--color-paper)] disabled:opacity-60"
+            />
+            {attachmentError && (
+              <p className="mt-1 text-[0.72rem] text-[var(--color-brick)]">
+                {attachmentError}
+              </p>
+            )}
+            {attachments.length > 0 && (
+              <ul className="mt-2 space-y-1 text-[0.78rem]">
+                {attachments.map((f, i) => (
+                  <li
+                    key={`${f.name}-${f.size}-${i}`}
+                    className="flex items-center justify-between gap-2 px-2 py-1 rounded-[var(--radius-sm)] bg-[var(--color-inset)]"
+                  >
+                    <span className="truncate" title={f.name}>
+                      {f.name}
+                      <span className="ml-2 text-[var(--color-ink-3)]">
+                        {(f.size / 1024).toFixed(0)} KB
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onRemoveAttachment(i)}
+                      disabled={disabled}
+                      className="text-[var(--color-ink-3)] hover:text-[var(--color-brick)] disabled:opacity-40"
+                      aria-label={`Remove ${f.name}`}
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <p className="mt-1 text-[0.7rem] text-[var(--color-ink-3)]">
+              Up to {ATTACHMENT_MAX_FILES} files, 25 MB each. Uploaded after
+              the building row is created; the extractor re-runs so it can
+              read them.
+            </p>
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -392,6 +622,8 @@ function KindButton({
 function buildEstimationPayload(
   preview: ParseResult,
   estimateKind: EstimateKind,
+  specialInstructions: string,
+  contextualText: string,
 ): CreateEstimationIn {
   const mode = estimateKind === 'rent' ? 'agent' : 'deterministic';
   return {
@@ -401,6 +633,8 @@ function buildEstimationPayload(
     population: 'active',
     estimate_kind: estimateKind,
     url: preview.source_url,
+    special_instructions: specialInstructions.trim() || null,
+    contextual_text: contextualText.trim() || null,
   };
 }
 

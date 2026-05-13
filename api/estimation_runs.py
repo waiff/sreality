@@ -237,6 +237,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "source_kind", "parse_confidence", "parse_confidence_per_field",
     "source_html",
     "subject_summary",
+    "special_instructions", "contextual_text",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -401,6 +402,8 @@ def create_estimation_run(
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
         subject_summary=subject_summary,
+        special_instructions=body.special_instructions,
+        contextual_text=body.contextual_text,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -628,6 +631,8 @@ def _persist_failed_run(
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
         subject_summary=None,
+        special_instructions=body.special_instructions,
+        contextual_text=body.contextual_text,
     )
     return _fetch_run(conn, run_id) or {}
 
@@ -782,6 +787,8 @@ def _run_agent_path(
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
         subject_summary=None,
+        special_instructions=body.special_instructions,
+        contextual_text=body.contextual_text,
     )
 
     try:
@@ -790,6 +797,8 @@ def _run_agent_path(
             target, filters, body.purchase_price_czk,
             skill=skill, provider=body.provider,
             recorder=recorder, estimation_run_id=run_id,
+            special_instructions=body.special_instructions,
+            contextual_text=body.contextual_text,
         )
     except Exception as exc:
         LOG.warning("agent run failed: %s", exc)

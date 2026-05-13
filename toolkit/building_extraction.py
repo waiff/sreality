@@ -168,6 +168,9 @@ def extract_building_units(
     snapshot_id: int | None = None,
     max_images: int | None = None,
     force_refresh: bool = False,
+    special_instructions: str | None = None,
+    contextual_text: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 
@@ -185,8 +188,14 @@ def extract_building_units(
         else _resolve_max_images(conn)
     )
 
+    has_operator_inputs = bool(
+        (special_instructions and special_instructions.strip())
+        or (contextual_text and contextual_text.strip())
+        or attachments
+    )
+
     cache_hit = False
-    if not force_refresh:
+    if not force_refresh and not has_operator_inputs:
         cached = _cache_lookup(conn, sreality_id, resolved_snapshot_id)
         if cached is not None:
             cache_hit = True
@@ -194,10 +203,16 @@ def extract_building_units(
         else:
             data = _produce_extraction(
                 conn, llm_client, sreality_id, snapshot, resolved_max_images,
+                special_instructions=special_instructions,
+                contextual_text=contextual_text,
+                attachments=attachments,
             )
     else:
         data = _produce_extraction(
             conn, llm_client, sreality_id, snapshot, resolved_max_images,
+            special_instructions=special_instructions,
+            contextual_text=contextual_text,
+            attachments=attachments,
         )
 
     return {
@@ -234,6 +249,10 @@ def _produce_extraction(
     sreality_id: int,
     snapshot: dict[str, Any],
     max_images: int,
+    *,
+    special_instructions: str | None = None,
+    contextual_text: str | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     listing = _fetch_listing(conn, sreality_id)
     image_blocks, n_images, fallback_warning = _build_image_blocks(
@@ -242,12 +261,43 @@ def _produce_extraction(
     text_payload = _build_text_payload(listing, snapshot)
 
     content: list[dict[str, Any]] = [{"type": "text", "text": text_payload}]
+    if special_instructions and special_instructions.strip():
+        content.append({
+            "type": "text",
+            "text": (
+                "<operator_instructions>\n"
+                + special_instructions.strip()
+                + "\n</operator_instructions>"
+            ),
+        })
+    if contextual_text and contextual_text.strip():
+        content.append({
+            "type": "text",
+            "text": (
+                "<contextual_text>\n"
+                + contextual_text.strip()
+                + "\n</contextual_text>"
+            ),
+        })
     if image_blocks:
         content.append({
             "type": "text",
-            "text": f"Photos and floor plans ({n_images}):",
+            "text": f"Photos and floor plans from the listing ({n_images}):",
         })
         content.extend(image_blocks)
+    custom_blocks, n_custom = _build_custom_attachment_blocks(
+        conn, attachments,
+    )
+    if custom_blocks:
+        content.append({
+            "type": "text",
+            "text": (
+                f"Operator-supplied attachments ({n_custom}). Treat these "
+                "as authoritative for the layout when they conflict with "
+                "the listing photos."
+            ),
+        })
+        content.extend(custom_blocks)
     content.append({
         "type": "text",
         "text": (
@@ -277,19 +327,26 @@ def _produce_extraction(
         if confidence == "high":
             confidence = "medium"
 
-    _cache_store(
-        conn,
-        sreality_id=sreality_id,
-        snapshot_id=snapshot["id"],
-        units=units,
-        building=building,
-        confidence=confidence,
-        warnings=warnings,
-        n_images=n_images,
-        model=response.model,
-        llm_call_id=response.llm_call_id,
-        cost_usd=response.cost_usd,
+    has_operator_inputs = bool(
+        (special_instructions and special_instructions.strip())
+        or (contextual_text and contextual_text.strip())
+        or attachments
     )
+
+    if not has_operator_inputs:
+        _cache_store(
+            conn,
+            sreality_id=sreality_id,
+            snapshot_id=snapshot["id"],
+            units=units,
+            building=building,
+            confidence=confidence,
+            warnings=warnings,
+            n_images=n_images,
+            model=response.model,
+            llm_call_id=response.llm_call_id,
+            cost_usd=response.cost_usd,
+        )
     return {
         "units": units,
         "building": building,
@@ -405,6 +462,41 @@ def _build_image_blocks(
             },
         })
     return blocks, len(blocks), None
+
+
+def _build_custom_attachment_blocks(
+    conn: "psycopg.Connection",
+    attachments: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Download operator-supplied attachments from R2 and encode them as
+    Anthropic vision blocks. Returns ([], 0) when there are no attachments
+    or R2 isn't configured; callers must keep the message valid without them.
+    """
+    if not attachments:
+        return [], 0
+    if not image_storage.is_configured():
+        return [], 0
+    r2 = image_storage.R2Client.from_env()
+    blocks: list[dict[str, Any]] = []
+    for att in attachments:
+        key = att.get("storage_key")
+        mime = att.get("mime_type") or "image/jpeg"
+        if not key:
+            continue
+        try:
+            data = r2.download_bytes(key)
+        except Exception:  # noqa: BLE001
+            continue
+        encoded = base64.standard_b64encode(data).decode("ascii")
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": encoded,
+            },
+        })
+    return blocks, len(blocks)
 
 
 def _build_text_payload(

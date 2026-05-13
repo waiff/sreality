@@ -10,21 +10,33 @@
  * step so B1 ships standalone.
  */
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError,
+  deleteBuildingAttachment,
+  fetchBuildingAttachmentBlob,
   getBuilding,
   reExtractBuilding,
+  updateBuildingInputs,
+  uploadBuildingAttachment,
 } from '@/lib/api';
 import { fmtAbsolute, fmtArea } from '@/lib/format';
 import BuildingUnitEditor from '@/components/BuildingUnitEditor';
 import type {
+  BuildingAttachment,
   BuildingRun,
   BuildingStatus,
   BuildingUnit,
 } from '@/lib/types';
+
+const ATTACHMENT_MIME = ['image/png', 'image/jpeg', 'image/webp'];
+const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
+const ATTACHMENT_MAX_FILES = 20;
+const EDITABLE_STATUSES: ReadonlyArray<BuildingStatus> = [
+  'pending', 'extracting', 'awaiting_input',
+];
 
 const buildingKey = (id: number) => ['building', id] as const;
 
@@ -74,6 +86,8 @@ export default function BuildingDetail() {
       <Header building={b} />
       <SubjectBlock building={b} />
       <Warnings building={b} />
+      <OperatorInputsSection building={b} onUpdated={onConfirmed} />
+      <AttachmentsSection building={b} onChanged={onConfirmed} />
 
       {b.status === 'awaiting_input' && (
         <div className="mt-2 flex justify-end">
@@ -288,6 +302,331 @@ function ReadOnlyUnits({ building }: { building: BuildingRun }) {
         </tbody>
       </table>
     </section>
+  );
+}
+
+/* ---------- operator inputs ---------- */
+
+function OperatorInputsSection({
+  building, onUpdated,
+}: {
+  building: BuildingRun;
+  onUpdated: (next: BuildingRun) => void;
+}) {
+  const editable = EDITABLE_STATUSES.includes(building.status);
+  const [instr, setInstr] = useState(building.special_instructions ?? '');
+  const [ctx, setCtx] = useState(building.contextual_text ?? '');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setInstr(building.special_instructions ?? '');
+    setCtx(building.contextual_text ?? '');
+  }, [building.id, building.special_instructions, building.contextual_text]);
+
+  const mut = useMutation<BuildingRun, ApiError>({
+    mutationFn: () =>
+      updateBuildingInputs(building.id, {
+        special_instructions: instr.trim() || null,
+        contextual_text: ctx.trim() || null,
+      }),
+    onSuccess: (next) => {
+      setError(null);
+      onUpdated(next);
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const dirty =
+    (instr || '') !== (building.special_instructions ?? '') ||
+    (ctx || '') !== (building.contextual_text ?? '');
+
+  const hasAny =
+    !!(building.special_instructions || building.contextual_text) ||
+    editable;
+  if (!hasAny) return null;
+
+  return (
+    <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)]">
+      <header className="px-5 py-3 border-b border-[var(--color-rule)]">
+        <h2 className="text-[0.85rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Operator context
+        </h2>
+      </header>
+      <div className="p-5 space-y-3">
+        <div>
+          <label
+            htmlFor={`building-${building.id}-instr`}
+            className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+          >
+            Special instructions
+          </label>
+          {editable ? (
+            <textarea
+              id={`building-${building.id}-instr`}
+              value={instr}
+              onChange={(e) => setInstr(e.target.value)}
+              disabled={mut.isPending}
+              rows={2}
+              maxLength={10_000}
+              placeholder="e.g. Treat the attic as habitable. Owner says heating refurbished in 2022."
+              className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+            />
+          ) : (
+            <pre className="mt-1 whitespace-pre-wrap text-[0.85rem] leading-relaxed font-sans text-[var(--color-ink)]">
+              {building.special_instructions || (
+                <span className="text-[var(--color-ink-3)]">—</span>
+              )}
+            </pre>
+          )}
+        </div>
+        <div>
+          <label
+            htmlFor={`building-${building.id}-ctx`}
+            className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+          >
+            Property context
+          </label>
+          {editable ? (
+            <textarea
+              id={`building-${building.id}-ctx`}
+              value={ctx}
+              onChange={(e) => setCtx(e.target.value)}
+              disabled={mut.isPending}
+              rows={4}
+              maxLength={20_000}
+              placeholder="Anything the listing doesn't say — legal status, neighbours, planning, recent work, …"
+              className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+            />
+          ) : (
+            <pre className="mt-1 whitespace-pre-wrap text-[0.85rem] leading-relaxed font-sans text-[var(--color-ink)]">
+              {building.contextual_text || (
+                <span className="text-[var(--color-ink-3)]">—</span>
+              )}
+            </pre>
+          )}
+        </div>
+        {editable && (
+          <div className="flex items-center justify-between gap-3">
+            {error && (
+              <p className="text-[0.78rem] text-[var(--color-brick)]">{error}</p>
+            )}
+            <p className="text-[0.7rem] text-[var(--color-ink-3)]">
+              Re-extract after edits so the new context flows into the unit
+              proposal.
+            </p>
+            <button
+              type="button"
+              onClick={() => mut.mutate()}
+              disabled={!dirty || mut.isPending}
+              className={[
+                'shrink-0 px-3 py-1.5 text-[0.78rem] rounded-[var(--radius-sm)] border',
+                !dirty || mut.isPending
+                  ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
+                  : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)]',
+              ].join(' ')}
+            >
+              {mut.isPending ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/* ---------- attachments ---------- */
+
+function AttachmentsSection({
+  building, onChanged,
+}: {
+  building: BuildingRun;
+  onChanged: (next: BuildingRun) => void;
+}) {
+  const editable = EDITABLE_STATUSES.includes(building.status);
+  const attachments = building.attachments ?? [];
+  const [error, setError] = useState<string | null>(null);
+  const qc = useQueryClient();
+
+  const refetch = async () => {
+    const next = await getBuilding(building.id);
+    onChanged(next);
+    qc.setQueryData(['building', building.id], next);
+  };
+
+  const uploadMut = useMutation<void, ApiError, FileList>({
+    mutationFn: async (files) => {
+      const list = Array.from(files);
+      for (const f of list) {
+        if (!ATTACHMENT_MIME.includes(f.type)) {
+          throw new ApiError(
+            `${f.name}: unsupported type ${f.type || 'unknown'}`,
+            415, null,
+          );
+        }
+        if (f.size > ATTACHMENT_MAX_BYTES) {
+          throw new ApiError(
+            `${f.name}: ${(f.size / 1024 / 1024).toFixed(1)} MB > 25 MB cap`,
+            413, null,
+          );
+        }
+      }
+      for (const f of list) {
+        await uploadBuildingAttachment(building.id, f);
+      }
+    },
+    onSuccess: async () => {
+      setError(null);
+      await refetch();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const deleteMut = useMutation<void, ApiError, number>({
+    mutationFn: async (attachmentId) => {
+      await deleteBuildingAttachment(building.id, attachmentId);
+    },
+    onSuccess: async () => {
+      setError(null);
+      await refetch();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  const showSection = editable || attachments.length > 0;
+  if (!showSection) return null;
+
+  return (
+    <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)]">
+      <header className="px-5 py-3 border-b border-[var(--color-rule)] flex items-baseline justify-between gap-4">
+        <h2 className="text-[0.85rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Attachments
+        </h2>
+        <span className="text-[0.7rem] text-[var(--color-ink-3)]">
+          {attachments.length}/{ATTACHMENT_MAX_FILES}
+        </span>
+      </header>
+      <div className="p-5 space-y-3">
+        {attachments.length === 0 && (
+          <p className="text-[0.85rem] text-[var(--color-ink-3)]">
+            No attachments yet. Upload floor plans, photos, or technical
+            drawings — the extractor will read them on the next pass.
+          </p>
+        )}
+        {attachments.length > 0 && (
+          <ul className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+            {attachments.map((a) => (
+              <AttachmentCard
+                key={a.id}
+                buildingId={building.id}
+                attachment={a}
+                onDelete={
+                  editable
+                    ? () => deleteMut.mutate(a.id)
+                    : undefined
+                }
+                deleting={deleteMut.isPending}
+              />
+            ))}
+          </ul>
+        )}
+        {editable && (
+          <div>
+            <input
+              type="file"
+              multiple
+              accept={ATTACHMENT_MIME.join(',')}
+              disabled={uploadMut.isPending}
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  uploadMut.mutate(e.target.files);
+                }
+                e.target.value = '';
+              }}
+              className="block text-[0.78rem] text-[var(--color-ink-2)] file:mr-2 file:rounded-[var(--radius-sm)] file:border file:border-[var(--color-rule)] file:bg-[var(--color-inset)] file:text-[var(--color-ink)] file:px-3 file:py-1.5 file:text-[0.78rem] file:cursor-pointer hover:file:bg-[var(--color-paper)] disabled:opacity-60"
+            />
+            <p className="mt-1 text-[0.7rem] text-[var(--color-ink-3)]">
+              {uploadMut.isPending
+                ? 'Uploading…'
+                : 'PNG / JPEG / WebP. Up to 20 files, 25 MB each.'}
+            </p>
+          </div>
+        )}
+        {error && (
+          <p className="text-[0.78rem] text-[var(--color-brick)]">{error}</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function AttachmentCard({
+  buildingId, attachment, onDelete, deleting,
+}: {
+  buildingId: number;
+  attachment: BuildingAttachment;
+  onDelete?: () => void;
+  deleting: boolean;
+}) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    let revoked = false;
+    let objectUrl: string | null = null;
+    (async () => {
+      try {
+        const blob = await fetchBuildingAttachmentBlob(buildingId, attachment.id);
+        if (revoked) return;
+        objectUrl = URL.createObjectURL(blob);
+        setSrc(objectUrl);
+      } catch {
+        // Leave src=null; the card renders a filename-only fallback.
+      }
+    })();
+    return () => {
+      revoked = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [buildingId, attachment.id]);
+
+  return (
+    <li className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)] overflow-hidden">
+      <div className="aspect-[4/3] bg-[var(--color-paper)] flex items-center justify-center">
+        {src ? (
+          <img
+            src={src}
+            alt={attachment.filename}
+            className="max-h-full max-w-full object-contain"
+          />
+        ) : (
+          <span className="text-[0.7rem] text-[var(--color-ink-3)]">
+            preview…
+          </span>
+        )}
+      </div>
+      <div className="px-3 py-2 flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-[0.78rem] text-[var(--color-ink)]" title={attachment.filename}>
+            {attachment.filename}
+          </p>
+          <p className="text-[0.7rem] text-[var(--color-ink-3)]">
+            {(attachment.byte_size / 1024).toFixed(0)} KB
+            {attachment.width_px && attachment.height_px
+              ? ` · ${attachment.width_px}×${attachment.height_px}`
+              : ''}
+          </p>
+        </div>
+        {onDelete && (
+          <button
+            type="button"
+            onClick={onDelete}
+            disabled={deleting}
+            className="shrink-0 text-[var(--color-ink-3)] hover:text-[var(--color-brick)] disabled:opacity-40 text-sm"
+            aria-label={`Delete ${attachment.filename}`}
+          >
+            ×
+          </button>
+        )}
+      </div>
+    </li>
   );
 }
 
