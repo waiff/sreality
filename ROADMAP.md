@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 15:43 UTC_
+_Last refreshed: 2026-05-13 18:06 UTC_
 
-**Branch:** `claude/move-stats-to-browse-hIxsP`
+**Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-13 15:43 UTC_
 **Last 10 commits:**
 
 ```
+1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
+bababba roadmap: refresh auto-status block
 23fae19 merge: resolve ROADMAP.md auto-status conflict with origin/main
 f4830c2 browse: per-disposition ppm2 box plots, retire Region tab
 de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
@@ -24,8 +26,6 @@ de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
 6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
 b2d94cb browse: cross-source hover sync between cards, table, and map
 c1150cc Merge pull request #73 from waiff/claude/browse-listings-map-layout-PHwYj
-0568357 roadmap: refresh auto-status block
-8b4a3e6 browse: raise cards carousel per-listing cap from 5 to 50
 ```
 
 <!-- END AUTO-STATUS -->
