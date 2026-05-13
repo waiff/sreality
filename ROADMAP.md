@@ -5,17 +5,20 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 09:05 UTC_
+_Last refreshed: 2026-05-13 09:40 UTC_
 
 **Branch:** `claude/estimation-price-by-condition-eLUE4`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 35 files, latest `036_building_unit_extractor.sql`.
+**Migrations on disk:** 37 files, latest `038_skill_rental_estimator_condition_scenarios.sql`.
 
 **Last 10 commits:**
 
 ```
+715027f estimation: teach rental_estimator_full_v1 about condition scenarios (migration not yet applied)
+b0495c8 estimation: add condition-scenario columns to estimation_runs (migration not yet applied)
+9bb5297 roadmap: refresh auto-status block
 59e9263 Merge pull request #61 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
 038193e building: Phase B1 — URL ingest + unit extractor + confirmation UI
 fbc584d Merge pull request #60 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
@@ -23,9 +26,6 @@ fbf8dc3 roadmap: plan Phase B1 (URL ingest + unit extractor + confirmation UI)
 c028816 Merge pull request #59 from waiff/claude/add-building-paste-feature-NmQIy
 6b95c75 roadmap: refresh auto-status block
 182fc2a building: renumber 034 -> 035 + apply migration
-40ad67d building: Phase B0 schema + scaffolding (migration not yet applied)
-d2a2e30 roadmap: refresh auto-status block
-d6396fe Merge pull request #57 from waiff/claude/review-roadmap-scope-BHt5w
 ```
 
 <!-- END AUTO-STATUS -->
