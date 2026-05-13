@@ -2,7 +2,6 @@ import { Navigate, type RouteObject } from 'react-router-dom';
 import Shell from './components/Shell';
 import Browse from './pages/Browse';
 import ListingDetail from './pages/ListingDetail';
-import Region from './pages/Region';
 import Health from './pages/Health';
 import BuildingDetail from './pages/BuildingDetail';
 import EstimationDetail from './pages/EstimationDetail';
@@ -23,7 +22,6 @@ export const routes: RouteObject[] = [
       { path: 'browse', element: <Browse /> },
       { path: 'listing', element: <ListingDetail /> },
       { path: 'listing/:sreality_id', element: <ListingDetail /> },
-      { path: 'region', element: <Region /> },
       { path: 'health', element: <Health /> },
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
       { path: 'estimations', element: <EstimationList /> },

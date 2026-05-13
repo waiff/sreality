@@ -1,4 +1,10 @@
--- 042_estimation_custom_inputs.sql
+-- 044_estimation_custom_inputs.sql
+--
+-- (Originally drafted as 042; renumbered to 044 because slot 042 was
+-- claimed by 042_browse_stats_ppm2_box.sql on
+-- claude/move-stats-to-browse-hIxsP, which merged to main before this
+-- migration. Renumbered before apply; safe coexist — the two
+-- migrations touch disjoint tables.)
 --
 -- Operator-supplied custom inputs that travel with an estimation:
 --

@@ -1,6 +1,9 @@
--- 043_skill_attachment_tool.sql
+-- 045_skill_attachment_tool.sql
 --
--- Wires the `read_floor_plan` tool (added by migration 042 + new
+-- (Renumbered from 043 alongside the renumbering of 042 →
+-- 044_estimation_custom_inputs.sql; see that migration's header.)
+--
+-- Wires the `read_floor_plan` tool (added by migration 044 + new
 -- toolkit/floor_plan.py) into the estimator skills, and seeds two
 -- new app_settings rows for the operator-tunable system prompt and
 -- model. Same pattern as migration 027 (visual layer) /

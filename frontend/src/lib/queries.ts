@@ -4,13 +4,12 @@ import {
   seenWithinToIso,
 } from './filters';
 import type {
-  ActiveByDayRow,
   HealthSummary,
   ImagePublic,
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
-  RegionStats,
+  Ppm2Box,
 } from './types';
 
 /* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so
@@ -302,13 +301,19 @@ export interface DistrictFacet {
   count: number;
 }
 
+export interface BrowseStatsDispositionRow {
+  disposition: string;
+  n: number;
+  ppm2_box: Ppm2Box | null;
+}
+
 export interface BrowseStats {
   total: number;
   new_7d: number;
   new_30d: number;
   price: { p25: number; p50: number; p75: number } | null;
   ppm2:  { p25: number; p50: number; p75: number } | null;
-  dispositions: ReadonlyArray<{ disposition: string; n: number }>;
+  dispositions: ReadonlyArray<BrowseStatsDispositionRow>;
 }
 
 export const fetchBrowseStats = async (
@@ -473,52 +478,6 @@ export const fetchImagesByListing = async (
     .order('id', { ascending: true });
   if (error) throw error;
   return (data ?? []) as unknown as ImagePublic[];
-};
-
-/* -------------------------------------------------------------------------- */
-/* Region page (Part D) — calls into migration 012 RPCs                       */
-/* -------------------------------------------------------------------------- */
-
-export type RegionMode =
-  | { kind: 'districts'; districts: string[] }
-  | { kind: 'radius'; lng: number; lat: number; radiusM: number };
-
-const rpcArgs = (mode: RegionMode) => {
-  if (mode.kind === 'districts') {
-    return {
-      districts_filter: mode.districts.length > 0 ? mode.districts : null,
-      center_lng: null,
-      center_lat: null,
-      radius_m: null,
-    };
-  }
-  return {
-    districts_filter: null,
-    center_lng: mode.lng,
-    center_lat: mode.lat,
-    radius_m: mode.radiusM,
-  };
-};
-
-export const isRegionDefined = (mode: RegionMode): boolean =>
-  mode.kind === 'districts' ? mode.districts.length > 0 : true;
-
-export const fetchRegionStats = async (mode: RegionMode): Promise<RegionStats> => {
-  const { data, error } = await supabase.rpc('region_stats', rpcArgs(mode));
-  if (error) throw error;
-  return data as RegionStats;
-};
-
-export const fetchRegionActiveByDay = async (
-  mode: RegionMode,
-  daysBack = 90,
-): Promise<ActiveByDayRow[]> => {
-  const { data, error } = await supabase.rpc('region_active_by_day', {
-    ...rpcArgs(mode),
-    days_back: daysBack,
-  });
-  if (error) throw error;
-  return (data ?? []) as ActiveByDayRow[];
 };
 
 /* -------------------------------------------------------------------------- */
