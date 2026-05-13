@@ -7,25 +7,25 @@
 
 _Last refreshed: 2026-05-13 19:17 UTC_
 
-**Branch:** `claude/rental-estimates-agent-tools-Lompi`
+**Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 43 files, latest `045_skill_attachment_tool.sql`.
+**Migrations on disk:** 44 files, latest `045_skill_attachment_tool.sql`.
 
 **Last 10 commits:**
 
 ```
+d676069 phase-ai slice A: capture full tool-call payloads alongside trace
+694e80e migrations: add 043 estimation_trace_payloads side-table
+5215551 roadmap: refresh auto-status block
+2ecf104 Merge pull request #78 from waiff/claude/rental-estimates-agent-tools-Lompi
+cda35d1 merge: resolve ROADMAP auto-status conflict with origin/main
 ddd81bf roadmap: refresh auto-status block
+bb74bc4 Merge pull request #77 from waiff/claude/add-estimation-files-context-ugzqK
 a7fdba4 roadmap: refresh auto-status block
 fdb5c6b roadmap: scope manual rental estimates + deferred agent code-exec
-abb5ccd merge: resolve ROADMAP auto-status conflict with origin/main
 4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
-1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
-bababba roadmap: refresh auto-status block
-43d5b2a estimations: operator-supplied instructions, context, and floor-plan attachments
-23fae19 merge: resolve ROADMAP.md auto-status conflict with origin/main
-f4830c2 browse: per-disposition ppm2 box plots, retire Region tab
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1402,7 +1402,66 @@ feedback-driven prompt refinement loop where the operator's written
 critique of a specific run gets fed back into the skill that produced
 it.
 
-### Phase AI: Feedback-driven skill refinement (proposed)
+### Phase AI: Feedback-driven skill refinement (active)
+
+Sliced into three independent PRs along the data-flow boundary:
+slice A captures full tool-call payloads alongside the existing
+bounded trace; slice B adds operator feedback capture; slice C
+drives the actual refiner skill. Each slice is independently
+useful.
+
+#### Slice A: Trace inspection enrichment (done)
+
+Migration 043 lands the side-table foundation; PR1 of three.
+
+- Migration 043: `estimation_trace_payloads(estimation_run_id,
+  step_n, full_output jsonb, captured_at)`, PK on the pair.
+  ON DELETE CASCADE so payloads track the parent run. RLS enabled,
+  no policies — service-role only; the frontend reads via the
+  bearer-gated endpoint below. 30-day retention documented in
+  CLAUDE.md (architectural rule #9 prose); no automated pruner,
+  manual SQL when the table grows.
+- `TraceRecorder.set_full_output(...)` + `iter_payloads()` +
+  top-level `flush_trace_payloads(conn, run_id, recorder)`. The
+  recorder accumulates `(step_n, full_output)` pairs in memory;
+  flush executes a single `executemany` INSERT after the parent
+  `estimation_runs` row is persisted. `ON CONFLICT DO NOTHING`
+  makes retry double-flush a no-op.
+- Wired into:
+  - `estimate_yield` (deterministic path): captures the full
+    `find_comparables` cohort and `analyze_distribution` result.
+  - `agent.run_agent_estimation`: captures every tool-call result
+    in the loop, plus the terminator input and unknown-tool
+    diagnostics. Exception paths leave the payload unset by
+    design (failed tool calls have nothing to drill into).
+  - All three persist sites: `create_estimation_run` success path,
+    `_persist_failed_run`, and `_run_agent_path` (both finalise
+    branches) call `flush_trace_payloads` after the row exists.
+- `GET /estimations/{id}/trace/{n}/payload` (bearer-gated) returns
+  `{step_n, full_output, captured_at}`, 404 when absent.
+- Frontend `Timeline.tsx`: `tool_call` step bodies render a
+  "Show full payload" expander that lazily calls the new
+  `useTracePayload(runId, stepN, enabled)` hook (added to
+  `frontend/src/lib/queries.ts`). `EstimationDetail` threads the
+  run id into `<Timeline runId={run.id} />`; previews and other
+  callers without a persisted run continue to render without the
+  expander.
+- Hermetic unit tests on `set_full_output` / `iter_payloads`:
+  computation/reasoning steps never produce payload rows;
+  numbering on payload rows lines up with the trace step `n`.
+
+Past-run drill-down is one-directional in time: the writer only
+captures payloads for runs executed *after* slice A shipped.
+Pre-existing `estimation_runs` rows lose the drill-down ability;
+the trace summary stays intact.
+
+#### Slice B: Feedback capture (next)
+
+#### Slice C: Refinement loop (after slice B)
+
+---
+
+#### Original phase brief (pre-slicing)
 
 **Trace inspection enrichment**
 

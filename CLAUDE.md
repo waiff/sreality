@@ -368,6 +368,18 @@ service that exposes it (`api/`). They do not apply to the scraper.
    single-digit kilobytes regardless of cohort size. Bumping the
    version is a deliberate change; future readers must handle older
    versions.
+   Full per-step tool outputs that the operator may want to drill
+   into later live in a separate side-table `estimation_trace_payloads`
+   (migration 043, Phase AI slice A), keyed on
+   `(estimation_run_id, step_n)`. Populated only for `tool_call`
+   steps that the agent loop or `estimate_yield` opts in via
+   `StepHandle.set_full_output(...)`. Reachable through
+   `GET /estimations/{id}/trace/{n}/payload` for click-to-expand
+   drill-down. Same retention discipline as
+   `listing_freshness_checks`: rows older than 30 days are safe to
+   delete; no automated pruner; manual SQL when the table grows.
+   Removing an old payload row strips the drill-down for that step
+   but leaves the trace summary intact.
 10. **Agent skills live in the `skills` table; the on-disk
     `skills/<name>/SKILL.md` file is the canonical seed.**
     Each skill is a bundle of (system prompt + allowed tool whitelist

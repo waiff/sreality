@@ -69,6 +69,7 @@ def estimate_yield(
             "result_count": cohort_res["metadata"]["result_count"],
             "data_freshness": cohort_res["metadata"].get("data_freshness"),
         })
+        step.set_full_output(cohort_res)
     listings = cohort_res["data"]["listings"]
     cohort_md = cohort_res["metadata"]
 
@@ -81,6 +82,7 @@ def estimate_yield(
         step.set_summary({
             k: d.get(k) for k in ("n", "median", "p25", "p75", "iqr")
         })
+        step.set_full_output(dist)
 
     scale_label = (
         f"scale per-m² by target area ({estimate_kind})"

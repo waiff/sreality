@@ -19,7 +19,7 @@
  * and the SummaryGrid helpers are shared across both layouts.
  */
 
-import { useState, type FC, type ReactNode } from 'react';
+import { createContext, useContext, useState, type FC, type ReactNode } from 'react';
 import type {
   Trace,
   TraceStep,
@@ -29,10 +29,20 @@ import type {
   TraceStepToolCall,
 } from '@/lib/types';
 import { fmtCount, fmtCzk } from '@/lib/format';
+import { useTracePayload } from '@/lib/queries';
 
 interface Props {
   trace: Trace | null;
+  /**
+   * Estimation run id. When supplied, tool_call rows expose a
+   * "Show full payload" expander that fetches from
+   * GET /estimations/{runId}/trace/{n}/payload. Omit for previews or
+   * any context where the payload side-table isn't reachable.
+   */
+  runId?: number;
 }
+
+const RunIdContext = createContext<number | null>(null);
 
 const SELECTION_SUMMARY_LABEL = 'comparable_selection_summary';
 const FCR_TOOL_NAME = 'find_comparables_relaxed';
@@ -62,7 +72,7 @@ interface SelectionSummary {
   stop_reason: string | null;
 }
 
-export default function Timeline({ trace }: Props) {
+export default function Timeline({ trace, runId }: Props) {
   if (!trace || trace.steps.length === 0) {
     return (
       <div className="text-sm text-[var(--color-ink-3)] italic">
@@ -72,12 +82,18 @@ export default function Timeline({ trace }: Props) {
   }
 
   const summary = pickSelectionSummary(trace.steps);
+  const body =
+    summary && summary.rounds.length > 0 ? (
+      <V2Layout trace={trace} summary={summary} />
+    ) : (
+      <FlatLayout trace={trace} />
+    );
 
-  if (summary && summary.rounds.length > 0) {
-    return <V2Layout trace={trace} summary={summary} />;
-  }
-
-  return <FlatLayout trace={trace} />;
+  return (
+    <RunIdContext.Provider value={runId ?? null}>
+      {body}
+    </RunIdContext.Provider>
+  );
 }
 
 /* -------------------------------------------------------------------------- */
@@ -645,6 +661,7 @@ function KindBadge({ kind }: { kind: TraceStepKind }) {
 
 function ToolCallBody({ step }: { step: TraceStep }) {
   const s = step as TraceStepToolCall;
+  const runId = useContext(RunIdContext);
   return (
     <div className="space-y-3">
       <DetailGroup label="Tool">
@@ -658,6 +675,47 @@ function ToolCallBody({ step }: { step: TraceStep }) {
       <DetailGroup label="Output summary">
         <SummaryGrid summary={s.output_summary} />
       </DetailGroup>
+      {runId != null && <FullPayloadDrillDown runId={runId} stepN={s.n} />}
+    </div>
+  );
+}
+
+function FullPayloadDrillDown({ runId, stepN }: { runId: number; stepN: number }) {
+  const [open, setOpen] = useState(false);
+  const query = useTracePayload(runId, stepN, open);
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="inline-flex items-baseline gap-1.5 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+      >
+        <Chevron open={open} />
+        {open ? 'Hide full payload' : 'Show full payload'}
+      </button>
+      {open && (
+        <div className="mt-2">
+          {query.isLoading && (
+            <p className="text-[0.78rem] text-[var(--color-ink-4)] italic">
+              loading payload…
+            </p>
+          )}
+          {query.isError && (
+            <p className="text-[0.78rem] text-[var(--color-brick)] italic">
+              {query.error?.status === 404
+                ? 'No payload captured for this step.'
+                : `Could not load payload: ${query.error?.message ?? 'unknown error'}`}
+            </p>
+          )}
+          {query.data && (
+            <pre className="font-mono text-[0.72rem] text-[var(--color-ink-2)] whitespace-pre-wrap bg-[var(--color-inset)] px-2 py-1.5 rounded-[var(--radius-xs)] border border-[var(--color-rule)] overflow-x-auto max-h-[28rem] overflow-y-auto">
+              {safeStringify(query.data.full_output)}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   );
 }

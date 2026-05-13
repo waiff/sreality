@@ -195,6 +195,18 @@ export const createEstimation = (
 export const getEstimation = (id: number): Promise<EstimationRun> =>
   request<EstimationRun>(`/estimations/${id}`);
 
+export interface TracePayload {
+  step_n: number;
+  full_output: unknown;
+  captured_at: string | null;
+}
+
+export const getTracePayload = (
+  runId: number,
+  stepN: number,
+): Promise<TracePayload> =>
+  request<TracePayload>(`/estimations/${runId}/trace/${stepN}/payload`);
+
 export const listEstimations = (
   params: EstimationListParams = {},
 ): Promise<EstimationListResponse> =>
