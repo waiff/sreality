@@ -702,6 +702,7 @@ def _initial_user_message(
             "max_age_days": filters.max_age_days,
             "category_main": filters.category_main,
             "category_type": filters.category_type,
+            "population": filters.population,
         },
         "purchase_price_czk": purchase_price_czk,
     }
