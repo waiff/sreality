@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 15:43 UTC_
+_Last refreshed: 2026-05-13 18:07 UTC_
 
-**Branch:** `claude/move-stats-to-browse-hIxsP`
+**Branch:** `claude/rental-estimates-agent-tools-Lompi`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-13 15:43 UTC_
 **Last 10 commits:**
 
 ```
+1be1fd3 Merge pull request #76 from waiff/claude/move-stats-to-browse-hIxsP
+bababba roadmap: refresh auto-status block
 23fae19 merge: resolve ROADMAP.md auto-status conflict with origin/main
 f4830c2 browse: per-disposition ppm2 box plots, retire Region tab
 de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
@@ -24,8 +26,6 @@ de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
 6736181 Merge remote-tracking branch 'origin/main' into claude/browse-listings-map-layout-PHwYj
 b2d94cb browse: cross-source hover sync between cards, table, and map
 c1150cc Merge pull request #73 from waiff/claude/browse-listings-map-layout-PHwYj
-0568357 roadmap: refresh auto-status block
-8b4a3e6 browse: raise cards carousel per-listing cap from 5 to 50
 ```
 
 <!-- END AUTO-STATUS -->
@@ -294,6 +294,43 @@ Builds on slice 1.
   picker.
 - Third provider (OpenAI or Vertex AI service-account auth).
 - Per-skill A/B comparison view on `/estimations`.
+
+### Phase 7d: Agent code execution (deferred)
+
+Let the agent build and run small ad-hoc Python when the fixed
+toolkit can't express a needed calculation (e.g. a one-off
+distribution fit, a custom aggregate over the comparables already
+in hand, a sensitivity check the existing tools don't cover).
+Scoped now, implemented later — sequenced after the manual
+rental estimates work (Phase U-ME) so the simpler, contained
+schema feature lands first.
+
+Operator-confirmed approach:
+- Self-hosted sandboxed subprocess on the Railway container.
+  No third-party sandbox (rules out e2b), no provider-hosted
+  code-exec beta (rules out Anthropic's `code_execution_20250522`
+  and Gemini's native `code_execution`). Cross-provider neutral
+  per CLAUDE.md.
+- Sandbox primitives still to design when the phase starts:
+  `subprocess.run` with `preexec_fn` setting `rlimit_as` /
+  `rlimit_cpu`, env scrub, no network egress, per-call tmpdir,
+  wall-clock timeout. Or `RestrictedPython` for a pure-Python
+  whitelist. Decision is part of the phase, not this stub.
+- New `agent_code_executions` audit table keyed on
+  `estimation_runs.id` so every code block, its stdout, stderr,
+  duration, and result is auditable alongside the existing
+  trace.
+- Wired as a new `computation_v1` skill rather than a flag on
+  `rental_estimator_v1` — keeps the safety boundary explicit
+  and avoids broadening the existing skill's allowed_tools by
+  a category-change rather than a per-tool addition.
+- Trace integration: each execution emits a `step.kind =
+  'code_execution'` entry alongside today's `tool_call`,
+  `computation`, and `reasoning` kinds. `TRACE_SCHEMA_VERSION`
+  in `api/estimation_runs.py` bumps when this lands.
+- Open questions deferred to the phase: pre-populated namespace
+  shape (pandas-ready vs pure dicts), whether the agent can
+  reference earlier tool outputs by name, soft-cost cap per run.
 
 ## UI track (parallel, independent of analytical phases)
 
@@ -825,6 +862,78 @@ notes — end-to-end.
     by `tag_id`, not by name. A shared `TagEditPopover` wires
     rename / recolour / delete into both tag pickers — the
     CurationBlock matches list and the Browse Filters "Add" rows.
+
+### Phase U-ME: Manual rental estimates (next)
+
+Capture operator-judgement rent figures as first-class data and
+make them visible to both humans (a panel on Listing Detail) and
+the agent (a new toolkit tool, consulted by
+`rental_estimator_v1` before `record_estimate`). Bridges the gap
+between an operator's broker quote / portfolio benchmark / gut
+number and the agent's defensible distribution — today that
+private signal only lives in `listing_notes` free text where
+neither side can use it as a number.
+
+Shape locked with the operator:
+- Point estimate (`rent_czk` integer, CHECK 1000–1000000), not
+  a range. Simpler than mirroring the estimator's p25/p75 and
+  matches how operators actually write the number down.
+- One row per estimate; many per listing. Mutable rows with
+  full audit history on UPDATE and DELETE via a trigger (same
+  pattern as `app_settings_history` in migration 020).
+- Free-text `author` + `source_kind` CHECK ∈
+  `broker / gut / external_comp / portfolio / other` + optional
+  `notes` (≤4000 chars).
+
+Scope:
+- Migration 043: `manual_rental_estimates` (FK
+  `sreality_id`, the fields above, `created_at`, `updated_at`,
+  `updated_by`) + `manual_rental_estimates_history` (append-only,
+  `change_kind` ∈ `update / delete`) + BEFORE UPDATE / AFTER
+  DELETE trigger. `manual_rental_estimates_public` view with
+  anon select grant (same pattern as `listing_notes_public` in
+  migration 025).
+- API: new `api/manual_estimates.py` exposing CRUD over
+  `/listings/{id}/manual_estimates` (GET + POST) and
+  `/manual_estimates/{id}` (PATCH + DELETE). All bearer-gated
+  per CLAUDE.md toolkit rule #8. Pydantic schemas appended to
+  `api/schemas.py`.
+- Toolkit: `toolkit/manual_estimates.py:get_manual_rental_estimates(conn,
+  sreality_id)` returns the standard `{data, metadata}` envelope
+  with `data.estimates` (empty list when none exist).
+  POST `/tools/get_manual_rental_estimates` route in
+  `api/main.py`.
+- Agent: handler + `_ToolDef` entry registered in
+  `api/agent.py:_build_tool_registry()` so the tool is callable
+  by name from the agent loop. Provider-agnostic — no changes
+  needed in `api/providers/`.
+- Migration 044: `UPDATE skills` for `rental_estimator_v1` —
+  appends `get_manual_rental_estimates` to `allowed_tools` and
+  inserts a new "CONSULT MANUAL ESTIMATES" step into the
+  system prompt between "VERIFY A SUSPICIOUS COMPARABLE" and
+  "WRITE 1-2 SENTENCES OF REASONING". The skill's prompt
+  instructs the agent: call the tool once before
+  `record_estimate`; if the point estimate diverges from any
+  manual figure by more than ~15%, name each manual figure and
+  its `source_kind` in `warnings`. The on-disk
+  `skills/rental_estimator_v1/SKILL.md` is updated in the same
+  commit so the file and the DB row stay in sync.
+- Frontend: `ManualEstimatesBlock` slotted into
+  `frontend/src/pages/ListingDetail.tsx` after `CurationBlock`
+  (manual estimates are operator-curated like tags/notes;
+  same shelf is the natural home). Reads via
+  `manual_rental_estimates_public` with the anon key; writes go
+  through the bearer-gated API endpoints. Wrappers in
+  `frontend/src/lib/api.ts` (`listManualEstimates`,
+  `createManualEstimate`, `updateManualEstimate`,
+  `deleteManualEstimate`). No design-token changes.
+
+Out of scope for this phase:
+- Manual estimates on sales / commercial listings (the field
+  is named `rent_czk` and CHECK-bounded; a future migration
+  generalises).
+- The agent's ad-hoc Python code execution capability — that's
+  Phase 7d above, deferred.
 
 ### Phase U2.7: New-listing notifications (proposed)
 
