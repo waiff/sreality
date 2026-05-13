@@ -240,13 +240,16 @@ def test_post_with_sreality_url_excludes_target_from_comparables(
              trace_recorder=None):
         captured["exclude_ids"] = list(target.exclude_ids)
         return {
-            "estimate_kind": "rent",
-            "estimated_monthly_rent_czk": 20000,
-            "rent_p25_czk": 19000, "rent_p75_czk": 21000,
-            "estimated_sale_price_czk": None,
-            "sale_p25_czk": None, "sale_p75_czk": None,
-            "gross_yield_pct": None, "confidence": "medium",
-            "sample_size": 5, "comparables_used": [], "warnings": [],
+            "data": {
+                "estimate_kind": "rent",
+                "estimated_monthly_rent_czk": 20000,
+                "rent_p25_czk": 19000, "rent_p75_czk": 21000,
+                "estimated_sale_price_czk": None,
+                "sale_p25_czk": None, "sale_p75_czk": None,
+                "gross_yield_pct": None, "confidence": "medium",
+                "sample_size": 5, "comparables_used": [], "warnings": [],
+            },
+            "metadata": {"tool": "estimate_yield"},
         }
     monkeypatch.setattr(ey, "estimate_yield", fake)
 
