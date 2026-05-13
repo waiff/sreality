@@ -303,6 +303,52 @@ export const updateSkill = (
     json: patch,
   });
 
+/* Download the skill row as a SKILL.md document (Anthropic skill
+ * folder convention). Returns the raw body as a Blob so the caller
+ * can trigger a browser download. */
+export const exportSkill = async (name: string): Promise<Blob> => {
+  if (!BASE_URL) {
+    throw new ApiError('API base URL is not configured', 0, null);
+  }
+  const res = await fetch(
+    `${BASE_URL}/admin/skills/${encodeURIComponent(name)}/export`,
+    { headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {} },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new ApiError(text || `HTTP ${res.status}`, res.status, text);
+  }
+  return res.blob();
+};
+
+/* Upload a SKILL.md (or zip containing one) and overwrite the matching
+ * row (or auto-create if the name is new). Returns the resulting Skill. */
+export const importSkill = async (file: File): Promise<Skill> => {
+  if (!BASE_URL) {
+    throw new ApiError('API base URL is not configured', 0, null);
+  }
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${BASE_URL}/admin/skills/import`, {
+    method: 'POST',
+    headers: TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {},
+    body: form,
+  });
+  const text = await res.text();
+  let body: unknown = null;
+  if (text) {
+    try { body = JSON.parse(text); } catch { body = text; }
+  }
+  if (!res.ok) {
+    const detail =
+      body && typeof body === 'object' && body !== null && 'detail' in body
+        ? String((body as { detail: unknown }).detail)
+        : res.statusText || `HTTP ${res.status}`;
+    throw new ApiError(detail, res.status, body);
+  }
+  return body as Skill;
+};
+
 export const listAppSettings = (): Promise<{ data: AppSetting[] }> =>
   request<{ data: AppSetting[] }>('/admin/app_settings');
 

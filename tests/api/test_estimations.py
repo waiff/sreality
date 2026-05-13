@@ -1051,3 +1051,21 @@ def test_post_with_sreality_url_populates_sreality_source_kind(client, monkeypat
     assert body["parse_confidence_per_field"] is None
     assert body["source_html"] is None
     assert body["input_sreality_id"] == 2836292428
+
+
+def test_default_max_age_days_is_180_for_both_kinds():
+    """The agent prefers delisted comparables across a long window;
+    `_default_max_age_days` returns 180 regardless of estimate_kind so
+    the base filter the agent inherits matches that intent."""
+    assert er._default_max_age_days("rent") == 180
+    assert er._default_max_age_days("sale") == 180
+
+
+def test_build_filters_uses_180_day_window():
+    from api.schemas import CreateEstimationIn, TargetIn
+    body = CreateEstimationIn(
+        spec=TargetIn(lat=50.0, lng=14.0),
+        estimate_kind="rent",
+    )
+    filters = er._build_filters(body)
+    assert filters.max_age_days == 180

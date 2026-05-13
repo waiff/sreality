@@ -16,16 +16,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from api import dependencies as deps
 from api.agent import list_agent_tools
+from api.skill_io import parse_skill_file, serialize_skill
 from api.skills import (
     SkillNotFound,
     SkillValidationError,
+    insert_skill,
     list_skills,
     load_skill,
+    skill_exists,
     update_skill,
 )
 
@@ -65,6 +69,69 @@ def get_skill(
         skill = load_skill(conn, name)
     except SkillNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _skill_to_dict(skill)
+
+
+@router.get("/skills/{name}/export", response_class=PlainTextResponse)
+def export_skill(
+    name: str, conn: Any = Depends(deps.get_db_conn)
+) -> PlainTextResponse:
+    """Export a skill row as a SKILL.md document.
+
+    Matches the Anthropic agent-SDK skill folder convention: frontmatter
+    (name, description, allowed_tools, preferred_model, limits) followed
+    by the system prompt body. The operator can save this file, edit it
+    in their editor of choice, and re-upload via POST /admin/skills/import.
+    """
+    try:
+        skill = load_skill(conn, name)
+    except SkillNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    body = serialize_skill(skill)
+    return PlainTextResponse(
+        content=body,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{name}__SKILL.md"'
+            ),
+        },
+    )
+
+
+@router.post("/skills/import")
+async def import_skill(
+    file: UploadFile = File(...),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Import a SKILL.md (or zip containing one) into the skills table.
+
+    Auto-creates the row when the SKILL.md's `name` doesn't already
+    exist. This intentionally departs from CLAUDE.md rule 10 in
+    exchange for operator UX. Re-importing an existing skill updates
+    the row in-place; the `skills_history` trigger preserves the
+    previous version automatically.
+    """
+    filename = file.filename or "SKILL.md"
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty upload")
+    try:
+        parsed = parse_skill_file(content, filename=filename)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    name = parsed["name"]
+    try:
+        if skill_exists(conn, name):
+            skill = update_skill(
+                conn, name, parsed, updated_by="settings_ui_import",
+            )
+        else:
+            skill = insert_skill(
+                conn, parsed, updated_by="settings_ui_import",
+            )
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _skill_to_dict(skill)
 
 

@@ -109,8 +109,21 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "type": "string",
                         "enum": ["exact", "loose", "any"],
                     },
-                    "max_age_days": {"type": "integer", "minimum": 1, "maximum": 90},
+                    "max_age_days": {"type": "integer", "minimum": 1},
                     "min_results": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "population": {
+                        "type": "string",
+                        "enum": ["active", "delisted", "all"],
+                        "description": (
+                            "Which cohort to draw comparables from. "
+                            "'delisted' restricts to listings that left sreality "
+                            "(typically rented at the asking price); 'all' unions "
+                            "delisted + active; 'active' only sees live listings. "
+                            "Per the rental_estimator_v1 prompt, start with "
+                            "'delisted' and widen to 'all' / 'active' if the "
+                            "sample is too small."
+                        ),
+                    },
                 },
                 "required": [],
             },
@@ -627,6 +640,8 @@ def _handle_find_comparables_relaxed(
         filters = replace(filters, disposition_match=args["disposition_match"])
     if "max_age_days" in args:
         filters = replace(filters, max_age_days=int(args["max_age_days"]))
+    if "population" in args:
+        filters = replace(filters, population=args["population"])
 
     min_results = int(args.get("min_results", 5))
     result = find_comparables_relaxed(
@@ -644,6 +659,7 @@ def _handle_find_comparables_relaxed(
             "disposition_match": filters.disposition_match,
             "max_age_days": filters.max_age_days,
             "min_results": min_results,
+            "population": filters.population,
         },
         "cohort_size": len(listings),
         "cohort_ids": sorted(new_ids),
@@ -1018,6 +1034,7 @@ def _initial_user_message(
             "max_age_days": filters.max_age_days,
             "category_main": filters.category_main,
             "category_type": filters.category_type,
+            "population": filters.population,
         },
         "purchase_price_czk": purchase_price_czk,
     }

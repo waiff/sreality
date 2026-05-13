@@ -72,7 +72,11 @@ _DEFAULT_ACTIVE_ONLY = True
 
 
 def _default_max_age_days(estimate_kind: str) -> int:
-    return 7 if estimate_kind == "rent" else 30
+    # 180 days for both kinds — the agent prefers delisted listings
+    # (which haven't been seen for weeks by definition) and needs the
+    # window wide enough to find enough of them. See
+    # skills/rental_estimator_v1/SKILL.md principles 2 + 3.
+    return 180
 
 
 class StepHandle:

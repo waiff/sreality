@@ -339,3 +339,50 @@ def test_reasoning_step_shape():
     assert "label" not in step
     assert step["output_summary"]["tool_calls_queued"] == ["find_comparables_relaxed"]
     assert step["output_summary"]["provider"] == "anthropic"
+
+
+# ---------------------------------------------------------------------------
+# tool schema invariants
+# ---------------------------------------------------------------------------
+
+def test_find_comparables_relaxed_schema_has_no_max_age_ceiling():
+    """The 90-day ceiling was dropped so the rental_estimator_v1 skill
+    can ask for max_age_days=180 per its operating principles."""
+    schema = agent_mod.AGENT_TOOLS["find_comparables_relaxed"].input_schema
+    age = schema["properties"]["max_age_days"]
+    assert age == {"type": "integer", "minimum": 1}
+
+
+def test_find_comparables_relaxed_schema_exposes_population():
+    schema = agent_mod.AGENT_TOOLS["find_comparables_relaxed"].input_schema
+    pop = schema["properties"]["population"]
+    assert pop["enum"] == ["active", "delisted", "all"]
+
+
+def test_population_arg_threads_into_filters(monkeypatch):
+    """Calling the relaxed handler with population overrides the
+    base-filter value and is echoed in the selection_rounds trace."""
+    captured: dict[str, Any] = {}
+
+    def fake_find(_conn, _target, filters, *, min_results):
+        captured["population"] = filters.population
+        captured["max_age_days"] = filters.max_age_days
+        return {"data": {"listings": [], "relaxation_trace": []},
+                "metadata": {"result_count": 0}}
+
+    monkeypatch.setattr(agent_mod, "find_comparables_relaxed", fake_find)
+
+    state = agent_mod._LoopState(  # type: ignore[attr-defined]
+        conn=_FakeConn(),
+        sreality_client=None,  # type: ignore[arg-type]
+        llm_client=None,  # type: ignore[arg-type]
+        target=_target(),
+        base_filters=ComparableFilters(radius_m=1000, max_age_days=180),
+    )
+    agent_mod._handle_find_comparables_relaxed(
+        {"population": "delisted", "max_age_days": 180}, state,
+    )
+    assert captured["population"] == "delisted"
+    assert captured["max_age_days"] == 180
+    assert state.selection_rounds[-1]["filters"]["population"] == "delisted"
+    assert state.selection_rounds[-1]["filters"]["max_age_days"] == 180
