@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 10:28 UTC_
+_Last refreshed: 2026-05-13 10:57 UTC_
 
 **Branch:** `claude/browse-listings-map-layout-PHwYj`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 35 files, latest `036_building_unit_extractor.sql`.
+**Migrations on disk:** 36 files, latest `037_browse_stats_categories.sql`.
 
 **Last 10 commits:**
 
 ```
+226df51 browse: sreality-style 3-column layout + category picker + map polish
 afb9600 Merge pull request #62 from waiff/claude/plan-phase-b2-U4ULP
 5457710 roadmap: refresh auto-status block
 8ab4982 roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ edcf0c3 roadmap: plan Phase B2 (per-unit fan-out + building rollup view)
 fbc584d Merge pull request #60 from waiff/claude/plan-phase-b1-skill-reuse-VrgpZ
 fbf8dc3 roadmap: plan Phase B1 (URL ingest + unit extractor + confirmation UI)
 c028816 Merge pull request #59 from waiff/claude/add-building-paste-feature-NmQIy
-6b95c75 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
