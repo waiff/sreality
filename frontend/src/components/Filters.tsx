@@ -686,8 +686,18 @@ function RangeFilter({
     }
     const n = Number(raw);
     if (!Number.isFinite(n) || n < 0) return;
-    if (which === 0) setLo(n);
-    else setHi(n);
+    const clamped = Math.max(bounds.min, Math.min(n, bounds.max));
+    if (which === 0) {
+      onChange([clamped === bounds.min ? null : clamped, value[1]]);
+    } else {
+      onChange([value[0], clamped === bounds.max ? null : clamped]);
+    }
+  };
+
+  const onCommit = () => {
+    const a = value[0];
+    const b = value[1];
+    if (a != null && b != null && a > b) onChange([b, a]);
   };
 
   return (
@@ -724,9 +734,9 @@ function RangeFilter({
         />
       </div>
       <div className="mt-3 flex items-center gap-2">
-        <NumberCell value={value[0]} placeholder={String(bounds.min)} onChange={onNumber(0)} />
+        <NumberCell value={value[0]} placeholder={String(bounds.min)} onChange={onNumber(0)} onBlur={onCommit} />
         <span className="text-[var(--color-ink-3)] text-sm">—</span>
-        <NumberCell value={value[1]} placeholder={String(bounds.max)} onChange={onNumber(1)} />
+        <NumberCell value={value[1]} placeholder={String(bounds.max)} onChange={onNumber(1)} onBlur={onCommit} />
         <span className="text-[var(--color-ink-3)] text-xs ml-1 tracking-wide">{unit}</span>
       </div>
     </Section>
