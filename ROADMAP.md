@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 08:33 UTC_
+_Last refreshed: 2026-05-14 08:42 UTC_
 
 **Branch:** `claude/floating-feedback-button-AQAFy`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-14 08:33 UTC_
 **Last 10 commits:**
 
 ```
+7ff2623 roadmap: refresh auto-status block
 d9f7e98 frontend: float feedback panel under header with inline skill-prompt editor
 89e84d4 Merge pull request #90 from waiff/claude/build-ai-feedback-loop-56uah
 00b77e9 tests: update fakes for skills.archived_at column
@@ -25,7 +26,6 @@ f77d687 Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback
 ee07229 Merge pull request #88 from waiff/claude/fix-to-field-autofill-j32TB
 acf7fba Merge remote-tracking branch 'origin/main' into claude/fix-to-field-autofill-j32TB
 3762a35 merge: resolve ROADMAP auto-status conflict with origin/main
-f8959e2 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
