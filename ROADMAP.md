@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 06:52 UTC_
+_Last refreshed: 2026-05-14 06:59 UTC_
 
 **Branch:** `claude/add-qual-data-upload-pdP1Q`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-14 06:52 UTC_
 **Last 10 commits:**
 
 ```
+224da86 roadmap: scope clarifications on Phase QUAL + Phase AI slice D
 8bf80af roadmap: add Phase QUAL + Phase AI slice D
 b1702ad Merge pull request #84 from waiff/claude/resolve-error-post-success-cors
 06c3afb api: make post-success persistence non-fatal + echo CORS on 500
@@ -25,7 +26,6 @@ f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
 2eb44a5 merge: resolve ROADMAP auto-status conflict with origin/main
 1511b4a roadmap: refresh auto-status block
 5dfd09e roadmap: refresh auto-status block
-c4d26e3 Merge pull request #81 from waiff/claude/rental-estimates-agent-tools-Lompi
 ```
 
 <!-- END AUTO-STATUS -->
