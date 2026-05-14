@@ -1,10 +1,11 @@
-import { Suspense, lazy, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchEstimation,
   fetchImagesByListingIds,
+  fetchListingById,
   fetchListingsByIds,
   submitEstimation,
 } from '@/lib/queries';
@@ -352,13 +353,43 @@ function YieldBlock({ run }: { run: EstimationRun }) {
   const kind = run.estimate_kind ?? 'rent';
   const areaM2 = run.input_spec?.area_m2 ?? null;
   const defaultRent = run.estimated_monthly_rent_czk;
+
+  /* When the operator pasted a sreality URL, fetch the subject listing
+   * so a sale URL can prefill the listing-price input from the actual
+   * asking price. Skipped for non-sreality (no DB row to read) and for
+   * spec-only runs. */
+  const subjectQ = useQuery<ListingPublic | null, Error>({
+    queryKey: ['estimation-subject-listing', run.input_sreality_id],
+    queryFn: () => fetchListingById(run.input_sreality_id as number),
+    enabled: run.input_sreality_id != null,
+    staleTime: 60_000,
+  });
+
+  const subjectSalePrice =
+    subjectQ.data && subjectQ.data.category_type === 'prodej'
+      ? subjectQ.data.price_czk
+      : null;
+
   const defaultPrice =
+    subjectSalePrice ??
     run.input_purchase_price_czk ??
     (kind === 'sale' ? run.estimated_sale_price_czk : null);
 
   const [rent, setRent] = useState<number | null>(defaultRent);
   const [costPerM2, setCostPerM2] = useState<number | null>(DEFAULT_FOND_CZK_PER_M2);
-  const [price, setPrice] = useState<number | null>(defaultPrice);
+  const [price, setPriceState] = useState<number | null>(defaultPrice);
+  const [priceTouched, setPriceTouched] = useState(false);
+
+  /* Sync the price input to the latest default until the operator types
+   * into it — handles the listing query resolving after first render. */
+  useEffect(() => {
+    if (!priceTouched) setPriceState(defaultPrice);
+  }, [defaultPrice, priceTouched]);
+
+  const setPrice = (v: number | null) => {
+    setPriceTouched(true);
+    setPriceState(v);
+  };
 
   const fondOprav =
     costPerM2 != null && areaM2 != null ? costPerM2 * areaM2 : null;
@@ -367,6 +398,12 @@ function YieldBlock({ run }: { run: EstimationRun }) {
     rent != null && fondOprav != null && price != null && price > 0
       ? ((rent - fondOprav) * 12) / price * 100
       : null;
+
+  const priceHint = subjectSalePrice != null
+    ? 'Default: from sale listing'
+    : defaultPrice != null
+      ? 'Default: from inputs'
+      : 'Set purchase price';
 
   return (
     <div>
@@ -435,7 +472,7 @@ function YieldBlock({ run }: { run: EstimationRun }) {
           step="100000"
           suffix="Kč"
           onChange={setPrice}
-          hint={defaultPrice != null ? 'Default: from inputs' : 'Set purchase price'}
+          hint={priceHint}
         />
       </div>
     </div>
