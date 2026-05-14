@@ -100,19 +100,105 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                 "Find listings comparable to the target, automatically widening "
                 "the area / disposition filters until at least min_results are "
                 "found (or the relaxation ladder is exhausted). Returns the "
-                "cohort + a relaxation_trace showing what was widened."
+                "cohort + a relaxation_trace showing what was widened.\n\n"
+                "Every filter is optional. Omitted filters fall back to the "
+                "base filters established for this run (request body + app_settings "
+                "defaults). The skill prompt should instruct WHEN and HOW to "
+                "tune each one; pass only the filters you want to differ from "
+                "the base for this round."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
+                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 10000},
                     "area_band_pct": {"type": "number", "minimum": 0.05, "maximum": 0.6},
                     "disposition_match": {
                         "type": "string",
                         "enum": ["exact", "loose", "any"],
                     },
-                    "max_age_days": {"type": "integer", "minimum": 1, "maximum": 90},
+                    "max_age_days": {"type": "integer", "minimum": 1, "maximum": 365},
                     "min_results": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "population": {
+                        "type": "string",
+                        "enum": ["active", "delisted", "all"],
+                        "description": "Override active_only: 'active' = is_active AND within max_age_days; 'delisted' = is_active=false (closed deals); 'all' = both.",
+                    },
+                    "floor_band": {
+                        "type": "integer", "minimum": 0, "maximum": 20,
+                        "description": "Match floors within +/- N of the target's floor. Omit to ignore floor.",
+                    },
+                    "condition_match": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict cohort to listings whose `condition` is in this list (Czech, no diacritics): novostavba, po_rekonstrukci, velmi_dobry, dobry, pred_rekonstrukci, k_demolici.",
+                    },
+                    "building_type_match": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict cohort to listings whose `building_type` is in this list (Czech): cihla, panel, smisena, skelet, drevo, kamen, montovana, nizkoenergeticka.",
+                    },
+                    "energy_rating_match": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict to energy ratings in this list (single capital letters A-G).",
+                    },
+                    "has_balcony": {
+                        "type": "boolean",
+                        "description": "Legacy combined flag (balcony OR terrace OR loggia). Prefer the granular `terrace` filter for new logic.",
+                    },
+                    "has_lift": {"type": "boolean"},
+                    "has_parking": {
+                        "type": "boolean",
+                        "description": "Legacy combined flag (parking OR garage). Prefer the granular `garage` / `min_parking_lots` filters for new logic.",
+                    },
+                    "min_price_czk": {"type": "integer", "minimum": 0},
+                    "max_price_czk": {"type": "integer", "minimum": 0},
+                    "category_main": {
+                        "type": "string",
+                        "description": "Czech category enum (no diacritics): byt, dum, komercni, pozemek, ostatni. Inherited from the request body by default — only override if you deliberately want to mix categories.",
+                    },
+                    "category_type": {
+                        "type": "string",
+                        "description": "Czech category type enum: pronajem, prodej, drazba. Inherited from the request body by default.",
+                    },
+                    "category_sub_cb": {
+                        "type": "integer",
+                        "description": "Numeric sreality sub-category code. Use with caution — narrows the cohort aggressively.",
+                    },
+                    "locality_district_id": {
+                        "type": "integer",
+                        "description": "Sreality district id. Useful for constraining cohort to a specific municipality.",
+                    },
+                    "locality_region_id": {
+                        "type": "integer",
+                        "description": "Sreality region id (broader than district).",
+                    },
+                    "include_unreliable": {
+                        "type": "boolean",
+                        "description": "Include listings whose detail fetches have given up (listing_fetch_failures.given_up = true). Default false.",
+                    },
+                    "furnished": {
+                        "type": "string",
+                        "description": "Czech enum: zarizeny, castecne, nezarizeny.",
+                    },
+                    "terrace": {"type": "boolean"},
+                    "cellar": {"type": "boolean"},
+                    "garage": {"type": "boolean"},
+                    "ownership": {
+                        "type": "string",
+                        "description": "Czech ownership enum: osobni, druzstevni, statni, podil.",
+                    },
+                    "min_estate_area": {
+                        "type": "number",
+                        "description": "m². Plot area lower bound (mostly for dum/pozemek categories).",
+                    },
+                    "max_estate_area": {"type": "number"},
+                    "min_usable_area": {
+                        "type": "number",
+                        "description": "m². Distinct from the target.area_m2 +/- area_band_pct window; this is an absolute floor.",
+                    },
+                    "max_usable_area": {"type": "number"},
+                    "min_parking_lots": {"type": "integer", "minimum": 0},
                 },
                 "required": [],
             },
@@ -496,6 +582,11 @@ class _LoopState:
     # The estimation_runs.id currently driving the loop; passed through
     # to vision tools so their llm_calls rows attribute correctly.
     estimation_run_id: int | None = None
+    # Operator-tunable filter defaults (app_settings, migration 052).
+    # Used to seed the agent's per-round min_results when the LLM
+    # omits it. Other filter defaults are already baked into
+    # `base_filters` upstream in `_build_filters`.
+    filter_defaults: Any = None
 
 
 # --- entrypoint -----------------------------------------------------------
@@ -524,6 +615,7 @@ def run_agent_estimation(
     on the run row.
     """
     from api.estimate_yield import _used_entry  # circular dep; lazy import
+    from api.estimation_runs import load_filter_defaults
 
     state = _LoopState(
         conn=conn,
@@ -533,6 +625,7 @@ def run_agent_estimation(
         base_filters=filters,
         building_run_id=building_run_id,
         estimation_run_id=estimation_run_id,
+        filter_defaults=load_filter_defaults(conn),
     )
 
     # Filter the tool registry to the skill's whitelist.
@@ -726,21 +819,130 @@ def _dispatch_tool(
     return tool_def.handler(args, state)
 
 
+_FCR_OVERRIDE_FIELDS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
+    ("radius_m", int),
+    ("area_band_pct", float),
+    ("disposition_match", str),
+    ("max_age_days", int),
+    ("population", str),
+    ("floor_band", int),
+    ("condition_match", list),
+    ("building_type_match", list),
+    ("energy_rating_match", list),
+    ("has_balcony", bool),
+    ("has_lift", bool),
+    ("has_parking", bool),
+    ("min_price_czk", int),
+    ("max_price_czk", int),
+    ("category_main", str),
+    ("category_type", str),
+    ("category_sub_cb", int),
+    ("locality_district_id", int),
+    ("locality_region_id", int),
+    ("include_unreliable", bool),
+    ("furnished", str),
+    ("terrace", bool),
+    ("cellar", bool),
+    ("garage", bool),
+    ("ownership", str),
+    ("min_estate_area", float),
+    ("max_estate_area", float),
+    ("min_usable_area", float),
+    ("max_usable_area", float),
+    ("min_parking_lots", int),
+)
+
+
+def _filters_snapshot(
+    filters: ComparableFilters, *, min_results: int,
+) -> dict[str, Any]:
+    """Render every ComparableFilters field the agent can tune into a flat
+    dict for the selection_rounds audit trail.
+
+    The frontend's Strategy table renders one row per key here, so every
+    field listed here gets a column in the UI — including fields the
+    agent left at the base value. That's the explicit guarantee from
+    the user: "show all filters an agent can use ... even if the
+    agent chose to leave the filter blank".
+    """
+    return {
+        "radius_m": filters.radius_m,
+        "area_band_pct": filters.area_band_pct,
+        "disposition_match": filters.disposition_match,
+        "max_age_days": filters.max_age_days,
+        "min_results": min_results,
+        "active_only": filters.active_only,
+        "population": filters.population,
+        "floor_band": filters.floor_band,
+        "condition_match": (
+            list(filters.condition_match) if filters.condition_match else None
+        ),
+        "building_type_match": (
+            list(filters.building_type_match)
+            if filters.building_type_match else None
+        ),
+        "energy_rating_match": (
+            list(filters.energy_rating_match)
+            if filters.energy_rating_match else None
+        ),
+        "has_balcony": filters.has_balcony,
+        "has_lift": filters.has_lift,
+        "has_parking": filters.has_parking,
+        "min_price_czk": filters.min_price_czk,
+        "max_price_czk": filters.max_price_czk,
+        "category_main": filters.category_main,
+        "category_type": filters.category_type,
+        "category_sub_cb": filters.category_sub_cb,
+        "locality_district_id": filters.locality_district_id,
+        "locality_region_id": filters.locality_region_id,
+        "include_unreliable": filters.include_unreliable,
+        "furnished": filters.furnished,
+        "terrace": filters.terrace,
+        "cellar": filters.cellar,
+        "garage": filters.garage,
+        "ownership": filters.ownership,
+        "min_estate_area": filters.min_estate_area,
+        "max_estate_area": filters.max_estate_area,
+        "min_usable_area": filters.min_usable_area,
+        "max_usable_area": filters.max_usable_area,
+        "min_parking_lots": filters.min_parking_lots,
+    }
+
+
+def _coerce_arg(name: str, value: Any, caster: Any) -> Any:
+    if value is None:
+        return None
+    if caster is bool:
+        return bool(value)
+    if caster is list:
+        if isinstance(value, list):
+            return [str(v) for v in value if v is not None and str(v) != ""]
+        return None
+    try:
+        return caster(value)
+    except (TypeError, ValueError):
+        LOG.warning("find_comparables_relaxed: bad value for %r: %r", name, value)
+        return None
+
+
 def _handle_find_comparables_relaxed(
     args: dict[str, Any], state: _LoopState,
 ) -> dict[str, Any]:
     from dataclasses import replace
     filters = state.base_filters
-    if "radius_m" in args:
-        filters = replace(filters, radius_m=int(args["radius_m"]))
-    if "area_band_pct" in args:
-        filters = replace(filters, area_band_pct=float(args["area_band_pct"]))
-    if "disposition_match" in args:
-        filters = replace(filters, disposition_match=args["disposition_match"])
-    if "max_age_days" in args:
-        filters = replace(filters, max_age_days=int(args["max_age_days"]))
+    for name, caster in _FCR_OVERRIDE_FIELDS:
+        if name not in args:
+            continue
+        coerced = _coerce_arg(name, args[name], caster)
+        if coerced is None and caster is list:
+            continue
+        filters = replace(filters, **{name: coerced})
 
-    min_results = int(args.get("min_results", 5))
+    min_results = int(
+        args.get("min_results", state.filter_defaults.min_results)
+        if state.filter_defaults
+        else args.get("min_results", 5)
+    )
     result = find_comparables_relaxed(
         state.conn, state.target, filters, min_results=min_results,
     )
@@ -750,13 +952,7 @@ def _handle_find_comparables_relaxed(
     new_ids = {int(l["sreality_id"]) for l in listings}
     state.selection_rounds.append({
         "n": len(state.selection_rounds) + 1,
-        "filters": {
-            "radius_m": filters.radius_m,
-            "area_band_pct": filters.area_band_pct,
-            "disposition_match": filters.disposition_match,
-            "max_age_days": filters.max_age_days,
-            "min_results": min_results,
-        },
+        "filters": _filters_snapshot(filters, min_results=min_results),
         "cohort_size": len(listings),
         "cohort_ids": sorted(new_ids),
         "added_ids": sorted(new_ids - prev_ids),

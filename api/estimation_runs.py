@@ -61,18 +61,66 @@ LOG = logging.getLogger(__name__)
 
 TRACE_SCHEMA_VERSION = 2
 
-# Filter defaults used by /estimations now that the request schema no
-# longer carries them. Agent-mode runs override these per-iteration
-# (the agent picks what to widen and by how much); deterministic-mode
-# runs use them as-is for a single shot.
+# Filter defaults used by /estimations. Live values are read from
+# `app_settings` (seeded by migration 052) so the operator can tune
+# them via the Settings page without a redeploy. The constants below
+# are fallbacks for when an app_settings row is missing or unreadable.
+# Agent-mode runs use these as round-1 base filters; the agent
+# overrides any of them per round through find_comparables_relaxed.
 _DEFAULT_RADIUS_M = 1000
 _DEFAULT_AREA_BAND_PCT = 0.20
 _DEFAULT_DISPOSITION_MATCH = "exact"
 _DEFAULT_ACTIVE_ONLY = True
+_DEFAULT_MIN_RESULTS = 5
 
 
 def _default_max_age_days(estimate_kind: str) -> int:
     return 7 if estimate_kind == "rent" else 30
+
+
+def _load_app_setting(
+    conn: "psycopg.Connection", key: str, fallback: Any,
+) -> Any:
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM app_settings WHERE key = %s", (key,),
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        LOG.warning("app_settings lookup failed for %r: %s", key, exc)
+        return fallback
+    if row is None or row[0] is None:
+        return fallback
+    return row[0]
+
+
+@dataclass(frozen=True)
+class FilterDefaults:
+    radius_m: int
+    area_band_pct: float
+    disposition_match: str
+    active_only: bool
+    max_age_days_rent: int
+    max_age_days_sale: int
+    min_results: int
+
+    def max_age_days_for(self, estimate_kind: str) -> int:
+        if estimate_kind == "rent":
+            return self.max_age_days_rent
+        return self.max_age_days_sale
+
+
+def load_filter_defaults(conn: "psycopg.Connection") -> FilterDefaults:
+    return FilterDefaults(
+        radius_m=int(_load_app_setting(conn, "default_radius_m", _DEFAULT_RADIUS_M)),
+        area_band_pct=float(_load_app_setting(conn, "default_area_band_pct", _DEFAULT_AREA_BAND_PCT)),
+        disposition_match=str(_load_app_setting(conn, "default_disposition_match", _DEFAULT_DISPOSITION_MATCH)),
+        active_only=bool(_load_app_setting(conn, "default_active_only", _DEFAULT_ACTIVE_ONLY)),
+        max_age_days_rent=int(_load_app_setting(conn, "default_max_age_days_rent", 7)),
+        max_age_days_sale=int(_load_app_setting(conn, "default_max_age_days_sale", 30)),
+        min_results=int(_load_app_setting(conn, "default_min_results", _DEFAULT_MIN_RESULTS)),
+    )
 
 
 class StepHandle:
@@ -400,7 +448,7 @@ def create_estimation_run(
 
     try:
         target = _build_target(resolution.target_spec, resolution.input_sreality_id)
-        filters = _build_filters(body)
+        filters = _build_filters(body, load_filter_defaults(conn))
     except Exception as exc:
         LOG.warning("target/filters build failed: %s", exc)
         return _persist_failed_run(
@@ -756,13 +804,16 @@ def _build_target(
     )
 
 
-def _build_filters(body: s.CreateEstimationIn) -> ComparableFilters:
+def _build_filters(
+    body: s.CreateEstimationIn,
+    defaults: FilterDefaults,
+) -> ComparableFilters:
     return ComparableFilters(
-        radius_m=_DEFAULT_RADIUS_M,
-        area_band_pct=_DEFAULT_AREA_BAND_PCT,
-        disposition_match=_DEFAULT_DISPOSITION_MATCH,
-        max_age_days=_default_max_age_days(body.estimate_kind),
-        active_only=_DEFAULT_ACTIVE_ONLY,
+        radius_m=defaults.radius_m,
+        area_band_pct=defaults.area_band_pct,
+        disposition_match=defaults.disposition_match,
+        max_age_days=defaults.max_age_days_for(body.estimate_kind),
+        active_only=defaults.active_only,
         population=body.population,
         floor_band=body.floor_band,
         condition_match=body.condition_match,

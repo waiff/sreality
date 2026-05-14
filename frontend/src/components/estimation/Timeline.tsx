@@ -47,15 +47,44 @@ const RunIdContext = createContext<number | null>(null);
 const SELECTION_SUMMARY_LABEL = 'comparable_selection_summary';
 const FCR_TOOL_NAME = 'find_comparables_relaxed';
 
+interface SelectionRoundFilters {
+  radius_m: number | null;
+  area_band_pct: number | null;
+  disposition_match: string | null;
+  max_age_days: number | null;
+  min_results: number | null;
+  active_only?: boolean | null;
+  population?: string | null;
+  floor_band?: number | null;
+  condition_match?: string[] | null;
+  building_type_match?: string[] | null;
+  energy_rating_match?: string[] | null;
+  has_balcony?: boolean | null;
+  has_lift?: boolean | null;
+  has_parking?: boolean | null;
+  min_price_czk?: number | null;
+  max_price_czk?: number | null;
+  category_main?: string | null;
+  category_type?: string | null;
+  category_sub_cb?: number | null;
+  locality_district_id?: number | null;
+  locality_region_id?: number | null;
+  include_unreliable?: boolean | null;
+  furnished?: string | null;
+  terrace?: boolean | null;
+  cellar?: boolean | null;
+  garage?: boolean | null;
+  ownership?: string | null;
+  min_estate_area?: number | null;
+  max_estate_area?: number | null;
+  min_usable_area?: number | null;
+  max_usable_area?: number | null;
+  min_parking_lots?: number | null;
+}
+
 interface SelectionRound {
   n: number;
-  filters: {
-    radius_m: number | null;
-    area_band_pct: number | null;
-    disposition_match: string | null;
-    max_age_days: number | null;
-    min_results: number | null;
-  };
+  filters: SelectionRoundFilters;
   cohort_size: number;
   cohort_ids: number[];
   added_ids: number[];
@@ -67,7 +96,7 @@ interface SelectionRound {
 interface SelectionSummary {
   n_rounds: number;
   rounds: SelectionRound[];
-  final_filters: SelectionRound['filters'] | null;
+  final_filters: SelectionRoundFilters | null;
   final_comparable_ids: number[];
   stop_reason: string | null;
 }
@@ -109,7 +138,7 @@ function pickSelectionSummary(steps: TraceStep[]): SelectionSummary | null {
     return {
       n_rounds: out.n_rounds ?? out.rounds.length,
       rounds: out.rounds as SelectionRound[],
-      final_filters: (out.final_filters ?? null) as SelectionRound['filters'] | null,
+      final_filters: (out.final_filters ?? null) as SelectionRoundFilters | null,
       final_comparable_ids: Array.isArray(out.final_comparable_ids)
         ? (out.final_comparable_ids as number[])
         : [],
@@ -168,16 +197,80 @@ function V2Layout({
 /* Strategy panel: filter-delta table + final picks                           */
 /* -------------------------------------------------------------------------- */
 
+const EM_DASH = '—';
+
+function fmtNumberUnit(v: unknown, unit: string): string {
+  return typeof v === 'number' ? `${fmtCount(v)} ${unit}` : EM_DASH;
+}
+
+function fmtBool(v: unknown): string {
+  if (v === true) return 'yes';
+  if (v === false) return 'no';
+  return EM_DASH;
+}
+
+function fmtString(v: unknown): string {
+  return typeof v === 'string' && v ? v : EM_DASH;
+}
+
+function fmtList(v: unknown): string {
+  if (Array.isArray(v) && v.length > 0) return v.join(', ');
+  return EM_DASH;
+}
+
+function fmtCzkPrice(v: unknown): string {
+  return typeof v === 'number' ? fmtCzk(v) : EM_DASH;
+}
+
+function filterValueEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 const FILTER_ROWS: Array<{
-  key: keyof SelectionRound['filters'];
+  key: keyof SelectionRoundFilters;
   label: string;
   fmt: (v: unknown) => string;
 }> = [
-  { key: 'radius_m', label: 'Radius', fmt: (v) => (typeof v === 'number' ? `${fmtCount(v)} m` : '—') },
-  { key: 'area_band_pct', label: 'Area band', fmt: (v) => (typeof v === 'number' ? `±${Math.round(v * 100)}%` : '—') },
-  { key: 'disposition_match', label: 'Disposition', fmt: (v) => (typeof v === 'string' ? v : '—') },
-  { key: 'max_age_days', label: 'Max age', fmt: (v) => (typeof v === 'number' ? `${v} d` : '—') },
-  { key: 'min_results', label: 'Min results', fmt: (v) => (typeof v === 'number' ? String(v) : '—') },
+  { key: 'radius_m', label: 'Radius', fmt: (v) => fmtNumberUnit(v, 'm') },
+  { key: 'area_band_pct', label: 'Area band', fmt: (v) => (typeof v === 'number' ? `±${Math.round(v * 100)}%` : EM_DASH) },
+  { key: 'disposition_match', label: 'Disposition', fmt: fmtString },
+  { key: 'max_age_days', label: 'Max age', fmt: (v) => (typeof v === 'number' ? `${v} d` : EM_DASH) },
+  { key: 'min_results', label: 'Min results', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
+  { key: 'active_only', label: 'Active only', fmt: fmtBool },
+  { key: 'population', label: 'Population', fmt: fmtString },
+  { key: 'floor_band', label: 'Floor band', fmt: (v) => (typeof v === 'number' ? `±${v}` : EM_DASH) },
+  { key: 'condition_match', label: 'Condition', fmt: fmtList },
+  { key: 'building_type_match', label: 'Building type', fmt: fmtList },
+  { key: 'energy_rating_match', label: 'Energy rating', fmt: fmtList },
+  { key: 'has_balcony', label: 'Has balcony*', fmt: fmtBool },
+  { key: 'has_lift', label: 'Has lift', fmt: fmtBool },
+  { key: 'has_parking', label: 'Has parking*', fmt: fmtBool },
+  { key: 'min_price_czk', label: 'Min price', fmt: fmtCzkPrice },
+  { key: 'max_price_czk', label: 'Max price', fmt: fmtCzkPrice },
+  { key: 'category_main', label: 'Category', fmt: fmtString },
+  { key: 'category_type', label: 'Type', fmt: fmtString },
+  { key: 'category_sub_cb', label: 'Sub-category', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
+  { key: 'locality_district_id', label: 'District id', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
+  { key: 'locality_region_id', label: 'Region id', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
+  { key: 'include_unreliable', label: 'Include unreliable', fmt: fmtBool },
+  { key: 'furnished', label: 'Furnished', fmt: fmtString },
+  { key: 'terrace', label: 'Terrace', fmt: fmtBool },
+  { key: 'cellar', label: 'Cellar', fmt: fmtBool },
+  { key: 'garage', label: 'Garage', fmt: fmtBool },
+  { key: 'ownership', label: 'Ownership', fmt: fmtString },
+  { key: 'min_estate_area', label: 'Min estate area', fmt: (v) => fmtNumberUnit(v, 'm²') },
+  { key: 'max_estate_area', label: 'Max estate area', fmt: (v) => fmtNumberUnit(v, 'm²') },
+  { key: 'min_usable_area', label: 'Min usable area', fmt: (v) => fmtNumberUnit(v, 'm²') },
+  { key: 'max_usable_area', label: 'Max usable area', fmt: (v) => fmtNumberUnit(v, 'm²') },
+  { key: 'min_parking_lots', label: 'Min parking lots', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
 ];
 
 function StrategyPanel({ summary }: { summary: SelectionSummary }) {
@@ -255,7 +348,7 @@ function FilterDeltaTable({ rounds }: { rounds: SelectionRound[] }) {
             {rounds.map((r, idx) => {
               const v = r.filters[key];
               const prev = idx === 0 ? undefined : rounds[idx - 1].filters[key];
-              const changed = idx > 0 && v !== prev;
+              const changed = idx > 0 && !filterValueEqual(v, prev);
               return (
                 <td
                   key={r.n}

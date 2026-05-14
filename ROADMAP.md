@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 08:33 UTC_
+_Last refreshed: 2026-05-14 19:40 UTC_
 
-**Branch:** `claude/floating-feedback-button-AQAFy`
+**Branch:** `claude/finetune-agent-traces-VDz9u`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-14 08:33 UTC_
 **Last 10 commits:**
 
 ```
+5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
+bcb3f00 frontend: correct ListingPublic.category_{main,type} to string
+e0ce9c4 frontend: prefill yield's listing price from a sale subject listing
+bcb6f58 Merge pull request #93 from waiff/claude/feedback-panel-residual-width-AQAFy
+a7bd9d5 frontend: float feedback panel into the page's right residual column
+4433786 Merge pull request #92 from waiff/claude/floating-feedback-button-AQAFy
+7ff2623 roadmap: refresh auto-status block
 d9f7e98 frontend: float feedback panel under header with inline skill-prompt editor
 89e84d4 Merge pull request #90 from waiff/claude/build-ai-feedback-loop-56uah
 00b77e9 tests: update fakes for skills.archived_at column
-f77d687 Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
-0cc2731 phase-ai slice C.1: consolidate rental skills, archive v1
-09d0c9f Merge pull request #87 from waiff/claude/add-yield-calculation-aXRbq
-ee07229 Merge pull request #88 from waiff/claude/fix-to-field-autofill-j32TB
-acf7fba Merge remote-tracking branch 'origin/main' into claude/fix-to-field-autofill-j32TB
-3762a35 merge: resolve ROADMAP auto-status conflict with origin/main
-f8959e2 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
