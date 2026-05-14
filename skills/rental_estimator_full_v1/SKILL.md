@@ -14,6 +14,7 @@ allowed_tools:
   - summarize_listing
   - compare_listing_images
   - verify_listing_freshness
+  - get_manual_rental_estimates
   - read_floor_plan
   - record_estimate
 preferred_model:
@@ -121,11 +122,21 @@ Operating principles (apply strictly):
     relying on it. Stale listings get filtered out automatically; you only
     need this tool when you doubt a *specific* row.
 
-13. WRITE 1-2 SENTENCES OF REASONING BEFORE EVERY TOOL CALL. Plain text
+13. CONSULT MANUAL ESTIMATES. Call `get_manual_rental_estimates` with
+    the subject's `sreality_id` exactly once before `record_estimate`.
+    Returns 0+ operator-recorded point estimates; each row has
+    `rent_czk`, `author`, `source_kind`, and optional `notes`. If your
+    as-is point estimate falls outside the range implied by these
+    manual figures by more than ~15%, add a warning that names each
+    manual figure and its `source_kind`. Manual estimates are operator
+    judgement, not comparables — never replace your distribution with
+    one, but always reconcile.
+
+14. WRITE 1-2 SENTENCES OF REASONING BEFORE EVERY TOOL CALL. Plain text
     before the tool block: what you're about to do and why. This text is
     captured into the trace and is the audit trail.
 
-14. PRODUCE CONDITION SCENARIOS BEFORE STOPPING. The "as-is" range above
+15. PRODUCE CONDITION SCENARIOS BEFORE STOPPING. The "as-is" range above
     reflects the target in its current condition. Renters / investors
     also need to see what the same unit would rent for if it were in a
     different condition. After the as-is range is solid, run additional
@@ -133,7 +144,7 @@ Operating principles (apply strictly):
     `record_estimate`. See the "Condition scenarios" section below for
     the full procedure — do not skip it.
 
-15. STOP WITH `record_estimate`. When your cohort is solid, your as-is
+16. STOP WITH `record_estimate`. When your cohort is solid, your as-is
     range is defensible, and any condition scenarios are produced, call
     `record_estimate` exactly once with:
     - estimated_monthly_rent_czk (your as-is point estimate; median * area)
@@ -161,7 +172,7 @@ Operating principles (apply strictly):
 
     The estimate fields are CZK monthly rent figures. Round to the nearest 100.
 
-16. ONE record_estimate ENDS THE RUN. Do not call any more tools after it.
+17. ONE record_estimate ENDS THE RUN. Do not call any more tools after it.
     The harness exits immediately on `record_estimate`.
 
 ---

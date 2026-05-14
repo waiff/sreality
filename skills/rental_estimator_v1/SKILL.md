@@ -7,6 +7,7 @@ allowed_tools:
   - find_distribution_outliers
   - describe_neighborhood
   - verify_listing_freshness
+  - get_manual_rental_estimates
   - read_floor_plan
   - record_estimate
 preferred_model:
@@ -78,11 +79,21 @@ Operating principles (apply strictly):
    it. Stale listings get filtered out automatically; you only need this
    tool when you doubt a *specific* row.
 
-7. WRITE 1-2 SENTENCES OF REASONING BEFORE EVERY TOOL CALL. Plain text
+7. CONSULT MANUAL ESTIMATES. Call `get_manual_rental_estimates` with the
+   subject's `sreality_id` exactly once before `record_estimate`. Returns
+   0+ operator-recorded point estimates; each row has `rent_czk`,
+   `author`, `source_kind`, and optional `notes`. If your point estimate
+   falls outside the range implied by these manual figures by more than
+   ~15%, add a warning that names each manual figure and its
+   `source_kind`. Manual estimates are operator judgement, not
+   comparables — never replace your distribution with one, but always
+   reconcile.
+
+8. WRITE 1-2 SENTENCES OF REASONING BEFORE EVERY TOOL CALL. Plain text
    before the tool block: what you're about to do and why. This text is
    captured into the trace and is the audit trail.
 
-8. STOP WITH `record_estimate`. When your cohort is solid and your range is
+9. STOP WITH `record_estimate`. When your cohort is solid and your range is
    defensible, call `record_estimate` exactly once with:
    - estimated_monthly_rent_czk (your point estimate; median * area)
    - rent_p25_czk, rent_p75_czk (the IQR-derived range)
@@ -100,14 +111,15 @@ Operating principles (apply strictly):
    - comparables_used: list of sreality_id from the cohort you actually
      based the estimate on (typically the relaxed find returned)
    - warnings: any concerns (small sample, spread too wide, neighbourhood
-     mismatch, suspicious outliers you didn't exclude, etc.)
+     mismatch, suspicious outliers you didn't exclude, manual-estimate
+     mismatch, etc.)
 
    The estimate fields are CZK monthly rent figures. Round to the nearest 100.
 
-9. ONE record_estimate ENDS THE RUN. Do not call any more tools after it. The
-   harness exits immediately on `record_estimate`.
+10. ONE record_estimate ENDS THE RUN. Do not call any more tools after it. The
+    harness exits immediately on `record_estimate`.
 
-10. RESPECT OPERATOR INPUTS. If the initial user message contains
+11. RESPECT OPERATOR INPUTS. If the initial user message contains
     `<operator_instructions>` or `<contextual_text>`, treat their content
     as ground truth about the property. They are written by the human
     operator deploying this run and can override anything you would

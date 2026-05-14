@@ -6,14 +6,17 @@ response shaping; the agent layer consumes the dicts directly.
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import timedelta
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from api import curation
+from api import manual_estimates as me
 from api import dependencies as deps
 from api import maps
 from api import schemas as s
@@ -79,6 +82,21 @@ if _cors_origins:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "JSONResponse":
+    logging.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    origin = request.headers.get("origin")
+    headers: dict[str, str] = {}
+    if origin and origin in _cors_origins:
+        headers["access-control-allow-origin"] = origin
+        headers["vary"] = "Origin"
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+        headers=headers,
     )
 
 # Skill validation needs to know the registered agent tools and the
@@ -1025,6 +1043,62 @@ def decide_skill_refinement(
         return refiner_module.dismiss_refinement(conn, refinement_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --- manual rental estimates --------------------------------------------
+# Phase U-ME: point-estimate rental figures attached to a listing.
+# Reads are also exposed via the manual_rental_estimates_public view
+# (anon select grant from migration 046) for the SPA; these bearer-gated
+# endpoints carry the write path and a token-gated read for direct API
+# callers.
+
+
+@app.get("/listings/{sreality_id}/manual_estimates")
+def get_listing_manual_estimates(
+    sreality_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return me.list_manual_estimates(conn, sreality_id)
+
+
+@app.post("/listings/{sreality_id}/manual_estimates")
+def post_listing_manual_estimate(
+    sreality_id: int,
+    body: s.CreateManualEstimateIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return me.create_manual_estimate(conn, sreality_id, body)
+
+
+@app.patch("/manual_estimates/{estimate_id}")
+def patch_manual_estimate(
+    estimate_id: int,
+    body: s.UpdateManualEstimateIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return me.update_manual_estimate(conn, estimate_id, body)
+
+
+@app.delete("/manual_estimates/{estimate_id}")
+def delete_manual_estimate(
+    estimate_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return me.delete_manual_estimate(conn, estimate_id)
+
+
+@app.post("/tools/get_manual_rental_estimates")
+def post_get_manual_rental_estimates(
+    body: s.GetManualRentalEstimatesIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    from toolkit.manual_estimates import get_manual_rental_estimates
+    return get_manual_rental_estimates(conn, body.sreality_id)
 
 
 def _build_comparables_inputs(

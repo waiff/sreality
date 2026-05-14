@@ -31,6 +31,9 @@ const Gallery = lazy(() => import('@/components/listing-detail/Gallery'));
 const CurationBlock = lazy(
   () => import('@/components/listing-detail/CurationBlock'),
 );
+const ManualEstimatesBlock = lazy(
+  () => import('@/components/listing-detail/ManualEstimatesBlock'),
+);
 
 const DAY_MS = 86_400_000;
 
@@ -112,6 +115,10 @@ export default function ListingDetail() {
       <Hairline />
       <Suspense fallback={null}>
         <CurationBlock sreality_id={listing.sreality_id} />
+      </Suspense>
+      <Hairline />
+      <Suspense fallback={null}>
+        <ManualEstimatesBlock sreality_id={listing.sreality_id} />
       </Suspense>
       <Hairline />
       <TimestampsBlock listing={listing} />

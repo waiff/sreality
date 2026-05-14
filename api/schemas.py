@@ -415,6 +415,35 @@ class AttachTagIn(BaseModel):
     tag_id: int
 
 
+# --- manual rental estimates ---------------------------------------------
+# Operator-recorded point estimates attached to a listing (Phase U-ME).
+# See migration 046 and CLAUDE.md "Operator workflow track".
+
+ManualEstimateSourceKind = Literal[
+    "broker", "gut", "external_comp", "portfolio", "other",
+]
+
+
+class CreateManualEstimateIn(BaseModel):
+    rent_czk:    int = Field(ge=1000, le=1000000)
+    author:      str = Field(min_length=1, max_length=120)
+    source_kind: ManualEstimateSourceKind
+    notes:       str | None = Field(default=None, min_length=1, max_length=4000)
+    updated_by:  str | None = Field(default=None, max_length=120)
+
+
+class UpdateManualEstimateIn(BaseModel):
+    rent_czk:    int | None = Field(default=None, ge=1000, le=1000000)
+    author:      str | None = Field(default=None, min_length=1, max_length=120)
+    source_kind: ManualEstimateSourceKind | None = None
+    notes:       str | None = Field(default=None, max_length=4000)
+    updated_by:  str | None = Field(default=None, max_length=120)
+
+
+class GetManualRentalEstimatesIn(BaseModel):
+    sreality_id: int
+
+
 # --- buildings ------------------------------------------------------------
 # Phase B0 of the building-decomposition track. See ROADMAP.md
 # "Building decomposition track" and CLAUDE.md architectural rule #13.
