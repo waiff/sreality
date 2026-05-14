@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 06:59 UTC_
+_Last refreshed: 2026-05-14 07:39 UTC_
 
-**Branch:** `claude/add-qual-data-upload-pdP1Q`
+**Branch:** `claude/fix-to-field-autofill-j32TB`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-14 06:59 UTC_
 **Last 10 commits:**
 
 ```
+f8959e2 roadmap: refresh auto-status block
+87c5c7a frontend: stop range-filter "to" input from snapping to "from" value
+79dcc34 Merge pull request #86 from waiff/claude/add-qual-data-upload-pdP1Q
+a2bde35 roadmap: refresh auto-status block
 224da86 roadmap: scope clarifications on Phase QUAL + Phase AI slice D
 8bf80af roadmap: add Phase QUAL + Phase AI slice D
 b1702ad Merge pull request #84 from waiff/claude/resolve-error-post-success-cors
 06c3afb api: make post-success persistence non-fatal + echo CORS on 500
 716edd8 Merge pull request #83 from waiff/claude/resolve-error-defensive-fixes
 63bfbc6 api: catch unhandled exceptions + persist target build failures
-f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
-2eb44a5 merge: resolve ROADMAP auto-status conflict with origin/main
-1511b4a roadmap: refresh auto-status block
-5dfd09e roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->

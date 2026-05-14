@@ -114,11 +114,13 @@ export function NumberCell({
   value,
   placeholder,
   onChange,
+  onBlur,
   ariaLabel,
 }: {
   value: number | null;
   placeholder: string;
   onChange: (e: ChangeEvent<HTMLInputElement>) => void;
+  onBlur?: () => void;
   ariaLabel?: string;
 }) {
   return (
@@ -128,6 +130,7 @@ export function NumberCell({
       value={value ?? ''}
       placeholder={placeholder}
       onChange={onChange}
+      onBlur={onBlur}
       aria-label={ariaLabel}
       className="w-full min-w-0 px-2 py-1.5 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
     />
