@@ -174,6 +174,7 @@ def make_skill_row(
     limits: dict[str, Any] | None = None,
     system_prompt: str = "system",
     description: str = "test",
+    archived_at: Any = None,
 ) -> tuple[Any, ...]:
     """Build a tuple matching the SELECT order in api.skills.load_skill."""
     return (
@@ -195,6 +196,7 @@ def make_skill_row(
             "wall_clock_timeout_s": 120.0,
         }),
         None,
+        archived_at,
     )
 
 

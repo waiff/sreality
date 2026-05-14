@@ -70,7 +70,7 @@ def client(monkeypatch, store):
     from api import routes
     admin = routes.admin
 
-    def fake_list_skills(conn):
+    def fake_list_skills(conn, *, include_archived=False):
         from api.skills import Skill, SkillLimits
         return [
             Skill(
