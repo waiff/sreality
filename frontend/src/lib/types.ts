@@ -19,8 +19,8 @@ export interface ListingPublic {
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
-  category_main: number | null;
-  category_type: number | null;
+  category_main: string | null;
+  category_type: string | null;
   price_czk: number | null;
   price_unit: string | null;
   area_m2: number | null;
