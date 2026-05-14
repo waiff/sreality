@@ -176,7 +176,7 @@ export default function EstimationDetail() {
       <Hairline />
       <FeedbackBlock runId={run.id} />
 
-      <FloatingFeedbackPanel runId={run.id} trace={run.trace} />
+      <FloatingFeedbackPanel runId={run.id} run={run} />
     </Page>
   );
 }
@@ -1572,15 +1572,36 @@ function pickSkillNameFromTrace(trace: Trace | null): string | null {
   return null;
 }
 
+/* Schema default in api/schemas.CreateEstimationIn — used as the
+ * skill-editor fallback when the run's trace pre-dates the
+ * skill_choice step or when the run was deterministic. */
+const DEFAULT_SKILL_NAME = 'rental_estimator_full_v1';
+
+/* Positions the floating panel column to the right of the centered
+ * `max-w-3xl` page body. Built so the panel fills the *residual*
+ * horizontal space when there is one, and falls back to a usable
+ * right-pinned width on narrower viewports.                       */
+const PANEL_LEFT = 'max(1rem, calc(50% + 24rem + 1rem))';
+const PANEL_RIGHT = '1rem';
+const PANEL_TOP = '3.75rem';
+const PANEL_MAX_HEIGHT = 'calc(100dvh - 4.5rem)';
+
 function FloatingFeedbackPanel({
   runId,
-  trace,
+  run,
 }: {
   runId: number;
-  trace: Trace | null;
+  run: EstimationRun;
 }) {
   const qc = useQueryClient();
-  const skillName = useMemo(() => pickSkillNameFromTrace(trace), [trace]);
+
+  const skillNameFromTrace = useMemo(
+    () => pickSkillNameFromTrace(run.trace),
+    [run.trace],
+  );
+  const effectiveSkillName = skillNameFromTrace ?? DEFAULT_SKILL_NAME;
+  const skillSource: 'trace' | 'default' =
+    skillNameFromTrace != null ? 'trace' : 'default';
 
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
@@ -1588,9 +1609,9 @@ function FloatingFeedbackPanel({
   const [promptDraft, setPromptDraft] = useState<string | null>(null);
 
   const skillQ = useQuery<Skill, ApiError>({
-    queryKey: ['admin', 'skills', skillName],
-    queryFn: () => getSkill(skillName as string),
-    enabled: open && skillName != null,
+    queryKey: ['admin', 'skills', effectiveSkillName],
+    queryFn: () => getSkill(effectiveSkillName),
+    enabled: open,
     staleTime: 30_000,
   });
 
@@ -1599,6 +1620,10 @@ function FloatingFeedbackPanel({
       setPromptDraft(skillQ.data.system_prompt);
     }
   }, [skillQ.data, promptDraft]);
+
+  useEffect(() => {
+    setPromptDraft(null);
+  }, [effectiveSkillName]);
 
   const promptDirty =
     skillQ.data != null &&
@@ -1625,7 +1650,7 @@ function FloatingFeedbackPanel({
   const updatePromptMut = useMutation<Skill, ApiError, { systemPrompt: string }>(
     {
       mutationFn: ({ systemPrompt }) =>
-        updateSkill(skillName as string, { system_prompt: systemPrompt }),
+        updateSkill(effectiveSkillName, { system_prompt: systemPrompt }),
       onSuccess: (skill) => {
         qc.setQueryData(['admin', 'skills', skill.name], skill);
         setPromptDraft(skill.system_prompt);
@@ -1637,7 +1662,10 @@ function FloatingFeedbackPanel({
 
   if (!open) {
     return (
-      <div className="fixed top-[3.75rem] right-4 z-20">
+      <div
+        className="fixed z-20"
+        style={{ top: PANEL_TOP, left: PANEL_LEFT, right: PANEL_RIGHT }}
+      >
         <button
           type="button"
           onClick={() => setOpen(true)}
@@ -1652,160 +1680,175 @@ function FloatingFeedbackPanel({
 
   return (
     <div
-      className="fixed top-[3.75rem] right-4 z-20 w-[28rem] max-w-[calc(100vw-2rem)] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] shadow-[0_8px_24px_rgba(0,0,0,0.08)] overflow-hidden flex flex-col"
-      style={{ maxHeight: 'calc(100dvh - 4.5rem)' }}
+      className="fixed z-20 flex flex-col gap-3 overflow-y-auto"
+      style={{
+        top: PANEL_TOP,
+        left: PANEL_LEFT,
+        right: PANEL_RIGHT,
+        maxHeight: PANEL_MAX_HEIGHT,
+      }}
     >
-      <div className="px-4 py-3 border-b border-[var(--color-rule)] flex items-center justify-between gap-3">
-        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-          Feedback
-        </p>
-        <button
-          type="button"
-          onClick={() => setOpen(false)}
-          aria-label="Close feedback"
-          className="text-[0.78rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] transition-colors"
-        >
-          Close
-        </button>
-      </div>
-
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (submitValid && !submitMut.isPending) {
-            submitMut.mutate({ text: text.trim(), kickOff });
-          }
-        }}
-        className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
-      >
-        <p className="text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
-          Tell the skill what it got wrong. The refiner reads your note
-          plus this run's trace and proposes an updated system prompt
-          for the skill that produced this estimate.
-        </p>
-
-        <div>
-          <FieldLabel required>
-            What did the skill get wrong on this run?
-          </FieldLabel>
-          <textarea
-            rows={4}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            maxLength={4000}
-            placeholder="e.g. The cohort was too broad — it kept three 4+kk listings even though the target is 2+kk. Tighten the disposition match before relaxing it."
-            className="mt-1.5 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
-          />
-          <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-            {text.length} / 4000
+      {/* Panel 1 — feedback composer ---------------------------------- */}
+      <section className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] shadow-[0_8px_24px_rgba(0,0,0,0.08)] overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--color-rule)] flex items-center justify-between gap-3">
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+            Feedback
           </p>
-        </div>
-
-        {skillName ? (
-          <div>
-            <FieldLabel>Skill prompt · {skillName}</FieldLabel>
-            {skillQ.isLoading && promptDraft === null ? (
-              <p className="mt-1.5 text-[0.78rem] text-[var(--color-ink-4)] italic">
-                Loading skill…
-              </p>
-            ) : skillQ.error ? (
-              <p className="mt-1.5 text-[0.78rem] text-[var(--color-brick)]">
-                Could not load skill: {skillQ.error.message}
-              </p>
-            ) : (
-              <>
-                <textarea
-                  rows={6}
-                  value={promptDraft ?? skillQ.data?.system_prompt ?? ''}
-                  onChange={(e) => setPromptDraft(e.target.value)}
-                  className="mt-1.5 w-full px-3 py-2 text-[0.78rem] font-mono rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
-                />
-                {updatePromptMut.error && (
-                  <p className="mt-1 text-[0.7rem] text-[var(--color-brick)]">
-                    Save failed: {updatePromptMut.error.message}
-                  </p>
-                )}
-                <div className="mt-1.5 flex items-center justify-between gap-2">
-                  <p className="text-[0.7rem] text-[var(--color-ink-4)]">
-                    {promptDirty
-                      ? 'Unsaved changes — saving writes the skill row immediately.'
-                      : 'Edits persist to the skill row when saved.'}
-                  </p>
-                  <button
-                    type="button"
-                    disabled={!promptDirty || updatePromptMut.isPending}
-                    onClick={() => {
-                      if (promptDraft != null) {
-                        updatePromptMut.mutate({ systemPrompt: promptDraft });
-                      }
-                    }}
-                    className={[
-                      'px-3 py-1 text-[0.78rem] rounded-[var(--radius-sm)] border transition-colors',
-                      !promptDirty || updatePromptMut.isPending
-                        ? 'border-[var(--color-rule-strong)] text-[var(--color-ink-4)] cursor-not-allowed'
-                        : 'border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
-                    ].join(' ')}
-                  >
-                    {updatePromptMut.isPending ? 'Saving…' : 'Save prompt'}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        ) : (
-          <p className="text-[0.78rem] text-[var(--color-ink-4)] italic">
-            This run is deterministic — no skill prompt to edit. Feedback
-            can still be recorded for later review.
-          </p>
-        )}
-
-        <label className="flex items-baseline gap-2 text-[0.82rem] text-[var(--color-ink-2)]">
-          <input
-            type="checkbox"
-            checked={kickOff}
-            onChange={(e) => setKickOff(e.target.checked)}
-          />
-          <span>
-            Run the refiner now (costs ~$0.05). Uncheck to stash the
-            feedback for a later batch.
-          </span>
-        </label>
-
-        {submitMut.error && (
-          <p className="text-[0.78rem] text-[var(--color-brick)]">
-            {submitMut.error.message ||
-              `Submit failed (HTTP ${submitMut.error.status}).`}
-          </p>
-        )}
-
-        <div className="flex items-center justify-end gap-2 pt-1">
           <button
             type="button"
             onClick={() => setOpen(false)}
-            className="px-3 py-2 text-sm rounded-[var(--radius-sm)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] transition-colors"
+            aria-label="Close feedback"
+            className="text-[0.78rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] transition-colors"
           >
             Close
           </button>
-          <button
-            type="submit"
-            disabled={!submitValid || submitMut.isPending}
-            className={[
-              'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
-              !submitValid || submitMut.isPending
-                ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
-                : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
-            ].join(' ')}
-          >
-            {submitMut.isPending
-              ? kickOff
-                ? 'Refining…'
-                : 'Saving…'
-              : kickOff
-                ? 'Submit and refine'
-                : 'Save without refining'}
-          </button>
         </div>
-      </form>
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (submitValid && !submitMut.isPending) {
+              submitMut.mutate({ text: text.trim(), kickOff });
+            }
+          }}
+          className="px-4 py-4 space-y-4"
+        >
+          <p className="text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
+            Tell the skill what it got wrong. The refiner reads your note
+            plus this run's trace and proposes an updated system prompt
+            for the skill that produced this estimate.
+          </p>
+
+          <div>
+            <FieldLabel required>
+              What did the skill get wrong on this run?
+            </FieldLabel>
+            <textarea
+              rows={4}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              maxLength={4000}
+              placeholder="e.g. The cohort was too broad — it kept three 4+kk listings even though the target is 2+kk. Tighten the disposition match before relaxing it."
+              className="mt-1.5 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+            />
+            <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+              {text.length} / 4000
+            </p>
+          </div>
+
+          <label className="flex items-baseline gap-2 text-[0.82rem] text-[var(--color-ink-2)]">
+            <input
+              type="checkbox"
+              checked={kickOff}
+              onChange={(e) => setKickOff(e.target.checked)}
+            />
+            <span>
+              Run the refiner now (costs ~$0.05). Uncheck to stash the
+              feedback for a later batch.
+            </span>
+          </label>
+
+          {submitMut.error && (
+            <p className="text-[0.78rem] text-[var(--color-brick)]">
+              {submitMut.error.message ||
+                `Submit failed (HTTP ${submitMut.error.status}).`}
+            </p>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="px-3 py-2 text-sm rounded-[var(--radius-sm)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] transition-colors"
+            >
+              Close
+            </button>
+            <button
+              type="submit"
+              disabled={!submitValid || submitMut.isPending}
+              className={[
+                'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
+                !submitValid || submitMut.isPending
+                  ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
+                  : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
+              ].join(' ')}
+            >
+              {submitMut.isPending
+                ? kickOff
+                  ? 'Refining…'
+                  : 'Saving…'
+                : kickOff
+                  ? 'Submit and refine'
+                  : 'Save without refining'}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      {/* Panel 2 — skill prompt editor -------------------------------- */}
+      <section className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] shadow-[0_8px_24px_rgba(0,0,0,0.08)] overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--color-rule)] flex items-center justify-between gap-3">
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+            Skill prompt · {effectiveSkillName}
+          </p>
+          <span className="text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
+            {skillSource === 'trace'
+              ? `from run trace · mode ${run.mode}`
+              : run.mode === 'agent'
+                ? 'default (run trace had no skill_choice)'
+                : `default (run was ${run.mode})`}
+          </span>
+        </div>
+        <div className="px-4 py-4 space-y-2">
+          {skillQ.isLoading && promptDraft === null ? (
+            <p className="text-[0.78rem] text-[var(--color-ink-4)] italic">
+              Loading skill…
+            </p>
+          ) : skillQ.error ? (
+            <p className="text-[0.78rem] text-[var(--color-brick)]">
+              Could not load skill: {skillQ.error.message}
+            </p>
+          ) : (
+            <>
+              <textarea
+                rows={12}
+                value={promptDraft ?? skillQ.data?.system_prompt ?? ''}
+                onChange={(e) => setPromptDraft(e.target.value)}
+                className="w-full px-3 py-2 text-[0.78rem] font-mono rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+              />
+              {updatePromptMut.error && (
+                <p className="text-[0.7rem] text-[var(--color-brick)]">
+                  Save failed: {updatePromptMut.error.message}
+                </p>
+              )}
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[0.7rem] text-[var(--color-ink-4)]">
+                  {promptDirty
+                    ? 'Unsaved changes — saving writes the skill row immediately.'
+                    : 'Edits persist to the skill row when saved.'}
+                </p>
+                <button
+                  type="button"
+                  disabled={!promptDirty || updatePromptMut.isPending}
+                  onClick={() => {
+                    if (promptDraft != null) {
+                      updatePromptMut.mutate({ systemPrompt: promptDraft });
+                    }
+                  }}
+                  className={[
+                    'px-3 py-1 text-[0.78rem] rounded-[var(--radius-sm)] border transition-colors',
+                    !promptDirty || updatePromptMut.isPending
+                      ? 'border-[var(--color-rule-strong)] text-[var(--color-ink-4)] cursor-not-allowed'
+                      : 'border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
+                  ].join(' ')}
+                >
+                  {updatePromptMut.isPending ? 'Saving…' : 'Save prompt'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
