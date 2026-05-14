@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 19:40 UTC_
+_Last refreshed: 2026-05-14 20:03 UTC_
 
 **Branch:** `claude/finetune-agent-traces-VDz9u`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 50 files, latest `051_skill_archive.sql`.
+**Migrations on disk:** 51 files, latest `052_estimation_default_filters.sql`.
 
 **Last 10 commits:**
 
 ```
+1af768c agent: expose every ComparableFilters field to the agent + show all filters in the trace
 5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
 bcb3f00 frontend: correct ListingPublic.category_{main,type} to string
 e0ce9c4 frontend: prefill yield's listing price from a sale subject listing
@@ -25,7 +26,6 @@ a7bd9d5 frontend: float feedback panel into the page's right residual column
 7ff2623 roadmap: refresh auto-status block
 d9f7e98 frontend: float feedback panel under header with inline skill-prompt editor
 89e84d4 Merge pull request #90 from waiff/claude/build-ai-feedback-loop-56uah
-00b77e9 tests: update fakes for skills.archived_at column
 ```
 
 <!-- END AUTO-STATUS -->
