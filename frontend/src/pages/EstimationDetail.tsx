@@ -96,6 +96,13 @@ export default function EstimationDetail() {
       <Crumb />
       <Header run={run} />
 
+      {!isFailed && (
+        <>
+          <Hairline />
+          <YieldBlock run={run} />
+        </>
+      )}
+
       {!isFailed && run.subject_summary && (
         <>
           <Hairline />
@@ -326,6 +333,167 @@ function RentRange({ run }: { run: EstimationRun }) {
           format={(n) => fmtCzk(n)}
         />
       </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Yield                                                                      */
+/*                                                                            */
+/* Pure client-side calculation. Three editable inputs (monthly rent,         */
+/* fond-oprav cost per m², listing price) drive the yield % live; the         */
+/* listing area comes from the run's input spec. Nothing here is persisted    */
+/* — operators tweak to model "what if" scenarios without writing a re-run.   */
+/* -------------------------------------------------------------------------- */
+
+const DEFAULT_FOND_CZK_PER_M2 = 10;
+
+function YieldBlock({ run }: { run: EstimationRun }) {
+  const kind = run.estimate_kind ?? 'rent';
+  const areaM2 = run.input_spec?.area_m2 ?? null;
+  const defaultRent = run.estimated_monthly_rent_czk;
+  const defaultPrice =
+    run.input_purchase_price_czk ??
+    (kind === 'sale' ? run.estimated_sale_price_czk : null);
+
+  const [rent, setRent] = useState<number | null>(defaultRent);
+  const [costPerM2, setCostPerM2] = useState<number | null>(DEFAULT_FOND_CZK_PER_M2);
+  const [price, setPrice] = useState<number | null>(defaultPrice);
+
+  const fondOprav =
+    costPerM2 != null && areaM2 != null ? costPerM2 * areaM2 : null;
+
+  const yieldPct =
+    rent != null && fondOprav != null && price != null && price > 0
+      ? ((rent - fondOprav) * 12) / price * 100
+      : null;
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between">
+        <SectionLabel>Yield</SectionLabel>
+        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)]">
+          live calculation
+        </p>
+      </div>
+
+      <div className="mt-4 px-5 py-5 rounded-[var(--radius-md)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)]">
+        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Gross yield
+        </p>
+        <p
+          className="mt-1.5 tabular-nums leading-none"
+          style={{
+            fontFamily: 'var(--font-display)',
+            fontWeight: 600,
+            fontSize: '3rem',
+            color: yieldPct != null ? 'var(--color-copper)' : 'var(--color-ink-4)',
+          }}
+        >
+          {yieldPct != null ? `${yieldPct.toFixed(2)} %` : '—'}
+        </p>
+        <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)] font-mono tabular-nums">
+          ((rent − fond oprav a SVJ) × 12) ÷ listing price
+        </p>
+      </div>
+
+      <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <YieldNumField
+          label="Monthly rent"
+          value={rent}
+          step="100"
+          suffix="Kč"
+          onChange={setRent}
+          hint={defaultRent != null ? 'Default: median estimate' : 'No estimate — set manually'}
+        />
+        <YieldNumField
+          label="Fond oprav + SVJ"
+          value={costPerM2}
+          step="1"
+          suffix="Kč/m²"
+          onChange={setCostPerM2}
+          hint={
+            fondOprav != null
+              ? `= ${fmtCzk(Math.round(fondOprav))} / mo`
+              : areaM2 == null
+                ? 'Area unavailable — fond oprav not computed'
+                : 'Cost per m² of usable area'
+          }
+        />
+        <YieldNumField
+          label="Area"
+          value={areaM2}
+          step="0.1"
+          suffix="m²"
+          onChange={() => undefined}
+          readOnly
+          hint="From listing"
+        />
+        <YieldNumField
+          label="Listing price"
+          value={price}
+          step="100000"
+          suffix="Kč"
+          onChange={setPrice}
+          hint={defaultPrice != null ? 'Default: from inputs' : 'Set purchase price'}
+        />
+      </div>
+    </div>
+  );
+}
+
+function YieldNumField({
+  label,
+  value,
+  step,
+  suffix,
+  hint,
+  readOnly,
+  onChange,
+}: {
+  label: string;
+  value: number | null;
+  step?: string;
+  suffix?: string;
+  hint?: string;
+  readOnly?: boolean;
+  onChange: (v: number | null) => void;
+}) {
+  return (
+    <div>
+      <FieldLabel>{label}</FieldLabel>
+      <div className="mt-1.5 flex items-stretch gap-2 min-w-0">
+        <input
+          type="text"
+          inputMode="decimal"
+          readOnly={readOnly}
+          value={value == null ? '' : String(value)}
+          step={step}
+          onChange={(e) => {
+            if (readOnly) return;
+            const raw = e.target.value.trim().replace(',', '.');
+            if (raw === '') return onChange(null);
+            const n = Number(raw);
+            if (Number.isFinite(n)) onChange(n);
+          }}
+          className={[
+            'flex-1 min-w-0 px-3 py-2 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] border text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]',
+            readOnly
+              ? 'bg-[var(--color-paper-2)] border-[var(--color-rule)] text-[var(--color-ink-2)] cursor-default'
+              : 'bg-[var(--color-inset)] border-[var(--color-rule)]',
+          ].join(' ')}
+        />
+        {suffix && (
+          <span className="self-center text-[0.78rem] tracking-wide text-[var(--color-ink-3)]">
+            {suffix}
+          </span>
+        )}
+      </div>
+      {hint && (
+        <p className="mt-1.5 text-[0.7rem] text-[var(--color-ink-4)] leading-relaxed">
+          {hint}
+        </p>
+      )}
     </div>
   );
 }
