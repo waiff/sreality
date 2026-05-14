@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 20:49 UTC_
+_Last refreshed: 2026-05-14 07:39 UTC_
 
-**Branch:** `claude/resolve-error-defensive-fixes`
+**Branch:** `claude/fix-to-field-autofill-j32TB`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,9 @@ _Last refreshed: 2026-05-13 20:49 UTC_
 **Last 10 commits:**
 
 ```
+b1702ad Merge pull request #84 from waiff/claude/resolve-error-post-success-cors
+06c3afb api: make post-success persistence non-fatal + echo CORS on 500
+716edd8 Merge pull request #83 from waiff/claude/resolve-error-defensive-fixes
 63bfbc6 api: catch unhandled exceptions + persist target build failures
 f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
 2eb44a5 merge: resolve ROADMAP auto-status conflict with origin/main
@@ -23,9 +26,6 @@ f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
 5dfd09e roadmap: refresh auto-status block
 c4d26e3 Merge pull request #81 from waiff/claude/rental-estimates-agent-tools-Lompi
 d61711f merge: resolve migration-043 slot collision with origin/main
-9dce66e roadmap: refresh auto-status block
-76850b0 manual rental estimates: table, API, agent tool, listing-detail panel
-10cfe87 Merge pull request #79 from waiff/claude/build-ai-feedback-loop-56uah
 ```
 
 <!-- END AUTO-STATUS -->
