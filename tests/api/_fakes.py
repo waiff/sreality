@@ -175,6 +175,7 @@ def make_skill_row(
     system_prompt: str = "system",
     description: str = "test",
     archived_at: Any = None,
+    version: int = 1,
 ) -> tuple[Any, ...]:
     """Build a tuple matching the SELECT order in api.skills.load_skill."""
     return (
@@ -197,6 +198,7 @@ def make_skill_row(
         }),
         None,
         archived_at,
+        version,
     )
 
 

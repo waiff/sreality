@@ -1550,7 +1550,7 @@ function FeedbackBlock({ runId }: { runId: number }) {
   const rows = listQ.data?.data ?? [];
 
   return (
-    <div>
+    <div id="feedback">
       <div className="flex items-baseline justify-between gap-4">
         <SectionLabel>Feedback</SectionLabel>
         <button

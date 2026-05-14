@@ -297,6 +297,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "source_html",
     "subject_summary",
     "special_instructions", "contextual_text",
+    "skill_name", "skill_version",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -308,10 +309,22 @@ _COST_TOTAL_SUBSELECT = (
     "(SELECT sum(cost_usd) FROM llm_calls WHERE estimation_run_id = er.id), "
     "0)::float AS cost_usd_total"
 )
-_RUN_PROJECTION = (
-    ", ".join(f"er.{c}" for c in _RUN_COLUMNS) + ", " + _COST_TOTAL_SUBSELECT
+# Boolean: is there at least one operator-supplied feedback row on
+# this run? Drives the "Feedback" button enable/disable on the
+# /estimations list (slice B follow-up).
+_HAS_FEEDBACK_SUBSELECT = (
+    "EXISTS("
+    "SELECT 1 FROM estimation_feedback WHERE estimation_run_id = er.id"
+    ") AS has_feedback"
 )
-_RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + ("cost_usd_total",)
+_RUN_PROJECTION = (
+    ", ".join(f"er.{c}" for c in _RUN_COLUMNS)
+    + ", " + _COST_TOTAL_SUBSELECT
+    + ", " + _HAS_FEEDBACK_SUBSELECT
+)
+_RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + (
+    "cost_usd_total", "has_feedback",
+)
 
 
 @dataclass
@@ -472,6 +485,8 @@ def create_estimation_run(
         subject_summary=subject_summary,
         special_instructions=body.special_instructions,
         contextual_text=body.contextual_text,
+        skill_name=None,
+        skill_version=None,
     )
     flush_trace_payloads(conn, run_id, recorder)
     return _fetch_run(conn, run_id) or {}
@@ -732,6 +747,8 @@ def _persist_failed_run(
         subject_summary=None,
         special_instructions=body.special_instructions,
         contextual_text=body.contextual_text,
+        skill_name=None,
+        skill_version=None,
     )
     flush_trace_payloads(conn, run_id, recorder)
     return _fetch_run(conn, run_id) or {}
@@ -890,6 +907,8 @@ def _run_agent_path(
         subject_summary=None,
         special_instructions=body.special_instructions,
         contextual_text=body.contextual_text,
+        skill_name=skill.name,
+        skill_version=skill.version,
     )
 
     try:
