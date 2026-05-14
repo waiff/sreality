@@ -378,7 +378,11 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             name="record_estimate",
             description=(
                 "Submit the final estimate and END THE RUN. Call exactly once. "
-                "After this tool returns, the agent loop exits immediately."
+                "After this tool returns, the agent loop exits immediately. "
+                "For a RENT run, fill `estimated_monthly_rent_czk`, "
+                "`rent_p25_czk`, `rent_p75_czk`. For a SALE run, fill "
+                "`estimated_sale_price_czk`, `sale_p25_czk`, `sale_p75_czk`. "
+                "Always fill `confidence` + `comparables_used`."
             ),
             input_schema={
                 "type": "object",
@@ -386,6 +390,9 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     "estimated_monthly_rent_czk": {"type": "integer", "minimum": 0},
                     "rent_p25_czk": {"type": "integer", "minimum": 0},
                     "rent_p75_czk": {"type": "integer", "minimum": 0},
+                    "estimated_sale_price_czk": {"type": "integer", "minimum": 0},
+                    "sale_p25_czk": {"type": "integer", "minimum": 0},
+                    "sale_p75_czk": {"type": "integer", "minimum": 0},
                     "confidence": {
                         "type": "string",
                         "enum": ["high", "medium", "low"],
@@ -399,13 +406,7 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "items": {"type": "string"},
                     },
                 },
-                "required": [
-                    "estimated_monthly_rent_czk",
-                    "rent_p25_czk",
-                    "rent_p75_czk",
-                    "confidence",
-                    "comparables_used",
-                ],
+                "required": ["confidence", "comparables_used"],
             },
             is_terminator=True,
         ),
@@ -465,6 +466,7 @@ def run_agent_estimation(
     provider: str,
     recorder: "TraceRecorder",
     estimation_run_id: int,
+    estimate_kind: str = "rent",
     special_instructions: str | None = None,
     contextual_text: str | None = None,
     building_run_id: int | None = None,
@@ -503,6 +505,7 @@ def run_agent_estimation(
     messages: list[Message] = [
         Message(role="user", content=[TextBlock(text=_initial_user_message(
             target, filters, purchase_price_czk,
+            estimate_kind=estimate_kind,
             special_instructions=special_instructions,
             contextual_text=contextual_text,
             attachments=attachments,
@@ -612,6 +615,7 @@ def run_agent_estimation(
         stop_reason=stop_reason,
         purchase_price_czk=purchase_price_czk,
         used_entry=_used_entry,
+        estimate_kind=estimate_kind,
     )
 
     _record_selection_summary(recorder, state, result, stop_reason)
@@ -988,6 +992,9 @@ def _terminator_summary(args: dict[str, Any]) -> dict[str, Any]:
         "estimated_monthly_rent_czk": args.get("estimated_monthly_rent_czk"),
         "rent_p25_czk": args.get("rent_p25_czk"),
         "rent_p75_czk": args.get("rent_p75_czk"),
+        "estimated_sale_price_czk": args.get("estimated_sale_price_czk"),
+        "sale_p25_czk": args.get("sale_p25_czk"),
+        "sale_p75_czk": args.get("sale_p75_czk"),
         "confidence": args.get("confidence"),
         "n_comparables_used": len(args.get("comparables_used") or []),
         "n_warnings": len(args.get("warnings") or []),
@@ -1013,31 +1020,34 @@ def _finalise(
     stop_reason: str,
     purchase_price_czk: int | None,
     used_entry: Callable[[dict[str, Any]], dict[str, Any]],
+    estimate_kind: str = "rent",
 ) -> AgentResult:
+    halted_data: dict[str, Any] = {
+        "estimated_monthly_rent_czk": None,
+        "rent_p25_czk": None,
+        "rent_p75_czk": None,
+        "estimated_sale_price_czk": None,
+        "sale_p25_czk": None,
+        "sale_p75_czk": None,
+        "gross_yield_pct": None,
+        "confidence": None,
+        "comparables_used": [],
+        "warnings": [f"agent halted: stop_reason={stop_reason}"],
+    }
     if stop_reason != "record_estimate" or state.final_call is None:
         return AgentResult(
-            data={
-                "estimated_monthly_rent_czk": None,
-                "rent_p25_czk": None,
-                "rent_p75_czk": None,
-                "gross_yield_pct": None,
-                "confidence": None,
-                "comparables_used": [],
-                "warnings": [f"agent halted: stop_reason={stop_reason}"],
-            },
+            data=halted_data,
             metadata={
                 "stop_reason": stop_reason,
                 "iterations": state.iterations,
                 "total_cost_usd": round(state.total_cost_usd, 6),
                 "provider": provider,
                 "skill": skill.name,
+                "estimate_kind": estimate_kind,
             },
         )
 
     call = state.final_call
-    estimate = _round_to_100(call.get("estimated_monthly_rent_czk"))
-    p25 = _round_to_100(call.get("rent_p25_czk"))
-    p75 = _round_to_100(call.get("rent_p75_czk"))
     confidence = call.get("confidence")
     warnings = list(call.get("warnings") or [])
 
@@ -1052,15 +1062,38 @@ def _finalise(
         )
     comparables_used = [used_entry(cohort_by_id[i]) for i in valid_ids]
 
-    yield_pct: float | None = None
-    if estimate is not None and purchase_price_czk and purchase_price_czk > 0:
-        yield_pct = round((estimate * 12) / purchase_price_czk * 100, 2)
+    rent_estimate = _round_to_100(call.get("estimated_monthly_rent_czk"))
+    rent_p25 = _round_to_100(call.get("rent_p25_czk"))
+    rent_p75 = _round_to_100(call.get("rent_p75_czk"))
+    sale_estimate = _round_to_100(call.get("estimated_sale_price_czk"))
+    sale_p25 = _round_to_100(call.get("sale_p25_czk"))
+    sale_p75 = _round_to_100(call.get("sale_p75_czk"))
+
+    if estimate_kind == "sale":
+        if sale_estimate is None:
+            warnings.append(
+                "sale estimate_kind but record_estimate was missing "
+                "estimated_sale_price_czk; treating as failed"
+            )
+        yield_pct: float | None = None
+    else:
+        yield_pct = None
+        if rent_estimate is None:
+            warnings.append(
+                "rent estimate_kind but record_estimate was missing "
+                "estimated_monthly_rent_czk; treating as failed"
+            )
+        elif purchase_price_czk and purchase_price_czk > 0:
+            yield_pct = round((rent_estimate * 12) / purchase_price_czk * 100, 2)
 
     return AgentResult(
         data={
-            "estimated_monthly_rent_czk": estimate,
-            "rent_p25_czk": p25,
-            "rent_p75_czk": p75,
+            "estimated_monthly_rent_czk": rent_estimate,
+            "rent_p25_czk": rent_p25,
+            "rent_p75_czk": rent_p75,
+            "estimated_sale_price_czk": sale_estimate,
+            "sale_p25_czk": sale_p25,
+            "sale_p75_czk": sale_p75,
             "gross_yield_pct": yield_pct,
             "confidence": confidence,
             "comparables_used": comparables_used,
@@ -1072,6 +1105,7 @@ def _finalise(
             "total_cost_usd": round(state.total_cost_usd, 6),
             "provider": provider,
             "skill": skill.name,
+            "estimate_kind": estimate_kind,
         },
     )
 
@@ -1083,6 +1117,7 @@ def _initial_user_message(
     filters: ComparableFilters,
     purchase_price_czk: int | None,
     *,
+    estimate_kind: str = "rent",
     special_instructions: str | None = None,
     contextual_text: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
@@ -1101,12 +1136,27 @@ def _initial_user_message(
             "category_main": filters.category_main,
             "category_type": filters.category_type,
         },
+        "estimate_kind": estimate_kind,
         "purchase_price_czk": purchase_price_czk,
     }
+    if estimate_kind == "sale":
+        task_line = (
+            "Estimate the sale price (CZK, the headline price a buyer would "
+            "pay today) for the following target. When you call "
+            "record_estimate, fill `estimated_sale_price_czk`, "
+            "`sale_p25_czk`, `sale_p75_czk` — leave the rent_* fields unset."
+        )
+    else:
+        task_line = (
+            "Estimate the monthly rent (CZK) for the following target. "
+            "When you call record_estimate, fill "
+            "`estimated_monthly_rent_czk`, `rent_p25_czk`, `rent_p75_czk` "
+            "— leave the sale_* fields unset."
+        )
     body = (
-        "Estimate the monthly rent (CZK) for the following target. "
-        "Follow your operating principles. The first tool call should "
-        "be find_comparables_relaxed.\n\n"
+        task_line
+        + " Follow your operating principles. The first tool call should "
+          "be find_comparables_relaxed.\n\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
     )
     if special_instructions and special_instructions.strip():

@@ -701,6 +701,11 @@ function ChildEstimateRow({
         >
           {label}
         </Link>
+        {child.estimate_kind && (
+          <span className="ml-2 text-[0.7rem] uppercase tracking-[0.15em] text-[var(--color-ink-3)]">
+            {child.estimate_kind}
+          </span>
+        )}
         {unit?.area_m2 != null && (
           <span className="ml-2 text-[0.78rem] text-[var(--color-ink-3)]">
             {fmtArea(unit.area_m2)}
@@ -712,14 +717,32 @@ function ChildEstimateRow({
           </span>
         )}
       </div>
-      <ChildRentReadout child={child} />
+      <ChildReadout child={child} />
       <ChildStatusBadge status={child.status} />
     </li>
   );
 }
 
-function ChildRentReadout({ child }: { child: BuildingChildRun }) {
+function ChildReadout({ child }: { child: BuildingChildRun }) {
   if (child.status === 'success') {
+    if (child.estimate_kind === 'sale') {
+      const median = child.estimated_sale_price_czk;
+      const p25 = child.sale_p25_czk;
+      const p75 = child.sale_p75_czk;
+      if (median == null) {
+        return <span className="text-[0.78rem] text-[var(--color-ink-3)]">no estimate</span>;
+      }
+      return (
+        <div className="text-right tabular-nums">
+          <span className="text-[0.9rem] text-[var(--color-ink)]">{fmtCzk(median)}</span>
+          {p25 != null && p75 != null && (
+            <p className="text-[0.7rem] text-[var(--color-ink-3)]">
+              {fmtCzk(p25)} – {fmtCzk(p75)}
+            </p>
+          )}
+        </div>
+      );
+    }
     const median = child.estimated_monthly_rent_czk;
     const p25 = child.rent_p25_czk;
     const p75 = child.rent_p75_czk;
@@ -771,30 +794,78 @@ function ChildStatusBadge({ status }: { status: BuildingChildRun['status'] }) {
 /* ---------- rollup totals (B2) ---------- */
 
 function RollupTotals({ building }: { building: BuildingRun }) {
-  const p25 = building.total_rent_p25_czk;
-  const p50 = building.total_rent_p50_czk;
-  const p75 = building.total_rent_p75_czk;
-  if (p25 == null && p50 == null && p75 == null) return null;
+  const hasRent =
+    building.total_rent_p25_czk != null ||
+    building.total_rent_p50_czk != null ||
+    building.total_rent_p75_czk != null;
+  const hasSale =
+    building.total_sale_p25_czk != null ||
+    building.total_sale_p50_czk != null ||
+    building.total_sale_p75_czk != null;
+  if (!hasRent && !hasSale) return null;
   return (
     <section className="mt-6 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5">
       <header className="flex items-baseline justify-between gap-4">
         <h2 className="text-[0.85rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-          Building total — monthly rent
+          Building totals
         </h2>
         <span className="text-[0.7rem] text-[var(--color-ink-3)]">
-          sum of per-unit medians
+          sum of per-unit medians; IQR endpoints summed
         </span>
       </header>
-      <p className="mt-3 text-2xl tabular-nums" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-6">
+        {hasRent && (
+          <TotalsCell
+            label="monthly rent"
+            unit="/mo"
+            p25={building.total_rent_p25_czk}
+            p50={building.total_rent_p50_czk}
+            p75={building.total_rent_p75_czk}
+          />
+        )}
+        {hasSale && (
+          <TotalsCell
+            label="sale price"
+            unit={null}
+            p25={building.total_sale_p25_czk}
+            p50={building.total_sale_p50_czk}
+            p75={building.total_sale_p75_czk}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TotalsCell({
+  label, unit, p25, p50, p75,
+}: {
+  label: string;
+  unit: string | null;
+  p25: number | null;
+  p50: number | null;
+  p75: number | null;
+}) {
+  return (
+    <div>
+      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        {label}
+      </p>
+      <p
+        className="mt-1 text-2xl tabular-nums"
+        style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+      >
         {p50 != null ? fmtCzk(p50) : '—'}
-        <span className="text-[var(--color-ink-3)] text-base ml-1">/mo</span>
+        {unit && (
+          <span className="text-[var(--color-ink-3)] text-base ml-1">{unit}</span>
+        )}
       </p>
       {p25 != null && p75 != null && (
         <p className="mt-1 text-[0.85rem] text-[var(--color-ink-3)] tabular-nums">
-          {fmtCzk(p25)} – {fmtCzk(p75)} (sum of per-unit IQR endpoints)
+          {fmtCzk(p25)} – {fmtCzk(p75)}
         </p>
       )}
-    </section>
+    </div>
   );
 }
 

@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 19:26 UTC_
+_Last refreshed: 2026-05-14 05:35 UTC_
 
-**Branch:** `claude/add-estimation-files-context-ugzqK`
+**Branch:** `claude/building-b2-fanout`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-13 19:26 UTC_
 **Last 10 commits:**
 
 ```
+0be8a9e buildings: B2 per-unit fan-out + rollup, with parent inputs threaded to children
+b7dcc38 roadmap: refresh auto-status block
 355e762 roadmap: refresh auto-status block
 abb5ccd merge: resolve ROADMAP auto-status conflict with origin/main
 4e9ef07 migrations: renumber 042→044, 043→045 (slot 042 claimed by main)
@@ -24,8 +26,6 @@ bababba roadmap: refresh auto-status block
 60d2809 roadmap: refresh auto-status block
 23fae19 merge: resolve ROADMAP.md auto-status conflict with origin/main
 f4830c2 browse: per-disposition ppm2 box plots, retire Region tab
-43d5b2a estimations: operator-supplied instructions, context, and floor-plan attachments
-de129d6 Merge pull request #75 from waiff/claude/unified-browse-experience-Oz9DR
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1211,26 +1211,30 @@ lands in B2; B1 stops at the human-in-the-loop gate.
   flow exercises; defer until a real bezrealitky `dum` URL surfaces
   in operator testing.
 
-### Phase B2: Per-unit fan-out + building rollup view (shipped — rent slice)
+### Phase B2: Per-unit fan-out + building rollup view (shipped — rent + sale)
 
 Implementation landed: `api/building_orchestrator.py:fan_out_unit_estimations`
 runs synchronously from `POST /buildings/{id}/confirm_units`. For each
-confirmed unit it inserts one `estimation_runs` row (mode='agent',
-estimate_kind='rent'), wired back via `building_run_id` +
-`building_unit_id`, then drives `run_agent_estimation` under the skill
-named by `app_settings.building_default_estimator_skill`. The parent's
+confirmed unit it inserts **one rent + one sale** `estimation_runs`
+row, wired back via `building_run_id` + `building_unit_id`. Each row
+drives `run_agent_estimation` under the matching skill — rent uses
+`app_settings.building_default_estimator_skill` (default
+`rental_estimator_v1`), sale uses
+`app_settings.building_default_sale_estimator_skill` (default
+`sale_estimator_v1`, seeded by migration 046). The parent's
 `special_instructions`, `contextual_text`, and uploaded attachments
-flow into every child, so the agent can call `read_floor_plan` on the
-attached drawings. Rollup (`rollup_building_estimates`) sums successful
-children's `rent_p25/p50/p75_czk` into `total_rent_*_czk` and
-transitions the parent to `success` / `failed`. Per-child failures
-don't kill the fan-out — the parent succeeds as long as at least one
-child does. Frontend renders per-unit estimate strips + rollup totals
-on `/building/:id`. Hermetic tests live in
-`tests/api/test_building_orchestrator.py`. **Sale-side fan-out remains
-out of scope per the original "Out of scope for B2" note below; the
-sale `total_*` columns stay null until a `sale_estimator_v1` skill
-ships.**
+flow into every child, so each agent can call `read_floor_plan` on
+the attached drawings. Rollup (`rollup_building_estimates`) sums
+successful children's percentiles independently per family into
+`total_rent_*_czk` and `total_sale_*_czk`, then transitions the
+parent to `success` / `failed`. Per-child failures don't kill the
+fan-out — the parent succeeds as long as at least one child does.
+If the sale skill row is missing, sale fan-out is silently skipped
+(rent-only mode). Frontend renders per-unit estimate strips (with
+kind badge) + side-by-side rent / sale rollup totals on
+`/building/:id`. Hermetic tests live in
+`tests/api/test_building_orchestrator.py`; the agent's sale-finalise
+path is covered in `tests/api/test_agent.py`.
 
 Below is the original B2 specification, kept for reference:
 

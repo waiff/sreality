@@ -3,24 +3,22 @@
 Hits the orchestrator directly with monkeypatched persistence helpers
 + a stub `run_agent_estimation`. Verifies:
 
-  - the orchestrator inserts one estimation_runs row per unit with
-    building_run_id + building_unit_id populated;
+  - the orchestrator inserts one rent + one sale estimation_runs row
+    per unit with building_run_id + building_unit_id populated;
   - operator inputs (special_instructions / contextual_text / attachments)
     flow into each child's agent call;
-  - successful children's rent percentiles roll up into the parent's
-    total_rent_* columns;
+  - successful children's rent + sale percentiles roll up into the
+    parent's total_rent_* / total_sale_* columns independently;
   - per-child failures don't break the fan-out; the parent transitions
     to 'success' as long as at least one child succeeded;
-  - skipping a unit with no area_m2 marks that child 'failed' but
-    other children still run.
+  - skipping a unit with no area_m2 marks both children 'failed';
+  - missing sale skill falls back to rent-only fan-out.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
-
-import pytest
 
 from api import building_orchestrator as bo
 from api import building_runs as br
@@ -35,13 +33,16 @@ class _Skill:
     )
 
 
-def _agent_result(*, rent: int = 30_000, p25: int = 25_000, p75: int = 35_000):
+def _agent_rent(*, rent: int = 30_000, p25: int = 25_000, p75: int = 35_000):
     from api.agent import AgentResult
     return AgentResult(
         data={
             "estimated_monthly_rent_czk": rent,
             "rent_p25_czk": p25,
             "rent_p75_czk": p75,
+            "estimated_sale_price_czk": None,
+            "sale_p25_czk": None,
+            "sale_p75_czk": None,
             "confidence": "medium",
             "comparables_used": [{"sreality_id": 111, "snapshot_id": 222}],
             "warnings": [],
@@ -52,13 +53,37 @@ def _agent_result(*, rent: int = 30_000, p25: int = 25_000, p75: int = 35_000):
             "provider": "anthropic",
             "skill": "rental_estimator_v1",
             "total_cost_usd": 0.07,
+            "estimate_kind": "rent",
+        },
+    )
+
+
+def _agent_sale(*, sale: int = 8_000_000, p25: int = 7_200_000, p75: int = 9_000_000):
+    from api.agent import AgentResult
+    return AgentResult(
+        data={
+            "estimated_monthly_rent_czk": None,
+            "rent_p25_czk": None,
+            "rent_p75_czk": None,
+            "estimated_sale_price_czk": sale,
+            "sale_p25_czk": p25,
+            "sale_p75_czk": p75,
+            "confidence": "medium",
+            "comparables_used": [{"sreality_id": 333, "snapshot_id": 444}],
+            "warnings": [],
+        },
+        metadata={
+            "stop_reason": "record_estimate",
+            "iterations": 5,
+            "provider": "anthropic",
+            "skill": "sale_estimator_v1",
+            "total_cost_usd": 0.09,
+            "estimate_kind": "sale",
         },
     )
 
 
 def _patch_persistence(monkeypatch, *, parent: dict[str, Any]):
-    """Replace _fetch_building / _update_building_fields / _insert_run /
-    _update_run_terminal with in-memory equivalents."""
     state = {
         "building": dict(parent),
         "children": {},
@@ -87,41 +112,60 @@ def _patch_persistence(monkeypatch, *, parent: dict[str, Any]):
     monkeypatch.setattr(er, "_insert_run", fake_insert_run)
     monkeypatch.setattr(er, "_update_run_terminal", fake_update_terminal)
 
-    # The orchestrator's rollup runs a raw SELECT; replace it too.
     def fake_rollup(conn, building_run_id):
-        rows = state["children"].values()
-        total_p25 = sum(int(r.get("rent_p25_czk") or 0) for r in rows if r.get("status") == "success")
-        total_p50 = sum(int(r.get("estimated_monthly_rent_czk") or 0) for r in rows if r.get("status") == "success")
-        total_p75 = sum(int(r.get("rent_p75_czk") or 0) for r in rows if r.get("status") == "success")
-        succ_with_rent = [
-            r for r in rows
-            if r.get("status") == "success" and r.get("estimated_monthly_rent_czk") is not None
-        ]
-        if not succ_with_rent:
-            n_succ = sum(1 for r in rows if r.get("status") == "success")
-            n_fail = sum(1 for r in rows if r.get("status") == "failed")
+        rows = list(state["children"].values())
+
+        def _sum_family(kind: str):
+            p25 = median = p75 = 0
+            n = 0
+            for r in rows:
+                if r.get("status") != "success" or r.get("estimate_kind") != kind:
+                    continue
+                if kind == "rent":
+                    a, b, c = r.get("rent_p25_czk"), r.get("estimated_monthly_rent_czk"), r.get("rent_p75_czk")
+                else:
+                    a, b, c = r.get("sale_p25_czk"), r.get("estimated_sale_price_czk"), r.get("sale_p75_czk")
+                if a is None or b is None or c is None:
+                    continue
+                p25 += int(a); median += int(b); p75 += int(c); n += 1
+            return (p25, median, p75) if n else None
+
+        rent = _sum_family("rent")
+        sale = _sum_family("sale")
+        fields: dict[str, Any] = {}
+        if rent is not None:
+            fields["total_rent_p25_czk"] = rent[0]
+            fields["total_rent_p50_czk"] = rent[1]
+            fields["total_rent_p75_czk"] = rent[2]
+        if sale is not None:
+            fields["total_sale_p25_czk"] = sale[0]
+            fields["total_sale_p50_czk"] = sale[1]
+            fields["total_sale_p75_czk"] = sale[2]
+        if rent is None and sale is None:
+            n_s = sum(1 for r in rows if r.get("status") == "success")
+            n_f = sum(1 for r in rows if r.get("status") == "failed")
             fake_update_building(
                 conn, parent["id"],
                 status="failed",
-                error_message=f"rollup: no successful child estimations with a rent range (success={n_succ}, failed={n_fail})",
+                error_message=f"rollup: no successful child estimations with a numeric range (success={n_s}, failed={n_f})",
             )
             return
-        fake_update_building(
-            conn, parent["id"],
-            status="success",
-            total_rent_p25_czk=total_p25,
-            total_rent_p50_czk=total_p50,
-            total_rent_p75_czk=total_p75,
-        )
+        fields["status"] = "success"
+        fake_update_building(conn, parent["id"], **fields)
 
     monkeypatch.setattr(bo, "rollup_building_estimates", fake_rollup)
     return state
 
 
-def _patch_external(monkeypatch, agent_outcomes):
+def _patch_external(
+    monkeypatch,
+    agent_outcomes: list[Any],
+    *,
+    sale_skill_available: bool = True,
+):
     """Stub list_attachments, _resolve_default_skill, load_skill,
-    run_agent_estimation. agent_outcomes is a list iterated per call."""
-    calls = []
+    run_agent_estimation."""
+    calls: list[dict[str, Any]] = []
 
     def fake_list_attachments(conn, building_run_id):
         return [
@@ -129,10 +173,15 @@ def _patch_external(monkeypatch, agent_outcomes):
              "storage_key": "k", "building_run_id": building_run_id},
         ]
 
-    def fake_resolve_skill(conn):
+    def fake_resolve_skill(conn, key, fallback):
+        if key == bo._DEFAULT_SALE_SKILL_KEY:
+            return "sale_estimator_v1" if sale_skill_available else "missing_sale"
         return "rental_estimator_v1"
 
     def fake_load_skill(conn, name):
+        from api.skills import SkillNotFound
+        if name == "missing_sale":
+            raise SkillNotFound(f"skill {name!r} not found")
         return _Skill(name=name)
 
     outcomes = list(agent_outcomes)
@@ -170,7 +219,7 @@ def _parent(units, **overrides):
     return base
 
 
-def test_fan_out_happy_path_two_units(monkeypatch):
+def test_fan_out_emits_rent_and_sale_per_unit(monkeypatch):
     units = [
         {"unit_id": "u1", "area_m2": 60.0, "disposition": "2+kk", "floor": "1"},
         {"unit_id": "u2", "area_m2": 75.0, "disposition": "3+kk", "floor": "2"},
@@ -179,8 +228,12 @@ def test_fan_out_happy_path_two_units(monkeypatch):
     agent_calls = _patch_external(
         monkeypatch,
         [
-            _agent_result(rent=30_000, p25=25_000, p75=35_000),
-            _agent_result(rent=38_000, p25=33_000, p75=42_000),
+            # Unit 1: rent then sale
+            _agent_rent(rent=30_000, p25=25_000, p75=35_000),
+            _agent_sale(sale=8_000_000, p25=7_200_000, p75=9_000_000),
+            # Unit 2: rent then sale
+            _agent_rent(rent=38_000, p25=33_000, p75=42_000),
+            _agent_sale(sale=10_000_000, p25=9_000_000, p75=11_500_000),
         ],
     )
 
@@ -191,46 +244,52 @@ def test_fan_out_happy_path_two_units(monkeypatch):
         building_run_id=7,
     )
 
-    # Two child runs inserted, both successful.
-    assert len(state["children"]) == 2
+    # Four child runs: 2 units × 2 kinds.
+    assert len(state["children"]) == 4
     assert all(c["status"] == "success" for c in state["children"].values())
 
-    # Each child carries the building FKs + per-unit identifiers.
-    by_unit = {c["building_unit_id"]: c for c in state["children"].values()}
-    assert set(by_unit) == {"u1", "u2"}
-    for c in by_unit.values():
+    # Children carry the right kind + FK linkage.
+    by_unit_kind = {(c["building_unit_id"], c["estimate_kind"]): c for c in state["children"].values()}
+    assert set(by_unit_kind) == {
+        ("u1", "rent"), ("u1", "sale"),
+        ("u2", "rent"), ("u2", "sale"),
+    }
+    for c in state["children"].values():
         assert c["building_run_id"] == 7
-        assert c["estimate_kind"] == "rent"
         assert c["mode"] == "agent"
 
-    # Operator inputs + attachments flowed into every agent call.
-    assert len(agent_calls) == 2
+    # Each agent call carried operator inputs + attachments and the right kind.
+    assert len(agent_calls) == 4
+    kinds_seen = [c["estimate_kind"] for c in agent_calls]
+    assert kinds_seen.count("rent") == 2
+    assert kinds_seen.count("sale") == 2
     for call in agent_calls:
         assert call["special_instructions"] == "Treat attic as habitable"
         assert call["contextual_text"] == "Owner says heating refurbished 2022"
         assert call["building_run_id"] == 7
-        attachments = call["attachments"]
-        assert len(attachments) == 1
-        assert attachments[0]["id"] == 901
+        assert len(call["attachments"]) == 1
+        assert call["attachments"][0]["id"] == 901
 
-    # Rollup landed on the parent.
+    # Rollup: rent + sale summed independently.
     assert state["building"]["status"] == "success"
     assert state["building"]["total_rent_p25_czk"] == 25_000 + 33_000
     assert state["building"]["total_rent_p50_czk"] == 30_000 + 38_000
     assert state["building"]["total_rent_p75_czk"] == 35_000 + 42_000
+    assert state["building"]["total_sale_p25_czk"] == 7_200_000 + 9_000_000
+    assert state["building"]["total_sale_p50_czk"] == 8_000_000 + 10_000_000
+    assert state["building"]["total_sale_p75_czk"] == 9_000_000 + 11_500_000
 
 
 def test_fan_out_tolerates_per_child_failure(monkeypatch):
     units = [
         {"unit_id": "u1", "area_m2": 60.0, "disposition": "2+kk"},
-        {"unit_id": "u2", "area_m2": 80.0, "disposition": "3+kk"},
     ]
     state = _patch_persistence(monkeypatch, parent=_parent(units))
     _patch_external(
         monkeypatch,
         [
-            RuntimeError("agent rate-limited"),
-            _agent_result(rent=40_000, p25=36_000, p75=44_000),
+            RuntimeError("rent agent rate-limited"),
+            _agent_sale(sale=7_500_000, p25=6_800_000, p75=8_300_000),
         ],
     )
 
@@ -243,9 +302,36 @@ def test_fan_out_tolerates_per_child_failure(monkeypatch):
 
     statuses = sorted(c["status"] for c in state["children"].values())
     assert statuses == ["failed", "success"]
-    # Parent rolls up to success with just the surviving child.
+    # Parent rolls up to success with the surviving sale child only.
     assert state["building"]["status"] == "success"
-    assert state["building"]["total_rent_p50_czk"] == 40_000
+    assert state["building"].get("total_rent_p50_czk") is None
+    assert state["building"]["total_sale_p50_czk"] == 7_500_000
+
+
+def test_fan_out_falls_back_to_rent_only_when_sale_skill_missing(monkeypatch):
+    units = [
+        {"unit_id": "u1", "area_m2": 60.0, "disposition": "2+kk"},
+    ]
+    state = _patch_persistence(monkeypatch, parent=_parent(units))
+    agent_calls = _patch_external(
+        monkeypatch,
+        [_agent_rent()],
+        sale_skill_available=False,
+    )
+
+    bo.fan_out_unit_estimations(
+        conn=object(),
+        sreality_client=object(),
+        llm_client=object(),
+        building_run_id=7,
+    )
+
+    # Only one agent call (rent); no sale child created.
+    assert len(agent_calls) == 1
+    assert agent_calls[0]["estimate_kind"] == "rent"
+    assert len(state["children"]) == 1
+    assert state["building"]["status"] == "success"
+    assert state["building"].get("total_sale_p50_czk") is None
 
 
 def test_fan_out_skips_units_without_area(monkeypatch):
@@ -256,7 +342,7 @@ def test_fan_out_skips_units_without_area(monkeypatch):
     state = _patch_persistence(monkeypatch, parent=_parent(units))
     agent_calls = _patch_external(
         monkeypatch,
-        [_agent_result()],  # only one call expected (u2)
+        [_agent_rent(), _agent_sale()],
     )
 
     bo.fan_out_unit_estimations(
@@ -266,13 +352,15 @@ def test_fan_out_skips_units_without_area(monkeypatch):
         building_run_id=7,
     )
 
-    # u1 created a 'failed' child without an agent call; u2 went through.
-    by_unit = {c["building_unit_id"]: c for c in state["children"].values()}
-    assert by_unit["u1"]["status"] == "failed"
-    assert "area_m2" in (by_unit["u1"].get("error_message") or "").lower()
-    assert by_unit["u2"]["status"] == "success"
-    assert len(agent_calls) == 1
-    # Parent still rolls up to success with the one surviving child.
+    by_unit_kind = {(c["building_unit_id"], c["estimate_kind"]): c for c in state["children"].values()}
+    # u1's two children are both 'failed' (no area_m2) and the agent
+    # was never called for them.
+    assert by_unit_kind[("u1", "rent")]["status"] == "failed"
+    assert by_unit_kind[("u1", "sale")]["status"] == "failed"
+    # u2's two children both went through the agent and succeeded.
+    assert by_unit_kind[("u2", "rent")]["status"] == "success"
+    assert by_unit_kind[("u2", "sale")]["status"] == "success"
+    assert len(agent_calls) == 2
     assert state["building"]["status"] == "success"
 
 
@@ -295,7 +383,7 @@ def test_fan_out_marks_parent_failed_when_missing_latlng(monkeypatch):
     units = [{"unit_id": "u1", "area_m2": 60.0, "disposition": "2+kk"}]
     state = _patch_persistence(
         monkeypatch,
-        parent=_parent(units, input_spec={"area_m2": 250.0}),  # no lat/lng
+        parent=_parent(units, input_spec={"area_m2": 250.0}),
     )
     _patch_external(monkeypatch, [])
 

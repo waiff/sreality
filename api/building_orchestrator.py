@@ -5,33 +5,33 @@ the operator has approved the unit list. For each unit:
 
   1. Build a `TargetSpec` from the parent building's lat/lng + the
      unit's area_m2 / disposition / floor.
-  2. INSERT one rent `estimation_runs` row linked back via
-     `building_run_id` + `building_unit_id` (mode='agent', status='running').
+  2. INSERT one rent + one sale `estimation_runs` row, both linked
+     back via `building_run_id` + `building_unit_id` (mode='agent',
+     status='running').
   3. Drive the apartment estimator skill (sourced from
-     `app_settings.building_default_estimator_skill`, default
-     `rental_estimator_v1`) with the parent's operator-supplied
-     `special_instructions`, `contextual_text`, and uploaded
-     attachments (so the child agent can call `read_floor_plan`).
-  4. UPDATE the child to its terminal status.
+     `app_settings.building_default_estimator_skill` for rent, and
+     `app_settings.building_default_sale_estimator_skill` for sale)
+     with the parent's operator-supplied `special_instructions`,
+     `contextual_text`, and uploaded attachments (so the child agent
+     can call `read_floor_plan`).
+  4. UPDATE each child to its terminal status.
 
 After every child has settled, sum the successful children's
-`rent_p25/p50/p75_czk` into the parent's `total_rent_*_czk` columns
-and transition the parent to `success` / `failed`.
-
-Sale-side fan-out is deliberately out of scope per ROADMAP § B2 — a
-`sale_estimator_v1` skill needs to ship first. Sale rollup columns
-stay null.
+`rent_p25 / median / p75_czk` into `total_rent_*_czk` and the
+successful sale children's `sale_p25 / estimated_sale_price / p75_czk`
+into `total_sale_*_czk`, then transition the parent to
+`success` / `failed`.
 
 Synchronous by design: matches the existing extraction call's
 wall-clock style and avoids adding async infrastructure. With the
 agent's per-skill `max_cost_usd` and `wall_clock_timeout_s` caps a
-5-unit building completes in 2-5 minutes in the common case.
+5-unit building takes 4-8 minutes (2 children per unit, 30-60s each).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from api import estimation_runs as er
 from toolkit.comparables import ComparableFilters, TargetSpec
@@ -44,8 +44,17 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
-_DEFAULT_SKILL_KEY = "building_default_estimator_skill"
-_DEFAULT_SKILL_FALLBACK = "rental_estimator_v1"
+EstimateKind = Literal["rent", "sale"]
+
+_DEFAULT_RENT_SKILL_KEY = "building_default_estimator_skill"
+_DEFAULT_SALE_SKILL_KEY = "building_default_sale_estimator_skill"
+_DEFAULT_RENT_SKILL_FALLBACK = "rental_estimator_v1"
+_DEFAULT_SALE_SKILL_FALLBACK = "sale_estimator_v1"
+
+_KIND_TO_CATEGORY_TYPE: dict[str, str] = {
+    "rent": "pronajem",
+    "sale": "prodej",
+}
 
 
 def fan_out_unit_estimations(
@@ -54,16 +63,19 @@ def fan_out_unit_estimations(
     llm_client: "LLMClient",
     building_run_id: int,
 ) -> dict[str, Any]:
-    """Drive per-unit estimations + rollup. Returns the updated parent row.
+    """Drive per-unit rent + sale estimations + rollup. Returns the parent row.
 
-    Per-unit failures are tolerated — a child agent that raises gets
+    Per-child failures are tolerated — a child agent that raises gets
     its row marked `failed` with the exception message, and the rest
     of the fan-out continues. Rollup uses only successful children.
     If every child fails, the parent transitions to `failed`.
+
+    If a sale skill is missing or misconfigured the sale fan-out is
+    skipped (the parent still succeeds on rent alone); rent skill
+    misconfiguration is fatal.
     """
-    from api.agent import run_agent_estimation
     from api.attachments import list_attachments
-    from api.building_runs import _fetch_building, _update_building_fields
+    from api.building_runs import _fetch_building
     from api.skills import SkillNotFound, load_skill
 
     parent = _fetch_building(conn, building_run_id)
@@ -93,15 +105,25 @@ def fan_out_unit_estimations(
         )
         return _fetch_building(conn, building_run_id) or {}
 
-    skill_name = _resolve_default_skill(conn)
+    rent_skill_name = _resolve_default_skill(conn, _DEFAULT_RENT_SKILL_KEY, _DEFAULT_RENT_SKILL_FALLBACK)
     try:
-        skill = load_skill(conn, skill_name)
+        rent_skill = load_skill(conn, rent_skill_name)
     except SkillNotFound:
         _mark_parent_failed(
             conn, building_run_id,
-            error=f"building_default_estimator_skill={skill_name!r} is unknown",
+            error=f"building_default_estimator_skill={rent_skill_name!r} is unknown",
         )
         return _fetch_building(conn, building_run_id) or {}
+
+    sale_skill_name = _resolve_default_skill(conn, _DEFAULT_SALE_SKILL_KEY, _DEFAULT_SALE_SKILL_FALLBACK)
+    sale_skill: Any = None
+    try:
+        sale_skill = load_skill(conn, sale_skill_name)
+    except SkillNotFound:
+        LOG.warning(
+            "B2 building_runs[%s] sale skill %r not found; skipping sale fan-out",
+            building_run_id, sale_skill_name,
+        )
 
     attachments = list_attachments(conn, building_run_id)
     special_instructions = parent.get("special_instructions")
@@ -110,33 +132,38 @@ def fan_out_unit_estimations(
     input_sreality_id = parent.get("input_sreality_id")
 
     LOG.info(
-        "B2 building_runs[%s] fanning out %d units under skill=%r "
+        "B2 building_runs[%s] fanning out %d units (rent=%r, sale=%r) "
         "with %d attachment(s)",
-        building_run_id, len(units), skill_name, len(attachments),
+        building_run_id, len(units),
+        rent_skill_name,
+        sale_skill_name if sale_skill is not None else None,
+        len(attachments),
     )
 
-    n_success = 0
-    n_failed = 0
+    tally = {"success": 0, "failed": 0}
     for unit in units:
-        outcome = _run_one_unit(
-            conn, sreality_client, llm_client,
-            parent=parent, unit=unit, lat=float(lat), lng=float(lng),
-            skill=skill, source=source,
-            input_sreality_id=input_sreality_id,
-            special_instructions=special_instructions,
-            contextual_text=contextual_text,
-            attachments=attachments,
-        )
-        if outcome == "success":
-            n_success += 1
-        else:
-            n_failed += 1
+        for kind, skill in (("rent", rent_skill), ("sale", sale_skill)):
+            if skill is None:
+                continue
+            outcome = _run_one_unit(
+                conn, sreality_client, llm_client,
+                parent=parent, unit=unit,
+                lat=float(lat), lng=float(lng),
+                skill=skill,
+                estimate_kind=kind,  # type: ignore[arg-type]
+                source=source,
+                input_sreality_id=input_sreality_id,
+                special_instructions=special_instructions,
+                contextual_text=contextual_text,
+                attachments=attachments,
+            )
+            tally[outcome] += 1
 
     rollup_building_estimates(conn, building_run_id)
 
     LOG.info(
         "B2 building_runs[%s] fan-out complete: %d success / %d failed",
-        building_run_id, n_success, n_failed,
+        building_run_id, tally["success"], tally["failed"],
     )
     return _fetch_building(conn, building_run_id) or {}
 
@@ -145,19 +172,22 @@ def rollup_building_estimates(
     conn: "psycopg.Connection",
     building_run_id: int,
 ) -> None:
-    """Sum successful child rent percentiles into the parent row and
-    transition the parent to its terminal status.
+    """Sum successful child rent + sale percentiles into the parent row
+    and transition the parent to its terminal status.
 
-    Sale columns stay null until sale-side fan-out is wired (Phase B2.5).
+    Rent and sale are summed independently. If neither family has any
+    successful children with a numeric range, the parent fails; if
+    either family has at least one good child, the parent succeeds
+    and the other family's totals stay null.
     """
-    from api.building_runs import _fetch_building, _update_building_fields
+    from api.building_runs import _update_building_fields
 
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT status,
+            SELECT estimate_kind, status,
                    rent_p25_czk, estimated_monthly_rent_czk, rent_p75_czk,
-                   error_message
+                   sale_p25_czk, estimated_sale_price_czk, sale_p75_czk
             FROM estimation_runs
             WHERE building_run_id = %s
             """,
@@ -173,41 +203,65 @@ def rollup_building_estimates(
         )
         return
 
-    total_p25 = 0
-    total_p50 = 0
-    total_p75 = 0
-    n_success_with_rent = 0
-    n_success = 0
-    n_failed = 0
-    for status, p25, median, p75, err in rows:
-        if status == "success":
-            n_success += 1
-            if p25 is not None and median is not None and p75 is not None:
-                total_p25 += int(p25)
-                total_p50 += int(median)
-                total_p75 += int(p75)
-                n_success_with_rent += 1
-        elif status == "failed":
-            n_failed += 1
+    rent_totals = _sum_family(rows, kind="rent")
+    sale_totals = _sum_family(rows, kind="sale")
 
-    if n_success_with_rent == 0:
+    fields: dict[str, Any] = {}
+    if rent_totals is not None:
+        fields["total_rent_p25_czk"] = rent_totals[0]
+        fields["total_rent_p50_czk"] = rent_totals[1]
+        fields["total_rent_p75_czk"] = rent_totals[2]
+    if sale_totals is not None:
+        fields["total_sale_p25_czk"] = sale_totals[0]
+        fields["total_sale_p50_czk"] = sale_totals[1]
+        fields["total_sale_p75_czk"] = sale_totals[2]
+
+    if rent_totals is None and sale_totals is None:
+        n_success = sum(1 for r in rows if r[1] == "success")
+        n_failed = sum(1 for r in rows if r[1] == "failed")
         _update_building_fields(
             conn, building_run_id,
             status="failed",
             error_message=(
-                f"rollup: no successful child estimations with a rent range "
+                f"rollup: no successful child estimations with a numeric range "
                 f"(success={n_success}, failed={n_failed})"
             ),
         )
         return
 
-    _update_building_fields(
-        conn, building_run_id,
-        status="success",
-        total_rent_p25_czk=total_p25,
-        total_rent_p50_czk=total_p50,
-        total_rent_p75_czk=total_p75,
-    )
+    fields["status"] = "success"
+    _update_building_fields(conn, building_run_id, **fields)
+
+
+def _sum_family(
+    rows: list[tuple[Any, ...]],
+    *,
+    kind: EstimateKind,
+) -> tuple[int, int, int] | None:
+    """Sum p25 / median / p75 over rows of `kind` that are `success`
+    AND have a complete numeric triple. Returns None if no row qualifies.
+    """
+    if kind == "rent":
+        idx = (2, 3, 4)
+    else:
+        idx = (5, 6, 7)
+    p25 = 0
+    median = 0
+    p75 = 0
+    n = 0
+    for row in rows:
+        if row[0] != kind or row[1] != "success":
+            continue
+        a, b, c = row[idx[0]], row[idx[1]], row[idx[2]]
+        if a is None or b is None or c is None:
+            continue
+        p25 += int(a)
+        median += int(b)
+        p75 += int(c)
+        n += 1
+    if n == 0:
+        return None
+    return p25, median, p75
 
 
 def _run_one_unit(
@@ -220,13 +274,14 @@ def _run_one_unit(
     lat: float,
     lng: float,
     skill: Any,
+    estimate_kind: EstimateKind,
     source: str,
     input_sreality_id: int | None,
     special_instructions: str | None,
     contextual_text: str | None,
     attachments: list[dict[str, Any]],
 ) -> str:
-    """Estimate one unit. Returns 'success' or 'failed' for caller tally.
+    """Estimate one (unit, estimate_kind) pair. Returns 'success' or 'failed'.
 
     Inserts the child row (status='running') BEFORE invoking the agent
     so `llm_calls.estimation_run_id` attribution lights up while the
@@ -239,6 +294,7 @@ def _run_one_unit(
     area_m2 = unit.get("area_m2")
     disposition = unit.get("disposition")
     floor = _normalize_floor(unit.get("floor"))
+    category_type = _KIND_TO_CATEGORY_TYPE[estimate_kind]
 
     target = TargetSpec(
         lat=lat,
@@ -252,10 +308,10 @@ def _run_one_unit(
         radius_m=er._DEFAULT_RADIUS_M,
         area_band_pct=er._DEFAULT_AREA_BAND_PCT,
         disposition_match=er._DEFAULT_DISPOSITION_MATCH,
-        max_age_days=er._default_max_age_days("rent"),
+        max_age_days=er._default_max_age_days(estimate_kind),
         active_only=er._DEFAULT_ACTIVE_ONLY,
         category_main="byt",
-        category_type="pronajem",
+        category_type=category_type,
     )
 
     input_spec = {
@@ -274,7 +330,7 @@ def _run_one_unit(
         source=source,
         mode="agent",
         status="running",
-        estimate_kind="rent",
+        estimate_kind=estimate_kind,
         input_url=None,
         input_sreality_id=None,
         input_spec=input_spec,
@@ -304,6 +360,7 @@ def _run_one_unit(
             target, filters, None,
             skill=skill, provider="anthropic",
             recorder=recorder, estimation_run_id=child_id,
+            estimate_kind=estimate_kind,
             special_instructions=special_instructions,
             contextual_text=contextual_text,
             building_run_id=parent["id"],
@@ -311,8 +368,8 @@ def _run_one_unit(
         )
     except Exception as exc:  # noqa: BLE001 — tolerated per docstring
         LOG.warning(
-            "B2 building_runs[%s] unit %s agent raised: %s",
-            parent["id"], unit_id, exc,
+            "B2 building_runs[%s] unit %s (%s) agent raised: %s",
+            parent["id"], unit_id, estimate_kind, exc,
         )
         trace = recorder.to_dict(f"agent failed: {type(exc).__name__}")
         er._update_run_terminal(
@@ -326,9 +383,24 @@ def _run_one_unit(
     d = agent_result.data
     md = agent_result.metadata
     status = "success" if md.get("stop_reason") == "record_estimate" else "failed"
+
+    if status == "success":
+        if estimate_kind == "rent" and d.get("estimated_monthly_rent_czk") is None:
+            status = "failed"
+        elif estimate_kind == "sale" and d.get("estimated_sale_price_czk") is None:
+            status = "failed"
+
     trace = recorder.to_dict(er._agent_summary_line(d, md))
     warnings = list(d.get("warnings") or []) or None
-    err = f"agent halted: {md.get('stop_reason')}" if status == "failed" else None
+    err: str | None
+    if status == "failed":
+        err = (
+            f"agent halted: {md.get('stop_reason')}"
+            if md.get("stop_reason") != "record_estimate"
+            else f"agent recorded {estimate_kind} estimate without the required {estimate_kind}_* fields"
+        )
+    else:
+        err = None
 
     er._update_run_terminal(
         conn, child_id,
@@ -336,6 +408,9 @@ def _run_one_unit(
         estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
         rent_p25_czk=d.get("rent_p25_czk"),
         rent_p75_czk=d.get("rent_p75_czk"),
+        estimated_sale_price_czk=d.get("estimated_sale_price_czk"),
+        sale_p25_czk=d.get("sale_p25_czk"),
+        sale_p75_czk=d.get("sale_p75_czk"),
         confidence=d.get("confidence"),
         comparables_used=d.get("comparables_used"),
         trace=trace,
@@ -360,19 +435,23 @@ def _mark_parent_failed(
     )
 
 
-def _resolve_default_skill(conn: "psycopg.Connection") -> str:
+def _resolve_default_skill(
+    conn: "psycopg.Connection",
+    key: str,
+    fallback: str,
+) -> str:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT value FROM app_settings WHERE key = %s",
-            (_DEFAULT_SKILL_KEY,),
+            (key,),
         )
         row = cur.fetchone()
     if row is None:
-        return _DEFAULT_SKILL_FALLBACK
+        return fallback
     value = row[0]
     if isinstance(value, str) and value:
         return value
-    return _DEFAULT_SKILL_FALLBACK
+    return fallback
 
 
 def _normalize_floor(value: Any) -> int | None:
