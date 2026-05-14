@@ -138,7 +138,11 @@ function ThemeGlyph({ kind }: { kind: 'sun' | 'moon' | 'system' }) {
 /* -------------------------------------------------------------------- */
 
 function SkillsSection() {
-  const skillsQ = useQuery({ queryKey: ['admin', 'skills'], queryFn: listSkills });
+  const [showArchived, setShowArchived] = useState(false);
+  const skillsQ = useQuery({
+    queryKey: ['admin', 'skills', { includeArchived: showArchived }],
+    queryFn: () => listSkills({ includeArchived: showArchived }),
+  });
   const toolsQ = useQuery({ queryKey: ['admin', 'tools'], queryFn: listAgentTools });
 
   if (skillsQ.error) {
@@ -153,30 +157,62 @@ function SkillsSection() {
 
   const skills = skillsQ.data.data;
   const tools = toolsQ.data.data;
+  const archivedCount = skills.filter((s) => s.archived_at != null).length;
 
   return (
     <div className="space-y-3">
       {skills.length === 0 && (
         <p className="text-sm text-[var(--color-ink-3)]">No skills yet.</p>
       )}
-      {skills.map((s) => (
-        <SkillCard key={s.name} skill={s} tools={tools} />
-      ))}
+      {skills
+        .filter((s) => showArchived || s.archived_at == null)
+        .map((s) => (
+          <SkillCard key={s.name} skill={s} tools={tools} />
+        ))}
+
+      <button
+        type="button"
+        onClick={() => setShowArchived((v) => !v)}
+        className="mt-2 text-[0.78rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] underline-offset-2 hover:underline"
+      >
+        {showArchived
+          ? 'Hide archived skills'
+          : archivedCount > 0
+            ? `Show archived skills (${archivedCount})`
+            : 'Show archived skills'}
+      </button>
     </div>
   );
 }
 
 function SkillCard({ skill, tools }: { skill: Skill; tools: AgentTool[] }) {
   const [open, setOpen] = useState(false);
+  const isArchived = skill.archived_at != null;
   return (
-    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
+    <div
+      className={[
+        'border rounded-[var(--radius-sm)]',
+        isArchived
+          ? 'border-[var(--color-rule-soft)] bg-[var(--color-paper-2)]/60'
+          : 'border-[var(--color-rule)] bg-[var(--color-paper)]',
+      ].join(' ')}
+    >
       <button
         type="button"
         className="w-full px-4 py-3 flex items-baseline justify-between gap-4 text-left"
         onClick={() => setOpen((v) => !v)}
       >
-        <div>
-          <div className="font-medium">{skill.name}</div>
+        <div className="min-w-0">
+          <div className="flex items-baseline gap-2">
+            <span className={['font-medium', isArchived ? 'text-[var(--color-ink-3)]' : ''].join(' ')}>
+              {skill.name}
+            </span>
+            {isArchived && (
+              <span className="inline-block px-1.5 py-px text-[0.6rem] tracking-[0.14em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper-2)] text-[var(--color-ink-4)] border border-[var(--color-rule)]">
+                archived
+              </span>
+            )}
+          </div>
           <div className="text-xs text-[var(--color-ink-3)] mt-0.5">
             {skill.description}
           </div>

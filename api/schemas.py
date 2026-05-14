@@ -246,7 +246,7 @@ class CreateEstimationIn(BaseModel):
 
     # Agent-mode only; ignored when mode == 'deterministic'.
     provider: Literal["anthropic", "gemini"] = "anthropic"
-    skill: str = "rental_estimator_v1"
+    skill: str = "rental_estimator_full_v1"
 
     estimate_kind: Literal["rent", "sale"] = "rent"
 

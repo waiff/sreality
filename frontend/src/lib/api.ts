@@ -438,6 +438,11 @@ export interface Skill {
   preferred_model: Record<string, string>;
   limits: SkillLimits;
   updated_at: string | null;
+  /* Migration 051 — non-null when this skill row has been archived.
+   * Archived skills are hidden from the Settings list by default;
+   * pass `?include_archived=true` to the GET /admin/skills endpoint
+   * to see them. */
+  archived_at: string | null;
 }
 
 export interface SkillUpdate {
@@ -455,8 +460,12 @@ export interface AppSetting {
   updated_at: string | null;
 }
 
-export const listSkills = (): Promise<{ data: Skill[] }> =>
-  request<{ data: Skill[] }>('/admin/skills');
+export const listSkills = (
+  options: { includeArchived?: boolean } = {},
+): Promise<{ data: Skill[] }> =>
+  request<{ data: Skill[] }>('/admin/skills', {
+    query: { include_archived: options.includeArchived ?? false },
+  });
 
 export const getSkill = (name: string): Promise<Skill> =>
   request<Skill>(`/admin/skills/${encodeURIComponent(name)}`);

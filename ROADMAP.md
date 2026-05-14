@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 03:58 UTC_
+_Last refreshed: 2026-05-14 07:45 UTC_
 
-**Branch:** `claude/resolve-error-defensive-fixes`
+**Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 50 files, latest `050_skill_refinements.sql`.
+**Migrations on disk:** 49 files, latest `050_skill_refinements.sql`.
 
 **Last 10 commits:**
 
 ```
+8fbb7f8 Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
 89654ea migrations: renumber 046/047/048 → 048/049/050 (slots taken by main)
 58bee66 phase-ai slices B + C: feedback capture + skill refinement loop
-ce205a3 phase-ai slice A.1: audit follow-ups — skill choice, decision reasons, wording
 b1702ad Merge pull request #84 from waiff/claude/resolve-error-post-success-cors
+ce205a3 phase-ai slice A.1: audit follow-ups — skill choice, decision reasons, wording
 06c3afb api: make post-success persistence non-fatal + echo CORS on 500
 716edd8 Merge pull request #83 from waiff/claude/resolve-error-defensive-fixes
 63bfbc6 api: catch unhandled exceptions + persist target build failures
-10cfe87 Merge pull request #79 from waiff/claude/build-ai-feedback-loop-56uah
-76850b0 manual rental estimates: table, API, agent tool, listing-detail panel
-d676069 phase-ai slice A: capture full tool-call payloads alongside trace
+f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
+2eb44a5 merge: resolve ROADMAP auto-status conflict with origin/main
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1569,6 +1569,36 @@ choices in the slice-B/C kickoff).
 - `auto_apply_refinements` flag is intentionally NOT implemented —
   operator chose suggest-then-confirm; auto-apply can be a Phase
   AI follow-up if same-session iteration feels slow.
+
+#### Slice C.1: Skill consolidation (done)
+
+Operator follow-up: two active rental skills (`rental_estimator_v1`
+and `rental_estimator_full_v1`) was confusing UX. Decision: keep
+only the full skill active, treat the older one as history. The
+refiner pipeline updates the full skill in place going forward —
+`skills_history` is the per-skill audit trail, no new sibling
+skill rows.
+
+- Migration 051 (applied): `skills.archived_at timestamptz`. Same
+  column on `skills_history` so snapshots preserve the archival
+  state. `rental_estimator_v1.archived_at` set to now().
+- Backend default: `CreateEstimationIn.skill` flipped from
+  `"rental_estimator_v1"` to `"rental_estimator_full_v1"`. Existing
+  estimations referencing v1 in their trace still load v1 (load_skill
+  doesn't filter by archival); only new estimations and the default
+  picker are gated.
+- `list_skills(conn, include_archived=False)` is the new shape;
+  `GET /admin/skills?include_archived=true` exposes archived rows.
+  Frontend `Skill.archived_at` + a "Show archived skills" toggle on
+  the Settings page. Archived cards render with a muted background
+  and a small `archived` tag.
+
+The "skill picker on the new-estimation modal" was scoped out —
+the operator's mental model is now: one canonical rental skill,
+refined in place via slice C, with history per-skill in
+`skills_history`. Past runs that ran under v1 keep their trace's
+`skill_choice` step pointing at v1; the row is still there for them
+to load.
 
 ---
 
