@@ -798,6 +798,7 @@ def _run_agent_path(
             target, filters, body.purchase_price_czk,
             skill=skill, provider=body.provider,
             recorder=recorder, estimation_run_id=run_id,
+            estimate_kind=body.estimate_kind,
             special_instructions=body.special_instructions,
             contextual_text=body.contextual_text,
         )
@@ -836,6 +837,9 @@ def _run_agent_path(
         estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
         rent_p25_czk=d.get("rent_p25_czk"),
         rent_p75_czk=d.get("rent_p75_czk"),
+        estimated_sale_price_czk=d.get("estimated_sale_price_czk"),
+        sale_p25_czk=d.get("sale_p25_czk"),
+        sale_p75_czk=d.get("sale_p75_czk"),
         gross_yield_pct=d.get("gross_yield_pct"),
         confidence=d.get("confidence"),
         comparables_used=d.get("comparables_used"),

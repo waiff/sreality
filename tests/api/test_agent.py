@@ -241,6 +241,60 @@ def test_happy_path_records_estimate(monkeypatch, provider_name):
     )
 
 
+@pytest.mark.parametrize("provider_name", ["anthropic", "gemini"])
+def test_sale_kind_records_sale_estimate(monkeypatch, provider_name):
+    """Sale runs fill sale_* fields; _finalise returns them in `data`."""
+    _patch_toolkit(monkeypatch)
+    conn = _FakeConn(app_settings={})
+
+    completions = [
+        _completion_with_tool(
+            "find_comparables_relaxed",
+            {"radius_m": 1000, "min_results": 5},
+            text="Sale cohort.",
+        ),
+        _completion_with_tool(
+            "record_estimate",
+            {
+                "estimated_sale_price_czk": 8_500_000,
+                "sale_p25_czk": 7_800_000,
+                "sale_p75_czk": 9_200_000,
+                "confidence": "medium",
+                "comparables_used": [100, 101, 102],
+                "warnings": [],
+            },
+            text="Sale range committed.",
+        ),
+    ]
+    prov = _ScriptedProvider(
+        provider_name, completions,
+        prices={"claude-sonnet-4-5": ModelPrice(3.0, 15.0), "gemini-2.5-pro": ModelPrice(1.25, 10.0)},
+    )
+    client = LLMClient(conn, providers={provider_name: prov})
+    recorder = TraceRecorder()
+
+    result = agent_mod.run_agent_estimation(
+        conn, sreality_client=None, llm_client=client,
+        target=_target(), filters=_filters(),
+        purchase_price_czk=None,
+        skill=_make_skill(), provider=provider_name,
+        recorder=recorder, estimation_run_id=42,
+        estimate_kind="sale",
+    )
+
+    assert result.metadata["stop_reason"] == "record_estimate"
+    assert result.metadata["estimate_kind"] == "sale"
+    assert result.data["estimated_sale_price_czk"] == 8_500_000
+    assert result.data["sale_p25_czk"] == 7_800_000
+    assert result.data["sale_p75_czk"] == 9_200_000
+    # Rent fields stay None on a sale run.
+    assert result.data["estimated_monthly_rent_czk"] is None
+    assert result.data["rent_p25_czk"] is None
+    assert result.data["rent_p75_czk"] is None
+    # No purchase price, no gross yield on a sale-mode run anyway.
+    assert result.data["gross_yield_pct"] is None
+
+
 # ---------------------------------------------------------------------------
 # iteration cap
 # ---------------------------------------------------------------------------
