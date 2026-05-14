@@ -1,4 +1,11 @@
--- 046_comparable_decisions.sql
+-- 048_comparable_decisions.sql
+--
+-- (Originally drafted as 046; bumped to 048 alongside the
+-- 047 → 049_estimation_feedback and 048 → 050_skill_refinements
+-- renames to clear slots 046 / 047 claimed by main's
+-- manual_rental_estimates work. The live DB has the original
+-- migration name recorded in supabase_migrations.schema_migrations
+-- already — this rename is filename-only.)
 --
 -- Audit improvement (Phase AI follow-up to slice A): the agent now
 -- emits a per-listing decision log alongside `comparables_used` so
@@ -49,7 +56,7 @@ comment on column estimation_runs.comparables_excluded is
   'Per-listing reasons for candidates the agent considered and did '
   'not include in comparables_used. Shape: '
   '[{sreality_id: int, reason: str}]. Null on deterministic runs '
-  'and on agent runs predating migration 046.';
+  'and on agent runs predating migration 048.';
 
 ------------------------------------------------------------------
 -- 2. Skill prompt updates — anchor on the existing

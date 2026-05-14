@@ -14,7 +14,7 @@ limits:
 
 # skill_refiner_v1 — canonical content
 
-This is the Phase AI slice C skill. Migration 048 seeds the row;
+This is the Phase AI slice C skill. Migration 050 seeds the row;
 runtime values live in the `skills` table.
 
 Unlike the rental estimator, this skill does **not** drive the

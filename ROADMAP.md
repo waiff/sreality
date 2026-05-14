@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-13 22:03 UTC_
+_Last refreshed: 2026-05-14 03:58 UTC_
 
 **Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 45 files, latest `046_comparable_decisions.sql`.
+**Migrations on disk:** 47 files, latest `048_skill_refinements.sql`.
 
 **Last 10 commits:**
 
 ```
+58bee66 phase-ai slices B + C: feedback capture + skill refinement loop
 ce205a3 phase-ai slice A.1: audit follow-ups — skill choice, decision reasons, wording
 72c764c Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
 d676069 phase-ai slice A: capture full tool-call payloads alongside trace
@@ -25,7 +26,6 @@ ddd81bf roadmap: refresh auto-status block
 bb74bc4 Merge pull request #77 from waiff/claude/add-estimation-files-context-ugzqK
 355e762 roadmap: refresh auto-status block
 a7fdba4 roadmap: refresh auto-status block
-694e80e migrations: add 043 estimation_trace_payloads side-table
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1460,7 +1460,7 @@ the trace summary stays intact.
 Operator-driven adjustments to the trace surface uncovered the
 moment slice A landed on /estimation/17:
 
-- Migration 046 — `estimation_runs.comparables_excluded jsonb` and
+- Migration 048 — `estimation_runs.comparables_excluded jsonb` and
   a string-replace UPDATE on both rental skill prompts inserting a
   required `comparable_decisions` bullet on the `record_estimate`
   arguments list. Applied via MCP; `skills_history` preserves the
@@ -1491,10 +1491,10 @@ These were follow-ups, not new slices — same PR.
 
 #### Slice B: Feedback capture (done)
 
-Migration 047 + the API surface land the operator's free-text
+Migration 049 + the API surface land the operator's free-text
 feedback as a first-class object linked back to the run:
 
-- Migration 047 (applied via MCP): `estimation_feedback(id,
+- Migration 049 (applied via MCP): `estimation_feedback(id,
   estimation_run_id, feedback_text, submitted_at, status,
   refinement_id)` with a CHECK enum on `status` covering the full
   lifecycle (`submitted | refining | proposed | applied |
@@ -1519,7 +1519,7 @@ feedback as a first-class object linked back to the run:
 Same-skill, suggest-then-confirm. Prompt-only edits (operator's
 choices in the slice-B/C kickoff).
 
-- Migration 048 (applied via MCP):
+- Migration 050 (applied via MCP):
   - `skill_refinements(id, skill_name FK skills, original_prompt,
     proposed_prompt, refiner_explanation, source_feedback_id FK
     estimation_feedback, status, created_at, applied_at)` —

@@ -5,7 +5,7 @@ Slice C: the refinement loop calls back into `update_feedback_status`
 to advance the lifecycle (submitted -> refining -> proposed | failed)
 as the refiner runs.
 
-Schema is in migration 047. Status transitions are validated at the
+Schema is in migration 049. Status transitions are validated at the
 application layer — the DB CHECK constraint enforces the enum but
 not the allowed transitions, because operator dismissals from any
 non-terminal state are legal.

@@ -1,7 +1,12 @@
--- 048_skill_refinements.sql
+-- 050_skill_refinements.sql
+--
+-- (Originally drafted as 048; bumped to 050 alongside the
+-- 046 → 048_comparable_decisions and 047 → 049_estimation_feedback
+-- renames to clear slots 046 / 047 claimed by main's
+-- manual_rental_estimates work. Filename-only rename.)
 --
 -- Phase AI slice C: the prompt-refiner pipeline. Consumes
--- `estimation_feedback` rows (migration 047), runs a single-pass
+-- `estimation_feedback` rows (migration 049), runs a single-pass
 -- skill (`skill_refiner_v1`), proposes an updated `system_prompt`
 -- for the skill that produced the run, and stores the proposal
 -- pending operator approval.

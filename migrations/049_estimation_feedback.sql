@@ -1,4 +1,9 @@
--- 047_estimation_feedback.sql
+-- 049_estimation_feedback.sql
+--
+-- (Originally drafted as 047; bumped to 049 alongside the
+-- 046 → 048_comparable_decisions and 048 → 050_skill_refinements
+-- renames to clear slot 047 claimed by main's
+-- skill_manual_estimates_tool work. Filename-only rename.)
 --
 -- Phase AI slice B: capture operator feedback on a specific
 -- estimation run. The frontend collects a short free-text note;
@@ -28,7 +33,7 @@
 --                        → dismissed (operator nuked it without ever
 --                                     running the refiner)
 --   refinement_id      int. FK to skill_refinements(id) added in
---                      migration 048 once that table exists. Null
+--                      migration 050 once that table exists. Null
 --                      until the refiner produces a proposal.
 --
 -- Append-only in spirit (architectural rule #1) — rows mutate only
@@ -56,7 +61,7 @@ comment on table estimation_feedback is
   'persists the note; slice C consumes it via the skill refiner.';
 
 comment on column estimation_feedback.refinement_id is
-  'FK to skill_refinements(id) added in migration 048. Null until '
+  'FK to skill_refinements(id) added in migration 050. Null until '
   'the refinement pipeline produces a proposal.';
 
 create index if not exists estimation_feedback_run_idx
