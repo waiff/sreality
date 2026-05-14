@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 06:33 UTC_
+_Last refreshed: 2026-05-14 06:52 UTC_
 
 **Branch:** `claude/add-qual-data-upload-pdP1Q`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-14 06:33 UTC_
 **Last 10 commits:**
 
 ```
+8bf80af roadmap: add Phase QUAL + Phase AI slice D
 b1702ad Merge pull request #84 from waiff/claude/resolve-error-post-success-cors
 06c3afb api: make post-success persistence non-fatal + echo CORS on 500
 716edd8 Merge pull request #83 from waiff/claude/resolve-error-defensive-fixes
@@ -25,7 +26,6 @@ f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
 1511b4a roadmap: refresh auto-status block
 5dfd09e roadmap: refresh auto-status block
 c4d26e3 Merge pull request #81 from waiff/claude/rental-estimates-agent-tools-Lompi
-d61711f merge: resolve migration-043 slot collision with origin/main
 ```
 
 <!-- END AUTO-STATUS -->
@@ -432,9 +432,14 @@ Headline scope:
 - LLM- or ML-derived quality scores. The indexes are operator-
   supplied facts; any reasoning on top happens at the agent layer
   per toolkit rule #1.
-- City-quality features beyond filter / notify (e.g. ranking the
-  agent's comparables by city quality, surfacing a quality badge on
-  Listing Detail) — natural follow-ups, not gated by this phase.
+- City-quality features beyond Browse filter / notification matching
+  (e.g. ranking the agent's comparables by city quality, surfacing a
+  quality badge on Listing Detail, applying city-quality predicates
+  to estimation cohorts) — natural follow-ups, not gated by this
+  phase. Phase QUAL deliberately does **not** touch the estimation
+  agent, the building decomposition flow, or any other surface; its
+  scope is the Browse filter primitives and the U2.7 notification /
+  watchdog spec.
 
 ## UI track (parallel, independent of analytical phases)
 
@@ -1653,9 +1658,11 @@ see which signal drove the label.
   `PUT /admin/skills/{name}`. Bump the seed `INSERT` migration's
   comment to flag the format change; do **not** edit the original
   migration (architectural rule #1).
-- The same flow is then applied to the building-estimator skill
-  (Phase B2) and any future estimator skills — the iteration
-  structure is part of the skill family, not the rental flow.
+- Building decomposition (Phase B2) fans out per-unit through the
+  same apartment estimator skill, so Slice D's iteration changes
+  propagate automatically — no separate building-level rework. The
+  building rollup view continues to aggregate the per-unit estimates
+  as they are produced; no new logic at the building tier.
 
 **Out of scope for this slice**
 
