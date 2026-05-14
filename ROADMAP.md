@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 07:45 UTC_
+_Last refreshed: 2026-05-14 08:33 UTC_
 
-**Branch:** `claude/build-ai-feedback-loop-56uah`
+**Branch:** `claude/floating-feedback-button-AQAFy`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 49 files, latest `050_skill_refinements.sql`.
+**Migrations on disk:** 50 files, latest `051_skill_archive.sql`.
 
 **Last 10 commits:**
 
 ```
+d9f7e98 frontend: float feedback panel under header with inline skill-prompt editor
+89e84d4 Merge pull request #90 from waiff/claude/build-ai-feedback-loop-56uah
+00b77e9 tests: update fakes for skills.archived_at column
+f77d687 Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
 0cc2731 phase-ai slice C.1: consolidate rental skills, archive v1
-8fbb7f8 Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
-89654ea migrations: renumber 046/047/048 → 048/049/050 (slots taken by main)
-58bee66 phase-ai slices B + C: feedback capture + skill refinement loop
-ce205a3 phase-ai slice A.1: audit follow-ups — skill choice, decision reasons, wording
 09d0c9f Merge pull request #87 from waiff/claude/add-yield-calculation-aXRbq
 ee07229 Merge pull request #88 from waiff/claude/fix-to-field-autofill-j32TB
-87c5c7a frontend: stop range-filter "to" input from snapping to "from" value
-79dcc34 Merge pull request #86 from waiff/claude/add-qual-data-upload-pdP1Q
-224da86 roadmap: scope clarifications on Phase QUAL + Phase AI slice D
+acf7fba Merge remote-tracking branch 'origin/main' into claude/fix-to-field-autofill-j32TB
+3762a35 merge: resolve ROADMAP auto-status conflict with origin/main
+f8959e2 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
