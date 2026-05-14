@@ -200,6 +200,19 @@ export interface ComparableUsed {
   snapshot_date: string | null;
   data_age_days: number | null;
   verified_during_estimate: boolean;
+  /* Migration 048 — per-comparable inclusion reason emitted by the
+   * agent in record_estimate.comparable_decisions. Null on
+   * deterministic runs and on agent runs predating migration 048. */
+  reason?: string | null;
+}
+
+/* Migration 048 — listings the agent considered and chose not to
+ * include in the cohort. Mirrors comparables_used but with only the
+ * id + a one-sentence reason. Null when the agent didn't emit
+ * comparable_decisions (legacy rows or deterministic runs). */
+export interface ComparableExcluded {
+  sreality_id: number;
+  reason: string;
 }
 
 /* Output of toolkit/summaries.py:summarize_listing — the five legacy
@@ -297,6 +310,10 @@ export interface EstimationRun {
   gross_yield_pct: number | null;
   confidence: Confidence | null;
   comparables_used: ComparableUsed[] | null;
+  /* Migration 048 — agent's per-listing decision log for candidates
+   * not included in comparables_used. Null on deterministic runs and
+   * on agent runs predating the migration. */
+  comparables_excluded: ComparableExcluded[] | null;
   trace: Trace | null;
   warnings: string[] | null;
   error_message: string | null;
@@ -328,6 +345,44 @@ export interface EstimationRun {
    * a re-run. */
   special_instructions: string | null;
   contextual_text: string | null;
+}
+
+/* Phase AI slice B — one row per operator feedback submission on
+ * an estimation run. Status walks the lifecycle in migration 049:
+ * submitted -> refining -> proposed -> applied | dismissed | failed.
+ * `refinement_id` is null until slice C's refiner produces a draft. */
+export type FeedbackStatus =
+  | 'submitted'
+  | 'refining'
+  | 'proposed'
+  | 'applied'
+  | 'dismissed'
+  | 'failed';
+
+export interface EstimationFeedback {
+  id: number;
+  estimation_run_id: number;
+  feedback_text: string;
+  submitted_at: string;
+  status: FeedbackStatus;
+  refinement_id: number | null;
+}
+
+/* Phase AI slice C — refiner-proposed prompt edit pending operator
+ * approval. The diff between `original_prompt` and `proposed_prompt`
+ * is what gets rendered for review. */
+export type RefinementStatus = 'proposed' | 'applied' | 'dismissed';
+
+export interface SkillRefinement {
+  id: number;
+  skill_name: string;
+  original_prompt: string;
+  proposed_prompt: string;
+  refiner_explanation: string;
+  source_feedback_id: number;
+  status: RefinementStatus;
+  created_at: string;
+  applied_at: string | null;
 }
 
 /* Filter half of the POST /estimations body — mirrors ComparableFilters

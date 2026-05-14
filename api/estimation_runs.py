@@ -290,7 +290,8 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "estimated_monthly_rent_czk", "rent_p25_czk", "rent_p75_czk",
     "estimated_sale_price_czk", "sale_p25_czk", "sale_p75_czk",
     "gross_yield_pct", "confidence",
-    "comparables_used", "trace", "warnings", "error_message",
+    "comparables_used", "comparables_excluded",
+    "trace", "warnings", "error_message",
     "parent_run_id", "rerun_reason",
     "source_kind", "parse_confidence", "parse_confidence_per_field",
     "source_html",
@@ -458,6 +459,7 @@ def create_estimation_run(
         gross_yield_pct=d.get("gross_yield_pct"),
         confidence=d.get("confidence"),
         comparables_used=d.get("comparables_used"),
+        comparables_excluded=None,
         trace=trace,
         warnings=merged_warnings or None,
         error_message=None,
@@ -717,6 +719,7 @@ def _persist_failed_run(
         gross_yield_pct=None,
         confidence=None,
         comparables_used=None,
+        comparables_excluded=None,
         trace=trace,
         warnings=merged or None,
         error_message=error_msg,
@@ -823,7 +826,7 @@ def _agent_summary_line(
     )
     return (
         f"agent {metadata.get('provider', '?')}/{metadata.get('skill', '?')} "
-        f"after {iters} iter{'s' if iters != 1 else ''} ({stop}){cost_part}"
+        f"after {iters} LLM turn{'s' if iters != 1 else ''} ({stop}){cost_part}"
         f" {confidence}{rent_part}".strip()
     )
 
@@ -874,6 +877,7 @@ def _run_agent_path(
         gross_yield_pct=None,
         confidence=None,
         comparables_used=None,
+        comparables_excluded=None,
         trace=recorder.to_dict("agent running"),
         warnings=None,
         error_message=None,
@@ -936,6 +940,7 @@ def _run_agent_path(
         gross_yield_pct=d.get("gross_yield_pct"),
         confidence=d.get("confidence"),
         comparables_used=d.get("comparables_used"),
+        comparables_excluded=d.get("comparables_excluded") or None,
         trace=trace,
         warnings=merged_warnings or None,
         error_message=err,
@@ -951,7 +956,10 @@ def _update_run_terminal(
     **fields: Any,
 ) -> None:
     """Parameterised UPDATE that writes only the supplied columns."""
-    for k in ("comparables_used", "trace", "warnings", "subject_summary"):
+    for k in (
+        "comparables_used", "comparables_excluded",
+        "trace", "warnings", "subject_summary",
+    ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])
     sets: list[str] = []
@@ -968,7 +976,8 @@ def _update_run_terminal(
 
 def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
     for k in (
-        "input_spec", "comparables_used", "trace", "warnings",
+        "input_spec", "comparables_used", "comparables_excluded",
+        "trace", "warnings",
         "parse_confidence_per_field", "subject_summary",
     ):
         if fields.get(k) is not None:

@@ -420,6 +420,31 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "type": "array",
                         "items": {"type": "string"},
                     },
+                    "comparable_decisions": {
+                        "type": "array",
+                        "description": (
+                            "Per-listing decision log for every candidate "
+                            "the agent considered. One entry per "
+                            "sreality_id with decision='included' or "
+                            "'excluded' and a 1-sentence reason. Entries "
+                            "with decision='included' must match "
+                            "comparables_used exactly. Required when the "
+                            "skill prompt asks for per-comparable "
+                            "reasoning; omitted by legacy callers."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "sreality_id": {"type": "integer"},
+                                "decision": {
+                                    "type": "string",
+                                    "enum": ["included", "excluded"],
+                                },
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["sreality_id", "decision", "reason"],
+                        },
+                    },
                 },
                 "required": [
                     "estimated_monthly_rent_czk",
@@ -520,6 +545,27 @@ def run_agent_estimation(
         for t in (AGENT_TOOLS[name] for name in skill.allowed_tools)
     ]
     model = skill.preferred_model[provider]
+
+    # Audit step #0: record which skill was selected and the knobs
+    # that came with it, before the loop runs. This answers "why was
+    # this skill used on this run?" — the trace itself states the
+    # name, description, model, and limits; the caller controls
+    # which skill is loaded (CreateEstimationIn.skill, default
+    # 'rental_estimator_v1') so the answer to "why this one over
+    # the alternatives" lives at the request boundary, but the
+    # operator now sees what was actually picked.
+    with recorder.computation("skill_choice") as h:
+        h.set_summary({
+            "skill_name": skill.name,
+            "skill_description": skill.description,
+            "provider": provider,
+            "model": model,
+            "max_iterations": skill.limits.max_iterations,
+            "max_cost_usd": skill.limits.max_cost_usd,
+            "wall_clock_timeout_s": skill.limits.wall_clock_timeout_s,
+            "allowed_tools": list(skill.allowed_tools),
+            "skill_updated_at": skill.updated_at,
+        })
 
     system_text = skill.system_prompt
     messages: list[Message] = [
@@ -1015,12 +1061,19 @@ def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _terminator_summary(args: dict[str, Any]) -> dict[str, Any]:
+    decisions = _normalise_decisions(args.get("comparable_decisions"))
     return {
         "estimated_monthly_rent_czk": args.get("estimated_monthly_rent_czk"),
         "rent_p25_czk": args.get("rent_p25_czk"),
         "rent_p75_czk": args.get("rent_p75_czk"),
         "confidence": args.get("confidence"),
         "n_comparables_used": len(args.get("comparables_used") or []),
+        "n_comparables_included": sum(
+            1 for d in decisions if d["decision"] == "included"
+        ),
+        "n_comparables_excluded": sum(
+            1 for d in decisions if d["decision"] == "excluded"
+        ),
         "n_warnings": len(args.get("warnings") or []),
     }
 
@@ -1081,7 +1134,24 @@ def _finalise(
             f"agent referenced {len(invented)} sreality_id(s) not in the "
             f"latest cohort: {sorted(invented)[:5]}{'…' if len(invented) > 5 else ''}"
         )
-    comparables_used = [used_entry(cohort_by_id[i]) for i in valid_ids]
+
+    # Join the per-comparable decisions onto the cohort entries so
+    # the frontend can render the inclusion reason inline. Excluded
+    # rows surface as a parallel list (no need to look them up in
+    # the cohort by id; we keep just the {sreality_id, reason}).
+    decisions = _normalise_decisions(call.get("comparable_decisions"))
+    reasons_in = {
+        d["sreality_id"]: d["reason"]
+        for d in decisions if d["decision"] == "included"
+    }
+    comparables_used = [
+        {**used_entry(cohort_by_id[i]), "reason": reasons_in.get(i)}
+        for i in valid_ids
+    ]
+    comparables_excluded = [
+        {"sreality_id": d["sreality_id"], "reason": d["reason"]}
+        for d in decisions if d["decision"] == "excluded"
+    ]
 
     yield_pct: float | None = None
     if estimate is not None and purchase_price_czk and purchase_price_czk > 0:
@@ -1095,6 +1165,7 @@ def _finalise(
             "gross_yield_pct": yield_pct,
             "confidence": confidence,
             "comparables_used": comparables_used,
+            "comparables_excluded": comparables_excluded,
             "warnings": warnings,
         },
         metadata={
@@ -1105,6 +1176,38 @@ def _finalise(
             "skill": skill.name,
         },
     )
+
+
+def _normalise_decisions(raw: Any) -> list[dict[str, Any]]:
+    """Coerce comparable_decisions from the LLM into a clean list.
+
+    Tolerates missing / malformed entries so a single bad row from
+    the model never fails the run. Each returned dict has exactly
+    three keys: sreality_id (int), decision ('included'/'excluded'),
+    reason (str). Anything outside that shape is dropped.
+    """
+    out: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            sid = int(item.get("sreality_id"))
+        except (TypeError, ValueError):
+            continue
+        decision = item.get("decision")
+        reason = item.get("reason")
+        if decision not in ("included", "excluded"):
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            continue
+        out.append({
+            "sreality_id": sid,
+            "decision": decision,
+            "reason": reason.strip(),
+        })
+    return out
 
 
 # --- helpers --------------------------------------------------------------

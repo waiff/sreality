@@ -58,6 +58,8 @@ CalledFor = Literal[
     "compare_listing_images",
     "agent_estimation",
     "extract_building_units",
+    "read_floor_plan",
+    "refine_skill",
 ]
 
 

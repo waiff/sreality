@@ -52,8 +52,19 @@ class UpdateAppSettingIn(BaseModel):
 # --- skills ---------------------------------------------------------------
 
 @router.get("/skills")
-def get_skills(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
-    skills = list_skills(conn)
+def get_skills(
+    include_archived: bool = False,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """List skills.
+
+    Archived skills (`archived_at IS NOT NULL`) are hidden by
+    default so the Settings page and new-estimation pickers focus
+    on the active set. Pass `?include_archived=true` to see the
+    full history (referenced by past estimations + the slice C
+    refiner's `skill_refinements.skill_name` FK).
+    """
+    skills = list_skills(conn, include_archived=include_archived)
     return {"data": [_skill_to_dict(s) for s in skills]}
 
 
@@ -173,6 +184,7 @@ def _skill_to_dict(skill: Any) -> dict[str, Any]:
             "wall_clock_timeout_s": skill.limits.wall_clock_timeout_s,
         },
         "updated_at": skill.updated_at,
+        "archived_at": skill.archived_at,
     }
 
 

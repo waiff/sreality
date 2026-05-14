@@ -51,6 +51,7 @@ class Skill:
     preferred_model: dict[str, str]
     limits: "SkillLimits"
     updated_at: str | None = None
+    archived_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,10 +62,14 @@ class SkillLimits:
 
 
 def load_skill(conn: "psycopg.Connection", name: str) -> Skill:
+    """Load one skill by name. Archived skills load fine — past
+    estimations referencing them must stay readable. The
+    new-estimation flow gates archived skills out at the schema /
+    list-skills boundary instead."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT name, description, system_prompt, allowed_tools, "
-            "preferred_model, limits, updated_at "
+            "preferred_model, limits, updated_at, archived_at "
             "FROM skills WHERE name = %s",
             (name,),
         )
@@ -74,13 +79,21 @@ def load_skill(conn: "psycopg.Connection", name: str) -> Skill:
     return _row_to_skill(row)
 
 
-def list_skills(conn: "psycopg.Connection") -> list[Skill]:
+def list_skills(
+    conn: "psycopg.Connection", *, include_archived: bool = False,
+) -> list[Skill]:
+    """List skills. Archived skills are hidden by default — the
+    operator's Settings page and any future picker should pass
+    `include_archived=True` only when they explicitly want the full
+    history."""
+    base = (
+        "SELECT name, description, system_prompt, allowed_tools, "
+        "preferred_model, limits, updated_at, archived_at "
+        "FROM skills"
+    )
+    where = "" if include_archived else " WHERE archived_at IS NULL"
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT name, description, system_prompt, allowed_tools, "
-            "preferred_model, limits, updated_at "
-            "FROM skills ORDER BY name"
-        )
+        cur.execute(base + where + " ORDER BY name")
         rows = cur.fetchall()
     return [_row_to_skill(r) for r in rows]
 
@@ -141,7 +154,10 @@ def update_skill(
 # --- helpers --------------------------------------------------------------
 
 def _row_to_skill(row: tuple[Any, ...]) -> Skill:
-    name, description, system_prompt, allowed_tools, preferred_model, limits, updated_at = row
+    (
+        name, description, system_prompt, allowed_tools,
+        preferred_model, limits, updated_at, archived_at,
+    ) = row
     return Skill(
         name=name,
         description=description,
@@ -154,6 +170,7 @@ def _row_to_skill(row: tuple[Any, ...]) -> Skill:
             wall_clock_timeout_s=float(limits.get("wall_clock_timeout_s", 120.0)),
         ),
         updated_at=str(updated_at) if updated_at is not None else None,
+        archived_at=str(archived_at) if archived_at is not None else None,
     )
 
 

@@ -19,6 +19,7 @@ import type {
   CreateBuildingFromUrlIn,
   UpdateBuildingInputsIn,
   CreateEstimationIn,
+  EstimationFeedback,
   EstimationListParams,
   EstimationListResponse,
   EstimationRun,
@@ -28,6 +29,7 @@ import type {
   UpdateManualEstimateIn,
   Note,
   ParseResult,
+  SkillRefinement,
   SourceKind,
   Tag,
   TagColor,
@@ -209,6 +211,46 @@ export const getTracePayload = (
   stepN: number,
 ): Promise<TracePayload> =>
   request<TracePayload>(`/estimations/${runId}/trace/${stepN}/payload`);
+
+/* Phase AI slice B — feedback capture. POST inserts a new
+ * `estimation_feedback` row and (default) fires the slice C
+ * refiner inline; the response carries the (feedback, refinement)
+ * pair so the UI can show the proposed prompt without a second
+ * round-trip. */
+export interface CreateFeedbackIn {
+  feedback_text: string;
+  kick_off_refinement?: boolean;
+}
+
+export interface FeedbackResponse {
+  feedback: EstimationFeedback;
+  refinement: SkillRefinement | null;
+}
+
+export const listEstimationFeedback = (
+  runId: number,
+): Promise<{ data: EstimationFeedback[] }> =>
+  request<{ data: EstimationFeedback[] }>(
+    `/estimations/${runId}/feedback`,
+  );
+
+export const submitEstimationFeedback = (
+  runId: number,
+  input: CreateFeedbackIn,
+): Promise<FeedbackResponse> =>
+  request<FeedbackResponse>(`/estimations/${runId}/feedback`, {
+    method: 'POST',
+    json: input,
+  });
+
+export const decideRefinement = (
+  refinementId: number,
+  decision: 'apply' | 'dismiss',
+): Promise<SkillRefinement> =>
+  request<SkillRefinement>(`/skill-refinements/${refinementId}/decision`, {
+    method: 'POST',
+    json: { decision },
+  });
 
 export const listEstimations = (
   params: EstimationListParams = {},
@@ -396,6 +438,11 @@ export interface Skill {
   preferred_model: Record<string, string>;
   limits: SkillLimits;
   updated_at: string | null;
+  /* Migration 051 — non-null when this skill row has been archived.
+   * Archived skills are hidden from the Settings list by default;
+   * pass `?include_archived=true` to the GET /admin/skills endpoint
+   * to see them. */
+  archived_at: string | null;
 }
 
 export interface SkillUpdate {
@@ -413,8 +460,12 @@ export interface AppSetting {
   updated_at: string | null;
 }
 
-export const listSkills = (): Promise<{ data: Skill[] }> =>
-  request<{ data: Skill[] }>('/admin/skills');
+export const listSkills = (
+  options: { includeArchived?: boolean } = {},
+): Promise<{ data: Skill[] }> =>
+  request<{ data: Skill[] }>('/admin/skills', {
+    query: { include_archived: options.includeArchived ?? false },
+  });
 
 export const getSkill = (name: string): Promise<Skill> =>
   request<Skill>(`/admin/skills/${encodeURIComponent(name)}`);

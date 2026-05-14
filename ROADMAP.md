@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 07:39 UTC_
+_Last refreshed: 2026-05-14 07:45 UTC_
 
-**Branch:** `claude/fix-to-field-autofill-j32TB`
+**Branch:** `claude/build-ai-feedback-loop-56uah`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 46 files, latest `047_skill_manual_estimates_tool.sql`.
+**Migrations on disk:** 49 files, latest `050_skill_refinements.sql`.
 
 **Last 10 commits:**
 
 ```
-f8959e2 roadmap: refresh auto-status block
+0cc2731 phase-ai slice C.1: consolidate rental skills, archive v1
+8fbb7f8 Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
+89654ea migrations: renumber 046/047/048 → 048/049/050 (slots taken by main)
+58bee66 phase-ai slices B + C: feedback capture + skill refinement loop
+ce205a3 phase-ai slice A.1: audit follow-ups — skill choice, decision reasons, wording
+09d0c9f Merge pull request #87 from waiff/claude/add-yield-calculation-aXRbq
+ee07229 Merge pull request #88 from waiff/claude/fix-to-field-autofill-j32TB
 87c5c7a frontend: stop range-filter "to" input from snapping to "from" value
 79dcc34 Merge pull request #86 from waiff/claude/add-qual-data-upload-pdP1Q
-a2bde35 roadmap: refresh auto-status block
 224da86 roadmap: scope clarifications on Phase QUAL + Phase AI slice D
-8bf80af roadmap: add Phase QUAL + Phase AI slice D
-b1702ad Merge pull request #84 from waiff/claude/resolve-error-post-success-cors
-06c3afb api: make post-success persistence non-fatal + echo CORS on 500
-716edd8 Merge pull request #83 from waiff/claude/resolve-error-defensive-fixes
-63bfbc6 api: catch unhandled exceptions + persist target build failures
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1565,9 +1565,149 @@ captures payloads for runs executed *after* slice A shipped.
 Pre-existing `estimation_runs` rows lose the drill-down ability;
 the trace summary stays intact.
 
-#### Slice B: Feedback capture (next)
+#### Slice A.1: Audit follow-ups (done)
 
-#### Slice C: Refinement loop (after slice B)
+Operator-driven adjustments to the trace surface uncovered the
+moment slice A landed on /estimation/17:
+
+- Migration 048 — `estimation_runs.comparables_excluded jsonb` and
+  a string-replace UPDATE on both rental skill prompts inserting a
+  required `comparable_decisions` bullet on the `record_estimate`
+  arguments list. Applied via MCP; `skills_history` preserves the
+  prior prompts.
+- `record_estimate` schema (api/agent.py) accepts
+  `comparable_decisions: [{sreality_id, decision, reason}]`. The
+  agent's terminator step now records `n_comparables_included` /
+  `n_comparables_excluded` in its bounded summary; the full
+  decisions list lives in the slice A side-table.
+- `_finalise` joins inclusion reasons onto each `comparables_used`
+  entry (new optional `reason` field) and emits a parallel
+  `comparables_excluded` list — both persisted on the run row.
+- Agent loop emits a `skill_choice` computation step before the
+  first LLM turn recording skill name, description, provider,
+  model, limits, and tool whitelist — answers "why was this skill
+  used" in the audit.
+- Agent summary line wording: `after N iters` → `after N LLM
+  turns` for clarity about what the counter represents.
+- Frontend: `ComparableUsed.reason` + new `ComparableExcluded`
+  type, "Why kept" column on the comparables table, "Considered
+  and set aside" panel below it, and Mode / Skill / Model rows in
+  the Inputs recap (pulled from the trace's `skill_choice` step).
+- Hermetic tests on `_normalise_decisions` (malformed entries
+  dropped, not raised) and on the agent trace shape (skill_choice
+  always first).
+
+These were follow-ups, not new slices — same PR.
+
+#### Slice B: Feedback capture (done)
+
+Migration 049 + the API surface land the operator's free-text
+feedback as a first-class object linked back to the run:
+
+- Migration 049 (applied via MCP): `estimation_feedback(id,
+  estimation_run_id, feedback_text, submitted_at, status,
+  refinement_id)` with a CHECK enum on `status` covering the full
+  lifecycle (`submitted | refining | proposed | applied |
+  dismissed | failed`). FK on the run cascades; RLS enabled, no
+  policies — service-role only.
+- `api/feedback.py` insert/get/list/update-status helpers (mirrors
+  the small storage modules elsewhere in `api/`).
+- `POST /estimations/{id}/feedback` accepts
+  `{feedback_text, kick_off_refinement=true}` and either stashes
+  the row (`status='submitted'`) or fires slice C inline
+  (`status='refining'` → terminal status set by the refiner).
+  `GET /estimations/{id}/feedback` returns the run's history,
+  newest first.
+- Frontend `FeedbackBlock` on `/estimation/:id`: composer with
+  textarea + "Run the refiner now" checkbox, history list with a
+  per-row status badge (FeedbackStatus), and per-row "View
+  proposed change" expander that lazy-loads the slice C
+  refinement.
+
+#### Slice C: Refinement loop (done)
+
+Same-skill, suggest-then-confirm. Prompt-only edits (operator's
+choices in the slice-B/C kickoff).
+
+- Migration 050 (applied via MCP):
+  - `skill_refinements(id, skill_name FK skills, original_prompt,
+    proposed_prompt, refiner_explanation, source_feedback_id FK
+    estimation_feedback, status, created_at, applied_at)` —
+    proposal lifecycle is `proposed → applied | dismissed`.
+  - FK from `estimation_feedback.refinement_id` →
+    `skill_refinements(id)`, `ON DELETE SET NULL`.
+  - `llm_calls.called_for` CHECK extended with `refine_skill`.
+  - `app_settings.llm_skill_refiner_system_prompt` +
+    `llm_skill_refiner_model` seeds (operator can edit live).
+  - `skills.skill_refiner_v1` seed row with prompt-only tool
+    whitelist (`["record_skill_refinement"]`) and tight limits
+    (`max_iterations=2`, `max_cost_usd=0.40`,
+    `wall_clock_timeout_s=60`).
+- `skills/skill_refiner_v1/SKILL.md` canonical docs.
+- `api/refiner.py` — single-pass LLM call, parses the run's
+  `skill_choice` trace step to discover which skill produced it
+  (deterministic / pre-slice-A.1 runs report a soft 'failed'
+  status), assembles the refiner user message from the original
+  prompt + feedback + compacted trace, calls
+  `LLMClient.call(called_for='refine_skill')`, and persists the
+  proposal. Helpers `apply_refinement` / `dismiss_refinement` flip
+  both the refinement and its parent feedback row; applying goes
+  through `skills.update_skill` so the existing `skills_history`
+  trigger from migration 029 preserves the prior prompt.
+- `GET /skill-refinements/{id}` and
+  `POST /skill-refinements/{id}/decision` (apply | dismiss),
+  bearer-gated.
+- Frontend: `RefinementProposal` renders the refiner's explanation,
+  a line-based prompt diff (green = added, red = removed), and
+  Apply / Dismiss buttons when the proposal is still in `proposed`
+  state. Diff is computed client-side from `original_prompt` and
+  `proposed_prompt`.
+- Hermetic tests (`tests/api/test_refiner.py`) cover the pure
+  helpers: `_pick_skill_name_from_run`,
+  `_build_refiner_user_message`, `_compact_steps`.
+
+**Caveats:**
+
+- Refiner can only act on agent-mode runs (deterministic runs
+  have no skill to refine). The lifecycle handles this by setting
+  the feedback's status to `failed` and never producing a
+  refinement row.
+- Past-run feedback works if the run has a `skill_choice` step in
+  its trace (i.e. ran under slice A.1 or later). Older agent runs
+  return `failed` with the same handling.
+- `auto_apply_refinements` flag is intentionally NOT implemented —
+  operator chose suggest-then-confirm; auto-apply can be a Phase
+  AI follow-up if same-session iteration feels slow.
+
+#### Slice C.1: Skill consolidation (done)
+
+Operator follow-up: two active rental skills (`rental_estimator_v1`
+and `rental_estimator_full_v1`) was confusing UX. Decision: keep
+only the full skill active, treat the older one as history. The
+refiner pipeline updates the full skill in place going forward —
+`skills_history` is the per-skill audit trail, no new sibling
+skill rows.
+
+- Migration 051 (applied): `skills.archived_at timestamptz`. Same
+  column on `skills_history` so snapshots preserve the archival
+  state. `rental_estimator_v1.archived_at` set to now().
+- Backend default: `CreateEstimationIn.skill` flipped from
+  `"rental_estimator_v1"` to `"rental_estimator_full_v1"`. Existing
+  estimations referencing v1 in their trace still load v1 (load_skill
+  doesn't filter by archival); only new estimations and the default
+  picker are gated.
+- `list_skills(conn, include_archived=False)` is the new shape;
+  `GET /admin/skills?include_archived=true` exposes archived rows.
+  Frontend `Skill.archived_at` + a "Show archived skills" toggle on
+  the Settings page. Archived cards render with a muted background
+  and a small `archived` tag.
+
+The "skill picker on the new-estimation modal" was scoped out —
+the operator's mental model is now: one canonical rental skill,
+refined in place via slice C, with history per-skill in
+`skills_history`. Past runs that ran under v1 keep their trace's
+`skill_choice` step pointing at v1; the row is still there for them
+to load.
 
 #### Slice D: Multi-pass estimation strategy + confidence revision (proposed)
 

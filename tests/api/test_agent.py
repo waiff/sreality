@@ -217,16 +217,21 @@ def test_happy_path_records_estimate(monkeypatch, provider_name):
 
     trace = recorder.to_dict("ok")
     kinds = [s["kind"] for s in trace["steps"]]
-    # reasoning + tool_call per turn × 3 turns, but the terminator
-    # has its own tool_call step so the loop kinds are: r, t, r, t,
-    # r, t. The final `computation` step is the v2-trace
-    # comparable_selection_summary emitted after the loop.
+    # First step is the `skill_choice` computation emitted before
+    # the loop runs (audit: which skill/provider/model was used).
+    # Then reasoning + tool_call per turn × 3 turns; the terminator
+    # has its own tool_call step. The final `computation` step is
+    # the v2-trace comparable_selection_summary emitted after the
+    # loop.
     assert kinds == [
+        "computation",
         "reasoning", "tool_call",
         "reasoning", "tool_call",
         "reasoning", "tool_call",
         "computation",
     ]
+    assert trace["steps"][0]["label"] == "skill_choice"
+    assert trace["steps"][0]["output_summary"]["provider"] == provider_name
     summary_step = trace["steps"][-1]
     assert summary_step["label"] == "comparable_selection_summary"
     assert summary_step["output_summary"]["n_rounds"] == 1
@@ -390,3 +395,38 @@ def test_recorder_payload_step_numbers_match_trace_steps():
     assert [p[0] for p in payloads] == [1, 3]
     assert payloads[0][1] == {"a": 1}
     assert payloads[1][1] == {"c": 3}
+
+
+# ---------------------------------------------------------------------------
+# Per-comparable decision normalisation
+# ---------------------------------------------------------------------------
+
+def test_normalise_decisions_drops_malformed_entries():
+    """The agent's comparable_decisions output is run through a
+    forgiving normaliser so one bad row from the model doesn't fail
+    the run."""
+    from api.agent import _normalise_decisions
+
+    raw = [
+        {"sreality_id": 1, "decision": "included", "reason": "tight match"},
+        {"sreality_id": "2", "decision": "excluded", "reason": "luxury outlier"},
+        # Missing sreality_id — drop.
+        {"decision": "included", "reason": "x"},
+        # Bogus decision value — drop.
+        {"sreality_id": 3, "decision": "maybe", "reason": "?"},
+        # Empty reason — drop.
+        {"sreality_id": 4, "decision": "included", "reason": "  "},
+        # Non-dict — drop.
+        "garbage",
+    ]
+    out = _normalise_decisions(raw)
+    assert [d["sreality_id"] for d in out] == [1, 2]
+    assert out[0] == {"sreality_id": 1, "decision": "included", "reason": "tight match"}
+    assert out[1]["decision"] == "excluded"
+
+
+def test_normalise_decisions_returns_empty_when_field_absent():
+    from api.agent import _normalise_decisions
+    assert _normalise_decisions(None) == []
+    assert _normalise_decisions("not a list") == []
+    assert _normalise_decisions([]) == []
