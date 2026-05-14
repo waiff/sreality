@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 07:36 UTC_
+_Last refreshed: 2026-05-14 06:59 UTC_
 
-**Branch:** `claude/add-yield-calculation-aXRbq`
+**Branch:** `claude/add-qual-data-upload-pdP1Q`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-14 07:36 UTC_
 **Last 10 commits:**
 
 ```
+224da86 roadmap: scope clarifications on Phase QUAL + Phase AI slice D
+8bf80af roadmap: add Phase QUAL + Phase AI slice D
 b1702ad Merge pull request #84 from waiff/claude/resolve-error-post-success-cors
 06c3afb api: make post-success persistence non-fatal + echo CORS on 500
 716edd8 Merge pull request #83 from waiff/claude/resolve-error-defensive-fixes
@@ -24,8 +26,6 @@ f56ea0d Merge pull request #82 from waiff/claude/resolve-error-NDaqH
 2eb44a5 merge: resolve ROADMAP auto-status conflict with origin/main
 1511b4a roadmap: refresh auto-status block
 5dfd09e roadmap: refresh auto-status block
-c4d26e3 Merge pull request #81 from waiff/claude/rental-estimates-agent-tools-Lompi
-d61711f merge: resolve migration-043 slot collision with origin/main
 ```
 
 <!-- END AUTO-STATUS -->
@@ -331,6 +331,115 @@ Operator-confirmed approach:
 - Open questions deferred to the phase: pre-populated namespace
   shape (pandas-ready vs pure dicts), whether the agent can
   reference earlier tool outputs by name, soft-cost cap per run.
+
+### Phase QUAL: Qualitative city data + population overlay (proposed)
+
+Operator-curated qualitative indexes (employment, safety, services,
+amenities, etc. — roughly 30 columns) for ~200 Czech cities, attached
+to the geo data already on each listing, plus an authoritative
+population column sourced from a public registry. Both surfaces feed
+the Browse filters and the U2.7 notification subscriptions so an
+alert can fire when "listing in a city with employment-index > 5 and
+population > 20 000" or on a compound proximity rule ("listing in a
+city with population > 5 000 and within 5 km of a city with
+safety-index > 6, services-index > X and population > 20 000") —
+combinable with the standard listing facets (floor area, disposition,
+price, price per m², etc.).
+
+Headline scope:
+- Migration: `cities(city_id, name, csu_code, geom geography(point,
+  4326), centroid_admin_polygon geography(multipolygon, 4326) NULL,
+  ...)` — canonical reference table. `city_id` resolved via the Czech
+  Statistical Office (ČSÚ) municipality code so successive uploads
+  align cleanly.
+- Migration: `city_indexes(city_id, source_revision, uploaded_at,
+  uploaded_by, raw_row jsonb)` + `city_index_values(city_id,
+  source_revision, index_name, value numeric)` — long-form so a new
+  index column on next upload doesn't need a schema migration. Append
+  -only via `source_revision`; the latest revision is the default
+  query target, prior revisions stay auditable.
+- Migration: `city_population(city_id, as_of_year, population,
+  source)` — one row per (city, year) so historical analysis stays
+  possible without breaking the latest-wins norm elsewhere.
+- Migration: extend `listings` with `nearest_city_id` (FK to
+  `cities`, nullable, backfilled from `geom`) so a per-listing filter
+  on city quality avoids a per-query spatial join. Trigger updates it
+  on insert / coordinate change.
+- Population source: pick one canonical feed during scope review
+  (ČSÚ open data, Wikidata SPARQL, or the OSM `admin_centre` tag) so
+  numbers don't drift between surfaces.
+- Spreadsheet ingest: `POST /admin/cities/indexes/upload`
+  (bearer-gated) accepts the operator's CSV / XLSX, validates the
+  column set, resolves city rows by ČSÚ code (with a name-fallback
+  preview for unmatched rows), writes a fresh `source_revision`,
+  returns row-level errors. FastAPI parses — never the browser. Same
+  upload-then-confirm pattern as building-unit extraction (Phase B1).
+- Browse filters: extend `Filters.tsx` with a "City quality" section
+  that enumerates available index names from the latest
+  `source_revision` so the UI updates automatically when an upload
+  adds an index. A new compound proximity filter ("within X km of a
+  city matching Y") is the headline new primitive — backed by a
+  single PostGIS query (`ST_DWithin` against the matching cities'
+  geoms) rather than UI-side iteration. Reuses the existing
+  `_shared_filter_where` helper so the matcher and Browse can never
+  disagree on what a filter means.
+- Notification integration: the saved-filter spec on
+  `notification_subscriptions` (Phase U2.7) extends to accept the new
+  city-quality and proximity predicates. The dispatch matcher reuses
+  the same SQL builder — one shared definition of "matches."
+- Operator surface: `/cities` admin page lists the registered
+  cities, current population, and latest index values for sanity-
+  checking the most recent upload.
+
+**Open questions (operator to decide before implementation starts)**
+
+- **Canonical city identity.** Match cities by ČSÚ municipality code
+  (`obec_kod`), Wikidata Q-id, or our own slug? ČSÚ recommended —
+  stable Czech-statistics identifier, joins cleanly to most public
+  datasets.
+- **Geo definition of "in city X".** Centroid + radius (sloppy at
+  city edges, cheap), nearest-city assignment (cheap, defensible),
+  or polygon containment using ČSÚ admin polygons (correct, adds a
+  one-off shapefile import). Nearest-city via `nearest_city_id`
+  recommended as the default; polygon containment can be added later
+  without invalidating data.
+- **Index schema shape.** Long-form `(city_id, index_name, value)`
+  (flexible — recommended) vs fixed columns (cleaner SQL, every new
+  index needs a migration). Long-form lets the Browse UI enumerate
+  indexes from data rather than schema, matching the
+  `app_settings`-style discipline.
+- **Population cadence.** Bulk-load once from a static dataset
+  (cheaper, drifts) or refresh annually via the same upload endpoint
+  (matches the index-upload workflow, no scheduled worker)? Annual-
+  upload recommended.
+- **Filter UI complexity ceiling.** "Within X km of a city with
+  markers A>n, B>m and population>k" is a nested predicate. Cap the
+  UI grammar at max-depth-1 nested rules (one outer city criterion +
+  one optional proximity criterion); deeper compound rules go via a
+  free-form JSON expression on power-user subscriptions only.
+- **Snapshot vs live for index values.** If a new `source_revision`
+  arrives between a notification being saved and its first dispatch,
+  does the dispatch use the spec's revision-as-of-saved or the
+  current one? Current-revision recommended (matches the
+  latest-wins norm); the alternative is heavier and rarely useful.
+
+**Out of scope for this phase**
+
+- Per-user index overrides (every operator sees the same index
+  values; single-operator identity model still applies).
+- Automated scraping of index data — input is a hand-curated
+  spreadsheet, not an automated feed.
+- LLM- or ML-derived quality scores. The indexes are operator-
+  supplied facts; any reasoning on top happens at the agent layer
+  per toolkit rule #1.
+- City-quality features beyond Browse filter / notification matching
+  (e.g. ranking the agent's comparables by city quality, surfacing a
+  quality badge on Listing Detail, applying city-quality predicates
+  to estimation cohorts) — natural follow-ups, not gated by this
+  phase. Phase QUAL deliberately does **not** touch the estimation
+  agent, the building decomposition flow, or any other surface; its
+  scope is the Browse filter primitives and the U2.7 notification /
+  watchdog spec.
 
 ## UI track (parallel, independent of analytical phases)
 
@@ -1459,6 +1568,111 @@ the trace summary stays intact.
 #### Slice B: Feedback capture (next)
 
 #### Slice C: Refinement loop (after slice B)
+
+#### Slice D: Multi-pass estimation strategy + confidence revision (proposed)
+
+Two related changes to the estimator skill's behaviour, separate
+from the refiner loop but in the same family of "make the agent's
+reasoning loop richer." Independent of slices A–C; can ship in
+parallel.
+
+**Multi-pass strategy**
+
+Today's `rental_estimator_v1` runs a single pass: pick filters,
+fetch comparables, compute the distribution, emit a point estimate.
+The revised flow runs three explicit iterations:
+
+1. **Reconnaissance.** Inspect the available sample for the
+   candidate filter spec — how many comparables exist, how
+   dispersed they are, whether obvious gaps (only top-floor flats,
+   only renovated units, etc.) constrain inference. Output: one or
+   more declared benchmarking strategies and the reasoning behind
+   each. A "strategy" here is a concrete plan ("widen radius to
+   1.5 km and trim 10/90", "find the two best-matched units and
+   anchor on those", "split the cohort by floor band and average").
+2. **Execution.** Run each declared strategy end to end (gather
+   the cohort it implies, compute its estimate, capture its
+   confidence inputs). Strategies that fall through — e.g.
+   "find two near-identical units" returns zero — fail open and
+   don't gate the run.
+3. **Adjudication.** Compare the strategies' results and pick the
+   one the agent judges most reliable. The chosen strategy's
+   estimate is the run's primary result; the others are recorded
+   as alternates in the trace so the operator can inspect what
+   was considered and why it was rejected.
+
+Iterate from step 1 until the chosen strategy reaches at least
+medium confidence per the revised score below, bounded by the
+skill's `max_iterations` and `max_cost_usd` so a stubborn run
+can't spend unbounded LLM credit. Hitting the bound returns the
+best-so-far estimate with the confidence label it actually
+earned (no rounding up).
+
+Trace shape: each iteration emits a `reasoning` step explaining
+the chosen strategy followed by the `tool_call` steps it needs.
+`TRACE_SCHEMA_VERSION` in `api/estimation_runs.py` bumps when
+this lands. Alternate-strategy summaries (estimate, confidence,
+reason for not picking) live in a new `alternate_strategies`
+array on the trace summary, kept small per architectural rule #9
+— full cohorts go to `estimation_trace_payloads` (Slice A) so
+each step's `output_summary` stays a summary.
+
+**Confidence revision**
+
+Today's confidence label is dominated by sample size. The revised
+calculation factors in:
+
+- **Quality of fit.** Two near-identical comparables (same
+  disposition, same micro-location, same floor band, same
+  condition, similar age) can warrant higher confidence than
+  fifty loose matches. Today this signal is implicit in the IQR;
+  it becomes an explicit input — a per-comparable "match score"
+  derived from facet overlap with the subject listing, with the
+  cohort's mean/min match score feeding the confidence calc.
+- **Sample size.** Still relevant — a single comparable is fragile
+  no matter how well-matched. The new formula doesn't drop sample
+  size, it stops letting sample size alone determine the label.
+- **Cross-strategy agreement.** When two independent strategies
+  (e.g. "narrow filter" vs. "broad filter trimmed to outliers")
+  produce estimates within a configurable epsilon (default ~5 %),
+  confidence rises; wide disagreement lowers it. Only emitted when
+  at least two strategies survived adjudication.
+- **Freshness.** Already captured in metadata, but factor it into
+  the label so a cohort full of stale comparables can't masquerade
+  as high-confidence.
+
+Labels stay `low | medium | high`. The label-shape change is
+coordinated across `api/schemas.py`, `toolkit/comparables.py`,
+the agent skill's prompt, and the `/estimation/:id` UI — capture
+as one migration when the score components persisted on
+`estimation_runs` change shape. `estimation_runs.confidence_score`
+gets a sibling `confidence_breakdown jsonb` so the operator can
+see which signal drove the label.
+
+**Skill / prompt impact**
+
+- `rental_estimator_v1` system prompt is rewritten to teach the
+  three-iteration flow and the new strategy vocabulary.
+  `app_settings_history` (migration 020) preserves the prior
+  prompt automatically when the operator writes through
+  `PUT /admin/skills/{name}`. Bump the seed `INSERT` migration's
+  comment to flag the format change; do **not** edit the original
+  migration (architectural rule #1).
+- Building decomposition (Phase B2) fans out per-unit through the
+  same apartment estimator skill, so Slice D's iteration changes
+  propagate automatically — no separate building-level rework. The
+  building rollup view continues to aggregate the per-unit estimates
+  as they are produced; no new logic at the building tier.
+
+**Out of scope for this slice**
+
+- Auto-tuning the strategy mix from past runs — that's Slice C's
+  refiner once it has data to learn from.
+- Operator-visible per-strategy A/B at the skill level — Phase 7
+  slice 2 covers that for skills as a whole.
+- New strategies beyond what the prompt enumerates. The skill
+  picks from a written list; expanding the list is a prompt edit,
+  not a code change.
 
 ---
 
