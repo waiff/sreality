@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 05:18 UTC_
+_Last refreshed: 2026-05-15 06:15 UTC_
 
 **Branch:** `claude/plan-notifications-watchdog-WtDbc`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-15 05:18 UTC_
 **Last 10 commits:**
 
 ```
+f728158 roadmap: refresh auto-status block
 d3ddeab Merge pull request #95 from waiff/claude/finetune-agent-traces-VDz9u
 78bcc22 roadmap: refresh auto-status block
 c265bce agent: server-derived cohort, no more LLM ID transcription
@@ -25,7 +26,6 @@ bacfc82 roadmap: refresh auto-status block
 5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
 bcb3f00 frontend: correct ListingPublic.category_{main,type} to string
 e0ce9c4 frontend: prefill yield's listing price from a sale subject listing
-bcb6f58 Merge pull request #93 from waiff/claude/feedback-panel-residual-width-AQAFy
 ```
 
 <!-- END AUTO-STATUS -->
