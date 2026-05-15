@@ -28,6 +28,13 @@ def client(monkeypatch):
     api_main.app.dependency_overrides[deps.require_token] = lambda: None
     api_main.app.dependency_overrides[deps.get_sreality_client] = lambda: object()
     api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
+    # Run scheduled BackgroundTasks synchronously in tests so the response
+    # payload reflects the post-extraction state, not the pending row.
+    from starlette.background import BackgroundTasks
+    monkeypatch.setattr(
+        BackgroundTasks, "add_task",
+        lambda self, func, *args, **kwargs: func(*args, **kwargs),
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -89,11 +96,26 @@ def _patch_persistence(monkeypatch) -> _State:
     def fake_attachments(conn, building_id: int) -> list[dict[str, Any]]:
         return []
 
+    def fake_bg(*, building_id, sreality_id, parse_warnings,
+                subject_summary, special_instructions, contextual_text):
+        br._execute_building_extraction(
+            object(), object(),
+            building_id=building_id,
+            sreality_id=sreality_id,
+            parse_warnings=parse_warnings,
+            subject_summary=subject_summary,
+            special_instructions=special_instructions,
+            contextual_text=contextual_text,
+        )
+
     monkeypatch.setattr(br, "_insert_building", fake_insert)
     monkeypatch.setattr(br, "_update_building_fields", fake_update)
     monkeypatch.setattr(br, "_fetch_building", fake_fetch)
     monkeypatch.setattr(br, "_fetch_children", fake_children)
     monkeypatch.setattr(br, "_fetch_attachments", fake_attachments)
+    monkeypatch.setattr(
+        br, "_execute_building_extraction_background", fake_bg,
+    )
     return state
 
 
@@ -161,6 +183,45 @@ def _example_extractor_payload() -> dict[str, Any]:
 
 
 # -- POST /buildings/from_url ------------------------------------------------
+
+
+def test_from_url_returns_pending_when_background_deferred(monkeypatch):
+    """POST /buildings/from_url returns the 'pending' row immediately
+    when extraction is deferred to a BackgroundTask. The browser
+    navigates to /building/:id and polls until status reaches
+    awaiting_input / failed.
+    """
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.require_token] = lambda: None
+    api_main.app.dependency_overrides[deps.get_sreality_client] = (
+        lambda: object()
+    )
+    api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
+    try:
+        state = _patch_persistence(monkeypatch)
+        _patch_dispatcher(monkeypatch, _FakeParseResult(
+            spec={"category_main": "dum", "category_type": "prodej",
+                  "lat": 50.1, "lng": 14.4},
+        ))
+        scheduled: list[int] = []
+        monkeypatch.setattr(
+            br, "_execute_building_extraction_background",
+            lambda **kw: scheduled.append(kw["building_id"]),
+        )
+
+        client_local = TestClient(api_main.app)
+        res = client_local.post(
+            "/buildings/from_url",
+            json={"source": "ui", "url": "https://example.cz/dum/1"},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["status"] == "pending"
+        assert body["units_proposal"] is None
+        assert scheduled == [1]
+        assert state.rows[1]["status"] == "pending"
+    finally:
+        api_main.app.dependency_overrides.clear()
 
 
 def test_from_url_happy_path(client, monkeypatch):

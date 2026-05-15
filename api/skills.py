@@ -52,6 +52,7 @@ class Skill:
     limits: "SkillLimits"
     updated_at: str | None = None
     archived_at: str | None = None
+    version: int = 1
 
 
 @dataclass(frozen=True)
@@ -69,7 +70,7 @@ def load_skill(conn: "psycopg.Connection", name: str) -> Skill:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT name, description, system_prompt, allowed_tools, "
-            "preferred_model, limits, updated_at, archived_at "
+            "preferred_model, limits, updated_at, archived_at, version "
             "FROM skills WHERE name = %s",
             (name,),
         )
@@ -88,7 +89,7 @@ def list_skills(
     history."""
     base = (
         "SELECT name, description, system_prompt, allowed_tools, "
-        "preferred_model, limits, updated_at, archived_at "
+        "preferred_model, limits, updated_at, archived_at, version "
         "FROM skills"
     )
     where = "" if include_archived else " WHERE archived_at IS NULL"
@@ -156,7 +157,7 @@ def update_skill(
 def _row_to_skill(row: tuple[Any, ...]) -> Skill:
     (
         name, description, system_prompt, allowed_tools,
-        preferred_model, limits, updated_at, archived_at,
+        preferred_model, limits, updated_at, archived_at, version,
     ) = row
     return Skill(
         name=name,
@@ -171,6 +172,7 @@ def _row_to_skill(row: tuple[Any, ...]) -> Skill:
         ),
         updated_at=str(updated_at) if updated_at is not None else None,
         archived_at=str(archived_at) if archived_at is not None else None,
+        version=int(version) if version is not None else 1,
     )
 
 

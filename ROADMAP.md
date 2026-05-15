@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 08:32 UTC_
+_Last refreshed: 2026-05-15 21:00 UTC_
 
-**Branch:** `claude/plan-notifications-watchdog-WtDbc`
+**Branch:** `claude/aggregate-empty-extractions-fix`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 60 files, latest `058_notifications_app_settings.sql`.
+**Migrations on disk:** 66 files, latest `064_condition_markers.sql`.
 
 **Last 10 commits:**
 
 ```
-ce1b593 Merge remote-tracking branch 'origin/main' into claude/plan-notifications-watchdog-WtDbc
-02563fa roadmap: refresh auto-status block
-ebf743a watchdog: ship Phase U2.7 in-app new-listing notifications
-ed21249 Merge pull request #97 from waiff/claude/data-freshness-investigation-MnhPd
-08af697 roadmap: refresh auto-status block
-ad0cb7d Merge pull request #96 from waiff/claude/add-market-velocity-filter-J14Vy
-041d55c migrations: backfill five files that production had applied but the repo was missing
-4e56f87 migrations: renumber TOM view + browse_stats to 054/055, preserve broker cols
-ecde5a2 browse: TOM filter, card badges, filter-panel overhaul
-5290c45 migrations: add notification_subscriptions + notification_dispatches (054, 055)
+a75676d aggregate: treat empty extractions table as no-op, not failure
+b91b0c6 Merge pull request #119 from waiff/claude/apartment-condition-scoring-jZ6qy
+9df5352 roadmap: refresh auto-status block
+f1bef29 condition: add Phase A — discover Czech condition markers
+cb3abb9 Merge pull request #118 from waiff/claude/reusable-filters-component-oRhvq
+4dc340f roadmap: refresh auto-status block
+dcc55ce filters: drop orphan LocationChipPicker
+fba9ea4 Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
+756e8db roadmap: refresh auto-status block
+8f1b8aa fix(filters): show place name + region context, not the type description
 ```
 
 <!-- END AUTO-STATUS -->
@@ -613,6 +613,39 @@ End-to-end browser flow over the U1b backend.
   last-seen (`viděno 8. 5.`), and the copper TOM pill
   (`94 dní`, Czech plural). Re-uses the existing token palette and
   borders-only depth strategy; no new design tokens.
+- Migration 061 enriches `browse_stats` with a
+  `price_quartile_velocity` field: the filtered cohort is split into
+  four equal-size price buckets via `ntile(4)` and each bucket reports
+  its `tom_days` distribution alongside its price range. Stacks on
+  top of 060's expanded signature — DROP-then-CREATE because the
+  function body grows a new CTE; the parameter list is unchanged from
+  060. The Stats tab renders this as a fourth Card ("Turnover by
+  price quartile") with horizontal box plots reusing the
+  `DispositionBoxPlots` SVG idiom. Active vs. delisted semantics of
+  the per-bucket TOM follow the user's status filter — no per-bucket
+  active/inactive split is computed.
+- Migration 062 adds `mean` to each bucket's `tom_box` so the
+  price/velocity signal isn't lost when `tom_days` is integer-clumped.
+  With a 14-day scrape window the five-number summary collapses to
+  identical medians across all four buckets even though means differ
+  monotonically (active 2+kk byt/pronajem: 8.9 / 9.0 / 9.4 / 9.9 days).
+  Frontend renders the mean as a copper dot on the box plot and a new
+  MEAN column in the numeric table; the caption now names the
+  integer-flooring caveat explicitly.
+- Migration 063 replaces the four-equal-bucket
+  `price_quartile_velocity` with a seven-band percentile split
+  `price_band_velocity`: p0–p10, p10–p25, p25–p45, p45–p55, p55–p75,
+  p75–p90, p90–p100. Narrower bands at the tails and around the
+  median, wider through the body, so the chart surfaces tail-vs-body
+  differences that an equal-quartile split would mask. The new
+  payload also reports `pct_share` per band (actual share of priced
+  cohort, since ties at percentile cuts make bucket sizes drift from
+  their nominal 10/15/20/10/20/15/10). Active 2+kk byt/pronajem shows
+  the body bands clustered at mean ≈ 9.2d while the priciest decile
+  jumps to 10.5d. Frontend rewrite: `PriceQuartileVelocity` →
+  `PriceBandVelocity`, seven rows on the y-axis with percentile +
+  price-range + n + share labels; Card heading and caption updated
+  accordingly.
 
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the

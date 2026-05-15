@@ -13,7 +13,7 @@ import os
 from datetime import timedelta
 from typing import Any, AsyncIterator, Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -33,6 +33,7 @@ from api.building_runs import (
     get_building_run,
     list_building_runs,
     re_extract,
+    sweep_stuck_buildings,
     update_building_inputs,
 )
 from api import attachments as attachments_module
@@ -44,6 +45,7 @@ from api.estimation_runs import (
     get_trace_payload,
     list_estimation_runs,
     preview_estimation,
+    sweep_stuck_runs,
 )
 from api import notifications as nf_module
 from api.routes.admin import router as admin_router
@@ -76,6 +78,12 @@ from toolkit.summaries import SummarizeError
 async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
     """Spawn the Watchdog matcher loop alongside the request handler.
 
+    On startup we also sweep any estimation_runs / building_runs left
+    in a non-terminal status by a server crash mid-background-task,
+    flipping rows older than 10 minutes to 'failed' with a clear
+    error_message so the operator isn't left looking at a forever-
+    pending row.
+
     The loop opens its own per-pass DB connection and respects the
     `notifications_matcher_interval_seconds` knob in `app_settings`.
     Setting that key to 0 keeps the task alive but idle, so an
@@ -85,6 +93,19 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
     is set — useful for tests / one-off CLI invocations that import
     api.main but don't want a background task chattering.
     """
+    if not os.environ.get("STUCK_ROW_SWEEP_DISABLED"):
+        try:
+            with deps.open_background_conn() as conn:
+                est = sweep_stuck_runs(conn)
+                bld = sweep_stuck_buildings(conn)
+            if est or bld:
+                logging.info(
+                    "stuck-row sweep on startup: %s estimation_runs, %s building_runs",
+                    est, bld,
+                )
+        except Exception:
+            logging.exception("stuck-row sweep failed on startup")
+
     stop_event: asyncio.Event = asyncio.Event()
     task: asyncio.Task[None] | None = None
     if not os.environ.get("NOTIFICATIONS_MATCHER_DISABLED"):
@@ -518,12 +539,15 @@ def post_estimations_preview(
 @app.post("/estimations")
 def post_estimations(
     body: s.CreateEstimationIn,
+    background_tasks: BackgroundTasks,
     conn: Any = Depends(deps.get_db_conn),
     client: Any = Depends(deps.get_sreality_client),
     llm_client: Any = Depends(deps.get_llm_client),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return create_estimation_run(conn, client, llm_client, body)
+    return create_estimation_run(
+        conn, client, llm_client, body, background_tasks=background_tasks,
+    )
 
 
 @app.get("/estimations/preview")
@@ -708,6 +732,7 @@ def post_buildings(
 @app.post("/buildings/from_url")
 def post_buildings_from_url(
     body: s.CreateBuildingFromUrlIn,
+    background_tasks: BackgroundTasks,
     conn: Any = Depends(deps.get_db_conn),
     sreality_client: Any = Depends(deps.get_sreality_client),
     llm_client: Any = Depends(deps.get_llm_client),
@@ -715,6 +740,7 @@ def post_buildings_from_url(
 ) -> dict[str, Any]:
     return create_building_run_from_url(
         conn, sreality_client, llm_client, body,
+        background_tasks=background_tasks,
     )
 
 

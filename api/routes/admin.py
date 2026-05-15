@@ -28,6 +28,7 @@ from api.skills import (
     load_skill,
     update_skill,
 )
+from toolkit import filter_registry
 
 if TYPE_CHECKING:
     import psycopg
@@ -47,6 +48,10 @@ class UpdateSkillIn(BaseModel):
 
 class UpdateAppSettingIn(BaseModel):
     value: Any  # jsonb shape; the caller knows what each key holds
+
+
+class UpdateFilterVisibilityIn(BaseModel):
+    enabled: bool
 
 
 # --- skills ---------------------------------------------------------------
@@ -167,6 +172,101 @@ def get_agent_tools() -> dict[str, Any]:
     list in the SPA.
     """
     return {"data": list_agent_tools()}
+
+
+# --- filter registry ------------------------------------------------------
+
+@router.get("/filter-schema")
+def get_filter_schema(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The canonical filter registry, with the operator's visibility
+    overrides applied in-line.
+
+    Used by the frontend at runtime (Settings matrix, agent-tool docs)
+    and as the seed for the build-time codegen in
+    `scripts/generate_filter_registry.py`. The committed
+    `frontend/src/lib/filterRegistry.generated.ts` mirrors the same
+    shape so the SPA can render `<FilterForm>` and `lib/filters.ts`
+    URL serialisation without a network hop.
+    """
+    visibility = filter_registry.visibility_map(conn)
+    return filter_registry.registry_to_json(visibility)
+
+
+@router.get("/filter-visibility")
+def get_filter_visibility(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Read the agenda × filter visibility matrix.
+
+    Rows missing from the table are implicit `enabled=true` — the
+    response includes every (agenda, filter) pair the registry
+    declares so the Settings UI can render the full matrix from one
+    call.
+    """
+    visibility = filter_registry.visibility_map(conn)
+    matrix: list[dict[str, Any]] = []
+    for f in filter_registry.all_filters():
+        for agenda in sorted(f.agendas):
+            matrix.append({
+                "agenda": str(agenda),
+                "filter_id": f.id,
+                "enabled": visibility.get((str(agenda), f.id), True),
+            })
+    return {"data": matrix}
+
+
+@router.put("/filter-visibility/{agenda}/{filter_id}")
+def put_filter_visibility(
+    agenda: str,
+    filter_id: str,
+    body: UpdateFilterVisibilityIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Toggle one (agenda, filter) cell.
+
+    Validates that the registry declares the filter for the agenda —
+    enabling a filter for an agenda that never references it would
+    silently do nothing, which is worse than rejecting the request.
+    """
+    try:
+        f = filter_registry.by_id(filter_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown filter id {filter_id!r}",
+        )
+    try:
+        agenda_enum = filter_registry.Agenda(agenda)
+    except ValueError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown agenda {agenda!r}",
+        )
+    if agenda_enum not in f.agendas:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"filter {filter_id!r} is not declared for agenda "
+                f"{agenda!r}; the registry would ignore the override."
+            ),
+        )
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO filter_visibility "
+            "  (agenda, filter_id, enabled, updated_at, updated_by) "
+            "VALUES (%s, %s, %s, now(), %s) "
+            "ON CONFLICT (agenda, filter_id) DO UPDATE "
+            "  SET enabled = excluded.enabled, "
+            "      updated_at = now(), "
+            "      updated_by = excluded.updated_by",
+            (agenda, filter_id, body.enabled, "settings_ui"),
+        )
+    return {
+        "agenda": agenda,
+        "filter_id": filter_id,
+        "enabled": body.enabled,
+    }
 
 
 # --- helpers --------------------------------------------------------------

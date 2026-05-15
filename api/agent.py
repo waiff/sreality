@@ -47,6 +47,7 @@ from toolkit import (
     summarize_listing,
     verify_listing_freshness,
 )
+from toolkit import filter_registry
 from toolkit.comparables import ComparableFilters, TargetSpec
 
 if TYPE_CHECKING:
@@ -110,95 +111,23 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 10000},
-                    "area_band_pct": {"type": "number", "minimum": 0.05, "maximum": 0.6},
-                    "disposition_match": {
-                        "type": "string",
-                        "enum": ["exact", "loose", "any"],
+                    # Every filter the registry declares for COMPARABLES.
+                    # Descriptions come from `filter_registry.REGISTRY[id]
+                    # .description` — single source of truth, no more
+                    # hand-written agent prose drifting from operator-
+                    # facing surfaces.
+                    **filter_registry.to_jsonschema_properties(
+                        filter_registry.Agenda.COMPARABLES,
+                    ),
+                    # Knobs specific to the relaxation wrapper — these
+                    # don't belong on `ComparableFilters` itself.
+                    "min_results": {
+                        "type": "integer", "minimum": 1, "maximum": 50,
+                        "description": (
+                            "Stop relaxing once at least this many "
+                            "comparables are found. Default 5."
+                        ),
                     },
-                    "max_age_days": {"type": "integer", "minimum": 1, "maximum": 365},
-                    "min_results": {"type": "integer", "minimum": 1, "maximum": 50},
-                    "population": {
-                        "type": "string",
-                        "enum": ["active", "delisted", "all"],
-                        "description": "Override active_only: 'active' = is_active AND within max_age_days; 'delisted' = is_active=false (closed deals); 'all' = both.",
-                    },
-                    "floor_band": {
-                        "type": "integer", "minimum": 0, "maximum": 20,
-                        "description": "Match floors within +/- N of the target's floor. Omit to ignore floor.",
-                    },
-                    "condition_match": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Restrict cohort to listings whose `condition` is in this list (Czech, no diacritics): novostavba, po_rekonstrukci, velmi_dobry, dobry, pred_rekonstrukci, k_demolici.",
-                    },
-                    "building_type_match": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Restrict cohort to listings whose `building_type` is in this list (Czech): cihla, panel, smisena, skelet, drevo, kamen, montovana, nizkoenergeticka.",
-                    },
-                    "energy_rating_match": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Restrict to energy ratings in this list (single capital letters A-G).",
-                    },
-                    "has_balcony": {
-                        "type": "boolean",
-                        "description": "Legacy combined flag (balcony OR terrace OR loggia). Prefer the granular `terrace` filter for new logic.",
-                    },
-                    "has_lift": {"type": "boolean"},
-                    "has_parking": {
-                        "type": "boolean",
-                        "description": "Legacy combined flag (parking OR garage). Prefer the granular `garage` / `min_parking_lots` filters for new logic.",
-                    },
-                    "min_price_czk": {"type": "integer", "minimum": 0},
-                    "max_price_czk": {"type": "integer", "minimum": 0},
-                    "category_main": {
-                        "type": "string",
-                        "description": "Czech category enum (no diacritics): byt, dum, komercni, pozemek, ostatni. Inherited from the request body by default — only override if you deliberately want to mix categories.",
-                    },
-                    "category_type": {
-                        "type": "string",
-                        "description": "Czech category type enum: pronajem, prodej, drazba. Inherited from the request body by default.",
-                    },
-                    "category_sub_cb": {
-                        "type": "integer",
-                        "description": "Numeric sreality sub-category code. Use with caution — narrows the cohort aggressively.",
-                    },
-                    "locality_district_id": {
-                        "type": "integer",
-                        "description": "Sreality district id. Useful for constraining cohort to a specific municipality.",
-                    },
-                    "locality_region_id": {
-                        "type": "integer",
-                        "description": "Sreality region id (broader than district).",
-                    },
-                    "include_unreliable": {
-                        "type": "boolean",
-                        "description": "Include listings whose detail fetches have given up (listing_fetch_failures.given_up = true). Default false.",
-                    },
-                    "furnished": {
-                        "type": "string",
-                        "description": "Czech enum: zarizeny, castecne, nezarizeny.",
-                    },
-                    "terrace": {"type": "boolean"},
-                    "cellar": {"type": "boolean"},
-                    "garage": {"type": "boolean"},
-                    "ownership": {
-                        "type": "string",
-                        "description": "Czech ownership enum: osobni, druzstevni, statni, podil.",
-                    },
-                    "min_estate_area": {
-                        "type": "number",
-                        "description": "m². Plot area lower bound (mostly for dum/pozemek categories).",
-                    },
-                    "max_estate_area": {"type": "number"},
-                    "min_usable_area": {
-                        "type": "number",
-                        "description": "m². Distinct from the target.area_m2 +/- area_band_pct window; this is an absolute floor.",
-                    },
-                    "max_usable_area": {"type": "number"},
-                    "min_parking_lots": {"type": "integer", "minimum": 0},
                 },
                 "required": [],
             },
@@ -253,8 +182,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
-                    "max_age_days": {"type": "integer", "minimum": 1, "maximum": 365},
+                    # The handler honours only radius_m + max_age_days;
+                    # category is taken from the run's base_filters and
+                    # cannot be overridden per-call. We pull descriptions
+                    # from the registry so the agent reads canonical text.
+                    "radius_m": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("radius_m"),
+                    ),
+                    "max_age_days": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("max_age_days"),
+                    ),
                 },
                 "required": [],
             },
@@ -291,13 +228,22 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
-                    "population": {
-                        "type": "string",
-                        "enum": ["active", "delisted", "all"],
-                    },
+                    # The handler honours radius_m + population only,
+                    # plus the velocity-specific trend_split_days. Other
+                    # cohort knobs come from base_filters.
+                    "radius_m": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("radius_m"),
+                    ),
+                    "population": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("population"),
+                    ),
                     "trend_split_days": {
                         "type": "integer", "minimum": 1, "maximum": 90,
+                        "description": (
+                            "Split the cohort's delisted listings into "
+                            "'recent' and 'older' buckets at N days ago "
+                            "for a trend signal. Default 7."
+                        ),
                     },
                 },
                 "required": [],

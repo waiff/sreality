@@ -338,6 +338,16 @@ export interface EstimationRun {
    * value is never null in practice, but the type tolerates it for
    * forward compatibility. */
   cost_usd_total: number | null;
+  /* Migration 052 — snapshot of the skill that produced this run.
+   * Null on deterministic runs and on pre-AI agent runs. Survives
+   * later edits to the live skill; the /estimations list reads
+   * these directly rather than re-parsing trace.steps. */
+  skill_name: string | null;
+  skill_version: number | null;
+  /* Migration 052 — true when at least one estimation_feedback row
+   * references this run. Drives the "Feedback" button enable state
+   * on the /estimations list. */
+  has_feedback: boolean;
   /* Migration 031 — structured Czech-real-estate summary of the
    * subject listing, generated server-side at estimation time when
    * input_sreality_id was set. Null on legacy runs and on runs
@@ -772,6 +782,14 @@ export interface WatchdogFilterSpec {
   furnished: Furnished | null;
   ownership: Ownership | null;
   min_parking_lots: number | null;
+  // Added with migration 060 / PR 2: backend now honours these,
+  // matching the Browse sidebar filter set. The Watchdog form
+  // surfaces them in a later PR — until then, API callers can set
+  // them directly through POST/PUT /notifications/subscriptions.
+  building_material: 'cihla' | 'panel' | 'smisena' | 'ostatni' | null;
+  min_garden_area: number | null;
+  max_garden_area: number | null;
+  tags: number[] | null;
 }
 
 export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
@@ -802,6 +820,10 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   furnished: null,
   ownership: null,
   min_parking_lots: null,
+  building_material: null,
+  min_garden_area: null,
+  max_garden_area: null,
+  tags: null,
 };
 
 export interface WatchdogSubscription {
