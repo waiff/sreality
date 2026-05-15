@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 04:57 UTC_
+_Last refreshed: 2026-05-15 08:28 UTC_
 
-**Branch:** `claude/finetune-agent-traces-VDz9u`
+**Branch:** `claude/agent-tom-filter-velocity-prune-A7kQp`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 52 files, latest `053_estimation_cohort_entries.sql`.
+**Migrations on disk:** 57 files, latest `055_browse_stats_velocity_filters.sql`.
 
 **Last 10 commits:**
 
 ```
+041d55c migrations: backfill five files that production had applied but the repo was missing
+4e56f87 migrations: renumber TOM view + browse_stats to 054/055, preserve broker cols
+ecde5a2 browse: TOM filter, card badges, filter-panel overhaul
+d3ddeab Merge pull request #95 from waiff/claude/finetune-agent-traces-VDz9u
+78bcc22 roadmap: refresh auto-status block
 c265bce agent: server-derived cohort, no more LLM ID transcription
 bacfc82 roadmap: refresh auto-status block
 20d3e71 roadmap: refresh auto-status block
 1af768c agent: expose every ComparableFilters field to the agent + show all filters in the trace
 5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
-bcb3f00 frontend: correct ListingPublic.category_{main,type} to string
-e0ce9c4 frontend: prefill yield's listing price from a sale subject listing
-bcb6f58 Merge pull request #93 from waiff/claude/feedback-panel-residual-width-AQAFy
-a7bd9d5 frontend: float feedback panel into the page's right residual column
-4433786 Merge pull request #92 from waiff/claude/floating-feedback-button-AQAFy
 ```
 
 <!-- END AUTO-STATUS -->

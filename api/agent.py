@@ -199,6 +199,14 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     },
                     "max_usable_area": {"type": "number"},
                     "min_parking_lots": {"type": "integer", "minimum": 0},
+                    "tom_days_min": {
+                        "type": "integer", "minimum": 0,
+                        "description": "Minimum time-on-market in days. Restricts cohort to listings on the market at least N days. Lets you exclude very-fresh listings whose asking prices have not yet been tested.",
+                    },
+                    "tom_days_max": {
+                        "type": "integer", "minimum": 1,
+                        "description": "Maximum time-on-market in days. Restricts cohort to listings NOT on the market longer than N days. For delisted listings this is the full sojourn (first_seen → last_seen); for active listings it is the right-censored duration to now(). Use with population='delisted' to focus on recently-cleared comparables.",
+                    },
                 },
                 "required": [],
             },
@@ -283,10 +291,12 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             description=(
                 "TOM (time-on-market) statistics across the target's spatial "
                 "+ attribute cohort. Returns median/p25/p75 TOM days, an "
-                "active vs delisted split, and a recent-vs-older trend. Use "
-                "when the cohort price spread is wide enough to suspect "
-                "demand is doing the work — slow markets justify lower "
-                "confidence."
+                "active vs delisted split, and a recent-vs-older trend. "
+                "Pass the same `population` / `tom_days_max` you used on "
+                "the latest find_comparables_relaxed call to measure "
+                "velocity on the same cohort; the resulting "
+                "`data.tom_stats.p75` is the natural ceiling for a "
+                "follow-up TOM-prune round."
             ),
             input_schema={
                 "type": "object",
@@ -296,6 +306,8 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "type": "string",
                         "enum": ["active", "delisted", "all"],
                     },
+                    "tom_days_min": {"type": "integer", "minimum": 0},
+                    "tom_days_max": {"type": "integer", "minimum": 1},
                     "trend_split_days": {
                         "type": "integer", "minimum": 1, "maximum": 90,
                     },
@@ -867,6 +879,8 @@ _FCR_OVERRIDE_FIELDS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
     ("min_usable_area", float),
     ("max_usable_area", float),
     ("min_parking_lots", int),
+    ("tom_days_min", int),
+    ("tom_days_max", int),
 )
 
 
@@ -923,6 +937,8 @@ def _filters_snapshot(
         "min_usable_area": filters.min_usable_area,
         "max_usable_area": filters.max_usable_area,
         "min_parking_lots": filters.min_parking_lots,
+        "tom_days_min": filters.tom_days_min,
+        "tom_days_max": filters.tom_days_max,
     }
 
 
@@ -1160,6 +1176,10 @@ def _handle_compute_market_velocity(
     filters = state.base_filters
     if "radius_m" in args:
         filters = replace(filters, radius_m=int(args["radius_m"]))
+    if "tom_days_min" in args:
+        filters = replace(filters, tom_days_min=int(args["tom_days_min"]))
+    if "tom_days_max" in args:
+        filters = replace(filters, tom_days_max=int(args["tom_days_max"]))
     return compute_market_velocity(
         state.conn, state.target, filters,
         population=args.get("population", "all"),
