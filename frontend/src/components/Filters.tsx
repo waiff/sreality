@@ -5,13 +5,13 @@ import {
   DEFAULT_FILTERS,
   isDefault,
   listingFiltersToRegistryView,
-  applyRegistryUpdate,
+  applyRegistryUpdates,
 } from '@/lib/filters';
 import { ControlGroup, Section } from '@/components/controls';
 import { FilterForm } from '@/components/FilterForm';
 import {
-  DistrictTypeahead,
   LocationControl,
+  LocationTypeahead,
   TagPicker,
 } from '@/components/filter-controls';
 
@@ -26,15 +26,22 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
   // already use. The adapter in lib/filters bridges both directions
   // (tri-state amenities pivot bool|null ↔ 'any'|'yes'|'no' inside it).
   const registryView = listingFiltersToRegistryView(filters);
-  const handleRegistryChange = (id: string, value: unknown) =>
-    onChange(applyRegistryUpdate(filters, id, value));
+  // Batched apply: every <FilterForm> emission ships an array of
+  // updates, so paired range edits (min + max in one slider drag)
+  // apply atomically. Without this, sequential id/value callbacks
+  // would each start from the same stale `filters` closure and the
+  // second update would overwrite the first — visible as a slider
+  // that refuses to move and a number input that swallows keystrokes.
+  const handleRegistryChange = (
+    updates: ReadonlyArray<{ id: string; value: unknown }>,
+  ) => onChange(applyRegistryUpdates(filters, updates));
 
   // Rich widgets the controls library can't generically express get
   // plugged in via customWidgets — keyed by registry id. The widgets
   // own their own data fetching; FilterForm just wires the value /
   // onChange through.
   const customWidgets = {
-    districts: DistrictTypeahead as never,
+    districts: LocationTypeahead as never,
     tags: TagPicker as never,
   };
 

@@ -17,7 +17,11 @@ import {
   type WatchdogFilterSpec,
 } from '@/lib/types';
 import { FilterForm } from '@/components/FilterForm';
-import { LocationControl, type CenterRadius } from '@/components/filter-controls';
+import {
+  LocationControl,
+  LocationTypeahead,
+  type CenterRadius,
+} from '@/components/filter-controls';
 
 export default function WatchdogEdit() {
   const { id } = useParams<{ id?: string }>();
@@ -132,10 +136,22 @@ export default function WatchdogEdit() {
         <FilterForm
           scope="watchdog"
           state={spec as unknown as Record<string, unknown>}
-          onChange={(id, value) =>
-            setSpec((prev) => ({ ...prev, [id]: value }) as WatchdogFilterSpec)
+          onChange={(updates) =>
+            setSpec((prev) => {
+              const next = { ...prev } as Record<string, unknown>;
+              for (const u of updates) next[u.id] = u.value;
+              return next as unknown as WatchdogFilterSpec;
+            })
           }
           exclude={['location']}
+          customWidgets={{
+            // Same Mapy.cz typeahead as Browse — keeps the operator's
+            // muscle memory consistent across surfaces. Tags don't
+            // surface here yet because Watchdog stores numeric tag ids
+            // and the rich picker needs the listings-attached colour
+            // palette context.
+            districts: LocationTypeahead as never,
+          }}
           labels={{
             category_main: 'Category main',
             category_type: 'Deal',

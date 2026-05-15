@@ -1623,7 +1623,7 @@ function FeedbackBlock({ runId }: { runId: number }) {
   const rows = listQ.data?.data ?? [];
 
   return (
-    <div>
+    <div id="feedback">
       <SectionLabel>Feedback history</SectionLabel>
       <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
         Previous notes on this run and the prompt edits they triggered.

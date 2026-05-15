@@ -337,8 +337,18 @@ service that exposes it (`api/`). They do not apply to the scraper.
      invalidates automatically. Only callable inside the building
      flow; the agent handler in `api/agent.py` enforces that the
      `attachment_id` belongs to the run's `building_run_id`.
+   - `discover_condition_markers`, which writes a structured list of
+     Czech "condition markers" (technical-state phrases like
+     "zateplená budova" or "po kompletní rekonstrukci") to
+     `listing_marker_extractions` (keyed on `(sreality_id, snapshot_id)`)
+     on cache miss. Phase A of the building/apartment condition-
+     scoring feature: feeds the one-off marker dictionary that the
+     forthcoming `score_listing_condition` will read. Same rationale
+     as `summarize_listing` / `compare_listing_images`: vision-augmented
+     extraction is expensive, the LLM is the source of truth, the
+     cache auto-invalidates when a new snapshot is recorded.
    No other toolkit function may write. The API service should still
-   connect with a read-only role if Postgres permits; these six paths
+   connect with a read-only role if Postgres permits; these seven paths
    then need a separately-elevated route. For now we ship with one
    role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always

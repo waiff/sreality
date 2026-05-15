@@ -1,0 +1,93 @@
+name: Discover condition markers (Phase A)
+
+# One-off Phase A driver for the building/apartment condition-scoring
+# feature. Runs scripts/discover_condition_markers.py against the
+# real Supabase DB and the Anthropic API to mine Czech condition
+# markers from a stratified sample of listings.
+#
+# Real LLM credits are spent. With the defaults (limit=2000,
+# n_images=5, Sonnet 4.5) expect roughly $50-80 per full run.
+#
+# Required GitHub secrets:
+#   SUPABASE_DB_URL
+#   ANTHROPIC_API_KEY
+#   R2_ACCOUNT_ID
+#   R2_ACCESS_KEY_ID
+#   R2_SECRET_ACCESS_KEY
+#   R2_BUCKET_NAME
+#
+# Outputs are persisted in `listing_marker_extractions`. To turn them
+# into a dictionary, run the "Aggregate condition markers" workflow
+# (or scripts/aggregate_condition_markers.py locally).
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Maximum number of listings to extract markers for
+        required: true
+        default: "2000"
+        type: string
+      n_images:
+        description: Images per listing (0 disables vision; default 5)
+        required: true
+        default: "5"
+        type: string
+      per_cell_cap:
+        description: Max picks per stratification cell
+        required: true
+        default: "6"
+        type: string
+      max_cost_usd:
+        description: Stop early when this run's LLM cost exceeds this cap (USD)
+        required: true
+        default: "80"
+        type: string
+      dry_run:
+        description: Print sample and exit without calling the LLM
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "psycopg[binary]>=3.2" \
+            "requests>=2.32" \
+            "boto3>=1.35" \
+            "anthropic>=0.40" \
+            "google-genai>=0.3"
+
+      - name: Run discovery
+        run: |
+          ARGS="--limit ${{ inputs.limit }} --n-images ${{ inputs.n_images }}"
+          ARGS="$ARGS --per-cell-cap ${{ inputs.per_cell_cap }}"
+          ARGS="$ARGS --max-cost-usd ${{ inputs.max_cost_usd }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python -m scripts.discover_condition_markers $ARGS

@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 12:18 UTC_
+_Last refreshed: 2026-05-15 21:16 UTC_
 
-**Branch:** `claude/review-unmerged-changes-mxsQa`
+**Branch:** `claude/discover-workflow-pythonpath-fix`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 65 files, latest `063_browse_stats_price_band_velocity.sql`.
+**Migrations on disk:** 66 files, latest `064_condition_markers.sql`.
 
 **Last 10 commits:**
 
 ```
-d3cf1e1 Merge pull request #112 from waiff/claude/reusable-filters-component-oRhvq
-0ad0037 Merge pull request #111 from waiff/claude/async-estimation-submission-LdiGj
-71f3739 frontend: component-level tests for FilterForm + filter-controls
-564c213 Merge remote-tracking branch 'origin/main' into claude/async-estimation-submission-LdiGj
-ae7742f Merge pull request #110 from waiff/claude/reusable-filters-component-oRhvq
-8893a17 estimations + buildings: respond fast, run heavy work in background
-7819eb6 roadmap: refresh auto-status block
-11aaced frontend: vitest + first batch of pure-function tests
-b6a78ba Merge pull request #109 from waiff/claude/reusable-filters-component-oRhvq
-5227e12 browse: centre+radius spatial mode with circle overlay on the map
+1514d8d roadmap: refresh auto-status block
+2338ba9 workflows: run condition-marker scripts as modules (fix ModuleNotFoundError)
+6b178ba Merge pull request #120 from waiff/claude/aggregate-empty-extractions-fix
+a75676d aggregate: treat empty extractions table as no-op, not failure
+b91b0c6 Merge pull request #119 from waiff/claude/apartment-condition-scoring-jZ6qy
+9df5352 roadmap: refresh auto-status block
+f1bef29 condition: add Phase A — discover Czech condition markers
+cb3abb9 Merge pull request #118 from waiff/claude/reusable-filters-component-oRhvq
+4dc340f roadmap: refresh auto-status block
+dcc55ce filters: drop orphan LocationChipPicker
 ```
 
 <!-- END AUTO-STATUS -->

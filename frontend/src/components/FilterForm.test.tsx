@@ -81,7 +81,12 @@ describe('<FilterForm>', () => {
     expect(byt).toHaveAttribute('aria-pressed', 'true');
     const dum = screen.getByRole('button', { name: 'Domy' });
     fireEvent.click(dum);
-    expect(onChange).toHaveBeenCalledWith('category_main', 'dum');
+    // Single-filter updates ship as one-element arrays — the batching
+    // shape is uniform across single + paired emissions so the parent
+    // can always apply them atomically.
+    expect(onChange).toHaveBeenCalledWith([
+      { id: 'category_main', value: 'dum' },
+    ]);
   });
 
   it('renders tristate filters as the TriRow control', () => {
@@ -100,7 +105,38 @@ describe('<FilterForm>', () => {
     // TriRow exposes "any", "yes", "no" buttons.
     const yes = screen.getByRole('button', { name: 'yes' });
     fireEvent.click(yes);
-    expect(onChange).toHaveBeenCalledWith('has_balcony', true);
+    expect(onChange).toHaveBeenCalledWith([
+      { id: 'has_balcony', value: true },
+    ]);
+  });
+
+  it('batches paired range updates so min and max apply atomically', () => {
+    // The original bug: dragging the lo thumb fired onChange(min, lo)
+    // followed immediately by onChange(max, oldMax), and a non-
+    // functional setter like Browse's URL writer saw both calls
+    // against the same stale filters — second call won, lo never
+    // changed. The batched shape sends both updates in one array so
+    // the parent reduces them together.
+    const onChange = vi.fn();
+    render(
+      <FilterForm
+        scope="browse"
+        state={{ min_price_czk: 5000, max_price_czk: 15_000 }}
+        onChange={onChange}
+        includeOnly={['min_price_czk']}
+        flat
+      />,
+    );
+    const sliders = screen.getAllByRole('slider') as HTMLInputElement[];
+    fireEvent.change(sliders[0], { target: { value: '8000' } });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const lastCall = onChange.mock.calls.at(-1)![0] as Array<{
+      id: string; value: unknown;
+    }>;
+    expect(lastCall).toHaveLength(2);
+    expect(lastCall.map((u) => u.id).sort()).toEqual([
+      'max_price_czk', 'min_price_czk',
+    ]);
   });
 
   it('routes a custom widget through the customWidgets prop', () => {
