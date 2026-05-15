@@ -176,6 +176,55 @@ def test_visibility_argument_attaches_per_filter_visibility() -> None:
     assert by_id["min_price_czk"]["visibility"]["watchdog"] is True
 
 
+# --- JSON Schema renderer -------------------------------------------------
+
+
+def test_to_jsonschema_property_carries_description_from_registry() -> None:
+    """The agent reads `description` from the JSON schema; assert it
+    matches the registry verbatim so every operator-tunable change
+    flows through."""
+    prop = fr.to_jsonschema_property(fr.by_id("min_price_czk"))
+    assert prop["type"] == "integer"
+    assert prop["description"] == fr.description("min_price_czk")
+    assert prop["minimum"] == 0
+
+
+def test_to_jsonschema_property_includes_enum_for_enum_filters() -> None:
+    prop = fr.to_jsonschema_property(fr.by_id("category_main"))
+    assert prop["type"] == "string"
+    # Constraints['enum'] surfaces as the JSON Schema enum keyword.
+    assert "byt" in prop["enum"]
+
+
+def test_to_jsonschema_property_list_filter_has_items() -> None:
+    prop = fr.to_jsonschema_property(fr.by_id("dispositions"))
+    assert prop["type"] == "array"
+    assert prop["items"]["type"] == "string"
+    # When enum_values is set, the items schema constrains values.
+    assert "1+kk" in prop["items"]["enum"]
+
+
+def test_to_jsonschema_properties_returns_visible_filters_for_agenda() -> None:
+    props = fr.to_jsonschema_properties(fr.Agenda.COMPARABLES)
+    # Every COMPARABLES filter appears, except the composite LOCATION.
+    for fid in [
+        "radius_m", "min_price_czk", "category_main",
+        "has_balcony", "ownership", "min_garden_area",
+    ]:
+        assert fid in props, f"{fid} missing from COMPARABLES properties"
+    assert "location" not in props
+
+
+def test_agent_find_comparables_relaxed_descriptions_come_from_registry() -> None:
+    """End-to-end: build the agent's tool registry, assert the
+    find_comparables_relaxed filter descriptions match registry strings."""
+    from api.agent import _build_tool_registry
+    tools = _build_tool_registry()
+    schema = tools["find_comparables_relaxed"].input_schema
+    for fid in ("min_price_czk", "has_balcony", "category_main", "ownership"):
+        assert schema["properties"][fid]["description"] == fr.description(fid)
+
+
 # --- codegen drift --------------------------------------------------------
 
 
