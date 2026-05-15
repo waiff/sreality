@@ -1,0 +1,70 @@
+name: Aggregate condition markers (Phase A review prep)
+
+# Runs scripts/aggregate_condition_markers.py against the live
+# `listing_marker_extractions` rows to produce
+# data/condition_markers_v1.json, then commits the JSON back to
+# the running branch so the operator can review it in the PR diff.
+#
+# No LLM is called by this workflow — it is pure clustering /
+# aggregation. Safe to re-run as many times as needed while the
+# discovery loop fills the cache.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      output_path:
+        description: Output JSON path inside the repo
+        required: true
+        default: "data/condition_markers_v1.json"
+        type: string
+      min_cluster_count:
+        description: Drop clusters whose total count is below this
+        required: true
+        default: "3"
+        type: string
+      similarity_threshold:
+        description: difflib ratio merge threshold (0.0-1.0)
+        required: true
+        default: "0.85"
+        type: string
+
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Run aggregation
+        run: |
+          python scripts/aggregate_condition_markers.py \
+            --output "${{ inputs.output_path }}" \
+            --min-cluster-count "${{ inputs.min_cluster_count }}" \
+            --similarity-threshold "${{ inputs.similarity_threshold }}"
+
+      - name: Commit + push dictionary
+        run: |
+          git config user.name  "claude-condition-markers[bot]"
+          git config user.email "claude-condition-markers@users.noreply.github.com"
+          git add "${{ inputs.output_path }}"
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "data: regenerate condition marker dictionary"
+          git push origin HEAD:${{ github.ref_name }}

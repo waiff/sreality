@@ -55,6 +55,7 @@ from toolkit.comparables import (  # noqa: E402
     find_comparables,
     find_comparables_relaxed,
 )
+from toolkit.condition_markers import discover_condition_markers  # noqa: E402
 from toolkit.distribution import analyze_distribution  # noqa: E402
 from toolkit.floor_plan import read_floor_plan  # noqa: E402
 from toolkit.freshness import verify_listing_freshness  # noqa: E402
@@ -88,6 +89,7 @@ __all__ = [
     "compute_market_velocity",
     "compute_walkability",
     "describe_neighborhood",
+    "discover_condition_markers",
     "extract_building_units",
     "find_anchor_amenities",
     "find_comparables",
