@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 21:16 UTC_
+_Last refreshed: 2026-05-15 21:50 UTC_
 
-**Branch:** `claude/discover-workflow-pythonpath-fix`
+**Branch:** `claude/aggregate-commit-step-guard`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-15 21:16 UTC_
 **Last 10 commits:**
 
 ```
+74dacd1 aggregate workflow: skip commit step when no output file exists
+213a82e Merge pull request #121 from waiff/claude/discover-workflow-pythonpath-fix
 1514d8d roadmap: refresh auto-status block
 2338ba9 workflows: run condition-marker scripts as modules (fix ModuleNotFoundError)
 6b178ba Merge pull request #120 from waiff/claude/aggregate-empty-extractions-fix
@@ -24,8 +26,6 @@ b91b0c6 Merge pull request #119 from waiff/claude/apartment-condition-scoring-jZ
 9df5352 roadmap: refresh auto-status block
 f1bef29 condition: add Phase A — discover Czech condition markers
 cb3abb9 Merge pull request #118 from waiff/claude/reusable-filters-component-oRhvq
-4dc340f roadmap: refresh auto-status block
-dcc55ce filters: drop orphan LocationChipPicker
 ```
 
 <!-- END AUTO-STATUS -->
