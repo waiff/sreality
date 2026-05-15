@@ -198,12 +198,23 @@ function SuggestPanel({
           <button
             type="button"
             onClick={() => onPick(s)}
-            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-sm text-left hover:bg-[var(--color-copper-soft)]"
+            className="w-full flex items-center justify-between gap-3 px-3 py-1.5 text-left hover:bg-[var(--color-copper-soft)]"
           >
-            <span className="truncate text-[var(--color-ink)]">
-              {/* Mapy.cz `label` carries the regional context (street →
-                * obec → kraj) and is the most useful display string. */}
-              {s.label || s.name}
+            <span className="min-w-0 flex-1 truncate">
+              {/* Mapy.cz puts the place name in `name` (e.g. "Ostrava")
+                * and the regional context in `location`
+                * (e.g. "okres Ostrava-město, Moravskoslezský kraj").
+                * `label` is the type-in-Czech ("Obec", "Vesnice") which
+                * the type badge already shows. Display name + location
+                * stacked so the dropdown reads as a real address list. */}
+              <span className="block text-sm text-[var(--color-ink)] truncate">
+                {s.name}
+              </span>
+              {s.location ? (
+                <span className="block text-[0.7rem] text-[var(--color-ink-3)] truncate">
+                  {s.location}
+                </span>
+              ) : null}
             </span>
             <span className="shrink-0 text-[0.65rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)] border border-[var(--color-rule)] rounded-[var(--radius-xs)] px-1.5 py-0.5">
               {typeBadge(s.type)}
