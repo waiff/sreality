@@ -17,6 +17,7 @@ import {
   type WatchdogFilterSpec,
 } from '@/lib/types';
 import { FilterForm } from '@/components/FilterForm';
+import { LocationControl, type CenterRadius } from '@/components/filter-controls';
 
 export default function WatchdogEdit() {
   const { id } = useParams<{ id?: string }>();
@@ -67,11 +68,6 @@ export default function WatchdogEdit() {
     },
   });
 
-  const set = <K extends keyof WatchdogFilterSpec>(
-    key: K,
-    value: WatchdogFilterSpec[K],
-  ) => setSpec((prev) => ({ ...prev, [key]: value }));
-
   const canSave = name.trim().length > 0 && !saveMut.isPending;
   const submitError = saveMut.error?.message ?? null;
 
@@ -107,34 +103,29 @@ export default function WatchdogEdit() {
           </Row>
         </Section>
 
-        <Section title="Spatial center">
-          <Row label="lat / lng / radius">
-            <div className="grid grid-cols-3 gap-2">
-              <NumberInput
-                value={spec.lat}
-                placeholder="lat"
-                step="0.000001"
-                onChange={(v) => set('lat', v)}
-              />
-              <NumberInput
-                value={spec.lng}
-                placeholder="lng"
-                step="0.000001"
-                onChange={(v) => set('lng', v)}
-              />
-              <NumberInput
-                value={spec.radius_m}
-                placeholder="radius m"
-                step="50"
-                onChange={(v) => set('radius_m', v == null ? null : Math.trunc(v))}
-              />
-            </div>
-            <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
-              Optional. All three must be set together. Restricts the
-              watchdog to listings within the circle. The integrated
-              map-driven dot + radius widget lands with Browse
-              adoption of the unified filter form.
-            </p>
+        <Section title="Spatial centre">
+          <Row label="Centre + radius">
+            <LocationControl
+              value={
+                spec.lat != null && spec.lng != null && spec.radius_m != null
+                  ? { lat: spec.lat, lng: spec.lng, radius_m: spec.radius_m }
+                  : null
+              }
+              onChange={(next: CenterRadius | null) => {
+                setSpec((prev) => ({
+                  ...prev,
+                  lat: next?.lat ?? null,
+                  lng: next?.lng ?? null,
+                  radius_m: next?.radius_m ?? null,
+                }));
+              }}
+              hint={
+                'Optional. Drag the dot or click the map to set the ' +
+                'centre; drag the slider for the radius. Restricts the ' +
+                'watchdog to listings inside the dashed circle. Clear ' +
+                'to drop the spatial filter entirely.'
+              }
+            />
           </Row>
         </Section>
 
@@ -300,43 +291,3 @@ function Toggle({
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Spatial-center input                                                       */
-/*                                                                            */
-/* The rest of the form is rendered by <FilterForm> (PR 3); only the          */
-/* lat/lng/radius_m triplet still has its own widget here. It folds into the  */
-/* composite LocationControl with map-driven dot + radius in a follow-up      */
-/* commit, at which point this file goes back to being all <FilterForm>.     */
-/* -------------------------------------------------------------------------- */
-
-function NumberInput({
-  value,
-  placeholder,
-  step,
-  onChange,
-}: {
-  value: number | null;
-  placeholder: string;
-  step: string;
-  onChange: (v: number | null) => void;
-}) {
-  return (
-    <input
-      type="number"
-      inputMode="decimal"
-      step={step}
-      value={value ?? ''}
-      placeholder={placeholder}
-      onChange={(e) => {
-        const raw = e.target.value.trim();
-        if (raw === '') {
-          onChange(null);
-          return;
-        }
-        const n = Number(raw);
-        onChange(Number.isFinite(n) ? n : null);
-      }}
-      className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-    />
-  );
-}

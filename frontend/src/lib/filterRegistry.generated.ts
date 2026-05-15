@@ -1143,7 +1143,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on listing price in CZK. For rentals this is the monthly rent; for sales the total asking price. Inclusive.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1154,7 +1154,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 100000,
+        "step": 500
       },
       "unit": "CZK",
       "enum_values": null,
@@ -1170,7 +1172,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on listing price in CZK. See `min_price_czk` for the rental-vs-sale semantics. Inclusive.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1181,7 +1183,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 100000,
+        "step": 500
       },
       "unit": "CZK",
       "enum_values": null,
@@ -1197,13 +1201,15 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Absolute floor on `area_m2` (square metres). Distinct from the target-relative `area_band_pct` used by the analytical surfaces; this is for Browse / Watchdog where there is no target to band around.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 300,
+        "step": 5
       },
       "unit": "m²",
       "enum_values": null,
@@ -1219,13 +1225,15 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Absolute ceiling on `area_m2` (square metres). See `min_area_m2`.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 300,
+        "step": 5
       },
       "unit": "m²",
       "enum_values": null,
@@ -1241,7 +1249,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on plot area in m². Mostly relevant for `category_main='dum'` (houses) and `pozemek` (land) — apartments usually have null estate_area.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1252,7 +1260,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 5000,
+        "step": 50
       },
       "unit": "m²",
       "enum_values": null,
@@ -1267,7 +1277,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on plot area in m². See `min_estate_area`.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1278,7 +1288,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 5000,
+        "step": 50
       },
       "unit": "m²",
       "enum_values": null,
@@ -1293,7 +1305,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on usable_area in m². Distinct from `area_m2` (the headline) — usable area excludes balconies, cellars, parking. Often smaller than `area_m2` for the same listing.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1304,7 +1316,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 500,
+        "step": 5
       },
       "unit": "m²",
       "enum_values": null,
@@ -1319,7 +1333,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on usable_area in m². See `min_usable_area`.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1330,7 +1344,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 500,
+        "step": 5
       },
       "unit": "m²",
       "enum_values": null,
@@ -1345,7 +1361,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on garden_area in m². Populated by the scraper for listings with a dedicated garden plot — usually houses and ground-floor apartments.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1356,7 +1372,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 5000,
+        "step": 50
       },
       "unit": "m²",
       "enum_values": null,
@@ -1369,7 +1387,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on garden_area in m². See `min_garden_area`.",
       "category": "Property",
-      "ui_control": "range_inputs",
+      "ui_control": "range_slider",
       "agendas": [
         "browse",
         "comparables",
@@ -1380,7 +1398,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "watchdog"
       ],
       "constraints": {
-        "min": 0
+        "min": 0,
+        "max": 5000,
+        "step": 50
       },
       "unit": "m²",
       "enum_values": null,

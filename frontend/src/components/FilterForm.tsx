@@ -40,6 +40,7 @@ import {
 import {
   MultiselectChips,
   RangeInputs,
+  RangeSlider,
   SingleSelectDropdown,
   type EnumOptionLite,
 } from '@/components/filter-controls';
@@ -140,7 +141,12 @@ export function FilterForm({
   );
 }
 
-/** Given a filter id, return the id of its companion max-side, if any. */
+/** Given a filter id, return the id of its companion max-side, if any.
+ *  Recognises three pairing patterns:
+ *    - `min_X`     ↔ `max_X`     (min_price_czk ↔ max_price_czk)
+ *    - `X_min`     ↔ `X_max`     (tom_days_min  ↔ tom_days_max)
+ *    - `X_min_Y`   ↔ `X_max_Y`   (last_seen_min_days ↔ last_seen_max_days)
+ *  Returns null when no companion is present in the visible set. */
 function findMaxSibling(id: string, present: Set<string>): string | null {
   if (id.startsWith('min_')) {
     const candidate = 'max_' + id.slice(4);
@@ -148,6 +154,11 @@ function findMaxSibling(id: string, present: Set<string>): string | null {
   }
   if (id.endsWith('_min')) {
     const candidate = id.slice(0, -4) + '_max';
+    return present.has(candidate) ? candidate : null;
+  }
+  const middle = id.match(/^(.+)_min_(.+)$/);
+  if (middle) {
+    const candidate = `${middle[1]}_max_${middle[2]}`;
     return present.has(candidate) ? candidate : null;
   }
   return null;
@@ -158,7 +169,11 @@ function findMaxSibling(id: string, present: Set<string>): string | null {
 function prettifyPair(minId: string, _maxId: string | undefined): string {
   let core = minId;
   if (core.startsWith('min_')) core = core.slice(4);
-  if (core.endsWith('_min')) core = core.slice(0, -4);
+  else if (core.endsWith('_min')) core = core.slice(0, -4);
+  else {
+    const middle = core.match(/^(.+)_min_(.+)$/);
+    if (middle) core = `${middle[1]}_${middle[2]}`;
+  }
   return prettifyId(core);
 }
 
@@ -183,11 +198,46 @@ function FilterRow({
   onChangeMax?: (v: unknown) => void;
   label: string;
 }) {
-  // When paired with a max-side, render the pair as a RangeInputs row
-  // regardless of the registry's ui_control (range_inputs and
-  // range_slider both collapse onto the paired RangeInputs widget for
-  // now; the dual-thumb slider lands in PR 4).
+  // When paired with a max-side, render the pair as either:
+  //   - a dual-thumb RangeSlider when the registry's constraints
+  //     declare a complete min + max + step bounds set (typical for
+  //     bounded filters like price / area / estate_area), or
+  //   - paired RangeInputs (open-ended) when bounds aren't complete.
+  //
+  // The registry's `ui_control` choice is a preference, not a hard
+  // override — adding bounds to a `range_inputs` entry auto-upgrades
+  // its UI to a slider without touching this dispatcher. That matches
+  // the Browse sidebar's existing slider widget without forcing every
+  // surface to opt in by hand.
   if (maxDef && onChangeMax) {
+    const c = def.constraints ?? {};
+    const hasFullBounds =
+      typeof c.min === 'number' &&
+      typeof c.max === 'number' &&
+      typeof c.step === 'number';
+    if (hasFullBounds) {
+      return (
+        <Section label={label}>
+          <RangeSlider
+            bounds={{
+              min: c.min as number,
+              max: c.max as number,
+              step: c.step as number,
+            }}
+            value={[
+              (value as number | null) ?? null,
+              (maxValue as number | null) ?? null,
+            ]}
+            onChange={([lo, hi]) => {
+              onChange(lo);
+              onChangeMax(hi);
+            }}
+            unit={def.unit ?? undefined}
+            ariaLabel={label}
+          />
+        </Section>
+      );
+    }
     return (
       <Section label={label}>
         <RangeInputs
