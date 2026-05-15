@@ -47,6 +47,19 @@ import {
 
 export type FilterState = Record<string, unknown>;
 
+/** One filter update emitted by the form. Multi-element arrays
+ *  represent atomic batches — paired min/max range edits both fire
+ *  in a single onChange call so the parent can apply them together
+ *  via `applyRegistryUpdates`. Without this batching a non-functional
+ *  setter (e.g. Browse's URL-writing setFilters) would see the second
+ *  call with the same stale state as the first, clobbering the first
+ *  change — which is exactly what broke slider drag + paired number
+ *  inputs on Browse. */
+export interface FilterUpdate {
+  id: string;
+  value: unknown;
+}
+
 export interface CustomFilterWidgetProps {
   value: unknown;
   onChange: (next: unknown) => void;
@@ -59,7 +72,11 @@ export type CustomFilterWidget = (
 interface FilterFormProps {
   scope: Agenda;
   state: FilterState;
-  onChange: (id: string, value: unknown) => void;
+  /** Apply one or more filter updates atomically. Single-value
+   *  changes ship as `[{id, value}]`; paired range edits ship the
+   *  min and max sides together. The parent must always treat the
+   *  array as one transaction against the current filter state. */
+  onChange: (updates: ReadonlyArray<FilterUpdate>) => void;
   /** Optional visibility override. When supplied, only filters with
    *  `visibility[scope] === true` render. When omitted, every filter
    *  the registry declares for `scope` renders (the all-on default). */
@@ -156,7 +173,7 @@ export function FilterForm({
         <Section key={f.id} label={label}>
           {custom({
             value: state[f.id],
-            onChange: (v) => onChange(f.id, v),
+            onChange: (v) => onChange([{ id: f.id, value: v }]),
           })}
         </Section>
       );
@@ -168,10 +185,7 @@ export function FilterForm({
         maxDef={maxDef ?? null}
         value={state[f.id]}
         maxValue={maxDef ? state[maxDef.id] : undefined}
-        onChange={(v) => onChange(f.id, v)}
-        onChangeMax={
-          maxDef ? (v) => onChange(maxDef.id, v) : undefined
-        }
+        emit={onChange}
         label={labels?.[f.id] ?? prettifyPair(f.id, maxDef?.id)}
       />
     );
@@ -276,18 +290,21 @@ function FilterRow({
   maxDef,
   value,
   maxValue,
-  onChange,
-  onChangeMax,
+  emit,
   label,
 }: {
   def: FilterDef;
   maxDef: FilterDef | null;
   value: unknown;
   maxValue: unknown;
-  onChange: (v: unknown) => void;
-  onChangeMax?: (v: unknown) => void;
+  emit: (updates: ReadonlyArray<FilterUpdate>) => void;
   label: string;
 }) {
+  // Single-filter helper: most rows fire one update at a time. Paired
+  // ranges below build a 2-element update array directly so both
+  // sides apply atomically against the parent's filter state.
+  const onChange = (v: unknown) => emit([{ id: def.id, value: v }]);
+
   // When paired with a max-side, render the pair as either:
   //   - a dual-thumb RangeSlider when the registry's constraints
   //     declare a complete min + max + step bounds set (typical for
@@ -299,7 +316,7 @@ function FilterRow({
   // its UI to a slider without touching this dispatcher. That matches
   // the Browse sidebar's existing slider widget without forcing every
   // surface to opt in by hand.
-  if (maxDef && onChangeMax) {
+  if (maxDef) {
     const c = def.constraints ?? {};
     const hasFullBounds =
       typeof c.min === 'number' &&
@@ -318,10 +335,12 @@ function FilterRow({
               (value as number | null) ?? null,
               (maxValue as number | null) ?? null,
             ]}
-            onChange={([lo, hi]) => {
-              onChange(lo);
-              onChangeMax(hi);
-            }}
+            onChange={([lo, hi]) =>
+              emit([
+                { id: def.id, value: lo },
+                { id: maxDef.id, value: hi },
+              ])
+            }
             unit={def.unit ?? undefined}
             ariaLabel={label}
           />
@@ -334,10 +353,12 @@ function FilterRow({
           minValue={(value as number | null) ?? null}
           maxValue={(maxValue as number | null) ?? null}
           coerce={def.type === 'int' ? 'int' : 'float'}
-          onChange={(lo, hi) => {
-            onChange(lo);
-            onChangeMax(hi);
-          }}
+          onChange={(lo, hi) =>
+            emit([
+              { id: def.id, value: lo },
+              { id: maxDef.id, value: hi },
+            ])
+          }
           ariaLabelMin={`${label} min`}
           ariaLabelMax={`${label} max`}
         />

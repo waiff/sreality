@@ -548,3 +548,20 @@ export function applyRegistryUpdate(
   }
   return { ...filters, [key]: value } as ListingFilters;
 }
+
+/** Apply a batch of `<FilterForm>` updates atomically. Loops
+ *  `applyRegistryUpdate` so paired range edits (min + max from one
+ *  slider drag) compose against the same starting state. Without
+ *  this, callers that route each update through a non-functional
+ *  setter (e.g. Browse's URL writer) would see the second call use
+ *  the same stale `filters` and overwrite the first — that's what
+ *  made the dual-thumb slider and paired number inputs refuse to
+ *  update under PR #112 before this fix. */
+export function applyRegistryUpdates(
+  filters: ListingFilters,
+  updates: ReadonlyArray<{ id: string; value: unknown }>,
+): ListingFilters {
+  let next = filters;
+  for (const u of updates) next = applyRegistryUpdate(next, u.id, u.value);
+  return next;
+}

@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 11:49 UTC_
+_Last refreshed: 2026-05-15 13:34 UTC_
 
 **Branch:** `claude/reusable-filters-component-oRhvq`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-15 11:49 UTC_
 **Last 10 commits:**
 
 ```
+71f3739 frontend: component-level tests for FilterForm + filter-controls
+ae7742f Merge pull request #110 from waiff/claude/reusable-filters-component-oRhvq
 7819eb6 roadmap: refresh auto-status block
 11aaced frontend: vitest + first batch of pure-function tests
 b6a78ba Merge pull request #109 from waiff/claude/reusable-filters-component-oRhvq
@@ -24,8 +26,6 @@ be80a64 Merge pull request #108 from waiff/claude/reusable-filters-component-oRh
 69a2467 filters: DistrictTypeahead + TagPicker primitives, Browse fully on FilterForm
 16ab6d0 Merge pull request #107 from waiff/claude/price-band-velocity
 392ed9b Merge pull request #106 from waiff/claude/reusable-filters-component-oRhvq
-ebd8bfe stats: replace 4-quartile turnover with 7-band percentile split
-b5a8212 filters: Browse sidebar adopts <FilterForm>
 ```
 
 <!-- END AUTO-STATUS -->
