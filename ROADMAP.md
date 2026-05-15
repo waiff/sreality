@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 04:57 UTC_
+_Last refreshed: 2026-05-15 05:43 UTC_
 
-**Branch:** `claude/finetune-agent-traces-VDz9u`
+**Branch:** `claude/data-freshness-investigation-MnhPd`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-15 04:57 UTC_
 **Last 10 commits:**
 
 ```
+d3ddeab Merge pull request #95 from waiff/claude/finetune-agent-traces-VDz9u
+78bcc22 roadmap: refresh auto-status block
 c265bce agent: server-derived cohort, no more LLM ID transcription
 bacfc82 roadmap: refresh auto-status block
 20d3e71 roadmap: refresh auto-status block
@@ -24,8 +26,6 @@ bacfc82 roadmap: refresh auto-status block
 bcb3f00 frontend: correct ListingPublic.category_{main,type} to string
 e0ce9c4 frontend: prefill yield's listing price from a sale subject listing
 bcb6f58 Merge pull request #93 from waiff/claude/feedback-panel-residual-width-AQAFy
-a7bd9d5 frontend: float feedback panel into the page's right residual column
-4433786 Merge pull request #92 from waiff/claude/floating-feedback-button-AQAFy
 ```
 
 <!-- END AUTO-STATUS -->
