@@ -486,7 +486,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             name="record_estimate",
             description=(
                 "Submit the final estimate and END THE RUN. Call exactly once. "
-                "After this tool returns, the agent loop exits immediately."
+                "After this tool returns, the agent loop exits immediately.\n\n"
+                "You do NOT need to retype sreality_ids. The harness already "
+                "knows which listings find_comparables_relaxed returned and "
+                "treats every one as INCLUDED by default. If you want to set "
+                "a specific listing aside (luxury / furnished outlier / "
+                "obviously bad data / etc.), add an entry to "
+                "`comparable_decisions` with decision='excluded' and a short "
+                "reason. Optional included entries with a reason annotate "
+                "*why* you kept a particular listing for the audit trail. "
+                "Inclusion is the default; exclusion is the editorial act."
             ),
             input_schema={
                 "type": "object",
@@ -498,10 +507,6 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "type": "string",
                         "enum": ["high", "medium", "low"],
                     },
-                    "comparables_used": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
                     "warnings": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -509,14 +514,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     "comparable_decisions": {
                         "type": "array",
                         "description": (
-                            "Per-listing decision log for every candidate "
-                            "the agent considered. One entry per "
-                            "sreality_id with decision='included' or "
-                            "'excluded' and a 1-sentence reason. Entries "
-                            "with decision='included' must match "
-                            "comparables_used exactly. Required when the "
-                            "skill prompt asks for per-comparable "
-                            "reasoning; omitted by legacy callers."
+                            "Curation log. The cohort is server-derived from "
+                            "the listings find_comparables_relaxed returned; "
+                            "default policy is INCLUDE. Use this field to "
+                            "express exclusions (decision='excluded' + "
+                            "reason) and, optionally, inclusion reasons "
+                            "(decision='included' + reason) for listings "
+                            "you want to call out. Entries referencing "
+                            "sreality_ids not actually in the cohort are "
+                            "ignored and surface as a hallucination warning "
+                            "on the run."
                         ),
                         "items": {
                             "type": "object",
@@ -531,13 +538,23 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                             "required": ["sreality_id", "decision", "reason"],
                         },
                     },
+                    "comparables_used": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": (
+                            "DEPRECATED. The server now derives "
+                            "comparables_used from the cohort minus "
+                            "exclusions; whatever you pass here is "
+                            "validated for hallucinations but no longer "
+                            "drives the included set. Omit it."
+                        ),
+                    },
                 },
                 "required": [
                     "estimated_monthly_rent_czk",
                     "rent_p25_czk",
                     "rent_p75_czk",
                     "confidence",
-                    "comparables_used",
                 ],
             },
             is_terminator=True,
@@ -950,8 +967,9 @@ def _handle_find_comparables_relaxed(
 
     prev_ids = {int(l["sreality_id"]) for l in state.last_cohort}
     new_ids = {int(l["sreality_id"]) for l in listings}
+    round_n = len(state.selection_rounds) + 1
     state.selection_rounds.append({
-        "n": len(state.selection_rounds) + 1,
+        "n": round_n,
         "filters": _filters_snapshot(filters, min_results=min_results),
         "cohort_size": len(listings),
         "cohort_ids": sorted(new_ids),
@@ -962,7 +980,126 @@ def _handle_find_comparables_relaxed(
     })
 
     state.last_cohort = listings
+    _persist_cohort_entries(state, listings, round_n=round_n)
     return result
+
+
+def _persist_cohort_entries(
+    state: _LoopState,
+    listings: list[dict[str, Any]],
+    *,
+    round_n: int,
+) -> None:
+    """Upsert one row per cohort listing into estimation_cohort_entries.
+
+    Server-authoritative source of truth: every find_comparables_relaxed
+    round records the listings it returned. `_finalise` then flips
+    `present_at_finalisation` for whatever is still in state.last_cohort
+    at terminator time, so the LLM never has to retype IDs.
+    """
+    if state.estimation_run_id is None or not listings:
+        return
+    sql = (
+        "INSERT INTO estimation_cohort_entries ("
+        "  estimation_run_id, sreality_id, first_seen_round_n,"
+        "  last_seen_round_n, snapshot_id, distance_m, price_czk,"
+        "  area_m2, price_per_m2, disposition"
+        ") VALUES ("
+        "  %(run_id)s, %(sid)s, %(round)s, %(round)s,"
+        "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(disp)s"
+        ") ON CONFLICT (estimation_run_id, sreality_id) DO UPDATE SET"
+        "  last_seen_round_n = EXCLUDED.last_seen_round_n,"
+        "  snapshot_id       = COALESCE(EXCLUDED.snapshot_id, estimation_cohort_entries.snapshot_id),"
+        "  distance_m        = COALESCE(EXCLUDED.distance_m, estimation_cohort_entries.distance_m),"
+        "  price_czk         = COALESCE(EXCLUDED.price_czk, estimation_cohort_entries.price_czk),"
+        "  area_m2           = COALESCE(EXCLUDED.area_m2, estimation_cohort_entries.area_m2),"
+        "  price_per_m2      = COALESCE(EXCLUDED.price_per_m2, estimation_cohort_entries.price_per_m2),"
+        "  disposition       = COALESCE(EXCLUDED.disposition, estimation_cohort_entries.disposition)"
+    )
+    try:
+        with state.conn.transaction(), state.conn.cursor() as cur:
+            for l in listings:
+                cur.execute(sql, {
+                    "run_id": state.estimation_run_id,
+                    "sid": int(l["sreality_id"]),
+                    "round": round_n,
+                    "snap": l.get("latest_snapshot_id"),
+                    "dist": l.get("distance_m"),
+                    "price": l.get("price_czk"),
+                    "area": l.get("area_m2"),
+                    "ppm2": l.get("price_per_m2"),
+                    "disp": l.get("disposition"),
+                })
+    except Exception as exc:
+        LOG.warning(
+            "persist_cohort_entries failed for run=%s round=%s: %s",
+            state.estimation_run_id, round_n, exc,
+        )
+
+
+def _persist_finalisation(
+    state: _LoopState,
+    *,
+    included_ids: set[int],
+    excluded_by_id: dict[int, str],
+    included_reasons: dict[int, str],
+) -> None:
+    """Mark which cohort entries survived to the final estimate.
+
+    Flips `present_at_finalisation` on every row whose sreality_id is
+    still in state.last_cohort (whether included or excluded). Sets
+    `excluded_by_agent` + `exclusion_reason` for rows the agent set
+    aside via comparable_decisions, and stores any explicit inclusion
+    reason. Hallucinated IDs were already filtered by `_finalise`, so
+    nothing the LLM invented reaches this table.
+    """
+    if state.estimation_run_id is None:
+        return
+    all_ids = set(included_ids) | set(excluded_by_id.keys())
+    if not all_ids:
+        return
+    try:
+        with state.conn.transaction(), state.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE estimation_cohort_entries SET "
+                "  present_at_finalisation = (sreality_id = ANY(%(present)s)),"
+                "  excluded_by_agent       = (sreality_id = ANY(%(excluded)s)),"
+                "  exclusion_reason        = NULL,"
+                "  inclusion_reason        = NULL "
+                "WHERE estimation_run_id = %(run_id)s",
+                {
+                    "run_id": state.estimation_run_id,
+                    "present": list(all_ids),
+                    "excluded": list(excluded_by_id.keys()),
+                },
+            )
+            for sid, reason in excluded_by_id.items():
+                cur.execute(
+                    "UPDATE estimation_cohort_entries SET "
+                    "  exclusion_reason = %(reason)s "
+                    "WHERE estimation_run_id = %(run_id)s AND sreality_id = %(sid)s",
+                    {
+                        "run_id": state.estimation_run_id,
+                        "sid": sid,
+                        "reason": reason,
+                    },
+                )
+            for sid, reason in included_reasons.items():
+                cur.execute(
+                    "UPDATE estimation_cohort_entries SET "
+                    "  inclusion_reason = %(reason)s "
+                    "WHERE estimation_run_id = %(run_id)s AND sreality_id = %(sid)s",
+                    {
+                        "run_id": state.estimation_run_id,
+                        "sid": sid,
+                        "reason": reason,
+                    },
+                )
+    except Exception as exc:
+        LOG.warning(
+            "persist_finalisation failed for run=%s: %s",
+            state.estimation_run_id, exc,
+        )
 
 
 def _handle_analyze_distribution(
@@ -1258,18 +1395,22 @@ def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
 
 def _terminator_summary(args: dict[str, Any]) -> dict[str, Any]:
     decisions = _normalise_decisions(args.get("comparable_decisions"))
+    # comparables_used is deprecated input; report the count if the
+    # agent still passed it so the trace shows what was supplied, but
+    # the authoritative inclusion count comes from `_finalise` after
+    # default-include against the server-side cohort.
     return {
         "estimated_monthly_rent_czk": args.get("estimated_monthly_rent_czk"),
         "rent_p25_czk": args.get("rent_p25_czk"),
         "rent_p75_czk": args.get("rent_p75_czk"),
         "confidence": args.get("confidence"),
-        "n_comparables_used": len(args.get("comparables_used") or []),
-        "n_comparables_included": sum(
+        "n_decisions_included": sum(
             1 for d in decisions if d["decision"] == "included"
         ),
-        "n_comparables_excluded": sum(
+        "n_decisions_excluded": sum(
             1 for d in decisions if d["decision"] == "excluded"
         ),
+        "n_comparables_used_declared": len(args.get("comparables_used") or []),
         "n_warnings": len(args.get("warnings") or []),
     }
 
@@ -1321,33 +1462,80 @@ def _finalise(
     confidence = call.get("confidence")
     warnings = list(call.get("warnings") or [])
 
-    declared_ids = set(int(i) for i in call.get("comparables_used") or [])
-    cohort_by_id = {l["sreality_id"]: l for l in state.last_cohort}
-    valid_ids = sorted(declared_ids & set(cohort_by_id.keys()))
-    invented = declared_ids - set(cohort_by_id.keys())
+    # Server-derived cohort, not LLM-declared. The cohort is whatever
+    # `state.last_cohort` holds at terminator time — those rows were
+    # written by `_handle_find_comparables_relaxed` round by round.
+    # The LLM's only authority is curation (decision='excluded' with
+    # a reason); any sreality_id it names that isn't actually in the
+    # cohort surfaces as a hallucination warning but never poisons
+    # the included set.
+    cohort_by_id = {int(l["sreality_id"]): l for l in state.last_cohort}
+    cohort_ids = set(cohort_by_id.keys())
+
+    decisions = _normalise_decisions(call.get("comparable_decisions"))
+    decisions_in_cohort = [
+        d for d in decisions if d["sreality_id"] in cohort_ids
+    ]
+    invented = sorted({
+        d["sreality_id"] for d in decisions
+        if d["sreality_id"] not in cohort_ids
+    })
     if invented:
         warnings.append(
             f"agent referenced {len(invented)} sreality_id(s) not in the "
-            f"latest cohort: {sorted(invented)[:5]}{'…' if len(invented) > 5 else ''}"
+            f"latest cohort (ignored): {invented[:5]}"
+            f"{'…' if len(invented) > 5 else ''}"
         )
 
-    # Join the per-comparable decisions onto the cohort entries so
-    # the frontend can render the inclusion reason inline. Excluded
-    # rows surface as a parallel list (no need to look them up in
-    # the cohort by id; we keep just the {sreality_id, reason}).
-    decisions = _normalise_decisions(call.get("comparable_decisions"))
-    reasons_in = {
-        d["sreality_id"]: d["reason"]
-        for d in decisions if d["decision"] == "included"
+    # Legacy comparables_used IDs ride along only for hallucination
+    # detection — they no longer drive the included set. The legacy
+    # path is preserved here so skills mid-migration don't silently
+    # change behaviour: an ID the agent declared but no decision
+    # references is still treated as included via default-include.
+    legacy_declared = {
+        int(i) for i in call.get("comparables_used") or []
     }
+    invented_legacy = sorted(legacy_declared - cohort_ids - set(invented))
+    if invented_legacy:
+        warnings.append(
+            f"agent referenced {len(invented_legacy)} sreality_id(s) in "
+            f"comparables_used not in the latest cohort (ignored): "
+            f"{invented_legacy[:5]}{'…' if len(invented_legacy) > 5 else ''}"
+        )
+
+    excluded_by_id = {
+        d["sreality_id"]: d["reason"]
+        for d in decisions_in_cohort if d["decision"] == "excluded"
+    }
+    included_reasons = {
+        d["sreality_id"]: d["reason"]
+        for d in decisions_in_cohort if d["decision"] == "included"
+    }
+
+    # Default-include: every cohort listing is in `comparables_used`
+    # unless the agent explicitly excluded it. This mirrors the
+    # statistics — analyze_distribution already consumed the full
+    # cohort, so the recorded "used" set should match.
+    included_ids = sorted(cohort_ids - set(excluded_by_id.keys()))
+
     comparables_used = [
-        {**used_entry(cohort_by_id[i]), "reason": reasons_in.get(i)}
-        for i in valid_ids
+        {
+            **used_entry(cohort_by_id[i]),
+            "reason": included_reasons.get(i),
+        }
+        for i in included_ids
     ]
     comparables_excluded = [
-        {"sreality_id": d["sreality_id"], "reason": d["reason"]}
-        for d in decisions if d["decision"] == "excluded"
+        {"sreality_id": sid, "reason": reason}
+        for sid, reason in sorted(excluded_by_id.items())
     ]
+
+    _persist_finalisation(
+        state,
+        included_ids=set(included_ids),
+        excluded_by_id=excluded_by_id,
+        included_reasons=included_reasons,
+    )
 
     yield_pct: float | None = None
     if estimate is not None and purchase_price_czk and purchase_price_czk > 0:

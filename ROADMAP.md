@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 20:58 UTC_
+_Last refreshed: 2026-05-15 04:35 UTC_
 
 **Branch:** `claude/finetune-agent-traces-VDz9u`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-14 20:58 UTC_
 **Last 10 commits:**
 
 ```
+bacfc82 roadmap: refresh auto-status block
 20d3e71 roadmap: refresh auto-status block
 1af768c agent: expose every ComparableFilters field to the agent + show all filters in the trace
 5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
@@ -25,7 +26,6 @@ bcb6f58 Merge pull request #93 from waiff/claude/feedback-panel-residual-width-A
 a7bd9d5 frontend: float feedback panel into the page's right residual column
 4433786 Merge pull request #92 from waiff/claude/floating-feedback-button-AQAFy
 7ff2623 roadmap: refresh auto-status block
-d9f7e98 frontend: float feedback panel under header with inline skill-prompt editor
 ```
 
 <!-- END AUTO-STATUS -->
