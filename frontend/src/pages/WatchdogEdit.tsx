@@ -19,6 +19,10 @@ import {
   type Ownership,
   type WatchdogFilterSpec,
 } from '@/lib/types';
+import {
+  LocationChipPicker,
+  type LocationChip,
+} from '@/components/LocationChipPicker';
 
 const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
   '1+kk', '1+1', '2+kk', '2+1',
@@ -62,13 +66,27 @@ export default function WatchdogEdit() {
     DEFAULT_WATCHDOG_FILTER_SPEC,
   );
   const [isActive, setIsActive] = useState(true);
+  const [districtChips, setDistrictChips] = useState<LocationChip[]>([]);
   const [hydrated, setHydrated] = useState(!isEdit);
 
   useEffect(() => {
     if (isEdit && existingQ.data && !hydrated) {
       setName(existingQ.data.name);
-      setSpec({ ...DEFAULT_WATCHDOG_FILTER_SPEC, ...existingQ.data.filter_spec });
+      const filterSpec = {
+        ...DEFAULT_WATCHDOG_FILTER_SPEC,
+        ...existingQ.data.filter_spec,
+      };
+      setSpec(filterSpec);
       setIsActive(existingQ.data.is_active);
+      /* Legacy watchdogs stored only the bare string list; hydrate as
+       * free-text chips ('' type → no badge, just the label). */
+      setDistrictChips(
+        (filterSpec.districts ?? []).map((d) => ({
+          name: d,
+          label: d,
+          type: '',
+        })),
+      );
       setHydrated(true);
     }
   }, [isEdit, existingQ.data, hydrated]);
@@ -168,14 +186,23 @@ export default function WatchdogEdit() {
 
         <Section title="Where">
           <Row label="District name(s)">
-            <CsvInput
-              value={spec.districts ?? []}
-              placeholder="e.g. Praha 2, Praha 5"
-              onChange={(v) => set('districts', v.length ? v : null)}
+            <LocationChipPicker
+              value={districtChips}
+              onChange={(chips) => {
+                setDistrictChips(chips);
+                set(
+                  'districts',
+                  chips.length ? chips.map((c) => c.name) : null,
+                );
+              }}
+              placeholder="e.g. Praha 2, Vinohrady"
             />
             <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
-              Comma-separated. Matched verbatim against the listing's
-              <code className="mx-1 text-[var(--color-ink-3)]">district</code> column.
+              Type to search municipalities and districts; pick from the
+              dropdown to add. Each chip is matched verbatim against the
+              listing's
+              <code className="mx-1 text-[var(--color-ink-3)]">district</code>
+              column.
             </p>
           </Row>
           <Row label="Spatial center">
@@ -516,32 +543,6 @@ function DispositionGrid({
         );
       })}
     </div>
-  );
-}
-
-function CsvInput({
-  value,
-  placeholder,
-  onChange,
-}: {
-  value: string[];
-  placeholder: string;
-  onChange: (v: string[]) => void;
-}) {
-  return (
-    <input
-      type="text"
-      value={value.join(', ')}
-      placeholder={placeholder}
-      onChange={(e) => {
-        const parts = e.target.value
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean);
-        onChange(parts);
-      }}
-      className="w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-    />
   );
 }
 
