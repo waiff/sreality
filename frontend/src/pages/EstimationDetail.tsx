@@ -341,7 +341,7 @@ function Header({
 
   return (
     <div className="mt-5">
-      <div className="grid gap-5 sm:gap-6 sm:grid-cols-[minmax(0,260px),1fr]">
+      <div className="grid gap-4 sm:gap-5 sm:grid-cols-[180px_1fr]">
         <SubjectImageStrip
           images={images}
           subject={subject}
@@ -435,8 +435,8 @@ function SubjectImageStrip({
   const content = (
     <div
       className={[
-        'aspect-[5/4] w-full overflow-hidden relative rounded-[var(--radius-sm)]',
-        'border border-[var(--color-rule)] bg-[var(--color-inset)]',
+        'aspect-[5/4] w-full max-w-[180px] sm:max-w-none overflow-hidden relative',
+        'rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)]',
       ].join(' ')}
     >
       {urls.length > 0 ? (
@@ -453,7 +453,7 @@ function SubjectImageStrip({
           }}
         />
       ) : (
-        <div className="w-full h-full flex items-center justify-center px-4 text-center text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        <div className="w-full h-full flex items-center justify-center px-2 text-center text-[0.58rem] leading-snug tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
           {placeholderText}
         </div>
       )}
