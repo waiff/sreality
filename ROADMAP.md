@@ -632,6 +632,20 @@ End-to-end browser flow over the U1b backend.
   Frontend renders the mean as a copper dot on the box plot and a new
   MEAN column in the numeric table; the caption now names the
   integer-flooring caveat explicitly.
+- Migration 063 replaces the four-equal-bucket
+  `price_quartile_velocity` with a seven-band percentile split
+  `price_band_velocity`: p0–p10, p10–p25, p25–p45, p45–p55, p55–p75,
+  p75–p90, p90–p100. Narrower bands at the tails and around the
+  median, wider through the body, so the chart surfaces tail-vs-body
+  differences that an equal-quartile split would mask. The new
+  payload also reports `pct_share` per band (actual share of priced
+  cohort, since ties at percentile cuts make bucket sizes drift from
+  their nominal 10/15/20/10/20/15/10). Active 2+kk byt/pronajem shows
+  the body bands clustered at mean ≈ 9.2d while the priciest decile
+  jumps to 10.5d. Frontend rewrite: `PriceQuartileVelocity` →
+  `PriceBandVelocity`, seven rows on the y-axis with percentile +
+  price-range + n + share labels; Card heading and caption updated
+  accordingly.
 
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the

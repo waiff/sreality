@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import type { BrowseStats } from '@/lib/queries';
 import { fmtCount, fmtCzk } from '@/lib/format';
 import DispositionBoxPlots from '@/components/region/DispositionBoxPlots';
-import PriceQuartileVelocity from '@/components/PriceQuartileVelocity';
+import PriceBandVelocity from '@/components/PriceBandVelocity';
 
 interface Props {
   stats: BrowseStats | null;
@@ -65,17 +65,17 @@ export default function BrowseStatsView({ stats, isLoading, isEmpty }: Props) {
         />
       </Card>
 
-      <Card label="Turnover by price quartile">
+      <Card label="Turnover by price band">
         <p className="-mt-1 mb-3 text-[0.75rem] text-[var(--color-ink-3)]">
-          Cohort split into four equal-size buckets by price (Q1 =
-          cheapest 25% of priced listings). Box = tom_days distribution
-          per bucket; copper bar is the median, copper dot is the mean.
-          Because tom_days is integer-floored the median often lands on
-          the same day across buckets — the mean reveals the
-          price/velocity signal it hides. Active vs. delisted semantics
-          follow the status filter above.
+          Cohort split into seven percentile bands by price — narrower
+          at the tails (p0–p10, p90–p100) and around the median
+          (p45–p55), wider through the body — so the chart can surface
+          tail-vs-body differences that an equal-quartile split would
+          mask. Box = tom_days distribution per band; copper bar is
+          the median, copper dot is the mean. Active vs. delisted
+          semantics follow the status filter above.
         </p>
-        <PriceQuartileVelocity rows={stats.price_quartile_velocity} />
+        <PriceBandVelocity rows={stats.price_band_velocity} />
       </Card>
     </div>
   );
