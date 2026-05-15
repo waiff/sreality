@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 10:06 UTC_
+_Last refreshed: 2026-05-15 10:27 UTC_
 
 **Branch:** `claude/reusable-filters-component-oRhvq`
 
@@ -16,6 +16,9 @@ _Last refreshed: 2026-05-15 10:06 UTC_
 **Last 10 commits:**
 
 ```
+52bb229 filters: shared <FilterForm> + Watchdog adoption (PR 3/4)
+54c0562 roadmap: refresh auto-status block
+59a4c97 settings: agenda × filter visibility matrix
 3ca0df2 roadmap: refresh auto-status block
 7417991 roadmap: refresh auto-status block
 35e7e0a watchdog: expose building material / garden area / tags in the form
@@ -23,9 +26,6 @@ bc6167e filters: backend parity for Watchdog + browse_stats (PR 2/4)
 0a9a9a5 filters: add canonical registry + visibility matrix + codegen (PR 1/4)
 3ffa36f Merge pull request #98 from waiff/claude/plan-notifications-watchdog-WtDbc
 ce1b593 Merge remote-tracking branch 'origin/main' into claude/plan-notifications-watchdog-WtDbc
-02563fa roadmap: refresh auto-status block
-ebf743a watchdog: ship Phase U2.7 in-app new-listing notifications
-ed21249 Merge pull request #97 from waiff/claude/data-freshness-investigation-MnhPd
 ```
 
 <!-- END AUTO-STATUS -->
