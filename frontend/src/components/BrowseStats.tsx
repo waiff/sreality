@@ -67,11 +67,13 @@ export default function BrowseStatsView({ stats, isLoading, isEmpty }: Props) {
 
       <Card label="Turnover by price quartile">
         <p className="-mt-1 mb-3 text-[0.75rem] text-[var(--color-ink-3)]">
-          Cohort split into four equal-size buckets by price. Box = tom_days
-          (turnover in days) distribution per bucket. Active vs. delisted
-          semantics depend on the status filter above — filter to delisted
-          for "time to delist", to active for "current age", or leave at
-          all for the mixed view.
+          Cohort split into four equal-size buckets by price (Q1 =
+          cheapest 25% of priced listings). Box = tom_days distribution
+          per bucket; copper bar is the median, copper dot is the mean.
+          Because tom_days is integer-floored the median often lands on
+          the same day across buckets — the mean reveals the
+          price/velocity signal it hides. Active vs. delisted semantics
+          follow the status filter above.
         </p>
         <PriceQuartileVelocity rows={stats.price_quartile_velocity} />
       </Card>

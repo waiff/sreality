@@ -613,6 +613,25 @@ End-to-end browser flow over the U1b backend.
   last-seen (`viděno 8. 5.`), and the copper TOM pill
   (`94 dní`, Czech plural). Re-uses the existing token palette and
   borders-only depth strategy; no new design tokens.
+- Migration 061 enriches `browse_stats` with a
+  `price_quartile_velocity` field: the filtered cohort is split into
+  four equal-size price buckets via `ntile(4)` and each bucket reports
+  its `tom_days` distribution alongside its price range. Stacks on
+  top of 060's expanded signature — DROP-then-CREATE because the
+  function body grows a new CTE; the parameter list is unchanged from
+  060. The Stats tab renders this as a fourth Card ("Turnover by
+  price quartile") with horizontal box plots reusing the
+  `DispositionBoxPlots` SVG idiom. Active vs. delisted semantics of
+  the per-bucket TOM follow the user's status filter — no per-bucket
+  active/inactive split is computed.
+- Migration 062 adds `mean` to each bucket's `tom_box` so the
+  price/velocity signal isn't lost when `tom_days` is integer-clumped.
+  With a 14-day scrape window the five-number summary collapses to
+  identical medians across all four buckets even though means differ
+  monotonically (active 2+kk byt/pronajem: 8.9 / 9.0 / 9.4 / 9.9 days).
+  Frontend renders the mean as a copper dot on the box plot and a new
+  MEAN column in the numeric table; the caption now names the
+  integer-flooring caveat explicitly.
 
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the
