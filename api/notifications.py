@@ -36,11 +36,10 @@ import contextlib
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from psycopg.types.json import Jsonb
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 from scraper import db as scraper_db
 
@@ -48,22 +47,6 @@ if TYPE_CHECKING:
     import psycopg
 
 LOG = logging.getLogger(__name__)
-
-
-# Mirrors frontend/src/lib/filters.ts:buildingMaterialToValues — the
-# operator-friendly material bucket (cihla / panel / smisena / ostatni)
-# expands to one or more sreality `building_type` codes. The four
-# buckets are the canonical Browse / Watchdog labels; the registry's
-# `building_material` filter accepts the bucket and the matcher does
-# the expansion. Update this constant if the frontend mapping evolves.
-_BUILDING_MATERIAL_VALUES: dict[str, tuple[str, ...]] = {
-    "cihla":   ("cihla",),
-    "panel":   ("panel",),
-    "smisena": ("smisena",),
-    "ostatni": (
-        "skelet", "drevo", "kamen", "montovana", "nizkoenergeticka",
-    ),
-}
 
 
 # --- filter spec ----------------------------------------------------------
@@ -132,20 +115,6 @@ class WatchdogFilterSpec(BaseModel):
 
     # Parking lots minimum.
     min_parking_lots: int | None = None
-
-    # Building material bucket (cihla / panel / smisena / ostatni).
-    # The matcher expands `ostatni` to the five sreality building_type
-    # values that fall outside the explicit three (see
-    # `_BUILDING_MATERIAL_VALUES`).
-    building_material: str | None = None
-
-    # Garden area bounds.
-    min_garden_area: float | None = None
-    max_garden_area: float | None = None
-
-    # Operator-curated tag ids. AND-semantics: a listing must carry
-    # every tag in the list to match.
-    tags: list[int] | None = None
 
     @model_validator(mode="after")
     def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
@@ -265,34 +234,6 @@ def _build_match_clauses(
     if spec.min_parking_lots is not None:
         where.append("l.parking_lots >= %(min_parking_lots)s")
         params["min_parking_lots"] = spec.min_parking_lots
-
-    if spec.building_material is not None:
-        values = _BUILDING_MATERIAL_VALUES.get(spec.building_material)
-        if values:
-            where.append("l.building_type = ANY(%(building_material_values)s)")
-            params["building_material_values"] = list(values)
-
-    if spec.min_garden_area is not None:
-        where.append("l.garden_area >= %(min_garden_area)s")
-        params["min_garden_area"] = spec.min_garden_area
-    if spec.max_garden_area is not None:
-        where.append("l.garden_area <= %(max_garden_area)s")
-        params["max_garden_area"] = spec.max_garden_area
-
-    if spec.tags:
-        # AND-semantics: the listing must carry every tag in the list.
-        # `count(distinct …) = array_length(…)` mirrors the browse_stats
-        # tag predicate (migration 055 / 060).
-        where.append(
-            "l.sreality_id IN ("
-            "SELECT lt.sreality_id FROM listing_tags lt "
-            "WHERE lt.tag_id = ANY(%(watchdog_tag_ids)s) "
-            "GROUP BY lt.sreality_id "
-            "HAVING count(distinct lt.tag_id) = "
-            "       cardinality(%(watchdog_tag_ids)s)"
-            ")"
-        )
-        params["watchdog_tag_ids"] = list(spec.tags)
 
     return where, params
 
@@ -884,127 +825,112 @@ def _read_int_setting(
         return default
 
 
-def _read_watermark(conn: "psycopg.Connection") -> datetime:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT value FROM app_settings "
-            "WHERE key = 'notifications_watermark_first_seen_at'",
-        )
-        row = cur.fetchone()
-    if row is None or row[0] is None:
-        # Defensive: if the seed row got nuked, behave as "process
-        # nothing older than now()" rather than blasting the feed.
-        return datetime.now(timezone.utc)
-    val = row[0]
-    if isinstance(val, str):
-        try:
-            return datetime.fromisoformat(val.replace("Z", "+00:00"))
-        except ValueError:
-            return datetime.now(timezone.utc)
-    if isinstance(val, datetime):
-        return val
-    return datetime.now(timezone.utc)
-
-
-def _write_watermark(
-    conn: "psycopg.Connection", new_value: datetime,
-) -> None:
-    iso = new_value.astimezone(timezone.utc).isoformat()
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE app_settings SET value = %s::jsonb, updated_at = now(), "
-            "updated_by = 'notifications_matcher' "
-            "WHERE key = 'notifications_watermark_first_seen_at'",
-            (json.dumps(iso),),
-        )
-
-
 def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     """One pass of the matcher. Returns counters useful for logging.
 
     Cheap to call directly — used by both the lifespan loop and the
-    operator-facing "run matcher now" admin button. Idempotent against
-    the (subscription, sreality_id) UNIQUE constraint.
+    operator-facing "run matcher now" button. Idempotent against the
+    (subscription_id, sreality_id) UNIQUE constraint.
+
+    Per-subscription cursor model (migration 065). Each subscription
+    has its own `last_matched_first_seen_at`; the matcher considers
+    listings with `first_seen_at > cursor` for that subscription only,
+    then advances the cursor to the max first_seen_at of the evaluated
+    window. New watchdogs default the cursor to `now() - 24h` so the
+    feed shows immediate backfill matches rather than sitting empty
+    until the next scrape lands.
     """
     settings = _load_matcher_settings(conn)
-    watermark = _read_watermark(conn)
-
-    # Pull the window of fresh listings once; per-subscription matching
-    # then runs as a single SQL each. We intentionally read just the
-    # `first_seen_at` upper bound so subsequent runs advance the
-    # watermark even when no subscription matched.
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT max(first_seen_at) FROM ("
-            "  SELECT first_seen_at FROM listings "
-            "  WHERE first_seen_at > %s "
-            "  ORDER BY first_seen_at ASC "
-            "  LIMIT %s"
-            ") sub",
-            (watermark, settings.window_listings),
-        )
-        row = cur.fetchone()
-    upper = row[0] if row and row[0] is not None else None
-
-    if upper is None:
-        # No fresh listings; nothing to do.
-        return {
-            "subscriptions_evaluated": 0,
-            "matches_inserted": 0,
-            "listings_in_window": 0,
-        }
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, filter_spec FROM notification_subscriptions "
+            "SELECT id, filter_spec, last_matched_first_seen_at "
+            "FROM notification_subscriptions "
             "WHERE is_active = true"
         )
         sub_rows = cur.fetchall()
 
     total_inserted = 0
-    listings_in_window = 0
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT count(*) FROM listings "
-            "WHERE first_seen_at > %s AND first_seen_at <= %s",
-            (watermark, upper),
-        )
-        ct = cur.fetchone()
-        listings_in_window = int(ct[0]) if ct else 0
+    total_listings_in_window = 0
+    cursors_advanced = 0
 
-    for sub_id, raw_spec in sub_rows:
+    for sub_id, raw_spec, cursor_ts in sub_rows:
         try:
             spec = WatchdogFilterSpec(**(raw_spec or {}))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — bad spec, skip but keep loop alive
             LOG.warning(
                 "matcher: subscription %s has invalid filter_spec: %s",
                 sub_id, exc,
             )
             continue
-        where, params = _build_match_clauses(spec)
-        where.append("l.first_seen_at > %(watermark)s")
-        where.append("l.first_seen_at <= %(upper)s")
-        params["watermark"] = watermark
-        params["upper"] = upper
 
-        sql = (
-            "INSERT INTO notification_dispatches "
-            "  (subscription_id, sreality_id, status, channel) "
-            "SELECT %(subscription_id)s, l.sreality_id, 'sent', 'in_app' "
-            "FROM listings l "
-            "WHERE " + " AND ".join(where) + " "
-            "ON CONFLICT (subscription_id, sreality_id) DO NOTHING"
-        )
-        params["subscription_id"] = str(sub_id)
+        where, params = _build_match_clauses(spec)
+        where.append("l.first_seen_at > %(cursor)s")
+        params["cursor"] = cursor_ts
+        joined_where = " AND ".join(where)
+
+        # Phase 1: find the window upper bound (max first_seen_at of
+        # the next batch of matching listings, capped at the operator
+        # knob). Reading the max separately means we can advance the
+        # cursor past listings even when the dedup constraint blocked
+        # the dispatch insert (re-running the matcher won't re-evaluate
+        # the same listings forever).
         with conn.cursor() as cur:
-            cur.execute(sql, params)
+            cur.execute(
+                "SELECT max(first_seen_at), count(*) FROM ("
+                "  SELECT l.first_seen_at FROM listings l "
+                f"  WHERE {joined_where} "
+                "  ORDER BY l.first_seen_at ASC "
+                "  LIMIT %(window_size)s"
+                ") sub",
+                {**params, "window_size": settings.window_listings},
+            )
+            row = cur.fetchone()
+        upper = row[0] if row and row[0] is not None else None
+        listings_in_window = int(row[1]) if row and row[1] is not None else 0
+        total_listings_in_window += listings_in_window
+
+        if upper is None:
+            continue
+
+        # Phase 2: insert dispatches for matches in the window.
+        insert_where = where + ["l.first_seen_at <= %(upper)s"]
+        insert_params = {
+            **params,
+            "upper": upper,
+            "subscription_id": str(sub_id),
+        }
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO notification_dispatches "
+                "  (subscription_id, sreality_id, status, channel) "
+                "SELECT %(subscription_id)s, l.sreality_id, 'sent', 'in_app' "
+                "FROM listings l "
+                f"WHERE {' AND '.join(insert_where)} "
+                "ON CONFLICT (subscription_id, sreality_id) DO NOTHING",
+                insert_params,
+            )
             total_inserted += cur.rowcount or 0
 
-    _write_watermark(conn, upper)
+        # Phase 3: advance the cursor for this subscription. Done in a
+        # separate UPDATE so a crash between INSERT and UPDATE only
+        # costs us a re-scan of the same window on the next pass —
+        # ON CONFLICT means no duplicate dispatches.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE notification_subscriptions "
+                "SET last_matched_first_seen_at = %s "
+                "WHERE id = %s AND last_matched_first_seen_at < %s",
+                (upper, sub_id, upper),
+            )
+            if cur.rowcount:
+                cursors_advanced += 1
+
     return {
         "subscriptions_evaluated": len(sub_rows),
         "matches_inserted": total_inserted,
-        "listings_in_window": listings_in_window,
+        "listings_in_window": total_listings_in_window,
+        "cursors_advanced": cursors_advanced,
     }
 
 

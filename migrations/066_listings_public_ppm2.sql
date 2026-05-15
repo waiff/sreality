@@ -1,4 +1,8 @@
--- 065_listings_public_ppm2.sql
+-- 066_listings_public_ppm2.sql
+-- (renumbered from 065 on merge — origin/main took 065 for
+-- subscription_cursor before this branch landed; live DB recorded
+-- this under the name `listings_public_ppm2` regardless of file
+-- number, so the rename is purely repo bookkeeping.)
 -- Surface price-per-square-metre as a first-class column on
 -- listings_public so the Browse cards / table / map sort order can
 -- include it without forcing the client to compute over a paginated
