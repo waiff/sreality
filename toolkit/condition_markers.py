@@ -24,6 +24,7 @@ post-hoc deduplication / clustering lives in
 from __future__ import annotations
 
 import base64
+import logging
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
@@ -33,6 +34,8 @@ try:
 except ImportError:
     def _Jsonb(value: Any) -> Any:  # type: ignore[misc]
         return value
+
+LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import psycopg
@@ -199,38 +202,41 @@ def _produce_extraction(
     snapshot: dict[str, Any],
     n_images: int,
 ) -> tuple[list[dict[str, Any]], str, str, float | None, int]:
+    from api.providers.base import ProviderError
+
     listing = _fetch_listing(conn, sreality_id)
     text_payload = _build_text_payload(listing, snapshot)
 
     image_blocks = _build_image_blocks_if_available(conn, sreality_id, n_images)
 
-    content: list[dict[str, Any]] = [{"type": "text", "text": text_payload}]
-    if image_blocks:
-        content.append({
-            "type": "text",
-            "text": f"Listing images ({len(image_blocks)}):",
-        })
-        content.extend(image_blocks)
-    content.append({
-        "type": "text",
-        "text": (
-            "Extract every condition marker you can spot. Building-scoped "
-            "and apartment-scoped markers go in the same flat list, "
-            "distinguished by the `scope` field. Skip amenities. Empty "
-            "list is acceptable if no concrete marker is present."
-        ),
-    })
-
     system = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
     model = llm_client.resolve_model(_MODEL_KEY)
 
-    response = llm_client.call(
-        called_for=_CALLED_FOR,
-        messages=[{"role": "user", "content": content}],
-        system=system,
-        tools=[RECORD_LISTING_MARKERS_TOOL],
-        model=model,
-    )
+    try:
+        response = llm_client.call(
+            called_for=_CALLED_FOR,
+            messages=[{"role": "user", "content": _build_content(text_payload, image_blocks)}],
+            system=system,
+            tools=[RECORD_LISTING_MARKERS_TOOL],
+            model=model,
+        )
+    except ProviderError as exc:
+        if image_blocks and "prompt is too long" in str(exc):
+            LOG.warning(
+                "discover_condition_markers: prompt too long for "
+                "sreality_id=%d with %d images; retrying without images",
+                sreality_id, len(image_blocks),
+            )
+            image_blocks = []
+            response = llm_client.call(
+                called_for=_CALLED_FOR,
+                messages=[{"role": "user", "content": _build_content(text_payload, image_blocks)}],
+                system=system,
+                tools=[RECORD_LISTING_MARKERS_TOOL],
+                model=model,
+            )
+        else:
+            raise
     markers, notes = _extract_tool_call(response.tool_calls)
 
     _cache_store(
@@ -308,6 +314,28 @@ def _fetch_listing(
         "condition": row[14],
         "energy_rating": row[15],
     }
+
+
+def _build_content(
+    text_payload: str, image_blocks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    content: list[dict[str, Any]] = [{"type": "text", "text": text_payload}]
+    if image_blocks:
+        content.append({
+            "type": "text",
+            "text": f"Listing images ({len(image_blocks)}):",
+        })
+        content.extend(image_blocks)
+    content.append({
+        "type": "text",
+        "text": (
+            "Extract every condition marker you can spot. Building-scoped "
+            "and apartment-scoped markers go in the same flat list, "
+            "distinguished by the `scope` field. Skip amenities. Empty "
+            "list is acceptable if no concrete marker is present."
+        ),
+    })
+    return content
 
 
 def _build_text_payload(

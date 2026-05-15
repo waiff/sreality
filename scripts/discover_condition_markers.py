@@ -83,7 +83,9 @@ def main() -> int:
     )
 
     started_at = time.monotonic()
-    with psycopg.connect(db_url, prepare_threshold=None) as conn:
+    with psycopg.connect(
+        db_url, autocommit=True, prepare_threshold=None,
+    ) as conn:
         sample = _select_stratified_sample(
             conn,
             limit=args.limit,

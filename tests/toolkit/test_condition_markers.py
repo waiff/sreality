@@ -222,6 +222,92 @@ def test_too_many_markers_rejected(monkeypatch):
         )
 
 
+# ---- Prompt-too-long fallback --------------------------------------------
+
+
+def test_prompt_too_long_retries_without_images(monkeypatch):
+    """When the LLM rejects an image-heavy prompt for length, the tool
+    transparently retries with image_blocks=[] and persists n_images=0.
+    """
+    _stub_image_storage(monkeypatch, configured=True)
+
+    # Stub R2 + image-key fetch so the first call attempt does send images.
+    fake_keys = ["img/1.jpg", "img/2.jpg", "img/3.jpg"]
+    monkeypatch.setattr(
+        condition_markers, "_fetch_image_keys",
+        lambda conn, sid, n: fake_keys,
+    )
+    class _FakeR2:
+        def download_bytes(self, key):
+            return b"\xff\xd8\xff\xe0"  # tiny jpeg header — irrelevant for stub
+    from scraper import image_storage
+    monkeypatch.setattr(image_storage, "R2Client", type(
+        "R2C", (), {"from_env": classmethod(lambda cls: _FakeR2())},
+    ))
+
+    from api.providers.base import ProviderError
+
+    markers = _example_markers()
+    plan = [
+        ("fetchone", (42, _NOW, {"text": "..."})),     # snapshot
+        ("fetchone", None),                            # cache miss
+        ("fetchone", _listing_row()),                  # _fetch_listing
+        ("execute_write", None),                       # _cache_store
+    ]
+    conn = _make_conn(plan)
+
+    # First call raises prompt-too-long; second call succeeds.
+    raising = _LLMResp(text="", tool_calls=[])
+    class _TwoCallLLM(_FakeLLM):
+        def call(self, **kwargs: Any) -> _LLMResp:
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                raise ProviderError(
+                    "anthropic call failed: Error code: 400 - "
+                    "prompt is too long: 210659 tokens > 200000 maximum"
+                )
+            return _llm_response(markers, "")
+
+    llm = _TwoCallLLM([raising, _llm_response(markers, "")])
+
+    res = condition_markers.discover_condition_markers(
+        conn, llm, sreality_id=123,  # type: ignore[arg-type]
+    )
+
+    assert len(llm.calls) == 2
+    # First attempt sent image blocks; second did not.
+    first_content = llm.calls[0]["messages"][0]["content"]
+    second_content = llm.calls[1]["messages"][0]["content"]
+    assert any(b.get("type") == "image" for b in first_content)
+    assert not any(b.get("type") == "image" for b in second_content)
+    assert res["data"]["markers"] == markers
+    assert res["data"]["n_images"] == 0
+
+
+def test_other_provider_errors_propagate(monkeypatch):
+    """Provider errors that aren't 'prompt is too long' must NOT trigger
+    the fallback — they should surface to the caller."""
+    _stub_image_storage(monkeypatch, configured=False)
+    from api.providers.base import ProviderError
+
+    plan = [
+        ("fetchone", (42, _NOW, {})),
+        ("fetchone", None),
+        ("fetchone", _listing_row()),
+    ]
+    conn = _make_conn(plan)
+    class _OnlyRaises(_FakeLLM):
+        def call(self, **kwargs: Any) -> _LLMResp:
+            self.calls.append(kwargs)
+            raise ProviderError("anthropic call failed: 503 Service Unavailable")
+    llm = _OnlyRaises([])
+    with pytest.raises(ProviderError, match="503"):
+        condition_markers.discover_condition_markers(
+            conn, llm, sreality_id=123,  # type: ignore[arg-type]
+        )
+    assert len(llm.calls) == 1  # no retry
+
+
 # ---- Envelope -------------------------------------------------------------
 
 
