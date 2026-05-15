@@ -50,6 +50,14 @@ export default function BuildingDetail() {
     queryFn: () => getBuilding(id as number),
     enabled: id != null,
     staleTime: 30_000,
+    refetchInterval: (q) => {
+      const status = q.state.data?.status;
+      return status === 'pending' ||
+        status === 'extracting' ||
+        status === 'estimating'
+        ? 2000
+        : false;
+    },
   });
 
   const reExtractMut = useMutation<BuildingRun, ApiError, void>({
@@ -80,10 +88,15 @@ export default function BuildingDetail() {
   }
 
   const b = runQ.data!;
+  const isInFlight =
+    b.status === 'pending' ||
+    b.status === 'extracting' ||
+    b.status === 'estimating';
   return (
     <Page>
       <Crumb id={b.id} />
       <Header building={b} />
+      {isInFlight && <InFlightNotice building={b} />}
       <SubjectBlock building={b} />
       <Warnings building={b} />
       <OperatorInputsSection building={b} onUpdated={onConfirmed} />
@@ -171,6 +184,30 @@ function Header({ building }: { building: BuildingRun }) {
     </header>
   );
 }
+
+function InFlightNotice({ building }: { building: BuildingRun }) {
+  const copy =
+    building.status === 'pending'
+      ? 'Queued — extraction will begin shortly.'
+      : building.status === 'extracting'
+        ? 'Extracting units from the listing.'
+        : 'Running per-unit estimates.';
+  return (
+    <section className="mt-4 flex items-start gap-3 px-4 py-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)]">
+      <span
+        aria-hidden
+        className="mt-1.5 inline-block h-2 w-2 rounded-full bg-[var(--color-copper)] animate-pulse"
+      />
+      <div>
+        <p className="text-[0.85rem] text-[var(--color-ink)]">{copy}</p>
+        <p className="mt-1 text-[0.75rem] text-[var(--color-ink-3)]">
+          You can navigate away — this page auto-updates when it finishes.
+        </p>
+      </div>
+    </section>
+  );
+}
+
 
 function StatusBadge({ status }: { status: BuildingStatus }) {
   const palette: Record<BuildingStatus, { fg: string; bg: string }> = {
