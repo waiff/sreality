@@ -8,16 +8,20 @@ scraper.parser verbatim — no duplicated parsing logic here.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from scraper import parser
+from scraper import db, hashing, parser
 
 if TYPE_CHECKING:
     import psycopg
 
     from scraper.sreality_client import SrealityClient
+
+
+LOG = logging.getLogger(__name__)
 
 
 _ID_RE = re.compile(r"/(\d{8,})(?=$|[/?#])")
@@ -38,8 +42,16 @@ def parse_sreality_url(
     *,
     client: "SrealityClient",
     conn: "psycopg.Connection",
+    persist: bool = False,
 ) -> dict[str, Any]:
     """Resolve a sreality.cz URL to a parsed spec ready for estimation.
+
+    When persist=True the fetched detail is upserted into listings +
+    snapshots + images (idempotent — the same path the scraper takes).
+    The estimation flow turns this on so a listing pasted into the UI
+    becomes a first-class row, which unlocks price prefill, the image
+    carousel, and downstream summarize_listing — without the operator
+    having to wait for the nightly scrape.
 
     Raises ValueError if no sreality_id can be recovered from the URL.
     Lets requests.HTTPError from the underlying client propagate.
@@ -48,6 +60,19 @@ def parse_sreality_url(
     raw = client.get_detail(sreality_id)
     spec = parser.parse_listing(raw)
     images = parser.parse_images(raw)
+
+    if persist:
+        try:
+            content_hash = hashing.content_hash(raw)
+            db.upsert_listing(conn, spec, raw, content_hash)
+            db.record_images(conn, sreality_id, images)
+        except Exception:
+            LOG.exception(
+                "parse_sreality_url: persist failed for id=%s; "
+                "estimation will continue without DB-backed subject",
+                sreality_id,
+            )
+
     return {
         "sreality_id": sreality_id,
         "spec": spec,

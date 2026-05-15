@@ -215,8 +215,9 @@ def _fetch_html_returns(html: str):
 def test_sreality_branch_uses_existing_parser(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake_parse_sreality_url(url, *, client, conn):
+    def fake_parse_sreality_url(url, *, client, conn, persist=False):
         captured["called"] = True
+        captured["persist"] = persist
         return {
             "sreality_id": 87654321,
             "spec": {
@@ -239,6 +240,7 @@ def test_sreality_branch_uses_existing_parser(monkeypatch):
         conn=conn,
     )
     assert captured.get("called") is True
+    assert captured.get("persist") is True
     assert result.source_kind == "sreality"
     assert result.parse_confidence == "high"
     assert result.parse_confidence_per_field is None

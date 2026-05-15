@@ -214,7 +214,9 @@ def _sreality_branch(
     sreality_client: "SrealityClient",
     conn: "psycopg.Connection",
 ) -> ParseResult:
-    parsed = url_parser.parse_sreality_url(url, client=sreality_client, conn=conn)
+    parsed = url_parser.parse_sreality_url(
+        url, client=sreality_client, conn=conn, persist=True,
+    )
     parser_spec = parsed["spec"]
     spec = {
         "lat": parser_spec.get("lat"),
