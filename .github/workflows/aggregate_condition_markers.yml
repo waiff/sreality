@@ -52,7 +52,7 @@ jobs:
 
       - name: Run aggregation
         run: |
-          python scripts/aggregate_condition_markers.py \
+          python -m scripts.aggregate_condition_markers \
             --output "${{ inputs.output_path }}" \
             --min-cluster-count "${{ inputs.min_cluster_count }}" \
             --similarity-threshold "${{ inputs.similarity_threshold }}"
