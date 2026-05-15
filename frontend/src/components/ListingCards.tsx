@@ -284,12 +284,14 @@ function Chevron({ dir }: { dir: 'left' | 'right' }) {
 
 /* -------------------------------------------------------------------------- */
 /* CardBadge — the building block of the vertical metadata stack on the right */
-/* margin of a listing card. Four tones, all borders-only + backdrop-blur to  */
-/* sit on top of the photo without competing for attention.                   */
+/* margin of a listing card. Four tones, all sit on a near-opaque paper-3     */
+/* base with a coloured border + text for semantic signal — the *-soft tokens */
+/* are rgba(_, 0.10) and wash out over a busy photo, so the border carries    */
+/* the colour and the paper layer keeps the badge legible.                    */
 /*                                                                            */
-/*   active   — sage (semantic "live"), strongest in the stack                */
-/*   inactive — brick (semantic "delisted"), same weight as active            */
-/*   muted    — paper-3/85 over photo, ink-2 text — for the date badges       */
+/*   active   — sage border + text (semantic "live")                          */
+/*   inactive — brick border + text (semantic "delisted")                     */
+/*   muted    — rule border + ink-2 text — for the date badges                */
 /*   copper   — the operator's headline TOM pill, accent token                */
 /*                                                                            */
 /* All four use the same 0.6rem uppercase tracking treatment as the original  */
@@ -300,13 +302,13 @@ type CardBadgeTone = 'active' | 'inactive' | 'muted' | 'copper';
 
 const CARD_BADGE_TONE: Record<CardBadgeTone, string> = {
   active:
-    'bg-[var(--color-sage-soft)] border-[var(--color-sage)]/40 text-[var(--color-sage)]',
+    'bg-[var(--color-paper-3)]/90 border-[var(--color-sage)]/70 text-[var(--color-sage)]',
   inactive:
-    'bg-[var(--color-brick-soft)] border-[var(--color-brick)]/40 text-[var(--color-brick)]',
+    'bg-[var(--color-paper-3)]/90 border-[var(--color-brick)]/70 text-[var(--color-brick)]',
   muted:
     'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-2)]',
   copper:
-    'bg-[var(--color-copper-soft)] border-[var(--color-copper)]/40 text-[var(--color-copper)]',
+    'bg-[var(--color-paper-3)]/90 border-[var(--color-copper)]/70 text-[var(--color-copper)]',
 };
 
 function CardBadge({
