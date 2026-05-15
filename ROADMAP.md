@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 14:31 UTC_
+_Last refreshed: 2026-05-15 19:57 UTC_
 
-**Branch:** `claude/reusable-filters-component-oRhvq`
+**Branch:** `claude/apartment-condition-scoring-jZ6qy`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-15 14:31 UTC_
 **Last 10 commits:**
 
 ```
+cb3abb9 Merge pull request #118 from waiff/claude/reusable-filters-component-oRhvq
+4dc340f roadmap: refresh auto-status block
+dcc55ce filters: drop orphan LocationChipPicker
+fba9ea4 Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
 756e8db roadmap: refresh auto-status block
 8f1b8aa fix(filters): show place name + region context, not the type description
+b33b673 Merge pull request #117 from waiff/claude/reusable-filters-component-oRhvq
 028442e filters: Mapy.cz-powered LocationTypeahead, wired in Browse + Watchdog
-3b6340d fix(filters): slider drag + paired inputs were a no-op on Browse
-71f3739 frontend: component-level tests for FilterForm + filter-controls
-ae7742f Merge pull request #110 from waiff/claude/reusable-filters-component-oRhvq
-7819eb6 roadmap: refresh auto-status block
-11aaced frontend: vitest + first batch of pure-function tests
-b6a78ba Merge pull request #109 from waiff/claude/reusable-filters-component-oRhvq
-5227e12 browse: centre+radius spatial mode with circle overlay on the map
+392c722 Merge pull request #116 from waiff/claude/preserve-browse-filters-O0SG0
+fb84abb Merge remote-tracking branch 'origin/main' into claude/preserve-browse-filters-O0SG0
 ```
 
 <!-- END AUTO-STATUS -->
