@@ -75,8 +75,8 @@ def main() -> int:
 
     import psycopg
 
-    from api.dependencies import get_providers
     from api.llm_client import LLMClient
+    from api.providers.anthropic import AnthropicProvider
     from toolkit.condition_markers import (
         DiscoveryError,
         discover_condition_markers,
@@ -105,7 +105,7 @@ def main() -> int:
             len(pending), len(sample) - len(pending),
         )
 
-        providers = get_providers()
+        providers = {"anthropic": AnthropicProvider()}
         llm_client = LLMClient(conn, providers=providers)
 
         scored = 0
