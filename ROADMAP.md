@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 20:34 UTC_
+_Last refreshed: 2026-05-15 21:00 UTC_
 
-**Branch:** `claude/apartment-condition-scoring-jZ6qy`
+**Branch:** `claude/aggregate-empty-extractions-fix`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,9 @@ _Last refreshed: 2026-05-15 20:34 UTC_
 **Last 10 commits:**
 
 ```
+a75676d aggregate: treat empty extractions table as no-op, not failure
+b91b0c6 Merge pull request #119 from waiff/claude/apartment-condition-scoring-jZ6qy
+9df5352 roadmap: refresh auto-status block
 f1bef29 condition: add Phase A — discover Czech condition markers
 cb3abb9 Merge pull request #118 from waiff/claude/reusable-filters-component-oRhvq
 4dc340f roadmap: refresh auto-status block
@@ -23,9 +26,6 @@ dcc55ce filters: drop orphan LocationChipPicker
 fba9ea4 Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
 756e8db roadmap: refresh auto-status block
 8f1b8aa fix(filters): show place name + region context, not the type description
-b33b673 Merge pull request #117 from waiff/claude/reusable-filters-component-oRhvq
-028442e filters: Mapy.cz-powered LocationTypeahead, wired in Browse + Watchdog
-392c722 Merge pull request #116 from waiff/claude/preserve-browse-filters-O0SG0
 ```
 
 <!-- END AUTO-STATUS -->
