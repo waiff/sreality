@@ -233,6 +233,11 @@ export default function Browse() {
                     onBoundsChange={setBounds}
                     hoveredIds={hoveredIds}
                     onHover={setHovered}
+                    centerCircle={
+                      filters.locationMode === 'center_radius'
+                        ? filters.centerRadius
+                        : null
+                    }
                   />
                 </Suspense>
               </div>

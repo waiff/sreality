@@ -1,7 +1,10 @@
 import { supabase } from './supabase';
 import {
+  type CenterRadius,
   type ListingFilters,
-  seenWithinToIso,
+  type MapBounds,
+  buildingMaterialToValues,
+  isoNDaysAgo,
 } from './filters';
 import type {
   HealthSummary,
@@ -12,18 +15,52 @@ import type {
   Ppm2Box,
 } from './types';
 
+/* Circle → bounding box approximation. Used when the operator picks
+ * the centre+radius mode on the map: PostgREST has no native
+ * ST_DWithin filter, so we send the bounding box of the radius
+ * circle as the spatial predicate. The bbox is slightly oversized
+ * versus the true circle (a square circumscribes a circle), which
+ * means a few extra listings near the corners can slip into the
+ * cohort — acceptable for the headline use case; true distance
+ * filtering belongs in a follow-up RPC if it ever matters. */
+const EARTH_RADIUS_M = 6_371_000;
+
+const centerRadiusBbox = (cr: CenterRadius): MapBounds => {
+  const dLat = (cr.radius_m / EARTH_RADIUS_M) * (180 / Math.PI);
+  const dLng =
+    (cr.radius_m / (EARTH_RADIUS_M * Math.cos((cr.lat * Math.PI) / 180))) *
+    (180 / Math.PI);
+  return {
+    south: cr.lat - dLat,
+    north: cr.lat + dLat,
+    west: cr.lng - dLng,
+    east: cr.lng + dLng,
+  };
+};
+
+/** Returns the bbox the cohort filter should apply for a given
+ *  filters object. Honours `locationMode`: viewport → use bounds
+ *  (or null); center_radius → derive bbox from centerRadius (or null
+ *  if no centre is set). The caller doesn't have to branch. */
+export const effectiveBbox = (f: ListingFilters): MapBounds | null => {
+  if (f.locationMode === 'center_radius') {
+    return f.centerRadius ? centerRadiusBbox(f.centerRadius) : null;
+  }
+  return f.bounds;
+};
+
 /* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so
  * the bottleneck is wire-bytes, not DOM. 50k features ≈ 0.3 MB gzipped. */
 export const MAP_CAP = 50_000;
 export const TABLE_PAGE_SIZE = 50;
 export const CARD_PAGE_SIZE = 24;
 
-const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,area_m2,district,last_seen_at,is_active';
+const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,area_m2,district,last_seen_at,is_active,tom_days';
 const TABLE_COLS =
-  'sreality_id,district,disposition,area_m2,price_czk,last_seen_at,is_active,' +
-  'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb';
+  'sreality_id,district,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
-  'sreality_id,district,locality,disposition,area_m2,price_czk,last_seen_at,is_active,' +
+  'sreality_id,district,locality,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'category_main,category_type';
 
 export type SortField =
@@ -71,8 +108,17 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   };
   if (f.status === 'active') r = r.eq('is_active', true);
   else if (f.status === 'inactive') r = r.eq('is_active', false);
-  const since = seenWithinToIso(f.seenWithin);
-  if (since) r = r.gte('last_seen_at', since);
+  /* Days-ago ranges. min = most recent allowed (so last_seen >= now()
+   * minus min); max = oldest allowed (so last_seen <= now() minus max).
+   * Wait — that's inverted. min_days = 3 means "seen at least 3 days
+   * ago", which is `last_seen <= now() - 3d`. max_days = 10 means
+   * "seen at most 10 days ago", which is `last_seen >= now() - 10d`. */
+  if (f.lastSeenMaxDays != null) r = r.gte('last_seen_at', isoNDaysAgo(f.lastSeenMaxDays));
+  if (f.lastSeenMinDays != null) r = r.lte('last_seen_at', isoNDaysAgo(f.lastSeenMinDays));
+  if (f.firstSeenMaxDays != null) r = r.gte('first_seen_at', isoNDaysAgo(f.firstSeenMaxDays));
+  if (f.firstSeenMinDays != null) r = r.lte('first_seen_at', isoNDaysAgo(f.firstSeenMinDays));
+  if (f.tomDaysMin != null) r = r.gte('tom_days', f.tomDaysMin);
+  if (f.tomDaysMax != null) r = r.lte('tom_days', f.tomDaysMax);
   r = r.eq('category_main', f.categoryMain);
   r = r.eq('category_type', f.categoryType);
   if (f.districts.length) r = r.in('district', f.districts);
@@ -90,16 +136,20 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.furnished       != null) r = r.eq('furnished',      f.furnished);
   if (f.ownership       != null) r = r.eq('ownership',      f.ownership);
   if (f.categorySubCb   != null) r = r.eq('category_sub_cb', f.categorySubCb);
+  if (f.buildingMaterial != null) {
+    r = r.in('building_type', buildingMaterialToValues(f.buildingMaterial));
+  }
   if (f.estateAreaMin   != null) r = r.gte('estate_area',   f.estateAreaMin);
   if (f.estateAreaMax   != null) r = r.lte('estate_area',   f.estateAreaMax);
   if (f.usableAreaMin   != null) r = r.gte('usable_area',   f.usableAreaMin);
   if (f.usableAreaMax   != null) r = r.lte('usable_area',   f.usableAreaMax);
   if (f.parkingLotsMin  != null) r = r.gte('parking_lots',  f.parkingLotsMin);
-  if (f.bounds) {
-    r = r.gte('lng', f.bounds.west)
-         .lte('lng', f.bounds.east)
-         .gte('lat', f.bounds.south)
-         .lte('lat', f.bounds.north);
+  const bbox = effectiveBbox(f);
+  if (bbox) {
+    r = r.gte('lng', bbox.west)
+         .lte('lng', bbox.east)
+         .gte('lat', bbox.south)
+         .lte('lat', bbox.north);
   }
   return r as unknown as T;
 };
@@ -114,6 +164,7 @@ export interface MapRow {
   district: string | null;
   last_seen_at: string;
   is_active: boolean;
+  tom_days: number | null;
 }
 
 export interface MapResult {
@@ -172,14 +223,17 @@ export interface TableRow {
   disposition: string | null;
   area_m2: number | null;
   price_czk: number | null;
+  first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
+  tom_days: number | null;
   estate_area: number | null;
   usable_area: number | null;
   parking_lots: number | null;
   furnished: string | null;
   ownership: string | null;
   category_sub_cb: number | null;
+  building_type: string | null;
 }
 
 export interface TableResult {
@@ -229,8 +283,10 @@ export interface CardRow {
   disposition: string | null;
   area_m2: number | null;
   price_czk: number | null;
+  first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
+  tom_days: number | null;
   category_main: string | null;
   category_type: string | null;
   /* Up to 5 image URLs in source-sequence order. Empty when the
@@ -307,6 +363,27 @@ export interface BrowseStatsDispositionRow {
   ppm2_box: Ppm2Box | null;
 }
 
+export interface TomBox {
+  n: number;
+  min: number;
+  p25: number;
+  median: number;
+  mean: number;
+  p75: number;
+  max: number;
+}
+
+export interface PriceBandVelocityRow {
+  bucket: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  p_lo: number;
+  p_hi: number;
+  n: number;
+  pct_share: number | null;
+  price_min: number | null;
+  price_max: number | null;
+  tom_box: TomBox | null;
+}
+
 export interface BrowseStats {
   total: number;
   new_7d: number;
@@ -314,15 +391,20 @@ export interface BrowseStats {
   price: { p25: number; p50: number; p75: number } | null;
   ppm2:  { p25: number; p50: number; p75: number } | null;
   dispositions: ReadonlyArray<BrowseStatsDispositionRow>;
+  price_band_velocity: ReadonlyArray<PriceBandVelocityRow>;
 }
 
 export const fetchBrowseStats = async (
   f: ListingFilters,
 ): Promise<BrowseStats> => {
-  const seenDays =
-    f.seenWithin === 'any' ? null : parseInt(f.seenWithin, 10);
   const triToBool = (t: typeof f.hasBalcony): boolean | null =>
     t === 'any' ? null : t === 'yes';
+
+  const buildingTypeArray = f.buildingMaterial
+    ? [...buildingMaterialToValues(f.buildingMaterial)]
+    : null;
+
+  const effBbox = effectiveBbox(f);
 
   const { data, error } = await supabase.rpc('browse_stats', {
     category_main_filter:    f.categoryMain,
@@ -335,7 +417,12 @@ export const fetchBrowseStats = async (
     area_max_filter:         f.areaMax,
     active_only_filter:      f.status === 'active',
     inactive_only_filter:    f.status === 'inactive',
-    seen_within_days_filter: seenDays,
+    last_seen_min_days:      f.lastSeenMinDays,
+    last_seen_max_days:      f.lastSeenMaxDays,
+    first_seen_min_days:     f.firstSeenMinDays,
+    first_seen_max_days:     f.firstSeenMaxDays,
+    tom_days_min:            f.tomDaysMin,
+    tom_days_max:            f.tomDaysMax,
     has_balcony_filter:      triToBool(f.hasBalcony),
     has_lift_filter:         triToBool(f.hasLift),
     has_parking_filter:      triToBool(f.hasParking),
@@ -344,11 +431,12 @@ export const fetchBrowseStats = async (
     cellar_filter:           triToBool(f.cellar),
     garage_filter:           triToBool(f.garage),
     category_sub_cb_filter:  f.categorySubCb,
+    building_type_filter:    buildingTypeArray,
     tag_ids:                 f.tags.length ? f.tags : null,
-    bbox_west:               f.bounds?.west  ?? null,
-    bbox_south:              f.bounds?.south ?? null,
-    bbox_east:               f.bounds?.east  ?? null,
-    bbox_north:              f.bounds?.north ?? null,
+    bbox_west:               effBbox?.west  ?? null,
+    bbox_south:              effBbox?.south ?? null,
+    bbox_east:               effBbox?.east  ?? null,
+    bbox_north:              effBbox?.north ?? null,
   });
   if (error) throw error;
   return data as BrowseStats;
@@ -375,7 +463,7 @@ export const fetchDistrictFacets = async (): Promise<DistrictFacet[]> => {
 };
 
 const DETAIL_COLS =
-  'sreality_id,first_seen_at,last_seen_at,is_active,' +
+  'sreality_id,first_seen_at,last_seen_at,is_active,tom_days,' +
   'category_main,category_type,price_czk,price_unit,' +
   'area_m2,disposition,locality,district,locality_district_id,locality_region_id,' +
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
@@ -620,6 +708,14 @@ export const fetchListingIdsWithAllTags = async (
   return ((data ?? []) as Array<{ sreality_id: number }>).map(
     (r) => r.sreality_id,
   );
+};
+
+export const watchdogKeys = {
+  all: ['watchdog'] as const,
+  subscriptions: ['watchdog', 'subscriptions'] as const,
+  subscription: (id: string) => ['watchdog', 'subscriptions', id] as const,
+  dispatches: (params: Record<string, unknown>) =>
+    ['watchdog', 'dispatches', params] as const,
 };
 
 export const curationKeys = {

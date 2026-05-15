@@ -1,13 +1,21 @@
 /* Compact popup for kicking off a new estimation OR a new building decomposition.
  *
+ * Both POST endpoints return a 'pending' row immediately and run the
+ * heavy work as a FastAPI BackgroundTask — the modal closes and
+ * navigates to the detail page in ~1 s. The detail page polls until
+ * status reaches a terminal value.
+ *
  * Apartment kind (default):
  *   Paste a listing URL → POST /estimations/preview to extract spec →
- *   POST /estimations to start the run → navigate to /estimation/:id.
+ *   POST /estimations to enqueue the run → navigate to /estimation/:id.
  *
  * Building kind (Phase B1):
- *   Paste a `dum` / `komercni` URL → POST /buildings/from_url runs the
- *   extractor synchronously → navigate to /building/:id where the
- *   operator reviews the unit proposal and confirms.
+ *   Paste a `dum` / `komercni` URL → POST /buildings/from_url enqueues
+ *   extraction → navigate to /building/:id where the operator reviews
+ *   the unit proposal once extraction lands. When the operator
+ *   uploaded attachments in the modal we additionally wait for the
+ *   first extraction pass to finish ('awaiting_input') and then
+ *   re-extract so the attachments are folded in.
  *
  * Estimate kind (rent vs sale) for the apartment path is operator-
  * chosen via a segmented control, defaulted to rent. The toggle always
@@ -30,6 +38,7 @@ import { useMutation } from '@tanstack/react-query';
 import {
   ApiError,
   createBuildingFromUrl,
+  getBuilding,
   previewListingUrl,
   reExtractBuilding,
   uploadBuildingAttachment,
@@ -134,9 +143,10 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
           await uploadBuildingAttachment(run.id, attachmentFiles[i]);
           setUploadStage({ done: i + 1, total: attachmentFiles.length });
         }
-        // Re-extract so the operator-uploaded images become part of the
-        // unit proposal. The extractor cache misses on any run with
-        // attachments, so this is real work, not a no-op.
+        // The first extraction is running in a backend BackgroundTask;
+        // re_extract requires status='awaiting_input'. Poll until it
+        // lands, then force a fresh pass that folds in the attachments.
+        await waitForStatus(run.id, 'awaiting_input');
         await reExtractBuilding(run.id);
       }
       return run;
@@ -222,16 +232,18 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
       : 'https://www.sreality.cz/detail/…';
   const helpCopy =
     kind === 'building'
-      ? 'We read description + floor plans + photos, propose the apartment units, and open the building for your review.'
-      : 'We scrape the listing, kick off the estimate, and open the run. You can adjust the spec and re-run from the detail page.';
+      ? 'We read the listing and start extracting units. Once the run opens you can navigate away — extraction continues in the background.'
+      : 'We scrape the listing and kick off the estimate. Once the run opens you can navigate away — it finishes in the background.';
   const submitLabel = pending
     ? previewMut.isPending
       ? 'Scraping…'
       : buildingMut.isPending
-        ? uploadStage
+        ? uploadStage && uploadStage.done < uploadStage.total
           ? `Uploading ${uploadStage.done}/${uploadStage.total}…`
-          : 'Extracting units…'
-        : 'Submitting…'
+          : uploadStage
+            ? 'Folding in attachments…'
+            : 'Opening…'
+        : 'Opening…'
     : kind === 'building'
       ? 'Decompose'
       : 'Estimate';
@@ -618,6 +630,29 @@ function KindButton({
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
 /* -------------------------------------------------------------------------- */
+
+async function waitForStatus(
+  buildingId: number,
+  target: BuildingRun['status'],
+  {
+    intervalMs = 2000,
+    timeoutMs = 5 * 60 * 1000,
+  }: { intervalMs?: number; timeoutMs?: number } = {},
+): Promise<BuildingRun> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const row = await getBuilding(buildingId);
+    if (row.status === target) return row;
+    if (row.status === 'failed') {
+      throw new Error(row.error_message ?? 'building extraction failed');
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for status='${target}'`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 
 function buildEstimationPayload(
   preview: ParseResult,

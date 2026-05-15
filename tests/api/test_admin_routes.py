@@ -150,6 +150,7 @@ def client(monkeypatch, store):
     class _AppSettingsConn:
         def __init__(self) -> None:
             self.last_rows: list[Any] = []
+            self.filter_visibility: dict[tuple[str, str], bool] = {}
         def cursor(self): return _AppSettingsCursor(self)
         def transaction(self):
             from contextlib import contextmanager
@@ -159,9 +160,35 @@ def client(monkeypatch, store):
             return _ctx()
 
     fake_conn = _AppSettingsConn()
+    # filter_visibility table support: the admin routes call
+    # SELECT agenda, filter_id, enabled FROM filter_visibility plus
+    # an INSERT ... ON CONFLICT for the PUT endpoint. Keep the fake
+    # cursor narrow and explicit instead of teaching it every SQL
+    # shape — the registry tests cover the in-memory helper directly.
+    orig_cursor = _AppSettingsConn.cursor
+    def filter_aware_cursor(self):
+        return _FilterVisibilityCursor(self) if True else orig_cursor(self)
+    class _FilterVisibilityCursor(_AppSettingsCursor):
+        def execute(self, sql, params=()):
+            sql_norm = " ".join(sql.split()).lower()
+            if sql_norm.startswith("select agenda, filter_id, enabled from filter_visibility"):
+                self._parent.last_rows = [
+                    (a, fid, en)
+                    for (a, fid), en in self._parent.filter_visibility.items()
+                ]
+                self._last = None
+                return
+            if sql_norm.startswith("insert into filter_visibility"):
+                agenda, filter_id, enabled, _by = params
+                self._parent.filter_visibility[(agenda, filter_id)] = bool(enabled)
+                self._last = None
+                return
+            return super().execute(sql, params)
+    _AppSettingsConn.cursor = filter_aware_cursor
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: fake_conn
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
+    _AppSettingsConn.cursor = orig_cursor
 
 
 def test_get_skills_returns_list(client):
@@ -231,4 +258,71 @@ def test_admin_routes_exempt_from_bearer_gate(client, monkeypatch):
     res = client.get("/admin/skills")
     assert res.status_code == 200
     res = client.get("/admin/tools")
+    assert res.status_code == 200
+
+
+def test_filter_schema_returns_registry_with_visibility(client):
+    res = client.get("/admin/filter-schema")
+    assert res.status_code == 200
+    payload = res.json()
+    assert "filters" in payload
+    assert "agendas" in payload
+    assert "categories" in payload
+    assert "ui_controls" in payload
+    ids = {f["id"] for f in payload["filters"]}
+    # Every filter we expect to exist in the registry.
+    for must_have in (
+        "min_price_czk", "min_parking_lots", "category_main",
+        "location", "districts", "status", "tom_days_min",
+    ):
+        assert must_have in ids, f"missing {must_have} in filter-schema payload"
+    # The matrix attaches a visibility map per filter; default-on.
+    sample = next(f for f in payload["filters"] if f["id"] == "min_price_czk")
+    assert sample["visibility"]["browse"] is True
+
+
+def test_filter_visibility_lists_full_matrix(client):
+    res = client.get("/admin/filter-visibility")
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert len(data) > 50  # plenty of pairs; all-on default
+    pair = ("browse", "min_price_czk")
+    rows = [r for r in data if (r["agenda"], r["filter_id"]) == pair]
+    assert len(rows) == 1
+    assert rows[0]["enabled"] is True
+
+
+def test_put_filter_visibility_toggles_cell(client):
+    res = client.put(
+        "/admin/filter-visibility/browse/min_price_czk",
+        json={"enabled": False},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["enabled"] is False
+    follow = client.get("/admin/filter-schema")
+    payload = follow.json()
+    sample = next(f for f in payload["filters"] if f["id"] == "min_price_czk")
+    assert sample["visibility"]["browse"] is False
+
+
+def test_put_filter_visibility_rejects_unknown_filter(client):
+    res = client.put(
+        "/admin/filter-visibility/browse/no_such_filter",
+        json={"enabled": False},
+    )
+    assert res.status_code == 404
+
+
+def test_put_filter_visibility_rejects_undeclared_pairing(client):
+    # `floor_band` is COMPARABLES/ESTIMATION/VELOCITY only — never Browse.
+    res = client.put(
+        "/admin/filter-visibility/browse/floor_band",
+        json={"enabled": False},
+    )
+    assert res.status_code == 400
+
+
+def test_filter_schema_is_exempt_from_bearer_gate(client, monkeypatch):
+    monkeypatch.setenv("API_TOKEN", "secret-xyz")
+    res = client.get("/admin/filter-schema")
     assert res.status_code == 200

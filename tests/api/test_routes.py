@@ -177,7 +177,9 @@ def test_describe_neighborhood_uses_defaults(client, monkeypatch):
     )
     assert res.status_code == 200
     assert captured["radius_m"] == 1000
-    assert captured["max_age_days"] == 30
+    # Freshness gate is no longer implicit; callers pass max_age_days
+    # explicitly when they want one.
+    assert captured["max_age_days"] is None
     assert captured["category_main"] == "byt"
     assert captured["category_type"] == "pronajem"
 

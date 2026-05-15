@@ -1,10 +1,11 @@
-import { Suspense, lazy, useMemo, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchEstimation,
   fetchImagesByListingIds,
+  fetchListingById,
   fetchListingsByIds,
   submitEstimation,
 } from '@/lib/queries';
@@ -19,9 +20,12 @@ import {
   ApiError,
   decideRefinement,
   fetchListingSummaries,
+  getSkill,
   listEstimationFeedback,
   submitEstimationFeedback,
+  updateSkill,
   type FeedbackResponse,
+  type Skill,
 } from '@/lib/api';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
@@ -44,6 +48,7 @@ import type {
   SkillRefinement,
   SubjectSummary,
   TargetSpecIn,
+  Trace,
 } from '@/lib/types';
 
 const ComparablesMap = lazy(
@@ -63,6 +68,10 @@ export default function EstimationDetail() {
     queryFn: () => fetchEstimation(id as number),
     enabled: id != null,
     staleTime: 60_000,
+    refetchInterval: (q) => {
+      const status = q.state.data?.status;
+      return status === 'pending' || status === 'running' ? 2000 : false;
+    },
   });
 
   const rerunMut = useMutation<EstimationRun, ApiError, RerunInput>({
@@ -101,6 +110,20 @@ export default function EstimationDetail() {
 
   const run = runQ.data!;
   const isFailed = run.status === 'failed';
+  const isInFlight = run.status === 'pending' || run.status === 'running';
+
+  if (isInFlight) {
+    return (
+      <Page>
+        <Crumb />
+        <Header run={run} />
+        <Hairline />
+        <InFlightBlock run={run} />
+        <Hairline />
+        <InputRecap run={run} />
+      </Page>
+    );
+  }
 
   return (
     <Page>
@@ -171,6 +194,8 @@ export default function EstimationDetail() {
 
       <Hairline />
       <FeedbackBlock runId={run.id} />
+
+      <FloatingFeedbackPanel runId={run.id} run={run} />
     </Page>
   );
 }
@@ -366,13 +391,43 @@ function YieldBlock({ run }: { run: EstimationRun }) {
   const kind = run.estimate_kind ?? 'rent';
   const areaM2 = run.input_spec?.area_m2 ?? null;
   const defaultRent = run.estimated_monthly_rent_czk;
+
+  /* When the operator pasted a sreality URL, fetch the subject listing
+   * so a sale URL can prefill the listing-price input from the actual
+   * asking price. Skipped for non-sreality (no DB row to read) and for
+   * spec-only runs. */
+  const subjectQ = useQuery<ListingPublic | null, Error>({
+    queryKey: ['estimation-subject-listing', run.input_sreality_id],
+    queryFn: () => fetchListingById(run.input_sreality_id as number),
+    enabled: run.input_sreality_id != null,
+    staleTime: 60_000,
+  });
+
+  const subjectSalePrice =
+    subjectQ.data && subjectQ.data.category_type === 'prodej'
+      ? subjectQ.data.price_czk
+      : null;
+
   const defaultPrice =
+    subjectSalePrice ??
     run.input_purchase_price_czk ??
     (kind === 'sale' ? run.estimated_sale_price_czk : null);
 
   const [rent, setRent] = useState<number | null>(defaultRent);
   const [costPerM2, setCostPerM2] = useState<number | null>(DEFAULT_FOND_CZK_PER_M2);
-  const [price, setPrice] = useState<number | null>(defaultPrice);
+  const [price, setPriceState] = useState<number | null>(defaultPrice);
+  const [priceTouched, setPriceTouched] = useState(false);
+
+  /* Sync the price input to the latest default until the operator types
+   * into it — handles the listing query resolving after first render. */
+  useEffect(() => {
+    if (!priceTouched) setPriceState(defaultPrice);
+  }, [defaultPrice, priceTouched]);
+
+  const setPrice = (v: number | null) => {
+    setPriceTouched(true);
+    setPriceState(v);
+  };
 
   const fondOprav =
     costPerM2 != null && areaM2 != null ? costPerM2 * areaM2 : null;
@@ -381,6 +436,12 @@ function YieldBlock({ run }: { run: EstimationRun }) {
     rent != null && fondOprav != null && price != null && price > 0
       ? ((rent - fondOprav) * 12) / price * 100
       : null;
+
+  const priceHint = subjectSalePrice != null
+    ? 'Default: from sale listing'
+    : defaultPrice != null
+      ? 'Default: from inputs'
+      : 'Set purchase price';
 
   return (
     <div>
@@ -449,7 +510,7 @@ function YieldBlock({ run }: { run: EstimationRun }) {
           step="100000"
           suffix="Kč"
           onChange={setPrice}
-          hint={defaultPrice != null ? 'Default: from inputs' : 'Set purchase price'}
+          hint={priceHint}
         />
       </div>
     </div>
@@ -523,6 +584,35 @@ function FailedBlock({ run }: { run: EstimationRun }) {
       <pre className="mt-3 px-3 py-2.5 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-[var(--color-brick)] text-[0.8rem] font-mono whitespace-pre-wrap break-words">
         {run.error_message ?? 'Unknown error.'}
       </pre>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* In-flight (pending / running)                                              */
+/* -------------------------------------------------------------------------- */
+
+function InFlightBlock({ run }: { run: EstimationRun }) {
+  const label =
+    run.status === 'pending' ? 'Queued' : 'Estimating';
+  return (
+    <div className="flex items-start gap-3">
+      <span
+        aria-hidden
+        className="mt-1.5 inline-block h-2 w-2 rounded-full bg-[var(--color-copper)] animate-pulse"
+      />
+      <div>
+        <SectionLabel>{label}</SectionLabel>
+        <p className="mt-2 text-[0.95rem] text-[var(--color-ink)]">
+          {run.mode === 'agent'
+            ? 'The agent is working through comparables and refining its estimate.'
+            : 'Pulling comparables and computing the rent distribution.'}
+        </p>
+        <p className="mt-2 text-[0.8rem] text-[var(--color-ink-3)]">
+          You can navigate away — this page auto-updates when the run
+          completes. Started {fmtRelative(run.created_at)}.
+        </p>
+      </div>
     </div>
   );
 }
@@ -1511,28 +1601,11 @@ const feedbackKeys = {
 
 function FeedbackBlock({ runId }: { runId: number }) {
   const qc = useQueryClient();
-  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const listQ = useQuery<{ data: EstimationFeedback[] }, ApiError>({
     queryKey: feedbackKeys.list(runId),
     queryFn: () => listEstimationFeedback(runId),
     staleTime: 30_000,
-  });
-
-  const submitMut = useMutation<
-    FeedbackResponse,
-    ApiError,
-    { text: string; kickOff: boolean }
-  >({
-    mutationFn: ({ text, kickOff }) =>
-      submitEstimationFeedback(runId, {
-        feedback_text: text,
-        kick_off_refinement: kickOff,
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: feedbackKeys.list(runId) });
-      setDrawerOpen(false);
-    },
   });
 
   const decideMut = useMutation<
@@ -1551,33 +1624,13 @@ function FeedbackBlock({ runId }: { runId: number }) {
 
   return (
     <div id="feedback">
-      <div className="flex items-baseline justify-between gap-4">
-        <SectionLabel>Feedback</SectionLabel>
-        <button
-          type="button"
-          onClick={() => setDrawerOpen((v) => !v)}
-          aria-expanded={drawerOpen}
-          className="text-[0.78rem] tracking-wide text-[var(--color-copper)] hover:text-[var(--color-copper-2)] underline-offset-2 hover:underline"
-        >
-          {drawerOpen ? 'Cancel' : 'Provide feedback'}
-        </button>
-      </div>
-
+      <SectionLabel>Feedback history</SectionLabel>
       <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
-        Tell the skill what it got wrong. The refiner reads your note
-        plus this run's trace and proposes an updated system prompt
-        for the skill that produced this estimate.
+        Previous notes on this run and the prompt edits they triggered.
+        Use the <span className="text-[var(--color-copper)]">Provide
+        feedback</span> button pinned at the top of the page to add a
+        new note.
       </p>
-
-      {drawerOpen && (
-        <FeedbackComposer
-          pending={submitMut.isPending}
-          error={submitMut.error}
-          onSubmit={(text, kickOff) =>
-            submitMut.mutate({ text, kickOff })
-          }
-        />
-      )}
 
       <FeedbackHistory
         rows={rows}
@@ -1592,81 +1645,313 @@ function FeedbackBlock({ runId }: { runId: number }) {
   );
 }
 
-function FeedbackComposer({
-  pending,
-  error,
-  onSubmit,
+function pickSkillNameFromTrace(trace: Trace | null): string | null {
+  if (!trace) return null;
+  for (const step of trace.steps ?? []) {
+    if (step.kind !== 'computation') continue;
+    if (step.label !== 'skill_choice') continue;
+    const name = step.output_summary?.skill_name;
+    return typeof name === 'string' && name.length > 0 ? name : null;
+  }
+  return null;
+}
+
+/* Schema default in api/schemas.CreateEstimationIn — used as the
+ * skill-editor fallback when the run's trace pre-dates the
+ * skill_choice step or when the run was deterministic. */
+const DEFAULT_SKILL_NAME = 'rental_estimator_full_v1';
+
+/* Positions the floating panel column to the right of the centered
+ * `max-w-3xl` page body. Built so the panel fills the *residual*
+ * horizontal space when there is one, and falls back to a usable
+ * right-pinned width on narrower viewports.                       */
+const PANEL_LEFT = 'max(1rem, calc(50% + 24rem + 1rem))';
+const PANEL_RIGHT = '1rem';
+const PANEL_TOP = '3.75rem';
+const PANEL_MAX_HEIGHT = 'calc(100dvh - 4.5rem)';
+
+function FloatingFeedbackPanel({
+  runId,
+  run,
 }: {
-  pending: boolean;
-  error: ApiError | null;
-  onSubmit: (text: string, kickOff: boolean) => void;
+  runId: number;
+  run: EstimationRun;
 }) {
+  const qc = useQueryClient();
+
+  const skillNameFromTrace = useMemo(
+    () => pickSkillNameFromTrace(run.trace),
+    [run.trace],
+  );
+  const effectiveSkillName = skillNameFromTrace ?? DEFAULT_SKILL_NAME;
+  const skillSource: 'trace' | 'default' =
+    skillNameFromTrace != null ? 'trace' : 'default';
+
+  const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const [kickOff, setKickOff] = useState(true);
-  const valid = text.trim().length > 0;
+  const [promptDraft, setPromptDraft] = useState<string | null>(null);
 
-  return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (valid && !pending) onSubmit(text.trim(), kickOff);
-      }}
-      className="mt-4 px-4 py-4 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] space-y-4"
-    >
-      <div>
-        <FieldLabel required>What did the skill get wrong on this run?</FieldLabel>
-        <textarea
-          rows={4}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          maxLength={4000}
-          placeholder="e.g. The cohort was too broad — it kept three 4+kk listings even though the target is 2+kk. Tighten the disposition match before relaxing it."
-          className="mt-1.5 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
-        />
-        <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-          {text.length} / 4000
-        </p>
-      </div>
+  const skillQ = useQuery<Skill, ApiError>({
+    queryKey: ['admin', 'skills', effectiveSkillName],
+    queryFn: () => getSkill(effectiveSkillName),
+    enabled: open,
+    staleTime: 30_000,
+  });
 
-      <label className="flex items-baseline gap-2 text-[0.82rem] text-[var(--color-ink-2)]">
-        <input
-          type="checkbox"
-          checked={kickOff}
-          onChange={(e) => setKickOff(e.target.checked)}
-        />
-        <span>
-          Run the refiner now (costs ~$0.05). Uncheck to stash the
-          feedback for a later batch.
-        </span>
-      </label>
+  useEffect(() => {
+    if (skillQ.data && promptDraft === null) {
+      setPromptDraft(skillQ.data.system_prompt);
+    }
+  }, [skillQ.data, promptDraft]);
 
-      {error && (
-        <p className="text-[0.78rem] text-[var(--color-brick)]">
-          {error.message || `Submit failed (HTTP ${error.status}).`}
-        </p>
-      )}
+  useEffect(() => {
+    setPromptDraft(null);
+  }, [effectiveSkillName]);
 
-      <div className="flex items-center gap-3">
+  const promptDirty =
+    skillQ.data != null &&
+    promptDraft != null &&
+    promptDraft !== skillQ.data.system_prompt;
+
+  const submitMut = useMutation<
+    FeedbackResponse,
+    ApiError,
+    { text: string; kickOff: boolean }
+  >({
+    mutationFn: ({ text, kickOff }) =>
+      submitEstimationFeedback(runId, {
+        feedback_text: text,
+        kick_off_refinement: kickOff,
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: feedbackKeys.list(runId) });
+      setText('');
+      setOpen(false);
+    },
+  });
+
+  const updatePromptMut = useMutation<Skill, ApiError, { systemPrompt: string }>(
+    {
+      mutationFn: ({ systemPrompt }) =>
+        updateSkill(effectiveSkillName, { system_prompt: systemPrompt }),
+      onSuccess: (skill) => {
+        qc.setQueryData(['admin', 'skills', skill.name], skill);
+        setPromptDraft(skill.system_prompt);
+      },
+    },
+  );
+
+  const submitValid = text.trim().length > 0;
+
+  if (!open) {
+    return (
+      <div
+        className="fixed z-20"
+        style={{ top: PANEL_TOP, left: PANEL_LEFT, right: PANEL_RIGHT }}
+      >
         <button
-          type="submit"
-          disabled={!valid || pending}
-          className={[
-            'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
-            !valid || pending
-              ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
-              : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
-          ].join(' ')}
+          type="button"
+          onClick={() => setOpen(true)}
+          className="inline-flex items-center gap-2 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] border border-[var(--color-copper)] text-[var(--color-copper)] bg-[var(--color-paper)] hover:bg-[var(--color-copper-soft)] shadow-[0_2px_8px_rgba(0,0,0,0.06)] transition-colors"
         >
-          {pending
-            ? kickOff
-              ? 'Refining…'
-              : 'Saving…'
-            : kickOff
-              ? 'Submit and refine'
-              : 'Save without refining'}
+          <FeedbackGlyph />
+          <span>Provide feedback</span>
         </button>
       </div>
-    </form>
+    );
+  }
+
+  return (
+    <div
+      className="fixed z-20 flex flex-col gap-3 overflow-y-auto"
+      style={{
+        top: PANEL_TOP,
+        left: PANEL_LEFT,
+        right: PANEL_RIGHT,
+        maxHeight: PANEL_MAX_HEIGHT,
+      }}
+    >
+      {/* Panel 1 — feedback composer ---------------------------------- */}
+      <section className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] shadow-[0_8px_24px_rgba(0,0,0,0.08)] overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--color-rule)] flex items-center justify-between gap-3">
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+            Feedback
+          </p>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            aria-label="Close feedback"
+            className="text-[0.78rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] transition-colors"
+          >
+            Close
+          </button>
+        </div>
+
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (submitValid && !submitMut.isPending) {
+              submitMut.mutate({ text: text.trim(), kickOff });
+            }
+          }}
+          className="px-4 py-4 space-y-4"
+        >
+          <p className="text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
+            Tell the skill what it got wrong. The refiner reads your note
+            plus this run's trace and proposes an updated system prompt
+            for the skill that produced this estimate.
+          </p>
+
+          <div>
+            <FieldLabel required>
+              What did the skill get wrong on this run?
+            </FieldLabel>
+            <textarea
+              rows={4}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              maxLength={4000}
+              placeholder="e.g. The cohort was too broad — it kept three 4+kk listings even though the target is 2+kk. Tighten the disposition match before relaxing it."
+              className="mt-1.5 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+            />
+            <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
+              {text.length} / 4000
+            </p>
+          </div>
+
+          <label className="flex items-baseline gap-2 text-[0.82rem] text-[var(--color-ink-2)]">
+            <input
+              type="checkbox"
+              checked={kickOff}
+              onChange={(e) => setKickOff(e.target.checked)}
+            />
+            <span>
+              Run the refiner now (costs ~$0.05). Uncheck to stash the
+              feedback for a later batch.
+            </span>
+          </label>
+
+          {submitMut.error && (
+            <p className="text-[0.78rem] text-[var(--color-brick)]">
+              {submitMut.error.message ||
+                `Submit failed (HTTP ${submitMut.error.status}).`}
+            </p>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="px-3 py-2 text-sm rounded-[var(--radius-sm)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] transition-colors"
+            >
+              Close
+            </button>
+            <button
+              type="submit"
+              disabled={!submitValid || submitMut.isPending}
+              className={[
+                'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
+                !submitValid || submitMut.isPending
+                  ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
+                  : 'bg-[var(--color-copper)] text-white border-[var(--color-copper)] hover:bg-[var(--color-copper-2)] hover:border-[var(--color-copper-2)]',
+              ].join(' ')}
+            >
+              {submitMut.isPending
+                ? kickOff
+                  ? 'Refining…'
+                  : 'Saving…'
+                : kickOff
+                  ? 'Submit and refine'
+                  : 'Save without refining'}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      {/* Panel 2 — skill prompt editor -------------------------------- */}
+      <section className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] shadow-[0_8px_24px_rgba(0,0,0,0.08)] overflow-hidden">
+        <div className="px-4 py-3 border-b border-[var(--color-rule)] flex items-center justify-between gap-3">
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+            Skill prompt · {effectiveSkillName}
+          </p>
+          <span className="text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
+            {skillSource === 'trace'
+              ? `from run trace · mode ${run.mode}`
+              : run.mode === 'agent'
+                ? 'default (run trace had no skill_choice)'
+                : `default (run was ${run.mode})`}
+          </span>
+        </div>
+        <div className="px-4 py-4 space-y-2">
+          {skillQ.isLoading && promptDraft === null ? (
+            <p className="text-[0.78rem] text-[var(--color-ink-4)] italic">
+              Loading skill…
+            </p>
+          ) : skillQ.error ? (
+            <p className="text-[0.78rem] text-[var(--color-brick)]">
+              Could not load skill: {skillQ.error.message}
+            </p>
+          ) : (
+            <>
+              <textarea
+                rows={12}
+                value={promptDraft ?? skillQ.data?.system_prompt ?? ''}
+                onChange={(e) => setPromptDraft(e.target.value)}
+                className="w-full px-3 py-2 text-[0.78rem] font-mono rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] resize-y"
+              />
+              {updatePromptMut.error && (
+                <p className="text-[0.7rem] text-[var(--color-brick)]">
+                  Save failed: {updatePromptMut.error.message}
+                </p>
+              )}
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[0.7rem] text-[var(--color-ink-4)]">
+                  {promptDirty
+                    ? 'Unsaved changes — saving writes the skill row immediately.'
+                    : 'Edits persist to the skill row when saved.'}
+                </p>
+                <button
+                  type="button"
+                  disabled={!promptDirty || updatePromptMut.isPending}
+                  onClick={() => {
+                    if (promptDraft != null) {
+                      updatePromptMut.mutate({ systemPrompt: promptDraft });
+                    }
+                  }}
+                  className={[
+                    'px-3 py-1 text-[0.78rem] rounded-[var(--radius-sm)] border transition-colors',
+                    !promptDirty || updatePromptMut.isPending
+                      ? 'border-[var(--color-rule-strong)] text-[var(--color-ink-4)] cursor-not-allowed'
+                      : 'border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
+                  ].join(' ')}
+                >
+                  {updatePromptMut.isPending ? 'Saving…' : 'Save prompt'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function FeedbackGlyph() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 13 13"
+      aria-hidden
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M2 3.5 L2 8.5 A1 1 0 0 0 3 9.5 L4.5 9.5 L4.5 11.5 L7 9.5 L10 9.5 A1 1 0 0 0 11 8.5 L11 3.5 A1 1 0 0 0 10 2.5 L3 2.5 A1 1 0 0 0 2 3.5 Z" />
+    </svg>
   );
 }
 

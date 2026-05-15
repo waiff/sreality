@@ -47,6 +47,7 @@ from toolkit import (
     summarize_listing,
     verify_listing_freshness,
 )
+from toolkit import filter_registry
 from toolkit.comparables import ComparableFilters, TargetSpec
 
 if TYPE_CHECKING:
@@ -100,19 +101,33 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                 "Find listings comparable to the target, automatically widening "
                 "the area / disposition filters until at least min_results are "
                 "found (or the relaxation ladder is exhausted). Returns the "
-                "cohort + a relaxation_trace showing what was widened."
+                "cohort + a relaxation_trace showing what was widened.\n\n"
+                "Every filter is optional. Omitted filters fall back to the "
+                "base filters established for this run (request body + app_settings "
+                "defaults). The skill prompt should instruct WHEN and HOW to "
+                "tune each one; pass only the filters you want to differ from "
+                "the base for this round."
             ),
             input_schema={
                 "type": "object",
                 "properties": {
-                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
-                    "area_band_pct": {"type": "number", "minimum": 0.05, "maximum": 0.6},
-                    "disposition_match": {
-                        "type": "string",
-                        "enum": ["exact", "loose", "any"],
+                    # Every filter the registry declares for COMPARABLES.
+                    # Descriptions come from `filter_registry.REGISTRY[id]
+                    # .description` — single source of truth, no more
+                    # hand-written agent prose drifting from operator-
+                    # facing surfaces.
+                    **filter_registry.to_jsonschema_properties(
+                        filter_registry.Agenda.COMPARABLES,
+                    ),
+                    # Knobs specific to the relaxation wrapper — these
+                    # don't belong on `ComparableFilters` itself.
+                    "min_results": {
+                        "type": "integer", "minimum": 1, "maximum": 50,
+                        "description": (
+                            "Stop relaxing once at least this many "
+                            "comparables are found. Default 5."
+                        ),
                     },
-                    "max_age_days": {"type": "integer", "minimum": 1, "maximum": 90},
-                    "min_results": {"type": "integer", "minimum": 1, "maximum": 50},
                 },
                 "required": [],
             },
@@ -167,8 +182,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
-                    "max_age_days": {"type": "integer", "minimum": 1, "maximum": 365},
+                    # The handler honours only radius_m + max_age_days;
+                    # category is taken from the run's base_filters and
+                    # cannot be overridden per-call. We pull descriptions
+                    # from the registry so the agent reads canonical text.
+                    "radius_m": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("radius_m"),
+                    ),
+                    "max_age_days": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("max_age_days"),
+                    ),
                 },
                 "required": [],
             },
@@ -205,13 +228,22 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "radius_m": {"type": "integer", "minimum": 100, "maximum": 5000},
-                    "population": {
-                        "type": "string",
-                        "enum": ["active", "delisted", "all"],
-                    },
+                    # The handler honours radius_m + population only,
+                    # plus the velocity-specific trend_split_days. Other
+                    # cohort knobs come from base_filters.
+                    "radius_m": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("radius_m"),
+                    ),
+                    "population": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("population"),
+                    ),
                     "trend_split_days": {
                         "type": "integer", "minimum": 1, "maximum": 90,
+                        "description": (
+                            "Split the cohort's delisted listings into "
+                            "'recent' and 'older' buckets at N days ago "
+                            "for a trend signal. Default 7."
+                        ),
                     },
                 },
                 "required": [],
@@ -400,7 +432,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             name="record_estimate",
             description=(
                 "Submit the final estimate and END THE RUN. Call exactly once. "
-                "After this tool returns, the agent loop exits immediately."
+                "After this tool returns, the agent loop exits immediately.\n\n"
+                "You do NOT need to retype sreality_ids. The harness already "
+                "knows which listings find_comparables_relaxed returned and "
+                "treats every one as INCLUDED by default. If you want to set "
+                "a specific listing aside (luxury / furnished outlier / "
+                "obviously bad data / etc.), add an entry to "
+                "`comparable_decisions` with decision='excluded' and a short "
+                "reason. Optional included entries with a reason annotate "
+                "*why* you kept a particular listing for the audit trail. "
+                "Inclusion is the default; exclusion is the editorial act."
             ),
             input_schema={
                 "type": "object",
@@ -412,10 +453,6 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "type": "string",
                         "enum": ["high", "medium", "low"],
                     },
-                    "comparables_used": {
-                        "type": "array",
-                        "items": {"type": "integer"},
-                    },
                     "warnings": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -423,14 +460,16 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                     "comparable_decisions": {
                         "type": "array",
                         "description": (
-                            "Per-listing decision log for every candidate "
-                            "the agent considered. One entry per "
-                            "sreality_id with decision='included' or "
-                            "'excluded' and a 1-sentence reason. Entries "
-                            "with decision='included' must match "
-                            "comparables_used exactly. Required when the "
-                            "skill prompt asks for per-comparable "
-                            "reasoning; omitted by legacy callers."
+                            "Curation log. The cohort is server-derived from "
+                            "the listings find_comparables_relaxed returned; "
+                            "default policy is INCLUDE. Use this field to "
+                            "express exclusions (decision='excluded' + "
+                            "reason) and, optionally, inclusion reasons "
+                            "(decision='included' + reason) for listings "
+                            "you want to call out. Entries referencing "
+                            "sreality_ids not actually in the cohort are "
+                            "ignored and surface as a hallucination warning "
+                            "on the run."
                         ),
                         "items": {
                             "type": "object",
@@ -445,13 +484,23 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                             "required": ["sreality_id", "decision", "reason"],
                         },
                     },
+                    "comparables_used": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": (
+                            "DEPRECATED. The server now derives "
+                            "comparables_used from the cohort minus "
+                            "exclusions; whatever you pass here is "
+                            "validated for hallucinations but no longer "
+                            "drives the included set. Omit it."
+                        ),
+                    },
                 },
                 "required": [
                     "estimated_monthly_rent_czk",
                     "rent_p25_czk",
                     "rent_p75_czk",
                     "confidence",
-                    "comparables_used",
                 ],
             },
             is_terminator=True,
@@ -496,6 +545,11 @@ class _LoopState:
     # The estimation_runs.id currently driving the loop; passed through
     # to vision tools so their llm_calls rows attribute correctly.
     estimation_run_id: int | None = None
+    # Operator-tunable filter defaults (app_settings, migration 052).
+    # Used to seed the agent's per-round min_results when the LLM
+    # omits it. Other filter defaults are already baked into
+    # `base_filters` upstream in `_build_filters`.
+    filter_defaults: Any = None
 
 
 # --- entrypoint -----------------------------------------------------------
@@ -524,6 +578,7 @@ def run_agent_estimation(
     on the run row.
     """
     from api.estimate_yield import _used_entry  # circular dep; lazy import
+    from api.estimation_runs import load_filter_defaults
 
     state = _LoopState(
         conn=conn,
@@ -533,6 +588,7 @@ def run_agent_estimation(
         base_filters=filters,
         building_run_id=building_run_id,
         estimation_run_id=estimation_run_id,
+        filter_defaults=load_filter_defaults(conn),
     )
 
     # Filter the tool registry to the skill's whitelist.
@@ -726,21 +782,130 @@ def _dispatch_tool(
     return tool_def.handler(args, state)
 
 
+_FCR_OVERRIDE_FIELDS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
+    ("radius_m", int),
+    ("area_band_pct", float),
+    ("disposition_match", str),
+    ("max_age_days", int),
+    ("population", str),
+    ("floor_band", int),
+    ("condition_match", list),
+    ("building_type_match", list),
+    ("energy_rating_match", list),
+    ("has_balcony", bool),
+    ("has_lift", bool),
+    ("has_parking", bool),
+    ("min_price_czk", int),
+    ("max_price_czk", int),
+    ("category_main", str),
+    ("category_type", str),
+    ("category_sub_cb", int),
+    ("locality_district_id", int),
+    ("locality_region_id", int),
+    ("include_unreliable", bool),
+    ("furnished", str),
+    ("terrace", bool),
+    ("cellar", bool),
+    ("garage", bool),
+    ("ownership", str),
+    ("min_estate_area", float),
+    ("max_estate_area", float),
+    ("min_usable_area", float),
+    ("max_usable_area", float),
+    ("min_parking_lots", int),
+)
+
+
+def _filters_snapshot(
+    filters: ComparableFilters, *, min_results: int,
+) -> dict[str, Any]:
+    """Render every ComparableFilters field the agent can tune into a flat
+    dict for the selection_rounds audit trail.
+
+    The frontend's Strategy table renders one row per key here, so every
+    field listed here gets a column in the UI — including fields the
+    agent left at the base value. That's the explicit guarantee from
+    the user: "show all filters an agent can use ... even if the
+    agent chose to leave the filter blank".
+    """
+    return {
+        "radius_m": filters.radius_m,
+        "area_band_pct": filters.area_band_pct,
+        "disposition_match": filters.disposition_match,
+        "max_age_days": filters.max_age_days,
+        "min_results": min_results,
+        "active_only": filters.active_only,
+        "population": filters.population,
+        "floor_band": filters.floor_band,
+        "condition_match": (
+            list(filters.condition_match) if filters.condition_match else None
+        ),
+        "building_type_match": (
+            list(filters.building_type_match)
+            if filters.building_type_match else None
+        ),
+        "energy_rating_match": (
+            list(filters.energy_rating_match)
+            if filters.energy_rating_match else None
+        ),
+        "has_balcony": filters.has_balcony,
+        "has_lift": filters.has_lift,
+        "has_parking": filters.has_parking,
+        "min_price_czk": filters.min_price_czk,
+        "max_price_czk": filters.max_price_czk,
+        "category_main": filters.category_main,
+        "category_type": filters.category_type,
+        "category_sub_cb": filters.category_sub_cb,
+        "locality_district_id": filters.locality_district_id,
+        "locality_region_id": filters.locality_region_id,
+        "include_unreliable": filters.include_unreliable,
+        "furnished": filters.furnished,
+        "terrace": filters.terrace,
+        "cellar": filters.cellar,
+        "garage": filters.garage,
+        "ownership": filters.ownership,
+        "min_estate_area": filters.min_estate_area,
+        "max_estate_area": filters.max_estate_area,
+        "min_usable_area": filters.min_usable_area,
+        "max_usable_area": filters.max_usable_area,
+        "min_parking_lots": filters.min_parking_lots,
+    }
+
+
+def _coerce_arg(name: str, value: Any, caster: Any) -> Any:
+    if value is None:
+        return None
+    if caster is bool:
+        return bool(value)
+    if caster is list:
+        if isinstance(value, list):
+            return [str(v) for v in value if v is not None and str(v) != ""]
+        return None
+    try:
+        return caster(value)
+    except (TypeError, ValueError):
+        LOG.warning("find_comparables_relaxed: bad value for %r: %r", name, value)
+        return None
+
+
 def _handle_find_comparables_relaxed(
     args: dict[str, Any], state: _LoopState,
 ) -> dict[str, Any]:
     from dataclasses import replace
     filters = state.base_filters
-    if "radius_m" in args:
-        filters = replace(filters, radius_m=int(args["radius_m"]))
-    if "area_band_pct" in args:
-        filters = replace(filters, area_band_pct=float(args["area_band_pct"]))
-    if "disposition_match" in args:
-        filters = replace(filters, disposition_match=args["disposition_match"])
-    if "max_age_days" in args:
-        filters = replace(filters, max_age_days=int(args["max_age_days"]))
+    for name, caster in _FCR_OVERRIDE_FIELDS:
+        if name not in args:
+            continue
+        coerced = _coerce_arg(name, args[name], caster)
+        if coerced is None and caster is list:
+            continue
+        filters = replace(filters, **{name: coerced})
 
-    min_results = int(args.get("min_results", 5))
+    min_results = int(
+        args.get("min_results", state.filter_defaults.min_results)
+        if state.filter_defaults
+        else args.get("min_results", 5)
+    )
     result = find_comparables_relaxed(
         state.conn, state.target, filters, min_results=min_results,
     )
@@ -748,15 +913,10 @@ def _handle_find_comparables_relaxed(
 
     prev_ids = {int(l["sreality_id"]) for l in state.last_cohort}
     new_ids = {int(l["sreality_id"]) for l in listings}
+    round_n = len(state.selection_rounds) + 1
     state.selection_rounds.append({
-        "n": len(state.selection_rounds) + 1,
-        "filters": {
-            "radius_m": filters.radius_m,
-            "area_band_pct": filters.area_band_pct,
-            "disposition_match": filters.disposition_match,
-            "max_age_days": filters.max_age_days,
-            "min_results": min_results,
-        },
+        "n": round_n,
+        "filters": _filters_snapshot(filters, min_results=min_results),
         "cohort_size": len(listings),
         "cohort_ids": sorted(new_ids),
         "added_ids": sorted(new_ids - prev_ids),
@@ -766,7 +926,126 @@ def _handle_find_comparables_relaxed(
     })
 
     state.last_cohort = listings
+    _persist_cohort_entries(state, listings, round_n=round_n)
     return result
+
+
+def _persist_cohort_entries(
+    state: _LoopState,
+    listings: list[dict[str, Any]],
+    *,
+    round_n: int,
+) -> None:
+    """Upsert one row per cohort listing into estimation_cohort_entries.
+
+    Server-authoritative source of truth: every find_comparables_relaxed
+    round records the listings it returned. `_finalise` then flips
+    `present_at_finalisation` for whatever is still in state.last_cohort
+    at terminator time, so the LLM never has to retype IDs.
+    """
+    if state.estimation_run_id is None or not listings:
+        return
+    sql = (
+        "INSERT INTO estimation_cohort_entries ("
+        "  estimation_run_id, sreality_id, first_seen_round_n,"
+        "  last_seen_round_n, snapshot_id, distance_m, price_czk,"
+        "  area_m2, price_per_m2, disposition"
+        ") VALUES ("
+        "  %(run_id)s, %(sid)s, %(round)s, %(round)s,"
+        "  %(snap)s, %(dist)s, %(price)s, %(area)s, %(ppm2)s, %(disp)s"
+        ") ON CONFLICT (estimation_run_id, sreality_id) DO UPDATE SET"
+        "  last_seen_round_n = EXCLUDED.last_seen_round_n,"
+        "  snapshot_id       = COALESCE(EXCLUDED.snapshot_id, estimation_cohort_entries.snapshot_id),"
+        "  distance_m        = COALESCE(EXCLUDED.distance_m, estimation_cohort_entries.distance_m),"
+        "  price_czk         = COALESCE(EXCLUDED.price_czk, estimation_cohort_entries.price_czk),"
+        "  area_m2           = COALESCE(EXCLUDED.area_m2, estimation_cohort_entries.area_m2),"
+        "  price_per_m2      = COALESCE(EXCLUDED.price_per_m2, estimation_cohort_entries.price_per_m2),"
+        "  disposition       = COALESCE(EXCLUDED.disposition, estimation_cohort_entries.disposition)"
+    )
+    try:
+        with state.conn.transaction(), state.conn.cursor() as cur:
+            for l in listings:
+                cur.execute(sql, {
+                    "run_id": state.estimation_run_id,
+                    "sid": int(l["sreality_id"]),
+                    "round": round_n,
+                    "snap": l.get("latest_snapshot_id"),
+                    "dist": l.get("distance_m"),
+                    "price": l.get("price_czk"),
+                    "area": l.get("area_m2"),
+                    "ppm2": l.get("price_per_m2"),
+                    "disp": l.get("disposition"),
+                })
+    except Exception as exc:
+        LOG.warning(
+            "persist_cohort_entries failed for run=%s round=%s: %s",
+            state.estimation_run_id, round_n, exc,
+        )
+
+
+def _persist_finalisation(
+    state: _LoopState,
+    *,
+    included_ids: set[int],
+    excluded_by_id: dict[int, str],
+    included_reasons: dict[int, str],
+) -> None:
+    """Mark which cohort entries survived to the final estimate.
+
+    Flips `present_at_finalisation` on every row whose sreality_id is
+    still in state.last_cohort (whether included or excluded). Sets
+    `excluded_by_agent` + `exclusion_reason` for rows the agent set
+    aside via comparable_decisions, and stores any explicit inclusion
+    reason. Hallucinated IDs were already filtered by `_finalise`, so
+    nothing the LLM invented reaches this table.
+    """
+    if state.estimation_run_id is None:
+        return
+    all_ids = set(included_ids) | set(excluded_by_id.keys())
+    if not all_ids:
+        return
+    try:
+        with state.conn.transaction(), state.conn.cursor() as cur:
+            cur.execute(
+                "UPDATE estimation_cohort_entries SET "
+                "  present_at_finalisation = (sreality_id = ANY(%(present)s)),"
+                "  excluded_by_agent       = (sreality_id = ANY(%(excluded)s)),"
+                "  exclusion_reason        = NULL,"
+                "  inclusion_reason        = NULL "
+                "WHERE estimation_run_id = %(run_id)s",
+                {
+                    "run_id": state.estimation_run_id,
+                    "present": list(all_ids),
+                    "excluded": list(excluded_by_id.keys()),
+                },
+            )
+            for sid, reason in excluded_by_id.items():
+                cur.execute(
+                    "UPDATE estimation_cohort_entries SET "
+                    "  exclusion_reason = %(reason)s "
+                    "WHERE estimation_run_id = %(run_id)s AND sreality_id = %(sid)s",
+                    {
+                        "run_id": state.estimation_run_id,
+                        "sid": sid,
+                        "reason": reason,
+                    },
+                )
+            for sid, reason in included_reasons.items():
+                cur.execute(
+                    "UPDATE estimation_cohort_entries SET "
+                    "  inclusion_reason = %(reason)s "
+                    "WHERE estimation_run_id = %(run_id)s AND sreality_id = %(sid)s",
+                    {
+                        "run_id": state.estimation_run_id,
+                        "sid": sid,
+                        "reason": reason,
+                    },
+                )
+    except Exception as exc:
+        LOG.warning(
+            "persist_finalisation failed for run=%s: %s",
+            state.estimation_run_id, exc,
+        )
 
 
 def _handle_analyze_distribution(
@@ -795,7 +1074,9 @@ def _handle_describe_neighborhood(
         lat=state.target.lat,
         lng=state.target.lng,
         radius_m=int(args.get("radius_m", state.base_filters.radius_m)),
-        max_age_days=int(args.get("max_age_days", 30)),
+        max_age_days=(
+            int(args["max_age_days"]) if "max_age_days" in args else None
+        ),
         category_main=state.base_filters.category_main,
         category_type=state.base_filters.category_type,
     )
@@ -1062,18 +1343,22 @@ def _tool_summary(name: str, result: dict[str, Any]) -> dict[str, Any]:
 
 def _terminator_summary(args: dict[str, Any]) -> dict[str, Any]:
     decisions = _normalise_decisions(args.get("comparable_decisions"))
+    # comparables_used is deprecated input; report the count if the
+    # agent still passed it so the trace shows what was supplied, but
+    # the authoritative inclusion count comes from `_finalise` after
+    # default-include against the server-side cohort.
     return {
         "estimated_monthly_rent_czk": args.get("estimated_monthly_rent_czk"),
         "rent_p25_czk": args.get("rent_p25_czk"),
         "rent_p75_czk": args.get("rent_p75_czk"),
         "confidence": args.get("confidence"),
-        "n_comparables_used": len(args.get("comparables_used") or []),
-        "n_comparables_included": sum(
+        "n_decisions_included": sum(
             1 for d in decisions if d["decision"] == "included"
         ),
-        "n_comparables_excluded": sum(
+        "n_decisions_excluded": sum(
             1 for d in decisions if d["decision"] == "excluded"
         ),
+        "n_comparables_used_declared": len(args.get("comparables_used") or []),
         "n_warnings": len(args.get("warnings") or []),
     }
 
@@ -1125,33 +1410,80 @@ def _finalise(
     confidence = call.get("confidence")
     warnings = list(call.get("warnings") or [])
 
-    declared_ids = set(int(i) for i in call.get("comparables_used") or [])
-    cohort_by_id = {l["sreality_id"]: l for l in state.last_cohort}
-    valid_ids = sorted(declared_ids & set(cohort_by_id.keys()))
-    invented = declared_ids - set(cohort_by_id.keys())
+    # Server-derived cohort, not LLM-declared. The cohort is whatever
+    # `state.last_cohort` holds at terminator time — those rows were
+    # written by `_handle_find_comparables_relaxed` round by round.
+    # The LLM's only authority is curation (decision='excluded' with
+    # a reason); any sreality_id it names that isn't actually in the
+    # cohort surfaces as a hallucination warning but never poisons
+    # the included set.
+    cohort_by_id = {int(l["sreality_id"]): l for l in state.last_cohort}
+    cohort_ids = set(cohort_by_id.keys())
+
+    decisions = _normalise_decisions(call.get("comparable_decisions"))
+    decisions_in_cohort = [
+        d for d in decisions if d["sreality_id"] in cohort_ids
+    ]
+    invented = sorted({
+        d["sreality_id"] for d in decisions
+        if d["sreality_id"] not in cohort_ids
+    })
     if invented:
         warnings.append(
             f"agent referenced {len(invented)} sreality_id(s) not in the "
-            f"latest cohort: {sorted(invented)[:5]}{'…' if len(invented) > 5 else ''}"
+            f"latest cohort (ignored): {invented[:5]}"
+            f"{'…' if len(invented) > 5 else ''}"
         )
 
-    # Join the per-comparable decisions onto the cohort entries so
-    # the frontend can render the inclusion reason inline. Excluded
-    # rows surface as a parallel list (no need to look them up in
-    # the cohort by id; we keep just the {sreality_id, reason}).
-    decisions = _normalise_decisions(call.get("comparable_decisions"))
-    reasons_in = {
-        d["sreality_id"]: d["reason"]
-        for d in decisions if d["decision"] == "included"
+    # Legacy comparables_used IDs ride along only for hallucination
+    # detection — they no longer drive the included set. The legacy
+    # path is preserved here so skills mid-migration don't silently
+    # change behaviour: an ID the agent declared but no decision
+    # references is still treated as included via default-include.
+    legacy_declared = {
+        int(i) for i in call.get("comparables_used") or []
     }
+    invented_legacy = sorted(legacy_declared - cohort_ids - set(invented))
+    if invented_legacy:
+        warnings.append(
+            f"agent referenced {len(invented_legacy)} sreality_id(s) in "
+            f"comparables_used not in the latest cohort (ignored): "
+            f"{invented_legacy[:5]}{'…' if len(invented_legacy) > 5 else ''}"
+        )
+
+    excluded_by_id = {
+        d["sreality_id"]: d["reason"]
+        for d in decisions_in_cohort if d["decision"] == "excluded"
+    }
+    included_reasons = {
+        d["sreality_id"]: d["reason"]
+        for d in decisions_in_cohort if d["decision"] == "included"
+    }
+
+    # Default-include: every cohort listing is in `comparables_used`
+    # unless the agent explicitly excluded it. This mirrors the
+    # statistics — analyze_distribution already consumed the full
+    # cohort, so the recorded "used" set should match.
+    included_ids = sorted(cohort_ids - set(excluded_by_id.keys()))
+
     comparables_used = [
-        {**used_entry(cohort_by_id[i]), "reason": reasons_in.get(i)}
-        for i in valid_ids
+        {
+            **used_entry(cohort_by_id[i]),
+            "reason": included_reasons.get(i),
+        }
+        for i in included_ids
     ]
     comparables_excluded = [
-        {"sreality_id": d["sreality_id"], "reason": d["reason"]}
-        for d in decisions if d["decision"] == "excluded"
+        {"sreality_id": sid, "reason": reason}
+        for sid, reason in sorted(excluded_by_id.items())
     ]
+
+    _persist_finalisation(
+        state,
+        included_ids=set(included_ids),
+        excluded_by_id=excluded_by_id,
+        included_reasons=included_reasons,
+    )
 
     yield_pct: float | None = None
     if estimate is not None and purchase_price_czk and purchase_price_czk > 0:

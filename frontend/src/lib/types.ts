@@ -19,8 +19,8 @@ export interface ListingPublic {
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
-  category_main: number | null;
-  category_type: number | null;
+  category_main: string | null;
+  category_type: string | null;
   price_czk: number | null;
   price_unit: string | null;
   area_m2: number | null;
@@ -52,6 +52,10 @@ export interface ListingPublic {
   garage: boolean | null;
   parking_lots: number | null;
   ownership: Ownership | null;
+  /* Migration 052 — "turned in" (TOM) in whole days. now() -
+   * first_seen_at for active listings (right-censored, growing);
+   * last_seen_at - first_seen_at for delisted. */
+  tom_days: number | null;
 }
 
 export interface ListingSnapshotPublic {
@@ -741,6 +745,135 @@ export interface BuildingListResponse {
   limit: number;
   offset: number;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Watchdog / new-listing notifications (Phase U2.7).                         */
+/*                                                                            */
+/* Subscriptions are saved filter specs; the backend matcher writes one       */
+/* dispatch per (subscription, listing) match. Wire shapes mirror             */
+/* api/notifications.py + migrations 056 / 057.                               */
+/* -------------------------------------------------------------------------- */
+
+export interface WatchdogFilterSpec {
+  category_main: string | null;
+  category_type: string | null;
+  category_sub_cb: number | null;
+  dispositions: string[] | null;
+  lat: number | null;
+  lng: number | null;
+  radius_m: number | null;
+  locality_district_id: number | null;
+  locality_region_id: number | null;
+  districts: string[] | null;
+  min_price_czk: number | null;
+  max_price_czk: number | null;
+  min_area_m2: number | null;
+  max_area_m2: number | null;
+  min_usable_area: number | null;
+  max_usable_area: number | null;
+  min_estate_area: number | null;
+  max_estate_area: number | null;
+  has_balcony: boolean | null;
+  has_lift: boolean | null;
+  has_parking: boolean | null;
+  terrace: boolean | null;
+  cellar: boolean | null;
+  garage: boolean | null;
+  furnished: Furnished | null;
+  ownership: Ownership | null;
+  min_parking_lots: number | null;
+  // Added with migration 060 / PR 2: backend now honours these,
+  // matching the Browse sidebar filter set. The Watchdog form
+  // surfaces them in a later PR — until then, API callers can set
+  // them directly through POST/PUT /notifications/subscriptions.
+  building_material: 'cihla' | 'panel' | 'smisena' | 'ostatni' | null;
+  min_garden_area: number | null;
+  max_garden_area: number | null;
+  tags: number[] | null;
+}
+
+export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
+  category_main: 'byt',
+  category_type: 'pronajem',
+  category_sub_cb: null,
+  dispositions: null,
+  lat: null,
+  lng: null,
+  radius_m: null,
+  locality_district_id: null,
+  locality_region_id: null,
+  districts: null,
+  min_price_czk: null,
+  max_price_czk: null,
+  min_area_m2: null,
+  max_area_m2: null,
+  min_usable_area: null,
+  max_usable_area: null,
+  min_estate_area: null,
+  max_estate_area: null,
+  has_balcony: null,
+  has_lift: null,
+  has_parking: null,
+  terrace: null,
+  cellar: null,
+  garage: null,
+  furnished: null,
+  ownership: null,
+  min_parking_lots: null,
+  building_material: null,
+  min_garden_area: null,
+  max_garden_area: null,
+  tags: null,
+};
+
+export interface WatchdogSubscription {
+  id: string;
+  name: string;
+  filter_spec: WatchdogFilterSpec;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  dispatch_count: number;
+}
+
+export interface WatchdogDispatch {
+  id: string;
+  subscription_id: string;
+  subscription_name: string;
+  sreality_id: number;
+  dispatched_at: string;
+  seen_at: string | null;
+  estimation_run_id: number | null;
+  estimation_status: EstimationStatus | null;
+  estimation_kind: 'rent' | 'sale' | null;
+  estimated_monthly_rent_czk: number | null;
+  estimated_sale_price_czk: number | null;
+  gross_yield_pct: number | null;
+  confidence: Confidence | null;
+  /* Listing-side fields joined via the matcher's LEFT JOIN. Null when
+   * the listing has been hard-deleted (shouldn't happen — architectural
+   * rule #3 forbids deletes — but render defensively). */
+  category_main: string | null;
+  category_type: string | null;
+  price_czk: number | null;
+  price_unit: string | null;
+  area_m2: number | null;
+  disposition: Disposition | null;
+  locality: string | null;
+  district: string | null;
+  is_active: boolean | null;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface WatchdogDispatchesResponse {
+  data: WatchdogDispatch[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export type WatchdogSeenFilter = 'all' | 'seen' | 'unseen';
 
 /* Manual rental estimates (Phase U-ME).
  * Operator-recorded point-estimate rentals attached to a listing.

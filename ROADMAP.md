@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-14 07:45 UTC_
+_Last refreshed: 2026-05-15 11:49 UTC_
 
-**Branch:** `claude/build-ai-feedback-loop-56uah`
+**Branch:** `claude/reusable-filters-component-oRhvq`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 49 files, latest `050_skill_refinements.sql`.
+**Migrations on disk:** 65 files, latest `063_browse_stats_price_band_velocity.sql`.
 
 **Last 10 commits:**
 
 ```
-0cc2731 phase-ai slice C.1: consolidate rental skills, archive v1
-8fbb7f8 Merge remote-tracking branch 'origin/main' into claude/build-ai-feedback-loop-56uah
-89654ea migrations: renumber 046/047/048 → 048/049/050 (slots taken by main)
-58bee66 phase-ai slices B + C: feedback capture + skill refinement loop
-ce205a3 phase-ai slice A.1: audit follow-ups — skill choice, decision reasons, wording
-09d0c9f Merge pull request #87 from waiff/claude/add-yield-calculation-aXRbq
-ee07229 Merge pull request #88 from waiff/claude/fix-to-field-autofill-j32TB
-87c5c7a frontend: stop range-filter "to" input from snapping to "from" value
-79dcc34 Merge pull request #86 from waiff/claude/add-qual-data-upload-pdP1Q
-224da86 roadmap: scope clarifications on Phase QUAL + Phase AI slice D
+7819eb6 roadmap: refresh auto-status block
+11aaced frontend: vitest + first batch of pure-function tests
+b6a78ba Merge pull request #109 from waiff/claude/reusable-filters-component-oRhvq
+5227e12 browse: centre+radius spatial mode with circle overlay on the map
+be80a64 Merge pull request #108 from waiff/claude/reusable-filters-component-oRhvq
+69a2467 filters: DistrictTypeahead + TagPicker primitives, Browse fully on FilterForm
+16ab6d0 Merge pull request #107 from waiff/claude/price-band-velocity
+392ed9b Merge pull request #106 from waiff/claude/reusable-filters-component-oRhvq
+ebd8bfe stats: replace 4-quartile turnover with 7-band percentile split
+b5a8212 filters: Browse sidebar adopts <FilterForm>
 ```
 
 <!-- END AUTO-STATUS -->
@@ -572,6 +572,81 @@ End-to-end browser flow over the U1b backend.
   the 7-day cache; `cost_usd_total` rolled up from `llm_calls`.
 - Commits `e9da41f`, `65b9967`, `d66da7e`. PR #29.
 
+### Phase U-BV: Browse velocity, card badges, filter overhaul (done)
+- Migration 052 promotes "turned in" (TOM = days on market) to a
+  first-class column on `listings_public`. Same definition as
+  `toolkit/velocity._tom_days`: `now() - first_seen_at` for active
+  rows, `last_seen_at - first_seen_at` for delisted. SQL and Python
+  now share one authoritative computation.
+- Migration 053 redoes `browse_stats` with a new filter surface:
+  `tom_days_min/max`, `last_seen_min/max_days` and
+  `first_seen_min/max_days` (both replacing the old preset
+  `seen_within_days_filter`), `building_type_filter text[]`.
+  Implicit `active_only=true` default dropped — Browse no longer
+  hides delisted listings unless asked.
+- Toolkit `ComparableFilters` grows the same six filter fields
+  (`tom_days_min/max`, `last_seen_min/max_days`,
+  `first_seen_min/max_days`) and flips defaults so no implicit
+  freshness gate fires. The deterministic estimator's
+  `_DEFAULT_ACTIVE_ONLY` and per-kind `max_age_days` are gone with
+  it. Velocity logic is unchanged; the new filter fields flow
+  through `_shared_filter_where` for free.
+- API: `FindComparablesIn`, `EstimateYieldIn`,
+  `ComputeMarketVelocityIn`, `DescribeNeighborhoodIn`, and
+  `CreateEstimationIn` all grow the six new optional filters; the
+  deterministic `_build_filters` plumbs them through. Agent's
+  `base_filters` carry them per-run without per-tool schema bloat.
+- Frontend: `ListingFilters` adds `tomDaysMin/Max`,
+  `lastSeenMinDays/MaxDays`, `firstSeenMinDays/MaxDays`,
+  `buildingMaterial`. `applyFilters` plumbs the days-ago ranges
+  against `last_seen_at` / `first_seen_at` and the TOM range against
+  `tom_days`. The four-bucket Building material picker (Cihla /
+  Panel / Smíšená / Ostatní) maps "Ostatní" to the five remaining
+  sreality values. Default `status` is now `'any'`.
+- Filter panel regrouped: Category / Location / Disposition / Price /
+  Size / Status & velocity / Building / Amenities / Curation.
+  ControlGroup legend bumped (0.82rem, ink-primary, semibold) so it
+  visually outweighs the smaller Section labels (0.62rem,
+  ink-tertiary). Redundant inner labels dropped on singleton groups.
+- Browse cards now stack four metadata badges down the right margin:
+  status (sage `Aktivní` / brick `Neaktivní`), first-seen (`od 5. 5.`),
+  last-seen (`viděno 8. 5.`), and the copper TOM pill
+  (`94 dní`, Czech plural). Re-uses the existing token palette and
+  borders-only depth strategy; no new design tokens.
+- Migration 061 enriches `browse_stats` with a
+  `price_quartile_velocity` field: the filtered cohort is split into
+  four equal-size price buckets via `ntile(4)` and each bucket reports
+  its `tom_days` distribution alongside its price range. Stacks on
+  top of 060's expanded signature — DROP-then-CREATE because the
+  function body grows a new CTE; the parameter list is unchanged from
+  060. The Stats tab renders this as a fourth Card ("Turnover by
+  price quartile") with horizontal box plots reusing the
+  `DispositionBoxPlots` SVG idiom. Active vs. delisted semantics of
+  the per-bucket TOM follow the user's status filter — no per-bucket
+  active/inactive split is computed.
+- Migration 062 adds `mean` to each bucket's `tom_box` so the
+  price/velocity signal isn't lost when `tom_days` is integer-clumped.
+  With a 14-day scrape window the five-number summary collapses to
+  identical medians across all four buckets even though means differ
+  monotonically (active 2+kk byt/pronajem: 8.9 / 9.0 / 9.4 / 9.9 days).
+  Frontend renders the mean as a copper dot on the box plot and a new
+  MEAN column in the numeric table; the caption now names the
+  integer-flooring caveat explicitly.
+- Migration 063 replaces the four-equal-bucket
+  `price_quartile_velocity` with a seven-band percentile split
+  `price_band_velocity`: p0–p10, p10–p25, p25–p45, p45–p55, p55–p75,
+  p75–p90, p90–p100. Narrower bands at the tails and around the
+  median, wider through the body, so the chart surfaces tail-vs-body
+  differences that an equal-quartile split would mask. The new
+  payload also reports `pct_share` per band (actual share of priced
+  cohort, since ties at percentile cuts make bucket sizes drift from
+  their nominal 10/15/20/10/20/15/10). Active 2+kk byt/pronajem shows
+  the body bands clustered at mean ≈ 9.2d while the priciest decile
+  jumps to 10.5d. Frontend rewrite: `PriceQuartileVelocity` →
+  `PriceBandVelocity`, seven rows on the y-axis with percentile +
+  price-range + n + share labels; Card heading and caption updated
+  accordingly.
+
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the
 bearer-token-gated FastAPI service to refresh a listing on demand.
@@ -1048,13 +1123,53 @@ Out of scope for this phase:
 - The agent's ad-hoc Python code execution capability — that's
   Phase 7d above, deferred.
 
-### Phase U2.7: New-listing notifications (proposed)
+### Phase U2.7: New-listing notifications — in-app slice (shipped)
 
-Push the operator a notification (email first, other channels later)
-the moment a freshly scraped listing matches a preset filter. Bridges
-the gap between the scraper's append-only walk and a low-latency
-alert surface — today the operator only sees new listings by
-re-running Browse manually.
+In-app slice landed: saved-filter "Watchdog" surface in the SPA, a
+background matcher loop in the FastAPI service, and per-row
+estimation kickoff that runs deterministically in the background and
+surfaces the yield once it lands. Email / SMS / push remain deferred
+(see open questions below). Cron cadence is still nightly; the
+operator can call `POST /notifications/matcher/run` from the UI's
+"Run matcher now" button to trigger an immediate evaluation against
+any newly-scraped listings.
+
+**What shipped**
+
+- Schema: migrations `056_notification_subscriptions.sql`,
+  `057_notification_dispatches.sql`, `058_notifications_app_settings.sql`.
+  Dispatches carry a nullable `estimation_run_id` FK so the
+  operator-triggered yield calculation links back to the
+  estimation row that lives on the existing `/estimation/:id` page.
+- Backend: `api/notifications.py` owns the `WatchdogFilterSpec`
+  Pydantic model, the SQL-clause renderer (mirrors
+  `_shared_filter_where` semantics), and the matcher loop spawned via
+  FastAPI's lifespan context manager. `api/routes/notifications.py`
+  exposes the standard bearer-gated CRUD + dispatch endpoints. The
+  matcher reads its cadence and the watermark from `app_settings`
+  rows seeded by 058 so the operator can tune both without a
+  redeploy.
+- Frontend: new `Watchdog` nav tab, `/watchdog` feed page,
+  `/watchdog/manage` list, `/watchdog/new` and `/watchdog/:id/edit`
+  filter editor. Notification rows expose the listing, disposition,
+  price, when it fired, the watchdog name, an "estimation" column
+  that streams the yield once the background task completes, and a
+  per-row "Run estimation" button.
+
+**What's deferred**
+
+- Email / SMS / push channels. `notification_dispatches.channel` is
+  CHECK-bounded to `'in_app'` only; a future migration adds the new
+  enum values and the dispatch worker grows a fan-out branch.
+- 5-minute scrape cadence (Shape A from the original proposal).
+  Today's nightly cron still applies; the matcher loop honestly
+  surfaces "no fresh listings" between scrapes. A new
+  `.github/workflows/scrape_probe.yml` is a separate slice.
+- Per-user identity (one shared operator stays the model).
+
+**Original brief (kept below as the design rationale)**
+
+
 
 Two cross-cutting pieces have to land together: a notification
 backend + UI for managing subscriptions, and a scraper cadence

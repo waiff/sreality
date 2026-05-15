@@ -9,6 +9,9 @@ import EstimationList from './pages/EstimationList';
 import Collections from './pages/Collections';
 import CollectionDetail from './pages/CollectionDetail';
 import Settings from './pages/Settings';
+import Watchdog from './pages/Watchdog';
+import WatchdogManage from './pages/WatchdogManage';
+import WatchdogEdit from './pages/WatchdogEdit';
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
 import DevConfidencePreview from './pages/DevConfidencePreview';
@@ -29,6 +32,10 @@ export const routes: RouteObject[] = [
       { path: 'building/:id', element: <BuildingDetail /> },
       { path: 'collections', element: <Collections /> },
       { path: 'collection/:id', element: <CollectionDetail /> },
+      { path: 'watchdog', element: <Watchdog /> },
+      { path: 'watchdog/manage', element: <WatchdogManage /> },
+      { path: 'watchdog/new', element: <WatchdogEdit /> },
+      { path: 'watchdog/:id/edit', element: <WatchdogEdit /> },
       { path: 'settings', element: <Settings /> },
       { path: 'dev/confidence-indicator', element: <DevConfidencePreview /> },
       { path: '*', element: <NotFound /> },

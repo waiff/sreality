@@ -27,19 +27,20 @@ def build_query(
     lat: float,
     lng: float,
     radius_m: int,
-    max_age_days: int,
+    max_age_days: int | None,
     category_main: str | None,
     category_type: str | None,
 ) -> tuple[str, dict[str, Any]]:
     """Render the SQL and parameter dict for the given inputs.
 
     Exposed so tests can assert on shape without a DB connection.
+    max_age_days=None drops the freshness gate; `active` becomes
+    "is_active=true" with no last_seen_at bound.
     """
     params: dict[str, Any] = {
         "lat": lat,
         "lng": lng,
         "radius_m": radius_m,
-        "max_age_days": max_age_days,
     }
     cat_clauses: list[str] = []
     if category_main is not None:
@@ -49,6 +50,12 @@ def build_query(
         cat_clauses.append("AND l.category_type = %(category_type)s")
         params["category_type"] = category_type
     cat_sql = "\n    ".join(cat_clauses)
+
+    if max_age_days is not None:
+        age_clause = "AND last_seen_at > now() - make_interval(days => %(max_age_days)s)"
+        params["max_age_days"] = max_age_days
+    else:
+        age_clause = ""
 
     sql = f"""
 WITH base AS (
@@ -73,7 +80,7 @@ WITH base AS (
 active AS (
   SELECT * FROM base
   WHERE is_active = true
-    AND last_seen_at > now() - make_interval(days => %(max_age_days)s)
+    {age_clause}
 ),
 disposition_mix AS (
   SELECT coalesce(disposition, 'unknown') AS k, count(*) AS n
@@ -152,7 +159,7 @@ def describe_neighborhood(
     lat: float,
     lng: float,
     radius_m: int = 1000,
-    max_age_days: int = 30,
+    max_age_days: int | None = None,
     category_main: str | None = "byt",
     category_type: str | None = "pronajem",
 ) -> dict[str, Any]:

@@ -1,7 +1,10 @@
-import { useState, type MouseEvent } from 'react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { CARD_PAGE_SIZE, type CardRow } from '@/lib/queries';
-import { fmtArea, fmtCzk, fmtPricePerM2 } from '@/lib/format';
+import {
+  fmtArea, fmtCzk, fmtPricePerM2,
+  fmtShortDate, fmtTomDays,
+} from '@/lib/format';
 
 interface Props {
   rows: CardRow[] | null;
@@ -168,14 +171,29 @@ function Card({
           </div>
         )}
 
-        {inactive && (
-          <span
-            className="absolute top-1 right-1 px-1.5 py-0.5 text-[0.6rem] tracking-[0.14em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-ochre-soft)] border border-[var(--color-ochre)]/30 text-[var(--color-ochre)] backdrop-blur-sm font-medium"
-            title="This listing is no longer active on sreality"
-          >
-            inactive
-          </span>
-        )}
+        {/* Metadata margin: four file-tab badges stacked down the
+          * right edge of the photo. Status leads (sage / brick), the
+          * two date badges sit muted in the middle, the copper TOM
+          * pill closes the run as the operator's headline metric.
+          * Borders-only, paper-3/85 + backdrop-blur over the photo. */}
+        <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
+          <CardBadge tone={inactive ? 'inactive' : 'active'}>
+            {inactive ? 'Neaktivní' : 'Aktivní'}
+          </CardBadge>
+          <CardBadge tone="muted" title="První záznam v archivu">
+            <span className="opacity-60 mr-1">od</span>
+            {fmtShortDate(r.first_seen_at)}
+          </CardBadge>
+          <CardBadge tone="muted" title="Naposled viděno na sreality">
+            <span className="opacity-60 mr-1">viděno</span>
+            {fmtShortDate(r.last_seen_at)}
+          </CardBadge>
+          {r.tom_days != null && (
+            <CardBadge tone="copper" title="Na trhu (turned in)">
+              {fmtTomDays(r.tom_days)}
+            </CardBadge>
+          )}
+        </div>
 
         {/* Carousel chrome — only when there's more than one photo.
           * Chevrons fade in on card hover so the photo dominates at
@@ -261,6 +279,59 @@ function Chevron({ dir }: { dir: 'left' | 'right' }) {
     >
       <path d={d} />
     </svg>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* CardBadge — the building block of the vertical metadata stack on the right */
+/* margin of a listing card. Four tones, all sit on a near-opaque paper-3     */
+/* base with a coloured border + text for semantic signal — the *-soft tokens */
+/* are rgba(_, 0.10) and wash out over a busy photo, so the border carries    */
+/* the colour and the paper layer keeps the badge legible.                    */
+/*                                                                            */
+/*   active   — sage border + text (semantic "live")                          */
+/*   inactive — brick border + text (semantic "delisted")                     */
+/*   muted    — rule border + ink-2 text — for the date badges                */
+/*   copper   — the operator's headline TOM pill, accent token                */
+/*                                                                            */
+/* All four use the same 0.6rem uppercase tracking treatment as the original  */
+/* INACTIVE pill so the file-tab silhouette stays consistent across cards.    */
+/* -------------------------------------------------------------------------- */
+
+type CardBadgeTone = 'active' | 'inactive' | 'muted' | 'copper';
+
+const CARD_BADGE_TONE: Record<CardBadgeTone, string> = {
+  active:
+    'bg-[var(--color-paper-3)]/90 border-[var(--color-sage)]/70 text-[var(--color-sage)]',
+  inactive:
+    'bg-[var(--color-paper-3)]/90 border-[var(--color-brick)]/70 text-[var(--color-brick)]',
+  muted:
+    'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-2)]',
+  copper:
+    'bg-[var(--color-paper-3)]/90 border-[var(--color-copper)]/70 text-[var(--color-copper)]',
+};
+
+function CardBadge({
+  tone,
+  children,
+  title,
+}: {
+  tone: CardBadgeTone;
+  children: ReactNode;
+  title?: string;
+}) {
+  return (
+    <span
+      title={title}
+      className={[
+        'inline-flex items-center px-1.5 py-0.5 text-[0.6rem] tracking-[0.12em]',
+        'uppercase rounded-[var(--radius-xs)] border backdrop-blur-sm font-medium',
+        'tabular-nums whitespace-nowrap',
+        CARD_BADGE_TONE[tone],
+      ].join(' ')}
+    >
+      {children}
+    </span>
   );
 }
 
