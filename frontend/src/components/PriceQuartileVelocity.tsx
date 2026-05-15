@@ -299,6 +299,14 @@ function BoxRow({
         stroke="var(--color-copper)"
         strokeWidth="1.5"
       />
+      <circle
+        cx={xOf(box.mean)}
+        cy={yMid}
+        r="3"
+        fill="var(--color-copper)"
+        stroke="var(--color-paper-2)"
+        strokeWidth="1.5"
+      />
 
       {hover && (
         <foreignObject
@@ -324,6 +332,7 @@ function BoxTooltip({ box }: { box: TomBox }) {
         <tbody>
           <Row label="max" v={box.max} />
           <Row label="p75" v={box.p75} />
+          <Row label="mean" v={box.mean} />
           <Row label="median" v={box.median} bold />
           <Row label="p25" v={box.p25} />
           <Row label="min" v={box.min} />
@@ -399,6 +408,7 @@ function NumericTable({ rows }: { rows: ReadonlyArray<PriceQuartileVelocityRow> 
             <Th>min</Th>
             <Th>p25</Th>
             <Th>median</Th>
+            <Th>mean</Th>
             <Th>p75</Th>
             <Th>max</Th>
           </tr>
@@ -418,11 +428,13 @@ function NumericTable({ rows }: { rows: ReadonlyArray<PriceQuartileVelocityRow> 
                   <Td>{fmtDays(r.tom_box.min)}</Td>
                   <Td>{fmtDays(r.tom_box.p25)}</Td>
                   <Td bold>{fmtDays(r.tom_box.median)}</Td>
+                  <Td>{fmtDays(r.tom_box.mean)}</Td>
                   <Td>{fmtDays(r.tom_box.p75)}</Td>
                   <Td>{fmtDays(r.tom_box.max)}</Td>
                 </>
               ) : (
                 <>
+                  <Td>—</Td>
                   <Td>—</Td>
                   <Td>—</Td>
                   <Td>—</Td>
