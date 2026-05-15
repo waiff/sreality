@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
@@ -20,5 +21,13 @@ export default defineConfig({
         },
       },
     },
+  },
+  test: {
+    // Pure-function tests today — no jsdom needed yet. Component
+    // tests will add `environment: 'jsdom'` and the testing-library
+    // setup in a follow-up batch.
+    environment: 'node',
+    setupFiles: ['./vitest.setup.ts'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
   },
 });
