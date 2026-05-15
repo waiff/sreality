@@ -649,6 +649,14 @@ export const fetchListingIdsWithAllTags = async (
   );
 };
 
+export const watchdogKeys = {
+  all: ['watchdog'] as const,
+  subscriptions: ['watchdog', 'subscriptions'] as const,
+  subscription: (id: string) => ['watchdog', 'subscriptions', id] as const,
+  dispatches: (params: Record<string, unknown>) =>
+    ['watchdog', 'dispatches', params] as const,
+};
+
 export const curationKeys = {
   collections: ['curation', 'collections'] as const,
   collection: (id: number) => ['curation', 'collection', id] as const,
