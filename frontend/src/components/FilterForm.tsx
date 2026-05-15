@@ -47,6 +47,15 @@ import {
 
 export type FilterState = Record<string, unknown>;
 
+export interface CustomFilterWidgetProps {
+  value: unknown;
+  onChange: (next: unknown) => void;
+}
+
+export type CustomFilterWidget = (
+  props: CustomFilterWidgetProps,
+) => React.ReactElement | null;
+
 interface FilterFormProps {
   scope: Agenda;
   state: FilterState;
@@ -59,9 +68,24 @@ interface FilterFormProps {
    *  for now, only when the host page renders its own widget for that
    *  filter (e.g. Watchdog's spatial-center inputs). */
   exclude?: ReadonlyArray<string>;
+  /** When set, render *only* the listed filter ids (after agenda /
+   *  visibility filtering). Lets a host page slice the registry into
+   *  its existing section layout. Min/max pairing still applies — pass
+   *  either side of a pair and the matching sibling is auto-included. */
+  includeOnly?: ReadonlyArray<string>;
   /** Override widget labels. Keyed by filter id; falls back to a
    *  prettified id. */
   labels?: Record<string, string>;
+  /** When true, render filters as a flat row list without the
+   *  per-category `<ControlGroup>` wrappers. Useful when the host page
+   *  already provides its own group container. */
+  flat?: boolean;
+  /** Per-filter widget overrides. Keyed by registry filter id.
+   *  When provided, the dispatcher renders the custom widget inside
+   *  the standard `<Section label={...}>` wrapper instead of the
+   *  built-in primitive. Use for rich widgets the controls library
+   *  can't generically express (district typeahead, tag picker, …). */
+  customWidgets?: Record<string, CustomFilterWidget>;
 }
 
 export function FilterForm({
@@ -70,14 +94,17 @@ export function FilterForm({
   onChange,
   visibility,
   exclude,
+  includeOnly,
   labels,
+  flat,
+  customWidgets,
 }: FilterFormProps) {
   const excludeSet = new Set(exclude ?? []);
   const visibilityById = new Map(
     (visibility ?? []).map((v) => [v.id, v.visibility]),
   );
 
-  const visibleFilters = FILTER_REGISTRY.filters.filter((f) => {
+  let visibleFilters = FILTER_REGISTRY.filters.filter((f) => {
     if (!f.agendas.includes(scope)) return false;
     if (excludeSet.has(f.id)) return false;
     if (visibilityById.size > 0) {
@@ -87,9 +114,22 @@ export function FilterForm({
     return true;
   });
 
+  if (includeOnly) {
+    // Auto-include the matching sibling of any min/max-style id in the
+    // includeOnly set so paired rows render correctly even when the
+    // caller only listed one half.
+    const expanded = new Set(includeOnly);
+    for (const id of includeOnly) {
+      const allIds = new Set(visibleFilters.map((f) => f.id));
+      const sibling = findMaxSibling(id, allIds) ?? findMinSibling(id, allIds);
+      if (sibling) expanded.add(sibling);
+    }
+    visibleFilters = visibleFilters.filter((f) => expanded.has(f.id));
+  }
+
   // Pair min/max sibling filters so the form renders one paired
-  // RangeInputs row per pair rather than two separate single-number
-  // rows. See `findMaxSibling` for the matching rules.
+  // RangeInputs / RangeSlider row per pair rather than two separate
+  // single-number rows. See `findMaxSibling` for the matching rules.
   const visibleIds = new Set(visibleFilters.map((f) => f.id));
   const pairedAsMin = new Map<string, FilterDef>();   // min id → max def
   const skipAsMax = new Set<string>();
@@ -102,6 +142,52 @@ export function FilterForm({
         skipAsMax.add(sibling);
       }
     }
+  }
+
+  const renderRow = (f: FilterDef) => {
+    const maxDef = pairedAsMin.get(f.id);
+    const custom = customWidgets?.[f.id];
+    if (custom) {
+      // Render the operator-supplied widget inside the standard
+      // Section wrapper so it carries the same label spacing as the
+      // built-in rows.
+      const label = labels?.[f.id] ?? prettifyId(f.id);
+      return (
+        <Section key={f.id} label={label}>
+          {custom({
+            value: state[f.id],
+            onChange: (v) => onChange(f.id, v),
+          })}
+        </Section>
+      );
+    }
+    return (
+      <FilterRow
+        key={f.id}
+        def={f}
+        maxDef={maxDef ?? null}
+        value={state[f.id]}
+        maxValue={maxDef ? state[maxDef.id] : undefined}
+        onChange={(v) => onChange(f.id, v)}
+        onChangeMax={
+          maxDef ? (v) => onChange(maxDef.id, v) : undefined
+        }
+        label={labels?.[f.id] ?? prettifyPair(f.id, maxDef?.id)}
+      />
+    );
+  };
+
+  if (flat) {
+    // Preserve registry declaration order so paired rows land next to
+    // their host group; the caller's wrapping `<ControlGroup>` provides
+    // the visual heading.
+    return (
+      <>
+        {visibleFilters
+          .filter((f) => !skipAsMax.has(f.id))
+          .map(renderRow)}
+      </>
+    );
   }
 
   const byCategory = new Map<string, FilterDef[]>();
@@ -118,27 +204,31 @@ export function FilterForm({
         .filter((c) => byCategory.has(c))
         .map((category) => (
           <ControlGroup key={category} title={category}>
-            {byCategory.get(category)!.map((f) => {
-              const maxDef = pairedAsMin.get(f.id);
-              return (
-                <FilterRow
-                  key={f.id}
-                  def={f}
-                  maxDef={maxDef ?? null}
-                  value={state[f.id]}
-                  maxValue={maxDef ? state[maxDef.id] : undefined}
-                  onChange={(v) => onChange(f.id, v)}
-                  onChangeMax={
-                    maxDef ? (v) => onChange(maxDef.id, v) : undefined
-                  }
-                  label={labels?.[f.id] ?? prettifyPair(f.id, maxDef?.id)}
-                />
-              );
-            })}
+            {byCategory.get(category)!.map(renderRow)}
           </ControlGroup>
         ))}
     </div>
   );
+}
+
+/** Inverse of `findMaxSibling`: given a max-side id, return the min
+ *  counterpart if present. Used so `includeOnly: ['max_price_czk']`
+ *  still renders the paired row. */
+function findMinSibling(id: string, present: Set<string>): string | null {
+  if (id.startsWith('max_')) {
+    const candidate = 'min_' + id.slice(4);
+    return present.has(candidate) ? candidate : null;
+  }
+  if (id.endsWith('_max')) {
+    const candidate = id.slice(0, -4) + '_min';
+    return present.has(candidate) ? candidate : null;
+  }
+  const middle = id.match(/^(.+)_max_(.+)$/);
+  if (middle) {
+    const candidate = `${middle[1]}_min_${middle[2]}`;
+    return present.has(candidate) ? candidate : null;
+  }
+  return null;
 }
 
 /** Given a filter id, return the id of its companion max-side, if any.

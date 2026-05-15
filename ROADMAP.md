@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 11:17 UTC_
+_Last refreshed: 2026-05-15 11:35 UTC_
 
-**Branch:** `claude/async-estimation-submission-LdiGj`
+**Branch:** `claude/reusable-filters-component-oRhvq`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 64 files, latest `062_browse_stats_tom_mean.sql`.
+**Migrations on disk:** 65 files, latest `063_browse_stats_price_band_velocity.sql`.
 
 **Last 10 commits:**
 
 ```
+5227e12 browse: centre+radius spatial mode with circle overlay on the map
+be80a64 Merge pull request #108 from waiff/claude/reusable-filters-component-oRhvq
+69a2467 filters: DistrictTypeahead + TagPicker primitives, Browse fully on FilterForm
+16ab6d0 Merge pull request #107 from waiff/claude/price-band-velocity
+392ed9b Merge pull request #106 from waiff/claude/reusable-filters-component-oRhvq
+ebd8bfe stats: replace 4-quartile turnover with 7-band percentile split
+b5a8212 filters: Browse sidebar adopts <FilterForm>
 40ead53 Merge pull request #105 from waiff/claude/reusable-filters-component-oRhvq
 9810855 filters: FilterForm pairs middle-positioned min/max ids too
 e775b8c filters: dual-thumb RangeSlider primitive + bounds in registry
-100c0f1 Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
-2f548ba Merge pull request #104 from waiff/claude/quartile-velocity-mean
-041d2c9 stats: surface mean alongside median in quartile turnover
-062d79c filters: map-driven LocationControl + Watchdog spatial-centre adoption
-23a7ae3 Merge pull request #103 from waiff/claude/reusable-filters-component-oRhvq
-4e8a5ba Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
-dd2bf21 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -632,6 +632,20 @@ End-to-end browser flow over the U1b backend.
   Frontend renders the mean as a copper dot on the box plot and a new
   MEAN column in the numeric table; the caption now names the
   integer-flooring caveat explicitly.
+- Migration 063 replaces the four-equal-bucket
+  `price_quartile_velocity` with a seven-band percentile split
+  `price_band_velocity`: p0–p10, p10–p25, p25–p45, p45–p55, p55–p75,
+  p75–p90, p90–p100. Narrower bands at the tails and around the
+  median, wider through the body, so the chart surfaces tail-vs-body
+  differences that an equal-quartile split would mask. The new
+  payload also reports `pct_share` per band (actual share of priced
+  cohort, since ties at percentile cuts make bucket sizes drift from
+  their nominal 10/15/20/10/20/15/10). Active 2+kk byt/pronajem shows
+  the body bands clustered at mean ≈ 9.2d while the priciest decile
+  jumps to 10.5d. Frontend rewrite: `PriceQuartileVelocity` →
+  `PriceBandVelocity`, seven rows on the y-axis with percentile +
+  price-range + n + share labels; Card heading and caption updated
+  accordingly.
 
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the
