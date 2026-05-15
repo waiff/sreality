@@ -1,6 +1,11 @@
 import { useState, type MouseEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { CARD_PAGE_SIZE, type CardRow } from '@/lib/queries';
+import {
+  CARD_PAGE_SIZE,
+  sortToParam,
+  type CardRow,
+  type SortSpec,
+} from '@/lib/queries';
 import {
   fmtArea, fmtCzk, fmtPricePerM2,
   fmtShortDate, fmtTomDays,
@@ -10,6 +15,7 @@ interface Props {
   rows: CardRow[] | null;
   total: number | null;
   page: number;
+  sort: SortSpec;
   isLoading: boolean;
   hasFilters: boolean;
   /* Truthy whenever the operator has narrowed by map area. Drives the
@@ -22,6 +28,7 @@ interface Props {
   hoveredIds: ReadonlySet<number>;
   onHover: (ids: ReadonlyArray<number> | null) => void;
   onPage: (page: number) => void;
+  onSort: (next: SortSpec) => void;
   onClearFilters: () => void;
   onClearBounds: () => void;
 }
@@ -30,12 +37,14 @@ export default function ListingCards({
   rows,
   total,
   page,
+  sort,
   isLoading,
   hasFilters,
   hasBounds,
   hoveredIds,
   onHover,
   onPage,
+  onSort,
   onClearFilters,
   onClearBounds,
 }: Props) {
@@ -49,8 +58,8 @@ export default function ListingCards({
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      <div className="flex items-center justify-between px-1 pb-3 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-        <span>
+      <div className="flex items-center justify-between px-1 pb-3 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums gap-3">
+        <span className="min-w-0 truncate">
           {showSkeleton
             ? 'Loading…'
             : total == null
@@ -59,7 +68,10 @@ export default function ListingCards({
                 ? '0 listings'
                 : `${start.toLocaleString('cs-CZ')}–${end.toLocaleString('cs-CZ')} of ${total.toLocaleString('cs-CZ')}`}
         </span>
-        <Pager page={page} totalPages={totalPages} onPage={onPage} />
+        <div className="flex items-center gap-2 shrink-0">
+          <SortDropdown sort={sort} onChange={onSort} />
+          <Pager page={page} totalPages={totalPages} onPage={onPage} />
+        </div>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto pr-1">
@@ -332,6 +344,58 @@ function CardBadge({
     >
       {children}
     </span>
+  );
+}
+
+/* Six headline sort orders for the cards lane. Two bookend the file
+ * by date (first_seen_at — when the listing entered our archive),
+ * two by price, two by price/m². The default keeps last_seen_at desc
+ * so the dropdown's "selected" option matches the URL on a fresh
+ * load even though that order isn't in the menu — operators land on
+ * "newest in archive" mentally and the existing default already
+ * approximates that. */
+const SORT_PRESETS: ReadonlyArray<{ label: string; spec: SortSpec }> = [
+  { label: 'Newest first',      spec: { field: 'first_seen_at', direction: 'desc' } },
+  { label: 'Oldest first',      spec: { field: 'first_seen_at', direction: 'asc'  } },
+  { label: 'Price: low → high', spec: { field: 'price_czk',     direction: 'asc'  } },
+  { label: 'Price: high → low', spec: { field: 'price_czk',     direction: 'desc' } },
+  { label: 'Price/m²: low → high', spec: { field: 'price_per_m2', direction: 'asc'  } },
+  { label: 'Price/m²: high → low', spec: { field: 'price_per_m2', direction: 'desc' } },
+];
+
+function SortDropdown({
+  sort,
+  onChange,
+}: {
+  sort: SortSpec;
+  onChange: (next: SortSpec) => void;
+}) {
+  const current = sortToParam(sort);
+  return (
+    <label className="inline-flex items-center gap-1.5">
+      <span className="text-[0.65rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)]">
+        Sort
+      </span>
+      <select
+        value={current}
+        onChange={(e) => {
+          const picked = SORT_PRESETS.find(
+            (p) => sortToParam(p.spec) === e.target.value,
+          );
+          if (picked) onChange(picked.spec);
+        }}
+        className="px-2 py-1 text-[0.7rem] rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] focus:outline-none focus:border-[var(--color-rule-strong)] transition-colors"
+      >
+        {!SORT_PRESETS.some((p) => sortToParam(p.spec) === current) && (
+          <option value={current}>Default</option>
+        )}
+        {SORT_PRESETS.map((p) => (
+          <option key={sortToParam(p.spec)} value={sortToParam(p.spec)}>
+            {p.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

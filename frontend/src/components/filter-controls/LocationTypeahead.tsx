@@ -42,9 +42,17 @@ const MIN_QUERY_LEN = 2;
 export function LocationTypeahead({
   value,
   onChange,
+  onPick,
 }: {
   value: ReadonlyArray<string> | null;
   onChange: (next: string[] | null) => void;
+  /* Fires once per picked suggestion. The Browse map listens for this
+   * to fly the viewport to the picked place — independent of the chip
+   * filter (which may or may not narrow the cohort, depending on
+   * whether the suggestion's `name` matches a real listings.district
+   * value). Picks without a `position` are still emitted; the
+   * receiver should no-op when `position` is missing. */
+  onPick?: (s: MapySuggestion) => void;
 }) {
   const selected = useMemo(() => value ?? [], [value]);
 
@@ -88,6 +96,7 @@ export function LocationTypeahead({
     onChange(next.length === 0 ? null : next);
 
   const add = (s: MapySuggestion) => {
+    onPick?.(s);
     if (selected.includes(s.name)) return;
     emit([...selected, s.name]);
     setQuery('');

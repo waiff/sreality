@@ -6,6 +6,8 @@ import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
+import type { MapFlyToCommand } from '@/components/ListingMap';
+import type { MapySuggestion } from '@/lib/maps';
 import {
   fromSearchParams,
   toSearchParams,
@@ -66,16 +68,22 @@ export default function Browse() {
     setSearchParams(sp, { replace: true });
   };
 
-  const setSort = (field: SortField) => {
-    const next: SortSpec =
-      sort.field === field
-        ? { field, direction: sort.direction === 'asc' ? 'desc' : 'asc' }
-        : { field, direction: defaultDirectionFor(field) };
+  const writeSort = (next: SortSpec) => {
     const sp = new URLSearchParams(searchParams);
     sp.delete('page');
     if (sortToParam(next) === sortToParam(DEFAULT_SORT)) sp.delete('sort');
     else sp.set('sort', sortToParam(next));
     setSearchParams(sp, { replace: false });
+  };
+
+  // Table column-header click: toggles direction on the same field,
+  // or jumps to a fresh field with its preferred default direction.
+  const setSortByField = (field: SortField) => {
+    const next: SortSpec =
+      sort.field === field
+        ? { field, direction: sort.direction === 'asc' ? 'desc' : 'asc' }
+        : { field, direction: defaultDirectionFor(field) };
+    writeSort(next);
   };
 
   const setPage = (next: number) => {
@@ -84,6 +92,21 @@ export default function Browse() {
     else sp.set('page', String(next));
     setSearchParams(sp, { replace: false });
   };
+
+  /* Map flyTo command. Set when the operator picks a place in the
+   * District typeahead; ListingMap watches this prop and animates to
+   * the new centre. The `ts` field guarantees identity changes on
+   * each pick so re-picking the same place still triggers a flyTo. */
+  const [mapFlyTo, setMapFlyTo] = useState<MapFlyToCommand | null>(null);
+  const handleLocationPick = useCallback((s: MapySuggestion) => {
+    if (!s.position) return;
+    setMapFlyTo({
+      lat: s.position.lat,
+      lng: s.position.lon,
+      zoom: zoomForSuggestionType(s.type),
+      ts: Date.now(),
+    });
+  }, []);
 
   /* Hover-sync between cards / table / map. The set is ephemeral —
    * lives only in component state, never in the URL. Hovering a single
@@ -141,8 +164,8 @@ export default function Browse() {
   });
 
   const cardsQuery = useQuery<CardsResult, Error>({
-    queryKey: ['cards', filters, page],
-    queryFn: () => fetchListingsForCards(filters, page),
+    queryKey: ['cards', filters, sort, page],
+    queryFn: () => fetchListingsForCards(filters, sort, page),
     placeholderData: (prev) => prev,
     enabled: tabFromUrl === 'map',
   });
@@ -182,7 +205,11 @@ export default function Browse() {
 
   return (
     <div className="flex">
-      <FilterSidebar filters={filters} onChange={setFilters} />
+      <FilterSidebar
+        filters={filters}
+        onChange={setFilters}
+        onLocationPick={handleLocationPick}
+      />
 
       <div className="flex-1 min-w-0 flex flex-col">
         <div className="px-6 pt-5">
@@ -213,12 +240,14 @@ export default function Browse() {
                 rows={cardsQuery.data?.rows ?? null}
                 total={cardsQuery.data?.total ?? null}
                 page={page}
+                sort={sort}
                 isLoading={cardsQuery.isLoading}
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
                 hoveredIds={hoveredIds}
                 onHover={setHovered}
                 onPage={setPage}
+                onSort={writeSort}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
                 onClearBounds={() => setBounds(null)}
               />
@@ -238,6 +267,7 @@ export default function Browse() {
                         ? filters.centerRadius
                         : null
                     }
+                    flyTo={mapFlyTo}
                   />
                 </Suspense>
               </div>
@@ -257,7 +287,7 @@ export default function Browse() {
                 hasFilters={!isDefault(filters)}
                 hoveredIds={hoveredIds}
                 onHover={setHovered}
-                onSort={setSort}
+                onSort={setSortByField}
                 onPage={setPage}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
               />
@@ -282,8 +312,29 @@ export default function Browse() {
   );
 }
 
+/* Picks a sensible zoom level for a Mapy.cz suggestion. Country /
+ * region suggestions zoom out far; address / POI picks zoom into the
+ * specific block. The exact numbers were eyeballed against Prague and
+ * Brno test picks — close enough to the right scale that the operator
+ * doesn't have to immediately reach for the zoom controls. */
+function zoomForSuggestionType(type: string): number {
+  if (type.startsWith('regional.address')) return 16;
+  if (type === 'regional.street') return 16;
+  if (type === 'poi') return 16;
+  if (type === 'regional.municipality_part') return 13;
+  if (type === 'regional.municipality') return 11;
+  if (type === 'regional.region') return 8;
+  if (type === 'regional.country') return 6;
+  return 13;
+}
+
 function defaultDirectionFor(field: SortField): 'asc' | 'desc' {
-  if (field === 'price_czk' || field === 'area_m2' || field === 'last_seen_at') return 'desc';
+  if (
+    field === 'price_czk' ||
+    field === 'area_m2' ||
+    field === 'last_seen_at' ||
+    field === 'first_seen_at'
+  ) return 'desc';
   return 'asc';
 }
 

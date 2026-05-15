@@ -65,8 +65,8 @@ const CARD_COLS =
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
-  | 'area_m2' | 'price_czk'
-  | 'last_seen_at' | 'is_active'
+  | 'area_m2' | 'price_czk' | 'price_per_m2'
+  | 'first_seen_at' | 'last_seen_at' | 'is_active'
   | 'estate_area' | 'usable_area' | 'parking_lots';
 
 export type SortDirection = 'asc' | 'desc';
@@ -80,8 +80,8 @@ export const DEFAULT_SORT: SortSpec = { field: 'last_seen_at', direction: 'desc'
 
 const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
   'sreality_id', 'district', 'disposition',
-  'area_m2', 'price_czk',
-  'last_seen_at', 'is_active',
+  'area_m2', 'price_czk', 'price_per_m2',
+  'first_seen_at', 'last_seen_at', 'is_active',
   'estate_area', 'usable_area', 'parking_lots',
 ];
 
@@ -314,6 +314,7 @@ const pickImageUrl = (img: {
 
 export const fetchListingsForCards = async (
   f: ListingFilters,
+  sort: SortSpec,
   page: number,
 ): Promise<CardsResult> => {
   const tagIds = await resolveTagPrefilter(f);
@@ -327,7 +328,10 @@ export const fetchListingsForCards = async (
     .select(CARD_COLS, { count: 'exact' });
   const filtered = applyFilters(base, f);
   const scoped = tagIds != null ? filtered.in('sreality_id', tagIds) : filtered;
-  const sorted = scoped.order('last_seen_at', { ascending: false, nullsFirst: false });
+  const sorted = scoped.order(sort.field, {
+    ascending: sort.direction === 'asc',
+    nullsFirst: false,
+  });
   const { data, count, error } = await sorted.range(from, to);
   if (error) throw error;
   const baseRows = (data ?? []) as unknown as Omit<CardRow, 'image_urls'>[];
