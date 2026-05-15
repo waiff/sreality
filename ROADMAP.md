@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 22:12 UTC_
+_Last refreshed: 2026-05-15 22:21 UTC_
 
 **Branch:** `claude/prefill-listing-price-h7erp`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-15 22:12 UTC_
 **Last 10 commits:**
 
 ```
+a7a3fb4 roadmap: refresh auto-status block
 b7973a8 estimation detail: persist sreality subject + richer header + saved yield inputs
 bb64371 Merge pull request #124 from waiff/claude/browse-sorting-map-center-Sibz6
 bbf458b Merge origin/main: renumber listings_public_ppm2 → 066
@@ -25,7 +26,6 @@ d01ca53 Merge pull request #123 from waiff/claude/aggregate-commit-step-guard
 701fa11 watchdog: fix stale migration-number references after renumber to 065
 1ef2931 Merge remote-tracking branch 'origin/main' into claude/watchdog-per-subscription-cursor
 47de6cf Merge origin/main into claude/browse-sorting-map-center-Sibz6
-74dacd1 aggregate workflow: skip commit step when no output file exists
 ```
 
 <!-- END AUTO-STATUS -->
