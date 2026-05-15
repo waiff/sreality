@@ -40,6 +40,7 @@ import {
 import {
   MultiselectChips,
   RangeInputs,
+  RangeSlider,
   SingleSelectDropdown,
   type EnumOptionLite,
 } from '@/components/filter-controls';
@@ -183,11 +184,46 @@ function FilterRow({
   onChangeMax?: (v: unknown) => void;
   label: string;
 }) {
-  // When paired with a max-side, render the pair as a RangeInputs row
-  // regardless of the registry's ui_control (range_inputs and
-  // range_slider both collapse onto the paired RangeInputs widget for
-  // now; the dual-thumb slider lands in PR 4).
+  // When paired with a max-side, render the pair as either:
+  //   - a dual-thumb RangeSlider when the registry's constraints
+  //     declare a complete min + max + step bounds set (typical for
+  //     bounded filters like price / area / estate_area), or
+  //   - paired RangeInputs (open-ended) when bounds aren't complete.
+  //
+  // The registry's `ui_control` choice is a preference, not a hard
+  // override — adding bounds to a `range_inputs` entry auto-upgrades
+  // its UI to a slider without touching this dispatcher. That matches
+  // the Browse sidebar's existing slider widget without forcing every
+  // surface to opt in by hand.
   if (maxDef && onChangeMax) {
+    const c = def.constraints ?? {};
+    const hasFullBounds =
+      typeof c.min === 'number' &&
+      typeof c.max === 'number' &&
+      typeof c.step === 'number';
+    if (hasFullBounds) {
+      return (
+        <Section label={label}>
+          <RangeSlider
+            bounds={{
+              min: c.min as number,
+              max: c.max as number,
+              step: c.step as number,
+            }}
+            value={[
+              (value as number | null) ?? null,
+              (maxValue as number | null) ?? null,
+            ]}
+            onChange={([lo, hi]) => {
+              onChange(lo);
+              onChangeMax(hi);
+            }}
+            unit={def.unit ?? undefined}
+            ariaLabel={label}
+          />
+        </Section>
+      );
+    }
     return (
       <Section label={label}>
         <RangeInputs
