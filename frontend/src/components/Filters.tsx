@@ -10,8 +10,8 @@ import {
 import { ControlGroup, Section } from '@/components/controls';
 import { FilterForm } from '@/components/FilterForm';
 import {
-  DistrictTypeahead,
   LocationControl,
+  LocationTypeahead,
   TagPicker,
 } from '@/components/filter-controls';
 
@@ -41,7 +41,7 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
   // own their own data fetching; FilterForm just wires the value /
   // onChange through.
   const customWidgets = {
-    districts: DistrictTypeahead as never,
+    districts: LocationTypeahead as never,
     tags: TagPicker as never,
   };
 
