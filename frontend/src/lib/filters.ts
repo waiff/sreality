@@ -1,7 +1,6 @@
 import type { Disposition, Furnished, Ownership } from './types';
 
 export type TriState = 'any' | 'yes' | 'no';
-export type SeenWithin = '1d' | '7d' | '30d' | 'any';
 export type ListingStatus = 'active' | 'inactive' | 'any';
 
 /* The three category_main values surfaced as filters in the UI. The DB
@@ -12,6 +11,11 @@ export type CategoryMain = 'byt' | 'dum' | 'komercni';
 /* CHECK constraint on listings.category_type allows pronajem / prodej /
  * drazba / podil; only the first two are user-facing in Browse. */
 export type CategoryType = 'pronajem' | 'prodej';
+
+/* Building material buckets surfaced in the filter panel. Maps to
+ * one or more sreality building_type values via BUILDING_MATERIAL_VALUES
+ * below. */
+export type BuildingMaterial = 'cihla' | 'panel' | 'smisena' | 'ostatni';
 
 /* Map-viewport rectangle. west < east, south < north, all WGS84
  * degrees. Acts as an additional filter alongside the sidebar fields:
@@ -34,7 +38,20 @@ export interface ListingFilters {
   areaMin: number | null;
   areaMax: number | null;
   status: ListingStatus;
-  seenWithin: SeenWithin;
+  /* Days-ago range on last_seen_at. min = most recent allowed (so
+   * lastSeenMinDays=3 hides listings seen in the last 2 days);
+   * max = oldest allowed. Either end null = unbounded. Replaces the
+   * 1d/7d/30d/any preset. */
+  lastSeenMinDays: number | null;
+  lastSeenMaxDays: number | null;
+  /* Days-ago range on first_seen_at — same semantics. */
+  firstSeenMinDays: number | null;
+  firstSeenMaxDays: number | null;
+  /* Days on market (= last_seen_at - first_seen_at, or now() -
+   * first_seen_at for active listings). Surfaced as tom_days on
+   * listings_public via migration 052. */
+  tomDaysMin: number | null;
+  tomDaysMax: number | null;
   hasBalcony: TriState;
   hasLift: TriState;
   hasParking: TriState;
@@ -45,6 +62,7 @@ export interface ListingFilters {
   furnished: Furnished | null;
   ownership: Ownership | null;
   categorySubCb: number | null;
+  buildingMaterial: BuildingMaterial | null;
   estateAreaMin: number | null;
   estateAreaMax: number | null;
   usableAreaMin: number | null;
@@ -66,8 +84,13 @@ export const DEFAULT_FILTERS: ListingFilters = {
   priceMax: null,
   areaMin: null,
   areaMax: null,
-  status: 'active',
-  seenWithin: '7d',
+  status: 'any',
+  lastSeenMinDays: null,
+  lastSeenMaxDays: null,
+  firstSeenMinDays: null,
+  firstSeenMaxDays: null,
+  tomDaysMin: null,
+  tomDaysMax: null,
   hasBalcony: 'any',
   hasLift: 'any',
   hasParking: 'any',
@@ -77,6 +100,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   furnished: null,
   ownership: null,
   categorySubCb: null,
+  buildingMaterial: null,
   estateAreaMin: null,
   estateAreaMax: null,
   usableAreaMin: null,
@@ -92,19 +116,38 @@ export const USABLE_AREA_BOUNDS = { min: 0, max: 500, step: 5 };
 export const PRICE_BOUNDS = { min: 0, max: 100_000, step: 500 };
 export const AREA_BOUNDS = { min: 0, max: 300, step: 5 };
 
+/* The "Ostatní" bucket expands to every sreality building_type value
+ * that isn't in the explicit three. Listings with a NULL building_type
+ * fall out of any non-null selection — matching how furnished /
+ * ownership filters already behave. */
+export const BUILDING_MATERIAL_OTHER_VALUES = [
+  'skelet', 'drevo', 'kamen', 'montovana', 'nizkoenergeticka',
+] as const;
+
+export const buildingMaterialToValues = (
+  m: BuildingMaterial,
+): readonly string[] => {
+  if (m === 'cihla')   return ['cihla'];
+  if (m === 'panel')   return ['panel'];
+  if (m === 'smisena') return ['smisena'];
+  return BUILDING_MATERIAL_OTHER_VALUES;
+};
+
 const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
   '1+kk', '1+1', '2+kk', '2+1',
   '3+kk', '3+1', '4+kk', '4+1',
   '5+kk', '5+1',
 ];
 
-const SEEN_VALUES: ReadonlyArray<SeenWithin> = ['1d', '7d', '30d', 'any'];
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
 const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
 const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = ['byt', 'dum', 'komercni'];
 const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = ['pronajem', 'prodej'];
+const BUILDING_MATERIAL_VALUES: ReadonlyArray<BuildingMaterial> = [
+  'cihla', 'panel', 'smisena', 'ostatni',
+];
 
 const splitCsv = (s: string | null): string[] =>
   s == null || s === '' ? [] : s.split(',').map(decodeURIComponent);
@@ -150,7 +193,11 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const [areaMin, areaMax] = parseRange(sp.get('area'));
   const [estateMin, estateMax] = parseRange(sp.get('estate'));
   const [usableMin, usableMax] = parseRange(sp.get('usable'));
-  const legacyAny: ListingStatus = sp.get('active') === '0' ? 'any' : 'active';
+  const [lastMin, lastMax] = parseRange(sp.get('seen'));
+  const [firstMin, firstMax] = parseRange(sp.get('first'));
+  const [tomMin, tomMax] = parseRange(sp.get('tom'));
+  /* Legacy ?active=0 from pre-status-enum URLs. The newer ?status= wins. */
+  const legacyStatus: ListingStatus = sp.get('active') === '0' ? 'any' : 'any';
   return {
     categoryMain: enumOr(sp.get('cat'), CATEGORY_MAIN_VALUES, 'byt'),
     categoryType: enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
@@ -160,8 +207,13 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     priceMax,
     areaMin,
     areaMax,
-    status: enumOr(sp.get('status'), STATUS_VALUES, legacyAny),
-    seenWithin: enumOr(sp.get('since'), SEEN_VALUES, '7d'),
+    status: enumOr(sp.get('status'), STATUS_VALUES, legacyStatus),
+    lastSeenMinDays: lastMin,
+    lastSeenMaxDays: lastMax,
+    firstSeenMinDays: firstMin,
+    firstSeenMaxDays: firstMax,
+    tomDaysMin: tomMin,
+    tomDaysMax: tomMax,
     hasBalcony: enumOr(sp.get('balcony'), TRI_VALUES, 'any'),
     hasLift: enumOr(sp.get('lift'), TRI_VALUES, 'any'),
     hasParking: enumOr(sp.get('parking'), TRI_VALUES, 'any'),
@@ -171,6 +223,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     furnished: enumOrNull(sp.get('furnished'), FURNISHED_VALUES),
     ownership: enumOrNull(sp.get('ownership'), OWNERSHIP_VALUES),
     categorySubCb: parseIntOrNull(sp.get('subcat')),
+    buildingMaterial: enumOrNull(sp.get('build'), BUILDING_MATERIAL_VALUES),
     estateAreaMin: estateMin,
     estateAreaMax: estateMax,
     usableAreaMin: usableMin,
@@ -203,6 +256,9 @@ const parseIntList = (s: string | null): number[] => {
   return out;
 };
 
+const fmtRange = (lo: number | null, hi: number | null): string =>
+  `${lo ?? ''}-${hi ?? ''}`;
+
 export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   const sp = new URLSearchParams();
   if (f.categoryMain !== 'byt') sp.set('cat', f.categoryMain);
@@ -210,13 +266,21 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.districts.length) sp.set('districts', joinCsv(f.districts));
   if (f.dispositions.length) sp.set('disposition', f.dispositions.join(','));
   if (f.priceMin != null || f.priceMax != null) {
-    sp.set('price', `${f.priceMin ?? ''}-${f.priceMax ?? ''}`);
+    sp.set('price', fmtRange(f.priceMin, f.priceMax));
   }
   if (f.areaMin != null || f.areaMax != null) {
-    sp.set('area', `${f.areaMin ?? ''}-${f.areaMax ?? ''}`);
+    sp.set('area', fmtRange(f.areaMin, f.areaMax));
   }
-  if (f.status !== 'active') sp.set('status', f.status);
-  if (f.seenWithin !== '7d') sp.set('since', f.seenWithin);
+  if (f.status !== 'any') sp.set('status', f.status);
+  if (f.lastSeenMinDays != null || f.lastSeenMaxDays != null) {
+    sp.set('seen', fmtRange(f.lastSeenMinDays, f.lastSeenMaxDays));
+  }
+  if (f.firstSeenMinDays != null || f.firstSeenMaxDays != null) {
+    sp.set('first', fmtRange(f.firstSeenMinDays, f.firstSeenMaxDays));
+  }
+  if (f.tomDaysMin != null || f.tomDaysMax != null) {
+    sp.set('tom', fmtRange(f.tomDaysMin, f.tomDaysMax));
+  }
   if (f.hasBalcony !== 'any') sp.set('balcony', f.hasBalcony);
   if (f.hasLift !== 'any') sp.set('lift', f.hasLift);
   if (f.hasParking !== 'any') sp.set('parking', f.hasParking);
@@ -226,11 +290,12 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.furnished) sp.set('furnished', f.furnished);
   if (f.ownership) sp.set('ownership', f.ownership);
   if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
+  if (f.buildingMaterial) sp.set('build', f.buildingMaterial);
   if (f.estateAreaMin != null || f.estateAreaMax != null) {
-    sp.set('estate', `${f.estateAreaMin ?? ''}-${f.estateAreaMax ?? ''}`);
+    sp.set('estate', fmtRange(f.estateAreaMin, f.estateAreaMax));
   }
   if (f.usableAreaMin != null || f.usableAreaMax != null) {
-    sp.set('usable', `${f.usableAreaMin ?? ''}-${f.usableAreaMax ?? ''}`);
+    sp.set('usable', fmtRange(f.usableAreaMin, f.usableAreaMax));
   }
   if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
   if (f.tags.length) sp.set('tags', f.tags.join(','));
@@ -244,11 +309,10 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   return sp;
 };
 
-export const seenWithinToIso = (s: SeenWithin): string | null => {
-  if (s === 'any') return null;
-  const days = s === '1d' ? 1 : s === '7d' ? 7 : 30;
-  return new Date(Date.now() - days * 86_400_000).toISOString();
-};
+/* Convert a "days ago" integer to an ISO timestamp for PostgREST
+ * predicates. n=7 -> seven days ago. */
+export const isoNDaysAgo = (days: number): string =>
+  new Date(Date.now() - days * 86_400_000).toISOString();
 
 const CATEGORY_MAIN_PLURAL: Record<CategoryMain, string> = {
   byt: 'apartments',
@@ -264,6 +328,13 @@ const CATEGORY_TYPE_LABEL: Record<CategoryType, string> = {
 export const categoryHeading = (f: ListingFilters): string =>
   `${CATEGORY_MAIN_PLURAL[f.categoryMain]} ${CATEGORY_TYPE_LABEL[f.categoryType]}`;
 
+const fmtDaysRange = (lo: number | null, hi: number | null): string => {
+  if (lo == null && hi == null) return '';
+  if (lo != null && hi != null) return `${lo}–${hi} d`;
+  if (lo != null)               return `≥ ${lo} d`;
+  return `≤ ${hi} d`;
+};
+
 export const summarise = (f: ListingFilters, count: number | null): string => {
   const bits: string[] = [];
   bits.push(f.status === 'active' ? 'active' : f.status === 'inactive' ? 'inactive' : 'all');
@@ -277,10 +348,10 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
   if (f.dispositions.length) {
     bits.push(`(${f.dispositions.slice(0, 4).join(', ')}${f.dispositions.length > 4 ? '…' : ''})`);
   }
-  if (f.seenWithin !== 'any') {
-    const human = f.seenWithin === '1d' ? '24 h' : f.seenWithin === '7d' ? '7 days' : '30 days';
-    bits.push(`seen within ${human}`);
-  }
+  const seenLabel = fmtDaysRange(f.lastSeenMinDays, f.lastSeenMaxDays);
+  if (seenLabel) bits.push(`last seen ${seenLabel}`);
+  const tomLabel = fmtDaysRange(f.tomDaysMin, f.tomDaysMax);
+  if (tomLabel) bits.push(`TOM ${tomLabel}`);
   if (f.bounds) bits.push('in this map area');
   return `Showing ${bits.join(' ')}`;
 };
@@ -294,8 +365,13 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.priceMax == null &&
   f.areaMin == null &&
   f.areaMax == null &&
-  f.status === 'active' &&
-  f.seenWithin === '7d' &&
+  f.status === 'any' &&
+  f.lastSeenMinDays == null &&
+  f.lastSeenMaxDays == null &&
+  f.firstSeenMinDays == null &&
+  f.firstSeenMaxDays == null &&
+  f.tomDaysMin == null &&
+  f.tomDaysMax == null &&
   f.hasBalcony === 'any' &&
   f.hasLift === 'any' &&
   f.hasParking === 'any' &&
@@ -305,6 +381,7 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.furnished == null &&
   f.ownership == null &&
   f.categorySubCb == null &&
+  f.buildingMaterial == null &&
   f.estateAreaMin == null &&
   f.estateAreaMax == null &&
   f.usableAreaMin == null &&

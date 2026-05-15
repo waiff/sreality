@@ -52,6 +52,10 @@ export interface ListingPublic {
   garage: boolean | null;
   parking_lots: number | null;
   ownership: Ownership | null;
+  /* Migration 052 — "turned in" (TOM) in whole days. now() -
+   * first_seen_at for active listings (right-censored, growing);
+   * last_seen_at - first_seen_at for delisted. */
+  tom_days: number | null;
 }
 
 export interface ListingSnapshotPublic {

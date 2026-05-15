@@ -27,8 +27,10 @@ class FindComparablesIn(BaseModel):
     radius_m: int = 1000
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
-    max_age_days: int = 7
-    active_only: bool = True
+    # No implicit freshness gate. Pass max_age_days / active_only
+    # explicitly when you want only fresh active listings.
+    max_age_days: int | None = None
+    active_only: bool = False
     floor_band: int | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
@@ -54,6 +56,12 @@ class FindComparablesIn(BaseModel):
     min_usable_area: float | None = None
     max_usable_area: float | None = None
     min_parking_lots: int | None = None
+    tom_days_min: int | None = None
+    tom_days_max: int | None = None
+    last_seen_min_days: int | None = None
+    last_seen_max_days: int | None = None
+    first_seen_min_days: int | None = None
+    first_seen_max_days: int | None = None
 
 
 class AnalyzeDistributionIn(BaseModel):
@@ -97,7 +105,8 @@ class DescribeNeighborhoodIn(BaseModel):
     lat: float
     lng: float
     radius_m: int = 1000
-    max_age_days: int = 30
+    # No implicit freshness gate; pass explicitly when needed.
+    max_age_days: int | None = None
     category_main: str | None = "byt"
     category_type: str | None = "pronajem"
 
@@ -139,6 +148,12 @@ class ComputeMarketVelocityIn(BaseModel):
     min_usable_area: float | None = None
     max_usable_area: float | None = None
     min_parking_lots: int | None = None
+    tom_days_min: int | None = None
+    tom_days_max: int | None = None
+    last_seen_min_days: int | None = None
+    last_seen_max_days: int | None = None
+    first_seen_min_days: int | None = None
+    first_seen_max_days: int | None = None
     population: Literal["active", "delisted", "all"] = "all"
     trend_split_days: int = 7
 
@@ -287,6 +302,12 @@ class CreateEstimationIn(BaseModel):
     min_usable_area: float | None = None
     max_usable_area: float | None = None
     min_parking_lots: int | None = None
+    tom_days_min: int | None = None
+    tom_days_max: int | None = None
+    last_seen_min_days: int | None = None
+    last_seen_max_days: int | None = None
+    first_seen_min_days: int | None = None
+    first_seen_max_days: int | None = None
 
     parent_run_id: int | None = None
     rerun_reason: str | None = None
@@ -333,7 +354,7 @@ class EstimateYieldIn(BaseModel):
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
     max_age_days: int | None = None
-    active_only: bool = True
+    active_only: bool = False
     floor_band: int | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
@@ -359,6 +380,12 @@ class EstimateYieldIn(BaseModel):
     min_usable_area: float | None = None
     max_usable_area: float | None = None
     min_parking_lots: int | None = None
+    tom_days_min: int | None = None
+    tom_days_max: int | None = None
+    last_seen_min_days: int | None = None
+    last_seen_max_days: int | None = None
+    first_seen_min_days: int | None = None
+    first_seen_max_days: int | None = None
 
     @model_validator(mode="after")
     def _apply_kind_defaults(self) -> "EstimateYieldIn":
@@ -366,8 +393,8 @@ class EstimateYieldIn(BaseModel):
             self.category_type = (
                 "pronajem" if self.estimate_kind == "rent" else "prodej"
             )
-        if self.max_age_days is None:
-            self.max_age_days = 7 if self.estimate_kind == "rent" else 30
+        # No implicit freshness gate. Callers that want only fresh active
+        # listings now pass max_age_days / active_only explicitly.
         return self
 
 

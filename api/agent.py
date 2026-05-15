@@ -1128,7 +1128,9 @@ def _handle_describe_neighborhood(
         lat=state.target.lat,
         lng=state.target.lng,
         radius_m=int(args.get("radius_m", state.base_filters.radius_m)),
-        max_age_days=int(args.get("max_age_days", 30)),
+        max_age_days=(
+            int(args["max_age_days"]) if "max_age_days" in args else None
+        ),
         category_main=state.base_filters.category_main,
         category_type=state.base_filters.category_type,
     )

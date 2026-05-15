@@ -3,10 +3,13 @@ import type { ChangeEvent, ReactNode } from 'react';
 export type TriValue = 'any' | 'yes' | 'no';
 
 /* -------------------------------------------------------------------------- */
-/* ControlGroup — a titled group of sections. Display-font small-caps         */
-/* legend sits above a heavier top rule so groups read louder than the        */
-/* Section labels nested inside them. First group in a container drops the    */
-/* top edge so it doesn't double up with the host's own border.               */
+/* ControlGroup — a titled group of sections. Display-font heading (~12.5px)  */
+/* sits clearly above the small-caps Section labels nested inside it. The     */
+/* visual gap between group title (heavier, larger, ink-primary) and section  */
+/* label (smaller, lighter tracking, ink-tertiary) is what makes the panel    */
+/* read as a hierarchy rather than a flat list.                               */
+/* First group in a container drops the top edge so it doesn't double up      */
+/* with the host's own border.                                                */
 /* -------------------------------------------------------------------------- */
 
 export function ControlGroup({
@@ -22,37 +25,39 @@ export function ControlGroup({
     <fieldset
       className={[
         'm-0 p-0 border-0 first:border-t-0 first:pt-0',
-        'pt-6 border-t border-[var(--color-rule-strong)]',
+        'pt-7 border-t border-[var(--color-rule-strong)]',
         className,
       ].join(' ')}
     >
       <legend
-        className="block w-full mb-5 text-[0.65rem] tracking-[0.22em] uppercase text-[var(--color-ink-2)] font-medium"
+        className="block w-full mb-4 text-[0.82rem] tracking-[0.04em] uppercase text-[var(--color-ink)] font-semibold"
         style={{ fontFamily: 'var(--font-display)' }}
       >
         {title}
       </legend>
-      <div className="space-y-6">{children}</div>
+      <div className="space-y-5">{children}</div>
     </fieldset>
   );
 }
 
 /* -------------------------------------------------------------------------- */
 /* Section + Label scaffolding                                                */
+/* Labels are deliberately quieter than ControlGroup titles: smaller, wider   */
+/* tracking, ink-tertiary. They mark fields inside a group, never groups.    */
 /* -------------------------------------------------------------------------- */
 
 export function Section({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
       <Label>{label}</Label>
-      <div className="mt-2.5">{children}</div>
+      <div className="mt-2">{children}</div>
     </div>
   );
 }
 
 export function Label({ children }: { children: ReactNode }) {
   return (
-    <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+    <p className="text-[0.62rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
       {children}
     </p>
   );
