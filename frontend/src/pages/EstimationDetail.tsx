@@ -68,6 +68,10 @@ export default function EstimationDetail() {
     queryFn: () => fetchEstimation(id as number),
     enabled: id != null,
     staleTime: 60_000,
+    refetchInterval: (q) => {
+      const status = q.state.data?.status;
+      return status === 'pending' || status === 'running' ? 2000 : false;
+    },
   });
 
   const rerunMut = useMutation<EstimationRun, ApiError, RerunInput>({
@@ -106,6 +110,20 @@ export default function EstimationDetail() {
 
   const run = runQ.data!;
   const isFailed = run.status === 'failed';
+  const isInFlight = run.status === 'pending' || run.status === 'running';
+
+  if (isInFlight) {
+    return (
+      <Page>
+        <Crumb />
+        <Header run={run} />
+        <Hairline />
+        <InFlightBlock run={run} />
+        <Hairline />
+        <InputRecap run={run} />
+      </Page>
+    );
+  }
 
   return (
     <Page>
@@ -566,6 +584,35 @@ function FailedBlock({ run }: { run: EstimationRun }) {
       <pre className="mt-3 px-3 py-2.5 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-[var(--color-brick)] text-[0.8rem] font-mono whitespace-pre-wrap break-words">
         {run.error_message ?? 'Unknown error.'}
       </pre>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* In-flight (pending / running)                                              */
+/* -------------------------------------------------------------------------- */
+
+function InFlightBlock({ run }: { run: EstimationRun }) {
+  const label =
+    run.status === 'pending' ? 'Queued' : 'Estimating';
+  return (
+    <div className="flex items-start gap-3">
+      <span
+        aria-hidden
+        className="mt-1.5 inline-block h-2 w-2 rounded-full bg-[var(--color-copper)] animate-pulse"
+      />
+      <div>
+        <SectionLabel>{label}</SectionLabel>
+        <p className="mt-2 text-[0.95rem] text-[var(--color-ink)]">
+          {run.mode === 'agent'
+            ? 'The agent is working through comparables and refining its estimate.'
+            : 'Pulling comparables and computing the rent distribution.'}
+        </p>
+        <p className="mt-2 text-[0.8rem] text-[var(--color-ink-3)]">
+          You can navigate away — this page auto-updates when the run
+          completes. Started {fmtRelative(run.created_at)}.
+        </p>
+      </div>
     </div>
   );
 }

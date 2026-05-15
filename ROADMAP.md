@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 10:27 UTC_
+_Last refreshed: 2026-05-15 11:17 UTC_
 
-**Branch:** `claude/reusable-filters-component-oRhvq`
+**Branch:** `claude/async-estimation-submission-LdiGj`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 62 files, latest `060_browse_stats_complete_filters.sql`.
+**Migrations on disk:** 64 files, latest `062_browse_stats_tom_mean.sql`.
 
 **Last 10 commits:**
 
 ```
-52bb229 filters: shared <FilterForm> + Watchdog adoption (PR 3/4)
-54c0562 roadmap: refresh auto-status block
-59a4c97 settings: agenda × filter visibility matrix
-3ca0df2 roadmap: refresh auto-status block
-7417991 roadmap: refresh auto-status block
-35e7e0a watchdog: expose building material / garden area / tags in the form
-bc6167e filters: backend parity for Watchdog + browse_stats (PR 2/4)
-0a9a9a5 filters: add canonical registry + visibility matrix + codegen (PR 1/4)
-3ffa36f Merge pull request #98 from waiff/claude/plan-notifications-watchdog-WtDbc
-ce1b593 Merge remote-tracking branch 'origin/main' into claude/plan-notifications-watchdog-WtDbc
+40ead53 Merge pull request #105 from waiff/claude/reusable-filters-component-oRhvq
+9810855 filters: FilterForm pairs middle-positioned min/max ids too
+e775b8c filters: dual-thumb RangeSlider primitive + bounds in registry
+100c0f1 Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
+2f548ba Merge pull request #104 from waiff/claude/quartile-velocity-mean
+041d2c9 stats: surface mean alongside median in quartile turnover
+062d79c filters: map-driven LocationControl + Watchdog spatial-centre adoption
+23a7ae3 Merge pull request #103 from waiff/claude/reusable-filters-component-oRhvq
+4e8a5ba Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
+dd2bf21 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
