@@ -28,6 +28,20 @@ export interface MapBounds {
   north: number;
 }
 
+/* Operator-set point + radius for the "dot + circle on the map" mode.
+ * When `locationMode === 'center_radius'` the cohort is filtered by an
+ * approximate bbox around (lat, lng) within `radius_m` metres; the
+ * sidebar's <LocationControl> owns the point + radius UI and the main
+ * map renders a dashed circle for visual context. Viewport bounds are
+ * ignored in this mode. */
+export interface CenterRadius {
+  lat: number;
+  lng: number;
+  radius_m: number;
+}
+
+export type LocationMode = 'viewport' | 'center_radius';
+
 export interface ListingFilters {
   categoryMain: CategoryMain;
   categoryType: CategoryType;
@@ -73,6 +87,11 @@ export interface ListingFilters {
    * recolour-by-delete-recreate stay queryable. */
   tags: number[];
   bounds: MapBounds | null;
+  /* `viewport` (default) = map pan/zoom emits bounds, those filter
+   * the cohort. `center_radius` = a sidebar-set point + radius drives
+   * the spatial predicate; bounds is ignored on the SQL side. */
+  locationMode: LocationMode;
+  centerRadius: CenterRadius | null;
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -108,6 +127,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   parkingLotsMin: null,
   tags: [],
   bounds: null,
+  locationMode: 'viewport',
+  centerRadius: null,
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -231,6 +252,10 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
     tags: parseIntList(sp.get('tags')),
     bounds: parseBounds(sp.get('bbox')),
+    locationMode: sp.get('locmode') === 'center_radius'
+      ? 'center_radius'
+      : 'viewport',
+    centerRadius: parseCenterRadius(sp.get('center')),
   };
 };
 
@@ -245,6 +270,16 @@ const parseBounds = (s: string | null): MapBounds | null => {
 };
 
 const fmtBoundsCoord = (n: number): string => Number(n.toFixed(5)).toString();
+
+const parseCenterRadius = (s: string | null): CenterRadius | null => {
+  if (!s) return null;
+  const parts = s.split(',');
+  if (parts.length !== 3) return null;
+  const [lat, lng, radius] = parts.map(Number);
+  if (![lat, lng, radius].every((x) => Number.isFinite(x))) return null;
+  if (radius <= 0) return null;
+  return { lat, lng, radius_m: Math.trunc(radius) };
+};
 
 const parseIntList = (s: string | null): number[] => {
   if (!s) return [];
@@ -304,6 +339,14 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
     sp.set(
       'bbox',
       `${fmtBoundsCoord(west)},${fmtBoundsCoord(south)},${fmtBoundsCoord(east)},${fmtBoundsCoord(north)}`,
+    );
+  }
+  if (f.locationMode === 'center_radius') sp.set('locmode', 'center_radius');
+  if (f.centerRadius) {
+    const { lat, lng, radius_m } = f.centerRadius;
+    sp.set(
+      'center',
+      `${fmtBoundsCoord(lat)},${fmtBoundsCoord(lng)},${radius_m}`,
     );
   }
   return sp;
@@ -388,7 +431,9 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.usableAreaMax == null &&
   f.parkingLotsMin == null &&
   f.tags.length === 0 &&
-  f.bounds == null;
+  f.bounds == null &&
+  f.locationMode === 'viewport' &&
+  f.centerRadius == null;
 
 
 /* -------------------------------------------------------------------------- */

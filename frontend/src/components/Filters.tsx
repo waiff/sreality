@@ -1,14 +1,17 @@
 import {
+  type CenterRadius,
   type ListingFilters,
+  type LocationMode,
   DEFAULT_FILTERS,
   isDefault,
   listingFiltersToRegistryView,
   applyRegistryUpdate,
 } from '@/lib/filters';
-import { ControlGroup } from '@/components/controls';
+import { ControlGroup, Section } from '@/components/controls';
 import { FilterForm } from '@/components/FilterForm';
 import {
   DistrictTypeahead,
+  LocationControl,
   TagPicker,
 } from '@/components/filter-controls';
 
@@ -84,6 +87,16 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
             labels={{ districts: 'District' }}
             customWidgets={customWidgets}
             flat
+          />
+          <LocationModeSection
+            mode={filters.locationMode}
+            centerRadius={filters.centerRadius}
+            onModeChange={(mode) =>
+              onChange({ ...filters, locationMode: mode })
+            }
+            onCenterRadiusChange={(cr) =>
+              onChange({ ...filters, centerRadius: cr })
+            }
           />
         </ControlGroup>
 
@@ -199,6 +212,71 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
         </ControlGroup>
       </div>
     </aside>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Location mode: viewport vs centre+radius                                   */
+/*                                                                            */
+/* The pill toggles which spatial predicate drives the cohort. In `viewport`  */
+/* mode (default) the main map's pan/zoom emits the bbox; in `center_radius`  */
+/* mode an in-sidebar small map widget lets the operator drop a dot and       */
+/* dial a radius — the cohort filters to that circle (approximated as a       */
+/* bbox client-side; the main map still draws the precise circle overlay).    */
+/* -------------------------------------------------------------------------- */
+
+function LocationModeSection({
+  mode,
+  centerRadius,
+  onModeChange,
+  onCenterRadiusChange,
+}: {
+  mode: LocationMode;
+  centerRadius: CenterRadius | null;
+  onModeChange: (next: LocationMode) => void;
+  onCenterRadiusChange: (next: CenterRadius | null) => void;
+}) {
+  return (
+    <Section label="Map filter">
+      <div className="inline-flex items-center gap-0.5 p-0.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)]">
+        {(['viewport', 'center_radius'] as const).map((m) => {
+          const on = mode === m;
+          return (
+            <button
+              key={m}
+              type="button"
+              onClick={() => onModeChange(m)}
+              aria-pressed={on}
+              className={[
+                'px-2.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] transition-colors',
+                on
+                  ? 'bg-[var(--color-copper)] text-white'
+                  : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+              ].join(' ')}
+            >
+              {m === 'viewport' ? 'Map viewport' : 'Centre + radius'}
+            </button>
+          );
+        })}
+      </div>
+      {mode === 'center_radius' ? (
+        <div className="mt-3">
+          <LocationControl
+            value={centerRadius}
+            onChange={onCenterRadiusChange}
+            hint={
+              'The cohort filters to listings inside the dashed circle. ' +
+              'Click the small map to set the centre or drag the marker. ' +
+              'The full-page map still shows the circle for context.'
+            }
+          />
+        </div>
+      ) : (
+        <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
+          Filtering by whatever the main map shows.
+        </p>
+      )}
+    </Section>
   );
 }
 
