@@ -23,10 +23,10 @@ export default defineConfig({
     },
   },
   test: {
-    // Pure-function tests today — no jsdom needed yet. Component
-    // tests will add `environment: 'jsdom'` and the testing-library
-    // setup in a follow-up batch.
-    environment: 'node',
+    // jsdom for component tests (RangeInputs, MultiselectChips, …).
+    // Pure-function tests still run here — jsdom adds a few ms of
+    // setup but otherwise behaves like node for non-DOM code.
+    environment: 'jsdom',
     setupFiles: ['./vitest.setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
   },

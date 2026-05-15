@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 11:35 UTC_
+_Last refreshed: 2026-05-15 11:49 UTC_
 
 **Branch:** `claude/reusable-filters-component-oRhvq`
 
@@ -16,6 +16,9 @@ _Last refreshed: 2026-05-15 11:35 UTC_
 **Last 10 commits:**
 
 ```
+7819eb6 roadmap: refresh auto-status block
+11aaced frontend: vitest + first batch of pure-function tests
+b6a78ba Merge pull request #109 from waiff/claude/reusable-filters-component-oRhvq
 5227e12 browse: centre+radius spatial mode with circle overlay on the map
 be80a64 Merge pull request #108 from waiff/claude/reusable-filters-component-oRhvq
 69a2467 filters: DistrictTypeahead + TagPicker primitives, Browse fully on FilterForm
@@ -23,9 +26,6 @@ be80a64 Merge pull request #108 from waiff/claude/reusable-filters-component-oRh
 392ed9b Merge pull request #106 from waiff/claude/reusable-filters-component-oRhvq
 ebd8bfe stats: replace 4-quartile turnover with 7-band percentile split
 b5a8212 filters: Browse sidebar adopts <FilterForm>
-40ead53 Merge pull request #105 from waiff/claude/reusable-filters-component-oRhvq
-9810855 filters: FilterForm pairs middle-positioned min/max ids too
-e775b8c filters: dual-thumb RangeSlider primitive + bounds in registry
 ```
 
 <!-- END AUTO-STATUS -->
