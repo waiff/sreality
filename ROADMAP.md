@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 06:15 UTC_
+_Last refreshed: 2026-05-15 06:26 UTC_
 
 **Branch:** `claude/plan-notifications-watchdog-WtDbc`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 52 files, latest `053_estimation_cohort_entries.sql`.
+**Migrations on disk:** 54 files, latest `055_notification_dispatches.sql`.
 
 **Last 10 commits:**
 
 ```
+c0396cb roadmap: refresh auto-status block
 f728158 roadmap: refresh auto-status block
 d3ddeab Merge pull request #95 from waiff/claude/finetune-agent-traces-VDz9u
 78bcc22 roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ bacfc82 roadmap: refresh auto-status block
 1af768c agent: expose every ComparableFilters field to the agent + show all filters in the trace
 5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
 bcb3f00 frontend: correct ListingPublic.category_{main,type} to string
-e0ce9c4 frontend: prefill yield's listing price from a sale subject listing
 ```
 
 <!-- END AUTO-STATUS -->
