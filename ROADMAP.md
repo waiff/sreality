@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 07:50 UTC_
+_Last refreshed: 2026-05-15 08:17 UTC_
 
 **Branch:** `claude/plan-notifications-watchdog-WtDbc`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-15 07:50 UTC_
 **Last 10 commits:**
 
 ```
+ebf743a watchdog: ship Phase U2.7 in-app new-listing notifications
 5290c45 migrations: add notification_subscriptions + notification_dispatches (054, 055)
 c0396cb roadmap: refresh auto-status block
 f728158 roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ c265bce agent: server-derived cohort, no more LLM ID transcription
 bacfc82 roadmap: refresh auto-status block
 20d3e71 roadmap: refresh auto-status block
 1af768c agent: expose every ComparableFilters field to the agent + show all filters in the trace
-5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
 ```
 
 <!-- END AUTO-STATUS -->
