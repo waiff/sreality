@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 10:27 UTC_
+_Last refreshed: 2026-05-15 11:35 UTC_
 
 **Branch:** `claude/reusable-filters-component-oRhvq`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 62 files, latest `060_browse_stats_complete_filters.sql`.
+**Migrations on disk:** 65 files, latest `063_browse_stats_price_band_velocity.sql`.
 
 **Last 10 commits:**
 
 ```
-52bb229 filters: shared <FilterForm> + Watchdog adoption (PR 3/4)
-54c0562 roadmap: refresh auto-status block
-59a4c97 settings: agenda × filter visibility matrix
-3ca0df2 roadmap: refresh auto-status block
-7417991 roadmap: refresh auto-status block
-35e7e0a watchdog: expose building material / garden area / tags in the form
-bc6167e filters: backend parity for Watchdog + browse_stats (PR 2/4)
-0a9a9a5 filters: add canonical registry + visibility matrix + codegen (PR 1/4)
-3ffa36f Merge pull request #98 from waiff/claude/plan-notifications-watchdog-WtDbc
-ce1b593 Merge remote-tracking branch 'origin/main' into claude/plan-notifications-watchdog-WtDbc
+5227e12 browse: centre+radius spatial mode with circle overlay on the map
+be80a64 Merge pull request #108 from waiff/claude/reusable-filters-component-oRhvq
+69a2467 filters: DistrictTypeahead + TagPicker primitives, Browse fully on FilterForm
+16ab6d0 Merge pull request #107 from waiff/claude/price-band-velocity
+392ed9b Merge pull request #106 from waiff/claude/reusable-filters-component-oRhvq
+ebd8bfe stats: replace 4-quartile turnover with 7-band percentile split
+b5a8212 filters: Browse sidebar adopts <FilterForm>
+40ead53 Merge pull request #105 from waiff/claude/reusable-filters-component-oRhvq
+9810855 filters: FilterForm pairs middle-positioned min/max ids too
+e775b8c filters: dual-thumb RangeSlider primitive + bounds in registry
 ```
 
 <!-- END AUTO-STATUS -->
