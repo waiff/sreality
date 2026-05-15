@@ -832,7 +832,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     operator-facing "run matcher now" button. Idempotent against the
     (subscription_id, sreality_id) UNIQUE constraint.
 
-    Per-subscription cursor model (migration 059). Each subscription
+    Per-subscription cursor model (migration 065). Each subscription
     has its own `last_matched_first_seen_at`; the matcher considers
     listings with `first_seen_at > cursor` for that subscription only,
     then advances the cursor to the max first_seen_at of the evaluated

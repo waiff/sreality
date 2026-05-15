@@ -183,8 +183,8 @@ class _FakeConn:
 
 def test_match_once_uses_per_subscription_cursor() -> None:
     """The matcher reads `last_matched_first_seen_at` per subscription
-    and injects it as the `cursor` clause — proves migration 059's
-    column drives the SQL, not the old global watermark."""
+    and injects it as the `cursor` clause — proves the per-subscription
+    cursor column drives the SQL, not the old global watermark."""
     sub_id = UUID("46a6005f-dc32-4d94-9ced-4d262b57ef6b")
     cursor_ts = datetime(2026, 5, 14, 13, 57, 48, tzinfo=timezone.utc)
     upper_ts = datetime(2026, 5, 15, 21, 0, 0, tzinfo=timezone.utc)
