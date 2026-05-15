@@ -1,6 +1,6 @@
--- 054_notification_subscriptions.sql
+-- 056_notification_subscriptions.sql
 --
--- Phase U2.7: New-listing notifications.
+-- Phase U2.7: New-listing notifications (the in-app "Watchdog" surface).
 --
 -- One row per saved-search subscription. `filter_spec` is the canonical
 -- Browse filter dict (the same shape `toolkit/comparables._shared_filter_where`

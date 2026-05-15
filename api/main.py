@@ -6,10 +6,12 @@ response shaping; the agent layer consumes the dicts directly.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,7 +45,9 @@ from api.estimation_runs import (
     list_estimation_runs,
     preview_estimation,
 )
+from api import notifications as nf_module
 from api.routes.admin import router as admin_router
+from api.routes.notifications import router as notifications_router
 from scraper.source_dispatcher import ParseError
 from toolkit import (
     ComparableFilters,
@@ -68,7 +72,35 @@ from toolkit import (
 from toolkit.image_similarity import ImageCompareError
 from toolkit.summaries import SummarizeError
 
-app = FastAPI(title="sreality toolkit API", version="0.3.0")
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
+    """Spawn the Watchdog matcher loop alongside the request handler.
+
+    The loop opens its own per-pass DB connection and respects the
+    `notifications_matcher_interval_seconds` knob in `app_settings`.
+    Setting that key to 0 keeps the task alive but idle, so an
+    operator can disable matching without redeploying.
+
+    Disabled entirely when the env var `NOTIFICATIONS_MATCHER_DISABLED`
+    is set — useful for tests / one-off CLI invocations that import
+    api.main but don't want a background task chattering.
+    """
+    stop_event: asyncio.Event = asyncio.Event()
+    task: asyncio.Task[None] | None = None
+    if not os.environ.get("NOTIFICATIONS_MATCHER_DISABLED"):
+        task = asyncio.create_task(
+            nf_module.matcher_loop(stop_event), name="notifications-matcher",
+        )
+    try:
+        yield
+    finally:
+        if task is not None:
+            stop_event.set()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(task, timeout=10.0)
+
+
+app = FastAPI(title="sreality toolkit API", version="0.3.0", lifespan=_lifespan)
 
 _cors_origins = [
     o.strip()
@@ -109,6 +141,9 @@ skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
 # Settings-page design (CLAUDE.md "Auth and secrets" + rule #8). The
 # private Railway URL is the security perimeter for these routes.
 app.include_router(admin_router)
+# /notifications/* (Watchdog feed + subscription CRUD) goes through
+# the standard bearer gate — operator content, not configuration.
+app.include_router(notifications_router)
 
 
 @app.get("/health")

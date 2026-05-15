@@ -33,6 +33,11 @@ import type {
   SourceKind,
   Tag,
   TagColor,
+  WatchdogDispatch,
+  WatchdogDispatchesResponse,
+  WatchdogFilterSpec,
+  WatchdogSeenFilter,
+  WatchdogSubscription,
 } from './types';
 
 /* Sources the backend allowlists for high-confidence parsing.
@@ -632,3 +637,96 @@ export const deleteManualEstimate = (
   request<{ deleted: true }>(`/manual_estimates/${estimate_id}`, {
     method: 'DELETE',
   });
+
+/* ----- Watchdog notifications (Phase U2.7) ------------------------------- */
+
+export interface ListWatchdogDispatchesParams {
+  subscription_id?: string;
+  seen?: WatchdogSeenFilter;
+  limit?: number;
+  offset?: number;
+}
+
+export const listWatchdogSubscriptions = (
+  options: { includeInactive?: boolean } = {},
+): Promise<{ data: WatchdogSubscription[]; total: number }> =>
+  request<{ data: WatchdogSubscription[]; total: number }>(
+    '/notifications/subscriptions',
+    { query: { include_inactive: options.includeInactive ?? true } },
+  );
+
+export const getWatchdogSubscription = (
+  id: string,
+): Promise<WatchdogSubscription> =>
+  request<WatchdogSubscription>(
+    `/notifications/subscriptions/${encodeURIComponent(id)}`,
+  );
+
+export const createWatchdogSubscription = (input: {
+  name: string;
+  filter_spec: WatchdogFilterSpec;
+  is_active?: boolean;
+}): Promise<WatchdogSubscription> =>
+  request<WatchdogSubscription>('/notifications/subscriptions', {
+    method: 'POST',
+    json: input,
+  });
+
+export const updateWatchdogSubscription = (
+  id: string,
+  patch: {
+    name?: string;
+    filter_spec?: WatchdogFilterSpec;
+    is_active?: boolean;
+  },
+): Promise<WatchdogSubscription> =>
+  request<WatchdogSubscription>(
+    `/notifications/subscriptions/${encodeURIComponent(id)}`,
+    { method: 'PUT', json: patch },
+  );
+
+export const deleteWatchdogSubscription = (
+  id: string,
+): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(
+    `/notifications/subscriptions/${encodeURIComponent(id)}`,
+    { method: 'DELETE' },
+  );
+
+export const listWatchdogDispatches = (
+  params: ListWatchdogDispatchesParams = {},
+): Promise<WatchdogDispatchesResponse> =>
+  request<WatchdogDispatchesResponse>('/notifications/dispatches', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const markWatchdogDispatchSeen = (
+  dispatchId: string,
+): Promise<WatchdogDispatch> =>
+  request<WatchdogDispatch>(
+    `/notifications/dispatches/${encodeURIComponent(dispatchId)}/mark-seen`,
+    { method: 'POST' },
+  );
+
+export const kickoffWatchdogDispatchEstimate = (
+  dispatchId: string,
+): Promise<WatchdogDispatch> =>
+  request<WatchdogDispatch>(
+    `/notifications/dispatches/${encodeURIComponent(dispatchId)}/estimate`,
+    { method: 'POST' },
+  );
+
+export const runWatchdogMatcher = (): Promise<{
+  data: {
+    subscriptions_evaluated: number;
+    matches_inserted: number;
+    listings_in_window: number;
+  };
+}> =>
+  request<{
+    data: {
+      subscriptions_evaluated: number;
+      matches_inserted: number;
+      listings_in_window: number;
+    };
+  }>('/notifications/matcher/run', { method: 'POST' });

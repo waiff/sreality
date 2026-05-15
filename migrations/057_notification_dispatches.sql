@@ -1,4 +1,4 @@
--- 055_notification_dispatches.sql
+-- 057_notification_dispatches.sql
 --
 -- Phase U2.7: Append-only audit + dedup guard for notification matches.
 --
@@ -13,6 +13,13 @@
 -- `seen_at` is the operator's read marker for the feed UI. Null means
 -- unread; the frontend sets it on click.
 --
+-- `estimation_run_id` links the notification to an operator-triggered
+-- background estimation. The Watchdog feed exposes a "Run estimation"
+-- action per row; clicking it INSERTs a `pending` estimation_runs row
+-- and stamps its id here so the UI can poll for the yield to land.
+-- ON DELETE SET NULL so dropping an old estimation_runs row never
+-- breaks the dispatch row's history.
+--
 -- ROADMAP line 1075 notes the future Dedup track (D1) will rename the
 -- dedup key from sreality_id to a canonical listing_id once D1 ships.
 -- That is a single-column rename; no functional change to the matcher.
@@ -20,17 +27,19 @@
 begin;
 
 create table notification_dispatches (
-    id               uuid        primary key default gen_random_uuid(),
-    subscription_id  uuid        not null
+    id                 uuid        primary key default gen_random_uuid(),
+    subscription_id    uuid        not null
         references notification_subscriptions(id) on delete cascade,
-    sreality_id      bigint      not null,
-    dispatched_at    timestamptz not null default now(),
-    channel          text        not null default 'in_app'
+    sreality_id        bigint      not null,
+    dispatched_at      timestamptz not null default now(),
+    channel            text        not null default 'in_app'
         check (channel in ('in_app')),
-    status           text        not null default 'sent'
+    status             text        not null default 'sent'
         check (status in ('sent', 'failed')),
-    error_message    text,
-    seen_at          timestamptz,
+    error_message      text,
+    seen_at            timestamptz,
+    estimation_run_id  bigint
+        references estimation_runs(id) on delete set null,
     unique (subscription_id, sreality_id)
 );
 
@@ -40,6 +49,9 @@ create index notification_dispatches_dispatched_at_idx
 create index notification_dispatches_unread_idx
     on notification_dispatches (subscription_id, seen_at)
     where seen_at is null;
+
+create index notification_dispatches_sreality_id_idx
+    on notification_dispatches (sreality_id);
 
 alter table notification_dispatches enable row level security;
 
@@ -56,5 +68,11 @@ comment on column notification_dispatches.channel is
 comment on column notification_dispatches.seen_at is
     'Read marker for the /notifications feed UI. Null means unread; the '
     'frontend sets it on row click via POST /notifications/dispatches/{id}/mark-seen.';
+
+comment on column notification_dispatches.estimation_run_id is
+    'Optional FK into estimation_runs. Stamped when the operator clicks '
+    '"Run estimation" on the notification row; the FastAPI background '
+    'task fills in the resulting yield. ON DELETE SET NULL so legacy '
+    'estimation cleanup never breaks the dispatch history.';
 
 commit;

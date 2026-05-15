@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 06:26 UTC_
+_Last refreshed: 2026-05-15 07:50 UTC_
 
 **Branch:** `claude/plan-notifications-watchdog-WtDbc`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 54 files, latest `055_notification_dispatches.sql`.
+**Migrations on disk:** 55 files, latest `058_notifications_app_settings.sql`.
 
 **Last 10 commits:**
 
 ```
+5290c45 migrations: add notification_subscriptions + notification_dispatches (054, 055)
 c0396cb roadmap: refresh auto-status block
 f728158 roadmap: refresh auto-status block
 d3ddeab Merge pull request #95 from waiff/claude/finetune-agent-traces-VDz9u
@@ -25,7 +26,6 @@ bacfc82 roadmap: refresh auto-status block
 20d3e71 roadmap: refresh auto-status block
 1af768c agent: expose every ComparableFilters field to the agent + show all filters in the trace
 5effa03 Merge pull request #94 from waiff/claude/yield-prefill-listing-price-v2
-bcb3f00 frontend: correct ListingPublic.category_{main,type} to string
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1048,13 +1048,53 @@ Out of scope for this phase:
 - The agent's ad-hoc Python code execution capability — that's
   Phase 7d above, deferred.
 
-### Phase U2.7: New-listing notifications (proposed)
+### Phase U2.7: New-listing notifications — in-app slice (shipped)
 
-Push the operator a notification (email first, other channels later)
-the moment a freshly scraped listing matches a preset filter. Bridges
-the gap between the scraper's append-only walk and a low-latency
-alert surface — today the operator only sees new listings by
-re-running Browse manually.
+In-app slice landed: saved-filter "Watchdog" surface in the SPA, a
+background matcher loop in the FastAPI service, and per-row
+estimation kickoff that runs deterministically in the background and
+surfaces the yield once it lands. Email / SMS / push remain deferred
+(see open questions below). Cron cadence is still nightly; the
+operator can call `POST /notifications/matcher/run` from the UI's
+"Run matcher now" button to trigger an immediate evaluation against
+any newly-scraped listings.
+
+**What shipped**
+
+- Schema: migrations `056_notification_subscriptions.sql`,
+  `057_notification_dispatches.sql`, `058_notifications_app_settings.sql`.
+  Dispatches carry a nullable `estimation_run_id` FK so the
+  operator-triggered yield calculation links back to the
+  estimation row that lives on the existing `/estimation/:id` page.
+- Backend: `api/notifications.py` owns the `WatchdogFilterSpec`
+  Pydantic model, the SQL-clause renderer (mirrors
+  `_shared_filter_where` semantics), and the matcher loop spawned via
+  FastAPI's lifespan context manager. `api/routes/notifications.py`
+  exposes the standard bearer-gated CRUD + dispatch endpoints. The
+  matcher reads its cadence and the watermark from `app_settings`
+  rows seeded by 058 so the operator can tune both without a
+  redeploy.
+- Frontend: new `Watchdog` nav tab, `/watchdog` feed page,
+  `/watchdog/manage` list, `/watchdog/new` and `/watchdog/:id/edit`
+  filter editor. Notification rows expose the listing, disposition,
+  price, when it fired, the watchdog name, an "estimation" column
+  that streams the yield once the background task completes, and a
+  per-row "Run estimation" button.
+
+**What's deferred**
+
+- Email / SMS / push channels. `notification_dispatches.channel` is
+  CHECK-bounded to `'in_app'` only; a future migration adds the new
+  enum values and the dispatch worker grows a fan-out branch.
+- 5-minute scrape cadence (Shape A from the original proposal).
+  Today's nightly cron still applies; the matcher loop honestly
+  surfaces "no fresh listings" between scrapes. A new
+  `.github/workflows/scrape_probe.yml` is a separate slice.
+- Per-user identity (one shared operator stays the model).
+
+**Original brief (kept below as the design rationale)**
+
+
 
 Two cross-cutting pieces have to land together: a notification
 backend + UI for managing subscriptions, and a scraper cadence

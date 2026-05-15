@@ -1,0 +1,1013 @@
+"""New-listing notifications ("Watchdog") backend (Phase U2.7).
+
+Three responsibilities:
+
+1. CRUD over `notification_subscriptions` — the operator's saved
+   filter specs. Each row holds a name + a `WatchdogFilterSpec` JSONB
+   blob mirroring (a subset of) `toolkit.ComparableFilters`.
+
+2. The background matcher. A FastAPI lifespan-spawned asyncio task
+   wakes every `notifications_matcher_interval_seconds`, walks listings
+   whose `first_seen_at > watermark` against every active subscription,
+   and writes one `notification_dispatches` row per (subscription,
+   listing) match. The UNIQUE constraint on `(subscription_id,
+   sreality_id)` means re-runs over the same window are idempotent.
+
+3. Operator-triggered "Run estimation" kickoff. Each dispatch row
+   gets a button that POSTs here; we INSERT a `pending`
+   `estimation_runs` row, link it on the dispatch, and let FastAPI's
+   `BackgroundTasks` finish the work asynchronously so the UI returns
+   immediately and polls for the yield to land.
+
+`WatchdogFilterSpec` is intentionally a separate, narrower model than
+`ComparableFilters`: the watchdog matcher does NOT require a target
+lat/lng (district / disposition / price filters alone are useful), but
+DOES accept a spatial center + radius for "alert me about anything
+near X". `_build_match_clauses` converts the spec into parameterised
+SQL — reusing the same column semantics as
+`toolkit/comparables._shared_filter_where` so the matcher can never
+disagree with Browse on what a filter means.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Literal
+
+from psycopg.types.json import Jsonb
+from pydantic import BaseModel, Field, model_validator
+
+from scraper import db as scraper_db
+
+if TYPE_CHECKING:
+    import psycopg
+
+LOG = logging.getLogger(__name__)
+
+
+# --- filter spec ----------------------------------------------------------
+
+class WatchdogFilterSpec(BaseModel):
+    """JSON shape persisted in `notification_subscriptions.filter_spec`.
+
+    Mirrors the subset of `toolkit.ComparableFilters` that the Browse
+    sidebar exposes; the matcher converts this into a parameterised
+    WHERE clause via `_build_match_clauses`. Every field defaults to
+    `None` so a watchdog can be as wide ("any apartment for rent") or
+    narrow ("furnished 3+kk in Praha 2 under 30 000 Kč near these
+    coordinates") as the operator wants.
+
+    Spatial filter is optional. When `lat` / `lng` / `radius_m` are all
+    set the matcher restricts to a circle around the point; missing any
+    of the three drops the spatial clause entirely.
+    """
+
+    # Category coords — defaults match the Browse defaults so a
+    # blank-save watchdog already targets "apartments for rent" rather
+    # than every category in the database.
+    category_main: str | None = "byt"
+    category_type: str | None = "pronajem"
+    category_sub_cb: int | None = None
+
+    # Disposition (multi-select; matches any).
+    dispositions: list[str] | None = None
+
+    # Spatial (all three required to apply).
+    lat: float | None = None
+    lng: float | None = None
+    radius_m: int | None = None
+
+    # Locality ids (cheap server-side filter — Browse exposes districts
+    # by name, but we store the id so renamed admin units don't break
+    # historical watchdogs).
+    locality_district_id: int | None = None
+    locality_region_id: int | None = None
+
+    # Optional district name match (for ergonomic "Praha 2"-style
+    # watchdogs without resolving the id first).
+    districts: list[str] | None = None
+
+    # Price + area bounds.
+    min_price_czk: int | None = None
+    max_price_czk: int | None = None
+    min_area_m2: float | None = None
+    max_area_m2: float | None = None
+    min_usable_area: float | None = None
+    max_usable_area: float | None = None
+    min_estate_area: float | None = None
+    max_estate_area: float | None = None
+
+    # Tri-state amenities (None = don't care).
+    has_balcony: bool | None = None
+    has_lift: bool | None = None
+    has_parking: bool | None = None
+    terrace: bool | None = None
+    cellar: bool | None = None
+    garage: bool | None = None
+
+    # Enumerated columns.
+    furnished: str | None = None
+    ownership: str | None = None
+
+    # Parking lots minimum.
+    min_parking_lots: int | None = None
+
+    @model_validator(mode="after")
+    def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
+        spatial = [self.lat, self.lng, self.radius_m]
+        set_count = sum(1 for v in spatial if v is not None)
+        if set_count not in (0, 3):
+            raise ValueError(
+                "lat / lng / radius_m must be all set or all None"
+            )
+        return self
+
+
+def _build_match_clauses(
+    spec: WatchdogFilterSpec,
+) -> tuple[list[str], dict[str, Any]]:
+    """Render the filter spec as parameterised WHERE clauses.
+
+    The matcher prepends a watermark / window clause; this helper owns
+    the spec-derived part only. Keep column semantics aligned with
+    `toolkit/comparables._shared_filter_where` so Browse / Watchdog
+    can never disagree on what a filter means.
+    """
+    where: list[str] = []
+    params: dict[str, Any] = {}
+
+    if spec.category_main is not None:
+        where.append("l.category_main = %(category_main)s")
+        params["category_main"] = spec.category_main
+    if spec.category_type is not None:
+        where.append("l.category_type = %(category_type)s")
+        params["category_type"] = spec.category_type
+    if spec.category_sub_cb is not None:
+        where.append("l.category_sub_cb = %(category_sub_cb)s")
+        params["category_sub_cb"] = spec.category_sub_cb
+
+    if spec.dispositions:
+        where.append("l.disposition = ANY(%(dispositions)s)")
+        params["dispositions"] = list(spec.dispositions)
+
+    if (
+        spec.lat is not None
+        and spec.lng is not None
+        and spec.radius_m is not None
+    ):
+        where.append("l.geom IS NOT NULL")
+        where.append(
+            "ST_DWithin("
+            "l.geom, "
+            "ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, "
+            "%(radius_m)s)"
+        )
+        params["lat"] = spec.lat
+        params["lng"] = spec.lng
+        params["radius_m"] = spec.radius_m
+
+    if spec.locality_district_id is not None:
+        where.append("l.locality_district_id = %(locality_district_id)s")
+        params["locality_district_id"] = spec.locality_district_id
+    if spec.locality_region_id is not None:
+        where.append("l.locality_region_id = %(locality_region_id)s")
+        params["locality_region_id"] = spec.locality_region_id
+    if spec.districts:
+        where.append("l.district = ANY(%(districts)s)")
+        params["districts"] = list(spec.districts)
+
+    if spec.min_price_czk is not None:
+        where.append("l.price_czk >= %(min_price_czk)s")
+        params["min_price_czk"] = spec.min_price_czk
+    if spec.max_price_czk is not None:
+        where.append("l.price_czk <= %(max_price_czk)s")
+        params["max_price_czk"] = spec.max_price_czk
+    if spec.min_area_m2 is not None:
+        where.append("l.area_m2 >= %(min_area_m2)s")
+        params["min_area_m2"] = spec.min_area_m2
+    if spec.max_area_m2 is not None:
+        where.append("l.area_m2 <= %(max_area_m2)s")
+        params["max_area_m2"] = spec.max_area_m2
+    if spec.min_usable_area is not None:
+        where.append("l.usable_area >= %(min_usable_area)s")
+        params["min_usable_area"] = spec.min_usable_area
+    if spec.max_usable_area is not None:
+        where.append("l.usable_area <= %(max_usable_area)s")
+        params["max_usable_area"] = spec.max_usable_area
+    if spec.min_estate_area is not None:
+        where.append("l.estate_area >= %(min_estate_area)s")
+        params["min_estate_area"] = spec.min_estate_area
+    if spec.max_estate_area is not None:
+        where.append("l.estate_area <= %(max_estate_area)s")
+        params["max_estate_area"] = spec.max_estate_area
+
+    if spec.has_balcony is not None:
+        where.append("l.has_balcony = %(has_balcony)s")
+        params["has_balcony"] = spec.has_balcony
+    if spec.has_lift is not None:
+        where.append("l.has_lift = %(has_lift)s")
+        params["has_lift"] = spec.has_lift
+    if spec.has_parking is not None:
+        where.append("l.has_parking = %(has_parking)s")
+        params["has_parking"] = spec.has_parking
+    if spec.terrace is not None:
+        where.append("l.terrace = %(terrace)s")
+        params["terrace"] = spec.terrace
+    if spec.cellar is not None:
+        where.append("l.cellar = %(cellar)s")
+        params["cellar"] = spec.cellar
+    if spec.garage is not None:
+        where.append("l.garage = %(garage)s")
+        params["garage"] = spec.garage
+
+    if spec.furnished is not None:
+        where.append("l.furnished = %(furnished)s")
+        params["furnished"] = spec.furnished
+    if spec.ownership is not None:
+        where.append("l.ownership = %(ownership)s")
+        params["ownership"] = spec.ownership
+
+    if spec.min_parking_lots is not None:
+        where.append("l.parking_lots >= %(min_parking_lots)s")
+        params["min_parking_lots"] = spec.min_parking_lots
+
+    return where, params
+
+
+# --- CRUD: subscriptions --------------------------------------------------
+
+
+@dataclass
+class SubscriptionRow:
+    id: str
+    name: str
+    filter_spec: dict[str, Any]
+    is_active: bool
+    created_at: str
+    updated_at: str
+    dispatch_count: int
+
+
+_SUB_COLS = "id, name, filter_spec, is_active, created_at, updated_at"
+
+
+def _row_to_sub(row: tuple[Any, ...], dispatch_count: int) -> SubscriptionRow:
+    return SubscriptionRow(
+        id=str(row[0]),
+        name=row[1],
+        filter_spec=row[2] or {},
+        is_active=bool(row[3]),
+        created_at=row[4].isoformat() if row[4] else "",
+        updated_at=row[5].isoformat() if row[5] else "",
+        dispatch_count=dispatch_count,
+    )
+
+
+def list_subscriptions(
+    conn: "psycopg.Connection",
+    *,
+    include_inactive: bool = True,
+) -> list[dict[str, Any]]:
+    where = "" if include_inactive else "WHERE is_active = true"
+    sql = (
+        f"SELECT {_SUB_COLS}, "
+        "  (SELECT count(*) FROM notification_dispatches "
+        "     WHERE subscription_id = notification_subscriptions.id) AS dispatch_count "
+        "FROM notification_subscriptions "
+        f"{where} "
+        "ORDER BY created_at DESC"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        rows = cur.fetchall()
+    return [
+        _row_to_sub(r[:-1], int(r[-1] or 0)).__dict__
+        for r in rows
+    ]
+
+
+def get_subscription(
+    conn: "psycopg.Connection", subscription_id: str,
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_SUB_COLS}, "
+            "  (SELECT count(*) FROM notification_dispatches "
+            "     WHERE subscription_id = %s) AS dispatch_count "
+            "FROM notification_subscriptions WHERE id = %s",
+            (subscription_id, subscription_id),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return _row_to_sub(row[:-1], int(row[-1] or 0)).__dict__
+
+
+def create_subscription(
+    conn: "psycopg.Connection",
+    *,
+    name: str,
+    filter_spec: WatchdogFilterSpec,
+    is_active: bool = True,
+) -> dict[str, Any]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO notification_subscriptions (name, filter_spec, is_active) "
+            "VALUES (%s, %s::jsonb, %s) RETURNING id",
+            (name, json.dumps(filter_spec.model_dump()), is_active),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return get_subscription(conn, str(row[0])) or {}
+
+
+def update_subscription(
+    conn: "psycopg.Connection",
+    subscription_id: str,
+    *,
+    name: str | None = None,
+    filter_spec: WatchdogFilterSpec | None = None,
+    is_active: bool | None = None,
+) -> dict[str, Any] | None:
+    sets: list[str] = []
+    params: list[Any] = []
+    if name is not None:
+        sets.append("name = %s")
+        params.append(name)
+    if filter_spec is not None:
+        sets.append("filter_spec = %s::jsonb")
+        params.append(json.dumps(filter_spec.model_dump()))
+    if is_active is not None:
+        sets.append("is_active = %s")
+        params.append(is_active)
+    if not sets:
+        return get_subscription(conn, subscription_id)
+    params.append(subscription_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE notification_subscriptions SET {', '.join(sets)} "
+            "WHERE id = %s",
+            params,
+        )
+        if cur.rowcount == 0:
+            return None
+    return get_subscription(conn, subscription_id)
+
+
+def delete_subscription(
+    conn: "psycopg.Connection", subscription_id: str,
+) -> bool:
+    """Hard delete. Cascade drops the dispatches via the FK."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM notification_subscriptions WHERE id = %s",
+            (subscription_id,),
+        )
+        return cur.rowcount > 0
+
+
+# --- dispatches (the notification feed) -----------------------------------
+
+
+_LISTING_PROJECTION = (
+    "l.sreality_id, l.category_main, l.category_type, l.price_czk, "
+    "l.price_unit, l.area_m2, l.disposition, l.locality, l.district, "
+    "l.is_active, l.first_seen_at, l.last_seen_at"
+)
+
+
+def list_dispatches(
+    conn: "psycopg.Connection",
+    *,
+    subscription_id: str | None = None,
+    seen: Literal["all", "seen", "unseen"] = "all",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Return the notification feed.
+
+    One row per `notification_dispatches` × `listings` join; rows that
+    fired against multiple subscriptions are grouped client-side by the
+    matching subscription names — but on the wire each row is the
+    canonical (dispatch, listing) pair so the table renders one line
+    per dispatch and the UI dedups (sreality_id → list of subscriptions)
+    when it wants the "fired by N watchdogs" presentation.
+    """
+    where: list[str] = []
+    params: dict[str, Any] = {}
+    if subscription_id is not None:
+        where.append("d.subscription_id = %(subscription_id)s")
+        params["subscription_id"] = subscription_id
+    if seen == "seen":
+        where.append("d.seen_at IS NOT NULL")
+    elif seen == "unseen":
+        where.append("d.seen_at IS NULL")
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    sql = (
+        "SELECT d.id, d.subscription_id, s.name AS subscription_name, "
+        "       d.sreality_id, d.dispatched_at, d.seen_at, "
+        "       d.estimation_run_id, "
+        "       er.status AS estimation_status, "
+        "       er.estimate_kind AS estimation_kind, "
+        "       er.estimated_monthly_rent_czk, "
+        "       er.estimated_sale_price_czk, "
+        "       er.gross_yield_pct, er.confidence, "
+        f"      {_LISTING_PROJECTION} "
+        "FROM notification_dispatches d "
+        "JOIN notification_subscriptions s ON s.id = d.subscription_id "
+        "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
+        "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
+        f"{where_sql} "
+        "ORDER BY d.dispatched_at DESC "
+        "LIMIT %(limit)s OFFSET %(offset)s"
+    )
+    count_sql = (
+        "SELECT count(*) FROM notification_dispatches d "
+        "JOIN notification_subscriptions s ON s.id = d.subscription_id "
+        f"{where_sql}"
+    )
+    list_params = {**params, "limit": limit, "offset": offset}
+
+    with conn.cursor() as cur:
+        cur.execute(sql, list_params)
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description] if cur.description else []
+        cur.execute(count_sql, params)
+        total_row = cur.fetchone()
+    total = int(total_row[0]) if total_row else 0
+    return {
+        "data": [_dispatch_row_to_dict(cols, r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def _dispatch_row_to_dict(cols: list[str], row: tuple[Any, ...]) -> dict[str, Any]:
+    out: dict[str, Any] = dict(zip(cols, row))
+    for k in ("dispatched_at", "seen_at", "first_seen_at", "last_seen_at"):
+        v = out.get(k)
+        if isinstance(v, datetime):
+            out[k] = v.isoformat()
+    if "subscription_id" in out and out["subscription_id"] is not None:
+        out["subscription_id"] = str(out["subscription_id"])
+    if "id" in out and out["id"] is not None:
+        out["id"] = str(out["id"])
+    if out.get("area_m2") is not None:
+        out["area_m2"] = float(out["area_m2"])
+    if out.get("gross_yield_pct") is not None:
+        out["gross_yield_pct"] = float(out["gross_yield_pct"])
+    return out
+
+
+def mark_dispatch_seen(
+    conn: "psycopg.Connection", dispatch_id: str,
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE notification_dispatches SET seen_at = now() "
+            "WHERE id = %s AND seen_at IS NULL",
+            (dispatch_id,),
+        )
+    return _fetch_dispatch(conn, dispatch_id)
+
+
+def _fetch_dispatch(
+    conn: "psycopg.Connection", dispatch_id: str,
+) -> dict[str, Any] | None:
+    sql = (
+        "SELECT d.id, d.subscription_id, s.name AS subscription_name, "
+        "       d.sreality_id, d.dispatched_at, d.seen_at, "
+        "       d.estimation_run_id, "
+        "       er.status AS estimation_status, "
+        "       er.estimate_kind AS estimation_kind, "
+        "       er.estimated_monthly_rent_czk, "
+        "       er.estimated_sale_price_czk, "
+        "       er.gross_yield_pct, er.confidence, "
+        f"      {_LISTING_PROJECTION} "
+        "FROM notification_dispatches d "
+        "JOIN notification_subscriptions s ON s.id = d.subscription_id "
+        "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
+        "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
+        "WHERE d.id = %s"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql, (dispatch_id,))
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description] if cur.description else []
+    if row is None:
+        return None
+    return _dispatch_row_to_dict(cols, row)
+
+
+# --- estimation kickoff ---------------------------------------------------
+
+
+_PRONAJEM = "pronajem"
+
+
+def _resolve_listing_for_estimate(
+    conn: "psycopg.Connection", sreality_id: int,
+) -> dict[str, Any] | None:
+    """Read everything the deterministic estimate needs straight from
+    `listings`. The notification matcher only ever fires on listings we
+    already have a row for, so we don't have to re-scrape.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sreality_id, "
+            "  ST_Y(geom::geometry) AS lat, "
+            "  ST_X(geom::geometry) AS lng, "
+            "  area_m2, disposition, floor, "
+            "  category_main, category_type, "
+            "  price_czk, price_unit "
+            "FROM listings WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+        row = cur.fetchone()
+        cols = [d[0] for d in cur.description] if cur.description else []
+    if row is None:
+        return None
+    out = dict(zip(cols, row))
+    if out.get("lat") is None or out.get("lng") is None:
+        return None
+    return out
+
+
+def kickoff_estimation_for_dispatch(
+    conn: "psycopg.Connection", dispatch_id: str,
+) -> tuple[dict[str, Any], int | None]:
+    """Stamp a pending estimation_runs row on the dispatch and return it.
+
+    Returns `(dispatch_row, new_estimation_run_id)`. When the dispatch
+    already has a run linked we surface that row untouched and return
+    `new_estimation_run_id = None`; the caller decides whether to
+    schedule a re-run. When the listing has no geom we surface a
+    `failed` estimation row immediately rather than queueing it,
+    because the deterministic estimator requires lat/lng.
+    """
+    dispatch = _fetch_dispatch(conn, dispatch_id)
+    if dispatch is None:
+        return ({}, None)
+
+    if dispatch.get("estimation_run_id") is not None:
+        return (dispatch, None)
+
+    sreality_id = int(dispatch["sreality_id"])
+    listing = _resolve_listing_for_estimate(conn, sreality_id)
+
+    if listing is None:
+        run_id = _insert_failed_run(
+            conn, sreality_id, error_message="listing missing or has no geom",
+        )
+        _link_dispatch_run(conn, dispatch_id, run_id)
+        return (_fetch_dispatch(conn, dispatch_id) or {}, None)
+
+    spec = {
+        "lat": float(listing["lat"]),
+        "lng": float(listing["lng"]),
+        "area_m2": float(listing["area_m2"]) if listing.get("area_m2") else None,
+        "disposition": listing.get("disposition"),
+        "floor": listing.get("floor"),
+        "exclude_ids": [sreality_id],
+    }
+    estimate_kind = (
+        "sale" if listing.get("category_type") == "prodej" else "rent"
+    )
+
+    run_id = _insert_pending_run(
+        conn,
+        sreality_id=sreality_id,
+        spec=spec,
+        estimate_kind=estimate_kind,
+        category_main=listing.get("category_main"),
+        category_type=listing.get("category_type"),
+    )
+    _link_dispatch_run(conn, dispatch_id, run_id)
+    return (_fetch_dispatch(conn, dispatch_id) or {}, run_id)
+
+
+def _link_dispatch_run(
+    conn: "psycopg.Connection", dispatch_id: str, run_id: int,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE notification_dispatches SET estimation_run_id = %s "
+            "WHERE id = %s",
+            (run_id, dispatch_id),
+        )
+
+
+def _insert_pending_run(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id: int,
+    spec: dict[str, Any],
+    estimate_kind: str,
+    category_main: str | None,
+    category_type: str | None,
+) -> int:
+    """INSERT a 'pending' estimation_runs row that the background task
+    will UPDATE to a terminal status once estimate_yield returns."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO estimation_runs ("
+            "  source, mode, status, estimate_kind, "
+            "  input_sreality_id, input_spec, "
+            "  category_main, category_type, "
+            "  trace"
+            ") VALUES ("
+            "  'ui', 'deterministic', 'pending', %s, "
+            "  %s, %s::jsonb, "
+            "  %s, %s, "
+            "  %s::jsonb"
+            ") RETURNING id",
+            (
+                estimate_kind,
+                sreality_id,
+                json.dumps(spec),
+                category_main,
+                category_type,
+                json.dumps({
+                    "version": 2,
+                    "summary": "queued from watchdog notification",
+                    "steps": [],
+                }),
+            ),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _insert_failed_run(
+    conn: "psycopg.Connection", sreality_id: int, *, error_message: str,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO estimation_runs ("
+            "  source, mode, status, estimate_kind, "
+            "  input_sreality_id, input_spec, error_message, trace"
+            ") VALUES ("
+            "  'ui', 'deterministic', 'failed', 'rent', "
+            "  %s, '{}'::jsonb, %s, %s::jsonb"
+            ") RETURNING id",
+            (
+                sreality_id,
+                error_message,
+                json.dumps({
+                    "version": 2,
+                    "summary": f"failed: {error_message}",
+                    "steps": [],
+                }),
+            ),
+        )
+        row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def run_pending_estimation(run_id: int) -> None:
+    """Background-task entry point. Opens a fresh DB connection (the
+    request connection is closed by the time this runs), loads the
+    pending row, runs the deterministic estimate, and UPDATEs the row
+    to its terminal status.
+
+    Catches every exception locally — a failure must NOT crash the
+    FastAPI worker. The row's `status='failed'` + `error_message`
+    columns are the audit trail.
+    """
+    from api.estimation_runs import _update_run_terminal  # local import to avoid cycle
+    from api.estimate_yield import estimate_yield
+    from toolkit import ComparableFilters, TargetSpec
+
+    LOG.info("run_pending_estimation start run_id=%s", run_id)
+    conn: Any = None
+    try:
+        conn = scraper_db.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT input_sreality_id, input_spec, estimate_kind, "
+                "       category_main, category_type "
+                "FROM estimation_runs WHERE id = %s",
+                (run_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            LOG.warning("run_pending_estimation: run %s missing", run_id)
+            return
+
+        sreality_id = row[0]
+        spec = row[1] or {}
+        estimate_kind = row[2] or "rent"
+        category_main = row[3]
+        category_type = row[4]
+
+        if (
+            spec.get("lat") is None
+            or spec.get("lng") is None
+        ):
+            _update_run_terminal(
+                conn, run_id,
+                status="failed",
+                error_message="missing lat/lng on input_spec",
+            )
+            return
+
+        target = TargetSpec(
+            lat=float(spec["lat"]),
+            lng=float(spec["lng"]),
+            area_m2=spec.get("area_m2"),
+            disposition=spec.get("disposition"),
+            floor=spec.get("floor"),
+            exclude_ids=list(spec.get("exclude_ids") or [sreality_id]),
+        )
+        # Use the same defaults as the deterministic UI path; reading
+        # from app_settings keeps the operator-tunable knobs honoured.
+        from api.estimation_runs import load_filter_defaults
+        defaults = load_filter_defaults(conn)
+        filters = ComparableFilters(
+            radius_m=defaults.radius_m,
+            area_band_pct=defaults.area_band_pct,
+            disposition_match=defaults.disposition_match,
+            max_age_days=defaults.max_age_days_for(estimate_kind),
+            active_only=defaults.active_only,
+            category_main=category_main or "byt",
+            category_type=category_type
+                or ("pronajem" if estimate_kind == "rent" else "prodej"),
+        )
+
+        # status -> running before the call so the UI sees progress
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE estimation_runs SET status = 'running' WHERE id = %s",
+                (run_id,),
+            )
+
+        try:
+            result = estimate_yield(
+                conn, target, filters, None,
+                estimate_kind=estimate_kind,
+            )
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            LOG.warning(
+                "run_pending_estimation: estimate_yield failed run_id=%s: %s",
+                run_id, exc,
+            )
+            _update_run_terminal(
+                conn, run_id,
+                status="failed",
+                error_message=f"{type(exc).__name__}: {exc}"[:1000],
+            )
+            return
+
+        d = result["data"]
+        _update_run_terminal(
+            conn, run_id,
+            status="success",
+            estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
+            rent_p25_czk=d.get("rent_p25_czk"),
+            rent_p75_czk=d.get("rent_p75_czk"),
+            estimated_sale_price_czk=d.get("estimated_sale_price_czk"),
+            sale_p25_czk=d.get("sale_p25_czk"),
+            sale_p75_czk=d.get("sale_p75_czk"),
+            gross_yield_pct=d.get("gross_yield_pct"),
+            confidence=d.get("confidence"),
+            comparables_used=d.get("comparables_used"),
+            warnings=d.get("warnings") or None,
+        )
+    except Exception as exc:  # noqa: BLE001 — last-resort guard
+        LOG.exception("run_pending_estimation crashed run_id=%s: %s", run_id, exc)
+    finally:
+        if conn is not None:
+            with contextlib.suppress(Exception):
+                conn.close()
+
+
+# --- matcher loop ---------------------------------------------------------
+
+
+@dataclass
+class MatcherSettings:
+    interval_seconds: int
+    window_listings: int
+
+
+def _load_matcher_settings(conn: "psycopg.Connection") -> MatcherSettings:
+    interval = _read_int_setting(
+        conn, "notifications_matcher_interval_seconds", default=300,
+    )
+    window = _read_int_setting(
+        conn, "notifications_match_window_listings", default=1000,
+    )
+    return MatcherSettings(
+        interval_seconds=max(0, interval),
+        window_listings=max(1, window),
+    )
+
+
+def _read_int_setting(
+    conn: "psycopg.Connection", key: str, *, default: int,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return default
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return default
+
+
+def _read_watermark(conn: "psycopg.Connection") -> datetime:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings "
+            "WHERE key = 'notifications_watermark_first_seen_at'",
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        # Defensive: if the seed row got nuked, behave as "process
+        # nothing older than now()" rather than blasting the feed.
+        return datetime.now(timezone.utc)
+    val = row[0]
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.now(timezone.utc)
+    if isinstance(val, datetime):
+        return val
+    return datetime.now(timezone.utc)
+
+
+def _write_watermark(
+    conn: "psycopg.Connection", new_value: datetime,
+) -> None:
+    iso = new_value.astimezone(timezone.utc).isoformat()
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE app_settings SET value = %s::jsonb, updated_at = now(), "
+            "updated_by = 'notifications_matcher' "
+            "WHERE key = 'notifications_watermark_first_seen_at'",
+            (json.dumps(iso),),
+        )
+
+
+def match_once(conn: "psycopg.Connection") -> dict[str, int]:
+    """One pass of the matcher. Returns counters useful for logging.
+
+    Cheap to call directly — used by both the lifespan loop and the
+    operator-facing "run matcher now" admin button. Idempotent against
+    the (subscription, sreality_id) UNIQUE constraint.
+    """
+    settings = _load_matcher_settings(conn)
+    watermark = _read_watermark(conn)
+
+    # Pull the window of fresh listings once; per-subscription matching
+    # then runs as a single SQL each. We intentionally read just the
+    # `first_seen_at` upper bound so subsequent runs advance the
+    # watermark even when no subscription matched.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT max(first_seen_at) FROM ("
+            "  SELECT first_seen_at FROM listings "
+            "  WHERE first_seen_at > %s "
+            "  ORDER BY first_seen_at ASC "
+            "  LIMIT %s"
+            ") sub",
+            (watermark, settings.window_listings),
+        )
+        row = cur.fetchone()
+    upper = row[0] if row and row[0] is not None else None
+
+    if upper is None:
+        # No fresh listings; nothing to do.
+        return {
+            "subscriptions_evaluated": 0,
+            "matches_inserted": 0,
+            "listings_in_window": 0,
+        }
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, filter_spec FROM notification_subscriptions "
+            "WHERE is_active = true"
+        )
+        sub_rows = cur.fetchall()
+
+    total_inserted = 0
+    listings_in_window = 0
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM listings "
+            "WHERE first_seen_at > %s AND first_seen_at <= %s",
+            (watermark, upper),
+        )
+        ct = cur.fetchone()
+        listings_in_window = int(ct[0]) if ct else 0
+
+    for sub_id, raw_spec in sub_rows:
+        try:
+            spec = WatchdogFilterSpec(**(raw_spec or {}))
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning(
+                "matcher: subscription %s has invalid filter_spec: %s",
+                sub_id, exc,
+            )
+            continue
+        where, params = _build_match_clauses(spec)
+        where.append("l.first_seen_at > %(watermark)s")
+        where.append("l.first_seen_at <= %(upper)s")
+        params["watermark"] = watermark
+        params["upper"] = upper
+
+        sql = (
+            "INSERT INTO notification_dispatches "
+            "  (subscription_id, sreality_id, status, channel) "
+            "SELECT %(subscription_id)s, l.sreality_id, 'sent', 'in_app' "
+            "FROM listings l "
+            "WHERE " + " AND ".join(where) + " "
+            "ON CONFLICT (subscription_id, sreality_id) DO NOTHING"
+        )
+        params["subscription_id"] = str(sub_id)
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            total_inserted += cur.rowcount or 0
+
+    _write_watermark(conn, upper)
+    return {
+        "subscriptions_evaluated": len(sub_rows),
+        "matches_inserted": total_inserted,
+        "listings_in_window": listings_in_window,
+    }
+
+
+async def matcher_loop(stop_event: asyncio.Event) -> None:
+    """The forever-running async matcher. Reads its own DB connection
+    each pass; idle waits respect `notifications_matcher_interval_seconds`
+    so an operator who edits the row only needs to wait for the current
+    sleep to elapse.
+    """
+    LOG.info("notification matcher loop starting")
+    while not stop_event.is_set():
+        # Read interval each pass so live edits to app_settings take
+        # effect without a restart.
+        interval = 300
+        try:
+            interval = await asyncio.to_thread(_read_interval_seconds)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("matcher: failed to read interval: %s", exc)
+
+        if interval <= 0:
+            LOG.info("notification matcher disabled (interval=0); idling")
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=60.0)
+            except asyncio.TimeoutError:
+                continue
+            else:
+                break
+
+        try:
+            stats = await asyncio.to_thread(_match_once_in_thread)
+            if stats.get("matches_inserted", 0) > 0:
+                LOG.info("notification matcher: %s", stats)
+            else:
+                LOG.debug("notification matcher: %s", stats)
+        except Exception as exc:  # noqa: BLE001
+            LOG.exception("notification matcher pass failed: %s", exc)
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=float(interval))
+        except asyncio.TimeoutError:
+            continue
+        else:
+            break
+    LOG.info("notification matcher loop stopped")
+
+
+def _read_interval_seconds() -> int:
+    conn = scraper_db.connect()
+    try:
+        return _read_int_setting(
+            conn, "notifications_matcher_interval_seconds", default=300,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _match_once_in_thread() -> dict[str, int]:
+    conn = scraper_db.connect()
+    try:
+        return match_once(conn)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
