@@ -499,6 +499,55 @@ export const updateAppSetting = (
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
 
+/* ----- filter registry + visibility (PR 1 / migration 059) ----------------
+ * The canonical filter list lives in toolkit/filter_registry.py. `getFilterSchema`
+ * returns the live registry plus the agenda × filter visibility matrix.
+ * `getFilterVisibility` is the same matrix without the registry — convenient
+ * when the SPA already has the static codegen output and only needs the
+ * operator's overrides. `setFilterVisibility` toggles one cell. */
+
+import type {
+  Agenda,
+  FilterDef,
+  UiControl,
+  FilterType,
+} from '@/lib/filterRegistry.generated';
+
+export type { Agenda, FilterDef, UiControl, FilterType };
+
+export interface FilterSchemaEntry extends FilterDef {
+  visibility: Record<Agenda, boolean>;
+}
+
+export interface FilterSchemaPayload {
+  agendas: Agenda[];
+  categories: string[];
+  ui_controls: UiControl[];
+  filters: FilterSchemaEntry[];
+}
+
+export interface FilterVisibilityRow {
+  agenda: Agenda;
+  filter_id: string;
+  enabled: boolean;
+}
+
+export const getFilterSchema = (): Promise<FilterSchemaPayload> =>
+  request<FilterSchemaPayload>('/admin/filter-schema');
+
+export const getFilterVisibility = (): Promise<{ data: FilterVisibilityRow[] }> =>
+  request<{ data: FilterVisibilityRow[] }>('/admin/filter-visibility');
+
+export const setFilterVisibility = (
+  agenda: Agenda,
+  filterId: string,
+  enabled: boolean,
+): Promise<FilterVisibilityRow> =>
+  request<FilterVisibilityRow>(
+    `/admin/filter-visibility/${encodeURIComponent(agenda)}/${encodeURIComponent(filterId)}`,
+    { method: 'PUT', json: { enabled } },
+  );
+
 /* ----- curation (U2.6) ---------------------------------------------------
  *
  * Collections, tags, and notes. Reads of `which tags / which collections
