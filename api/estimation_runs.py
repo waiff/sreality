@@ -840,6 +840,12 @@ def _build_filters(
         min_usable_area=body.min_usable_area,
         max_usable_area=body.max_usable_area,
         min_parking_lots=body.min_parking_lots,
+        tom_days_min=body.tom_days_min,
+        tom_days_max=body.tom_days_max,
+        last_seen_min_days=body.last_seen_min_days,
+        last_seen_max_days=body.last_seen_max_days,
+        first_seen_min_days=body.first_seen_min_days,
+        first_seen_max_days=body.first_seen_max_days,
     )
 
 

@@ -283,10 +283,11 @@ def _query_corridor(
 
     if filters.active_only:
         listing_where.append("l.is_active = true")
-        listing_where.append(
-            "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
-        )
-        params["max_age_days"] = filters.max_age_days
+        if filters.max_age_days is not None:
+            listing_where.append(
+                "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
+            )
+            params["max_age_days"] = filters.max_age_days
 
     params.update({
         "transport_types":  list(transport_types),

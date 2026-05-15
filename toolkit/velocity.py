@@ -392,6 +392,12 @@ def _filters_used(
         "locality_district_id": filters.locality_district_id,
         "locality_region_id": filters.locality_region_id,
         "include_unreliable": filters.include_unreliable,
+        "tom_days_min": filters.tom_days_min,
+        "tom_days_max": filters.tom_days_max,
+        "last_seen_min_days": filters.last_seen_min_days,
+        "last_seen_max_days": filters.last_seen_max_days,
+        "first_seen_min_days": filters.first_seen_min_days,
+        "first_seen_max_days": filters.first_seen_max_days,
         "population": population,
         "trend_split_days": trend_split_days,
     }

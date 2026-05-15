@@ -13,7 +13,7 @@ import TagEditPopover from '@/components/curation/TagEditPopover';
 import {
   type ListingFilters,
   type ListingStatus,
-  type SeenWithin,
+  type BuildingMaterial,
   type CategoryMain,
   type CategoryType,
   PRICE_BOUNDS,
@@ -59,7 +59,7 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
         )}
       </div>
 
-      <div className="px-5 py-5 space-y-9">
+      <div className="px-5 py-5 space-y-7">
         <ControlGroup title="Category">
           <CategoryMainPicker
             value={filters.categoryMain}
@@ -71,14 +71,16 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
           />
         </ControlGroup>
 
-        <ControlGroup title="Where">
+        <ControlGroup title="Location">
+          {/* Single field — group title carries the meaning, so we
+            * drop the redundant inner "District" label. */}
           <DistrictPicker
             value={filters.districts}
             onChange={(v) => set('districts', v)}
           />
         </ControlGroup>
 
-        <ControlGroup title="Listing">
+        <ControlGroup title="Disposition">
           <DispositionPicker
             value={filters.dispositions}
             onChange={(v) => set('dispositions', v)}
@@ -89,7 +91,7 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
           />
         </ControlGroup>
 
-        <ControlGroup title="Price & size">
+        <ControlGroup title="Price">
           <RangeFilter
             label="Price"
             unit="Kč"
@@ -99,6 +101,9 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
               onChange({ ...filters, priceMin: min, priceMax: max })
             }
           />
+        </ControlGroup>
+
+        <ControlGroup title="Size">
           <RangeFilter
             label="Area"
             unit="m²"
@@ -128,12 +133,52 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
           />
         </ControlGroup>
 
-        <ControlGroup title="Status">
-          <ActiveBlock
+        <ControlGroup title="Status & velocity">
+          <StatusPicker
             status={filters.status}
-            seenWithin={filters.seenWithin}
-            onStatus={(v) => set('status', v)}
-            onSeen={(v) => set('seenWithin', v)}
+            onChange={(v) => set('status', v)}
+          />
+          <DaysRangeFilter
+            label="First seen (days ago)"
+            value={[filters.firstSeenMinDays, filters.firstSeenMaxDays]}
+            onChange={([min, max]) =>
+              onChange({ ...filters, firstSeenMinDays: min, firstSeenMaxDays: max })
+            }
+          />
+          <DaysRangeFilter
+            label="Last seen (days ago)"
+            value={[filters.lastSeenMinDays, filters.lastSeenMaxDays]}
+            onChange={([min, max]) =>
+              onChange({ ...filters, lastSeenMinDays: min, lastSeenMaxDays: max })
+            }
+          />
+          <DaysRangeFilter
+            label="Turned in (days)"
+            value={[filters.tomDaysMin, filters.tomDaysMax]}
+            onChange={([min, max]) =>
+              onChange({ ...filters, tomDaysMin: min, tomDaysMax: max })
+            }
+          />
+        </ControlGroup>
+
+        <ControlGroup title="Building">
+          <EnumPicker<Furnished>
+            label="Furnished"
+            value={filters.furnished}
+            options={FURNISHED_OPTIONS}
+            onChange={(v) => set('furnished', v)}
+          />
+          <EnumPicker<Ownership>
+            label="Ownership"
+            value={filters.ownership}
+            options={OWNERSHIP_OPTIONS}
+            onChange={(v) => set('ownership', v)}
+          />
+          <EnumPicker<BuildingMaterial>
+            label="Building material"
+            value={filters.buildingMaterial}
+            options={BUILDING_MATERIAL_OPTIONS}
+            onChange={(v) => set('buildingMaterial', v)}
           />
         </ControlGroup>
 
@@ -164,20 +209,6 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
               }}
             />
           </Section>
-
-          <EnumPicker<Furnished>
-            label="Furnished"
-            value={filters.furnished}
-            options={FURNISHED_OPTIONS}
-            onChange={(v) => set('furnished', v)}
-          />
-
-          <EnumPicker<Ownership>
-            label="Ownership"
-            value={filters.ownership}
-            options={OWNERSHIP_OPTIONS}
-            onChange={(v) => set('ownership', v)}
-          />
         </ControlGroup>
 
         <ControlGroup title="Curation">
@@ -744,32 +775,21 @@ function RangeFilter({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Active + Last-seen-within combined block                                   */
+/* Status picker — any / active / inactive. Default 'any'.                   */
 /* -------------------------------------------------------------------------- */
 
-const SEEN_OPTS: ReadonlyArray<{ value: SeenWithin; label: string }> = [
-  { value: '1d',  label: '24 h'  },
-  { value: '7d',  label: '7 d'   },
-  { value: '30d', label: '30 d'  },
-  { value: 'any', label: 'any'   },
-];
-
 const STATUS_OPTS: ReadonlyArray<{ value: ListingStatus; label: string }> = [
+  { value: 'any',      label: 'Any'      },
   { value: 'active',   label: 'Active'   },
   { value: 'inactive', label: 'Inactive' },
-  { value: 'any',      label: 'Any'      },
 ];
 
-function ActiveBlock({
+function StatusPicker({
   status,
-  seenWithin,
-  onStatus,
-  onSeen,
+  onChange,
 }: {
   status: ListingStatus;
-  seenWithin: SeenWithin;
-  onStatus: (v: ListingStatus) => void;
-  onSeen: (v: SeenWithin) => void;
+  onChange: (v: ListingStatus) => void;
 }) {
   return (
     <Section label="Status">
@@ -778,22 +798,7 @@ function ActiveBlock({
           <PickButton
             key={opt.value}
             on={status === opt.value}
-            onClick={() => onStatus(opt.value)}
-          >
-            {opt.label}
-          </PickButton>
-        ))}
-      </div>
-      <p className="mt-3 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-        Last seen within
-      </p>
-      <div className="mt-1.5 grid grid-cols-4 gap-1">
-        {SEEN_OPTS.map((opt) => (
-          <PickButton
-            key={opt.value}
-            on={seenWithin === opt.value}
-            onClick={() => onSeen(opt.value)}
-            className="px-2 py-1"
+            onClick={() => onChange(opt.value)}
           >
             {opt.label}
           </PickButton>
@@ -802,3 +807,80 @@ function ActiveBlock({
     </Section>
   );
 }
+
+/* -------------------------------------------------------------------------- */
+/* DaysRangeFilter — paired number inputs ("from – to" days). Either end      */
+/* blank means unbounded. Used for first_seen / last_seen "days ago" and for  */
+/* the TOM ("turned in") range.                                               */
+/* -------------------------------------------------------------------------- */
+
+function DaysRangeFilter({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: [number | null, number | null];
+  onChange: (next: [number | null, number | null]) => void;
+}) {
+  const parse = (raw: string): number | null => {
+    const trimmed = raw.replace(/\s/g, '');
+    if (trimmed === '') return null;
+    const n = Number(trimmed);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.trunc(n);
+  };
+
+  const onLo = (e: ChangeEvent<HTMLInputElement>) => {
+    onChange([parse(e.target.value), value[1]]);
+  };
+  const onHi = (e: ChangeEvent<HTMLInputElement>) => {
+    onChange([value[0], parse(e.target.value)]);
+  };
+  const onCommit = () => {
+    const [lo, hi] = value;
+    if (lo != null && hi != null && lo > hi) onChange([hi, lo]);
+  };
+
+  return (
+    <Section label={label}>
+      <div className="flex items-center gap-2">
+        <NumberCell
+          value={value[0]}
+          placeholder="any"
+          onChange={onLo}
+          onBlur={onCommit}
+          ariaLabel={`${label} minimum`}
+        />
+        <span className="text-[var(--color-ink-3)] text-sm">—</span>
+        <NumberCell
+          value={value[1]}
+          placeholder="any"
+          onChange={onHi}
+          onBlur={onCommit}
+          ariaLabel={`${label} maximum`}
+        />
+        <span className="text-[var(--color-ink-3)] text-xs ml-1 tracking-wide">d</span>
+      </div>
+    </Section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Building-material options. Sreality reports 8 distinct values; we collapse */
+/* them into four buckets per operator confirmation. "Ostatní" expands to     */
+/* the remaining five via buildingMaterialToValues in lib/filters.ts.         */
+/* -------------------------------------------------------------------------- */
+
+const BUILDING_MATERIAL_LABELS: Record<BuildingMaterial, string> = {
+  cihla:    'Cihla',
+  panel:    'Panel',
+  smisena:  'Smíšená',
+  ostatni:  'Ostatní',
+};
+
+const BUILDING_MATERIAL_OPTIONS: ReadonlyArray<EnumOption<BuildingMaterial>> =
+  (Object.keys(BUILDING_MATERIAL_LABELS) as BuildingMaterial[]).map((v) => ({
+    value: v,
+    label: BUILDING_MATERIAL_LABELS[v],
+  }));
