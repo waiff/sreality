@@ -248,11 +248,13 @@ function RunsTable({
               <Th align="left">When</Th>
               <Th align="left">Source</Th>
               <Th align="left">Kind</Th>
+              <Th align="left">Skill</Th>
               <Th align="left">Status</Th>
               <Th align="left">Input</Th>
               <Th align="right">Estimate</Th>
               <Th align="left">Confidence</Th>
               <Th align="right">N</Th>
+              <Th align="left">Feedback</Th>
             </tr>
           </thead>
           <tbody>
@@ -310,6 +312,9 @@ function Row({ run }: { run: EstimationRun }) {
         <KindBadge kind={run.estimate_kind} />
       </td>
       <td className="px-4 py-2.5 align-middle">
+        <SkillCell run={run} />
+      </td>
+      <td className="px-4 py-2.5 align-middle">
         <StatusPill status={run.status} />
       </td>
       <td className="px-4 py-2.5 align-middle max-w-[300px]">
@@ -324,7 +329,55 @@ function Row({ run }: { run: EstimationRun }) {
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {compsCount != null ? compsCount : <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
+      <td className="px-4 py-2.5 align-middle">
+        <FeedbackCell run={run} />
+      </td>
     </tr>
+  );
+}
+
+function SkillCell({ run }: { run: EstimationRun }) {
+  if (!run.skill_name) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  return (
+    <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-2)]">
+      <span className="truncate max-w-[180px]" title={run.skill_name}>
+        {shortSkillName(run.skill_name)}
+      </span>
+      {run.skill_version != null && (
+        <span className="text-[0.65rem] tracking-wide text-[var(--color-ink-4)]">
+          v{run.skill_version}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function shortSkillName(name: string): string {
+  // rental_estimator_full_v1 → rental_estimator_full. Strip the _vN
+  // suffix because the migration 052 `version` column carries it.
+  return name.replace(/_v\d+$/, '');
+}
+
+function FeedbackCell({ run }: { run: EstimationRun }) {
+  if (!run.has_feedback) {
+    return (
+      <span
+        className="inline-flex items-center px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-4)] cursor-not-allowed select-none"
+        title="No feedback was given on this run"
+      >
+        view
+      </span>
+    );
+  }
+  return (
+    <Link
+      to={`/estimation/${run.id}#feedback`}
+      className="inline-flex items-center px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-xs)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)] hover:text-white transition-colors"
+    >
+      view
+    </Link>
   );
 }
 

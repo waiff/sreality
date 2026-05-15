@@ -95,6 +95,7 @@ def _patch_persistence(monkeypatch) -> _State:
                     "source_kind", "parse_confidence",
                     "parse_confidence_per_field", "source_html",
                     "subject_summary",
+                    "skill_name", "skill_version",
                 )
             },
         }
