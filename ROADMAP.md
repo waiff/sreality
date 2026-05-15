@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 20:52 UTC_
+_Last refreshed: 2026-05-15 21:18 UTC_
 
 **Branch:** `claude/browse-sorting-map-center-Sibz6`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 66 files, latest `064_condition_markers.sql`.
+**Migrations on disk:** 67 files, latest `065_listings_public_ppm2.sql`.
 
 **Last 10 commits:**
 
 ```
+e91fe77 browse: card sort dropdown + map flyTo on location pick
 b91b0c6 Merge pull request #119 from waiff/claude/apartment-condition-scoring-jZ6qy
 9df5352 roadmap: refresh auto-status block
 f1bef29 condition: add Phase A — discover Czech condition markers
@@ -25,7 +26,6 @@ dcc55ce filters: drop orphan LocationChipPicker
 fba9ea4 Merge remote-tracking branch 'origin/main' into claude/reusable-filters-component-oRhvq
 756e8db roadmap: refresh auto-status block
 8f1b8aa fix(filters): show place name + region context, not the type description
-b33b673 Merge pull request #117 from waiff/claude/reusable-filters-component-oRhvq
 ```
 
 <!-- END AUTO-STATUS -->
