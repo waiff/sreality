@@ -326,6 +326,23 @@ export interface BrowseStatsDispositionRow {
   ppm2_box: Ppm2Box | null;
 }
 
+export interface TomBox {
+  n: number;
+  min: number;
+  p25: number;
+  median: number;
+  p75: number;
+  max: number;
+}
+
+export interface PriceQuartileVelocityRow {
+  bucket: 1 | 2 | 3 | 4;
+  n: number;
+  price_min: number;
+  price_max: number;
+  tom_box: TomBox | null;
+}
+
 export interface BrowseStats {
   total: number;
   new_7d: number;
@@ -333,6 +350,7 @@ export interface BrowseStats {
   price: { p25: number; p50: number; p75: number } | null;
   ppm2:  { p25: number; p50: number; p75: number } | null;
   dispositions: ReadonlyArray<BrowseStatsDispositionRow>;
+  price_quartile_velocity: ReadonlyArray<PriceQuartileVelocityRow>;
 }
 
 export const fetchBrowseStats = async (
