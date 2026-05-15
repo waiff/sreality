@@ -10,6 +10,30 @@ const czNumberCompact = new Intl.NumberFormat('cs-CZ', {
   maximumFractionDigits: 1,
 });
 
+const czShortDate = new Intl.DateTimeFormat('cs-CZ', {
+  day: 'numeric',
+  month: 'numeric',
+});
+
+/* Czech short date — "5. 5." (day. month.). Used on listing-card
+ * badges where the year is implicit and screen real estate is tiny. */
+export const fmtShortDate = (iso: string | null | undefined): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return czShortDate.format(d);
+};
+
+/* Czech-plural day count: 1 den, 2-4 dny, 5+ dní. Negative or null -> "—". */
+export const fmtTomDays = (n: number | null | undefined): string => {
+  if (n == null || n < 0) return '—';
+  const noun =
+    n === 1 ? 'den' :
+    n >= 2 && n <= 4 ? 'dny' :
+    'dní';
+  return `${czNumber.format(n)}${NBSP}${noun}`;
+};
+
 export const fmtCount = (n: number | null | undefined): string =>
   n == null ? '—' : czNumber.format(n);
 

@@ -43,8 +43,11 @@ class ComparableFilters:
     radius_m: int = 1000
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
-    max_age_days: int = 7
-    active_only: bool = True
+    # No implicit freshness gate. Callers that want "active and seen
+    # within N days" must say so explicitly. The agent and the
+    # deterministic estimator both pass these on demand.
+    max_age_days: int | None = None
+    active_only: bool = False
     population: Literal["active", "delisted", "all"] | None = None
     floor_band: int | None = None
     condition_match: list[str] | None = None
@@ -71,6 +74,18 @@ class ComparableFilters:
     min_usable_area: float | None = None
     max_usable_area: float | None = None
     min_parking_lots: int | None = None
+    # TOM ("turned in") = time on market in days. Mirrors migration 052's
+    # listings_public.tom_days: now() - first_seen_at for active rows,
+    # last_seen_at - first_seen_at for delisted. Inclusive bounds.
+    tom_days_min: int | None = None
+    tom_days_max: int | None = None
+    # Days-ago ranges on the source timestamps. min_days = most recent
+    # allowed (e.g. min=3 means "seen >= 3 days ago", so excludes
+    # listings seen in the last 2 days). max_days = oldest allowed.
+    last_seen_min_days: int | None = None
+    last_seen_max_days: int | None = None
+    first_seen_min_days: int | None = None
+    first_seen_max_days: int | None = None
 
 
 _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
@@ -218,6 +233,43 @@ def _shared_filter_where(
         where.append("l.parking_lots >= %(min_parking_lots)s")
         params["min_parking_lots"] = filters.min_parking_lots
 
+    # TOM bounds. The expression mirrors migration 052's
+    # listings_public.tom_days computation so SQL and Python agree on
+    # the definition of "days on market".
+    _tom_expr = (
+        "(case when l.is_active "
+        "then greatest(0, floor(extract(epoch from (now() - l.first_seen_at)) / 86400)::int) "
+        "else greatest(0, floor(extract(epoch from (l.last_seen_at - l.first_seen_at)) / 86400)::int) "
+        "end)"
+    )
+    if filters.tom_days_min is not None:
+        where.append(f"{_tom_expr} >= %(tom_days_min)s")
+        params["tom_days_min"] = filters.tom_days_min
+    if filters.tom_days_max is not None:
+        where.append(f"{_tom_expr} <= %(tom_days_max)s")
+        params["tom_days_max"] = filters.tom_days_max
+
+    if filters.last_seen_max_days is not None:
+        where.append(
+            "l.last_seen_at >= now() - make_interval(days => %(last_seen_max_days)s)"
+        )
+        params["last_seen_max_days"] = filters.last_seen_max_days
+    if filters.last_seen_min_days is not None:
+        where.append(
+            "l.last_seen_at <= now() - make_interval(days => %(last_seen_min_days)s)"
+        )
+        params["last_seen_min_days"] = filters.last_seen_min_days
+    if filters.first_seen_max_days is not None:
+        where.append(
+            "l.first_seen_at >= now() - make_interval(days => %(first_seen_max_days)s)"
+        )
+        params["first_seen_max_days"] = filters.first_seen_max_days
+    if filters.first_seen_min_days is not None:
+        where.append(
+            "l.first_seen_at <= now() - make_interval(days => %(first_seen_min_days)s)"
+        )
+        params["first_seen_min_days"] = filters.first_seen_min_days
+
     if not filters.include_unreliable:
         where.append(
             "NOT EXISTS ("
@@ -248,16 +300,18 @@ def build_query(
         pass
     elif filters.population == "active":
         where.append("l.is_active = true")
-        where.append(
-            "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
-        )
-        params["max_age_days"] = filters.max_age_days
+        if filters.max_age_days is not None:
+            where.append(
+                "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
+            )
+            params["max_age_days"] = filters.max_age_days
     elif filters.active_only:
         where.append("l.is_active = true")
-        where.append(
-            "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
-        )
-        params["max_age_days"] = filters.max_age_days
+        if filters.max_age_days is not None:
+            where.append(
+                "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
+            )
+            params["max_age_days"] = filters.max_age_days
 
     sql = (
         "SELECT\n"
@@ -349,6 +403,12 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "min_usable_area": filters.min_usable_area,
         "max_usable_area": filters.max_usable_area,
         "min_parking_lots": filters.min_parking_lots,
+        "tom_days_min": filters.tom_days_min,
+        "tom_days_max": filters.tom_days_max,
+        "last_seen_min_days": filters.last_seen_min_days,
+        "last_seen_max_days": filters.last_seen_max_days,
+        "first_seen_min_days": filters.first_seen_min_days,
+        "first_seen_max_days": filters.first_seen_max_days,
     }
 
 

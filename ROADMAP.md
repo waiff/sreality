@@ -572,6 +572,48 @@ End-to-end browser flow over the U1b backend.
   the 7-day cache; `cost_usd_total` rolled up from `llm_calls`.
 - Commits `e9da41f`, `65b9967`, `d66da7e`. PR #29.
 
+### Phase U-BV: Browse velocity, card badges, filter overhaul (done)
+- Migration 052 promotes "turned in" (TOM = days on market) to a
+  first-class column on `listings_public`. Same definition as
+  `toolkit/velocity._tom_days`: `now() - first_seen_at` for active
+  rows, `last_seen_at - first_seen_at` for delisted. SQL and Python
+  now share one authoritative computation.
+- Migration 053 redoes `browse_stats` with a new filter surface:
+  `tom_days_min/max`, `last_seen_min/max_days` and
+  `first_seen_min/max_days` (both replacing the old preset
+  `seen_within_days_filter`), `building_type_filter text[]`.
+  Implicit `active_only=true` default dropped — Browse no longer
+  hides delisted listings unless asked.
+- Toolkit `ComparableFilters` grows the same six filter fields
+  (`tom_days_min/max`, `last_seen_min/max_days`,
+  `first_seen_min/max_days`) and flips defaults so no implicit
+  freshness gate fires. The deterministic estimator's
+  `_DEFAULT_ACTIVE_ONLY` and per-kind `max_age_days` are gone with
+  it. Velocity logic is unchanged; the new filter fields flow
+  through `_shared_filter_where` for free.
+- API: `FindComparablesIn`, `EstimateYieldIn`,
+  `ComputeMarketVelocityIn`, `DescribeNeighborhoodIn`, and
+  `CreateEstimationIn` all grow the six new optional filters; the
+  deterministic `_build_filters` plumbs them through. Agent's
+  `base_filters` carry them per-run without per-tool schema bloat.
+- Frontend: `ListingFilters` adds `tomDaysMin/Max`,
+  `lastSeenMinDays/MaxDays`, `firstSeenMinDays/MaxDays`,
+  `buildingMaterial`. `applyFilters` plumbs the days-ago ranges
+  against `last_seen_at` / `first_seen_at` and the TOM range against
+  `tom_days`. The four-bucket Building material picker (Cihla /
+  Panel / Smíšená / Ostatní) maps "Ostatní" to the five remaining
+  sreality values. Default `status` is now `'any'`.
+- Filter panel regrouped: Category / Location / Disposition / Price /
+  Size / Status & velocity / Building / Amenities / Curation.
+  ControlGroup legend bumped (0.82rem, ink-primary, semibold) so it
+  visually outweighs the smaller Section labels (0.62rem,
+  ink-tertiary). Redundant inner labels dropped on singleton groups.
+- Browse cards now stack four metadata badges down the right margin:
+  status (sage `Aktivní` / brick `Neaktivní`), first-seen (`od 5. 5.`),
+  last-seen (`viděno 8. 5.`), and the copper TOM pill
+  (`94 dní`, Czech plural). Re-uses the existing token palette and
+  borders-only depth strategy; no new design tokens.
+
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the
 bearer-token-gated FastAPI service to refresh a listing on demand.
