@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 08:19 UTC_
+_Last refreshed: 2026-05-15 08:55 UTC_
 
-**Branch:** `claude/plan-notifications-watchdog-WtDbc`
+**Branch:** `claude/reusable-filters-component-oRhvq`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-15 08:19 UTC_
 **Last 10 commits:**
 
 ```
+3ffa36f Merge pull request #98 from waiff/claude/plan-notifications-watchdog-WtDbc
+ce1b593 Merge remote-tracking branch 'origin/main' into claude/plan-notifications-watchdog-WtDbc
 02563fa roadmap: refresh auto-status block
 ebf743a watchdog: ship Phase U2.7 in-app new-listing notifications
-5290c45 migrations: add notification_subscriptions + notification_dispatches (054, 055)
-c0396cb roadmap: refresh auto-status block
-f728158 roadmap: refresh auto-status block
-d3ddeab Merge pull request #95 from waiff/claude/finetune-agent-traces-VDz9u
-78bcc22 roadmap: refresh auto-status block
-c265bce agent: server-derived cohort, no more LLM ID transcription
-bacfc82 roadmap: refresh auto-status block
-20d3e71 roadmap: refresh auto-status block
+ed21249 Merge pull request #97 from waiff/claude/data-freshness-investigation-MnhPd
+08af697 roadmap: refresh auto-status block
+ad0cb7d Merge pull request #96 from waiff/claude/add-market-velocity-filter-J14Vy
+041d55c migrations: backfill five files that production had applied but the repo was missing
+4e56f87 migrations: renumber TOM view + browse_stats to 054/055, preserve broker cols
+ecde5a2 browse: TOM filter, card badges, filter-panel overhaul
 ```
 
 <!-- END AUTO-STATUS -->
