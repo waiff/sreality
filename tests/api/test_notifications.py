@@ -118,3 +118,75 @@ def test_build_clauses_categoryless_spec() -> None:
     assert not any("l.category_type" in w for w in where)
     assert "category_main" not in params
     assert "category_type" not in params
+
+
+def test_build_clauses_building_material_expands_to_building_type_values() -> None:
+    """The operator-friendly four-bucket label maps to one or more
+    sreality `building_type` codes (matching frontend's
+    `buildingMaterialToValues`)."""
+    spec = WatchdogFilterSpec(building_material="cihla")
+    where, params = _build_match_clauses(spec)
+    assert "l.building_type = ANY(%(building_material_values)s)" in where
+    assert params["building_material_values"] == ["cihla"]
+
+    spec = WatchdogFilterSpec(building_material="ostatni")
+    where, params = _build_match_clauses(spec)
+    assert params["building_material_values"] == [
+        "skelet", "drevo", "kamen", "montovana", "nizkoenergeticka",
+    ]
+
+
+def test_build_clauses_unknown_building_material_drops_clause() -> None:
+    """A bucket label outside the four known values silently drops the
+    clause rather than producing an empty IN ()."""
+    spec = WatchdogFilterSpec(building_material="bogus")
+    where, params = _build_match_clauses(spec)
+    assert not any("building_type" in w for w in where)
+    assert "building_material_values" not in params
+
+
+def test_build_clauses_garden_area_bounds() -> None:
+    spec = WatchdogFilterSpec(min_garden_area=50.0, max_garden_area=500.0)
+    where, params = _build_match_clauses(spec)
+    assert "l.garden_area >= %(min_garden_area)s" in where
+    assert "l.garden_area <= %(max_garden_area)s" in where
+    assert params["min_garden_area"] == 50.0
+    assert params["max_garden_area"] == 500.0
+
+
+def test_build_clauses_tags_use_and_semantics() -> None:
+    spec = WatchdogFilterSpec(tags=[5, 7, 12])
+    where, params = _build_match_clauses(spec)
+    tag_clauses = [w for w in where if "listing_tags" in w]
+    assert len(tag_clauses) == 1
+    clause = tag_clauses[0]
+    # AND-semantics: must carry every tag in the list.
+    assert "GROUP BY lt.sreality_id" in clause
+    assert "count(distinct lt.tag_id)" in clause
+    assert params["watchdog_tag_ids"] == [5, 7, 12]
+
+
+def test_build_clauses_empty_tag_list_drops_clause() -> None:
+    """An empty tag list (vs `None`) should not produce an IN () that
+    matches zero rows."""
+    spec = WatchdogFilterSpec(tags=[])
+    where, _ = _build_match_clauses(spec)
+    assert not any("listing_tags" in w for w in where)
+
+
+def test_build_clauses_parking_lots_min() -> None:
+    spec = WatchdogFilterSpec(min_parking_lots=2)
+    where, params = _build_match_clauses(spec)
+    assert "l.parking_lots >= %(min_parking_lots)s" in where
+    assert params["min_parking_lots"] == 2
+
+
+def test_build_clauses_district_id_and_region_id() -> None:
+    spec = WatchdogFilterSpec(
+        locality_district_id=12, locality_region_id=3,
+    )
+    where, params = _build_match_clauses(spec)
+    assert "l.locality_district_id = %(locality_district_id)s" in where
+    assert "l.locality_region_id = %(locality_region_id)s" in where
+    assert params["locality_district_id"] == 12
+    assert params["locality_region_id"] == 3

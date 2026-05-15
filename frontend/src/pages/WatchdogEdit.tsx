@@ -38,6 +38,15 @@ const OWNERSHIP_LABELS: Record<Ownership, string> = {
   statni: 'Státní/obecní',
 };
 
+type BuildingMaterial = 'cihla' | 'panel' | 'smisena' | 'ostatni';
+
+const BUILDING_MATERIAL_LABELS: Record<BuildingMaterial, string> = {
+  cihla: 'Cihla',
+  panel: 'Panel',
+  smisena: 'Smíšená',
+  ostatni: 'Ostatní',
+};
+
 type TriState = 'any' | 'yes' | 'no';
 
 const boolToTri = (v: boolean | null): TriState =>
@@ -255,6 +264,18 @@ export default function WatchdogEdit() {
               }}
             />
           </Row>
+          <Row label="Garden area m²">
+            <RangePair
+              min={spec.min_garden_area}
+              max={spec.max_garden_area}
+              minPlaceholder="min"
+              maxPlaceholder="max"
+              onChange={(lo, hi) => {
+                set('min_garden_area', lo);
+                set('max_garden_area', hi);
+              }}
+            />
+          </Row>
           <Row label="Min parking lots">
             <NumberInput
               value={spec.min_parking_lots}
@@ -314,6 +335,30 @@ export default function WatchdogEdit() {
               labels={OWNERSHIP_LABELS}
               onChange={(v) => set('ownership', v)}
             />
+          </Row>
+          <Row label="Building">
+            <EnumSelect<BuildingMaterial>
+              value={spec.building_material}
+              labels={BUILDING_MATERIAL_LABELS}
+              onChange={(v) => set('building_material', v)}
+            />
+          </Row>
+          <Row label="Tags">
+            <CsvInput
+              value={(spec.tags ?? []).map((n) => String(n))}
+              placeholder="comma-separated tag ids"
+              onChange={(parts) => {
+                const ids = parts
+                  .map((p) => Number(p))
+                  .filter((n) => Number.isFinite(n) && n > 0);
+                set('tags', ids.length > 0 ? ids : null);
+              }}
+            />
+            <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
+              AND-semantics: a listing matches only if it carries
+              every tag in the list. The rich picker arrives with the
+              unified filter form; for now, paste numeric ids.
+            </p>
           </Row>
         </Section>
 
