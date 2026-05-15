@@ -1171,6 +1171,73 @@ def registry_to_json(
     }
 
 
+# --- JSON Schema rendering for agent tool input_schemas -------------------
+# `to_jsonschema_property` turns one FilterDef into the {type, description,
+# minimum, maximum, enum, items, …} block that lives under each tool's
+# `properties` dict in the agent's input_schema. `to_jsonschema_properties`
+# does the same for every filter declared for a given agenda, which is
+# usually what an agent tool wants. The agent's hand-written `_build_tool_
+# registry` previously hard-coded these descriptions per tool; centralising
+# them here means a description tweak in `filter_registry.py` flows to every
+# agent and every operator-facing surface in a single PR.
+
+_JSON_TYPE_MAP: dict[FilterType, str] = {
+    FilterType.INT: "integer",
+    FilterType.FLOAT: "number",
+    FilterType.BOOL: "boolean",
+    FilterType.STRING: "string",
+    FilterType.STRING_LIST: "array",
+    FilterType.INT_LIST: "array",
+    FilterType.LOCATION: "object",
+}
+
+
+def to_jsonschema_property(f: FilterDef) -> dict[str, Any]:
+    """Render one FilterDef as a JSON Schema property."""
+    prop: dict[str, Any] = {
+        "type": _JSON_TYPE_MAP[f.type],
+        "description": f.description,
+    }
+    constraints = f.constraints or {}
+    if "min" in constraints:
+        prop["minimum"] = constraints["min"]
+    if "max" in constraints:
+        prop["maximum"] = constraints["max"]
+    if "enum" in constraints:
+        prop["enum"] = list(constraints["enum"])
+    if f.type == FilterType.STRING_LIST:
+        items: dict[str, Any] = {"type": "string"}
+        if f.enum_values:
+            items["enum"] = [o.value for o in f.enum_values]
+        prop["items"] = items
+    elif f.type == FilterType.INT_LIST:
+        prop["items"] = {"type": "integer"}
+    return prop
+
+
+def to_jsonschema_properties(
+    agenda: Agenda,
+    *,
+    conn: "psycopg.Connection | None" = None,
+    exclude: frozenset[str] = frozenset(),
+) -> dict[str, dict[str, Any]]:
+    """Render every (visible) filter for `agenda` as a `properties` dict.
+
+    `exclude` skips named filters — useful for composite filters
+    (LOCATION) and host-specific knobs that the tool resolves
+    server-side (e.g. `target` lat/lng).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for f in effective_for(agenda, conn):
+        if f.id in exclude:
+            continue
+        if f.type == FilterType.LOCATION:
+            # Composite — agents don't pass it directly.
+            continue
+        out[f.id] = to_jsonschema_property(f)
+    return out
+
+
 __all__ = [
     "Agenda",
     "UiControl",
@@ -1185,6 +1252,8 @@ __all__ = [
     "effective_for",
     "visibility_map",
     "registry_to_json",
+    "to_jsonschema_property",
+    "to_jsonschema_properties",
     "CATEGORY_MAIN_OPTIONS",
     "CATEGORY_TYPE_OPTIONS",
     "FURNISHED_OPTIONS",

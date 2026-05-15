@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 09:48 UTC_
+_Last refreshed: 2026-05-15 10:27 UTC_
 
-**Branch:** `claude/add-market-velocity-stats-qvhZO`
+**Branch:** `claude/reusable-filters-component-oRhvq`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 61 files, latest `059_browse_stats_price_quartile_velocity.sql`.
+**Migrations on disk:** 62 files, latest `060_browse_stats_complete_filters.sql`.
 
 **Last 10 commits:**
 
 ```
-24e3560 Merge pull request #100 from waiff/claude/card-badge-legibility-Tk3rF
-d770529 frontend: opaque paper backing on card badges, lift colour to border
+52bb229 filters: shared <FilterForm> + Watchdog adoption (PR 3/4)
+54c0562 roadmap: refresh auto-status block
+59a4c97 settings: agenda × filter visibility matrix
+3ca0df2 roadmap: refresh auto-status block
+7417991 roadmap: refresh auto-status block
+35e7e0a watchdog: expose building material / garden area / tags in the form
+bc6167e filters: backend parity for Watchdog + browse_stats (PR 2/4)
+0a9a9a5 filters: add canonical registry + visibility matrix + codegen (PR 1/4)
 3ffa36f Merge pull request #98 from waiff/claude/plan-notifications-watchdog-WtDbc
 ce1b593 Merge remote-tracking branch 'origin/main' into claude/plan-notifications-watchdog-WtDbc
-02563fa roadmap: refresh auto-status block
-ebf743a watchdog: ship Phase U2.7 in-app new-listing notifications
-ed21249 Merge pull request #97 from waiff/claude/data-freshness-investigation-MnhPd
-08af697 roadmap: refresh auto-status block
-ad0cb7d Merge pull request #96 from waiff/claude/add-market-velocity-filter-J14Vy
-041d55c migrations: backfill five files that production had applied but the repo was missing
 ```
 
 <!-- END AUTO-STATUS -->
@@ -613,17 +613,6 @@ End-to-end browser flow over the U1b backend.
   last-seen (`viděno 8. 5.`), and the copper TOM pill
   (`94 dní`, Czech plural). Re-uses the existing token palette and
   borders-only depth strategy; no new design tokens.
-- Migration 061 enriches `browse_stats` with a
-  `price_quartile_velocity` field: the filtered cohort is split into
-  four equal-size price buckets via `ntile(4)` and each bucket reports
-  its `tom_days` distribution alongside its price range. Stacks on
-  top of 060's expanded signature — DROP-then-CREATE because the
-  function body grows a new CTE; the parameter list is unchanged from
-  060. The Stats tab renders this as a fourth Card ("Turnover by
-  price quartile") with horizontal box plots reusing the
-  `DispositionBoxPlots` SVG idiom. Active vs. delisted semantics of
-  the per-bucket TOM follow the user's status filter — no per-bucket
-  active/inactive split is computed.
 
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the
