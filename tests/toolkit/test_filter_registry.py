@@ -176,6 +176,50 @@ def test_visibility_argument_attaches_per_filter_visibility() -> None:
     assert by_id["min_price_czk"]["visibility"]["watchdog"] is True
 
 
+# --- min/max pair invariants ---------------------------------------------
+
+
+def test_min_max_pairs_have_companion() -> None:
+    """Every min-side range filter declares the matching max sibling.
+
+    `FilterForm` pairs them into one slider / inputs row. A missing
+    companion would render as an orphan number input — usable but
+    user-confusing. Three pairing patterns are valid:
+
+        min_X         ↔ max_X         (min_price_czk ↔ max_price_czk)
+        X_min         ↔ X_max         (tom_days_min  ↔ tom_days_max)
+        X_min_Y       ↔ X_max_Y       (last_seen_min_days ↔ last_seen_max_days)
+
+    One-sided filters (`min_X` with no upper bound, e.g.
+    `min_parking_lots` = "at least N parking spots") opt out by
+    living in `ONE_SIDED_MINS` below. FilterForm renders those as a
+    single number input via the unpaired-range fallthrough.
+    """
+    import re
+    ONE_SIDED_MINS = frozenset({"min_parking_lots"})
+    ids = set(fr.REGISTRY.keys())
+    for fid in ids:
+        if fid in ONE_SIDED_MINS:
+            continue
+        if fid.startswith("min_"):
+            companion = "max_" + fid[len("min_"):]
+            assert companion in ids, (
+                f"{fid} declared without companion {companion}"
+            )
+        elif fid.endswith("_min"):
+            companion = fid[:-len("_min")] + "_max"
+            assert companion in ids, (
+                f"{fid} declared without companion {companion}"
+            )
+        else:
+            middle = re.match(r"^(.+)_min_(.+)$", fid)
+            if middle:
+                companion = f"{middle.group(1)}_max_{middle.group(2)}"
+                assert companion in ids, (
+                    f"{fid} declared without companion {companion}"
+                )
+
+
 # --- JSON Schema renderer -------------------------------------------------
 
 

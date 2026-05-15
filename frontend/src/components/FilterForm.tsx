@@ -141,7 +141,12 @@ export function FilterForm({
   );
 }
 
-/** Given a filter id, return the id of its companion max-side, if any. */
+/** Given a filter id, return the id of its companion max-side, if any.
+ *  Recognises three pairing patterns:
+ *    - `min_X`     ↔ `max_X`     (min_price_czk ↔ max_price_czk)
+ *    - `X_min`     ↔ `X_max`     (tom_days_min  ↔ tom_days_max)
+ *    - `X_min_Y`   ↔ `X_max_Y`   (last_seen_min_days ↔ last_seen_max_days)
+ *  Returns null when no companion is present in the visible set. */
 function findMaxSibling(id: string, present: Set<string>): string | null {
   if (id.startsWith('min_')) {
     const candidate = 'max_' + id.slice(4);
@@ -149,6 +154,11 @@ function findMaxSibling(id: string, present: Set<string>): string | null {
   }
   if (id.endsWith('_min')) {
     const candidate = id.slice(0, -4) + '_max';
+    return present.has(candidate) ? candidate : null;
+  }
+  const middle = id.match(/^(.+)_min_(.+)$/);
+  if (middle) {
+    const candidate = `${middle[1]}_max_${middle[2]}`;
     return present.has(candidate) ? candidate : null;
   }
   return null;
@@ -159,7 +169,11 @@ function findMaxSibling(id: string, present: Set<string>): string | null {
 function prettifyPair(minId: string, _maxId: string | undefined): string {
   let core = minId;
   if (core.startsWith('min_')) core = core.slice(4);
-  if (core.endsWith('_min')) core = core.slice(0, -4);
+  else if (core.endsWith('_min')) core = core.slice(0, -4);
+  else {
+    const middle = core.match(/^(.+)_min_(.+)$/);
+    if (middle) core = `${middle[1]}_${middle[2]}`;
+  }
   return prettifyId(core);
 }
 
