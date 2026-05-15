@@ -90,4 +90,4 @@ jobs:
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
-          python scripts/discover_condition_markers.py $ARGS
+          python -m scripts.discover_condition_markers $ARGS
