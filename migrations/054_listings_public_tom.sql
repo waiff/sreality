@@ -1,4 +1,4 @@
--- 052_listings_public_tom.sql
+-- 054_listings_public_tom.sql
 -- Promote "time on market" (TOM, called "turned in" by the operator)
 -- to a first-class column on listings_public. Same definition as
 -- toolkit/velocity._tom_days: still-active listings count from
@@ -16,9 +16,17 @@
 --   * SQL and Python share one definition; the value the velocity
 --     toolkit returns matches what the browse panel filters on
 --
+-- Numbered 054 to leapfrog two migrations applied to the live DB that
+-- aren't yet in this repo (`052_skill_versioning`,
+-- `estimation_default_filters`, `estimation_cohort_entries`). The
+-- broker_{name,email,phone} columns reflect the live view definition
+-- post `026_listings_public_broker` (also applied live but missing from
+-- the repo) — those columns must be preserved here or the view loses
+-- them.
+--
 -- CREATE OR REPLACE preserves the anon SELECT grant from migration 008.
--- Listing column order matches 023 with `tom_days` appended last so any
--- destructuring caller picks it up as an additional key.
+-- `tom_days` is appended last so any destructuring caller picks it up
+-- as an additional key.
 
 create or replace view listings_public as
 select
@@ -35,6 +43,7 @@ select
   estate_area, usable_area, garden_area,
   category_sub_cb,
   furnished, terrace, cellar, garage, parking_lots, ownership,
+  broker_name, broker_email, broker_phone,
   case
     when is_active
       then greatest(0, floor(extract(epoch from (now() - first_seen_at)) / 86400)::int)
@@ -42,3 +51,4 @@ select
       greatest(0, floor(extract(epoch from (last_seen_at - first_seen_at)) / 86400)::int)
   end as tom_days
 from listings;
+

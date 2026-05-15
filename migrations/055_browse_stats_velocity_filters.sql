@@ -1,7 +1,7 @@
--- 053_browse_stats_velocity_filters.sql
+-- 055_browse_stats_velocity_filters.sql
 -- Replace browse_stats() signature to support:
 --   * TOM ("turned in") range filter via `tom_days_min` / `tom_days_max`
---     (the column added in migration 052)
+--     (the column added in migration 054)
 --   * last_seen_at as a from-to days range via `last_seen_min_days` /
 --     `last_seen_max_days` (replacing the old 1d/7d/30d preset
 --     `seen_within_days_filter`)
