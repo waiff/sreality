@@ -80,7 +80,7 @@ def main() -> int:
     LOG.info("loaded %d raw marker entries", len(rows))
     if not rows:
         LOG.warning("no rows in listing_marker_extractions; nothing to aggregate")
-        return 1
+        return 0
 
     building_raw = [r for r in rows if r["scope"] == "building"]
     apartment_raw = [r for r in rows if r["scope"] == "apartment"]
