@@ -331,6 +331,7 @@ export interface TomBox {
   min: number;
   p25: number;
   median: number;
+  mean: number;
   p75: number;
   max: number;
 }

@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 09:48 UTC_
+_Last refreshed: 2026-05-15 10:26 UTC_
 
 **Branch:** `claude/add-market-velocity-stats-qvhZO`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 61 files, latest `059_browse_stats_price_quartile_velocity.sql`.
+**Migrations on disk:** 63 files, latest `061_browse_stats_price_quartile_velocity.sql`.
 
 **Last 10 commits:**
 
 ```
+33a3488 stats: add Turnover by price quartile to Browse Stats tab
+696ff68 Merge pull request #101 from waiff/claude/reusable-filters-component-oRhvq
+3ca0df2 roadmap: refresh auto-status block
+7417991 roadmap: refresh auto-status block
+35e7e0a watchdog: expose building material / garden area / tags in the form
+bc6167e filters: backend parity for Watchdog + browse_stats (PR 2/4)
+0a9a9a5 filters: add canonical registry + visibility matrix + codegen (PR 1/4)
 24e3560 Merge pull request #100 from waiff/claude/card-badge-legibility-Tk3rF
 d770529 frontend: opaque paper backing on card badges, lift colour to border
 3ffa36f Merge pull request #98 from waiff/claude/plan-notifications-watchdog-WtDbc
-ce1b593 Merge remote-tracking branch 'origin/main' into claude/plan-notifications-watchdog-WtDbc
-02563fa roadmap: refresh auto-status block
-ebf743a watchdog: ship Phase U2.7 in-app new-listing notifications
-ed21249 Merge pull request #97 from waiff/claude/data-freshness-investigation-MnhPd
-08af697 roadmap: refresh auto-status block
-ad0cb7d Merge pull request #96 from waiff/claude/add-market-velocity-filter-J14Vy
-041d55c migrations: backfill five files that production had applied but the repo was missing
 ```
 
 <!-- END AUTO-STATUS -->
@@ -624,6 +624,14 @@ End-to-end browser flow over the U1b backend.
   `DispositionBoxPlots` SVG idiom. Active vs. delisted semantics of
   the per-bucket TOM follow the user's status filter — no per-bucket
   active/inactive split is computed.
+- Migration 062 adds `mean` to each bucket's `tom_box` so the
+  price/velocity signal isn't lost when `tom_days` is integer-clumped.
+  With a 14-day scrape window the five-number summary collapses to
+  identical medians across all four buckets even though means differ
+  monotonically (active 2+kk byt/pronajem: 8.9 / 9.0 / 9.4 / 9.9 days).
+  Frontend renders the mean as a copper dot on the box plot and a new
+  MEAN column in the numeric table; the caption now names the
+  integer-flooring caveat explicitly.
 
 ### Phase U2.5: Freshness write-path (next)
 "Verify freshness" button on Listing Detail that calls the
