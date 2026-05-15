@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 14:20 UTC_
+_Last refreshed: 2026-05-15 14:31 UTC_
 
 **Branch:** `claude/reusable-filters-component-oRhvq`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-15 14:20 UTC_
 **Last 10 commits:**
 
 ```
+756e8db roadmap: refresh auto-status block
+8f1b8aa fix(filters): show place name + region context, not the type description
 028442e filters: Mapy.cz-powered LocationTypeahead, wired in Browse + Watchdog
 3b6340d fix(filters): slider drag + paired inputs were a no-op on Browse
 71f3739 frontend: component-level tests for FilterForm + filter-controls
@@ -24,8 +26,6 @@ ae7742f Merge pull request #110 from waiff/claude/reusable-filters-component-oRh
 11aaced frontend: vitest + first batch of pure-function tests
 b6a78ba Merge pull request #109 from waiff/claude/reusable-filters-component-oRhvq
 5227e12 browse: centre+radius spatial mode with circle overlay on the map
-be80a64 Merge pull request #108 from waiff/claude/reusable-filters-component-oRhvq
-69a2467 filters: DistrictTypeahead + TagPicker primitives, Browse fully on FilterForm
 ```
 
 <!-- END AUTO-STATUS -->
