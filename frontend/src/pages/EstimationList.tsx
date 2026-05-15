@@ -247,7 +247,6 @@ function RunsTable({
             <tr>
               <Th align="left">When</Th>
               <Th align="left">Source</Th>
-              <Th align="left">Kind</Th>
               <Th align="left">Skill</Th>
               <Th align="left">Status</Th>
               <Th align="left">Input</Th>
@@ -309,15 +308,12 @@ function Row({ run }: { run: EstimationRun }) {
         <SourceBadge source={run.source} />
       </td>
       <td className="px-4 py-2.5 align-middle">
-        <KindBadge kind={run.estimate_kind} />
-      </td>
-      <td className="px-4 py-2.5 align-middle">
         <SkillCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle">
         <StatusPill status={run.status} />
       </td>
-      <td className="px-4 py-2.5 align-middle max-w-[300px]">
+      <td className="px-4 py-2.5 align-middle max-w-[200px]">
         <InputCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
@@ -342,7 +338,7 @@ function SkillCell({ run }: { run: EstimationRun }) {
   }
   return (
     <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-2)]">
-      <span className="truncate max-w-[180px]" title={run.skill_name}>
+      <span className="truncate max-w-[120px]" title={run.skill_name}>
         {shortSkillName(run.skill_name)}
       </span>
       {run.skill_version != null && (
@@ -425,16 +421,6 @@ function SourceBadge({ source }: { source: EstimationSource }) {
   return (
     <span className="inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.16em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper)] text-[var(--color-ink-3)] border border-[var(--color-rule)]">
       {source}
-    </span>
-  );
-}
-
-function KindBadge({ kind }: { kind: EstimationRun['estimate_kind'] }) {
-  const resolved = kind ?? 'rent';
-  const label = resolved === 'sale' ? 'sale' : 'rent';
-  return (
-    <span className="inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.16em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper)] text-[var(--color-ink-3)] border border-[var(--color-rule)]">
-      {label}
     </span>
   );
 }
