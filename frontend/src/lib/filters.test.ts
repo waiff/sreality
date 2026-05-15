@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_FILTERS,
   applyRegistryUpdate,
+  applyRegistryUpdates,
   fromSearchParams,
   isDefault,
   type ListingFilters,
@@ -176,5 +177,39 @@ describe('applyRegistryUpdate', () => {
     const view = listingFiltersToRegistryView(f0);
     const f1 = applyRegistryUpdate(DEFAULT_FILTERS, 'min_price_czk', view.min_price_czk);
     expect(f1.priceMin).toBe(12_000);
+  });
+});
+
+describe('applyRegistryUpdates (batched)', () => {
+  it('applies min and max in one transaction', () => {
+    // Regression for the slider-frozen bug: when the FilterForm
+    // emitted two onChange(id, value) calls in a row, a non-functional
+    // setter saw both against the same stale state and the second
+    // overwrote the first. The batched helper threads each update
+    // through the prior result, so both sides land.
+    const next = applyRegistryUpdates(DEFAULT_FILTERS, [
+      { id: 'min_price_czk', value: 5_000 },
+      { id: 'max_price_czk', value: 25_000 },
+    ]);
+    expect(next.priceMin).toBe(5_000);
+    expect(next.priceMax).toBe(25_000);
+  });
+
+  it('preserves a value when the corresponding update has the same value', () => {
+    const start: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      priceMin: 5_000,
+      priceMax: 25_000,
+    };
+    const next = applyRegistryUpdates(start, [
+      { id: 'min_price_czk', value: 8_000 },
+      { id: 'max_price_czk', value: 25_000 },
+    ]);
+    expect(next.priceMin).toBe(8_000);
+    expect(next.priceMax).toBe(25_000);
+  });
+
+  it('returns the original filters for an empty batch', () => {
+    expect(applyRegistryUpdates(DEFAULT_FILTERS, [])).toBe(DEFAULT_FILTERS);
   });
 });

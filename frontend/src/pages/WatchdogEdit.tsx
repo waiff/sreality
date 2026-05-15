@@ -132,8 +132,12 @@ export default function WatchdogEdit() {
         <FilterForm
           scope="watchdog"
           state={spec as unknown as Record<string, unknown>}
-          onChange={(id, value) =>
-            setSpec((prev) => ({ ...prev, [id]: value }) as WatchdogFilterSpec)
+          onChange={(updates) =>
+            setSpec((prev) => {
+              const next = { ...prev } as Record<string, unknown>;
+              for (const u of updates) next[u.id] = u.value;
+              return next as unknown as WatchdogFilterSpec;
+            })
           }
           exclude={['location']}
           labels={{
