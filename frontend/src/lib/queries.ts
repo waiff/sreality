@@ -352,11 +352,6 @@ export const fetchListingsForCards = async (
 };
 
 
-export interface DistrictFacet {
-  district: string;
-  count: number;
-}
-
 export interface BrowseStatsDispositionRow {
   disposition: string;
   n: number;
@@ -440,26 +435,6 @@ export const fetchBrowseStats = async (
   });
   if (error) throw error;
   return data as BrowseStats;
-};
-
-let districtCache: DistrictFacet[] | null = null;
-
-export const fetchDistrictFacets = async (): Promise<DistrictFacet[]> => {
-  if (districtCache) return districtCache;
-  const { data, error } = await supabase
-    .from('listings_public')
-    .select('district')
-    .not('district', 'is', null);
-  if (error) throw error;
-  const counts = new Map<string, number>();
-  for (const row of (data ?? []) as Array<{ district: string | null }>) {
-    if (!row.district) continue;
-    counts.set(row.district, (counts.get(row.district) ?? 0) + 1);
-  }
-  districtCache = [...counts.entries()]
-    .map(([district, count]) => ({ district, count }))
-    .sort((a, b) => b.count - a.count || a.district.localeCompare(b.district));
-  return districtCache;
 };
 
 const DETAIL_COLS =
