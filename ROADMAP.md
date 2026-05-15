@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 04:35 UTC_
+_Last refreshed: 2026-05-15 04:57 UTC_
 
 **Branch:** `claude/finetune-agent-traces-VDz9u`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 51 files, latest `052_estimation_default_filters.sql`.
+**Migrations on disk:** 52 files, latest `053_estimation_cohort_entries.sql`.
 
 **Last 10 commits:**
 
 ```
+c265bce agent: server-derived cohort, no more LLM ID transcription
 bacfc82 roadmap: refresh auto-status block
 20d3e71 roadmap: refresh auto-status block
 1af768c agent: expose every ComparableFilters field to the agent + show all filters in the trace
@@ -25,7 +26,6 @@ e0ce9c4 frontend: prefill yield's listing price from a sale subject listing
 bcb6f58 Merge pull request #93 from waiff/claude/feedback-panel-residual-width-AQAFy
 a7bd9d5 frontend: float feedback panel into the page's right residual column
 4433786 Merge pull request #92 from waiff/claude/floating-feedback-button-AQAFy
-7ff2623 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
