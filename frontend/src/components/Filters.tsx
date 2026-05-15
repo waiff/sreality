@@ -7,6 +7,7 @@ import {
   listingFiltersToRegistryView,
   applyRegistryUpdates,
 } from '@/lib/filters';
+import type { MapySuggestion } from '@/lib/maps';
 import { ControlGroup, Section } from '@/components/controls';
 import { FilterForm } from '@/components/FilterForm';
 import {
@@ -18,9 +19,15 @@ import {
 interface SidebarProps {
   filters: ListingFilters;
   onChange: (next: ListingFilters) => void;
+  /* Browse passes this so picking a place in the District typeahead
+   * also re-centres the main map. The widget still updates the chip
+   * filter via the normal onChange path; this is a side channel for
+   * the map navigation. Optional so other consumers (Watchdog edit
+   * form, etc.) can mount the sidebar without it. */
+  onLocationPick?: (s: MapySuggestion) => void;
 }
 
-export function FilterSidebar({ filters, onChange }: SidebarProps) {
+export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProps) {
   // <FilterForm> reads snake_case registry ids; Browse keeps the
   // camelCase `ListingFilters` shape its queries / URL serialisation
   // already use. The adapter in lib/filters bridges both directions
@@ -39,9 +46,9 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
   // Rich widgets the controls library can't generically express get
   // plugged in via customWidgets — keyed by registry id. The widgets
   // own their own data fetching; FilterForm just wires the value /
-  // onChange through.
+  // onChange through. The District field renders inline (below) so it
+  // can also surface its picked-suggestion side channel to Browse.
   const customWidgets = {
-    districts: LocationTypeahead as never,
     tags: TagPicker as never,
   };
 
@@ -86,15 +93,15 @@ export function FilterSidebar({ filters, onChange }: SidebarProps) {
         </ControlGroup>
 
         <ControlGroup title="Location">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={['districts']}
-            labels={{ districts: 'District' }}
-            customWidgets={customWidgets}
-            flat
-          />
+          <Section label="District">
+            <LocationTypeahead
+              value={filters.districts}
+              onChange={(next) =>
+                onChange({ ...filters, districts: next ?? [] })
+              }
+              onPick={onLocationPick}
+            />
+          </Section>
           <LocationModeSection
             mode={filters.locationMode}
             centerRadius={filters.centerRadius}
