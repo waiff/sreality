@@ -22,10 +22,14 @@ import {
   listAppSettings,
   updateAppSetting,
   listAgentTools,
+  getFilterSchema,
+  setFilterVisibility,
   type Skill,
   type AppSetting,
   type AgentTool,
   type SkillUpdate,
+  type Agenda,
+  type FilterSchemaEntry,
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
@@ -58,6 +62,21 @@ export default function Settings() {
           (URL parser, listing summary, image comparison).
         </p>
         <AppSettingsSection />
+      </section>
+
+      <section className="mt-10">
+        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
+          Filter availability
+        </h2>
+        <p className="text-sm text-[var(--color-ink-3)] mb-3">
+          One row per filter from the canonical registry; columns are
+          the agendas (Browse, Watchdog, agent tools, …) where that
+          filter can apply. Toggle a cell off to hide the filter
+          from that surface — backend matchers and UI forms both
+          respect the matrix. Default is on everywhere a filter is
+          declared.
+        </p>
+        <FilterVisibilitySection />
       </section>
 
       <section className="mt-10">
@@ -504,6 +523,213 @@ function AppSettingRow({ setting }: { setting: AppSetting }) {
     </div>
   );
 }
+
+/* -------------------------------------------------------------------- */
+/* Filter availability (PR 1 / migration 059)                            */
+/* -------------------------------------------------------------------- */
+
+function FilterVisibilitySection() {
+  const qc = useQueryClient();
+  const schemaQ = useQuery({
+    queryKey: ['admin', 'filter-schema'],
+    queryFn: getFilterSchema,
+  });
+
+  // Pending writes that haven't returned yet keep optimistic UI feedback.
+  const [pending, setPending] = useState<Set<string>>(new Set());
+
+  const mut = useMutation({
+    mutationFn: ({
+      agenda, filterId, enabled,
+    }: {
+      agenda: Agenda;
+      filterId: string;
+      enabled: boolean;
+    }) => setFilterVisibility(agenda, filterId, enabled),
+    onMutate: async ({ agenda, filterId, enabled }) => {
+      const key = ['admin', 'filter-schema'] as const;
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<typeof schemaQ.data>(key);
+      if (prev) {
+        qc.setQueryData(key, {
+          ...prev,
+          filters: prev.filters.map((f) =>
+            f.id === filterId
+              ? { ...f, visibility: { ...f.visibility, [agenda]: enabled } }
+              : f,
+          ),
+        });
+      }
+      setPending((p) => new Set(p).add(`${agenda}|${filterId}`));
+      return { prev };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.prev) {
+        qc.setQueryData(['admin', 'filter-schema'], ctx.prev);
+      }
+    },
+    onSettled: (_data, _err, { agenda, filterId }) => {
+      setPending((p) => {
+        const next = new Set(p);
+        next.delete(`${agenda}|${filterId}`);
+        return next;
+      });
+      qc.invalidateQueries({ queryKey: ['admin', 'filter-schema'] });
+    },
+  });
+
+  if (schemaQ.error) return <ErrorBanner message={schemaQ.error.message} />;
+  if (!schemaQ.data) {
+    return <p className="text-sm text-[var(--color-ink-3)]">Loading filter registry…</p>;
+  }
+
+  const { agendas, categories, filters } = schemaQ.data;
+  const filtersByCategory = new Map<string, FilterSchemaEntry[]>();
+  for (const f of filters) {
+    const list = filtersByCategory.get(f.category) ?? [];
+    list.push(f);
+    filtersByCategory.set(f.category, list);
+  }
+
+  return (
+    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)]">
+              <th className="text-left px-3 py-2 font-medium text-[var(--color-ink-2)] sticky left-0 bg-[var(--color-paper-2)]">
+                Filter
+              </th>
+              {agendas.map((a) => (
+                <th
+                  key={a}
+                  className="text-center px-2 py-2 font-medium text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-3)] min-w-[6rem]"
+                >
+                  {a}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {categories
+              .filter((c) => filtersByCategory.has(c))
+              .map((category) => (
+                <FilterCategoryRows
+                  key={category}
+                  category={category}
+                  filters={filtersByCategory.get(category)!}
+                  agendas={agendas}
+                  pending={pending}
+                  onToggle={(agenda, filterId, enabled) =>
+                    mut.mutate({ agenda, filterId, enabled })
+                  }
+                />
+              ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="px-3 py-2 text-[0.7rem] text-[var(--color-ink-4)] border-t border-[var(--color-rule)] bg-[var(--color-paper-2)]/50">
+        A dash (—) means the filter doesn't apply to that agenda — the
+        registry doesn't declare it there, so there's nothing to toggle.
+      </p>
+    </div>
+  );
+}
+
+function FilterCategoryRows({
+  category,
+  filters,
+  agendas,
+  pending,
+  onToggle,
+}: {
+  category: string;
+  filters: FilterSchemaEntry[];
+  agendas: Agenda[];
+  pending: Set<string>;
+  onToggle: (agenda: Agenda, filterId: string, enabled: boolean) => void;
+}) {
+  return (
+    <>
+      <tr className="bg-[var(--color-paper)]/60 border-b border-[var(--color-rule-soft)]">
+        <td
+          colSpan={agendas.length + 1}
+          className="px-3 py-1.5 text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium"
+        >
+          {category}
+        </td>
+      </tr>
+      {filters.map((f) => (
+        <tr key={f.id} className="border-b border-[var(--color-rule-soft)] last:border-b-0">
+          <td className="px-3 py-2 align-top sticky left-0 bg-[var(--color-paper)]">
+            <div className="font-mono text-[0.78rem] text-[var(--color-ink)]">{f.id}</div>
+            <div className="mt-0.5 text-[0.7rem] text-[var(--color-ink-3)] max-w-[28rem] leading-snug">
+              {f.description}
+            </div>
+          </td>
+          {agendas.map((a) => {
+            const declared = a in f.visibility;
+            if (!declared) {
+              return (
+                <td key={a} className="text-center text-[var(--color-ink-4)] px-2 py-2">
+                  —
+                </td>
+              );
+            }
+            const enabled = f.visibility[a];
+            const isPending = pending.has(`${a}|${f.id}`);
+            return (
+              <td key={a} className="text-center px-2 py-2">
+                <FilterCell
+                  enabled={enabled}
+                  pending={isPending}
+                  onChange={(next) => onToggle(a, f.id, next)}
+                />
+              </td>
+            );
+          })}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function FilterCell({
+  enabled,
+  pending,
+  onChange,
+}: {
+  enabled: boolean;
+  pending: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!enabled)}
+      aria-pressed={enabled}
+      disabled={pending}
+      className={[
+        'inline-flex items-center justify-center w-9 h-5 rounded-full border transition-colors',
+        enabled
+          ? 'bg-[var(--color-sage-soft)] border-[var(--color-sage)]/60'
+          : 'bg-[var(--color-paper-2)] border-[var(--color-rule)]',
+        pending ? 'opacity-50 cursor-wait' : 'cursor-pointer',
+      ].join(' ')}
+    >
+      <span
+        className={[
+          'w-3 h-3 rounded-full transition-transform',
+          enabled
+            ? 'translate-x-2 bg-[var(--color-sage)]'
+            : '-translate-x-2 bg-[var(--color-ink-4)]',
+        ].join(' ')}
+        aria-hidden
+      />
+    </button>
+  );
+}
+
 
 /* -------------------------------------------------------------------- */
 /* Shared                                                                */

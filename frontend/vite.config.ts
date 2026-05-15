@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
@@ -20,5 +21,13 @@ export default defineConfig({
         },
       },
     },
+  },
+  test: {
+    // jsdom for component tests (RangeInputs, MultiselectChips, …).
+    // Pure-function tests still run here — jsdom adds a few ms of
+    // setup but otherwise behaves like node for non-DOM code.
+    environment: 'jsdom',
+    setupFiles: ['./vitest.setup.ts'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
   },
 });

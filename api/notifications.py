@@ -50,6 +50,22 @@ if TYPE_CHECKING:
 LOG = logging.getLogger(__name__)
 
 
+# Mirrors frontend/src/lib/filters.ts:buildingMaterialToValues — the
+# operator-friendly material bucket (cihla / panel / smisena / ostatni)
+# expands to one or more sreality `building_type` codes. The four
+# buckets are the canonical Browse / Watchdog labels; the registry's
+# `building_material` filter accepts the bucket and the matcher does
+# the expansion. Update this constant if the frontend mapping evolves.
+_BUILDING_MATERIAL_VALUES: dict[str, tuple[str, ...]] = {
+    "cihla":   ("cihla",),
+    "panel":   ("panel",),
+    "smisena": ("smisena",),
+    "ostatni": (
+        "skelet", "drevo", "kamen", "montovana", "nizkoenergeticka",
+    ),
+}
+
+
 # --- filter spec ----------------------------------------------------------
 
 class WatchdogFilterSpec(BaseModel):
@@ -116,6 +132,20 @@ class WatchdogFilterSpec(BaseModel):
 
     # Parking lots minimum.
     min_parking_lots: int | None = None
+
+    # Building material bucket (cihla / panel / smisena / ostatni).
+    # The matcher expands `ostatni` to the five sreality building_type
+    # values that fall outside the explicit three (see
+    # `_BUILDING_MATERIAL_VALUES`).
+    building_material: str | None = None
+
+    # Garden area bounds.
+    min_garden_area: float | None = None
+    max_garden_area: float | None = None
+
+    # Operator-curated tag ids. AND-semantics: a listing must carry
+    # every tag in the list to match.
+    tags: list[int] | None = None
 
     @model_validator(mode="after")
     def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
@@ -235,6 +265,34 @@ def _build_match_clauses(
     if spec.min_parking_lots is not None:
         where.append("l.parking_lots >= %(min_parking_lots)s")
         params["min_parking_lots"] = spec.min_parking_lots
+
+    if spec.building_material is not None:
+        values = _BUILDING_MATERIAL_VALUES.get(spec.building_material)
+        if values:
+            where.append("l.building_type = ANY(%(building_material_values)s)")
+            params["building_material_values"] = list(values)
+
+    if spec.min_garden_area is not None:
+        where.append("l.garden_area >= %(min_garden_area)s")
+        params["min_garden_area"] = spec.min_garden_area
+    if spec.max_garden_area is not None:
+        where.append("l.garden_area <= %(max_garden_area)s")
+        params["max_garden_area"] = spec.max_garden_area
+
+    if spec.tags:
+        # AND-semantics: the listing must carry every tag in the list.
+        # `count(distinct …) = array_length(…)` mirrors the browse_stats
+        # tag predicate (migration 055 / 060).
+        where.append(
+            "l.sreality_id IN ("
+            "SELECT lt.sreality_id FROM listing_tags lt "
+            "WHERE lt.tag_id = ANY(%(watchdog_tag_ids)s) "
+            "GROUP BY lt.sreality_id "
+            "HAVING count(distinct lt.tag_id) = "
+            "       cardinality(%(watchdog_tag_ids)s)"
+            ")"
+        )
+        params["watchdog_tag_ids"] = list(spec.tags)
 
     return where, params
 

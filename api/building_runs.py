@@ -128,20 +128,24 @@ def create_building_run_from_url(
     sreality_client: "SrealityClient",
     llm_client: "LLMClient",
     body: s.CreateBuildingFromUrlIn,
+    background_tasks: Any | None = None,
 ) -> dict[str, Any]:
-    """B1: parse the URL, run the extractor, persist the row.
+    """B1: parse the URL, INSERT a 'pending' row, schedule extraction as
+    a BackgroundTask, return the row immediately.
 
-    Synchronous: blocks until extraction completes (or fails). v1
-    accepts the wall-clock cost; Phase 7 slice 2's async lifecycle
-    retrofits polling later.
-
-    Status transitions inside this call:
+    Status transitions:
       INSERT pending  →  extracting  →  awaiting_input  (success)
                                     →  failed           (any error)
 
+    The handler returns in ~1 s. The browser navigates to the building
+    detail page, which polls until status reaches awaiting_input / failed.
+
     Apartment URLs (category_main='byt') are rejected with HTTP 400
-    BEFORE the row is INSERTed — those go through /estimations, and
-    we don't want stale `byt` rows polluting the building flow.
+    BEFORE the row is INSERTed — those go through /estimations.
+
+    When `background_tasks` is None, extraction runs inline (preserves
+    behaviour for tests and any caller that wants the row populated
+    before reading it back).
     """
     try:
         result = source_dispatcher.parse_listing_url(
@@ -217,6 +221,89 @@ def create_building_run_from_url(
         )
         return _fetch_building(conn, building_id) or {}
 
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _execute_building_extraction_background,
+            building_id=building_id,
+            sreality_id=int(result.sreality_id),
+            parse_warnings=list(result.warnings),
+            subject_summary=subject_summary,
+            special_instructions=body.special_instructions,
+            contextual_text=body.contextual_text,
+        )
+        return _fetch_building(conn, building_id) or {}
+
+    _execute_building_extraction(
+        conn, llm_client,
+        building_id=building_id,
+        sreality_id=int(result.sreality_id),
+        parse_warnings=list(result.warnings),
+        subject_summary=subject_summary,
+        special_instructions=body.special_instructions,
+        contextual_text=body.contextual_text,
+    )
+    return _fetch_building(conn, building_id) or {}
+
+
+def _execute_building_extraction_background(
+    *,
+    building_id: int,
+    sreality_id: int,
+    parse_warnings: list[str],
+    subject_summary: dict[str, Any] | None,
+    special_instructions: str | None,
+    contextual_text: str | None,
+) -> None:
+    """Background-task entry: open a fresh connection + LLM client and
+    run the extractor. Any uncaught exception flips the row to 'failed'.
+    """
+    from api import dependencies as deps
+
+    try:
+        with deps.open_background_conn() as conn:
+            from api.llm_client import LLMClient
+            llm_client = LLMClient(conn, providers=deps.get_providers())
+            _execute_building_extraction(
+                conn, llm_client,
+                building_id=building_id,
+                sreality_id=sreality_id,
+                parse_warnings=parse_warnings,
+                subject_summary=subject_summary,
+                special_instructions=special_instructions,
+                contextual_text=contextual_text,
+            )
+    except Exception as exc:
+        LOG.exception(
+            "background building extraction %s crashed", building_id,
+        )
+        try:
+            with deps.open_background_conn() as conn:
+                _update_building_fields(
+                    conn, building_id,
+                    status="failed",
+                    error_message=(
+                        f"background crash: {type(exc).__name__}: {exc}"
+                    )[:1000],
+                )
+        except Exception:
+            LOG.exception(
+                "failed to mark building %s failed after background crash",
+                building_id,
+            )
+
+
+def _execute_building_extraction(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    *,
+    building_id: int,
+    sreality_id: int,
+    parse_warnings: list[str],
+    subject_summary: dict[str, Any] | None,
+    special_instructions: str | None,
+    contextual_text: str | None,
+) -> None:
+    """Run the extractor for an already-INSERTed pending row."""
     _update_building_fields(conn, building_id, status="extracting")
     attachments = _fetch_attachments(conn, building_id)
 
@@ -224,9 +311,9 @@ def create_building_run_from_url(
         envelope = building_extraction.extract_building_units(
             conn,
             llm_client,
-            sreality_id=result.sreality_id,
-            special_instructions=body.special_instructions,
-            contextual_text=body.contextual_text,
+            sreality_id=sreality_id,
+            special_instructions=special_instructions,
+            contextual_text=contextual_text,
             attachments=attachments or None,
         )
     except BuildingExtractionError as exc:
@@ -238,7 +325,7 @@ def create_building_run_from_url(
             status="failed",
             error_message=f"extraction failed: {exc}",
         )
-        return _fetch_building(conn, building_id) or {}
+        return
     except Exception as exc:  # noqa: BLE001
         LOG.exception(
             "building_runs[%s] unexpected extractor error", building_id,
@@ -248,7 +335,7 @@ def create_building_run_from_url(
             status="failed",
             error_message=f"unexpected extractor error: {exc}",
         )
-        return _fetch_building(conn, building_id) or {}
+        return
 
     payload = envelope["data"]
     proposal = {
@@ -265,7 +352,7 @@ def create_building_run_from_url(
         **(subject_summary or {}),
         "building": payload["building"],
     }
-    merged_warnings = list(result.warnings) + list(payload.get("warnings") or [])
+    merged_warnings = list(parse_warnings) + list(payload.get("warnings") or [])
 
     _update_building_fields(
         conn, building_id,
@@ -274,7 +361,32 @@ def create_building_run_from_url(
         subject_summary=merged_subject_summary,
         warnings=merged_warnings or None,
     )
-    return _fetch_building(conn, building_id) or {}
+
+
+def sweep_stuck_buildings(
+    conn: "psycopg.Connection",
+    *,
+    older_than_minutes: int = 10,
+) -> int:
+    """Mark any building_runs in a non-terminal-non-awaiting status older
+    than the cutoff as 'failed'. Returns the number of rows updated.
+
+    Recovers from server restart mid-background-extraction. We exclude
+    'awaiting_input' (the human-in-the-loop pause is intentional) and
+    'estimating' is left for now — it's handled by B2's orchestrator.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE building_runs "
+            "SET status = 'failed', "
+            "    error_message = coalesce(error_message, "
+            "        'interrupted by server restart') "
+            "WHERE status IN ('pending', 'extracting') "
+            "  AND created_at < now() - make_interval(mins => %s) "
+            "RETURNING id",
+            (older_than_minutes,),
+        )
+        return len(cur.fetchall())
 
 
 def confirm_units(

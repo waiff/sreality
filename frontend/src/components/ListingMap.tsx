@@ -1,8 +1,41 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import type { MapRow } from '@/lib/queries';
-import type { MapBounds } from '@/lib/filters';
+import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
+
+/* Polygon approximation of a metres-radius circle around (lat, lng).
+ * Same haversine ring the small <LocationControl> uses — 96 points is
+ * smooth enough to read as a circle while staying cheap. */
+const CENTER_CIRCLE_POINTS = 96;
+const EARTH_RADIUS_M = 6_371_000;
+
+const centerRadiusPolygon = (
+  cr: CenterRadius,
+): GeoJSON.Feature<GeoJSON.Polygon> => {
+  const latRad = (cr.lat * Math.PI) / 180;
+  const coords: [number, number][] = [];
+  for (let i = 0; i <= CENTER_CIRCLE_POINTS; i++) {
+    const theta = (i / CENTER_CIRCLE_POINTS) * 2 * Math.PI;
+    const dx = cr.radius_m * Math.cos(theta);
+    const dy = cr.radius_m * Math.sin(theta);
+    const dLng =
+      (dx / (EARTH_RADIUS_M * Math.cos(latRad))) * (180 / Math.PI);
+    const dLat = (dy / EARTH_RADIUS_M) * (180 / Math.PI);
+    coords.push([cr.lng + dLng, cr.lat + dLat]);
+  }
+  return {
+    type: 'Feature',
+    properties: {},
+    geometry: { type: 'Polygon', coordinates: [coords] },
+  };
+};
+
+const emptyCenterCircle: GeoJSON.Feature<GeoJSON.Polygon> = {
+  type: 'Feature',
+  properties: {},
+  geometry: { type: 'Polygon', coordinates: [[]] },
+};
 
 const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 9.5 };
@@ -52,13 +85,22 @@ interface Props {
    * of truth for its own viewport. */
   bounds: MapBounds | null;
   /* Fires on user-driven pan/zoom (we ignore programmatic moves).
-   * `null` means "the operator cleared the map area" (Reset-view). */
+   * `null` means "the operator cleared the map area" (Reset-view).
+   * Suppressed when `locationMode === 'center_radius'`: the
+   * spatial predicate comes from the sidebar's centre+radius
+   * widget, not the viewport. */
   onBoundsChange?: (b: MapBounds | null) => void;
   /* Cross-source hover sync. Listings whose ids appear here render
    * with the highlight paint expressions; the map pushes its own
    * mouseenter/mouseleave events outward through onHover. */
   hoveredIds: ReadonlySet<number>;
   onHover: (ids: ReadonlyArray<number> | null) => void;
+  /* When set (i.e. the operator chose centre+radius mode in the
+   * sidebar) the map renders a dashed copper circle around the
+   * point so the cohort's geographic scope is visible. The circle
+   * is purely visual — the cohort filtering happens client-side
+   * via an approximate bbox in queries.effectiveBbox. */
+  centerCircle: CenterRadius | null;
 }
 
 export default function ListingMap({
@@ -70,6 +112,7 @@ export default function ListingMap({
   onBoundsChange,
   hoveredIds,
   onHover,
+  centerCircle,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -91,6 +134,13 @@ export default function ListingMap({
    * callback without rebinding. */
   const onHoverRef = useRef(onHover);
   onHoverRef.current = onHover;
+  /* When centre+radius mode is active the `moveend` handler must
+   * skip emitting bounds — the cohort filters by the dashed circle,
+   * not the viewport. Suppression flag rather than removing the
+   * listener so toggling the mode at runtime doesn't require a
+   * map remount. */
+  const suppressBoundsRef = useRef(centerCircle != null);
+  suppressBoundsRef.current = centerCircle != null;
   /* Tracks which feature ids currently carry feature-state.hovered =
    * true so we know which to clear before applying the next set. */
   const styledIdsRef = useRef<Set<number>>(new Set());
@@ -292,6 +342,33 @@ export default function ListingMap({
           .addTo(map);
       });
 
+      /* Centre+radius overlay. The polygon source carries an empty
+       * ring when the operator hasn't picked a centre yet; the
+       * effect below populates it when `centerCircle` is non-null. */
+      map.addSource('center-circle', {
+        type: 'geojson',
+        data: emptyCenterCircle,
+      });
+      map.addLayer({
+        id: 'center-circle-fill',
+        type: 'fill',
+        source: 'center-circle',
+        paint: {
+          'fill-color': '#b58438',
+          'fill-opacity': 0.08,
+        },
+      });
+      map.addLayer({
+        id: 'center-circle-outline',
+        type: 'line',
+        source: 'center-circle',
+        paint: {
+          'line-color': '#b58438',
+          'line-width': 1.5,
+          'line-dasharray': [2, 2],
+        },
+      });
+
       setReady(true);
 
       /* Restore the exact viewport captured in the URL on mount.
@@ -313,9 +390,12 @@ export default function ListingMap({
     /* Only user-driven moveends propagate to the URL. Programmatic
      * fitBounds / easeTo calls produce events with `originalEvent ===
      * undefined`, which we skip — otherwise the initial-fit refit and
-     * the Reset-view animation would both write to the URL. */
+     * the Reset-view animation would both write to the URL.
+     * Also skip when centre+radius mode is on; the dashed circle owns
+     * the spatial predicate in that mode. */
     map.on('moveend', (e) => {
       if (e.originalEvent == null) return;
+      if (suppressBoundsRef.current) return;
       const cb = onBoundsChangeRef.current;
       if (!cb) return;
       const b = map.getBounds();
@@ -333,6 +413,20 @@ export default function ListingMap({
       mapRef.current = null;
     };
   }, []);
+
+  // Sync the centre+radius overlay polygon whenever the prop changes.
+  // No-op until the map's `load` event has run — until then there's
+  // no `center-circle` source to call setData on.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const src = map.getSource('center-circle') as
+      | GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData(
+      centerCircle ? centerRadiusPolygon(centerCircle) : emptyCenterCircle,
+    );
+  }, [centerCircle, ready]);
 
   // Push fresh rows to the source whenever the filter result changes.
   // Only the very first non-empty result gets a fitBounds call; after

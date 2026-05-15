@@ -1,6 +1,8 @@
 import { supabase } from './supabase';
 import {
+  type CenterRadius,
   type ListingFilters,
+  type MapBounds,
   buildingMaterialToValues,
   isoNDaysAgo,
 } from './filters';
@@ -12,6 +14,40 @@ import type {
   ListingSnapshotPublic,
   Ppm2Box,
 } from './types';
+
+/* Circle → bounding box approximation. Used when the operator picks
+ * the centre+radius mode on the map: PostgREST has no native
+ * ST_DWithin filter, so we send the bounding box of the radius
+ * circle as the spatial predicate. The bbox is slightly oversized
+ * versus the true circle (a square circumscribes a circle), which
+ * means a few extra listings near the corners can slip into the
+ * cohort — acceptable for the headline use case; true distance
+ * filtering belongs in a follow-up RPC if it ever matters. */
+const EARTH_RADIUS_M = 6_371_000;
+
+const centerRadiusBbox = (cr: CenterRadius): MapBounds => {
+  const dLat = (cr.radius_m / EARTH_RADIUS_M) * (180 / Math.PI);
+  const dLng =
+    (cr.radius_m / (EARTH_RADIUS_M * Math.cos((cr.lat * Math.PI) / 180))) *
+    (180 / Math.PI);
+  return {
+    south: cr.lat - dLat,
+    north: cr.lat + dLat,
+    west: cr.lng - dLng,
+    east: cr.lng + dLng,
+  };
+};
+
+/** Returns the bbox the cohort filter should apply for a given
+ *  filters object. Honours `locationMode`: viewport → use bounds
+ *  (or null); center_radius → derive bbox from centerRadius (or null
+ *  if no centre is set). The caller doesn't have to branch. */
+export const effectiveBbox = (f: ListingFilters): MapBounds | null => {
+  if (f.locationMode === 'center_radius') {
+    return f.centerRadius ? centerRadiusBbox(f.centerRadius) : null;
+  }
+  return f.bounds;
+};
 
 /* Maplibre-gl renders a GeoJSON source via WebGL with clustering, so
  * the bottleneck is wire-bytes, not DOM. 50k features ≈ 0.3 MB gzipped. */
@@ -108,11 +144,12 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.usableAreaMin   != null) r = r.gte('usable_area',   f.usableAreaMin);
   if (f.usableAreaMax   != null) r = r.lte('usable_area',   f.usableAreaMax);
   if (f.parkingLotsMin  != null) r = r.gte('parking_lots',  f.parkingLotsMin);
-  if (f.bounds) {
-    r = r.gte('lng', f.bounds.west)
-         .lte('lng', f.bounds.east)
-         .gte('lat', f.bounds.south)
-         .lte('lat', f.bounds.north);
+  const bbox = effectiveBbox(f);
+  if (bbox) {
+    r = r.gte('lng', bbox.west)
+         .lte('lng', bbox.east)
+         .gte('lat', bbox.south)
+         .lte('lat', bbox.north);
   }
   return r as unknown as T;
 };
@@ -326,6 +363,27 @@ export interface BrowseStatsDispositionRow {
   ppm2_box: Ppm2Box | null;
 }
 
+export interface TomBox {
+  n: number;
+  min: number;
+  p25: number;
+  median: number;
+  mean: number;
+  p75: number;
+  max: number;
+}
+
+export interface PriceBandVelocityRow {
+  bucket: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  p_lo: number;
+  p_hi: number;
+  n: number;
+  pct_share: number | null;
+  price_min: number | null;
+  price_max: number | null;
+  tom_box: TomBox | null;
+}
+
 export interface BrowseStats {
   total: number;
   new_7d: number;
@@ -333,6 +391,7 @@ export interface BrowseStats {
   price: { p25: number; p50: number; p75: number } | null;
   ppm2:  { p25: number; p50: number; p75: number } | null;
   dispositions: ReadonlyArray<BrowseStatsDispositionRow>;
+  price_band_velocity: ReadonlyArray<PriceBandVelocityRow>;
 }
 
 export const fetchBrowseStats = async (
@@ -344,6 +403,8 @@ export const fetchBrowseStats = async (
   const buildingTypeArray = f.buildingMaterial
     ? [...buildingMaterialToValues(f.buildingMaterial)]
     : null;
+
+  const effBbox = effectiveBbox(f);
 
   const { data, error } = await supabase.rpc('browse_stats', {
     category_main_filter:    f.categoryMain,
@@ -372,10 +433,10 @@ export const fetchBrowseStats = async (
     category_sub_cb_filter:  f.categorySubCb,
     building_type_filter:    buildingTypeArray,
     tag_ids:                 f.tags.length ? f.tags : null,
-    bbox_west:               f.bounds?.west  ?? null,
-    bbox_south:              f.bounds?.south ?? null,
-    bbox_east:               f.bounds?.east  ?? null,
-    bbox_north:              f.bounds?.north ?? null,
+    bbox_west:               effBbox?.west  ?? null,
+    bbox_south:              effBbox?.south ?? null,
+    bbox_east:               effBbox?.east  ?? null,
+    bbox_north:              effBbox?.north ?? null,
   });
   if (error) throw error;
   return data as BrowseStats;

@@ -772,6 +772,14 @@ export interface WatchdogFilterSpec {
   furnished: Furnished | null;
   ownership: Ownership | null;
   min_parking_lots: number | null;
+  // Added with migration 060 / PR 2: backend now honours these,
+  // matching the Browse sidebar filter set. The Watchdog form
+  // surfaces them in a later PR — until then, API callers can set
+  // them directly through POST/PUT /notifications/subscriptions.
+  building_material: 'cihla' | 'panel' | 'smisena' | 'ostatni' | null;
+  min_garden_area: number | null;
+  max_garden_area: number | null;
+  tags: number[] | null;
 }
 
 export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
@@ -802,6 +810,10 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   furnished: null,
   ownership: null,
   min_parking_lots: null,
+  building_material: null,
+  min_garden_area: null,
+  max_garden_area: null,
+  tags: null,
 };
 
 export interface WatchdogSubscription {

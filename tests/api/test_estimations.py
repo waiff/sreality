@@ -31,6 +31,15 @@ def client(monkeypatch):
     api_main.app.dependency_overrides[deps.get_llm_client] = (
         lambda: object()
     )
+    # Run scheduled BackgroundTasks synchronously inside the handler so the
+    # response payload reflects the post-task state. Without this, the
+    # handler returns the freshly-INSERTed 'pending' row and the heavy
+    # work would run after res.json() is captured.
+    from starlette.background import BackgroundTasks
+    monkeypatch.setattr(
+        BackgroundTasks, "add_task",
+        lambda self, func, *args, **kwargs: func(*args, **kwargs),
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -54,6 +63,13 @@ def _patch_persistence(monkeypatch) -> _State:
         state.next_id += 1
         state.inserts[rid] = dict(fields)
         return rid
+
+    def fake_update(conn, run_id: int, **fields: Any) -> None:
+        if run_id in state.inserts:
+            state.inserts[run_id].update(fields)
+
+    def fake_flush(conn, run_id: int, recorder) -> None:
+        return None
 
     def fake_fetch(conn, run_id: int) -> dict[str, Any] | None:
         if run_id not in state.inserts:
@@ -83,9 +99,25 @@ def _patch_persistence(monkeypatch) -> _State:
             },
         }
 
+    def fake_bg(*, run_id, body, resolution):
+        target = er._build_target(
+            resolution.target_spec, resolution.input_sreality_id,
+        )
+        filters = er._build_filters(body, er.load_filter_defaults(None))
+        er._execute_estimation_run(
+            object(), object(), object(), run_id,
+            body=body, resolution=resolution,
+            target=target, filters=filters,
+        )
+
     monkeypatch.setattr(er, "_insert_run", fake_insert)
+    monkeypatch.setattr(er, "_update_run_terminal", fake_update)
+    monkeypatch.setattr(er, "flush_trace_payloads", fake_flush)
     monkeypatch.setattr(er, "_fetch_run", fake_fetch)
     monkeypatch.setattr(er, "_build_subject_summary", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        er, "_execute_estimation_run_background", fake_bg,
+    )
     return state
 
 
@@ -170,6 +202,48 @@ def _patch_url_parser(monkeypatch, sreality_id: int = 2836292428) -> None:
 # ----------------------------------------------------------------------
 # POST /estimations
 # ----------------------------------------------------------------------
+
+def test_post_returns_pending_when_background_deferred(monkeypatch):
+    """POST /estimations must return the freshly-INSERTed 'pending' row
+    immediately when the heavy work is deferred. Verifies the
+    fast-respond contract — without the per-test BackgroundTasks
+    synchronous override, the response should still be a valid 200
+    with status='pending' so the browser can navigate to the detail
+    page and poll.
+    """
+    api_main.app.dependency_overrides[deps.get_db_conn] = lambda: object()
+    api_main.app.dependency_overrides[deps.get_sreality_client] = (
+        lambda: object()
+    )
+    api_main.app.dependency_overrides[deps.get_llm_client] = lambda: object()
+    try:
+        state = _patch_persistence(monkeypatch)
+        _patch_estimate(monkeypatch)
+
+        # Replace the background entry point with a counter — we only
+        # care that it was SCHEDULED, not that it ran.
+        scheduled: list[int] = []
+        monkeypatch.setattr(
+            er, "_execute_estimation_run_background",
+            lambda **kw: scheduled.append(kw["run_id"]),
+        )
+
+        client_local = TestClient(api_main.app)
+        res = client_local.post(
+            "/estimations",
+            json={"spec": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}},
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["status"] == "pending"
+        assert body["id"] == 1
+        assert body["estimated_monthly_rent_czk"] is None
+        assert scheduled == [1]
+        # The persisted row was also pending at INSERT time.
+        assert state.inserts[1]["status"] == "pending"
+    finally:
+        api_main.app.dependency_overrides.clear()
+
 
 def test_post_with_spec_creates_success_row(client, monkeypatch):
     state = _patch_persistence(monkeypatch)
@@ -1052,3 +1126,38 @@ def test_post_with_sreality_url_populates_sreality_source_kind(client, monkeypat
     assert body["parse_confidence_per_field"] is None
     assert body["source_html"] is None
     assert body["input_sreality_id"] == 2836292428
+
+
+# ----------------------------------------------------------------------
+# Stuck-row sweep (startup recovery)
+# ----------------------------------------------------------------------
+
+def test_sweep_stuck_runs_marks_old_pending_rows_failed():
+    """Capture the UPDATE that the lifespan startup sweep emits.
+
+    The function takes a `psycopg.Connection`; for a tractable unit
+    test we use a minimal fake that records the executed SQL + params
+    and reports a row count via `fetchall`.
+    """
+    captured: dict[str, Any] = {}
+
+    class _FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+        def fetchall(self):
+            return [(1,), (2,), (3,)]
+
+    class _FakeConn:
+        def cursor(self): return _FakeCursor()
+        def transaction(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    n = er.sweep_stuck_runs(_FakeConn(), older_than_minutes=15)
+    assert n == 3
+    assert "status IN ('pending', 'running')" in captured["sql"]
+    assert "interrupted by server restart" in captured["sql"]
+    assert captured["params"] == (15,)

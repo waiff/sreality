@@ -28,6 +28,20 @@ export interface MapBounds {
   north: number;
 }
 
+/* Operator-set point + radius for the "dot + circle on the map" mode.
+ * When `locationMode === 'center_radius'` the cohort is filtered by an
+ * approximate bbox around (lat, lng) within `radius_m` metres; the
+ * sidebar's <LocationControl> owns the point + radius UI and the main
+ * map renders a dashed circle for visual context. Viewport bounds are
+ * ignored in this mode. */
+export interface CenterRadius {
+  lat: number;
+  lng: number;
+  radius_m: number;
+}
+
+export type LocationMode = 'viewport' | 'center_radius';
+
 export interface ListingFilters {
   categoryMain: CategoryMain;
   categoryType: CategoryType;
@@ -73,6 +87,11 @@ export interface ListingFilters {
    * recolour-by-delete-recreate stay queryable. */
   tags: number[];
   bounds: MapBounds | null;
+  /* `viewport` (default) = map pan/zoom emits bounds, those filter
+   * the cohort. `center_radius` = a sidebar-set point + radius drives
+   * the spatial predicate; bounds is ignored on the SQL side. */
+  locationMode: LocationMode;
+  centerRadius: CenterRadius | null;
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -108,6 +127,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   parkingLotsMin: null,
   tags: [],
   bounds: null,
+  locationMode: 'viewport',
+  centerRadius: null,
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -231,6 +252,10 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
     tags: parseIntList(sp.get('tags')),
     bounds: parseBounds(sp.get('bbox')),
+    locationMode: sp.get('locmode') === 'center_radius'
+      ? 'center_radius'
+      : 'viewport',
+    centerRadius: parseCenterRadius(sp.get('center')),
   };
 };
 
@@ -245,6 +270,16 @@ const parseBounds = (s: string | null): MapBounds | null => {
 };
 
 const fmtBoundsCoord = (n: number): string => Number(n.toFixed(5)).toString();
+
+const parseCenterRadius = (s: string | null): CenterRadius | null => {
+  if (!s) return null;
+  const parts = s.split(',');
+  if (parts.length !== 3) return null;
+  const [lat, lng, radius] = parts.map(Number);
+  if (![lat, lng, radius].every((x) => Number.isFinite(x))) return null;
+  if (radius <= 0) return null;
+  return { lat, lng, radius_m: Math.trunc(radius) };
+};
 
 const parseIntList = (s: string | null): number[] => {
   if (!s) return [];
@@ -304,6 +339,14 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
     sp.set(
       'bbox',
       `${fmtBoundsCoord(west)},${fmtBoundsCoord(south)},${fmtBoundsCoord(east)},${fmtBoundsCoord(north)}`,
+    );
+  }
+  if (f.locationMode === 'center_radius') sp.set('locmode', 'center_radius');
+  if (f.centerRadius) {
+    const { lat, lng, radius_m } = f.centerRadius;
+    sp.set(
+      'center',
+      `${fmtBoundsCoord(lat)},${fmtBoundsCoord(lng)},${radius_m}`,
     );
   }
   return sp;
@@ -388,4 +431,120 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.usableAreaMax == null &&
   f.parkingLotsMin == null &&
   f.tags.length === 0 &&
-  f.bounds == null;
+  f.bounds == null &&
+  f.locationMode === 'viewport' &&
+  f.centerRadius == null;
+
+
+/* -------------------------------------------------------------------------- */
+/* Registry adapter                                                            */
+/*                                                                            */
+/* Browse keeps its camelCase `ListingFilters` shape; the unified              */
+/* `<FilterForm>` reads snake_case registry ids. These two helpers bridge      */
+/* the gap at the boundary so we don't have to rename the type or the 40+     */
+/* references inside `queries.ts`. Tri-state amenities pivot here too:        */
+/* `'any' | 'yes' | 'no'` ⇄ `null | true | false`.                            */
+/* -------------------------------------------------------------------------- */
+
+/** Registry id → ListingFilters key. Keys not present here aren't part
+ *  of the Browse filter set (e.g. `radius_m` and `area_band_pct` are
+ *  cohort-tuning knobs that don't surface on Browse). */
+const REGISTRY_KEY_MAP = {
+  category_main: 'categoryMain',
+  category_type: 'categoryType',
+  category_sub_cb: 'categorySubCb',
+  dispositions: 'dispositions',
+  districts: 'districts',
+  status: 'status',
+  min_price_czk: 'priceMin',
+  max_price_czk: 'priceMax',
+  min_area_m2: 'areaMin',
+  max_area_m2: 'areaMax',
+  min_estate_area: 'estateAreaMin',
+  max_estate_area: 'estateAreaMax',
+  min_usable_area: 'usableAreaMin',
+  max_usable_area: 'usableAreaMax',
+  has_balcony: 'hasBalcony',
+  has_lift: 'hasLift',
+  has_parking: 'hasParking',
+  terrace: 'terrace',
+  cellar: 'cellar',
+  garage: 'garage',
+  furnished: 'furnished',
+  ownership: 'ownership',
+  building_material: 'buildingMaterial',
+  min_parking_lots: 'parkingLotsMin',
+  tags: 'tags',
+  tom_days_min: 'tomDaysMin',
+  tom_days_max: 'tomDaysMax',
+  last_seen_min_days: 'lastSeenMinDays',
+  last_seen_max_days: 'lastSeenMaxDays',
+  first_seen_min_days: 'firstSeenMinDays',
+  first_seen_max_days: 'firstSeenMaxDays',
+} as const satisfies Record<string, keyof ListingFilters>;
+
+type RegistryKey = keyof typeof REGISTRY_KEY_MAP;
+
+const TRISTATE_KEYS: ReadonlyArray<RegistryKey> = [
+  'has_balcony', 'has_lift', 'has_parking', 'terrace', 'cellar', 'garage',
+];
+
+const triToBoolNullable = (v: TriState): boolean | null =>
+  v === 'any' ? null : v === 'yes';
+
+const boolNullableToTri = (v: unknown): TriState => {
+  if (v === null || v === undefined) return 'any';
+  return v ? 'yes' : 'no';
+};
+
+/** Project a `ListingFilters` onto the snake_case shape that
+ *  `<FilterForm>` reads. Tri-state amenities convert to `bool | null`;
+ *  empty `tags` array becomes `null` (registry's "no constraint"
+ *  sentinel for list filters). */
+export function listingFiltersToRegistryView(
+  filters: ListingFilters,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [registryId, key] of Object.entries(REGISTRY_KEY_MAP)) {
+    const v = filters[key as keyof ListingFilters];
+    if ((TRISTATE_KEYS as ReadonlyArray<string>).includes(registryId)) {
+      out[registryId] = triToBoolNullable(v as TriState);
+    } else if (registryId === 'tags') {
+      out[registryId] = (v as number[]).length === 0 ? null : v;
+    } else if (registryId === 'dispositions' || registryId === 'districts') {
+      const arr = v as unknown[];
+      out[registryId] = arr.length === 0 ? null : arr;
+    } else {
+      out[registryId] = v;
+    }
+  }
+  return out;
+}
+
+/** Reverse of `listingFiltersToRegistryView`. Given a `<FilterForm>`
+ *  onChange `(id, value)`, returns the next `ListingFilters`. Unknown
+ *  ids are no-ops — Browse doesn't track every registry filter. */
+export function applyRegistryUpdate(
+  filters: ListingFilters,
+  id: string,
+  value: unknown,
+): ListingFilters {
+  if (!(id in REGISTRY_KEY_MAP)) return filters;
+  const key = REGISTRY_KEY_MAP[id as RegistryKey];
+  if ((TRISTATE_KEYS as ReadonlyArray<string>).includes(id)) {
+    return { ...filters, [key]: boolNullableToTri(value) };
+  }
+  if (id === 'tags') {
+    const next = value == null ? [] : (value as number[]);
+    return { ...filters, tags: next };
+  }
+  if (id === 'dispositions') {
+    const next = value == null ? [] : (value as Disposition[]);
+    return { ...filters, dispositions: next };
+  }
+  if (id === 'districts') {
+    const next = value == null ? [] : (value as string[]);
+    return { ...filters, districts: next };
+  }
+  return { ...filters, [key]: value } as ListingFilters;
+}

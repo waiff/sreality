@@ -49,6 +49,14 @@ export default function EstimationList() {
     queryFn: () => fetchEstimationsList(queryParams),
     placeholderData: keepPreviousData,
     staleTime: 30_000,
+    refetchInterval: (q) => {
+      const rows = q.state.data?.data ?? [];
+      return rows.some(
+        (r) => r.status === 'pending' || r.status === 'running',
+      )
+        ? 3000
+        : false;
+    },
   });
 
   const setFilter = (key: 'source' | 'status', value: string | null) => {
