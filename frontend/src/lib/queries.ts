@@ -336,11 +336,14 @@ export interface TomBox {
   max: number;
 }
 
-export interface PriceQuartileVelocityRow {
-  bucket: 1 | 2 | 3 | 4;
+export interface PriceBandVelocityRow {
+  bucket: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  p_lo: number;
+  p_hi: number;
   n: number;
-  price_min: number;
-  price_max: number;
+  pct_share: number | null;
+  price_min: number | null;
+  price_max: number | null;
   tom_box: TomBox | null;
 }
 
@@ -351,7 +354,7 @@ export interface BrowseStats {
   price: { p25: number; p50: number; p75: number } | null;
   ppm2:  { p25: number; p50: number; p75: number } | null;
   dispositions: ReadonlyArray<BrowseStatsDispositionRow>;
-  price_quartile_velocity: ReadonlyArray<PriceQuartileVelocityRow>;
+  price_band_velocity: ReadonlyArray<PriceBandVelocityRow>;
 }
 
 export const fetchBrowseStats = async (

@@ -1,24 +1,22 @@
-/* Price-quartile turnover box plots backed by
- * browse_stats.price_quartile_velocity (migration 059). Four rows, one per
- * quartile (Q1=cheapest, Q4=priciest), showing the tom_days distribution of
- * each bucket on a shared horizontal scale.
+/* Per-price-band turnover box plots backed by
+ * browse_stats.price_band_velocity (migration 063). Seven rows, one
+ * per percentile band — narrower at the tails and around the median,
+ * wider through the body of the price distribution — so the chart
+ * can surface tail-vs-body differences that a four-quartile split
+ * would mask. The price cuts come from the filtered cohort, so the
+ * y-axis re-derives whenever the filter changes.
  *
- * The active/inactive semantic of tom_days is set upstream by the user's
+ * Active vs. delisted semantics are set upstream by the user's
  * status filter in the Browse sidebar: status=active → "current age",
- * status=inactive → "time to delist", status=all → mixed. The component
- * itself stays unit-agnostic and renders whatever the RPC delivers.
- *
- * Styling intentionally mirrors DispositionBoxPlots (Tukey 1.5×IQR
- * whiskers, copper median line, hover-triggered numeric tooltip) so the
- * Stats tab reads as a cohesive surface rather than two parallel idioms.
+ * status=inactive → "time to delist", status=all → mixed.
  */
 
 import { useMemo, useState } from 'react';
-import type { PriceQuartileVelocityRow, TomBox } from '@/lib/queries';
+import type { PriceBandVelocityRow, TomBox } from '@/lib/queries';
 import { fmtCount, fmtCzk } from '@/lib/format';
 
 interface Props {
-  rows: ReadonlyArray<PriceQuartileVelocityRow>;
+  rows: ReadonlyArray<PriceBandVelocityRow>;
 }
 
 const MIN_BOX_N = 5;
@@ -26,16 +24,18 @@ const MIN_BOX_N = 5;
 const NBSP = ' ';
 const cz = new Intl.NumberFormat('cs-CZ');
 const fmtDays = (n: number): string => `${cz.format(Math.round(n))}${NBSP}d`;
-const fmtRange = (lo: number, hi: number): string =>
-  `${fmtCzk(lo).replace(/ Kč$/, '')} – ${fmtCzk(hi)}`;
+const fmtRange = (lo: number | null, hi: number | null): string => {
+  if (lo == null || hi == null) return '—';
+  return `${fmtCzk(lo).replace(/ Kč$/, '')} – ${fmtCzk(hi)}`;
+};
 
 const PADDING_X = 16;
-const LABEL_WIDTH = 152;
-const ROW_HEIGHT = 40;
+const LABEL_WIDTH = 200;
+const ROW_HEIGHT = 44;
 const BOX_HALF_HEIGHT = 9;
 const WHISKER_CAP_HEIGHT = 6;
 const AXIS_HEIGHT = 28;
-const VIEW_WIDTH = 720;
+const VIEW_WIDTH = 820;
 
 interface Whiskers {
   low: number;
@@ -77,31 +77,34 @@ const niceBounds = (
   return { lo: niceLo, hi: niceHi, step };
 };
 
-const BUCKET_LABELS: Record<1 | 2 | 3 | 4, string> = {
-  1: 'Q1 · cheapest',
-  2: 'Q2',
-  3: 'Q3',
-  4: 'Q4 · priciest',
+const bandName = (p_lo: number, p_hi: number): string =>
+  `p${p_lo} – p${p_hi}`;
+
+const bandRoleLabel = (p_lo: number, p_hi: number): string | null => {
+  if (p_lo === 0)   return 'cheapest 10%';
+  if (p_hi === 100) return 'priciest 10%';
+  if (p_lo === 45 && p_hi === 55) return 'median ±5pp';
+  return null;
 };
 
-export default function PriceQuartileVelocity({ rows }: Props) {
-  const data = useMemo(() => rows.slice().sort((a, b) => a.bucket - b.bucket), [rows]);
+export default function PriceBandVelocity({ rows }: Props) {
+  const data = useMemo(() => rows.slice().sort((a, b) => a.p_lo - b.p_lo), [rows]);
   const renderable = data.filter(
-    (r): r is PriceQuartileVelocityRow & { tom_box: TomBox } =>
+    (r): r is PriceBandVelocityRow & { tom_box: TomBox } =>
       r.tom_box != null && r.tom_box.n >= MIN_BOX_N,
   );
 
-  if (data.length === 0) {
+  if (data.length === 0 || data.every((r) => r.n === 0)) {
     return (
       <p className="text-sm text-[var(--color-ink-3)] italic">
-        Not enough priced listings in this filter to bucket by price quartile.
+        Not enough priced listings in this filter to bucket by price band.
       </p>
     );
   }
   if (renderable.length === 0) {
     return (
       <p className="text-sm text-[var(--color-ink-3)] italic">
-        Insufficient data for box plots (each bucket needs at least {MIN_BOX_N} listings with a tom_days value).
+        Insufficient data for box plots (each band needs at least {MIN_BOX_N} listings with a tom_days value).
       </p>
     );
   }
@@ -128,9 +131,9 @@ export default function PriceQuartileVelocity({ rows }: Props) {
       <div className="overflow-x-auto">
         <svg
           viewBox={`0 0 ${VIEW_WIDTH} ${viewHeight}`}
-          className="w-full max-w-3xl"
+          className="w-full max-w-4xl"
           role="img"
-          aria-label="Time on market by price quartile"
+          aria-label="Time on market by price percentile band"
         >
           <line
             x1={plotX0}
@@ -177,23 +180,29 @@ export default function PriceQuartileVelocity({ rows }: Props) {
 
           {data.map((row, i) => {
             const yMid = i * ROW_HEIGHT + ROW_HEIGHT / 2;
-            const label = BUCKET_LABELS[row.bucket];
+            const name = bandName(row.p_lo, row.p_hi);
+            const role = bandRoleLabel(row.p_lo, row.p_hi);
             return (
               <g key={row.bucket}>
                 <text
                   x={PADDING_X + LABEL_WIDTH - 8}
-                  y={yMid - 4}
+                  y={yMid - 9}
                   fontSize="11.5"
                   fontFamily="var(--font-sans)"
                   textAnchor="end"
                   fill="var(--color-ink)"
-                  style={{ fontWeight: 500 }}
+                  style={{ fontWeight: 500, fontVariantNumeric: 'tabular-nums' }}
                 >
-                  {label}
+                  {name}
+                  {role ? (
+                    <tspan fill="var(--color-ink-3)" style={{ fontWeight: 400 }}>
+                      {` · ${role}`}
+                    </tspan>
+                  ) : null}
                 </text>
                 <text
                   x={PADDING_X + LABEL_WIDTH - 8}
-                  y={yMid + 9}
+                  y={yMid + 4}
                   fontSize="9.5"
                   fontFamily="var(--font-sans)"
                   textAnchor="end"
@@ -204,7 +213,7 @@ export default function PriceQuartileVelocity({ rows }: Props) {
                 </text>
                 <text
                   x={PADDING_X + LABEL_WIDTH - 8}
-                  y={yMid + 21}
+                  y={yMid + 17}
                   fontSize="9.5"
                   fontFamily="var(--font-sans)"
                   textAnchor="end"
@@ -212,6 +221,7 @@ export default function PriceQuartileVelocity({ rows }: Props) {
                   style={{ fontVariantNumeric: 'tabular-nums' }}
                 >
                   n = {fmtCount(row.n)}
+                  {row.pct_share != null ? ` · ${row.pct_share.toFixed(1)}%` : ''}
                 </text>
                 {row.tom_box && row.tom_box.n >= MIN_BOX_N ? (
                   <BoxRow box={row.tom_box} yMid={yMid} xOf={xOf} />
@@ -310,10 +320,10 @@ function BoxRow({
 
       {hover && (
         <foreignObject
-          x={Math.min(xWHigh + 8, 480)}
-          y={yMid - 60}
+          x={Math.min(xWHigh + 8, 520)}
+          y={yMid - 70}
           width="200"
-          height="120"
+          height="140"
         >
           <BoxTooltip box={box} />
         </foreignObject>
@@ -392,19 +402,20 @@ function InsufficientPlaceholder({
   );
 }
 
-function NumericTable({ rows }: { rows: ReadonlyArray<PriceQuartileVelocityRow> }) {
+function NumericTable({ rows }: { rows: ReadonlyArray<PriceBandVelocityRow> }) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-xs tabular-nums border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper-2)]">
         <thead>
           <tr className="text-left">
             <th className="px-3 py-2 font-medium text-[var(--color-ink-3)] tracking-wide uppercase text-[0.65rem]">
-              Bucket
+              Band
             </th>
             <th className="px-3 py-2 font-medium text-left text-[var(--color-ink-3)] tracking-wide uppercase text-[0.65rem]">
               Price range
             </th>
             <Th>n</Th>
+            <Th>share</Th>
             <Th>min</Th>
             <Th>p25</Th>
             <Th>median</Th>
@@ -414,36 +425,45 @@ function NumericTable({ rows }: { rows: ReadonlyArray<PriceQuartileVelocityRow> 
           </tr>
         </thead>
         <tbody>
-          {rows.map((r) => (
-            <tr key={r.bucket} className="border-t border-[var(--color-rule-soft)]">
-              <td className="px-3 py-1.5 text-[var(--color-ink)] font-medium">
-                {BUCKET_LABELS[r.bucket]}
-              </td>
-              <td className="px-3 py-1.5 text-[var(--color-ink-2)]">
-                {fmtRange(r.price_min, r.price_max)}
-              </td>
-              <Td>{fmtCount(r.n)}</Td>
-              {r.tom_box ? (
-                <>
-                  <Td>{fmtDays(r.tom_box.min)}</Td>
-                  <Td>{fmtDays(r.tom_box.p25)}</Td>
-                  <Td bold>{fmtDays(r.tom_box.median)}</Td>
-                  <Td>{fmtDays(r.tom_box.mean)}</Td>
-                  <Td>{fmtDays(r.tom_box.p75)}</Td>
-                  <Td>{fmtDays(r.tom_box.max)}</Td>
-                </>
-              ) : (
-                <>
-                  <Td>—</Td>
-                  <Td>—</Td>
-                  <Td>—</Td>
-                  <Td>—</Td>
-                  <Td>—</Td>
-                  <Td>—</Td>
-                </>
-              )}
-            </tr>
-          ))}
+          {rows.map((r) => {
+            const role = bandRoleLabel(r.p_lo, r.p_hi);
+            return (
+              <tr key={r.bucket} className="border-t border-[var(--color-rule-soft)]">
+                <td className="px-3 py-1.5 text-[var(--color-ink)] font-medium">
+                  {bandName(r.p_lo, r.p_hi)}
+                  {role && (
+                    <span className="ml-2 text-[var(--color-ink-3)] font-normal">
+                      {role}
+                    </span>
+                  )}
+                </td>
+                <td className="px-3 py-1.5 text-[var(--color-ink-2)]">
+                  {fmtRange(r.price_min, r.price_max)}
+                </td>
+                <Td>{fmtCount(r.n)}</Td>
+                <Td>{r.pct_share != null ? `${r.pct_share.toFixed(1)}%` : '—'}</Td>
+                {r.tom_box ? (
+                  <>
+                    <Td>{fmtDays(r.tom_box.min)}</Td>
+                    <Td>{fmtDays(r.tom_box.p25)}</Td>
+                    <Td bold>{fmtDays(r.tom_box.median)}</Td>
+                    <Td>{fmtDays(r.tom_box.mean)}</Td>
+                    <Td>{fmtDays(r.tom_box.p75)}</Td>
+                    <Td>{fmtDays(r.tom_box.max)}</Td>
+                  </>
+                ) : (
+                  <>
+                    <Td>—</Td>
+                    <Td>—</Td>
+                    <Td>—</Td>
+                    <Td>—</Td>
+                    <Td>—</Td>
+                    <Td>—</Td>
+                  </>
+                )}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
