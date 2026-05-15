@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import type { BrowseStats } from '@/lib/queries';
 import { fmtCount, fmtCzk } from '@/lib/format';
 import DispositionBoxPlots from '@/components/region/DispositionBoxPlots';
+import PriceQuartileVelocity from '@/components/PriceQuartileVelocity';
 
 interface Props {
   stats: BrowseStats | null;
@@ -62,6 +63,17 @@ export default function BrowseStatsView({ stats, isLoading, isEmpty }: Props) {
             ppm2_box: r.ppm2_box,
           }))}
         />
+      </Card>
+
+      <Card label="Turnover by price quartile">
+        <p className="-mt-1 mb-3 text-[0.75rem] text-[var(--color-ink-3)]">
+          Cohort split into four equal-size buckets by price. Box = tom_days
+          (turnover in days) distribution per bucket. Active vs. delisted
+          semantics depend on the status filter above — filter to delisted
+          for "time to delist", to active for "current age", or leave at
+          all for the mixed view.
+        </p>
+        <PriceQuartileVelocity rows={stats.price_quartile_velocity} />
       </Card>
     </div>
   );
