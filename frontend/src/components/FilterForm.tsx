@@ -47,6 +47,15 @@ import {
 
 export type FilterState = Record<string, unknown>;
 
+export interface CustomFilterWidgetProps {
+  value: unknown;
+  onChange: (next: unknown) => void;
+}
+
+export type CustomFilterWidget = (
+  props: CustomFilterWidgetProps,
+) => React.ReactElement | null;
+
 interface FilterFormProps {
   scope: Agenda;
   state: FilterState;
@@ -71,6 +80,12 @@ interface FilterFormProps {
    *  per-category `<ControlGroup>` wrappers. Useful when the host page
    *  already provides its own group container. */
   flat?: boolean;
+  /** Per-filter widget overrides. Keyed by registry filter id.
+   *  When provided, the dispatcher renders the custom widget inside
+   *  the standard `<Section label={...}>` wrapper instead of the
+   *  built-in primitive. Use for rich widgets the controls library
+   *  can't generically express (district typeahead, tag picker, …). */
+  customWidgets?: Record<string, CustomFilterWidget>;
 }
 
 export function FilterForm({
@@ -82,6 +97,7 @@ export function FilterForm({
   includeOnly,
   labels,
   flat,
+  customWidgets,
 }: FilterFormProps) {
   const excludeSet = new Set(exclude ?? []);
   const visibilityById = new Map(
@@ -130,6 +146,21 @@ export function FilterForm({
 
   const renderRow = (f: FilterDef) => {
     const maxDef = pairedAsMin.get(f.id);
+    const custom = customWidgets?.[f.id];
+    if (custom) {
+      // Render the operator-supplied widget inside the standard
+      // Section wrapper so it carries the same label spacing as the
+      // built-in rows.
+      const label = labels?.[f.id] ?? prettifyId(f.id);
+      return (
+        <Section key={f.id} label={label}>
+          {custom({
+            value: state[f.id],
+            onChange: (v) => onChange(f.id, v),
+          })}
+        </Section>
+      );
+    }
     return (
       <FilterRow
         key={f.id}
