@@ -1,5 +1,5 @@
 import { Suspense, lazy, useMemo } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   fetchListingById,
@@ -143,11 +143,21 @@ function Page({ children }: { children: React.ReactNode }) {
 }
 
 function Crumb() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const className =
+    'inline-flex items-center gap-1.5 text-[0.75rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors';
+
+  if (location.key !== 'default') {
+    return (
+      <button type="button" onClick={() => navigate(-1)} className={className}>
+        <BackArrow />
+        <span>Back to browse</span>
+      </button>
+    );
+  }
   return (
-    <Link
-      to="/browse"
-      className="inline-flex items-center gap-1.5 text-[0.75rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
-    >
+    <Link to="/browse" className={className}>
       <BackArrow />
       <span>Back to browse</span>
     </Link>
