@@ -12,7 +12,7 @@ import {
 import type { Furnished, Ownership } from '@/lib/types';
 
 interface Column {
-  field: SortField | 'price_per_m2' | 'furnished' | 'ownership';
+  field: SortField | 'furnished' | 'ownership';
   label: string;
   align?: 'left' | 'right';
   sortable: boolean;
@@ -25,7 +25,7 @@ const COLUMNS: ReadonlyArray<Column> = [
   { field: 'area_m2',       label: 'Area',        align: 'right', sortable: true  },
   { field: 'estate_area',   label: 'Lot',         align: 'right', sortable: true  },
   { field: 'price_czk',     label: 'Price',       align: 'right', sortable: true  },
-  { field: 'price_per_m2',  label: 'Price / m²',  align: 'right', sortable: false },
+  { field: 'price_per_m2',  label: 'Price / m²',  align: 'right', sortable: true  },
   { field: 'parking_lots',  label: 'Parking',     align: 'right', sortable: true  },
   { field: 'furnished',     label: 'Furnished',   align: 'left',  sortable: false },
   { field: 'ownership',     label: 'Ownership',   align: 'left',  sortable: false },

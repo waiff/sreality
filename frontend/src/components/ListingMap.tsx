@@ -75,6 +75,17 @@ const toFeatureCollection = (rows: MapRow[]): FC => ({
   })),
 });
 
+/* Imperative "fly to this place" command. `ts` is a monotonic stamp
+ * (Date.now() at the originating event) so back-to-back picks of the
+ * same place still trigger a flyTo — the prop's identity changes
+ * even when lat/lng/zoom don't. */
+export interface MapFlyToCommand {
+  lat: number;
+  lng: number;
+  zoom?: number;
+  ts: number;
+}
+
 interface Props {
   rows: MapRow[];
   total: number | null;
@@ -101,6 +112,12 @@ interface Props {
    * is purely visual — the cohort filtering happens client-side
    * via an approximate bbox in queries.effectiveBbox. */
   centerCircle: CenterRadius | null;
+  /* Latest "fly to this place" command from outside (e.g. a District
+   * typeahead pick). The map watches the prop's identity and animates
+   * to (lat, lng, zoom) when it changes. Programmatic moves don't
+   * write back to the URL bbox — the existing chip-based district
+   * filter handles cohort narrowing. */
+  flyTo?: MapFlyToCommand | null;
 }
 
 export default function ListingMap({
@@ -113,6 +130,7 @@ export default function ListingMap({
   hoveredIds,
   onHover,
   centerCircle,
+  flyTo,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -448,6 +466,25 @@ export default function ListingMap({
     });
     didInitialFitRef.current = true;
   }, [rows, ready]);
+
+  /* Imperative flyTo on each new command (identity-based via ts).
+   * Marks didInitialFitRef so the rows-effect doesn't subsequently
+   * fitBounds-over the freshly-flown viewport. The rows refetch from
+   * URL filters (notably the district chip the typeahead also added)
+   * keeps the on-screen pins in sync with the new place. */
+  const lastFlyToTsRef = useRef<number | null>(null);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map || !flyTo) return;
+    if (lastFlyToTsRef.current === flyTo.ts) return;
+    lastFlyToTsRef.current = flyTo.ts;
+    map.flyTo({
+      center: [flyTo.lng, flyTo.lat],
+      zoom: flyTo.zoom ?? map.getZoom(),
+      duration: 700,
+    });
+    didInitialFitRef.current = true;
+  }, [flyTo, ready]);
 
   /* Project the shared hoveredIds set onto maplibre's feature-state
    * so the paint expressions on the 'point' layer light up. Clearing
