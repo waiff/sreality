@@ -1,9 +1,10 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchEstimation,
+  fetchImagesByListing,
   fetchImagesByListingIds,
   fetchListingById,
   fetchListingsByIds,
@@ -57,6 +58,39 @@ const ComparablesMap = lazy(
 const ComparableModal = lazy(
   () => import('@/components/estimation/ComparableModal'),
 );
+
+/* Shared by Header (image carousel) and YieldBlock (sale-price prefill).
+ * Hoisted to the EstimationDetail body so both consumers read from one
+ * React Query result instead of re-fetching the same row. */
+function useSubjectListing(run: EstimationRun | null) {
+  const id = run?.input_sreality_id;
+  return useQuery<ListingPublic | null, Error>({
+    queryKey: ['estimation-subject-listing', id],
+    queryFn: () => fetchListingById(id as number),
+    enabled: id != null,
+    staleTime: 60_000,
+  });
+}
+
+function useSubjectImages(run: EstimationRun | null, enabled: boolean) {
+  const id = run?.input_sreality_id;
+  return useQuery<ImagePublic[], Error>({
+    queryKey: ['estimation-subject-images', id],
+    queryFn: () => fetchImagesByListing(id as number),
+    enabled: enabled && id != null,
+    staleTime: 60_000,
+  });
+}
+
+const R2_PUBLIC_BASE =
+  (import.meta.env.VITE_R2_PUBLIC_BASE as string | undefined) ?? undefined;
+
+function pickImageUrl(img: ImagePublic): string {
+  if (R2_PUBLIC_BASE && img.storage_path) {
+    return `${R2_PUBLIC_BASE.replace(/\/$/, '')}/${img.storage_path}`;
+  }
+  return img.sreality_url;
+}
 
 export default function EstimationDetail() {
   const { id: idParam } = useParams();
@@ -112,11 +146,32 @@ export default function EstimationDetail() {
   const isFailed = run.status === 'failed';
   const isInFlight = run.status === 'pending' || run.status === 'running';
 
+  return (
+    <EstimationDetailBody
+      run={run}
+      isFailed={isFailed}
+      isInFlight={isInFlight}
+      rerunMut={rerunMut}
+    />
+  );
+}
+
+function EstimationDetailBody({
+  run, isFailed, isInFlight, rerunMut,
+}: {
+  run: EstimationRun;
+  isFailed: boolean;
+  isInFlight: boolean;
+  rerunMut: ReturnType<typeof useMutation<EstimationRun, ApiError, RerunInput>>;
+}) {
+  const subjectQ = useSubjectListing(run);
+  const imagesQ = useSubjectImages(run, subjectQ.data != null);
+
   if (isInFlight) {
     return (
       <Page>
         <Crumb />
-        <Header run={run} />
+        <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
         <Hairline />
         <InFlightBlock run={run} />
         <Hairline />
@@ -128,12 +183,12 @@ export default function EstimationDetail() {
   return (
     <Page>
       <Crumb />
-      <Header run={run} />
+      <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
 
       {!isFailed && (
         <>
           <Hairline />
-          <YieldBlock run={run} />
+          <YieldBlock run={run} subject={subjectQ.data ?? null} />
         </>
       )}
 
@@ -257,7 +312,21 @@ function BackArrow() {
 /* Header                                                                     */
 /* -------------------------------------------------------------------------- */
 
-function Header({ run }: { run: EstimationRun }) {
+/* The header is the case-file cover for an estimation. Left column is a
+ * photo dossier (carousel of listing photos, same chevron/counter chrome
+ * as the browse cards). Right column carries the run identity, the big
+ * estimated headline, and the listing facts that tell the operator what
+ * they're looking at. Badges (confidence + source) ride the top-right
+ * corner. Falls back gracefully when the subject listing isn't in our DB
+ * yet — the right column degrades to just the estimate number + run
+ * metadata, and the photo well shows a neutral placeholder. */
+function Header({
+  run, subject, images,
+}: {
+  run: EstimationRun;
+  subject: ListingPublic | null;
+  images: ImagePublic[];
+}) {
   const failed = run.status === 'failed';
   const kind = run.estimate_kind ?? 'rent';
   const headline = failed
@@ -271,39 +340,301 @@ function Header({ run }: { run: EstimationRun }) {
         : 'No estimate produced';
 
   return (
-    <div className="mt-5 flex items-start justify-between gap-6">
-      <div className="min-w-0">
-        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-          Estimation · run #{run.id}
-        </p>
-        <h1
-          className="mt-1.5 text-[2.4rem] leading-[1.05] tabular-nums"
-          style={{
-            fontFamily: 'var(--font-display)',
-            fontWeight: 600,
-            color: failed ? 'var(--color-brick)' : 'var(--color-ink)',
-          }}
-        >
-          {headline}
-        </h1>
-        {!failed && run.gross_yield_pct != null && (
-          <p className="mt-1.5 text-sm font-mono tabular-nums text-[var(--color-ink-2)]">
-            gross yield <span className="text-[var(--color-ink)]">{run.gross_yield_pct.toFixed(2)}&nbsp;%</span>
+    <div className="mt-5">
+      <div className="grid gap-5 sm:gap-6 sm:grid-cols-[minmax(0,260px),1fr]">
+        <SubjectImageStrip
+          images={images}
+          subject={subject}
+          spec={run.input_spec ?? null}
+          inputUrl={run.input_url}
+        />
+
+        <div className="min-w-0 flex flex-col">
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+              Estimation · run #{run.id}
+            </p>
+            <div className="shrink-0 flex flex-col items-end gap-1.5">
+              {!failed && <ConfidencePill confidence={run.confidence} />}
+              <SourceBadge source={run.source} />
+            </div>
+          </div>
+          <h1
+            className="mt-1.5 text-[2.4rem] leading-[1.05] tabular-nums"
+            style={{
+              fontFamily: 'var(--font-display)',
+              fontWeight: 600,
+              color: failed ? 'var(--color-brick)' : 'var(--color-ink)',
+            }}
+          >
+            {headline}
+          </h1>
+          {!failed && run.gross_yield_pct != null && (
+            <p className="mt-1.5 text-sm font-mono tabular-nums text-[var(--color-ink-2)]">
+              gross yield <span className="text-[var(--color-ink)]">{run.gross_yield_pct.toFixed(2)}&nbsp;%</span>
+            </p>
+          )}
+          <p
+            className="mt-2 text-[0.75rem] tracking-wide text-[var(--color-ink-3)]"
+            title={fmtAbsolute(run.created_at)}
+          >
+            {fmtRelative(run.created_at)}
           </p>
-        )}
-        <p
-          className="mt-2 text-[0.75rem] tracking-wide text-[var(--color-ink-3)]"
-          title={fmtAbsolute(run.created_at)}
-        >
-          {fmtRelative(run.created_at)}
-        </p>
-      </div>
-      <div className="shrink-0 flex flex-col items-end gap-1.5">
-        {!failed && <ConfidencePill confidence={run.confidence} />}
-        <SourceBadge source={run.source} />
+
+          <SubjectIdentity
+            run={run}
+            subject={subject}
+          />
+        </div>
       </div>
     </div>
   );
+}
+
+/* "Photo dossier" — the photo strip that pins this estimation to a
+ * tangible listing. Carousel chrome is the same vocabulary the browse
+ * cards use (translucent paper-3 chevrons + tabular counter), keeping
+ * the gestural language consistent across the app. When there are no
+ * photos (listing not yet in our DB, or images table empty), the well
+ * shows a quiet placeholder rather than a broken-photo glyph — the
+ * absence is information, not an error. */
+function SubjectImageStrip({
+  images, subject, spec, inputUrl,
+}: {
+  images: ImagePublic[];
+  subject: ListingPublic | null;
+  spec: EstimationRun['input_spec'];
+  inputUrl: string | null;
+}) {
+  const [index, setIndex] = useState(0);
+  const urls = useMemo(() => images.map(pickImageUrl), [images]);
+  const safeIndex = urls.length === 0 ? 0 : Math.min(index, urls.length - 1);
+  const hasMany = urls.length > 1;
+
+  const step = useCallback(
+    (delta: number) => (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (urls.length === 0) return;
+      setIndex((cur) => (cur + delta + urls.length) % urls.length);
+    },
+    [urls.length],
+  );
+
+  const inactive = subject ? !subject.is_active : false;
+  const sid = subject?.sreality_id;
+
+  const placeholderText = subject
+    ? 'no photos'
+    : inputUrl
+      ? 'listing not yet in archive'
+      : spec
+        ? 'spec-only estimation'
+        : 'no subject listing';
+
+  const content = (
+    <div
+      className={[
+        'aspect-[5/4] w-full overflow-hidden relative rounded-[var(--radius-sm)]',
+        'border border-[var(--color-rule)] bg-[var(--color-inset)]',
+      ].join(' ')}
+    >
+      {urls.length > 0 ? (
+        <img
+          src={urls[safeIndex]}
+          alt=""
+          loading="lazy"
+          className={[
+            'w-full h-full object-cover',
+            inactive ? 'saturate-[0.55] brightness-[0.95]' : '',
+          ].join(' ')}
+          onError={(e) => {
+            (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
+          }}
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center px-4 text-center text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+          {placeholderText}
+        </div>
+      )}
+
+      {subject && (
+        <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
+          <span
+            className={[
+              'inline-flex items-center px-1.5 py-0.5 text-[0.6rem] tracking-[0.12em]',
+              'uppercase rounded-[var(--radius-xs)] border backdrop-blur-sm font-medium',
+              inactive
+                ? 'bg-[var(--color-paper-3)]/90 border-[var(--color-brick)]/70 text-[var(--color-brick)]'
+                : 'bg-[var(--color-paper-3)]/90 border-[var(--color-sage)]/70 text-[var(--color-sage)]',
+            ].join(' ')}
+          >
+            {inactive ? 'Neaktivní' : 'Aktivní'}
+          </span>
+        </div>
+      )}
+
+      {hasMany && (
+        <>
+          <button
+            type="button"
+            onClick={step(-1)}
+            aria-label="Previous photo"
+            className="absolute top-1/2 left-1 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-colors"
+          >
+            <CarouselChevron dir="left" />
+          </button>
+          <button
+            type="button"
+            onClick={step(1)}
+            aria-label="Next photo"
+            className="absolute top-1/2 right-1 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-colors"
+          >
+            <CarouselChevron dir="right" />
+          </button>
+          <span className="absolute bottom-1 right-1 px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm">
+            {safeIndex + 1} / {urls.length}
+          </span>
+        </>
+      )}
+    </div>
+  );
+
+  if (sid != null) {
+    return (
+      <Link
+        to={`/listing/${sid}`}
+        className="block group focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus)] rounded-[var(--radius-sm)]"
+        title="Open listing detail"
+      >
+        {content}
+      </Link>
+    );
+  }
+  return content;
+}
+
+function CarouselChevron({ dir }: { dir: 'left' | 'right' }) {
+  const d = dir === 'left' ? 'M7.5 3 L4 6 L7.5 9' : 'M4.5 3 L8 6 L4.5 9';
+  return (
+    <svg
+      width="12" height="12" viewBox="0 0 12 12" aria-hidden fill="none"
+      stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"
+    >
+      <path d={d} />
+    </svg>
+  );
+}
+
+/* Listing identity — the "what is this estimation about" line(s). Pulls
+ * from the persisted listings_public row when available; falls back to
+ * the spec stored on the run so spec-only estimations still read
+ * cleanly. Title is the Czech taxonomy ("Byt 2+kk · 71 m²"), one line
+ * for locality, one mono row for sale price + price/m² when those make
+ * sense. Goes silent (returns null) when there is genuinely nothing to
+ * show beyond the spec lat/lng. */
+function SubjectIdentity({
+  run, subject,
+}: {
+  run: EstimationRun;
+  subject: ListingPublic | null;
+}) {
+  const spec = run.input_spec ?? null;
+
+  const categoryMain = subject?.category_main ?? null;
+  const categoryType = subject?.category_type ?? null;
+  const disposition = subject?.disposition ?? spec?.disposition ?? null;
+  const area = subject?.area_m2 ?? spec?.area_m2 ?? null;
+  const floor = subject?.floor ?? spec?.floor ?? null;
+  const totalFloors = subject?.total_floors ?? null;
+
+  const title = formatListingTitle(categoryMain, categoryType, disposition, area);
+  const place = subject
+    ? [subject.locality, subject.district].filter(Boolean).join(', ')
+    : null;
+
+  const isSale = categoryType === 'prodej';
+  const isRent = categoryType === 'pronajem';
+  const showListingPrice = subject?.price_czk != null;
+  const listingPriceLabel = isSale
+    ? 'sale price'
+    : isRent
+      ? 'monthly rent'
+      : 'list price';
+  const ppm2 =
+    subject?.price_czk != null && subject.area_m2 != null
+      ? fmtPricePerM2(subject.price_czk, subject.area_m2)
+      : null;
+
+  const floorLine =
+    floor != null
+      ? totalFloors != null
+        ? `${floor}. patro / ${totalFloors}`
+        : `${floor}. patro`
+      : null;
+
+  if (!title && !place && !showListingPrice && !floorLine) return null;
+
+  return (
+    <div className="mt-4 pt-4 border-t border-[var(--color-rule)]">
+      {title && (
+        <h2
+          className="text-[1rem] leading-snug text-[var(--color-ink)]"
+          style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+        >
+          {title}
+        </h2>
+      )}
+      {place && (
+        <p className="mt-0.5 text-[0.82rem] text-[var(--color-ink-2)] truncate">
+          {place}
+        </p>
+      )}
+      <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[0.78rem] font-mono tabular-nums text-[var(--color-ink-2)]">
+        {showListingPrice && (
+          <span>
+            <span className="text-[0.65rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)] mr-1">
+              {listingPriceLabel}
+            </span>
+            <span className="text-[var(--color-ink)]">{fmtCzk(subject!.price_czk)}</span>
+          </span>
+        )}
+        {ppm2 && (
+          <span className="text-[var(--color-ink-3)]">{ppm2}</span>
+        )}
+        {floorLine && (
+          <span className="text-[var(--color-ink-3)]">{floorLine}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatListingTitle(
+  categoryMain: string | null,
+  categoryType: string | null,
+  disposition: string | null,
+  areaM2: number | null,
+): string | null {
+  const kind = (() => {
+    if (categoryMain === 'byt') return 'Byt';
+    if (categoryMain === 'dum') return 'Dům';
+    if (categoryMain === 'komercni') return 'Komerční prostor';
+    return null;
+  })();
+  const deal =
+    categoryType === 'pronajem'
+      ? 'k pronájmu'
+      : categoryType === 'prodej'
+        ? 'na prodej'
+        : null;
+  const parts: string[] = [];
+  if (kind && deal) parts.push(`${kind} ${deal}`);
+  else if (kind) parts.push(kind);
+  else if (disposition || areaM2 != null) parts.push('Nemovitost');
+  if (disposition) parts.push(disposition);
+  if (areaM2 != null) parts.push(fmtArea(areaM2));
+  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 function ConfidencePill({ confidence }: { confidence: Confidence | null }) {
@@ -387,47 +718,92 @@ function RentRange({ run }: { run: EstimationRun }) {
 
 const DEFAULT_FOND_CZK_PER_M2 = 10;
 
-function YieldBlock({ run }: { run: EstimationRun }) {
+function YieldBlock({
+  run, subject,
+}: {
+  run: EstimationRun;
+  subject: ListingPublic | null;
+}) {
   const kind = run.estimate_kind ?? 'rent';
   const areaM2 = run.input_spec?.area_m2 ?? null;
   const defaultRent = run.estimated_monthly_rent_czk;
 
-  /* When the operator pasted a sreality URL, fetch the subject listing
-   * so a sale URL can prefill the listing-price input from the actual
-   * asking price. Skipped for non-sreality (no DB row to read) and for
-   * spec-only runs. */
-  const subjectQ = useQuery<ListingPublic | null, Error>({
-    queryKey: ['estimation-subject-listing', run.input_sreality_id],
-    queryFn: () => fetchListingById(run.input_sreality_id as number),
-    enabled: run.input_sreality_id != null,
-    staleTime: 60_000,
-  });
-
   const subjectSalePrice =
-    subjectQ.data && subjectQ.data.category_type === 'prodej'
-      ? subjectQ.data.price_czk
-      : null;
+    subject && subject.category_type === 'prodej' ? subject.price_czk : null;
 
   const defaultPrice =
     subjectSalePrice ??
     run.input_purchase_price_czk ??
     (kind === 'sale' ? run.estimated_sale_price_czk : null);
 
-  const [rent, setRent] = useState<number | null>(defaultRent);
-  const [costPerM2, setCostPerM2] = useState<number | null>(DEFAULT_FOND_CZK_PER_M2);
-  const [price, setPriceState] = useState<number | null>(defaultPrice);
-  const [priceTouched, setPriceTouched] = useState(false);
+  /* Hydrate the form from localStorage so an operator returning to the
+   * page sees the same scenario they were modelling last visit. Keyed
+   * on run.id — re-runs spawn a new id, so the new run starts from
+   * defaults rather than carrying scenario state forward. */
+  const storageKey = `sreality.estimation.${run.id}.yield`;
+  const persisted = useMemo(() => readYieldState(storageKey), [storageKey]);
 
-  /* Sync the price input to the latest default until the operator types
-   * into it — handles the listing query resolving after first render. */
+  const [rent, setRent] = useState<number | null>(
+    persisted?.rent !== undefined ? persisted.rent : defaultRent,
+  );
+  const [costPerM2, setCostPerM2] = useState<number | null>(
+    persisted?.costPerM2 !== undefined ? persisted.costPerM2 : DEFAULT_FOND_CZK_PER_M2,
+  );
+  const [price, setPriceState] = useState<number | null>(
+    persisted?.price !== undefined ? persisted.price : defaultPrice,
+  );
+  const [priceTouched, setPriceTouched] = useState<boolean>(
+    persisted?.priceTouched ?? false,
+  );
+  const [rentTouched, setRentTouched] = useState<boolean>(
+    persisted?.rentTouched ?? false,
+  );
+  const [costTouched, setCostTouched] = useState<boolean>(
+    persisted?.costTouched ?? false,
+  );
+
+  /* Sync untouched inputs to the latest defaults — handles the subject
+   * listing query resolving after first render, or a defaultRent
+   * arriving in a refetch. Once the operator types into a field that
+   * field is "owned" by their entry and stops following the default. */
   useEffect(() => {
     if (!priceTouched) setPriceState(defaultPrice);
   }, [defaultPrice, priceTouched]);
+
+  useEffect(() => {
+    writeYieldState(storageKey, {
+      rent, costPerM2, price, priceTouched, rentTouched, costTouched,
+    });
+  }, [storageKey, rent, costPerM2, price, priceTouched, rentTouched, costTouched]);
 
   const setPrice = (v: number | null) => {
     setPriceTouched(true);
     setPriceState(v);
   };
+  const setRentTouching = (v: number | null) => {
+    setRentTouched(true);
+    setRent(v);
+  };
+  const setCostTouching = (v: number | null) => {
+    setCostTouched(true);
+    setCostPerM2(v);
+  };
+
+  const resetScenario = () => {
+    setPriceTouched(false);
+    setRentTouched(false);
+    setCostTouched(false);
+    setRent(defaultRent);
+    setCostPerM2(DEFAULT_FOND_CZK_PER_M2);
+    setPriceState(defaultPrice);
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch {
+      /* localStorage unavailable — quiet failure, scenario reset still works in-memory. */
+    }
+  };
+
+  const hasOverrides = priceTouched || rentTouched || costTouched;
 
   const fondOprav =
     costPerM2 != null && areaM2 != null ? costPerM2 * areaM2 : null;
@@ -445,11 +821,23 @@ function YieldBlock({ run }: { run: EstimationRun }) {
 
   return (
     <div>
-      <div className="flex items-baseline justify-between">
+      <div className="flex items-baseline justify-between gap-3">
         <SectionLabel>Yield</SectionLabel>
-        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)]">
-          live calculation
-        </p>
+        <div className="flex items-baseline gap-3">
+          {hasOverrides && (
+            <button
+              type="button"
+              onClick={resetScenario}
+              className="text-[0.7rem] tracking-wide uppercase text-[var(--color-copper)] hover:text-[var(--color-copper-2)] hover:underline underline-offset-2 transition-colors"
+              title="Discard edits and restore the defaults"
+            >
+              Reset
+            </button>
+          )}
+          <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)]">
+            {hasOverrides ? 'edited · saved locally' : 'live calculation'}
+          </p>
+        </div>
       </div>
 
       <div className="mt-4 px-5 py-5 rounded-[var(--radius-md)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)]">
@@ -478,7 +866,7 @@ function YieldBlock({ run }: { run: EstimationRun }) {
           value={rent}
           step="100"
           suffix="Kč"
-          onChange={setRent}
+          onChange={setRentTouching}
           hint={defaultRent != null ? 'Default: median estimate' : 'No estimate — set manually'}
         />
         <YieldNumField
@@ -486,7 +874,7 @@ function YieldBlock({ run }: { run: EstimationRun }) {
           value={costPerM2}
           step="1"
           suffix="Kč/m²"
-          onChange={setCostPerM2}
+          onChange={setCostTouching}
           hint={
             fondOprav != null
               ? `= ${fmtCzk(Math.round(fondOprav))} / mo`
@@ -515,6 +903,47 @@ function YieldBlock({ run }: { run: EstimationRun }) {
       </div>
     </div>
   );
+}
+
+interface PersistedYieldState {
+  rent: number | null;
+  costPerM2: number | null;
+  price: number | null;
+  priceTouched: boolean;
+  rentTouched: boolean;
+  costTouched: boolean;
+}
+
+function readYieldState(key: string): PersistedYieldState | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedYieldState>;
+    return {
+      rent: numOrNull(parsed.rent),
+      costPerM2: numOrNull(parsed.costPerM2),
+      price: numOrNull(parsed.price),
+      priceTouched: !!parsed.priceTouched,
+      rentTouched: !!parsed.rentTouched,
+      costTouched: !!parsed.costTouched,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeYieldState(key: string, state: PersistedYieldState): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(state));
+  } catch {
+    /* Quota exceeded or unavailable (private mode) — fall through. */
+  }
+}
+
+function numOrNull(v: unknown): number | null {
+  if (v == null) return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  return null;
 }
 
 function YieldNumField({

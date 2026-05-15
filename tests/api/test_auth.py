@@ -68,7 +68,7 @@ def client(monkeypatch):
     def fake_list_runs(conn, **_kw):
         return {"data": [], "total": 0, "limit": 50, "offset": 0}
 
-    def fake_parse_url(url, *, client, conn):
+    def fake_parse_url(url, *, client, conn, persist=False):
         return {
             "sreality_id": 2836292428,
             "spec": {"sreality_id": 2836292428, "lat": 50.0, "lon": 14.0},

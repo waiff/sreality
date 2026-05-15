@@ -181,7 +181,7 @@ def _patch_url_parser(monkeypatch, sreality_id: int = 2836292428) -> None:
     """Patch the dispatcher's view of parse_sreality_url so a sreality URL
     flows through the new dispatcher with the same shape as before.
     """
-    def fake(url: str, *, client, conn) -> dict[str, Any]:
+    def fake(url: str, *, client, conn, persist: bool = False) -> dict[str, Any]:
         return {
             "sreality_id": sreality_id,
             "spec": {
@@ -586,7 +586,7 @@ def test_preview_upstream_error_returns_502(client, monkeypatch):
     import requests
     state = _patch_persistence(monkeypatch)
 
-    def fake(url: str, *, client, conn) -> dict[str, Any]:
+    def fake(url: str, *, client, conn, persist: bool = False) -> dict[str, Any]:
         raise requests.HTTPError("502 Bad Gateway from sreality")
 
     monkeypatch.setattr(scraper_url_parser, "parse_sreality_url", fake)
@@ -601,7 +601,7 @@ def test_preview_upstream_error_returns_502(client, monkeypatch):
 
 
 def test_preview_exposes_listing_block(client, monkeypatch):
-    def fake(url: str, *, client, conn) -> dict[str, Any]:
+    def fake(url: str, *, client, conn, persist: bool = False) -> dict[str, Any]:
         return {
             "sreality_id": 2836292428,
             "spec": {
