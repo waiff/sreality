@@ -345,6 +345,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "source_html",
     "subject_summary",
     "special_instructions", "contextual_text",
+    "skill_name", "skill_version",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -356,10 +357,22 @@ _COST_TOTAL_SUBSELECT = (
     "(SELECT sum(cost_usd) FROM llm_calls WHERE estimation_run_id = er.id), "
     "0)::float AS cost_usd_total"
 )
-_RUN_PROJECTION = (
-    ", ".join(f"er.{c}" for c in _RUN_COLUMNS) + ", " + _COST_TOTAL_SUBSELECT
+# Boolean: is there at least one operator-supplied feedback row on
+# this run? Drives the "Feedback" button enable/disable on the
+# /estimations list (slice B follow-up).
+_HAS_FEEDBACK_SUBSELECT = (
+    "EXISTS("
+    "SELECT 1 FROM estimation_feedback WHERE estimation_run_id = er.id"
+    ") AS has_feedback"
 )
-_RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + ("cost_usd_total",)
+_RUN_PROJECTION = (
+    ", ".join(f"er.{c}" for c in _RUN_COLUMNS)
+    + ", " + _COST_TOTAL_SUBSELECT
+    + ", " + _HAS_FEEDBACK_SUBSELECT
+)
+_RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + (
+    "cost_usd_total", "has_feedback",
+)
 
 
 @dataclass
@@ -424,17 +437,24 @@ def create_estimation_run(
     sreality_client: "SrealityClient",
     llm_client: "LLMClient",
     body: s.CreateEstimationIn,
+    background_tasks: Any | None = None,
 ) -> dict[str, Any]:
-    """POST /estimations: resolve input, run the estimate, persist, return row.
+    """POST /estimations: parse the URL, INSERT a pending row, schedule the
+    heavy work as a BackgroundTask, return the row immediately.
 
-    Synchronous deterministic mode goes straight to a terminal status —
-    'success' or 'failed' — in a single INSERT. Agent mode uses an
-    early-INSERT (status='running') so LLM costs can attribute via
-    `llm_calls.estimation_run_id` while the loop is in flight, then
-    UPDATEs to the terminal status.
+    The handler completes in ~1 s (just URL parse + INSERT) instead of
+    waiting 3–10 s for the full estimate. The browser navigates to the
+    detail page, which polls until the row reaches a terminal status.
+
+    Hard failures during setup (URL parse, target / filter build, skill
+    lookup) are still persisted inline with `status='failed'` — those
+    rows have no work to background.
+
+    When `background_tasks` is None (tests that want synchronous
+    behaviour, ClickUp / agent callers that want the row populated
+    before they read it back), the heavy work runs inline on the
+    request thread.
     """
-    from api.estimate_yield import estimate_yield
-
     try:
         resolution = _resolve_input(conn, sreality_client, llm_client, body)
     except Exception as exc:
@@ -457,14 +477,167 @@ def create_estimation_run(
             extra_warnings=[],
         )
 
+    skill_obj = None
     if body.mode == "agent":
-        return _run_agent_path(
-            conn, sreality_client, llm_client, body,
+        from api.skills import SkillNotFound, load_skill
+        try:
+            skill_obj = load_skill(conn, body.skill)
+        except SkillNotFound:
+            return _persist_failed_run(
+                conn, body=body, resolution=resolution,
+                recorder=TraceRecorder(),
+                error_msg=f"unknown skill: {body.skill!r}",
+                extra_warnings=[],
+            )
+        initial_status = "running"
+    else:
+        initial_status = "pending"
+
+    run_id = _insert_run(
+        conn,
+        source=body.source,
+        mode=body.mode,
+        status=initial_status,
+        estimate_kind=body.estimate_kind,
+        input_url=resolution.input_url,
+        input_sreality_id=resolution.input_sreality_id,
+        input_spec=resolution.target_spec,
+        input_purchase_price_czk=body.purchase_price_czk,
+        estimated_monthly_rent_czk=None,
+        rent_p25_czk=None,
+        rent_p75_czk=None,
+        estimated_sale_price_czk=None,
+        sale_p25_czk=None,
+        sale_p75_czk=None,
+        gross_yield_pct=None,
+        confidence=None,
+        comparables_used=None,
+        comparables_excluded=None,
+        trace=TraceRecorder().to_dict("pending"),
+        warnings=list(resolution.parse_warnings) or None,
+        error_message=None,
+        parent_run_id=body.parent_run_id,
+        rerun_reason=body.rerun_reason,
+        source_kind=resolution.source_kind,
+        parse_confidence=resolution.parse_confidence,
+        parse_confidence_per_field=resolution.parse_confidence_per_field,
+        source_html=resolution.source_html,
+        subject_summary=None,
+        special_instructions=body.special_instructions,
+        contextual_text=body.contextual_text,
+        skill_name=skill_obj.name if skill_obj is not None else None,
+        skill_version=skill_obj.version if skill_obj is not None else None,
+    )
+
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _execute_estimation_run_background,
+            run_id=run_id,
+            body=body,
+            resolution=resolution,
+        )
+        return _fetch_run(conn, run_id) or {}
+
+    _execute_estimation_run(
+        conn, sreality_client, llm_client, run_id,
+        body=body, resolution=resolution, target=target, filters=filters,
+    )
+    return _fetch_run(conn, run_id) or {}
+
+
+def _execute_estimation_run_background(
+    *,
+    run_id: int,
+    body: s.CreateEstimationIn,
+    resolution: _Resolution,
+) -> None:
+    """Background-task entry: opens its own connection + clients and
+    runs the heavy work. Any uncaught exception flips the row to
+    'failed' so it can't get stuck.
+    """
+    from api import dependencies as deps
+
+    try:
+        with deps.open_background_conn() as conn:
+            from api.llm_client import LLMClient
+            sreality_client = deps.get_sreality_client()
+            llm_client = LLMClient(conn, providers=deps.get_providers())
+            try:
+                target = _build_target(
+                    resolution.target_spec, resolution.input_sreality_id,
+                )
+                filters = _build_filters(body, load_filter_defaults(conn))
+            except Exception as exc:
+                LOG.exception("background target/filters build failed for run %s", run_id)
+                _safe_mark_failed(
+                    conn, run_id,
+                    f"target build failed: {type(exc).__name__}: {exc}"[:1000],
+                )
+                return
+            _execute_estimation_run(
+                conn, sreality_client, llm_client, run_id,
+                body=body, resolution=resolution,
+                target=target, filters=filters,
+            )
+    except Exception as exc:
+        LOG.exception("background estimation run %s crashed", run_id)
+        # Last-ditch: open a fresh connection so we can still mark failed.
+        try:
+            with deps.open_background_conn() as conn:
+                _safe_mark_failed(
+                    conn, run_id,
+                    f"background crash: {type(exc).__name__}: {exc}"[:1000],
+                )
+        except Exception:
+            LOG.exception(
+                "failed to mark run %s failed after background crash", run_id,
+            )
+
+
+def _safe_mark_failed(
+    conn: "psycopg.Connection", run_id: int, error_msg: str,
+) -> None:
+    """UPDATE the row to status='failed' with an error_message.
+
+    Used as a last-ditch path when the background task can't otherwise
+    record the failure (e.g. it crashed before the per-step trace was
+    finalised). Best-effort — never raises.
+    """
+    try:
+        _update_run_terminal(
+            conn, run_id, status="failed", error_message=error_msg,
+        )
+    except Exception:
+        LOG.exception("_safe_mark_failed failed for run %s", run_id)
+
+
+def _execute_estimation_run(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient",
+    llm_client: "LLMClient",
+    run_id: int,
+    *,
+    body: s.CreateEstimationIn,
+    resolution: _Resolution,
+    target: TargetSpec,
+    filters: ComparableFilters,
+) -> None:
+    """Run the heavy estimation work for an already-INSERTed row.
+
+    Deterministic mode: runs estimate_yield, UPDATEs to terminal.
+    Agent mode: delegates to the existing agent dispatch which UPDATEs
+    the same row in place.
+    """
+    if body.mode == "agent":
+        _run_agent_path(
+            conn, sreality_client, llm_client, run_id, body,
             resolution=resolution, target=target, filters=filters,
         )
+        return
+
+    from api.estimate_yield import estimate_yield
 
     recorder = TraceRecorder()
-
     try:
         result = estimate_yield(
             conn, target, filters, body.purchase_price_czk,
@@ -473,12 +646,18 @@ def create_estimation_run(
             trace_recorder=recorder,
         )
     except Exception as exc:
-        LOG.warning("estimate_yield failed: %s", exc)
+        LOG.warning("estimate_yield failed for run %s: %s", run_id, exc)
         error_msg = f"{type(exc).__name__}: {exc}"[:1000]
-        return _persist_failed_run(
-            conn, body=body, resolution=resolution, recorder=recorder,
-            error_msg=error_msg, extra_warnings=[],
+        trace = recorder.to_dict(f"failed: {error_msg.split(':', 1)[0]}")
+        _update_run_terminal(
+            conn, run_id,
+            status="failed",
+            trace=trace,
+            warnings=list(resolution.parse_warnings) or None,
+            error_message=error_msg,
         )
+        flush_trace_payloads(conn, run_id, recorder)
+        return
 
     d = result["data"]
     summary_text = _summary_line(d, filters.radius_m)
@@ -488,16 +667,9 @@ def create_estimation_run(
     subject_summary = _build_subject_summary(
         conn, llm_client, resolution.input_sreality_id,
     )
-    run_id = _insert_run(
-        conn,
-        source=body.source,
-        mode=body.mode,
+    _update_run_terminal(
+        conn, run_id,
         status="success",
-        estimate_kind=body.estimate_kind,
-        input_url=resolution.input_url,
-        input_sreality_id=resolution.input_sreality_id,
-        input_spec=resolution.target_spec,
-        input_purchase_price_czk=body.purchase_price_czk,
         estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
         rent_p25_czk=d.get("rent_p25_czk"),
         rent_p75_czk=d.get("rent_p75_czk"),
@@ -507,28 +679,44 @@ def create_estimation_run(
         gross_yield_pct=d.get("gross_yield_pct"),
         confidence=d.get("confidence"),
         comparables_used=d.get("comparables_used"),
-        comparables_excluded=None,
         trace=trace,
         warnings=merged_warnings or None,
-        error_message=None,
-        parent_run_id=body.parent_run_id,
-        rerun_reason=body.rerun_reason,
-        source_kind=resolution.source_kind,
-        parse_confidence=resolution.parse_confidence,
-        parse_confidence_per_field=resolution.parse_confidence_per_field,
-        source_html=resolution.source_html,
         subject_summary=subject_summary,
-        special_instructions=body.special_instructions,
-        contextual_text=body.contextual_text,
     )
     flush_trace_payloads(conn, run_id, recorder)
-    return _fetch_run(conn, run_id) or {}
 
 
 def get_estimation_run(
     conn: "psycopg.Connection", run_id: int
 ) -> dict[str, Any] | None:
     return _fetch_run(conn, run_id)
+
+
+def sweep_stuck_runs(
+    conn: "psycopg.Connection",
+    *,
+    older_than_minutes: int = 10,
+) -> int:
+    """Mark any estimation_runs in a non-terminal status older than the
+    cutoff as 'failed'. Returns the number of rows updated.
+
+    Called from the FastAPI lifespan startup hook to recover rows
+    orphaned by a server restart mid-background-task. Manual SQL is
+    fine for one-off cleanup; this is the routine path so the operator
+    doesn't have to.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE estimation_runs "
+            "SET status = 'failed', "
+            "    error_message = coalesce(error_message, "
+            "        'interrupted by server restart') "
+            "WHERE status IN ('pending', 'running') "
+            "  AND created_at < now() - make_interval(mins => %s) "
+            "RETURNING id",
+            (older_than_minutes,),
+        )
+        return len(cur.fetchall())
 
 
 def get_trace_payload(
@@ -780,6 +968,8 @@ def _persist_failed_run(
         subject_summary=None,
         special_instructions=body.special_instructions,
         contextual_text=body.contextual_text,
+        skill_name=None,
+        skill_version=None,
     )
     flush_trace_payloads(conn, run_id, recorder)
     return _fetch_run(conn, run_id) or {}
@@ -892,62 +1082,25 @@ def _run_agent_path(
     conn: "psycopg.Connection",
     sreality_client: "SrealityClient",
     llm_client: "LLMClient",
+    run_id: int,
     body: s.CreateEstimationIn,
     *,
     resolution: _Resolution,
     target: TargetSpec,
     filters: ComparableFilters,
-) -> dict[str, Any]:
-    """Agent-mode dispatch. Inserts a 'running' row, drives the agent
-    loop, then UPDATEs to the terminal status. The early INSERT is what
-    lets `llm_calls.estimation_run_id` attribute every per-turn call."""
+) -> None:
+    """Agent-mode dispatch. The row is already INSERTed with
+    status='running' by the caller; this drives the agent loop and
+    UPDATEs to a terminal status. The early INSERT is what lets
+    `llm_calls.estimation_run_id` attribute every per-turn call."""
     from api.agent import run_agent_estimation
-    from api.skills import SkillNotFound, load_skill
+    from api.skills import load_skill
 
-    try:
-        skill = load_skill(conn, body.skill)
-    except SkillNotFound:
-        recorder = TraceRecorder()
-        return _persist_failed_run(
-            conn, body=body, resolution=resolution, recorder=recorder,
-            error_msg=f"unknown skill: {body.skill!r}",
-            extra_warnings=[],
-        )
+    # Skill existence is validated by the caller before INSERT — we
+    # re-load here because the background path opens a fresh connection.
+    skill = load_skill(conn, body.skill)
 
     recorder = TraceRecorder()
-    run_id = _insert_run(
-        conn,
-        source=body.source,
-        mode="agent",
-        status="running",
-        estimate_kind=body.estimate_kind,
-        input_url=resolution.input_url,
-        input_sreality_id=resolution.input_sreality_id,
-        input_spec=resolution.target_spec,
-        input_purchase_price_czk=body.purchase_price_czk,
-        estimated_monthly_rent_czk=None,
-        rent_p25_czk=None,
-        rent_p75_czk=None,
-        estimated_sale_price_czk=None,
-        sale_p25_czk=None,
-        sale_p75_czk=None,
-        gross_yield_pct=None,
-        confidence=None,
-        comparables_used=None,
-        comparables_excluded=None,
-        trace=recorder.to_dict("agent running"),
-        warnings=None,
-        error_message=None,
-        parent_run_id=body.parent_run_id,
-        rerun_reason=body.rerun_reason,
-        source_kind=resolution.source_kind,
-        parse_confidence=resolution.parse_confidence,
-        parse_confidence_per_field=resolution.parse_confidence_per_field,
-        source_html=resolution.source_html,
-        subject_summary=None,
-        special_instructions=body.special_instructions,
-        contextual_text=body.contextual_text,
-    )
 
     try:
         agent_result = run_agent_estimation(
@@ -969,7 +1122,7 @@ def _run_agent_path(
             error_message=f"{type(exc).__name__}: {exc}"[:1000],
         )
         flush_trace_payloads(conn, run_id, recorder)
-        return _fetch_run(conn, run_id) or {}
+        return
 
     d = agent_result.data
     md = agent_result.metadata
@@ -1004,7 +1157,6 @@ def _run_agent_path(
         subject_summary=subject_summary,
     )
     flush_trace_payloads(conn, run_id, recorder)
-    return _fetch_run(conn, run_id) or {}
 
 
 def _update_run_terminal(

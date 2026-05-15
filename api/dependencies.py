@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
@@ -16,6 +17,21 @@ if TYPE_CHECKING:
 
 
 def get_db_conn() -> "Iterator[psycopg.Connection]":
+    conn = db.connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def open_background_conn() -> "Iterator[psycopg.Connection]":
+    """Open a dedicated DB connection for a FastAPI BackgroundTask.
+
+    The request-scoped `get_db_conn` connection is closed once the HTTP
+    response is sent, so background work that runs after the response
+    must open its own.
+    """
     conn = db.connect()
     try:
         yield conn
