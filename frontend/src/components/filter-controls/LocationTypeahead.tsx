@@ -11,14 +11,20 @@
  *   onChange(next)         — null normalises to no constraint
  *
  * On pick, the suggestion's `name` field becomes the chip and is
- * appended to `value`. The downstream filter (listings.district text
- * match in queries.ts / browse_stats) is unchanged — picks of
- * district-shaped suggestions match cleanly; picks of street / POI
- * suggestions won't necessarily match `listings.district` text, but
- * they're surfaced so the operator gets a richer suggestion set and
- * can pick the part of the regional structure that actually filters
- * (typing "Vodičkova" surfaces "Praha 1" / "Praha 2" rows alongside
- * the street itself).
+ * appended to `value`. The downstream filter (queries.ts applyFilters
+ * + browse_stats migration 067) matches each chip as a
+ * case-insensitive substring against BOTH `district` AND `locality`
+ * on listings_public, OR'd across chips. Picking "Hruškové Dvory"
+ * (a `regional.municipality_part`) matches listings whose locality
+ * text contains that token even though no listing's canonical okres
+ * equals it; picking "okres Jihlava" matches via the `district`
+ * column directly. Each chip OR's both columns, so picks at any
+ * granularity Mapy.cz surfaces narrow the cohort instead of
+ * silently zeroing it.
+ *
+ * onPick (independent of the chip filter) fires once per pick so the
+ * Browse map can fly the viewport to the picked place's centre —
+ * useful even when the chip itself narrows the cohort tightly.
  *
  * No count column — Mapy.cz doesn't return one, and the previous
  * count (from `fetchDistrictFacets`) was misleading: it counted every
