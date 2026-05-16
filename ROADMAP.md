@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-16 11:09 UTC_
+_Last refreshed: 2026-05-16 11:22 UTC_
 
 **Branch:** `claude/fix-district-filter-AAm5L`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-16 11:09 UTC_
 **Last 10 commits:**
 
 ```
+b669695 roadmap: refresh auto-status block
+75fa440 browse: district chip ILIKE substring on district OR locality
 a4aa4b9 data: regenerate condition marker dictionary
 5ca3743 Merge pull request #129 from waiff/claude/discovery-prompt-too-long-fallback
 a9945df discovery: connect with autocommit=True so per-listing writes persist
@@ -24,8 +26,6 @@ a9945df discovery: connect with autocommit=True so per-listing writes persist
 a7a3fb4 roadmap: refresh auto-status block
 5fe9694 Merge pull request #127 from waiff/claude/discovery-stratification-sql-fix
 0a0742b discovery: split NTILE into outer CTE (fix WindowingError)
-b7973a8 estimation detail: persist sreality subject + richer header + saved yield inputs
-c291126 Merge pull request #126 from waiff/claude/discover-script-skip-fastapi
 ```
 
 <!-- END AUTO-STATUS -->
