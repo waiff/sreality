@@ -96,6 +96,23 @@ export const parseSort = (raw: string | null): SortSpec => {
 export const sortToParam = (s: SortSpec): string =>
   `${s.direction === 'desc' ? '-' : ''}${s.field}`;
 
+/* Escape a literal user-supplied substring for embedding in a
+ * PostgREST `or=(...)` clause as the right-hand side of `ilike`.
+ * Reserved chars: `*` (wildcard), `,` (clause separator), `(` `)`
+ * (grouping), `"` (quote), `\` (escape). Wrap in quotes and escape
+ * the breakouts. Mapy.cz suggestion names are usually clean Czech
+ * place names, but some POI names include parentheses. */
+const escapeIlikePattern = (raw: string): string => {
+  const escaped = raw
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\*/g, '\\*')
+    .replace(/,/g, '\\,')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)');
+  return `"*${escaped}*"`;
+};
+
 /* Generic identity-typed helper. Postgrest's filter methods all return the
  * same builder, so passing the chain through any subset of them preserves
  * the input type at runtime. */
@@ -105,6 +122,7 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     gte: (c: string, v: unknown) => typeof r;
     lte: (c: string, v: unknown) => typeof r;
     in:  (c: string, v: readonly unknown[]) => typeof r;
+    or:  (q: string) => typeof r;
   };
   if (f.status === 'active') r = r.eq('is_active', true);
   else if (f.status === 'inactive') r = r.eq('is_active', false);
@@ -121,7 +139,23 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.tomDaysMax != null) r = r.lte('tom_days', f.tomDaysMax);
   r = r.eq('category_main', f.categoryMain);
   r = r.eq('category_type', f.categoryType);
-  if (f.districts.length) r = r.in('district', f.districts);
+  if (f.districts.length) {
+    /* Each chip becomes (district ilike *X* OR locality ilike *X*),
+     * OR'd across chips. Mapy.cz suggests at every granularity (okres,
+     * obec, část obce, street, POI); listings only carry the canonical
+     * okres in `district`, but the part-of-municipality / street / POI
+     * name does appear in the `locality` free-text. Substring match
+     * across both gives a non-zero cohort regardless of which level
+     * the operator picks. Kept in lockstep with browse_stats (migration
+     * 067) which applies the same predicate. */
+    const clauses = f.districts
+      .flatMap((d) => {
+        const pat = escapeIlikePattern(d);
+        return [`district.ilike.${pat}`, `locality.ilike.${pat}`];
+      })
+      .join(',');
+    r = r.or(clauses);
+  }
   if (f.dispositions.length) r = r.in('disposition', f.dispositions);
   if (f.priceMin != null) r = r.gte('price_czk', f.priceMin);
   if (f.priceMax != null) r = r.lte('price_czk', f.priceMax);
