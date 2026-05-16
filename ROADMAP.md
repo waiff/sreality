@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-15 22:12 UTC_
+_Last refreshed: 2026-05-16 06:34 UTC_
 
-**Branch:** `claude/prefill-listing-price-h7erp`
+**Branch:** `claude/discovery-prompt-too-long-fallback`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-15 22:12 UTC_
 **Last 10 commits:**
 
 ```
+a9945df discovery: connect with autocommit=True so per-listing writes persist
+50a57aa discovery: fall back to text-only when prompt exceeds 200k tokens
+0ae2d52 Merge pull request #128 from waiff/claude/prefill-listing-price-h7erp
+a7a3fb4 roadmap: refresh auto-status block
+5fe9694 Merge pull request #127 from waiff/claude/discovery-stratification-sql-fix
+0a0742b discovery: split NTILE into outer CTE (fix WindowingError)
 b7973a8 estimation detail: persist sreality subject + richer header + saved yield inputs
-bb64371 Merge pull request #124 from waiff/claude/browse-sorting-map-center-Sibz6
-bbf458b Merge origin/main: renumber listings_public_ppm2 → 066
-745b482 roadmap: refresh auto-status block
-f2d7b35 Merge pull request #122 from waiff/claude/watchdog-per-subscription-cursor
-d01ca53 Merge pull request #123 from waiff/claude/aggregate-commit-step-guard
-701fa11 watchdog: fix stale migration-number references after renumber to 065
-1ef2931 Merge remote-tracking branch 'origin/main' into claude/watchdog-per-subscription-cursor
-47de6cf Merge origin/main into claude/browse-sorting-map-center-Sibz6
-74dacd1 aggregate workflow: skip commit step when no output file exists
+c291126 Merge pull request #126 from waiff/claude/discover-script-skip-fastapi
+a51e5cd discovery: skip FastAPI-shaped api.dependencies, build provider inline
+2fa6a14 Merge pull request #125 from waiff/claude/review-unmerged-changes-mxsQa
 ```
 
 <!-- END AUTO-STATUS -->
