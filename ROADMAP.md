@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-17 18:44 UTC_
+_Last refreshed: 2026-05-17 19:04 UTC_
 
 **Branch:** `claude/condition-markers-curated-rubric`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-17 18:44 UTC_
 **Last 10 commits:**
 
 ```
+63b84f8 roadmap: refresh auto-status block
 cd271b0 condition: curated marker whitelist + 5-level rubric draft
 27079a6 data: regenerate condition marker dictionary
 94756d4 Merge pull request #134 from waiff/claude/rental-estimator-prompt-Beviv
@@ -25,7 +26,6 @@ cd271b0 condition: curated marker whitelist + 5-level rubric draft
 34d5d0b Merge pull request #133 from waiff/claude/add-condition-filter-TTY7j
 ea6063a Merge remote-tracking branch 'origin/main' into claude/add-condition-filter-TTY7j
 3b73ce3 filters: expose condition (Stav objektu) on Browse, Watchdog, Settings, Neighborhood, Defaults
-f3bc76d Merge pull request #132 from waiff/claude/fix-daily-scrape-fTsfg
 ```
 
 <!-- END AUTO-STATUS -->
