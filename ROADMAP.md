@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-17 14:16 UTC_
+_Last refreshed: 2026-05-17 16:01 UTC_
 
 **Branch:** `claude/rental-estimator-prompt-Beviv`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 72 files, latest `069_filter_visibility_condition.sql`.
+**Migrations on disk:** 73 files, latest `070_rental_estimator_v2_prompt.sql`.
 
 **Last 10 commits:**
 
 ```
+5a6e356 skill: rewrite rental_estimator_full_v1 around autonomy + drop unwired scenarios
 34d5d0b Merge pull request #133 from waiff/claude/add-condition-filter-TTY7j
 ea6063a Merge remote-tracking branch 'origin/main' into claude/add-condition-filter-TTY7j
 3b73ce3 filters: expose condition (Stav objektu) on Browse, Watchdog, Settings, Neighborhood, Defaults
@@ -25,7 +26,6 @@ f3bc76d Merge pull request #132 from waiff/claude/fix-daily-scrape-fTsfg
 4d53f1b scraper: shrink touch_listings chunk + force PK-index plan
 1cbc7ff Merge pull request #131 from waiff/claude/fix-district-filter-AAm5L
 b96509c Merge remote-tracking branch 'origin/main' into claude/fix-district-filter-AAm5L
-b669695 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
