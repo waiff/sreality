@@ -640,7 +640,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
-            agendas=frozenset({Agenda.COMPARABLES, Agenda.ESTIMATION, Agenda.VELOCITY}),
+            agendas=_ALL_AGENDAS,
             enum_values=CONDITION_OPTIONS,
         ),
         FilterDef(

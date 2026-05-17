@@ -180,10 +180,13 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
             scope="browse"
             state={registryView}
             onChange={handleRegistryChange}
-            includeOnly={['furnished', 'ownership', 'building_material']}
+            includeOnly={[
+              'furnished', 'ownership', 'condition_match', 'building_material',
+            ]}
             labels={{
               furnished: 'Furnished',
               ownership: 'Ownership',
+              condition_match: 'Condition',
               building_material: 'Building material',
             }}
             flat

@@ -57,6 +57,19 @@ describe('URL round-trip', () => {
     expect(round.furnished).toBe('castecne');
   });
 
+  it('round-trips conditionMatch and drops unknown values', () => {
+    const f: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      conditionMatch: ['novostavba', 'po_rekonstrukci'],
+    };
+    const round = fromSearchParams(toSearchParams(f));
+    expect(round.conditionMatch).toEqual(['novostavba', 'po_rekonstrukci']);
+    // Unknown values in the URL must not leak into state — they
+    // would otherwise reach Supabase and tighten the cohort to zero.
+    const dirty = new URLSearchParams('condition=novostavba,bogus_value');
+    expect(fromSearchParams(dirty).conditionMatch).toEqual(['novostavba']);
+  });
+
   it('round-trips the centre+radius mode and coordinates', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,
@@ -129,6 +142,15 @@ describe('listingFiltersToRegistryView', () => {
     expect(view.tags).toBeNull();
     expect(view.dispositions).toBeNull();
     expect(view.districts).toBeNull();
+    expect(view.condition_match).toBeNull();
+  });
+
+  it('passes a populated conditionMatch array through to the registry', () => {
+    const view = listingFiltersToRegistryView({
+      ...DEFAULT_FILTERS,
+      conditionMatch: ['novostavba', 'velmi_dobry'],
+    });
+    expect(view.condition_match).toEqual(['novostavba', 'velmi_dobry']);
   });
 
   it('passes scalar fields through unchanged', () => {
@@ -164,6 +186,17 @@ describe('applyRegistryUpdate', () => {
     expect(f.tags).toEqual([]);
     f = applyRegistryUpdate(f, 'tags', [5, 7]);
     expect(f.tags).toEqual([5, 7]);
+  });
+
+  it('normalises conditionMatch null ↔ array at the registry boundary', () => {
+    let f: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      conditionMatch: ['novostavba'],
+    };
+    f = applyRegistryUpdate(f, 'condition_match', null);
+    expect(f.conditionMatch).toEqual([]);
+    f = applyRegistryUpdate(f, 'condition_match', ['velmi_dobry', 'dobry']);
+    expect(f.conditionMatch).toEqual(['velmi_dobry', 'dobry']);
   });
 
   it('ignores unknown registry ids without mutating filters', () => {

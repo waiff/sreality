@@ -685,9 +685,13 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
+        "browse",
         "comparables",
+        "defaults",
         "estimation",
-        "velocity"
+        "neighborhood",
+        "velocity",
+        "watchdog"
       ],
       "constraints": null,
       "unit": null,
