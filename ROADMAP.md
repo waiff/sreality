@@ -5,19 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-17 11:01 UTC_
+_Last refreshed: 2026-05-17 11:16 UTC_
 
-**Branch:** `claude/fix-daily-scrape-fTsfg`
+**Branch:** `claude/add-condition-filter-TTY7j`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 70 files, latest `067_browse_stats_district_ilike.sql`.
+**Migrations on disk:** 72 files, latest `069_filter_visibility_condition.sql`.
 
 **Last 10 commits:**
 
 ```
-0e2d4eb roadmap: refresh auto-status block
-4d53f1b scraper: shrink touch_listings chunk + force PK-index plan
+3b73ce3 filters: expose condition (Stav objektu) on Browse, Watchdog, Settings, Neighborhood, Defaults
 1cbc7ff Merge pull request #131 from waiff/claude/fix-district-filter-AAm5L
 b96509c Merge remote-tracking branch 'origin/main' into claude/fix-district-filter-AAm5L
 b669695 roadmap: refresh auto-status block
@@ -26,6 +25,7 @@ b4d5d2a Merge pull request #130 from waiff/claude/discovery-prompt-too-long-fall
 8d69628 roadmap: refresh auto-status block
 a4aa4b9 data: regenerate condition marker dictionary
 5ca3743 Merge pull request #129 from waiff/claude/discovery-prompt-too-long-fallback
+a9945df discovery: connect with autocommit=True so per-listing writes persist
 ```
 
 <!-- END AUTO-STATUS -->

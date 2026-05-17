@@ -108,6 +108,27 @@ def test_build_clauses_enumerated_columns() -> None:
     assert params["ownership"] == "osobni"
 
 
+def test_build_clauses_condition_match() -> None:
+    """condition_match feeds ANY() against l.condition — the same
+    pattern toolkit/comparables uses, so Browse / Watchdog stay
+    aligned with the analytical surfaces."""
+    spec = WatchdogFilterSpec(
+        condition_match=["novostavba", "po_rekonstrukci"],
+    )
+    where, params = _build_match_clauses(spec)
+    assert "l.condition = ANY(%(condition_match)s)" in where
+    assert params["condition_match"] == ["novostavba", "po_rekonstrukci"]
+
+
+def test_build_clauses_condition_match_empty_list_drops_clause() -> None:
+    """An empty list behaves like None — no WHERE clause emitted.
+    Matches how `dispositions` already behaves."""
+    spec = WatchdogFilterSpec(condition_match=[])
+    where, params = _build_match_clauses(spec)
+    assert not any("l.condition" in w for w in where)
+    assert "condition_match" not in params
+
+
 def test_build_clauses_categoryless_spec() -> None:
     """An operator who explicitly clears the category filters gets a
     spec with no category WHERE clauses — the watchdog matches every

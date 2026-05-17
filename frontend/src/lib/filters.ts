@@ -75,6 +75,7 @@ export interface ListingFilters {
   garage: TriState;
   furnished: Furnished | null;
   ownership: Ownership | null;
+  conditionMatch: string[];
   categorySubCb: number | null;
   buildingMaterial: BuildingMaterial | null;
   estateAreaMin: number | null;
@@ -118,6 +119,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   garage: 'any',
   furnished: null,
   ownership: null,
+  conditionMatch: [],
   categorySubCb: null,
   buildingMaterial: null,
   estateAreaMin: null,
@@ -164,6 +166,10 @@ const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
 const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
 const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
+const CONDITION_VALUES: ReadonlyArray<string> = [
+  'novostavba', 'po_rekonstrukci', 'velmi_dobry',
+  'dobry', 'pred_rekonstrukci', 'k_demolici',
+];
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = ['byt', 'dum', 'komercni'];
 const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = ['pronajem', 'prodej'];
 const BUILDING_MATERIAL_VALUES: ReadonlyArray<BuildingMaterial> = [
@@ -243,6 +249,9 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     garage: enumOr(sp.get('garage'), TRI_VALUES, 'any'),
     furnished: enumOrNull(sp.get('furnished'), FURNISHED_VALUES),
     ownership: enumOrNull(sp.get('ownership'), OWNERSHIP_VALUES),
+    conditionMatch: splitCsv(sp.get('condition')).filter(
+      (c) => CONDITION_VALUES.includes(c),
+    ),
     categorySubCb: parseIntOrNull(sp.get('subcat')),
     buildingMaterial: enumOrNull(sp.get('build'), BUILDING_MATERIAL_VALUES),
     estateAreaMin: estateMin,
@@ -324,6 +333,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.garage !== 'any') sp.set('garage', f.garage);
   if (f.furnished) sp.set('furnished', f.furnished);
   if (f.ownership) sp.set('ownership', f.ownership);
+  if (f.conditionMatch.length) sp.set('condition', f.conditionMatch.join(','));
   if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
   if (f.buildingMaterial) sp.set('build', f.buildingMaterial);
   if (f.estateAreaMin != null || f.estateAreaMax != null) {
@@ -423,6 +433,7 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.garage === 'any' &&
   f.furnished == null &&
   f.ownership == null &&
+  f.conditionMatch.length === 0 &&
   f.categorySubCb == null &&
   f.buildingMaterial == null &&
   f.estateAreaMin == null &&
@@ -472,6 +483,7 @@ const REGISTRY_KEY_MAP = {
   garage: 'garage',
   furnished: 'furnished',
   ownership: 'ownership',
+  condition_match: 'conditionMatch',
   building_material: 'buildingMaterial',
   min_parking_lots: 'parkingLotsMin',
   tags: 'tags',
@@ -511,7 +523,11 @@ export function listingFiltersToRegistryView(
       out[registryId] = triToBoolNullable(v as TriState);
     } else if (registryId === 'tags') {
       out[registryId] = (v as number[]).length === 0 ? null : v;
-    } else if (registryId === 'dispositions' || registryId === 'districts') {
+    } else if (
+      registryId === 'dispositions'
+      || registryId === 'districts'
+      || registryId === 'condition_match'
+    ) {
       const arr = v as unknown[];
       out[registryId] = arr.length === 0 ? null : arr;
     } else {
@@ -545,6 +561,10 @@ export function applyRegistryUpdate(
   if (id === 'districts') {
     const next = value == null ? [] : (value as string[]);
     return { ...filters, districts: next };
+  }
+  if (id === 'condition_match') {
+    const next = value == null ? [] : (value as string[]);
+    return { ...filters, conditionMatch: next };
   }
   return { ...filters, [key]: value } as ListingFilters;
 }
