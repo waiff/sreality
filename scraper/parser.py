@@ -52,6 +52,27 @@ OWNERSHIP: dict[int, str] = {
     3: "statni",      # státní/obecní
 }
 
+# Sreality emits the building condition as a display string on the
+# "Stav objektu" item — there's no numeric code. We canonicalise it
+# to the same underscore / no-diacritics form used for the other
+# enum columns. Unknown labels (a new condition class, a typo)
+# return None rather than leaking the raw label, so downstream
+# filters always see a value drawn from CONDITION_OPTIONS.
+CONDITION: dict[str, str] = {
+    "velmi dobrý":       "velmi_dobry",
+    "dobrý":             "dobry",
+    "novostavba":        "novostavba",
+    "po rekonstrukci":   "po_rekonstrukci",
+    "ve výstavbě":       "ve_vystavbe",
+    "před rekonstrukcí": "pred_rekonstrukci",
+    "projekt":           "projekt",
+    "rezervováno":       "rezervovano",
+    "v rekonstrukci":    "v_rekonstrukci",
+    "špatný":            "spatny",
+    "k demolici":        "k_demolici",
+    "prodáno":           "prodano",
+}
+
 # Canonical district labels keyed by sreality's locality_district_id.
 # Mirrors the seed in migration 041_district_canonical_label.sql; the
 # DB row is the runtime source of truth for the backfilled column,
@@ -387,8 +408,8 @@ def _condition(
     item = _find_item(items_by_name, "Stav objektu")
     if item is None:
         return None
-    val = str(item.get("value", "")).strip()
-    return val.lower() if val else None
+    val = str(item.get("value", "")).strip().lower()
+    return CONDITION.get(val) if val else None
 
 
 def _energy_rating(

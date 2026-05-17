@@ -167,8 +167,9 @@ const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'
 const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
 const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
 const CONDITION_VALUES: ReadonlyArray<string> = [
-  'novostavba', 'po_rekonstrukci', 'velmi_dobry',
-  'dobry', 'pred_rekonstrukci', 'k_demolici',
+  'novostavba', 'po_rekonstrukci', 'velmi_dobry', 'dobry',
+  'pred_rekonstrukci', 've_vystavbe', 'v_rekonstrukci',
+  'projekt', 'rezervovano', 'spatny', 'k_demolici', 'prodano',
 ];
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = ['byt', 'dum', 'komercni'];
 const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = ['pronajem', 'prodej'];

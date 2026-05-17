@@ -175,12 +175,18 @@ BUILDING_TYPE_OPTIONS: tuple[EnumOption, ...] = (
 )
 
 CONDITION_OPTIONS: tuple[EnumOption, ...] = (
-    EnumOption("novostavba", "Novostavba", "New build"),
-    EnumOption("po_rekonstrukci", "Po rekonstrukci", "Recently renovated"),
-    EnumOption("velmi_dobry", "Velmi dobrý", "Very good"),
-    EnumOption("dobry", "Dobrý", "Good"),
+    EnumOption("novostavba",        "Novostavba",        "New build"),
+    EnumOption("po_rekonstrukci",   "Po rekonstrukci",   "Recently renovated"),
+    EnumOption("velmi_dobry",       "Velmi dobrý",       "Very good"),
+    EnumOption("dobry",             "Dobrý",             "Good"),
     EnumOption("pred_rekonstrukci", "Před rekonstrukcí", "Needs renovation"),
-    EnumOption("k_demolici", "K demolici", "For demolition"),
+    EnumOption("ve_vystavbe",       "Ve výstavbě",       "Under construction"),
+    EnumOption("v_rekonstrukci",    "V rekonstrukci",    "Being renovated"),
+    EnumOption("projekt",           "Projekt",           "Project / pre-construction"),
+    EnumOption("rezervovano",       "Rezervováno",       "Reserved"),
+    EnumOption("spatny",            "Špatný",            "Poor"),
+    EnumOption("k_demolici",        "K demolici",        "For demolition"),
+    EnumOption("prodano",           "Prodáno",           "Sold"),
 )
 
 ENERGY_RATING_OPTIONS: tuple[EnumOption, ...] = (
@@ -636,7 +642,8 @@ def _build_registry() -> dict[str, FilterDef]:
                 "Restrict cohort to listings whose `condition` is in "
                 "this list. Czech values without diacritics: "
                 "novostavba, po_rekonstrukci, velmi_dobry, dobry, "
-                "pred_rekonstrukci, k_demolici."
+                "pred_rekonstrukci, ve_vystavbe, v_rekonstrukci, "
+                "projekt, rezervovano, spatny, k_demolici, prodano."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,

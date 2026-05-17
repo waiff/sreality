@@ -681,7 +681,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "condition",
       "default": null,
-      "description": "Restrict cohort to listings whose `condition` is in this list. Czech values without diacritics: novostavba, po_rekonstrukci, velmi_dobry, dobry, pred_rekonstrukci, k_demolici.",
+      "description": "Restrict cohort to listings whose `condition` is in this list. Czech values without diacritics: novostavba, po_rekonstrukci, velmi_dobry, dobry, pred_rekonstrukci, ve_vystavbe, v_rekonstrukci, projekt, rezervovano, spatny, k_demolici, prodano.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -722,9 +722,39 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "label_en": "Needs renovation"
         },
         {
+          "value": "ve_vystavbe",
+          "label_cs": "Ve výstavbě",
+          "label_en": "Under construction"
+        },
+        {
+          "value": "v_rekonstrukci",
+          "label_cs": "V rekonstrukci",
+          "label_en": "Being renovated"
+        },
+        {
+          "value": "projekt",
+          "label_cs": "Projekt",
+          "label_en": "Project / pre-construction"
+        },
+        {
+          "value": "rezervovano",
+          "label_cs": "Rezervováno",
+          "label_en": "Reserved"
+        },
+        {
+          "value": "spatny",
+          "label_cs": "Špatný",
+          "label_en": "Poor"
+        },
+        {
           "value": "k_demolici",
           "label_cs": "K demolici",
           "label_en": "For demolition"
+        },
+        {
+          "value": "prodano",
+          "label_cs": "Prodáno",
+          "label_en": "Sold"
         }
       ],
       "aliases": []
