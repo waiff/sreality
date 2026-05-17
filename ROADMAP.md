@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-17 10:38 UTC_
+_Last refreshed: 2026-05-17 16:10 UTC_
 
 **Branch:** `claude/discovery-prompt-too-long-fallback`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-17 10:38 UTC_
 **Last 10 commits:**
 
 ```
+52f899f roadmap: refresh auto-status block
 686e4a6 roadmap: refresh auto-status block
 8d69628 roadmap: refresh auto-status block
 a9945df discovery: connect with autocommit=True so per-listing writes persist
@@ -25,7 +26,6 @@ a7a3fb4 roadmap: refresh auto-status block
 5fe9694 Merge pull request #127 from waiff/claude/discovery-stratification-sql-fix
 0a0742b discovery: split NTILE into outer CTE (fix WindowingError)
 b7973a8 estimation detail: persist sreality subject + richer header + saved yield inputs
-c291126 Merge pull request #126 from waiff/claude/discover-script-skip-fastapi
 ```
 
 <!-- END AUTO-STATUS -->
