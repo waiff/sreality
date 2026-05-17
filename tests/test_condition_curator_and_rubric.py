@@ -168,3 +168,48 @@ def test_rubric_levels_are_consecutive_and_descending():
         assert levels == list(range(n, 0, -1)), (
             f"rubric levels not in descending {n}..1 order: {levels}"
         )
+
+
+def test_rubric_confidence_policy_pins_silent_default():
+    """Silent listings with no fallback signal MUST land on level 3 with
+    confidence < 0.2. Guards against accidental drift in either the
+    forced level or the upper confidence bound."""
+    root = _project_root()
+    rubric_path = root / "data" / "condition_rubric_v1.json"
+    if not rubric_path.is_file():
+        import pytest
+        pytest.skip("rubric missing in this checkout")
+    rubric = json.loads(rubric_path.read_text(encoding="utf-8"))
+    policy = rubric.get("confidence_policy")
+    assert policy is not None, "rubric missing confidence_policy section"
+    bands = {b["name"]: b for b in policy["bands"]}
+    silent = bands.get("silent_no_fallback")
+    assert silent is not None, "confidence_policy missing silent_no_fallback band"
+    assert silent["forced_level"] == 3, (
+        f"silent_no_fallback forced_level must be 3, got {silent['forced_level']}"
+    )
+    lo, hi = silent["confidence_range"]
+    assert lo == 0.0 and hi <= 0.20, (
+        f"silent_no_fallback confidence_range must be [0.0, <=0.20], got [{lo}, {hi}]"
+    )
+
+
+def test_rubric_fallback_chain_has_expected_steps():
+    """Fallback chain is the contract the Phase B scorer reads. Pin the
+    four steps so a casual edit can't drop one (e.g. accidentally
+    removing the listings.condition fallback would silently change scorer
+    behaviour for ~20% of listings with no apartment markers)."""
+    root = _project_root()
+    rubric_path = root / "data" / "condition_rubric_v1.json"
+    if not rubric_path.is_file():
+        import pytest
+        pytest.skip("rubric missing in this checkout")
+    rubric = json.loads(rubric_path.read_text(encoding="utf-8"))
+    chain = rubric.get("fallback_chain")
+    assert isinstance(chain, list) and len(chain) == 4, (
+        f"fallback_chain must have exactly 4 steps, got {len(chain) if chain else None}"
+    )
+    joined = " ".join(chain).lower()
+    assert "curated markers" in joined
+    assert "listings.condition" in joined
+    assert "hard default" in joined or "default" in joined

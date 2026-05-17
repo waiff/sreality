@@ -3,6 +3,22 @@
   "level_count": 5,
   "scale": "1 = critical, 5 = excellent (higher is better)",
   "notes": "Hand-drafted rubric (Phase A, v1). Required marker IDs reference data/condition_markers_curated.json. The Phase B scorer treats `required_marker_ids` as 'any of these strongly suggests at least this level' and `disqualifying_marker_ids` as 'presence forbids classification at this level or above'. Silent listings (zero markers, ~9% of the sample) default to level 3 unless other structured signals (e.g. listings.condition='Novostavba') override.",
+  "confidence_policy": {
+    "description": "Per-scope confidence (0..1) the scorer MUST emit alongside each level. Bands below are upper bounds — the scorer may go lower within a band when evidence is unusually thin or contradictory.",
+    "bands": [
+      {"name": "strong_evidence",      "criterion": "Multiple curated markers AND no contradictions",                                       "confidence_range": [0.80, 0.95]},
+      {"name": "single_strong_marker", "criterion": "1-2 high-signal markers (rubric required_marker_ids of L4 or L5) AND no contradictions","confidence_range": [0.60, 0.80]},
+      {"name": "weak_marker_or_fallback","criterion": "Single L3 / medium marker, OR fallback to listings.condition enum",                  "confidence_range": [0.40, 0.60]},
+      {"name": "contradictions",       "criterion": "Both positive AND negative markers present in the same scope — flag in notes",         "confidence_range": [0.30, 0.50]},
+      {"name": "silent_no_fallback",   "criterion": "Zero curated markers in this scope AND listings.condition empty AND no other usable structured signal",   "confidence_range": [0.00, 0.20], "forced_level": 3}
+    ]
+  },
+  "fallback_chain": [
+    "1. Curated markers extracted from this listing's snapshot (primary signal).",
+    "2. listings.condition enum (Novostavba→5, Po rekonstrukci→4, Velmi dobrý stav→4, Dobrý stav→3, Před rekonstrukcí→2).",
+    "3. listings.building_type + energy_rating + year_built — weak signals usable only when 1 and 2 are both empty.",
+    "4. Hard default: level 3, confidence < 0.20 (silent_no_fallback band)."
+  ],
   "building_levels": [
     {
       "level": 5,
