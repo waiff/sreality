@@ -1,0 +1,57 @@
+name: Seed condition settings (Phase B init)
+
+# One-shot workflow that populates the two large app_settings rows
+# created by migration 072 — `llm_condition_rubric` and
+# `llm_condition_marker_dictionary` — from the committed JSON files
+# (data/condition_rubric_v1.json + data/condition_markers_curated.json).
+#
+# Migration 072 inserts both rows as `{}` placeholders so the SQL file
+# stays compact. score_listing_condition raises ScoringError if either
+# row is still empty at call time. Trigger this workflow once after
+# applying migration 072, and again whenever the operator regenerates
+# either file (re-aggregation or rubric tweak). Every prior value is
+# preserved by the app_settings_history trigger from migration 020,
+# so this is safe to re-run.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+# No LLM cost — pure DB UPDATE.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print sizes and exit without UPDATEing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Run seed
+        run: |
+          ARGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="--dry-run"
+          fi
+          python -m scripts.seed_condition_settings $ARGS
