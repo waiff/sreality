@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-17 10:57 UTC_
+_Last refreshed: 2026-05-17 11:16 UTC_
 
 **Branch:** `claude/add-condition-filter-TTY7j`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-17 10:57 UTC_
 **Last 10 commits:**
 
 ```
+3b73ce3 filters: expose condition (Stav objektu) on Browse, Watchdog, Settings, Neighborhood, Defaults
 1cbc7ff Merge pull request #131 from waiff/claude/fix-district-filter-AAm5L
 b96509c Merge remote-tracking branch 'origin/main' into claude/fix-district-filter-AAm5L
 b669695 roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ b4d5d2a Merge pull request #130 from waiff/claude/discovery-prompt-too-long-fall
 a4aa4b9 data: regenerate condition marker dictionary
 5ca3743 Merge pull request #129 from waiff/claude/discovery-prompt-too-long-fallback
 a9945df discovery: connect with autocommit=True so per-listing writes persist
-50a57aa discovery: fall back to text-only when prompt exceeds 200k tokens
 ```
 
 <!-- END AUTO-STATUS -->
