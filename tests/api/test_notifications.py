@@ -208,6 +208,31 @@ def test_build_clauses_categoryless_spec() -> None:
     assert "category_type" not in params
 
 
+def test_build_clauses_condition_level_minimums() -> None:
+    """Watchdog must honour the new condition-level filters so the
+    operator can say 'alert me when a level-5 apartment shows up'."""
+    spec = WatchdogFilterSpec(
+        building_condition_level_min=4,
+        apartment_condition_level_min=5,
+    )
+    where, params = _build_match_clauses(spec)
+    assert any("building_condition_level >= %(building_condition_level_min)s" in w for w in where)
+    assert any("apartment_condition_level >= %(apartment_condition_level_min)s" in w for w in where)
+    assert params["building_condition_level_min"] == 4
+    assert params["apartment_condition_level_min"] == 5
+
+
+def test_build_clauses_condition_level_minimums_omitted_by_default() -> None:
+    """Absent filters add no clauses — NULL rows would otherwise be
+    excluded by an unintended `IS NOT NULL` check."""
+    spec = WatchdogFilterSpec()
+    where, params = _build_match_clauses(spec)
+    assert not any("building_condition_level" in w for w in where)
+    assert not any("apartment_condition_level" in w for w in where)
+    assert "building_condition_level_min" not in params
+    assert "apartment_condition_level_min" not in params
+
+
 # --- match_once with a fake psycopg connection ---------------------------
 
 
