@@ -166,6 +166,8 @@ export default function WatchdogEdit() {
             min_estate_area: 'Estate area m²',
             min_garden_area: 'Garden area m²',
             min_parking_lots: 'Min parking lots',
+            building_condition_level_min: 'Min building condition (1–5)',
+            apartment_condition_level_min: 'Min apartment condition (1–5)',
             has_balcony: 'Balcony',
             has_lift: 'Lift',
             has_parking: 'Parking',

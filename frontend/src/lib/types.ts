@@ -434,6 +434,8 @@ export interface EstimationFilters {
   min_usable_area: number | null;
   max_usable_area: number | null;
   min_parking_lots: number | null;
+  building_condition_level_min: number | null;
+  apartment_condition_level_min: number | null;
 }
 
 export interface CreateEstimationIn extends Partial<EstimationFilters> {
@@ -789,6 +791,10 @@ export interface WatchdogFilterSpec {
   furnished: Furnished | null;
   ownership: Ownership | null;
   min_parking_lots: number | null;
+  // Derived condition scores (migrations 072 / 073). Same NULL-excluding
+  // `>= N` semantics as the Browse filter.
+  building_condition_level_min: number | null;
+  apartment_condition_level_min: number | null;
   // Added with migration 060 / PR 2: backend now honours these,
   // matching the Browse sidebar filter set. The Watchdog form
   // surfaces them in a later PR — until then, API callers can set
@@ -827,6 +833,8 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   furnished: null,
   ownership: null,
   min_parking_lots: null,
+  building_condition_level_min: null,
+  apartment_condition_level_min: null,
   building_material: null,
   min_garden_area: null,
   max_garden_area: null,

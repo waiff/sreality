@@ -182,12 +182,15 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
             onChange={handleRegistryChange}
             includeOnly={[
               'furnished', 'ownership', 'condition_match', 'building_material',
+              'building_condition_level_min', 'apartment_condition_level_min',
             ]}
             labels={{
               furnished: 'Furnished',
               ownership: 'Ownership',
-              condition_match: 'Condition',
+              condition_match: 'Condition (Stav objektu)',
               building_material: 'Building material',
+              building_condition_level_min: 'Min building condition (1–5)',
+              apartment_condition_level_min: 'Min apartment condition (1–5)',
             }}
             flat
           />
