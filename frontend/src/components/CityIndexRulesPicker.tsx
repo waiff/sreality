@@ -36,10 +36,12 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
     gcTime: Infinity,
   });
 
-  /* Group definitions by category for the dropdown. Overall + category
-   * aggregates appear first so the most common filter targets are at
-   * the top of the picker. */
-  const groups = useMemo(() => groupByCategory(defs ?? []), [defs]);
+  /* Group definitions for the dropdown. A small operator-curated
+   * "Pinned" group appears at the top — these are the indexes the
+   * operator reaches for most often, prefixed with a dash to make
+   * the pinning visually obvious. The rest of the list stays grouped
+   * by `category` (Overall / Health / Material / Services / Sub). */
+  const groups = useMemo(() => groupForPicker(defs ?? []), [defs]);
 
   const update = (next: CityIndexRule[]) => {
     onChange(next.length === 0 ? null : next);
@@ -102,7 +104,7 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
                 <optgroup key={g.label} label={g.label}>
                   {g.defs.map((d) => (
                     <option key={d.index_name} value={d.index_name}>
-                      {d.label_en ?? d.label_cs}
+                      {g.prefix}{indexLabel(d)}
                     </option>
                   ))}
                 </optgroup>
@@ -145,23 +147,68 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
 }
 
 const CATEGORY_LABELS: Record<CityIndexDefinition['category'], string> = {
-  overall: 'Overall',
-  health_env: 'Health & environment',
-  material_edu: 'Material & education',
-  services_relations: 'Services & relations',
-  sub_index: 'Sub-indexes',
+  overall: 'Celkové',
+  health_env: 'Zdraví a prostředí',
+  material_edu: 'Práce a vzdělání',
+  services_relations: 'Služby a vztahy',
+  sub_index: 'Ostatní indexy',
 };
 
-function groupByCategory(
+/* Operator-curated short list of the indexes that get reached for
+ * most often. They render at the top of the dropdown as a "Pinned"
+ * optgroup with each label prefixed by `- ` so the pinning is
+ * visually obvious. Adding / removing an entry is a one-line edit;
+ * unknown slugs are silently ignored if the seed hasn't loaded
+ * them. Order in the array is the display order. */
+const PINNED_SLUGS: readonly string[] = [
+  'celkove_hodnoceni',     // Celkové hodnocení
+  'prirustek_obyvatel',    // Index přírůstku obyvatelstva
+  'stehovani_mladych',     // Index stěhování mladých
+  'pracovni_mista',        // Index nabídky pracovních míst
+  'nezamestnanost',        // Index nezaměstnanosti
+  'silnicni_sit',          // Index silniční sítě
+  'zeleznicni_doprava',    // Index železniční dopravy
+];
+
+/** Czech label first; fall back to the English one if `label_cs` is
+ *  missing (shouldn't happen post-seed, but the registry typing keeps
+ *  `label_en` optional / nullable so we stay defensive). */
+export function indexLabel(d: CityIndexDefinition): string {
+  return d.label_cs || d.label_en || d.index_name;
+}
+
+interface PickerGroup {
+  label: string;
+  defs: ReadonlyArray<CityIndexDefinition>;
+  /** Prefix prepended to each option's label inside this group.
+   *  Used to mark the pinned set with a leading dash. */
+  prefix: string;
+}
+
+function groupForPicker(
   defs: ReadonlyArray<CityIndexDefinition>,
-): { label: string; defs: ReadonlyArray<CityIndexDefinition> }[] {
+): PickerGroup[] {
+  const byName = new Map(defs.map((d) => [d.index_name, d]));
+  const pinnedDefs = PINNED_SLUGS
+    .map((slug) => byName.get(slug))
+    .filter((d): d is CityIndexDefinition => d != null);
+  const pinnedSet = new Set(pinnedDefs.map((d) => d.index_name));
+
+  const groups: PickerGroup[] = [];
+  if (pinnedDefs.length > 0) {
+    groups.push({ label: 'Připnuté', defs: pinnedDefs, prefix: '- ' });
+  }
+
   const order: CityIndexDefinition['category'][] = [
     'overall', 'health_env', 'material_edu', 'services_relations', 'sub_index',
   ];
-  return order
-    .map((cat) => ({
-      label: CATEGORY_LABELS[cat],
-      defs: defs.filter((d) => d.category === cat),
-    }))
-    .filter((g) => g.defs.length > 0);
+  for (const cat of order) {
+    const inCat = defs.filter(
+      (d) => d.category === cat && !pinnedSet.has(d.index_name),
+    );
+    if (inCat.length > 0) {
+      groups.push({ label: CATEGORY_LABELS[cat], defs: inCat, prefix: '' });
+    }
+  }
+  return groups;
 }

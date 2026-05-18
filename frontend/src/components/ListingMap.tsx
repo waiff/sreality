@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import type { CityIndexDefinition, CuratedCity, MapRow } from '@/lib/queries';
 import type { CenterRadius, MapBounds } from '@/lib/filters';
+import { indexLabel } from '@/components/CityIndexRulesPicker';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 
 /* Polygon approximation of a metres-radius circle around (lat, lng).
@@ -774,10 +775,10 @@ function CityMapControls({
             value={colorByIndex?.index_name ?? ''}
             onChange={(e) => onColorByIndexChange?.(e.target.value || null)}
           >
-            <option value="">None</option>
+            <option value="">Žádné</option>
             {cityIndexDefinitions.map((d) => (
               <option key={d.index_name} value={d.index_name}>
-                {d.label_en ?? d.label_cs}
+                {indexLabel(d)}
               </option>
             ))}
           </select>
@@ -793,7 +794,7 @@ function CityMapControls({
           />
           <div className="flex justify-between text-[0.65rem] text-[var(--color-ink-3)] tabular-nums">
             <span>{colorByIndex.scale_min}</span>
-            <span className="text-[var(--color-ink-2)]">{colorByIndex.label_en ?? colorByIndex.label_cs}</span>
+            <span className="text-[var(--color-ink-2)]">{indexLabel(colorByIndex)}</span>
             <span>{colorByIndex.scale_max}</span>
           </div>
         </div>
@@ -872,7 +873,7 @@ function cityPopupHtml(
   const rows = sortedDefs.slice(0, 8).map((d) => {
     const key = `${c.city_id}:${d.index_name}`;
     const v = values.get(key);
-    const label = d.label_en ?? d.label_cs;
+    const label = indexLabel(d);
     const valueText = typeof v === 'number'
       ? v.toFixed(1)
       : '—';

@@ -54,9 +54,31 @@ export default function Browse() {
   const tabFromUrl = (searchParams.get('tab') ?? 'map') as TabKey;
   /* Phase QUAL — map-overlay UI state. Not part of the filter spec
    * (these don't narrow the cohort, they just paint city pins). Held
-   * in the URL so a shared link reproduces what the operator saw. */
+   * in the URL so a shared link reproduces what the operator saw.
+   * These keys are NOT serialised by `toSearchParams`, so every other
+   * URL rewriter on this page MUST preserve them explicitly (see
+   * `preserveExtras`). The previous draft dropped them on pan/zoom,
+   * which manifested as the operator's color-by selection vanishing
+   * on every map gesture. */
   const showCities = searchParams.get('cities') !== '0';
   const colorByIndexName = searchParams.get('colorby') ?? null;
+
+  /* Copy URL keys that live outside `toSearchParams` (tab, sort, the
+   * city-overlay knobs). Used by every URL rewriter on this page so
+   * `setBounds` / `setFilters` / `writeSort` / `setPage` can't drop
+   * them by accident. `page` is deliberately omitted — callers that
+   * want to reset paging should not call `preserveExtras`. */
+  const preserveExtras = useCallback(
+    (sp: URLSearchParams): URLSearchParams => {
+      for (const key of ['tab', 'sort', 'cities', 'colorby']) {
+        const v = searchParams.get(key);
+        if (v != null) sp.set(key, v);
+      }
+      return sp;
+    },
+    [searchParams],
+  );
+
   const setShowCities = useCallback(
     (next: boolean) => {
       const sp = new URLSearchParams(searchParams);
@@ -78,15 +100,11 @@ export default function Browse() {
 
   const setFilters = useCallback(
     (next: ListingFilters) => {
-      const sp = toSearchParams(next);
-      const tab = searchParams.get('tab');
-      const sortRaw = searchParams.get('sort');
-      if (tab) sp.set('tab', tab);
-      if (sortRaw) sp.set('sort', sortRaw);
+      const sp = preserveExtras(toSearchParams(next));
       // page is intentionally dropped — new filter set, reset to first page.
       setSearchParams(sp, { replace: false });
     },
-    [searchParams, setSearchParams],
+    [preserveExtras, setSearchParams],
   );
 
   const setTab = (next: TabKey) => {
@@ -172,14 +190,10 @@ export default function Browse() {
   const setBounds = useCallback(
     (b: MapBounds | null) => {
       const next: ListingFilters = { ...filters, bounds: b };
-      const sp = toSearchParams(next);
-      const tab = searchParams.get('tab');
-      const sortRaw = searchParams.get('sort');
-      if (tab) sp.set('tab', tab);
-      if (sortRaw) sp.set('sort', sortRaw);
+      const sp = preserveExtras(toSearchParams(next));
       setSearchParams(sp, { replace: true });
     },
-    [filters, searchParams, setSearchParams],
+    [filters, preserveExtras, setSearchParams],
   );
 
   /* Map tab fetches two cohorts in parallel: every (geo-located) listing
