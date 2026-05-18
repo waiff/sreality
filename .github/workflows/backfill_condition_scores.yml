@@ -50,7 +50,7 @@ on:
         default: "10"
         type: string
       max_age_days:
-        description: Only score listings whose last_seen_at is within this many days
+        description: Only score listings whose last_seen_at is within this many days (0 = no freshness filter)
         required: true
         default: "30"
         type: string

@@ -87,6 +87,13 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.image_workers,
         )
 
+    if (
+        rc == 0
+        and not args.dry_run
+        and not args.no_condition_scoring
+    ):
+        _run_condition_scoring(max_scores=args.max_condition_scores)
+
     return rc
 
 
@@ -152,6 +159,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=DEFAULT_IMAGE_WORKERS,
         help=f"concurrent download/upload workers (default: {DEFAULT_IMAGE_WORKERS})",
+    )
+    p.add_argument(
+        "--no-condition-scoring",
+        action="store_true",
+        help=(
+            "skip the condition-scoring phase even if ANTHROPIC_API_KEY "
+            "is configured"
+        ),
+    )
+    p.add_argument(
+        "--max-condition-scores",
+        type=int,
+        default=200,
+        help=(
+            "cap number of condition scores written this run (default: "
+            "200; ~$3/run at the cached rate). Set to 0 to disable."
+        ),
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
@@ -518,6 +542,99 @@ def _fetch_one_image(
         return (key, None)
     except Exception as exc:
         return (key, exc)
+
+
+def _run_condition_scoring(max_scores: int) -> None:
+    """Score listings whose latest snapshot has no condition-score row.
+
+    No-op when ANTHROPIC_API_KEY is unset (mirrors the image-download
+    phase's gate on R2 env vars) — a misconfigured deploy can't break
+    the scrape. No region filter: every newly-changed snapshot gets
+    scored as it lands, matching architectural rule #14. Per-listing
+    cost at the cached rate is ~$0.014 (after the first ~17.8k-token
+    cache write), so the 200-default cap holds nightly spend ~$3.
+    """
+    if max_scores <= 0:
+        LOG.info("SCORE skipped (--max-condition-scores=0)")
+        return
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        LOG.info("SCORE skipped (ANTHROPIC_API_KEY not set)")
+        return
+
+    from api.llm_client import LLMClient
+    from api.providers.anthropic import AnthropicProvider
+    from toolkit.condition_scoring import ScoringError, score_listing_condition
+
+    with db.connect() as conn:
+        pending = _pending_condition_scores(conn, limit=max_scores)
+        total = len(pending)
+        LOG.info("SCORE pending=%d cap=%d", total, max_scores)
+        if total == 0:
+            LOG.info("SCORE done scored=0 errors=0 cost=$0.0000")
+            return
+
+        providers = {"anthropic": AnthropicProvider()}
+        llm_client = LLMClient(conn, providers=providers)
+
+        scored = 0
+        errors = 0
+        cost_so_far = 0.0
+        for i, sid in enumerate(pending, start=1):
+            try:
+                result = score_listing_condition(
+                    conn, llm_client, sreality_id=sid, n_images=0,
+                )
+            except ScoringError as exc:
+                errors += 1
+                LOG.warning("SCORE id=%d skipped error=%s", sid, exc)
+                continue
+            except Exception as exc:
+                errors += 1
+                LOG.exception("SCORE id=%d crashed: %s", sid, exc)
+                continue
+
+            scored += 1
+            c = result["data"].get("cost_usd") or 0.0
+            if not result["data"].get("cache_hit"):
+                cost_so_far += float(c)
+            if i % 50 == 0 or i == total:
+                LOG.info(
+                    "SCORE progress=%d/%d scored=%d errors=%d cost_so_far=$%.4f",
+                    i, total, scored, errors, cost_so_far,
+                )
+
+    LOG.info(
+        "SCORE done scored=%d errors=%d cost=$%.4f",
+        scored, errors, cost_so_far,
+    )
+
+
+def _pending_condition_scores(conn: Any, *, limit: int) -> list[int]:
+    """Active listings whose latest snapshot has no row in
+    `listing_condition_scores`. Mirrors the backfill selection (no
+    region filter) so the same idempotent / resumable semantics apply:
+    score rows drop out of subsequent runs once written.
+    """
+    sql = (
+        "WITH latest_snapshot AS ( "
+        "  SELECT sreality_id, MAX(id) AS snapshot_id "
+        "  FROM listing_snapshots GROUP BY sreality_id "
+        ") "
+        "SELECT l.sreality_id "
+        "FROM listings l "
+        "JOIN latest_snapshot ls ON ls.sreality_id = l.sreality_id "
+        "LEFT JOIN listing_condition_scores cs "
+        "  ON cs.sreality_id = ls.sreality_id "
+        " AND cs.snapshot_id = ls.snapshot_id "
+        "WHERE l.is_active = true "
+        "  AND l.last_seen_at > now() - interval '30 days' "
+        "  AND cs.id IS NULL "
+        "ORDER BY l.last_seen_at DESC "
+        "LIMIT %s"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql, (limit,))
+        return [int(r[0]) for r in cur.fetchall()]
 
 
 def _extract_id(estate: dict[str, Any]) -> int | None:
