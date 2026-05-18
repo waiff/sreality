@@ -1,0 +1,105 @@
+name: Backfill condition scores (Phase B2)
+
+# Manual workflow that backfills building/apartment condition scores
+# for active listings. Resumable — each invocation processes only
+# listings whose latest snapshot doesn't yet have a row in
+# `listing_condition_scores`. The script writes to both the cache
+# table AND the two listings.*_condition_level columns in one
+# transaction per listing (autocommit=True on the connection means
+# every successful score commits independently — a workflow timeout
+# or cancel preserves the rows already done).
+#
+# Default region filter is the operator's chosen four kraje:
+#   10 Praha · 11 Středočeský · 2 Plzeňský · 13 Vysočina
+# (other kraje stay unscored for now; the daily scrape pipeline in
+# B4 will score newly-changed listings everywhere without any
+# region filter). Clear the input to score every region.
+#
+# Cost-capped via `max_cost_usd` so a single accidental run can't
+# blow past the operator's per-run budget. Reach the cap mid-run
+# and the script logs a SCORE cost cap reached line and exits 0
+# with the rows scored so far preserved.
+#
+# Required GitHub secrets:
+#   SUPABASE_DB_URL    — same one used by every other workflow
+#   ANTHROPIC_API_KEY  — Sonnet 4.5 by default; see
+#                        app_settings.llm_condition_model
+#   R2_*               — optional; only needed when `n_images > 0`.
+
+on:
+  workflow_dispatch:
+    inputs:
+      region_ids:
+        description: Comma-separated locality_region_id list (empty = no region filter)
+        required: false
+        default: "10,11,2,13"
+        type: string
+      limit:
+        description: Maximum number of listings to score in this run
+        required: true
+        default: "500"
+        type: string
+      n_images:
+        description: Images per listing (0 disables vision; default 0 matches discovery)
+        required: true
+        default: "0"
+        type: string
+      max_cost_usd:
+        description: Stop early when this run's LLM cost exceeds this cap (USD)
+        required: true
+        default: "10"
+        type: string
+      max_age_days:
+        description: Only score listings whose last_seen_at is within this many days
+        required: true
+        default: "30"
+        type: string
+      dry_run:
+        description: Print first 20 pending IDs and exit without calling the LLM
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "psycopg[binary]>=3.2" \
+            "requests>=2.32" \
+            "boto3>=1.35" \
+            "anthropic>=0.40"
+
+      - name: Run backfill
+        run: |
+          ARGS="--region-ids '${{ inputs.region_ids }}'"
+          ARGS="$ARGS --limit ${{ inputs.limit }}"
+          ARGS="$ARGS --n-images ${{ inputs.n_images }}"
+          ARGS="$ARGS --max-cost-usd ${{ inputs.max_cost_usd }}"
+          ARGS="$ARGS --max-age-days ${{ inputs.max_age_days }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          eval python -m scripts.backfill_condition_scores $ARGS
