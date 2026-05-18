@@ -184,6 +184,8 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.usableAreaMin   != null) r = r.gte('usable_area',   f.usableAreaMin);
   if (f.usableAreaMax   != null) r = r.lte('usable_area',   f.usableAreaMax);
   if (f.parkingLotsMin  != null) r = r.gte('parking_lots',  f.parkingLotsMin);
+  if (f.buildingConditionLevelMin  != null) r = r.gte('building_condition_level',  f.buildingConditionLevelMin);
+  if (f.apartmentConditionLevelMin != null) r = r.gte('apartment_condition_level', f.apartmentConditionLevelMin);
   const bbox = effectiveBbox(f);
   if (bbox) {
     r = r.gte('lng', bbox.west)
