@@ -692,6 +692,47 @@ def _build_registry() -> dict[str, FilterDef]:
             enum_values=ENERGY_RATING_OPTIONS,
         ),
         FilterDef(
+            id="building_condition_level_min",
+            type=FilterType.INT,
+            pg_column="building_condition_level",
+            default=None,
+            description=(
+                "Minimum building condition score (`building_condition_level "
+                ">= N`, 1..5). Set by toolkit.condition_scoring.score_listing_condition "
+                "off the curated Czech marker dictionary + 5-level rubric. "
+                "NULL rows (not yet scored) are excluded from the result. "
+                "5 = výborný stav (excellent), 4 = velmi dobrý stav, "
+                "3 = průměrný / udržovaný, 2 = vyžaduje rekonstrukci, "
+                "1 = kritický stav."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=_ALL_AGENDAS,
+            constraints={"min": 1, "max": 5},
+            aliases=("buildingConditionLevelMin",),
+        ),
+        FilterDef(
+            id="apartment_condition_level_min",
+            type=FilterType.INT,
+            pg_column="apartment_condition_level",
+            default=None,
+            description=(
+                "Minimum apartment condition score (`apartment_condition_level "
+                ">= N`, 1..5). Same scorer as building_condition_level_min "
+                "but scoped to the unit itself rather than the building shell. "
+                "NULL rows (not yet scored) are excluded from the result. "
+                "5 = výborný stav (novostavba / po kompletní rekonstrukci), "
+                "4 = velmi dobrý stav (po rekonstrukci, new jádro / koupelna), "
+                "3 = průměrný, 2 = v původním stavu / před rekonstrukcí, "
+                "1 = umakartové jádro."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=_ALL_AGENDAS,
+            constraints={"min": 1, "max": 5},
+            aliases=("apartmentConditionLevelMin",),
+        ),
+        FilterDef(
             id="furnished",
             type=FilterType.STRING,
             pg_column="furnished",

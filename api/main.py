@@ -363,6 +363,8 @@ def post_compute_market_velocity(
         min_usable_area=body.min_usable_area,
         max_usable_area=body.max_usable_area,
         min_parking_lots=body.min_parking_lots,
+        building_condition_level_min=body.building_condition_level_min,
+        apartment_condition_level_min=body.apartment_condition_level_min,
     )
     return compute_market_velocity(
         conn, target, filters,
@@ -911,6 +913,8 @@ def post_estimate_yield(
         min_usable_area=body.min_usable_area,
         max_usable_area=body.max_usable_area,
         min_parking_lots=body.min_parking_lots,
+        building_condition_level_min=body.building_condition_level_min,
+        apartment_condition_level_min=body.apartment_condition_level_min,
     )
     return estimate_yield(
         conn, target, filters, body.purchase_price_czk,
@@ -1204,5 +1208,7 @@ def _build_comparables_inputs(
         min_usable_area=body.min_usable_area,
         max_usable_area=body.max_usable_area,
         min_parking_lots=body.min_parking_lots,
+        building_condition_level_min=body.building_condition_level_min,
+        apartment_condition_level_min=body.apartment_condition_level_min,
     )
     return target, filters
