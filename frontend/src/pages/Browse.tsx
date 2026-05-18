@@ -275,7 +275,7 @@ export default function Browse() {
      * holds (AND). Population bounds gate the same set. */
     const rulesPass = (city: CuratedCity): boolean => {
       for (const r of filters.cityIndexRules) {
-        const v = allMap.get(`${city.city_id}:${r.indexName}`);
+        const v = allMap.get(`${city.city_id}:${r.index_name}`);
         if (v == null) return false;
         const op = r.op ?? '>=';
         if (op === '>='  && !(v >= r.value)) return false;

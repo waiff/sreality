@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 18:41 UTC_
+_Last refreshed: 2026-05-18 19:13 UTC_
 
 **Branch:** `claude/review-qual-roadmap-TutYL`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 81 files, latest `078_curated_cities.sql`.
+**Migrations on disk:** 82 files, latest `079_listings_with_city_quality.sql`.
 
 **Last 10 commits:**
 
 ```
+b1d4149 phase QUAL: curated city indexes, watchdog parity, map overlay
 8be16c4 Merge pull request #148 from waiff/claude/fix-failed-estimation-ogCpV
 fbec766 estimations: tool runtime panel, retry-on-list, batched walkability
 7cb6b20 Merge pull request #147 from waiff/claude/drop-listings-raw-json-idx
@@ -25,7 +26,6 @@ fed76f5 browse: registry-driven PostgREST filter dispatch + drift guard
 f66db7a browse: actually apply condition-level filters in PostgREST query
 77d8497 Merge pull request #145 from waiff/claude/rental-estimator-prompt-Beviv
 a9a9222 roadmap: refresh auto-status block
-88161c6 estimator: v3 prompt + surface target condition for three-axis matching
 ```
 
 <!-- END AUTO-STATUS -->
@@ -389,31 +389,62 @@ overlay that can be heatmap-color-coded by any chosen index.
   kraj_name)`, definitions upsert by `index_name`, each run appends
   a new `city_index_revisions` row.
 
-**What's next** (separate slice):
+**Next-commit follow-ups also shipped**:
 
-- **Population CSV**: ČSÚ "Počet obyvatel v obcích k 1.1.2024"
-  snapshot committed at `data/csu_population_2024.csv`. Seed
-  script already loads it on present; an admin-page "Refresh
-  population" button is the next-year follow-up.
-- **Stats tab**: `browse_stats` RPC doesn't yet honour the
-  city-quality predicate, so the Stats counts are unfiltered when
-  a city-quality filter is active. Map and Table tabs are
-  correctly filtered. Migration to extend `browse_stats` is the
-  follow-up.
+- **Watchdog editor surfaces the city-quality section.** The picker
+  + 3 numeric fields now render in `WatchdogEdit.tsx` via the same
+  custom-widget wire-up Browse uses. `WatchdogFilterSpec` gained
+  the four matching fields (`city_index_rules`,
+  `min_city_population`, `max_city_population`,
+  `near_city_proximity`) and `DEFAULT_WATCHDOG_FILTER_SPEC` gets
+  the matching nulls. Picker wire shape unified on snake_case
+  `{index_name, op, value}` so the same operator output flows
+  unchanged to the Browse RPC, Watchdog matcher, and the new Stats
+  RPC.
+- **Stats tab honours city-quality filters.** Migration 080 extends
+  `browse_stats` to 44 params with the same four city-quality
+  inputs the listings RPC accepts. Same EXISTS / NOT EXISTS
+  semantics. Aliased the outer SELECT (`from listings_public l`)
+  to avoid the bare-`lat`/`lng` ambiguity inside the EXISTS, which
+  silently turned the geographic filter into a no-op on the first
+  draft. `fetchBrowseStats` now passes the four params; Stats and
+  Map/Table can never disagree on a city-quality cohort again.
+- **Population fetcher**: `scripts/fetch_population_wikidata.py`
+  queries Wikidata's public SPARQL endpoint for every Czech
+  municipality's `population (P1082) @ point in time (P585)`,
+  matches by `(name, kraj)` against the curated list, and writes
+  `data/csu_population_2024.csv` — the file the seed script
+  already loads on present. Wired through
+  `.github/workflows/refresh_population.yml` for operator-triggered
+  refresh; no DB access required (the workflow just regenerates
+  the committed CSV).
+
+**Still next** (separate slice):
+
 - **`/cities` admin page**: in-app uploader for next year's CSV
   (preview + confirm two-step). Today's flow goes through the
   GitHub Action.
-- **Watchdog UI surface**: the registry-driven `<FilterForm>` will
-  render the new section in the Watchdog editor automatically once
-  the editor consumes the `CityIndexRulesPicker` custom widget
-  (one-line wire-up in `WatchdogEdit.tsx`).
-- **Operator decisions still open**:
-  - Per-city `default_radius_m` tuning. The current value comes
-    from each city's Mapy.cz bbox half-diagonal (clamped 2–25 km).
-    Major cities like Praha may want a manual override; the column
-    is editable in `curated_cities`.
-  - Whether to expose the `op` operator (currently locked to `>=`
-    in the picker) or keep it simple.
+- **Per-city `default_radius_m` rework.** The current value comes
+  from each city's Mapy.cz bbox half-diagonal (clamped 2–25 km).
+  This works for small towns but is too tight for major cities —
+  e.g. Brno comes out at 2 km, well short of Brno's actual
+  built-up footprint, so a Brno-rule + Brno listing pair can miss
+  unless the listing sits within 2 km of the centroid. The right
+  fix is a population-weighted radius (`r ≈ k·sqrt(pop / density)`,
+  clamped 2–25 km) once `city_population` is seeded by the
+  Wikidata fetcher above. Manual overrides via direct UPDATE on
+  `curated_cities.default_radius_m` work today.
+- **Prague gap.** The operator's source CSV omits Prague
+  (instead carries Prague-Východ / Prague-Západ as suburban
+  okres entries). City-quality filters therefore don't activate
+  for any Prague-bbox listing today. Adding a manual Prague row
+  to `curated_cities` (centroid 14.43,50.07 / radius 18 km) and
+  seeding its 33 index values from a separate source is the
+  cleanest fix; deferred until the operator decides whether they
+  want Prague-as-one or Prague-broken-into-districts.
+- **Operator decision still open**: whether to expose the `op`
+  operator (currently locked to `>=` in the picker) or keep it
+  simple.
 
 Headline scope:
 - Migration: `cities(city_id, name, csu_code, geom geography(point,
