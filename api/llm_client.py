@@ -61,6 +61,7 @@ CalledFor = Literal[
     "read_floor_plan",
     "refine_skill",
     "discover_condition_markers",
+    "score_listing_condition",
 ]
 
 

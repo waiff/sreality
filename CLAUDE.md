@@ -271,6 +271,30 @@ separate dev/staging database. Treat every operation accordingly.
     extractor's original guess is auditable. The business-case
     overlay (Phase B3) lives in `business_case jsonb` on this
     same row.
+14. **Condition scoring is two-axis (building + apartment).**
+    `listings.condition` (the raw sreality "Stav objektu" enum, ~11
+    Czech text values) stays as the source field — it's what
+    `listings_public` exposes today and what the legacy filter binds
+    against. The two new derived columns
+    `listings.building_condition_level` and
+    `apartment_condition_level` (integers 1..5, NULL if not yet
+    scored) live alongside it, computed by
+    `toolkit.condition_scoring.score_listing_condition`. The score
+    cache lives in `listing_condition_scores`, keyed on
+    `(sreality_id, snapshot_id)` — same auto-invalidation pattern as
+    `listing_summaries` / `listing_marker_extractions`. The scorer
+    writes the cache row AND updates the two `listings` columns in
+    one transaction with a latest-wins guard so a stale-snapshot
+    scorer can't overwrite a fresher score. The coarse
+    `condition_assessment` produced by `summarize_listing` is for
+    cohort skimming, not authoritative filtering — use the new
+    columns for that. The 5-level rubric lives in
+    `data/condition_rubric_v1.json` (committed) and is loaded into
+    `app_settings.llm_condition_rubric` by
+    `scripts/seed_condition_settings.py`; the curated marker
+    dictionary follows the same pattern via
+    `data/condition_markers_curated.json` →
+    `app_settings.llm_condition_marker_dictionary`.
 
 ## Toolkit and API rules
 
@@ -342,13 +366,26 @@ service that exposes it (`api/`). They do not apply to the scraper.
      "zateplená budova" or "po kompletní rekonstrukci") to
      `listing_marker_extractions` (keyed on `(sreality_id, snapshot_id)`)
      on cache miss. Phase A of the building/apartment condition-
-     scoring feature: feeds the one-off marker dictionary that the
-     forthcoming `score_listing_condition` will read. Same rationale
-     as `summarize_listing` / `compare_listing_images`: vision-augmented
+     scoring feature: feeds the one-off marker dictionary that
+     `score_listing_condition` reads. Same rationale as
+     `summarize_listing` / `compare_listing_images`: vision-augmented
      extraction is expensive, the LLM is the source of truth, the
      cache auto-invalidates when a new snapshot is recorded.
+   - `score_listing_condition`, which writes per-listing
+     building/apartment condition levels (1..5) + marker_ids matched +
+     per-axis confidence to `listing_condition_scores` (keyed on
+     `(sreality_id, snapshot_id)`) AND updates the two derived columns
+     on `listings` (`building_condition_level`, `apartment_condition_level`)
+     in the same transaction, guarded by a latest-wins subquery so a
+     stale-snapshot scorer can't overwrite a fresher score. Phase B of
+     the condition-scoring feature; reads the rubric + marker
+     dictionary from `app_settings.llm_condition_rubric` and
+     `app_settings.llm_condition_marker_dictionary` (populated by
+     `scripts/seed_condition_settings.py`). Auto-invalidates on new
+     snapshot — same pattern as the other vision-augmented analytical
+     tools.
    No other toolkit function may write. The API service should still
-   connect with a read-only role if Postgres permits; these seven paths
+   connect with a read-only role if Postgres permits; these eight paths
    then need a separately-elevated route. For now we ship with one
    role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always
