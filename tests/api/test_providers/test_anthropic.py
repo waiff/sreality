@@ -101,7 +101,13 @@ def test_text_block_round_trips(patch_anthropic):
     assert out.usage.input_tokens == 10
     assert out.usage.output_tokens == 5
     assert sdk.calls[0]["model"] == "claude-sonnet-4-5"
-    assert sdk.calls[0]["system"] == "be terse"
+    # System is wrapped as a list-of-blocks with cache_control so the
+    # prefix becomes Anthropic-cache-eligible. Plain string would not be.
+    assert sdk.calls[0]["system"] == [{
+        "type": "text",
+        "text": "be terse",
+        "cache_control": {"type": "ephemeral"},
+    }]
     assert sdk.calls[0]["messages"][0]["content"][0] == {
         "type": "text", "text": "hi",
     }
@@ -201,6 +207,44 @@ def test_no_cache_control_when_tools_empty(patch_anthropic):
         model="claude-sonnet-4-5",
     )
     assert "tools" not in sdk.calls[0]
+
+
+def test_system_is_wrapped_as_cached_block(patch_anthropic):
+    """System prompt must be sent as a list-of-blocks with cache_control
+    ephemeral, NOT as a plain string. String form is not cache-eligible
+    on Anthropic — keeping the test pins this invariant so a refactor
+    can't silently bring back the un-cached form (8-10x cost regression
+    on long-system callers like the condition scorer)."""
+    sdk = patch_anthropic(_RawResponse(text="ok"))
+    p = AnthropicProvider()
+    p.complete(
+        system="long static system prompt that should be cached",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[],
+        model="claude-sonnet-4-5",
+    )
+    sent_system = sdk.calls[0]["system"]
+    assert isinstance(sent_system, list), (
+        f"system must be list-of-blocks for cache eligibility, got {type(sent_system).__name__}"
+    )
+    assert len(sent_system) == 1
+    assert sent_system[0]["type"] == "text"
+    assert sent_system[0]["text"] == "long static system prompt that should be cached"
+    assert sent_system[0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_empty_system_is_not_sent(patch_anthropic):
+    """Don't send a system block when the caller passes an empty string —
+    keeps requests clean and avoids charging a 1-token cache write."""
+    sdk = patch_anthropic(_RawResponse(text="ok"))
+    p = AnthropicProvider()
+    p.complete(
+        system="",
+        messages=[Message(role="user", content=[TextBlock(text="x")])],
+        tools=[],
+        model="claude-sonnet-4-5",
+    )
+    assert "system" not in sdk.calls[0]
 
 
 def test_missing_api_key_raises():
