@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 11:15 UTC_
+_Last refreshed: 2026-05-18 11:24 UTC_
 
 **Branch:** `claude/condition-watchdog-agent-rebased`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-18 11:15 UTC_
 **Last 10 commits:**
 
 ```
+1cf34d1 roadmap: refresh auto-status block
 8932cbe condition: expose level filters to Watchdog + agent (B3 follow-up)
 bedb966 Merge pull request #142 from waiff/claude/fix-district-filter-AAm5L
 bd5b805 Merge origin/main into claude/fix-district-filter-AAm5L
@@ -25,7 +26,6 @@ d2fe5c8 Merge pull request #141 from waiff/claude/condition-scoring-b4
 d251761 roadmap: refresh auto-status block
 816e458 condition: B4 — scrape pipeline scoring phase + backfill 0-day escape hatch
 0f9fece Merge pull request #140 from waiff/claude/condition-scoring-b3
-f1f82b0 condition: B3 — filter registry + comparables + API + frontend wiring
 ```
 
 <!-- END AUTO-STATUS -->
