@@ -813,6 +813,8 @@ _FCR_OVERRIDE_FIELDS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
     ("min_usable_area", float),
     ("max_usable_area", float),
     ("min_parking_lots", int),
+    ("building_condition_level_min", int),
+    ("apartment_condition_level_min", int),
 )
 
 
@@ -869,6 +871,8 @@ def _filters_snapshot(
         "min_usable_area": filters.min_usable_area,
         "max_usable_area": filters.max_usable_area,
         "min_parking_lots": filters.min_parking_lots,
+        "building_condition_level_min": filters.building_condition_level_min,
+        "apartment_condition_level_min": filters.apartment_condition_level_min,
     }
 
 

@@ -316,5 +316,7 @@ function summariseFilter(spec: WatchdogFilterSpec): string {
   if (spec.furnished) bits.push(FURNISHED_TEXT[spec.furnished] ?? spec.furnished);
   if (spec.ownership) bits.push(spec.ownership);
   if (spec.min_parking_lots != null) bits.push(`≥${spec.min_parking_lots} parking`);
+  if (spec.building_condition_level_min != null) bits.push(`bld≥${spec.building_condition_level_min}`);
+  if (spec.apartment_condition_level_min != null) bits.push(`apt≥${spec.apartment_condition_level_min}`);
   return bits.join(' · ');
 }

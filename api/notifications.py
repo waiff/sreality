@@ -153,6 +153,12 @@ class WatchdogFilterSpec(BaseModel):
     # Parking lots minimum.
     min_parking_lots: int | None = None
 
+    # Derived condition scores (migrations 072 / 073). Minimum-threshold,
+    # NULL rows excluded by the `>= N` comparison — same semantics as
+    # the Browse filter.
+    building_condition_level_min: int | None = None
+    apartment_condition_level_min: int | None = None
+
     @model_validator(mode="after")
     def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
         spatial = [self.lat, self.lng, self.radius_m]
@@ -296,6 +302,13 @@ def _build_match_clauses(
     if spec.min_parking_lots is not None:
         where.append("l.parking_lots >= %(min_parking_lots)s")
         params["min_parking_lots"] = spec.min_parking_lots
+
+    if spec.building_condition_level_min is not None:
+        where.append("l.building_condition_level >= %(building_condition_level_min)s")
+        params["building_condition_level_min"] = spec.building_condition_level_min
+    if spec.apartment_condition_level_min is not None:
+        where.append("l.apartment_condition_level >= %(apartment_condition_level_min)s")
+        params["apartment_condition_level_min"] = spec.apartment_condition_level_min
 
     return where, params
 
