@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-16 11:22 UTC_
+_Last refreshed: 2026-05-18 09:05 UTC_
 
 **Branch:** `claude/fix-district-filter-AAm5L`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 70 files, latest `067_browse_stats_district_ilike.sql`.
+**Migrations on disk:** 72 files, latest `069_notification_subscriptions_districts_chip.sql`.
 
 **Last 10 commits:**
 
 ```
+b96509c Merge remote-tracking branch 'origin/main' into claude/fix-district-filter-AAm5L
 b669695 roadmap: refresh auto-status block
 75fa440 browse: district chip ILIKE substring on district OR locality
+b4d5d2a Merge pull request #130 from waiff/claude/discovery-prompt-too-long-fallback
+8d69628 roadmap: refresh auto-status block
 a4aa4b9 data: regenerate condition marker dictionary
 5ca3743 Merge pull request #129 from waiff/claude/discovery-prompt-too-long-fallback
 a9945df discovery: connect with autocommit=True so per-listing writes persist
 50a57aa discovery: fall back to text-only when prompt exceeds 200k tokens
 0ae2d52 Merge pull request #128 from waiff/claude/prefill-listing-price-h7erp
-a7a3fb4 roadmap: refresh auto-status block
-5fe9694 Merge pull request #127 from waiff/claude/discovery-stratification-sql-fix
-0a0742b discovery: split NTILE into outer CTE (fix WindowingError)
 ```
 
 <!-- END AUTO-STATUS -->

@@ -88,6 +88,58 @@ describe('URL round-trip', () => {
     expect(sp.has('locmode')).toBe(false);
     expect(sp.has('center')).toBe(false);
   });
+
+  it('parses a legacy ?districts=Praha URL into a single context-less chip', () => {
+    const sp = new URLSearchParams({ districts: 'Praha' });
+    const round = fromSearchParams(sp);
+    expect(round.districts).toEqual([{ name: 'Praha', context: null }]);
+  });
+
+  it('round-trips a single chip without context (no districts_ctx in URL)', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [{ name: 'okres Jihlava', context: null }],
+    };
+    const sp = toSearchParams(f);
+    expect(sp.get('districts')).toBe('okres%20Jihlava');
+    expect(sp.has('districts_ctx')).toBe(false); // clean URL — no ctx needed
+    expect(fromSearchParams(sp).districts).toEqual(f.districts);
+  });
+
+  it('round-trips a chip with parent-municipality context', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [{ name: 'Edvarda Beneše', context: 'Plzeň' }],
+    };
+    const sp = toSearchParams(f);
+    expect(sp.get('districts')).toBe('Edvarda%20Bene%C5%A1e');
+    expect(sp.get('districts_ctx')).toBe('Plze%C5%88');
+    expect(fromSearchParams(sp).districts).toEqual(f.districts);
+  });
+
+  it('round-trips a mix of chips (some with context, some without)', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [
+        { name: 'Praha', context: null },
+        { name: 'Edvarda Beneše', context: 'Plzeň' },
+      ],
+    };
+    const round = fromSearchParams(toSearchParams(f));
+    expect(round.districts).toEqual(f.districts);
+  });
+
+  it('lifts two same-name chips with different contexts as two entries', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [
+        { name: 'Edvarda Beneše', context: 'Plzeň' },
+        { name: 'Edvarda Beneše', context: 'Olomouc' },
+      ],
+    };
+    const round = fromSearchParams(toSearchParams(f));
+    expect(round.districts).toEqual(f.districts);
+  });
 });
 
 describe('isDefault', () => {
@@ -164,6 +216,25 @@ describe('applyRegistryUpdate', () => {
     expect(f.tags).toEqual([]);
     f = applyRegistryUpdate(f, 'tags', [5, 7]);
     expect(f.tags).toEqual([5, 7]);
+  });
+
+  it('accepts DistrictChip[] for districts and lifts legacy string[] callers', () => {
+    let f = { ...DEFAULT_FILTERS };
+    f = applyRegistryUpdate(f, 'districts', [
+      { name: 'Edvarda Beneše', context: 'Plzeň' },
+    ]);
+    expect(f.districts).toEqual([{ name: 'Edvarda Beneše', context: 'Plzeň' }]);
+
+    // Legacy callers (e.g. a registry-driven test fixture) that still
+    // pass plain strings get lifted to context-null chips so the
+    // shape stays consistent at the boundary.
+    f = applyRegistryUpdate(DEFAULT_FILTERS, 'districts', ['okres Jihlava']);
+    expect(f.districts).toEqual([
+      { name: 'okres Jihlava', context: null },
+    ]);
+
+    f = applyRegistryUpdate(f, 'districts', null);
+    expect(f.districts).toEqual([]);
   });
 
   it('ignores unknown registry ids without mutating filters', () => {

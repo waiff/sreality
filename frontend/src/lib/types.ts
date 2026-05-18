@@ -1,6 +1,8 @@
 /* Wire shapes mirroring the public views from migration 008. Only the columns
  * the UI actually reads are typed here; expand as Parts B–E need more. */
 
+import type { DistrictChip } from './filters';
+
 export type Disposition =
   | '1+kk' | '1+1'
   | '2+kk' | '2+1'
@@ -764,7 +766,12 @@ export interface WatchdogFilterSpec {
   radius_m: number | null;
   locality_district_id: number | null;
   locality_region_id: number | null;
-  districts: string[] | null;
+  /* Each chip is `{name, context}` — context narrows the name match
+   * to a parent municipality so the watchdog matcher (api/
+   * notifications.py) doesn't fire on streets of the same name in
+   * other cities. See migration 070 for the one-shot lift of legacy
+   * `string[]` entries to this shape. */
+  districts: DistrictChip[] | null;
   min_price_czk: number | null;
   max_price_czk: number | null;
   min_area_m2: number | null;
