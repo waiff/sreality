@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-17 19:04 UTC_
+_Last refreshed: 2026-05-18 04:18 UTC_
 
 **Branch:** `claude/add-condition-filter-TTY7j`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 72 files, latest `069_filter_visibility_condition.sql`.
+**Migrations on disk:** 73 files, latest `070_normalize_condition_values.sql`.
 
 **Last 10 commits:**
 
 ```
+80ae563 filters: normalize listings.condition to canonical codes
 ea6063a Merge remote-tracking branch 'origin/main' into claude/add-condition-filter-TTY7j
 3b73ce3 filters: expose condition (Stav objektu) on Browse, Watchdog, Settings, Neighborhood, Defaults
 f3bc76d Merge pull request #132 from waiff/claude/fix-daily-scrape-fTsfg
@@ -25,7 +26,6 @@ f3bc76d Merge pull request #132 from waiff/claude/fix-daily-scrape-fTsfg
 1cbc7ff Merge pull request #131 from waiff/claude/fix-district-filter-AAm5L
 b96509c Merge remote-tracking branch 'origin/main' into claude/fix-district-filter-AAm5L
 b669695 roadmap: refresh auto-status block
-75fa440 browse: district chip ILIKE substring on district OR locality
 ```
 
 <!-- END AUTO-STATUS -->
