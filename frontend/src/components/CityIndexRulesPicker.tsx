@@ -1,7 +1,7 @@
 /* Phase QUAL — operator-curated city-quality filter widget.
  *
  * Plugs into `<FilterForm customWidgets={...}>` under the registry id
- * `city_index_rules`. Each rule is `{indexName, op, value}`; multiple
+ * `city_index_rules`. Each rule is `{index_name, op, value}`; multiple
  * rules AND. The dropdown enumerates indexes from
  * `city_index_definitions_public` so adding an index to a new CSV
  * upload surfaces here automatically — no frontend change needed.
@@ -48,7 +48,7 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
   const addRule = () => {
     if (!defs || defs.length === 0) return;
     const next: CityIndexRule = {
-      indexName: defs[0].index_name,
+      index_name: defs[0].index_name,
       op: FIXED_OP,
       value: 7,
     };
@@ -87,7 +87,7 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
         </p>
       )}
       {rules.map((rule, i) => {
-        const def = defs.find((d) => d.index_name === rule.indexName);
+        const def = defs.find((d) => d.index_name === rule.index_name);
         return (
           <div
             key={i}
@@ -95,8 +95,8 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
           >
             <select
               className="flex-1 min-w-0 bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-1.5 py-1 text-[0.75rem]"
-              value={rule.indexName}
-              onChange={(e) => setRule(i, { indexName: e.target.value })}
+              value={rule.index_name}
+              onChange={(e) => setRule(i, { index_name: e.target.value })}
             >
               {groups.map((g) => (
                 <optgroup key={g.label} label={g.label}>

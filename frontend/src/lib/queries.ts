@@ -237,25 +237,13 @@ async function resolveCityQualityPrefilter(
   f: ListingFilters,
 ): Promise<number[] | null> {
   if (!hasCityQualityFilter(f)) return null;
-  const rules = f.cityIndexRules.map((r) => ({
-    index_name: r.indexName,
-    value: r.value,
-  }));
-  const proximity = f.nearCityProximity
-    ? {
-        index_rules: f.nearCityProximity.indexRules.map((r) => ({
-          index_name: r.indexName,
-          value: r.value,
-        })),
-        population_min: f.nearCityProximity.populationMin,
-        radius_km: f.nearCityProximity.radiusKm,
-      }
-    : null;
+  /* Filters carry the wire shape (snake_case) directly so no
+   * translation layer is needed before calling the RPC. */
   const { data, error } = await supabase.rpc('listings_with_city_quality', {
-    p_index_rules: rules.length === 0 ? null : rules,
+    p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
     p_pop_min: f.minCityPopulation,
     p_pop_max: f.maxCityPopulation,
-    p_proximity: proximity,
+    p_proximity: f.nearCityProximity,
   });
   if (error) throw error;
   return ((data ?? []) as Array<{ sreality_id: number }>).map(
@@ -541,6 +529,14 @@ export const fetchBrowseStats = async (
     bbox_south:              effBbox?.south ?? null,
     bbox_east:               effBbox?.east  ?? null,
     bbox_north:              effBbox?.north ?? null,
+    /* Phase QUAL — same shape the `listings_with_city_quality` RPC
+     * accepts. Migration 080 added these four params to browse_stats
+     * so Stats counts stay aligned with Map / Table when a city-
+     * quality filter is active. */
+    city_index_rules:        f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
+    city_pop_min:            f.minCityPopulation,
+    city_pop_max:            f.maxCityPopulation,
+    city_proximity:          f.nearCityProximity,
   });
   if (error) throw error;
   return data as BrowseStats;

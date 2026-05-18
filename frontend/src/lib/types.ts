@@ -803,6 +803,25 @@ export interface WatchdogFilterSpec {
   min_garden_area: number | null;
   max_garden_area: number | null;
   tags: number[] | null;
+  /* Phase QUAL — curated-city quality predicates. Mirrors the
+   * Python `WatchdogFilterSpec` fields in `api/notifications.py`.
+   * Same wire shape as Browse's `ListingFilters.cityIndexRules`. */
+  city_index_rules: Array<{
+    index_name: string;
+    op?: '>=' | '<=' | '==' | '!=' | '>' | '<';
+    value: number;
+  }> | null;
+  min_city_population: number | null;
+  max_city_population: number | null;
+  near_city_proximity: {
+    index_rules: Array<{
+      index_name: string;
+      op?: '>=' | '<=' | '==' | '!=' | '>' | '<';
+      value: number;
+    }>;
+    population_min: number | null;
+    radius_km: number;
+  } | null;
 }
 
 export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
@@ -839,6 +858,10 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   min_garden_area: null,
   max_garden_area: null,
   tags: null,
+  city_index_rules: null,
+  min_city_population: null,
+  max_city_population: null,
+  near_city_proximity: null,
 };
 
 export interface WatchdogSubscription {

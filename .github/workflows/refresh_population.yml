@@ -1,0 +1,72 @@
+name: Refresh city populations from Wikidata
+
+# Pulls the latest population reading for every curated city from
+# Wikidata's public SPARQL endpoint, writes
+# data/csu_population_<year>.csv, and commits it back to the branch.
+# The next run of `Seed curated cities` will pick the CSV up and
+# upsert into `city_population`.
+#
+# Wikidata mirrors ČSÚ's official municipality population numbers
+# under property `P1082` (point in time qualified by `P585`). The
+# fetcher selects the latest reading at or before the chosen cutoff
+# year so we never get a hypothetical-future row by accident.
+#
+# No DB access required — the workflow just refreshes a committed
+# CSV. Seed picks it up via its existing CSV path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: Latest year to accept (e.g. 2024, 2025)
+        required: false
+        default: "2024"
+      commit:
+        description: Commit the regenerated CSV back to the branch
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests
+
+      - name: Fetch + write CSV
+        # Always writes to data/csu_population_2024.csv — the stable
+        # filename the seed script looks for by default. The `--year`
+        # input controls the cutoff, not the output filename, so
+        # bumping the snapshot doesn't require a seed-script edit.
+        run: |
+          python scripts/fetch_population_wikidata.py \
+            --year "${{ inputs.year }}" \
+            --out "data/csu_population_2024.csv"
+
+      - name: Commit CSV
+        if: ${{ inputs.commit == 'true' }}
+        run: |
+          if git diff --quiet "data/csu_population_2024.csv"; then
+            echo "No population changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "data/csu_population_2024.csv"
+          git commit -m "data: refresh curated_cities populations (${{ inputs.year }} cutoff)"
+          git push

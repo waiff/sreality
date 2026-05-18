@@ -42,27 +42,29 @@ export interface CenterRadius {
 
 export type LocationMode = 'viewport' | 'center_radius';
 
-/* Phase QUAL — one entry in `cityIndexRules`. `indexName` is the slug
- * from `city_index_definitions_public` (e.g. `bezpecnost`,
+/* Phase QUAL — one entry in `cityIndexRules`. Snake_case keys mirror
+ * the wire shape consumed by the `listings_with_city_quality` RPC
+ * and `api/notifications._build_match_clauses`, so the same picker
+ * output flows unchanged to Browse and Watchdog. `index_name` is the
+ * slug from `city_index_definitions_public` (e.g. `bezpecnost`,
  * `prakticti_lekari`); `value` is the threshold the city must meet
- * under `op` (defaults to `>=`). Multiple rules AND. Browse and the
- * Watchdog matcher (`api/notifications._build_match_clauses`) share
- * the same JSON shape. */
+ * under `op` (defaults to `>=`). Multiple rules AND. */
 export interface CityIndexRule {
-  indexName: string;
+  index_name: string;
   op?: '>=' | '<=' | '==' | '!=' | '>' | '<';
   value: number;
 }
 
 /* Phase QUAL — composite "within X km of a city matching Y" filter.
- * `indexRules` is the inner per-city criterion (same shape as
- * `cityIndexRules`); `populationMin` is an optional minimum for the
- * matching city; `radiusKm` is the spatial range to allow listings
- * around any matching city. */
+ * Snake_case keys for the same wire-parity reason. `index_rules`
+ * is the inner per-city criterion (same shape as `CityIndexRule[]`);
+ * `population_min` is an optional minimum for the matching city;
+ * `radius_km` is the spatial range to allow listings around any
+ * matching city. */
 export interface NearCityProximity {
-  indexRules: CityIndexRule[];
-  populationMin: number | null;
-  radiusKm: number;
+  index_rules: CityIndexRule[];
+  population_min: number | null;
+  radius_km: number;
 }
 
 /* One entry of the district chip list. `name` is the primary phrase
@@ -381,7 +383,7 @@ const parseCityIndexRules = (s: string | null): CityIndexRule[] => {
     const op = opStr && _VALID_OPS.has(opStr)
       ? (opStr as CityIndexRule['op'])
       : '>=';
-    out.push({ indexName: name, op, value });
+    out.push({ index_name: name, op, value });
   }
   return out;
 };
@@ -390,11 +392,11 @@ const fmtCityIndexRules = (rules: CityIndexRule[]): string =>
   rules
     .map((r) => {
       const op = r.op && r.op !== '>=' ? `:${r.op}` : '';
-      return `${r.indexName}:${r.value}${op}`;
+      return `${r.index_name}:${r.value}${op}`;
     })
     .join(',');
 
-/* `cq_prox` URL shape: `radiusKm|indexName:value,...|pop_min`.
+/* `cq_prox` URL shape: `radius_km|index_name:value,...|pop_min`.
  * `pop_min` is empty when null. */
 const parseNearCityProximity = (s: string | null): NearCityProximity | null => {
   if (!s) return null;
@@ -406,13 +408,17 @@ const parseNearCityProximity = (s: string | null): NearCityProximity | null => {
   const popMin = parts[2] && parts[2] !== ''
     ? parseIntOrNull(parts[2])
     : null;
-  return { radiusKm: Math.trunc(radiusKm), indexRules, populationMin: popMin };
+  return {
+    radius_km: Math.trunc(radiusKm),
+    index_rules: indexRules,
+    population_min: popMin,
+  };
 };
 
 const fmtNearCityProximity = (p: NearCityProximity): string => {
-  const rules = fmtCityIndexRules(p.indexRules);
-  const pop = p.populationMin == null ? '' : String(p.populationMin);
-  return `${p.radiusKm}|${rules}|${pop}`;
+  const rules = fmtCityIndexRules(p.index_rules);
+  const pop = p.population_min == null ? '' : String(p.population_min);
+  return `${p.radius_km}|${rules}|${pop}`;
 };
 
 const parseBounds = (s: string | null): MapBounds | null => {

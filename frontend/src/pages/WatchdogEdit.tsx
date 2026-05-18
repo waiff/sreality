@@ -17,6 +17,7 @@ import {
   type WatchdogFilterSpec,
 } from '@/lib/types';
 import { FilterForm } from '@/components/FilterForm';
+import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import {
   LocationControl,
   LocationTypeahead,
@@ -151,6 +152,11 @@ export default function WatchdogEdit() {
             // and the rich picker needs the listings-attached colour
             // palette context.
             districts: LocationTypeahead as never,
+            // Phase QUAL — city-quality rule picker. The matcher in
+            // api/notifications._build_match_clauses already understands
+            // the filter; surfacing the widget here completes the
+            // Watchdog-side parity with Browse.
+            city_index_rules: CityIndexRulesPicker as never,
           }}
           labels={{
             category_main: 'Category main',
