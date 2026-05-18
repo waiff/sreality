@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 09:05 UTC_
+_Last refreshed: 2026-05-18 09:30 UTC_
 
 **Branch:** `claude/fix-district-filter-AAm5L`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 72 files, latest `069_notification_subscriptions_districts_chip.sql`.
+**Migrations on disk:** 73 files, latest `070_notification_subscriptions_districts_chip.sql`.
 
 **Last 10 commits:**
 
 ```
+d1bf4b0 browse + watchdog: narrow district chips to parent municipality
 b96509c Merge remote-tracking branch 'origin/main' into claude/fix-district-filter-AAm5L
 b669695 roadmap: refresh auto-status block
 75fa440 browse: district chip ILIKE substring on district OR locality
@@ -25,7 +26,6 @@ a4aa4b9 data: regenerate condition marker dictionary
 5ca3743 Merge pull request #129 from waiff/claude/discovery-prompt-too-long-fallback
 a9945df discovery: connect with autocommit=True so per-listing writes persist
 50a57aa discovery: fall back to text-only when prompt exceeds 200k tokens
-0ae2d52 Merge pull request #128 from waiff/claude/prefill-listing-price-h7erp
 ```
 
 <!-- END AUTO-STATUS -->
