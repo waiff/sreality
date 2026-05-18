@@ -98,6 +98,14 @@ export interface ListingFilters {
   usableAreaMin: number | null;
   usableAreaMax: number | null;
   parkingLotsMin: number | null;
+  /* Migration 022 — house listings carry a separate garden area
+   * (`garden_area`) distinct from the lot area (`estate_area`). Wired
+   * to the registry; not yet exposed in the Browse sidebar UI
+   * (the Filters.tsx `includeOnly` for the Size group would need to
+   * include them), but settable via URL params and honoured by
+   * Watchdog. */
+  gardenAreaMin: number | null;
+  gardenAreaMax: number | null;
   /* Derived condition scores (migrations 072 / 073). 1..5 each; rows
    * with NULL (not yet scored) are excluded from the result when a
    * min is set. Set by toolkit.condition_scoring.score_listing_condition. */
@@ -147,6 +155,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   usableAreaMin: null,
   usableAreaMax: null,
   parkingLotsMin: null,
+  gardenAreaMin: null,
+  gardenAreaMax: null,
   buildingConditionLevelMin: null,
   apartmentConditionLevelMin: null,
   tags: [],
@@ -300,6 +310,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     usableAreaMin: usableMin,
     usableAreaMax: usableMax,
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
+    gardenAreaMin: parseIntOrNull(sp.get('garden_min')),
+    gardenAreaMax: parseIntOrNull(sp.get('garden_max')),
     buildingConditionLevelMin: parseIntOrNull(sp.get('bld_cond_min')),
     apartmentConditionLevelMin: parseIntOrNull(sp.get('apt_cond_min')),
     tags: parseIntList(sp.get('tags')),
@@ -397,6 +409,8 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
     sp.set('usable', fmtRange(f.usableAreaMin, f.usableAreaMax));
   }
   if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
+  if (f.gardenAreaMin != null) sp.set('garden_min', String(f.gardenAreaMin));
+  if (f.gardenAreaMax != null) sp.set('garden_max', String(f.gardenAreaMax));
   if (f.buildingConditionLevelMin != null) sp.set('bld_cond_min', String(f.buildingConditionLevelMin));
   if (f.apartmentConditionLevelMin != null) sp.set('apt_cond_min', String(f.apartmentConditionLevelMin));
   if (f.tags.length) sp.set('tags', f.tags.join(','));
@@ -500,6 +514,8 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.usableAreaMin == null &&
   f.usableAreaMax == null &&
   f.parkingLotsMin == null &&
+  f.gardenAreaMin == null &&
+  f.gardenAreaMax == null &&
   f.buildingConditionLevelMin == null &&
   f.apartmentConditionLevelMin == null &&
   f.tags.length === 0 &&
@@ -521,7 +537,7 @@ export const isDefault = (f: ListingFilters): boolean =>
 /** Registry id → ListingFilters key. Keys not present here aren't part
  *  of the Browse filter set (e.g. `radius_m` and `area_band_pct` are
  *  cohort-tuning knobs that don't surface on Browse). */
-const REGISTRY_KEY_MAP = {
+export const REGISTRY_KEY_MAP = {
   category_main: 'categoryMain',
   category_type: 'categoryType',
   category_sub_cb: 'categorySubCb',
@@ -547,6 +563,8 @@ const REGISTRY_KEY_MAP = {
   condition_match: 'conditionMatch',
   building_material: 'buildingMaterial',
   min_parking_lots: 'parkingLotsMin',
+  min_garden_area: 'gardenAreaMin',
+  max_garden_area: 'gardenAreaMax',
   building_condition_level_min: 'buildingConditionLevelMin',
   apartment_condition_level_min: 'apartmentConditionLevelMin',
   tags: 'tags',
