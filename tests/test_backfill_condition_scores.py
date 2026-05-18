@@ -134,6 +134,33 @@ def test_select_pending_sql_invariants():
     assert params == ("30 days", [10, 11, 2, 13], [10, 11, 2, 13], 500)
 
 
+def test_select_pending_max_age_days_zero_drops_freshness_clause():
+    """`max_age_days <= 0` is the operator's escape hatch to score older
+    listings. The SQL must NOT include the `last_seen_at > now() - ...`
+    branch, and the params tuple must drop the interval value."""
+    m = _load_backfill_module()
+    conn = _ScriptedConn([])
+    m._select_pending(
+        conn, region_ids=[10, 11], max_age_days=0, limit=500,
+    )
+    sql, params = conn.cursor_obj.executed[0]
+    assert "l.is_active = true" in sql  # still applies
+    assert "last_seen_at >" not in sql  # freshness gate gone
+    # Params: region_ids (×2), limit — no interval prefix
+    assert params == ([10, 11], [10, 11], 500)
+
+
+def test_select_pending_negative_max_age_days_also_drops_freshness():
+    m = _load_backfill_module()
+    conn = _ScriptedConn([])
+    m._select_pending(
+        conn, region_ids=[], max_age_days=-1, limit=10,
+    )
+    sql, params = conn.cursor_obj.executed[0]
+    assert "last_seen_at >" not in sql
+    assert params == ([], [], 10)
+
+
 def test_select_pending_with_empty_region_filter_still_passes_cardinality_gate():
     """Empty list path is the operator's 'do everything' override. The
     query passes [] to the cardinality(...) gate, which evaluates to 0

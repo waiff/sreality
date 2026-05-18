@@ -64,7 +64,12 @@ def main() -> int:
     )
     parser.add_argument(
         "--max-age-days", type=int, default=30,
-        help="Only score listings whose last_seen_at is within this many days (default 30).",
+        help=(
+            "Only score listings whose last_seen_at is within this many "
+            "days (default 30). Set to 0 to disable the freshness "
+            "filter entirely — useful for one-off backfills reaching "
+            "older listings."
+        ),
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -212,7 +217,17 @@ def _select_pending(
     The region filter passes the list as int[] and gates on
     cardinality so the empty-list case (no filter) compiles to no
     additional restriction.
+
+    `max_age_days <= 0` drops the freshness clause entirely — score
+    every active listing regardless of when it was last seen. The
+    `is_active = true` guard still applies. Useful for one-off
+    backfills that want to reach older listings the scraper hasn't
+    walked recently.
     """
+    freshness_clause = (
+        " AND l.last_seen_at > now() - %s::interval"
+        if max_age_days > 0 else ""
+    )
     sql = (
         "WITH latest_snapshot AS ( "
         "  SELECT sreality_id, MAX(id) AS snapshot_id "
@@ -225,7 +240,7 @@ def _select_pending(
         "  ON cs.sreality_id = ls.sreality_id "
         " AND cs.snapshot_id = ls.snapshot_id "
         "WHERE l.is_active = true "
-        "  AND l.last_seen_at > now() - %s::interval "
+        + freshness_clause +
         "  AND cs.id IS NULL "
         "  AND ( "
         "    cardinality(%s::int[]) = 0 "
@@ -234,9 +249,13 @@ def _select_pending(
         "ORDER BY l.last_seen_at DESC "
         "LIMIT %s"
     )
-    interval = f"{max_age_days} days"
+    params: tuple[Any, ...]
+    if max_age_days > 0:
+        params = (f"{max_age_days} days", region_ids, region_ids, limit)
+    else:
+        params = (region_ids, region_ids, limit)
     with conn.cursor() as cur:
-        cur.execute(sql, (interval, region_ids, region_ids, limit))
+        cur.execute(sql, params)
         return [int(r[0]) for r in cur.fetchall()]
 
 
