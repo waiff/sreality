@@ -113,6 +113,7 @@ export default function Timeline({ trace, runId }: Props) {
   }
 
   const summary = pickSelectionSummary(trace.steps);
+  const toolStats = aggregateToolStats(trace.steps);
   const body =
     summary && summary.rounds.length > 0 ? (
       <V2Layout trace={trace} summary={summary} />
@@ -122,8 +123,92 @@ export default function Timeline({ trace, runId }: Props) {
 
   return (
     <RunIdContext.Provider value={runId ?? null}>
+      {toolStats.length > 0 && (
+        <div className="mb-7">
+          <ToolRuntimeSummary stats={toolStats} />
+        </div>
+      )}
       {body}
     </RunIdContext.Provider>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tool runtime summary — per-run rollup of tool_call durations               */
+/* -------------------------------------------------------------------------- */
+
+interface ToolStat {
+  tool: string;
+  count: number;
+  total_ms: number;
+  max_ms: number;
+}
+
+function aggregateToolStats(steps: TraceStep[]): ToolStat[] {
+  const byTool = new Map<string, ToolStat>();
+  for (const step of steps) {
+    if (step.kind !== 'tool_call') continue;
+    const tool = (step as TraceStepToolCall).tool;
+    if (!tool) continue;
+    const ms = step.duration_ms ?? 0;
+    const existing = byTool.get(tool);
+    if (existing) {
+      existing.count += 1;
+      existing.total_ms += ms;
+      if (ms > existing.max_ms) existing.max_ms = ms;
+    } else {
+      byTool.set(tool, { tool, count: 1, total_ms: ms, max_ms: ms });
+    }
+  }
+  return [...byTool.values()].sort((a, b) => b.total_ms - a.total_ms);
+}
+
+function ToolRuntimeSummary({ stats }: { stats: ToolStat[] }) {
+  const grandTotalMs = stats.reduce((sum, s) => sum + s.total_ms, 0);
+  const grandCalls = stats.reduce((sum, s) => sum + s.count, 0);
+  return (
+    <details className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]">
+      <summary className="cursor-pointer select-none px-3 py-2 flex items-baseline gap-3">
+        <span className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          Tool runtime
+        </span>
+        <span className="text-[0.78rem] text-[var(--color-ink-2)] tabular-nums">
+          {fmtCount(grandCalls)} call{grandCalls === 1 ? '' : 's'}
+          {' · '}
+          {fmtDuration(grandTotalMs)} total
+        </span>
+      </summary>
+      <div className="px-3 pb-3 pt-1 overflow-x-auto">
+        <table className="w-full text-[0.8rem]">
+          <thead>
+            <tr className="text-left text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
+              <th scope="col" className="py-1.5 pr-4 font-medium">Tool</th>
+              <th scope="col" className="py-1.5 px-2 text-right font-medium">Calls</th>
+              <th scope="col" className="py-1.5 px-2 text-right font-medium">Total</th>
+              <th scope="col" className="py-1.5 pl-2 text-right font-medium">Longest</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.map((s) => (
+              <tr key={s.tool} className="border-t border-[var(--color-rule-soft)]">
+                <td className="py-1.5 pr-4 font-mono text-[var(--color-ink-2)] truncate">
+                  {s.tool}
+                </td>
+                <td className="py-1.5 px-2 text-right tabular-nums text-[var(--color-ink-2)]">
+                  {fmtCount(s.count)}
+                </td>
+                <td className="py-1.5 px-2 text-right tabular-nums text-[var(--color-ink-2)]">
+                  {fmtDuration(s.total_ms)}
+                </td>
+                <td className="py-1.5 pl-2 text-right tabular-nums text-[var(--color-ink-2)]">
+                  {fmtDuration(s.max_ms)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
   );
 }
 

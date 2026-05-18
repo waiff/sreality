@@ -182,15 +182,15 @@ def test_zero_overpass_results_still_writes_fetch_row():
 
 
 def test_partial_cache_only_refetches_missing_categories():
+    # Pass order: all cache checks → batched Overpass for misses →
+    # batched write → all reads.
     plan: list[_Step] = [
-        # tram_stop: hit
-        _Step("fetchone", (1,)),
-        _Step("fetchall", [_amenity_row()]),
-        # supermarket: miss → fetch + write + read
-        _Step("fetchone", None),
-        _Step("execute_write", None),  # insert amenity
-        _Step("execute_write", None),  # insert amenity_fetches
-        _Step("fetchall", [_amenity_row()]),
+        _Step("fetchone", (1,)),        # tram_stop cache hit
+        _Step("fetchone", None),        # supermarket cache miss
+        _Step("execute_write", None),   # insert amenity (supermarket)
+        _Step("execute_write", None),   # insert amenity_fetches (supermarket)
+        _Step("fetchall", [_amenity_row()]),  # read tram_stop
+        _Step("fetchall", [_amenity_row()]),  # read supermarket
     ]
     conn = _make_conn(plan)
     client = _FakeOverpass([
@@ -205,6 +205,7 @@ def test_partial_cache_only_refetches_missing_categories():
         overpass_client=client,
     )
 
+    # Only the missing category's tag dicts are sent to Overpass.
     assert len(client.calls) == 1
     assert client.calls[0]["tags"] == amen.CATEGORY_TAGS["supermarket"]
     assert res["data"]["from_cache"] == {
@@ -244,10 +245,11 @@ def test_envelope_metadata_shape():
 def test_data_freshness_uses_max_fetched_at_across_categories():
     older = datetime(2026, 1, 1, tzinfo=timezone.utc)
     newer = datetime(2026, 4, 1, tzinfo=timezone.utc)
+    # Pass order: all cache checks → all reads.
     plan: list[_Step] = [
         _Step("fetchone", (1,)),
-        _Step("fetchall", [_amenity_row(fetched_at=older)]),
         _Step("fetchone", (1,)),
+        _Step("fetchall", [_amenity_row(fetched_at=older)]),
         _Step("fetchall", [_amenity_row(fetched_at=newer)]),
     ]
     conn = _make_conn(plan)
@@ -290,10 +292,12 @@ def test_no_density_note_when_under_threshold():
 
 
 def test_default_categories_are_all_of_them():
-    # Every category answers as a hit → 2 steps each.
+    # Pass order: all cache checks first (N consecutive fetchones),
+    # then all reads (N consecutive fetchalls).
     plan: list[_Step] = []
     for _ in amen.CATEGORY_TAGS:
         plan.append(_Step("fetchone", (1,)))
+    for _ in amen.CATEGORY_TAGS:
         plan.append(_Step("fetchall", []))
     conn = _make_conn(plan)
     res = amen.find_anchor_amenities(
@@ -302,6 +306,121 @@ def test_default_categories_are_all_of_them():
     )
     assert set(res["data"]["categories"]) == set(amen.CATEGORY_TAGS)
     assert res["metadata"]["filters_used"]["categories"] == list(amen.CATEGORY_TAGS)
+
+
+# Batched Overpass + classifier
+
+
+def test_multiple_misses_share_one_overpass_call():
+    # Two miss categories: classifier routes each returned element
+    # to the right per-category bucket so one batched call covers both.
+    plan: list[_Step] = [
+        _Step("fetchone", None),        # tram_stop miss
+        _Step("fetchone", None),        # supermarket miss
+        _Step("execute_write", None),   # insert tram_stop element
+        _Step("execute_write", None),   # insert amenity_fetches for tram_stop
+        _Step("execute_write", None),   # insert supermarket element
+        _Step("execute_write", None),   # insert amenity_fetches for supermarket
+        _Step("fetchall", [_amenity_row(name="Anděl")]),    # read tram_stop
+        _Step("fetchall", [_amenity_row(name="Albert")]),   # read supermarket
+    ]
+    conn = _make_conn(plan)
+    client = _FakeOverpass([
+        [
+            {"source_id": "node/1", "name": "Anděl",
+             "lat": 50.0, "lng": 14.0,
+             "tags": {"railway": "tram_stop"}},
+            {"source_id": "node/2", "name": "Albert",
+             "lat": 50.0, "lng": 14.0,
+             "tags": {"shop": "supermarket"}},
+        ],
+    ])
+
+    res = amen.find_anchor_amenities(
+        conn, lat=50.0, lng=14.0, radius_m=500,  # type: ignore[arg-type]
+        categories=["tram_stop", "supermarket"],
+        overpass_client=client,
+    )
+
+    # Exactly one Overpass round-trip — the win this slice is shipping.
+    assert len(client.calls) == 1
+    assert client.calls[0]["tags"] == (
+        amen.CATEGORY_TAGS["tram_stop"] + amen.CATEGORY_TAGS["supermarket"]
+    )
+
+    # The write transaction covered both categories' inserts in one go.
+    assert conn.transactions_opened == 1
+
+    # Classifier put each element into its expected category.
+    inserts = [
+        e for e in conn.cursor_obj.executed
+        if "INSERT INTO amenities" in e[0]
+    ]
+    by_source = {e[1]["source_id"]: e[1]["category"] for e in inserts}
+    assert by_source == {"node/1": "tram_stop", "node/2": "supermarket"}
+
+    assert res["data"]["from_cache"] == {
+        "tram_stop": False, "supermarket": False,
+    }
+
+
+def test_zero_result_miss_still_writes_amenity_fetches_row():
+    # A miss category that Overpass returns nothing for still gets an
+    # amenity_fetches row so the next call sees the cache as fresh.
+    plan: list[_Step] = [
+        _Step("fetchone", None),        # tram_stop miss
+        _Step("fetchone", None),        # park miss
+        _Step("execute_write", None),   # amenity_fetches for tram_stop (zero amenities)
+        _Step("execute_write", None),   # amenity_fetches for park (zero amenities)
+        _Step("fetchall", []),
+        _Step("fetchall", []),
+    ]
+    conn = _make_conn(plan)
+    client = _FakeOverpass([[]])  # both categories empty
+
+    amen.find_anchor_amenities(
+        conn, lat=50.0, lng=14.0, radius_m=500,  # type: ignore[arg-type]
+        categories=["tram_stop", "park"],
+        overpass_client=client,
+    )
+
+    fetch_inserts = [
+        e for e in conn.cursor_obj.executed
+        if "INSERT INTO amenity_fetches" in e[0]
+    ]
+    categories = {e[1]["category"] for e in fetch_inserts}
+    assert categories == {"tram_stop", "park"}
+    for ins in fetch_inserts:
+        assert ins[1]["count"] == 0
+
+
+def test_matches_category_or_within_list_and_within_dict():
+    school_tags = amen.CATEGORY_TAGS["school_primary"]
+    # Matches first dict (amenity=school, isced:level=1).
+    assert amen._matches_category(
+        {"amenity": "school", "isced:level": "1"}, school_tags,
+    )
+    # Matches via CZ-specific clause.
+    assert amen._matches_category(
+        {"amenity": "school", "school:CZ": "zakladni"}, school_tags,
+    )
+    # AND inside a dict: missing isced:level → no match on the first dict.
+    assert not amen._matches_category(
+        {"amenity": "school"}, school_tags,
+    )
+    # OR across dicts: high-school (isced 2;3) doesn't match anything.
+    assert not amen._matches_category(
+        {"amenity": "school", "isced:level": "2;3"}, school_tags,
+    )
+
+
+def test_matches_category_value_true_means_key_present():
+    # `tram_stop` has a tag dict with public_transport=stop_position
+    # AND tram=yes (no value=True), so this is purely value matching.
+    # Use a fake dict with a value=True clause to cover the branch.
+    fake_tags: list[dict[str, str | bool]] = [{"name": True}]
+    assert amen._matches_category({"name": "Anděl"}, fake_tags)
+    assert not amen._matches_category({}, fake_tags)
 
 
 # SQL shape (sanity that we're using the spatial functions correctly)
@@ -323,6 +442,8 @@ def test_cache_check_uses_st_dwithin_and_radius_filter():
     assert "ST_DWithin(" in cache_check_sql
     assert "radius_m = %(radius_m)s" in cache_check_sql
     assert "make_interval(days =>" in cache_check_sql
+    # Widened from 1.0m → 50.0m so nearby listings share cached rows.
+    assert "50.0" in cache_check_sql
 
 
 def test_read_query_uses_st_distance_and_orders_by_it():

@@ -31,11 +31,16 @@ import {
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
 import { PickButton } from '@/components/controls';
+import {
+  buildRerunPayload,
+  canRerun,
+  type RerunInput,
+  type RerunOverrides,
+} from '@/lib/rerun';
 import type {
   ComparableExcluded,
   ComparableUsed,
   Confidence,
-  CreateEstimationIn,
   Disposition,
   EstimationFeedback,
   EstimationProvider,
@@ -48,7 +53,6 @@ import type {
   Population,
   SkillRefinement,
   SubjectSummary,
-  TargetSpecIn,
   Trace,
 } from '@/lib/types';
 
@@ -1580,20 +1584,6 @@ function Th({ align, children }: { align: 'left' | 'right'; children: React.Reac
  * attributes belong to the listing scrape, not the run, and aren't
  * something the operator can override here. */
 
-type RerunOverrides = {
-  spec?: TargetSpecIn;
-  estimate_kind?: 'rent' | 'sale';
-  provider?: EstimationProvider;
-  population?: Population;
-  purchase_price_czk?: number | null;
-  expected_monthly_rent_czk?: number | null;
-};
-
-interface RerunInput {
-  run: EstimationRun;
-  overrides?: RerunOverrides;
-}
-
 const DISPOSITIONS: ReadonlyArray<Disposition> = [
   '1+kk', '1+1',
   '2+kk', '2+1',
@@ -1642,7 +1632,7 @@ function RerunBlock({
   pending: boolean;
   error: ApiError | null;
 }) {
-  const canRerun = run.input_url != null || run.input_spec != null;
+  const rerunnable = canRerun(run);
   const [expanded, setExpanded] = useState(false);
   const [state, setState] = useState<AdjustState>(() => adjustStateFromRun(run));
 
@@ -1684,11 +1674,11 @@ function RerunBlock({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
           type="button"
-          disabled={!canRerun || pending}
+          disabled={!rerunnable || pending}
           onClick={() => onRerun()}
           className={[
             'px-4 py-2 text-sm rounded-[var(--radius-sm)] border transition-colors',
-            !canRerun || pending
+            !rerunnable || pending
               ? 'bg-[var(--color-rule-strong)] text-[var(--color-ink-4)] border-[var(--color-rule-strong)] cursor-not-allowed'
               : 'bg-[var(--color-paper-2)] text-[var(--color-ink-2)] border-[var(--color-rule)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)]',
           ].join(' ')}
@@ -1696,7 +1686,7 @@ function RerunBlock({
           {pending ? 'Re-running…' : 'Re-run with same inputs'}
         </button>
 
-        {canRerun && run.input_spec && (
+        {rerunnable && run.input_spec && (
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
@@ -1708,7 +1698,7 @@ function RerunBlock({
           </button>
         )}
 
-        {!canRerun && (
+        {!rerunnable && (
           <span className="text-[0.78rem] text-[var(--color-ink-3)]">
             Original inputs unavailable.
           </span>
@@ -2666,47 +2656,6 @@ function computeLineDiff(
 async function fetchSkillRefinement(id: number): Promise<SkillRefinement> {
   const { apiGet } = await import('@/lib/api');
   return apiGet<SkillRefinement>(`/skill-refinements/${id}`);
-}
-
-function buildRerunPayload(
-  run: EstimationRun,
-  overrides?: RerunOverrides,
-): CreateEstimationIn {
-  const estimateKind =
-    overrides?.estimate_kind ?? run.estimate_kind ?? 'rent';
-  const mode = estimateKind === 'rent' ? 'agent' : 'deterministic';
-  const purchasePrice =
-    overrides?.purchase_price_czk !== undefined
-      ? overrides.purchase_price_czk
-      : run.input_purchase_price_czk;
-  const expectedRent =
-    overrides?.expected_monthly_rent_czk !== undefined
-      ? overrides.expected_monthly_rent_czk
-      : null;
-
-  const base: CreateEstimationIn = {
-    source: 'ui',
-    mode,
-    estimate_kind: estimateKind,
-    parent_run_id: run.id,
-    rerun_reason: overrides ? 'adjust' : 'manual',
-    purchase_price_czk: purchasePrice,
-    expected_monthly_rent_czk: expectedRent,
-    /* Carry operator inputs forward on a re-run. The new row stores its
-     * own copy; the original stays untouched (audit invariant). */
-    special_instructions: run.special_instructions ?? null,
-    contextual_text: run.contextual_text ?? null,
-    ...(overrides?.provider ? { provider: overrides.provider } : {}),
-    ...(overrides?.population ? { population: overrides.population } : {}),
-  };
-
-  if (overrides?.spec) {
-    return { ...base, spec: overrides.spec };
-  }
-  if (run.input_url) {
-    return { ...base, url: run.input_url };
-  }
-  return { ...base, spec: (run.input_spec ?? undefined) as TargetSpecIn | undefined };
 }
 
 /* -------------------------------------------------------------------------- */
