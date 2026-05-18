@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 08:16 UTC_
+_Last refreshed: 2026-05-18 11:52 UTC_
 
-**Branch:** `claude/condition-scoring-b3`
+**Branch:** `claude/rental-estimator-prompt-Beviv`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 76 files, latest `073_listings_public_condition_levels.sql`.
+**Migrations on disk:** 79 files, latest `076_rental_estimator_v3_condition_filters.sql`.
 
 **Last 10 commits:**
 
 ```
-f1f82b0 condition: B3 — filter registry + comparables + API + frontend wiring
-10637c4 Merge pull request #139 from waiff/claude/anthropic-system-prompt-caching
-63f66c2 anthropic: wrap system prompt in cached block (8-10x cost cut)
-e857e7f Merge pull request #138 from waiff/claude/condition-scoring-b2
-b00ae7e condition: B2 — backfill workflow with region filter (4 kraje default)
-c926481 Merge pull request #137 from waiff/claude/condition-scoring-b1
-672d4b5 condition: B1 — per-listing scorer + schema (migrations 072, 073)
-09d8fab Merge pull request #136 from waiff/claude/rubric-confidence-policy
-06cf139 rubric: pin silent + no-fallback at level 3 confidence < 0.20
-5c0901e Merge pull request #135 from waiff/claude/condition-markers-curated-rubric
+88161c6 estimator: v3 prompt + surface target condition for three-axis matching
+ad2e0d8 Merge pull request #144 from waiff/claude/condition-watchdog-agent-rebased
+8932cbe condition: expose level filters to Watchdog + agent (B3 follow-up)
+bedb966 Merge pull request #142 from waiff/claude/fix-district-filter-AAm5L
+bd5b805 Merge origin/main into claude/fix-district-filter-AAm5L
+ac93d06 roadmap: refresh auto-status block
+d1bf4b0 browse + watchdog: narrow district chips to parent municipality
+d2fe5c8 Merge pull request #141 from waiff/claude/condition-scoring-b4
+d251761 roadmap: refresh auto-status block
+816e458 condition: B4 — scrape pipeline scoring phase + backfill 0-day escape hatch
 ```
 
 <!-- END AUTO-STATUS -->
