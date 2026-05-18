@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 08:16 UTC_
+_Last refreshed: 2026-05-18 10:16 UTC_
 
-**Branch:** `claude/condition-scoring-b3`
+**Branch:** `claude/condition-scoring-b4`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,9 @@ _Last refreshed: 2026-05-18 08:16 UTC_
 **Last 10 commits:**
 
 ```
+d251761 roadmap: refresh auto-status block
+816e458 condition: B4 — scrape pipeline scoring phase + backfill 0-day escape hatch
+0f9fece Merge pull request #140 from waiff/claude/condition-scoring-b3
 f1f82b0 condition: B3 — filter registry + comparables + API + frontend wiring
 10637c4 Merge pull request #139 from waiff/claude/anthropic-system-prompt-caching
 63f66c2 anthropic: wrap system prompt in cached block (8-10x cost cut)
@@ -23,9 +26,6 @@ e857e7f Merge pull request #138 from waiff/claude/condition-scoring-b2
 b00ae7e condition: B2 — backfill workflow with region filter (4 kraje default)
 c926481 Merge pull request #137 from waiff/claude/condition-scoring-b1
 672d4b5 condition: B1 — per-listing scorer + schema (migrations 072, 073)
-09d8fab Merge pull request #136 from waiff/claude/rubric-confidence-policy
-06cf139 rubric: pin silent + no-fallback at level 3 confidence < 0.20
-5c0901e Merge pull request #135 from waiff/claude/condition-markers-curated-rubric
 ```
 
 <!-- END AUTO-STATUS -->
