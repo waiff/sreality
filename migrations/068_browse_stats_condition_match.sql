@@ -1,45 +1,29 @@
--- 069_browse_stats_district_context.sql
+-- 068_browse_stats_condition_match.sql
 --
--- Each district chip can now carry a parent-municipality context so
--- picking "Edvarda Beneše" from the Mapy.cz dropdown's Plzeň entry
--- narrows the cohort to that city alone instead of returning every
--- street with the same name across the country (Plzeň + Olomouc +
--- Hradec Králové — 7 hits across 3 cities, the bug exposed by
--- migration 067).
+-- Add the `condition_match_filter` parameter to `browse_stats` so the
+-- Browse sidebar can narrow the cohort by sreality's "Stav objektu"
+-- column. The unified filter registry already declares
+-- `condition_match` as a multiselect over the `condition` column; this
+-- migration extends the RPC signature to honour it (the same way
+-- `building_type_filter` was wired in earlier rounds).
 --
--- The frontend now sends two parallel arrays: `districts_filter`
--- (chip names, unchanged) and `districts_context_filter` (the parent
--- municipality from Mapy.cz's `regionalStructure`, or NULL / '' for
--- picks at the municipality level and coarser). They walk in lockstep
--- via `unnest(..., ...) WITH ORDINALITY` so chip `i`'s context
--- narrows chip `i`'s name match.
+-- The Watchdog matcher (`api/notifications._build_match_clauses`)
+-- runs the same predicate against `listings` directly, so the two
+-- code paths stay in lockstep.
 --
--- Per-chip predicate:
---   (district ILIKE '%name%' OR locality ILIKE '%name%')
---   AND (ctx IS NULL OR ctx = '' OR
---        district ILIKE '%ctx%' OR locality ILIKE '%ctx%')
--- OR'd across chips. ctx = NULL or '' preserves the migration 067
--- behaviour exactly, so "okres Jihlava" / "Praha" / "Hruškové Dvory"
--- continue to match without narrowing.
+-- We drop the prior 38-argument overload before installing the new
+-- 39-argument version. `CREATE OR REPLACE FUNCTION` only matches on
+-- the full argument list, so adding a parameter creates a sibling
+-- function rather than replacing the existing one. Both overloads
+-- then satisfy every existing call (the old one exactly, the new one
+-- via the new param's default), making every PostgREST RPC ambiguous
+-- with "function browse_stats is not unique". The DROP keeps a single
+-- canonical function in place. The new signature is a strict superset
+-- of 067 so no caller loses functionality.
 --
--- Adding a parameter to a function in Postgres creates a NEW overload
--- alongside the existing one — `CREATE OR REPLACE FUNCTION` only
--- replaces when the parameter list is an exact match. Without an
--- explicit DROP of the 39-param overload, calls using named
--- arguments (the only call style we use) become ambiguous:
--- "function browse_stats(districts_filter => text[]) is not unique".
--- The DROP IF EXISTS below removes the 068 catch-up overload before
--- the new 40-param signature is created. Grants on the 40-param
--- version then come straight from the role-level
--- `GRANT EXECUTE ON FUNCTION ... TO anon` already on the database —
--- no re-grant needed.
---
--- Same performance profile as 067: ILIKE on `locality` is a
--- seq-scan at the current row count (tens of thousands) and runs
--- well under 100 ms. The added per-chip ctx check is one extra
--- ILIKE per row per chip — same magnitude. If row count crosses
--- ~250k, the follow-up flagged in 067 (pg_trgm + GIN trigram index)
--- becomes attractive.
+-- Postgres' default ACL on the `public` schema grants EXECUTE on new
+-- functions to `anon` and `authenticated`, so dropping + recreating
+-- leaves the same effective grants in place — verified post-apply.
 
 drop function if exists browse_stats(
   text[], text[], integer, integer, integer, integer, boolean,
@@ -47,56 +31,55 @@ drop function if exists browse_stats(
   boolean, boolean, boolean, boolean, text, boolean, boolean, boolean,
   integer, text[], bigint[], text, text,
   double precision, double precision, double precision, double precision,
-  text, double precision, double precision, double precision,
-  double precision, integer, double precision, double precision,
-  text[]
+  text, double precision, double precision, double precision, double precision,
+  integer, double precision, double precision
 );
 
 create or replace function browse_stats(
-  districts_filter         text[]   default null,
-  dispositions_filter      text[]   default null,
-  price_min_filter         integer  default null,
-  price_max_filter         integer  default null,
-  area_min_filter          integer  default null,
-  area_max_filter          integer  default null,
-  active_only_filter       boolean  default false,
-  last_seen_min_days       integer  default null,
-  last_seen_max_days       integer  default null,
-  first_seen_min_days      integer  default null,
-  first_seen_max_days      integer  default null,
-  tom_days_min             integer  default null,
-  tom_days_max             integer  default null,
-  has_balcony_filter       boolean  default null,
-  has_lift_filter          boolean  default null,
-  has_parking_filter       boolean  default null,
-  inactive_only_filter     boolean  default false,
-  furnished_filter         text     default null,
-  terrace_filter           boolean  default null,
-  cellar_filter            boolean  default null,
-  garage_filter            boolean  default null,
-  category_sub_cb_filter   integer  default null,
-  building_type_filter     text[]   default null,
-  tag_ids                  bigint[] default null,
-  category_main_filter     text     default null,
-  category_type_filter     text     default null,
-  bbox_west                double precision default null,
-  bbox_south               double precision default null,
-  bbox_east                double precision default null,
-  bbox_north               double precision default null,
-  ownership_filter         text     default null,
-  estate_area_min_filter   double precision default null,
-  estate_area_max_filter   double precision default null,
-  usable_area_min_filter   double precision default null,
-  usable_area_max_filter   double precision default null,
-  parking_lots_min_filter  integer  default null,
-  garden_area_min_filter   double precision default null,
-  garden_area_max_filter   double precision default null,
-  condition_match_filter   text[]   default null,
-  districts_context_filter text[]   default null
+  districts_filter           text[]   default null,
+  dispositions_filter        text[]   default null,
+  price_min_filter           integer  default null,
+  price_max_filter           integer  default null,
+  area_min_filter            integer  default null,
+  area_max_filter            integer  default null,
+  active_only_filter         boolean  default false,
+  last_seen_min_days         integer  default null,
+  last_seen_max_days         integer  default null,
+  first_seen_min_days        integer  default null,
+  first_seen_max_days        integer  default null,
+  tom_days_min               integer  default null,
+  tom_days_max               integer  default null,
+  has_balcony_filter         boolean  default null,
+  has_lift_filter            boolean  default null,
+  has_parking_filter         boolean  default null,
+  inactive_only_filter       boolean  default false,
+  furnished_filter           text     default null,
+  terrace_filter             boolean  default null,
+  cellar_filter              boolean  default null,
+  garage_filter              boolean  default null,
+  category_sub_cb_filter     integer  default null,
+  building_type_filter       text[]   default null,
+  tag_ids                    bigint[] default null,
+  category_main_filter       text     default null,
+  category_type_filter       text     default null,
+  bbox_west                  double precision default null,
+  bbox_south                 double precision default null,
+  bbox_east                  double precision default null,
+  bbox_north                 double precision default null,
+  ownership_filter           text     default null,
+  estate_area_min_filter     double precision default null,
+  estate_area_max_filter     double precision default null,
+  usable_area_min_filter     double precision default null,
+  usable_area_max_filter     double precision default null,
+  parking_lots_min_filter    integer  default null,
+  garden_area_min_filter     double precision default null,
+  garden_area_max_filter     double precision default null,
+  condition_match_filter     text[]   default null
 )
 returns jsonb
 language sql
 stable
+security invoker
 as $$
   with filtered as (
     select
@@ -122,19 +105,9 @@ as $$
         districts_filter is null
         or array_length(districts_filter, 1) is null
         or exists (
-          select 1
-          from unnest(
-                 districts_filter,
-                 coalesce(
-                   districts_context_filter,
-                   array_fill(null::text, array[array_length(districts_filter, 1)])
-                 )
-               ) with ordinality as t(needle, ctx, ord)
-          where (district ilike '%' || needle || '%'
-              or locality ilike '%' || needle || '%')
-            and (ctx is null or ctx = ''
-              or district ilike '%' || ctx || '%'
-              or locality ilike '%' || ctx || '%')
+          select 1 from unnest(districts_filter) as needle
+          where district ilike '%' || needle || '%'
+             or locality ilike '%' || needle || '%'
         )
       )
       and (dispositions_filter    is null or disposition     = any(dispositions_filter))

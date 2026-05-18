@@ -150,7 +150,7 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
      * (parent municipality from `regionalStructure`) is what stops a
      * "Edvarda Beneše" pick in Plzeň from also matching the streets
      * of the same name in Olomouc / Hradec Králové. Kept in lockstep
-     * with browse_stats (migration 069) which applies the same
+     * with browse_stats (migration 074) which applies the same
      * predicate via `unnest(names, contexts) WITH ORDINALITY`. */
     const chipClause = (d: { name: string; context: string | null }): string => {
       const namePat = escapeIlikePattern(d.name);
@@ -174,6 +174,7 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.garage     !== 'any') r = r.eq('garage',      f.garage     === 'yes');
   if (f.furnished       != null) r = r.eq('furnished',      f.furnished);
   if (f.ownership       != null) r = r.eq('ownership',      f.ownership);
+  if (f.conditionMatch.length)   r = r.in('condition',      f.conditionMatch);
   if (f.categorySubCb   != null) r = r.eq('category_sub_cb', f.categorySubCb);
   if (f.buildingMaterial != null) {
     r = r.in('building_type', buildingMaterialToValues(f.buildingMaterial));
@@ -473,6 +474,7 @@ export const fetchBrowseStats = async (
     garage_filter:           triToBool(f.garage),
     category_sub_cb_filter:  f.categorySubCb,
     building_type_filter:    buildingTypeArray,
+    condition_match_filter:  f.conditionMatch.length ? f.conditionMatch : null,
     tag_ids:                 f.tags.length ? f.tags : null,
     bbox_west:               effBbox?.west  ?? null,
     bbox_south:              effBbox?.south ?? null,

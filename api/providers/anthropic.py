@@ -64,7 +64,19 @@ class AnthropicProvider:
             "messages": [_msg_to_anthropic(m) for m in messages],
         }
         if system:
-            kwargs["system"] = system
+            # Wrap as a list-of-blocks with cache_control so the system
+            # prompt becomes part of Anthropic's cached prefix. String
+            # form is NOT cache-eligible — switching to this shape on
+            # turn 1 writes the cache (charged 1.25×), every subsequent
+            # call within the 5-min TTL reads from cache (charged 0.1×).
+            # Anthropic silently no-ops cache_control when the prefix
+            # is below the model's minimum (~1024 tokens for Sonnet),
+            # so this is safe to set unconditionally.
+            kwargs["system"] = [{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }]
         if tools:
             tool_dicts = [_tool_to_anthropic(t) for t in tools]
             # One cache breakpoint at the end of tools captures

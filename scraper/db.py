@@ -192,7 +192,7 @@ def record_images(
         return cur.rowcount or 0
 
 
-TOUCH_CHUNK_SIZE = 1000
+TOUCH_CHUNK_SIZE = 250
 
 
 def touch_listings(
@@ -206,8 +206,11 @@ def touch_listings(
     another detail fetch.
 
     Chunked because Supabase's transaction pooler enforces a statement
-    timeout (~2 min) and a single UPDATE over the full ~13k-id list
-    blows past it.
+    timeout (~2 min) and a single UPDATE over the full id list blows past
+    it. The UPDATE uses unnest+JOIN rather than `sreality_id = ANY(%s)`
+    so the planner always drives off the PK index — large ANY() arrays
+    can fall to a seqscan when stats are off, which is what tipped the
+    20k-listing `dum prodej` category over the timeout.
     """
     ids = list(sreality_ids)
     if not ids:
@@ -221,7 +224,8 @@ def touch_listings(
                 UPDATE listings
                 SET last_seen_at = now(),
                     is_active = true
-                WHERE sreality_id = ANY(%s)
+                FROM unnest(%s::bigint[]) AS u(sreality_id)
+                WHERE listings.sreality_id = u.sreality_id
                 """,
                 (chunk,),
             )

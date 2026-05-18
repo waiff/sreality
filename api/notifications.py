@@ -104,9 +104,9 @@ class WatchdogFilterSpec(BaseModel):
     # Optional district name match (for ergonomic "Praha 2"-style
     # watchdogs without resolving the id first). Each chip is a
     # `DistrictChip` — `{name, context}` — so the matcher's SQL
-    # mirrors the per-chip predicate Browse uses (migration 069):
+    # mirrors the per-chip predicate Browse uses (migration 074):
     # name match AND'd with an optional parent-municipality context
-    # narrow. Migration 070 lifted any pre-existing rows from
+    # narrow. Migration 075 lifted any pre-existing rows from
     # `text[]` to the chip shape; the field_validator below also
     # accepts plain `list[str]` request bodies for clients that
     # haven't redeployed yet.
@@ -148,6 +148,7 @@ class WatchdogFilterSpec(BaseModel):
     # Enumerated columns.
     furnished: str | None = None
     ownership: str | None = None
+    condition_match: list[str] | None = None
 
     # Parking lots minimum.
     min_parking_lots: int | None = None
@@ -213,7 +214,7 @@ def _build_match_clauses(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
-        # Same per-chip predicate as `browse_stats` (migration 069):
+        # Same per-chip predicate as `browse_stats` (migration 074):
         #   (district ILIKE *name* OR locality ILIKE *name*)
         #   AND (no context, OR district/locality ILIKE *context*)
         # OR'd across chips. Keeps Browse and Watchdog in lockstep on
@@ -288,6 +289,9 @@ def _build_match_clauses(
     if spec.ownership is not None:
         where.append("l.ownership = %(ownership)s")
         params["ownership"] = spec.ownership
+    if spec.condition_match:
+        where.append("l.condition = ANY(%(condition_match)s)")
+        params["condition_match"] = list(spec.condition_match)
 
     if spec.min_parking_lots is not None:
         where.append("l.parking_lots >= %(min_parking_lots)s")

@@ -15,7 +15,7 @@
  * `regionalStructure` for the nearest `regional.municipality` and
  * sets that as `context` (or null for picks already at the
  * municipality / region / country level). The downstream filter
- * (queries.ts applyFilters + browse_stats migration 069 + the
+ * (queries.ts applyFilters + browse_stats migration 074 + the
  * Watchdog matcher in api/notifications.py) matches each chip as
  *   (district ILIKE *name* OR locality ILIKE *name*)
  *   AND (context IS NULL OR district ILIKE *context* OR locality ILIKE *context*)

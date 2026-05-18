@@ -1,11 +1,11 @@
--- 070_notification_subscriptions_districts_chip.sql
+-- 075_notification_subscriptions_districts_chip.sql
 --
 -- One-shot UPDATE lifting existing Watchdog `filter_spec.districts`
 -- from `text[]` to the new chip shape `[{name, context}]` introduced
--- by migration 069's two-array signature on `browse_stats`.
+-- by migration 074's two-array signature on `browse_stats`.
 --
 -- Backfill is loss-free: a legacy `"X"` chip becomes
--- `{"name": "X", "context": null}`, which under migration 069's SQL
+-- `{"name": "X", "context": null}`, which under migration 074's SQL
 -- behaves identically to today (a NULL ctx skips the narrowing
 -- clause). The API model accepts both shapes in case any in-flight
 -- request lands during deploy.

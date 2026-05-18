@@ -120,7 +120,7 @@ def test_build_clauses_district_chip_with_context_anding_the_narrow() -> None:
     """A chip with a parent municipality narrows the name match — the
     fix for 'Edvarda Beneše · Plzeň' no longer dragging in the streets
     of the same name in Olomouc / Hradec Králové. Generates the same
-    AND'd predicate browse_stats applies (migration 069)."""
+    AND'd predicate browse_stats applies (migration 074)."""
     spec = WatchdogFilterSpec(
         districts=[{"name": "Edvarda Beneše", "context": "Plzeň"}],
     )
@@ -173,6 +173,27 @@ def test_build_clauses_enumerated_columns() -> None:
     assert "l.ownership = %(ownership)s" in where
     assert params["furnished"] == "ano"
     assert params["ownership"] == "osobni"
+
+
+def test_build_clauses_condition_match() -> None:
+    """condition_match feeds ANY() against l.condition — the same
+    pattern toolkit/comparables uses, so Browse / Watchdog stay
+    aligned with the analytical surfaces."""
+    spec = WatchdogFilterSpec(
+        condition_match=["novostavba", "po_rekonstrukci"],
+    )
+    where, params = _build_match_clauses(spec)
+    assert "l.condition = ANY(%(condition_match)s)" in where
+    assert params["condition_match"] == ["novostavba", "po_rekonstrukci"]
+
+
+def test_build_clauses_condition_match_empty_list_drops_clause() -> None:
+    """An empty list behaves like None — no WHERE clause emitted.
+    Matches how `dispositions` already behaves."""
+    spec = WatchdogFilterSpec(condition_match=[])
+    where, params = _build_match_clauses(spec)
+    assert not any("l.condition" in w for w in where)
+    assert "condition_match" not in params
 
 
 def test_build_clauses_categoryless_spec() -> None:

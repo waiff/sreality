@@ -90,6 +90,7 @@ export interface ListingFilters {
   garage: TriState;
   furnished: Furnished | null;
   ownership: Ownership | null;
+  conditionMatch: string[];
   categorySubCb: number | null;
   buildingMaterial: BuildingMaterial | null;
   estateAreaMin: number | null;
@@ -97,6 +98,11 @@ export interface ListingFilters {
   usableAreaMin: number | null;
   usableAreaMax: number | null;
   parkingLotsMin: number | null;
+  /* Derived condition scores (migrations 072 / 073). 1..5 each; rows
+   * with NULL (not yet scored) are excluded from the result when a
+   * min is set. Set by toolkit.condition_scoring.score_listing_condition. */
+  buildingConditionLevelMin: number | null;
+  apartmentConditionLevelMin: number | null;
   /* Migration 025 — operator tags. AND-semantics: a listing must carry
    * every selected tag id. Stored as ids (not names) so renames /
    * recolour-by-delete-recreate stay queryable. */
@@ -133,6 +139,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   garage: 'any',
   furnished: null,
   ownership: null,
+  conditionMatch: [],
   categorySubCb: null,
   buildingMaterial: null,
   estateAreaMin: null,
@@ -140,6 +147,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   usableAreaMin: null,
   usableAreaMax: null,
   parkingLotsMin: null,
+  buildingConditionLevelMin: null,
+  apartmentConditionLevelMin: null,
   tags: [],
   bounds: null,
   locationMode: 'viewport',
@@ -179,6 +188,10 @@ const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
 const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
 const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
+const CONDITION_VALUES: ReadonlyArray<string> = [
+  'novostavba', 'po_rekonstrukci', 'velmi_dobry',
+  'dobry', 'pred_rekonstrukci', 'k_demolici',
+];
 const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = ['byt', 'dum', 'komercni'];
 const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = ['pronajem', 'prodej'];
 const BUILDING_MATERIAL_VALUES: ReadonlyArray<BuildingMaterial> = [
@@ -277,6 +290,9 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     garage: enumOr(sp.get('garage'), TRI_VALUES, 'any'),
     furnished: enumOrNull(sp.get('furnished'), FURNISHED_VALUES),
     ownership: enumOrNull(sp.get('ownership'), OWNERSHIP_VALUES),
+    conditionMatch: splitCsv(sp.get('condition')).filter(
+      (c) => CONDITION_VALUES.includes(c),
+    ),
     categorySubCb: parseIntOrNull(sp.get('subcat')),
     buildingMaterial: enumOrNull(sp.get('build'), BUILDING_MATERIAL_VALUES),
     estateAreaMin: estateMin,
@@ -284,6 +300,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     usableAreaMin: usableMin,
     usableAreaMax: usableMax,
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
+    buildingConditionLevelMin: parseIntOrNull(sp.get('bld_cond_min')),
+    apartmentConditionLevelMin: parseIntOrNull(sp.get('apt_cond_min')),
     tags: parseIntList(sp.get('tags')),
     bounds: parseBounds(sp.get('bbox')),
     locationMode: sp.get('locmode') === 'center_radius'
@@ -369,6 +387,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.garage !== 'any') sp.set('garage', f.garage);
   if (f.furnished) sp.set('furnished', f.furnished);
   if (f.ownership) sp.set('ownership', f.ownership);
+  if (f.conditionMatch.length) sp.set('condition', f.conditionMatch.join(','));
   if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
   if (f.buildingMaterial) sp.set('build', f.buildingMaterial);
   if (f.estateAreaMin != null || f.estateAreaMax != null) {
@@ -378,6 +397,8 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
     sp.set('usable', fmtRange(f.usableAreaMin, f.usableAreaMax));
   }
   if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
+  if (f.buildingConditionLevelMin != null) sp.set('bld_cond_min', String(f.buildingConditionLevelMin));
+  if (f.apartmentConditionLevelMin != null) sp.set('apt_cond_min', String(f.apartmentConditionLevelMin));
   if (f.tags.length) sp.set('tags', f.tags.join(','));
   if (f.bounds) {
     const { west, south, east, north } = f.bounds;
@@ -471,6 +492,7 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.garage === 'any' &&
   f.furnished == null &&
   f.ownership == null &&
+  f.conditionMatch.length === 0 &&
   f.categorySubCb == null &&
   f.buildingMaterial == null &&
   f.estateAreaMin == null &&
@@ -478,6 +500,8 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.usableAreaMin == null &&
   f.usableAreaMax == null &&
   f.parkingLotsMin == null &&
+  f.buildingConditionLevelMin == null &&
+  f.apartmentConditionLevelMin == null &&
   f.tags.length === 0 &&
   f.bounds == null &&
   f.locationMode === 'viewport' &&
@@ -520,8 +544,11 @@ const REGISTRY_KEY_MAP = {
   garage: 'garage',
   furnished: 'furnished',
   ownership: 'ownership',
+  condition_match: 'conditionMatch',
   building_material: 'buildingMaterial',
   min_parking_lots: 'parkingLotsMin',
+  building_condition_level_min: 'buildingConditionLevelMin',
+  apartment_condition_level_min: 'apartmentConditionLevelMin',
   tags: 'tags',
   tom_days_min: 'tomDaysMin',
   tom_days_max: 'tomDaysMax',
@@ -559,7 +586,11 @@ export function listingFiltersToRegistryView(
       out[registryId] = triToBoolNullable(v as TriState);
     } else if (registryId === 'tags') {
       out[registryId] = (v as number[]).length === 0 ? null : v;
-    } else if (registryId === 'dispositions' || registryId === 'districts') {
+    } else if (
+      registryId === 'dispositions'
+      || registryId === 'districts'
+      || registryId === 'condition_match'
+    ) {
       const arr = v as unknown[];
       out[registryId] = arr.length === 0 ? null : arr;
     } else {
@@ -599,6 +630,10 @@ export function applyRegistryUpdate(
       typeof v === 'string' ? { name: v, context: null } : v,
     );
     return { ...filters, districts: next };
+  }
+  if (id === 'condition_match') {
+    const next = value == null ? [] : (value as string[]);
+    return { ...filters, conditionMatch: next };
   }
   return { ...filters, [key]: value } as ListingFilters;
 }

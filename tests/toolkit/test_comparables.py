@@ -316,6 +316,35 @@ def test_estate_and_usable_area_bands_and_min_parking_lots():
     assert params["min_parking_lots"] == 2
 
 
+def test_condition_level_min_filters_add_where_branches():
+    """Both new condition-level filters should add `>= N` branches and
+    bind the parameters. Absent (None) filters add no clauses — important
+    because NULL rows would otherwise be excluded by an unconditional
+    `IS NOT NULL` check."""
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(
+            building_condition_level_min=4,
+            apartment_condition_level_min=3,
+        ),
+    )
+    assert "l.building_condition_level >= %(building_condition_level_min)s" in sql
+    assert "l.apartment_condition_level >= %(apartment_condition_level_min)s" in sql
+    assert params["building_condition_level_min"] == 4
+    assert params["apartment_condition_level_min"] == 3
+
+
+def test_condition_level_filters_absent_when_none():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(),
+    )
+    assert "building_condition_level" not in sql
+    assert "apartment_condition_level" not in sql
+    assert "building_condition_level_min" not in params
+    assert "apartment_condition_level_min" not in params
+
+
 def test_exclude_ids_uses_array_not_equal():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0, exclude_ids=[1, 2, 3]),

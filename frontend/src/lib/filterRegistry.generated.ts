@@ -686,9 +686,13 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
+        "browse",
         "comparables",
+        "defaults",
         "estimation",
-        "velocity"
+        "neighborhood",
+        "velocity",
+        "watchdog"
       ],
       "constraints": null,
       "unit": null,
@@ -883,6 +887,60 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         }
       ],
       "aliases": []
+    },
+    {
+      "id": "building_condition_level_min",
+      "type": "int",
+      "pg_column": "building_condition_level",
+      "default": null,
+      "description": "Minimum building condition score (`building_condition_level >= N`, 1..5). Set by toolkit.condition_scoring.score_listing_condition off the curated Czech marker dictionary + 5-level rubric. NULL rows (not yet scored) are excluded from the result. 5 = výborný stav (excellent), 4 = velmi dobrý stav, 3 = průměrný / udržovaný, 2 = vyžaduje rekonstrukci, 1 = kritický stav.",
+      "category": "Property",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "comparables",
+        "defaults",
+        "estimation",
+        "neighborhood",
+        "velocity",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 1,
+        "max": 5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "buildingConditionLevelMin"
+      ]
+    },
+    {
+      "id": "apartment_condition_level_min",
+      "type": "int",
+      "pg_column": "apartment_condition_level",
+      "default": null,
+      "description": "Minimum apartment condition score (`apartment_condition_level >= N`, 1..5). Same scorer as building_condition_level_min but scoped to the unit itself rather than the building shell. NULL rows (not yet scored) are excluded from the result. 5 = výborný stav (novostavba / po kompletní rekonstrukci), 4 = velmi dobrý stav (po rekonstrukci, new jádro / koupelna), 3 = průměrný, 2 = v původním stavu / před rekonstrukcí, 1 = umakartové jádro.",
+      "category": "Property",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "comparables",
+        "defaults",
+        "estimation",
+        "neighborhood",
+        "velocity",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 1,
+        "max": 5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "apartmentConditionLevelMin"
+      ]
     },
     {
       "id": "furnished",

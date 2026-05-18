@@ -56,6 +56,7 @@ from toolkit.comparables import (  # noqa: E402
     find_comparables_relaxed,
 )
 from toolkit.condition_markers import discover_condition_markers  # noqa: E402
+from toolkit.condition_scoring import score_listing_condition  # noqa: E402
 from toolkit.distribution import analyze_distribution  # noqa: E402
 from toolkit.floor_plan import read_floor_plan  # noqa: E402
 from toolkit.freshness import verify_listing_freshness  # noqa: E402
@@ -98,6 +99,7 @@ __all__ = [
     "find_distribution_outliers",
     "get_manual_rental_estimates",
     "read_floor_plan",
+    "score_listing_condition",
     "summarize_listing",
     "verify_listing_freshness",
 ]

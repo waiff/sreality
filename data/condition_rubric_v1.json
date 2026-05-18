@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "level_count": 5,
+  "scale": "1 = critical, 5 = excellent (higher is better)",
+  "notes": "Hand-drafted rubric (Phase A, v1). Required marker IDs reference data/condition_markers_curated.json. The Phase B scorer treats `required_marker_ids` as 'any of these strongly suggests at least this level' and `disqualifying_marker_ids` as 'presence forbids classification at this level or above'. Silent listings (zero markers, ~9% of the sample) default to level 3 unless other structured signals (e.g. listings.condition='Novostavba') override.",
+  "confidence_policy": {
+    "description": "Per-scope confidence (0..1) the scorer MUST emit alongside each level. Bands below are upper bounds — the scorer may go lower within a band when evidence is unusually thin or contradictory.",
+    "bands": [
+      {"name": "strong_evidence",      "criterion": "Multiple curated markers AND no contradictions",                                       "confidence_range": [0.80, 0.95]},
+      {"name": "single_strong_marker", "criterion": "1-2 high-signal markers (rubric required_marker_ids of L4 or L5) AND no contradictions","confidence_range": [0.60, 0.80]},
+      {"name": "weak_marker_or_fallback","criterion": "Single L3 / medium marker, OR fallback to listings.condition enum",                  "confidence_range": [0.40, 0.60]},
+      {"name": "contradictions",       "criterion": "Both positive AND negative markers present in the same scope — flag in notes",         "confidence_range": [0.30, 0.50]},
+      {"name": "silent_no_fallback",   "criterion": "Zero curated markers in this scope AND listings.condition empty AND no other usable structured signal",   "confidence_range": [0.00, 0.20], "forced_level": 3}
+    ]
+  },
+  "fallback_chain": [
+    "1. Curated markers extracted from this listing's snapshot (primary signal).",
+    "2. listings.condition enum (Novostavba→5, Po rekonstrukci→4, Velmi dobrý stav→4, Dobrý stav→3, Před rekonstrukcí→2).",
+    "3. listings.building_type + energy_rating + year_built — weak signals usable only when 1 and 2 are both empty.",
+    "4. Hard default: level 3, confidence < 0.20 (silent_no_fallback band)."
+  ],
+  "building_levels": [
+    {
+      "level": 5,
+      "label_cs": "výborný stav",
+      "label_en": "excellent",
+      "description": "Brand-new build OR documented complete renovation of the whole structure within the last few years. Either an unambiguous claim of novostavba / kompletní rekonstrukce / dům po kompletní rekonstrukci, or a recent dated rekonstrukce 20xx marker. No negative markers may be present.",
+      "required_marker_ids": [
+        "B002",
+        "B015",
+        "B024",
+        "B063",
+        "B096",
+        "B114"
+      ],
+      "disqualifying_marker_ids": [
+        "B005",
+        "B050",
+        "B064",
+        "B066",
+        "B106",
+        "B134"
+      ]
+    },
+    {
+      "level": 4,
+      "label_cs": "velmi dobrý stav",
+      "label_en": "very good",
+      "description": "Building has had substantial structural / envelope modernization but isn't a full rebuild — typically a combination of: insulation, new roof, new façade, replaced risers / electric / water trunks, new lift, panelák revitalisation, heat pump or PV installation. Or an explicit 'velmi dobrý stav' / 'velmi dobrý technický stav' claim. No negative markers.",
+      "required_marker_ids": [
+        "B008",
+        "B009",
+        "B010",
+        "B011",
+        "B013",
+        "B014",
+        "B018",
+        "B020",
+        "B022",
+        "B023",
+        "B027",
+        "B028",
+        "B030",
+        "B033",
+        "B036",
+        "B038",
+        "B041",
+        "B044",
+        "B045"
+      ],
+      "disqualifying_marker_ids": [
+        "B005",
+        "B050",
+        "B064",
+        "B066",
+        "B106",
+        "B134"
+      ]
+    },
+    {
+      "level": 3,
+      "label_cs": "průměrný / udržovaný",
+      "label_en": "average / maintained",
+      "description": "Building is maintained but has only partial / incremental upgrades, OR the listing is silent on building condition. Examples: plastic windows in the common areas, 'udržovaný dům', 'dobrý stav objektu', or no claim either way. This is the default bucket for listings without explicit positive or negative building-level signals.",
+      "required_marker_ids": [
+        "B016",
+        "B017",
+        "B021",
+        "B032"
+      ],
+      "disqualifying_marker_ids": [
+        "B005",
+        "B050",
+        "B064",
+        "B066",
+        "B106",
+        "B134"
+      ]
+    },
+    {
+      "level": 2,
+      "label_cs": "vyžaduje rekonstrukci",
+      "label_en": "needs work",
+      "description": "Building has an explicit negative claim about technical state: 'před rekonstrukcí', 'v původním stavu', 'ke kompletní rekonstrukci', 'určen k rekonstrukci'. Not yet at the demolition / shell-only extreme.",
+      "required_marker_ids": [
+        "B005",
+        "B050",
+        "B064",
+        "B106"
+      ],
+      "disqualifying_marker_ids": [
+        "B066",
+        "B134"
+      ]
+    },
+    {
+      "level": 1,
+      "label_cs": "kritický stav",
+      "label_en": "critical",
+      "description": "Demolition candidate, raw shell, or explicit 'špatný stav objektu'. Only assign when the listing makes a near-unambiguous critical-state claim.",
+      "required_marker_ids": [
+        "B066",
+        "B134"
+      ],
+      "disqualifying_marker_ids": []
+    }
+  ],
+  "apartment_levels": [
+    {
+      "level": 5,
+      "label_cs": "výborný stav",
+      "label_en": "excellent",
+      "description": "Either a brand-new apartment (novostavba) OR an explicitly complete recent renovation of the unit: 'po kompletní rekonstrukci', 'kompletně zrekonstruovaný byt', 'kompletní rekonstrukce bytu', 'po celkové rekonstrukci', 'celková rekonstrukce'. Or a dated 'rok rekonstrukce 20xx' within the last few years. No negative markers.",
+      "required_marker_ids": [
+        "A001",
+        "A005",
+        "A019",
+        "A027",
+        "A042",
+        "A063",
+        "A090"
+      ],
+      "disqualifying_marker_ids": [
+        "A013",
+        "A075",
+        "A082",
+        "A116",
+        "A121",
+        "A221",
+        "A262"
+      ]
+    },
+    {
+      "level": 4,
+      "label_cs": "velmi dobrý stav",
+      "label_en": "very good",
+      "description": "Unit has been substantially modernized but isn't claimed as a full renovation. Strong signals here: 'po rekonstrukci', new sanitary core (nové jádro / zděné jádro / nové bytové jádro / nové zděné jádro), new bathroom (nová koupelna), new electrical / water / drain trunks, new triple-glazed plastic windows, 'velmi dobrý stav' / 've velmi dobrém stavu'. No negative markers.",
+      "required_marker_ids": [
+        "A003",
+        "A008",
+        "A011",
+        "A014",
+        "A015",
+        "A022",
+        "A025",
+        "A028",
+        "A034",
+        "A041",
+        "A048",
+        "A057",
+        "A080",
+        "A096",
+        "A133",
+        "A259"
+      ],
+      "disqualifying_marker_ids": [
+        "A013",
+        "A075",
+        "A082",
+        "A116",
+        "A121",
+        "A221",
+        "A262"
+      ]
+    },
+    {
+      "level": 3,
+      "label_cs": "průměrný / částečně modernizovaný",
+      "label_en": "average / partially modernized",
+      "description": "Unit has partial / incremental upgrades but no full-renovation claim: a new kitchen line, plastic windows, new floors, partial renovation, modern bathroom features. Also the default bucket for silent listings (no explicit positive or negative apartment-level claim).",
+      "required_marker_ids": [
+        "A002",
+        "A004",
+        "A006",
+        "A007",
+        "A012",
+        "A016",
+        "A017",
+        "A020",
+        "A021",
+        "A023",
+        "A030",
+        "A035",
+        "A039",
+        "A051",
+        "A056",
+        "A058",
+        "A061",
+        "A062",
+        "A066",
+        "A067",
+        "A081"
+      ],
+      "disqualifying_marker_ids": [
+        "A013",
+        "A075",
+        "A082",
+        "A116",
+        "A121",
+        "A221",
+        "A262"
+      ]
+    },
+    {
+      "level": 2,
+      "label_cs": "vyžaduje rekonstrukci",
+      "label_en": "needs work",
+      "description": "Apartment has an explicit negative claim: 'v původním stavu', 'určený k rekonstrukci', 'původní dřevěná okna', 'původní rozvody', 'původní jádro', or no kitchen at all. Not yet at the umakart / shell extreme.",
+      "required_marker_ids": [
+        "A013",
+        "A075",
+        "A082",
+        "A121",
+        "A221",
+        "A262"
+      ],
+      "disqualifying_marker_ids": [
+        "A116"
+      ]
+    },
+    {
+      "level": 1,
+      "label_cs": "kritický stav",
+      "label_en": "critical",
+      "description": "Umakartové jádro (1970s laminated-board sanitary core) is the canonical level-1 trigger. Only assign when an extreme original-state marker is unambiguously claimed.",
+      "required_marker_ids": [
+        "A116"
+      ],
+      "disqualifying_marker_ids": []
+    }
+  ]
+}

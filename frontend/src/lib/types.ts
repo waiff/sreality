@@ -769,7 +769,7 @@ export interface WatchdogFilterSpec {
   /* Each chip is `{name, context}` — context narrows the name match
    * to a parent municipality so the watchdog matcher (api/
    * notifications.py) doesn't fire on streets of the same name in
-   * other cities. See migration 070 for the one-shot lift of legacy
+   * other cities. See migration 075 for the one-shot lift of legacy
    * `string[]` entries to this shape. */
   districts: DistrictChip[] | null;
   min_price_czk: number | null;

@@ -1,33 +1,57 @@
--- 068_browse_stats_condition_match_filter.sql
+-- 074_browse_stats_district_context.sql
 --
--- Catch-up migration. Production's `browse_stats` carries a 39th
--- parameter — `condition_match_filter text[] default null` — wired
--- into a `condition = ANY(condition_match_filter)` predicate, that
--- no committed migration adds. This file documents the param as it
--- lives in production today so the migration trail and the live
--- schema agree.
+-- Each district chip can now carry a parent-municipality context so
+-- picking "Edvarda Beneše" from the Mapy.cz dropdown's Plzeň entry
+-- narrows the cohort to that city alone instead of returning every
+-- street with the same name across the country (Plzeň + Olomouc +
+-- Hradec Králové — 18 hits across 6 cities, the bug exposed by
+-- migration 067).
 --
--- No behaviour change: re-issues `browse_stats` with exactly the
--- production signature + body that ALREADY exists when this migration
--- runs. (The body was captured via `pg_get_functiondef()` against
--- the live function before this file was committed.) Applying it
--- against a fresh database brings that database up to the production
--- baseline so a follow-up migration that appends another parameter
--- (`069_browse_stats_district_context`) can do so without tripping
--- Postgres's parameter-rename guard.
+-- The frontend now sends two parallel arrays: `districts_filter`
+-- (chip names, unchanged) and `districts_context_filter` (the parent
+-- municipality from Mapy.cz's `regionalStructure`, or NULL / '' for
+-- picks at the municipality level and coarser). They walk in lockstep
+-- via `unnest(..., ...) WITH ORDINALITY` so chip `i`'s context
+-- narrows chip `i`'s name match.
 --
--- The `condition_match_filter` parameter narrows the cohort to
--- listings whose `condition` column is in the supplied list. Browse
--- doesn't currently surface it as a UI filter — the registry routes
--- `condition_match` to the Comparables / Estimation / Velocity
--- agendas, not Browse — but the param accepts NULL (the default) and
--- is therefore a no-op for every existing caller. Keeping it lets
--- the next session decide whether to surface it on Browse / Watchdog
--- without another schema dance.
+-- Per-chip predicate:
+--   (district ILIKE '%name%' OR locality ILIKE '%name%')
+--   AND (ctx IS NULL OR ctx = '' OR
+--        district ILIKE '%ctx%' OR locality ILIKE '%ctx%')
+-- OR'd across chips. ctx = NULL or '' preserves the migration 067
+-- behaviour exactly, so "okres Jihlava" / "Praha" / "Hruškové Dvory"
+-- continue to match without narrowing.
 --
--- Pure CREATE OR REPLACE on an existing function with an identical
--- signature is a no-op as far as Postgres is concerned; grants and
--- dependencies survive.
+-- Adding a parameter to a function in Postgres creates a NEW overload
+-- alongside the existing one — `CREATE OR REPLACE FUNCTION` only
+-- replaces when the parameter list is an exact match. Without an
+-- explicit DROP of the 39-param overload, calls using named
+-- arguments (the only call style we use) become ambiguous:
+-- "function browse_stats(districts_filter => text[]) is not unique".
+-- The DROP IF EXISTS below removes the 39-param signature that
+-- migration 068 (`068_browse_stats_condition_match.sql`) leaves
+-- behind before the 40-param signature is created. Grants on the
+-- 40-param version then come straight from the role-level
+-- `GRANT EXECUTE ON FUNCTION ... TO anon` already on the database —
+-- no re-grant needed.
+--
+-- Same performance profile as 067: ILIKE on `locality` is a
+-- seq-scan at the current row count (tens of thousands) and runs
+-- well under 100 ms. The added per-chip ctx check is one extra
+-- ILIKE per row per chip — same magnitude. If row count crosses
+-- ~250k, the follow-up flagged in 067 (pg_trgm + GIN trigram index)
+-- becomes attractive.
+
+drop function if exists browse_stats(
+  text[], text[], integer, integer, integer, integer, boolean,
+  integer, integer, integer, integer, integer, integer,
+  boolean, boolean, boolean, boolean, text, boolean, boolean, boolean,
+  integer, text[], bigint[], text, text,
+  double precision, double precision, double precision, double precision,
+  text, double precision, double precision, double precision,
+  double precision, integer, double precision, double precision,
+  text[]
+);
 
 create or replace function browse_stats(
   districts_filter         text[]   default null,
@@ -68,7 +92,8 @@ create or replace function browse_stats(
   parking_lots_min_filter  integer  default null,
   garden_area_min_filter   double precision default null,
   garden_area_max_filter   double precision default null,
-  condition_match_filter   text[]   default null
+  condition_match_filter   text[]   default null,
+  districts_context_filter text[]   default null
 )
 returns jsonb
 language sql
@@ -98,9 +123,19 @@ as $$
         districts_filter is null
         or array_length(districts_filter, 1) is null
         or exists (
-          select 1 from unnest(districts_filter) as needle
-          where district ilike '%' || needle || '%'
-             or locality ilike '%' || needle || '%'
+          select 1
+          from unnest(
+                 districts_filter,
+                 coalesce(
+                   districts_context_filter,
+                   array_fill(null::text, array[array_length(districts_filter, 1)])
+                 )
+               ) with ordinality as t(needle, ctx, ord)
+          where (district ilike '%' || needle || '%'
+              or locality ilike '%' || needle || '%')
+            and (ctx is null or ctx = ''
+              or district ilike '%' || ctx || '%'
+              or locality ilike '%' || ctx || '%')
         )
       )
       and (dispositions_filter    is null or disposition     = any(dispositions_filter))
