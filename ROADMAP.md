@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-17 16:01 UTC_
+_Last refreshed: 2026-05-18 05:11 UTC_
 
-**Branch:** `claude/rental-estimator-prompt-Beviv`
+**Branch:** `claude/anthropic-system-prompt-caching`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 73 files, latest `070_rental_estimator_v2_prompt.sql`.
+**Migrations on disk:** 76 files, latest `073_listings_public_condition_levels.sql`.
 
 **Last 10 commits:**
 
 ```
-5a6e356 skill: rewrite rental_estimator_full_v1 around autonomy + drop unwired scenarios
-34d5d0b Merge pull request #133 from waiff/claude/add-condition-filter-TTY7j
-ea6063a Merge remote-tracking branch 'origin/main' into claude/add-condition-filter-TTY7j
-3b73ce3 filters: expose condition (Stav objektu) on Browse, Watchdog, Settings, Neighborhood, Defaults
-f3bc76d Merge pull request #132 from waiff/claude/fix-daily-scrape-fTsfg
-75c70f1 roadmap: refresh auto-status block
-0e2d4eb roadmap: refresh auto-status block
-4d53f1b scraper: shrink touch_listings chunk + force PK-index plan
-1cbc7ff Merge pull request #131 from waiff/claude/fix-district-filter-AAm5L
-b96509c Merge remote-tracking branch 'origin/main' into claude/fix-district-filter-AAm5L
+63f66c2 anthropic: wrap system prompt in cached block (8-10x cost cut)
+e857e7f Merge pull request #138 from waiff/claude/condition-scoring-b2
+b00ae7e condition: B2 — backfill workflow with region filter (4 kraje default)
+c926481 Merge pull request #137 from waiff/claude/condition-scoring-b1
+672d4b5 condition: B1 — per-listing scorer + schema (migrations 072, 073)
+09d8fab Merge pull request #136 from waiff/claude/rubric-confidence-policy
+06cf139 rubric: pin silent + no-fallback at level 3 confidence < 0.20
+5c0901e Merge pull request #135 from waiff/claude/condition-markers-curated-rubric
+cd271b0 condition: curated marker whitelist + 5-level rubric draft
+27079a6 data: regenerate condition marker dictionary
 ```
 
 <!-- END AUTO-STATUS -->
