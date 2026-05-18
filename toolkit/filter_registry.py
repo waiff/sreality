@@ -77,7 +77,8 @@ class FilterType(StrEnum):
     STRING = "string"
     STRING_LIST = "string_list"
     INT_LIST = "int_list"
-    LOCATION = "location"  # composite object — only used with UiControl.LOCATION
+    LOCATION = "location"            # composite — only used with UiControl.LOCATION
+    DISTRICT_CHIP_LIST = "district_chip_list"  # list of {name, context|null} — Browse/Watchdog districts
 
 
 # --- value containers -----------------------------------------------------
@@ -280,15 +281,23 @@ def _build_registry() -> dict[str, FilterDef]:
 
         FilterDef(
             id="districts",
-            type=FilterType.STRING_LIST,
+            type=FilterType.DISTRICT_CHIP_LIST,
             pg_column="district",
             default=None,
             description=(
                 "Match listings whose `district` (human-readable text) "
-                "is in the list. Multi-value AND-of-OR: a listing "
-                "matches if ANY of its district name appears, and "
-                "districts is AND'd with the other filters. Use "
-                "`locality_district_id` for renames-stable matching."
+                "is in the list. Each chip is an object "
+                "`{name: str, context: str | null}`: `name` is the "
+                "primary phrase to match (ILIKE substring across "
+                "`district` and `locality`), `context` is the parent "
+                "municipality from Mapy.cz's `regionalStructure` that "
+                "narrows the match when set (so picking the Plzeň "
+                "entry for 'Edvarda Beneše' doesn't drag in the "
+                "Olomouc + Hradec Králové streets of the same name). "
+                "Multi-value AND-of-OR: a listing matches if ANY chip "
+                "matches, and districts is AND'd with the other "
+                "filters. Use `locality_district_id` for "
+                "renames-stable matching."
             ),
             category=CATEGORY_SPATIAL,
             ui_control=UiControl.MULTISELECT,
@@ -1230,6 +1239,7 @@ _JSON_TYPE_MAP: dict[FilterType, str] = {
     FilterType.STRING_LIST: "array",
     FilterType.INT_LIST: "array",
     FilterType.LOCATION: "object",
+    FilterType.DISTRICT_CHIP_LIST: "array",
 }
 
 
@@ -1253,6 +1263,16 @@ def to_jsonschema_property(f: FilterDef) -> dict[str, Any]:
         prop["items"] = items
     elif f.type == FilterType.INT_LIST:
         prop["items"] = {"type": "integer"}
+    elif f.type == FilterType.DISTRICT_CHIP_LIST:
+        prop["items"] = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "context": {"type": ["string", "null"]},
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        }
     return prop
 
 

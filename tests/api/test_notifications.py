@@ -99,6 +99,73 @@ def test_build_clauses_dispositions_use_any() -> None:
     assert params["dispositions"] == ["2+kk", "2+1", "3+kk"]
 
 
+def test_build_clauses_district_chip_without_context() -> None:
+    """A chip with `context=None` produces a single (district ILIKE name OR
+    locality ILIKE name) clause — same shape as the migration 067
+    behaviour, preserved for picks at the municipality / okres / kraj
+    level (where there's nothing finer to narrow against)."""
+    spec = WatchdogFilterSpec(
+        districts=[{"name": "okres Jihlava", "context": None}],
+    )
+    where, params = _build_match_clauses(spec)
+    district_clause = next(w for w in where if "district_name_0" in w)
+    assert "l.district ILIKE '%' || %(district_name_0)s || '%'" in district_clause
+    assert "l.locality ILIKE '%' || %(district_name_0)s || '%'" in district_clause
+    assert " AND " not in district_clause
+    assert params["district_name_0"] == "okres Jihlava"
+    assert "district_ctx_0" not in params
+
+
+def test_build_clauses_district_chip_with_context_anding_the_narrow() -> None:
+    """A chip with a parent municipality narrows the name match — the
+    fix for 'Edvarda Beneše · Plzeň' no longer dragging in the streets
+    of the same name in Olomouc / Hradec Králové. Generates the same
+    AND'd predicate browse_stats applies (migration 074)."""
+    spec = WatchdogFilterSpec(
+        districts=[{"name": "Edvarda Beneše", "context": "Plzeň"}],
+    )
+    where, params = _build_match_clauses(spec)
+    district_clause = next(w for w in where if "district_name_0" in w)
+    assert "%(district_name_0)s" in district_clause
+    assert "%(district_ctx_0)s" in district_clause
+    assert " AND " in district_clause
+    assert params["district_name_0"] == "Edvarda Beneše"
+    assert params["district_ctx_0"] == "Plzeň"
+
+
+def test_build_clauses_district_multiple_chips_are_or_joined() -> None:
+    """Two chips OR'd: the cohort matches either (Plzeň-narrowed) or
+    (Olomouc-narrowed). Matches the per-chip OR Browse uses."""
+    spec = WatchdogFilterSpec(
+        districts=[
+            {"name": "Edvarda Beneše", "context": "Plzeň"},
+            {"name": "Edvarda Beneše", "context": "Olomouc"},
+        ],
+    )
+    where, params = _build_match_clauses(spec)
+    district_clause = next(w for w in where if "district_name_0" in w)
+    assert "%(district_name_0)s" in district_clause
+    assert "%(district_name_1)s" in district_clause
+    assert " OR " in district_clause
+    assert params["district_ctx_0"] == "Plzeň"
+    assert params["district_ctx_1"] == "Olomouc"
+
+
+def test_filter_spec_lifts_legacy_string_districts() -> None:
+    """Pre-migration-070 request bodies passing `districts: ["Praha"]`
+    still validate — the field_validator lifts each string to a
+    `{name, context: None}` chip so the matcher only sees the new
+    shape. Covers the deploy window between the API redeploy and the
+    backfill running."""
+    spec = WatchdogFilterSpec(districts=["Praha", "okres Jihlava"])
+    assert spec.districts is not None
+    assert len(spec.districts) == 2
+    assert spec.districts[0].name == "Praha"
+    assert spec.districts[0].context is None
+    assert spec.districts[1].name == "okres Jihlava"
+    assert spec.districts[1].context is None
+
+
 def test_build_clauses_enumerated_columns() -> None:
     spec = WatchdogFilterSpec(furnished="ano", ownership="osobni")
     where, params = _build_match_clauses(spec)
@@ -246,10 +313,16 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     assert "l.first_seen_at > %(cursor)s" in sql
     assert isinstance(params, dict) and params["cursor"] == cursor_ts
 
-    # And that the filter spec made it through too.
+    # And that the filter spec made it through too. The district chip
+    # without a context lands as a single ILIKE-OR pair under the
+    # `district_name_0` placeholder (matching browse_stats' migration
+    # 069 predicate); the row's legacy string form is lifted by
+    # `WatchdogFilterSpec._lift_legacy_districts` before SQL build.
     assert params["category_main"] == "byt"
     assert params["category_type"] == "pronajem"
-    assert params["districts"] == ["Praha"]
+    assert params["district_name_0"] == "Praha"
+    assert "district_ctx_0" not in params  # null context = no narrow
+    assert "l.district ILIKE '%' || %(district_name_0)s || '%'" in sql
 
 
 def test_match_once_skips_subscription_with_no_listings() -> None:

@@ -7,20 +7,21 @@
  * district names already in our listings table.
  *
  * Interaction contract matches the rest of filter-controls:
- *   value: string[] | null  — selected place names (chips)
- *   onChange(next)         — null normalises to no constraint
+ *   value: DistrictChip[] | null  — selected chips
+ *   onChange(next)                — null normalises to no constraint
  *
- * On pick, the suggestion's `name` field becomes the chip and is
- * appended to `value`. The downstream filter (queries.ts applyFilters
- * + browse_stats migration 067) matches each chip as a
- * case-insensitive substring against BOTH `district` AND `locality`
- * on listings_public, OR'd across chips. Picking "Hruškové Dvory"
- * (a `regional.municipality_part`) matches listings whose locality
- * text contains that token even though no listing's canonical okres
- * equals it; picking "okres Jihlava" matches via the `district`
- * column directly. Each chip OR's both columns, so picks at any
- * granularity Mapy.cz surfaces narrow the cohort instead of
- * silently zeroing it.
+ * Each chip is `{name, context}`. On pick, the suggestion's `name`
+ * field becomes the chip's `name`; `deriveContext` walks
+ * `regionalStructure` for the nearest `regional.municipality` and
+ * sets that as `context` (or null for picks already at the
+ * municipality / region / country level). The downstream filter
+ * (queries.ts applyFilters + browse_stats migration 074 + the
+ * Watchdog matcher in api/notifications.py) matches each chip as
+ *   (district ILIKE *name* OR locality ILIKE *name*)
+ *   AND (context IS NULL OR district ILIKE *context* OR locality ILIKE *context*)
+ * OR'd across chips. This is the registry-aligned widget for both
+ * Browse and Watchdog — the same component renders in both surfaces
+ * through `customWidgets={{districts: LocationTypeahead}}`.
  *
  * onPick (independent of the chip filter) fires once per pick so the
  * Browse map can fly the viewport to the picked place's centre —
@@ -41,17 +42,41 @@ import {
   SUGGEST_NOT_CONFIGURED,
   typeBadge,
 } from '@/lib/maps';
+import type { DistrictChip } from '@/lib/filters';
 
 const QUERY_DEBOUNCE_MS = 150;
 const MIN_QUERY_LEN = 2;
+
+/* Mapy.cz suggestion types that ARE municipality-or-coarser. Picks
+ * at any of these get `context: null` — they already name the
+ * municipality (or are above it), so there's nothing finer-grained
+ * to narrow against. Picks below this granularity (street, address,
+ * část obce, POI) inherit the nearest `regional.municipality` from
+ * the `regionalStructure` chain. */
+const MUNICIPALITY_OR_COARSER = new Set([
+  'regional.municipality',
+  'regional.region',
+  'regional.country',
+]);
+
+export function deriveContext(s: MapySuggestion): string | null {
+  if (MUNICIPALITY_OR_COARSER.has(s.type)) return null;
+  const muni = (s.regionalStructure ?? []).find(
+    (e) => e.type === 'regional.municipality',
+  );
+  return muni?.name ?? null;
+}
+
+const sameChip = (a: DistrictChip, b: DistrictChip): boolean =>
+  a.name === b.name && a.context === b.context;
 
 export function LocationTypeahead({
   value,
   onChange,
   onPick,
 }: {
-  value: ReadonlyArray<string> | null;
-  onChange: (next: string[] | null) => void;
+  value: ReadonlyArray<DistrictChip> | null;
+  onChange: (next: DistrictChip[] | null) => void;
   /* Fires once per picked suggestion. The Browse map listens for this
    * to fly the viewport to the picked place — independent of the chip
    * filter (which may or may not narrow the cohort, depending on
@@ -95,22 +120,26 @@ export function LocationTypeahead({
 
   const matches = useMemo(() => {
     if (!suggestQ.data) return [];
-    return suggestQ.data.filter((s) => !selected.includes(s.name));
+    return suggestQ.data.filter((s) => {
+      const chip: DistrictChip = { name: s.name, context: deriveContext(s) };
+      return !selected.some((c) => sameChip(c, chip));
+    });
   }, [suggestQ.data, selected]);
 
-  const emit = (next: string[]) =>
+  const emit = (next: DistrictChip[]) =>
     onChange(next.length === 0 ? null : next);
 
   const add = (s: MapySuggestion) => {
     onPick?.(s);
-    if (selected.includes(s.name)) return;
-    emit([...selected, s.name]);
+    const chip: DistrictChip = { name: s.name, context: deriveContext(s) };
+    if (selected.some((c) => sameChip(c, chip))) return;
+    emit([...selected, chip]);
     setQuery('');
     setDebounced('');
   };
 
-  const remove = (name: string) => {
-    emit(selected.filter((x) => x !== name));
+  const remove = (chip: DistrictChip) => {
+    emit(selected.filter((c) => !sameChip(c, chip)));
   };
 
   const isLoading = suggestQ.isFetching && debounced.length >= MIN_QUERY_LEN;
@@ -153,24 +182,30 @@ export function LocationTypeahead({
 
       {selected.length > 0 && (
         <ul className="mt-2 flex flex-wrap gap-1.5">
-          {selected.map((d) => (
-            <li key={d}>
-              <button
-                type="button"
-                onClick={() => remove(d)}
-                className="group inline-flex items-center gap-1.5 px-2 py-1 text-xs rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
-                aria-label={`Remove ${d}`}
-              >
-                <span>{d}</span>
-                <span
-                  className="text-[var(--color-copper)]/60 group-hover:text-[var(--color-copper)]"
-                  aria-hidden
+          {selected.map((chip) => {
+            const label = chip.context
+              ? `${chip.name} · ${chip.context}`
+              : chip.name;
+            const key = `${chip.name}::${chip.context ?? ''}`;
+            return (
+              <li key={key}>
+                <button
+                  type="button"
+                  onClick={() => remove(chip)}
+                  className="group inline-flex items-center gap-1.5 px-2 py-1 text-xs rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
+                  aria-label={`Remove ${label}`}
                 >
-                  ×
-                </span>
-              </button>
-            </li>
-          ))}
+                  <span>{label}</span>
+                  <span
+                    className="text-[var(--color-copper)]/60 group-hover:text-[var(--color-copper)]"
+                    aria-hidden
+                  >
+                    ×
+                  </span>
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

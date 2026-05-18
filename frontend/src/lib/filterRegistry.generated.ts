@@ -30,6 +30,7 @@ export type UiControl =
 
 export type FilterType =
   | "bool"
+  | "district_chip_list"
   | "float"
   | "int"
   | "int_list"
@@ -116,10 +117,10 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     },
     {
       "id": "districts",
-      "type": "string_list",
+      "type": "district_chip_list",
       "pg_column": "district",
       "default": null,
-      "description": "Match listings whose `district` (human-readable text) is in the list. Multi-value AND-of-OR: a listing matches if ANY of its district name appears, and districts is AND'd with the other filters. Use `locality_district_id` for renames-stable matching.",
+      "description": "Match listings whose `district` (human-readable text) is in the list. Each chip is an object `{name: str, context: str | null}`: `name` is the primary phrase to match (ILIKE substring across `district` and `locality`), `context` is the parent municipality from Mapy.cz's `regionalStructure` that narrows the match when set (so picking the Plzeň entry for 'Edvarda Beneše' doesn't drag in the Olomouc + Hradec Králové streets of the same name). Multi-value AND-of-OR: a listing matches if ANY chip matches, and districts is AND'd with the other filters. Use `locality_district_id` for renames-stable matching.",
       "category": "Spatial",
       "ui_control": "multiselect",
       "agendas": [

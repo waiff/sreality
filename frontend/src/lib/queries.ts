@@ -140,21 +140,26 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   r = r.eq('category_main', f.categoryMain);
   r = r.eq('category_type', f.categoryType);
   if (f.districts.length) {
-    /* Each chip becomes (district ilike *X* OR locality ilike *X*),
+    /* Each chip becomes:
+     *   (district ilike *name* OR locality ilike *name*)
+     *   AND (no context, OR district/locality ilike *context*)
      * OR'd across chips. Mapy.cz suggests at every granularity (okres,
      * obec, část obce, street, POI); listings only carry the canonical
      * okres in `district`, but the part-of-municipality / street / POI
-     * name does appear in the `locality` free-text. Substring match
-     * across both gives a non-zero cohort regardless of which level
-     * the operator picks. Kept in lockstep with browse_stats (migration
-     * 067) which applies the same predicate. */
-    const clauses = f.districts
-      .flatMap((d) => {
-        const pat = escapeIlikePattern(d);
-        return [`district.ilike.${pat}`, `locality.ilike.${pat}`];
-      })
-      .join(',');
-    r = r.or(clauses);
+     * name does appear in the `locality` free-text. The context half
+     * (parent municipality from `regionalStructure`) is what stops a
+     * "Edvarda Beneše" pick in Plzeň from also matching the streets
+     * of the same name in Olomouc / Hradec Králové. Kept in lockstep
+     * with browse_stats (migration 074) which applies the same
+     * predicate via `unnest(names, contexts) WITH ORDINALITY`. */
+    const chipClause = (d: { name: string; context: string | null }): string => {
+      const namePat = escapeIlikePattern(d.name);
+      const nameHalf = `or(district.ilike.${namePat},locality.ilike.${namePat})`;
+      if (!d.context) return nameHalf;
+      const ctxPat = escapeIlikePattern(d.context);
+      return `and(${nameHalf},or(district.ilike.${ctxPat},locality.ilike.${ctxPat}))`;
+    };
+    r = r.or(f.districts.map(chipClause).join(','));
   }
   if (f.dispositions.length) r = r.in('disposition', f.dispositions);
   if (f.priceMin != null) r = r.gte('price_czk', f.priceMin);
@@ -443,7 +448,10 @@ export const fetchBrowseStats = async (
   const { data, error } = await supabase.rpc('browse_stats', {
     category_main_filter:    f.categoryMain,
     category_type_filter:    f.categoryType,
-    districts_filter:        f.districts.length ? f.districts : null,
+    districts_filter:        f.districts.length ? f.districts.map((d) => d.name) : null,
+    districts_context_filter: f.districts.length
+      ? f.districts.map((d) => d.context ?? '')
+      : null,
     dispositions_filter:     f.dispositions.length ? f.dispositions : null,
     price_min_filter:        f.priceMin,
     price_max_filter:        f.priceMax,

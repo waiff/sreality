@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 from scraper import db as scraper_db
 
@@ -50,6 +50,20 @@ LOG = logging.getLogger(__name__)
 
 
 # --- filter spec ----------------------------------------------------------
+
+
+class DistrictChip(BaseModel):
+    """One entry in `WatchdogFilterSpec.districts`.
+
+    Mirrors the frontend's `DistrictChip` (`frontend/src/lib/filters.ts`).
+    `name` is the primary phrase to match (ILIKE substring across
+    `district` and `locality`); `context` is the parent municipality
+    from Mapy.cz's `regionalStructure` that narrows the match when set.
+    """
+
+    name: str
+    context: str | None = None
+
 
 class WatchdogFilterSpec(BaseModel):
     """JSON shape persisted in `notification_subscriptions.filter_spec`.
@@ -88,8 +102,30 @@ class WatchdogFilterSpec(BaseModel):
     locality_region_id: int | None = None
 
     # Optional district name match (for ergonomic "Praha 2"-style
-    # watchdogs without resolving the id first).
-    districts: list[str] | None = None
+    # watchdogs without resolving the id first). Each chip is a
+    # `DistrictChip` — `{name, context}` — so the matcher's SQL
+    # mirrors the per-chip predicate Browse uses (migration 074):
+    # name match AND'd with an optional parent-municipality context
+    # narrow. Migration 075 lifted any pre-existing rows from
+    # `text[]` to the chip shape; the field_validator below also
+    # accepts plain `list[str]` request bodies for clients that
+    # haven't redeployed yet.
+    districts: list["DistrictChip"] | None = None
+
+    @field_validator("districts", mode="before")
+    @classmethod
+    def _lift_legacy_districts(cls, v: Any) -> Any:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            return v
+        out: list[Any] = []
+        for item in v:
+            if isinstance(item, str):
+                out.append({"name": item, "context": None})
+            else:
+                out.append(item)
+        return out
 
     # Price + area bounds.
     min_price_czk: int | None = None
@@ -178,8 +214,30 @@ def _build_match_clauses(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
-        where.append("l.district = ANY(%(districts)s)")
-        params["districts"] = list(spec.districts)
+        # Same per-chip predicate as `browse_stats` (migration 074):
+        #   (district ILIKE *name* OR locality ILIKE *name*)
+        #   AND (no context, OR district/locality ILIKE *context*)
+        # OR'd across chips. Keeps Browse and Watchdog in lockstep on
+        # what a District chip means.
+        chip_clauses: list[str] = []
+        for i, chip in enumerate(spec.districts):
+            n_key = f"district_name_{i}"
+            params[n_key] = chip.name
+            name_half = (
+                f"(l.district ILIKE '%' || %({n_key})s || '%' "
+                f"OR l.locality ILIKE '%' || %({n_key})s || '%')"
+            )
+            if chip.context:
+                c_key = f"district_ctx_{i}"
+                params[c_key] = chip.context
+                ctx_half = (
+                    f"(l.district ILIKE '%' || %({c_key})s || '%' "
+                    f"OR l.locality ILIKE '%' || %({c_key})s || '%')"
+                )
+                chip_clauses.append(f"({name_half} AND {ctx_half})")
+            else:
+                chip_clauses.append(name_half)
+        where.append("(" + " OR ".join(chip_clauses) + ")")
 
     if spec.min_price_czk is not None:
         where.append("l.price_czk >= %(min_price_czk)s")

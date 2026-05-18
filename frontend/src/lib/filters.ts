@@ -42,10 +42,25 @@ export interface CenterRadius {
 
 export type LocationMode = 'viewport' | 'center_radius';
 
+/* One entry of the district chip list. `name` is the primary phrase
+ * to match (`district` / `locality` ILIKE substring); `context` is
+ * the parent municipality from Mapy.cz's `regionalStructure` that
+ * narrows the match when set, so picking the Plzeň entry for
+ * "Edvarda Beneše" doesn't drag in the Olomouc + Hradec Králové
+ * streets of the same name. Picks at the municipality / okres / kraj
+ * level (or coarser) leave context null and behave exactly like the
+ * pre-context chips. The same shape is sent to the watchdog matcher
+ * (`api/notifications.WatchdogFilterSpec.districts`) so Browse and
+ * Watchdog stay aligned via the shared filter registry. */
+export interface DistrictChip {
+  name: string;
+  context: string | null;
+}
+
 export interface ListingFilters {
   categoryMain: CategoryMain;
   categoryType: CategoryType;
-  districts: string[];
+  districts: DistrictChip[];
   dispositions: Disposition[];
   priceMin: number | null;
   priceMax: number | null;
@@ -188,6 +203,25 @@ const splitCsv = (s: string | null): string[] =>
 
 const joinCsv = (xs: string[]): string => xs.map(encodeURIComponent).join(',');
 
+/* Parse the parallel `districts` (names) + `districts_ctx` (contexts)
+ * query params into a `DistrictChip[]`. Empty-string entries in the
+ * contexts CSV stand for "no context for this chip" — that's how we
+ * keep the URL clean when only some chips carry a parent. Missing
+ * `districts_ctx` entirely means every chip has `context: null`,
+ * matching the legacy URL shape (`?districts=Praha`). */
+const parseDistrictChips = (
+  namesRaw: string | null,
+  ctxRaw: string | null,
+): DistrictChip[] => {
+  const names = splitCsv(namesRaw);
+  if (names.length === 0) return [];
+  const ctxs = splitCsv(ctxRaw);
+  return names.map((name, i) => {
+    const ctx = ctxs[i];
+    return { name, context: ctx == null || ctx === '' ? null : ctx };
+  });
+};
+
 const parseInt0 = (s: string | null): number | null => {
   if (s == null || s === '') return null;
   const n = Number(s);
@@ -235,7 +269,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   return {
     categoryMain: enumOr(sp.get('cat'), CATEGORY_MAIN_VALUES, 'byt'),
     categoryType: enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
-    districts: splitCsv(sp.get('districts')),
+    districts: parseDistrictChips(sp.get('districts'), sp.get('districts_ctx')),
     dispositions,
     priceMin,
     priceMax,
@@ -316,7 +350,18 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   const sp = new URLSearchParams();
   if (f.categoryMain !== 'byt') sp.set('cat', f.categoryMain);
   if (f.categoryType !== 'pronajem') sp.set('deal', f.categoryType);
-  if (f.districts.length) sp.set('districts', joinCsv(f.districts));
+  if (f.districts.length) {
+    sp.set('districts', joinCsv(f.districts.map((d) => d.name)));
+    /* Omit the contexts param when every chip's context is null —
+     * keeps URLs for the common okres-only case identical to the
+     * pre-context shape. */
+    if (f.districts.some((d) => d.context !== null)) {
+      sp.set(
+        'districts_ctx',
+        joinCsv(f.districts.map((d) => d.context ?? '')),
+      );
+    }
+  }
   if (f.dispositions.length) sp.set('disposition', f.dispositions.join(','));
   if (f.priceMin != null || f.priceMax != null) {
     sp.set('price', fmtRange(f.priceMin, f.priceMax));
@@ -405,7 +450,10 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
   bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} ${CATEGORY_MAIN_PLURAL[f.categoryMain]}`);
   bits.push(CATEGORY_TYPE_LABEL[f.categoryType]);
   if (f.districts.length) {
-    const shown = f.districts.slice(0, 3).join(', ');
+    const shown = f.districts
+      .slice(0, 3)
+      .map((d) => (d.context ? `${d.name} · ${d.context}` : d.name))
+      .join(', ');
     const extra = f.districts.length > 3 ? ` +${f.districts.length - 3}` : '';
     bits.push(`in ${shown}${extra}`);
   }
@@ -574,7 +622,13 @@ export function applyRegistryUpdate(
     return { ...filters, dispositions: next };
   }
   if (id === 'districts') {
-    const next = value == null ? [] : (value as string[]);
+    if (value == null) return { ...filters, districts: [] };
+    /* Lift legacy callers that still emit `string[]` so a registry-
+     * scope edit (or a stale test fixture) doesn't quietly drop the
+     * context shape. Mixed arrays are tolerated; objects pass through. */
+    const next = (value as Array<DistrictChip | string>).map((v) =>
+      typeof v === 'string' ? { name: v, context: null } : v,
+    );
     return { ...filters, districts: next };
   }
   if (id === 'condition_match') {
