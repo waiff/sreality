@@ -159,6 +159,13 @@ class WatchdogFilterSpec(BaseModel):
     building_condition_level_min: int | None = None
     apartment_condition_level_min: int | None = None
 
+    # Phase QUAL — curated-city quality predicates. Browse + Watchdog
+    # only; not exposed to the estimation agent.
+    city_index_rules: list[dict[str, Any]] | None = None
+    min_city_population: int | None = None
+    max_city_population: int | None = None
+    near_city_proximity: dict[str, Any] | None = None
+
     @model_validator(mode="after")
     def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
         spatial = [self.lat, self.lng, self.radius_m]
@@ -309,6 +316,19 @@ def _build_match_clauses(
     if spec.apartment_condition_level_min is not None:
         where.append("l.apartment_condition_level >= %(apartment_condition_level_min)s")
         params["apartment_condition_level_min"] = spec.apartment_condition_level_min
+
+    # Phase QUAL — city quality predicates. Delegated to the same helper
+    # `_shared_filter_where` calls so Browse and Watchdog stay in lockstep.
+    from toolkit.comparables import ComparableFilters, _city_quality_clauses
+    cq_filters = ComparableFilters(
+        city_index_rules=spec.city_index_rules,
+        min_city_population=spec.min_city_population,
+        max_city_population=spec.max_city_population,
+        near_city_proximity=spec.near_city_proximity,
+    )
+    city_clauses, city_params = _city_quality_clauses(cq_filters)
+    where.extend(city_clauses)
+    params.update(city_params)
 
     return where, params
 

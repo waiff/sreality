@@ -10,6 +10,7 @@ import {
 import type { MapySuggestion } from '@/lib/maps';
 import { ControlGroup, Section } from '@/components/controls';
 import { FilterForm } from '@/components/FilterForm';
+import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import {
   LocationControl,
   LocationTypeahead,
@@ -50,6 +51,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
   // can also surface its picked-suggestion side channel to Browse.
   const customWidgets = {
     tags: TagPicker as never,
+    city_index_rules: CityIndexRulesPicker as never,
   };
 
   return (
@@ -226,6 +228,26 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
             onChange={handleRegistryChange}
             includeOnly={['tags']}
             labels={{ tags: 'Tags' }}
+            customWidgets={customWidgets}
+            flat
+          />
+        </ControlGroup>
+
+        <ControlGroup title="City quality">
+          <FilterForm
+            scope="browse"
+            state={registryView}
+            onChange={handleRegistryChange}
+            includeOnly={[
+              'city_index_rules',
+              'min_city_population',
+              'max_city_population',
+            ]}
+            labels={{
+              city_index_rules: 'Rules (city must satisfy all)',
+              min_city_population: 'Min population',
+              max_city_population: 'Max population',
+            }}
             customWidgets={customWidgets}
             flat
           />
