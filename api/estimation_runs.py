@@ -975,6 +975,36 @@ def _persist_failed_run(
     return _fetch_run(conn, run_id) or {}
 
 
+def _load_subject_condition(
+    conn: "psycopg.Connection",
+    sreality_id: int | None,
+) -> dict[str, Any] | None:
+    """Fetch the subject listing's condition fields for the agent prompt.
+
+    Returns the sreality `condition` enum plus the two derived 1-5
+    levels (apartment + building). Derived levels are NULL until the
+    scoring phase has run on that snapshot; the agent prompt teaches
+    the LLM to skip the matching level_min filter when its target is
+    NULL on that axis.
+    """
+    if sreality_id is None:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT condition, apartment_condition_level, "
+            "building_condition_level FROM listings WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "condition": row[0],
+        "apartment_condition_level": row[1],
+        "building_condition_level": row[2],
+    }
+
+
 def _build_target(
     spec: dict[str, Any] | None,
     input_sreality_id: int | None = None,
@@ -1112,6 +1142,9 @@ def _run_agent_path(
             recorder=recorder, estimation_run_id=run_id,
             special_instructions=body.special_instructions,
             contextual_text=body.contextual_text,
+            subject_condition=_load_subject_condition(
+                conn, resolution.input_sreality_id,
+            ),
         )
     except Exception as exc:
         LOG.warning("agent run failed: %s", exc)

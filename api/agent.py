@@ -570,6 +570,7 @@ def run_agent_estimation(
     contextual_text: str | None = None,
     building_run_id: int | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    subject_condition: dict[str, Any] | None = None,
 ) -> AgentResult:
     """Drive the agent loop. Returns AgentResult with `metadata.stop_reason`.
 
@@ -630,6 +631,7 @@ def run_agent_estimation(
             special_instructions=special_instructions,
             contextual_text=contextual_text,
             attachments=attachments,
+            subject_condition=subject_condition,
         ))])
     ]
 
@@ -1556,7 +1558,9 @@ def _initial_user_message(
     special_instructions: str | None = None,
     contextual_text: str | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    subject_condition: dict[str, Any] | None = None,
 ) -> str:
+    cond = subject_condition or {}
     payload = {
         "target": {
             "lat": target.lat,
@@ -1564,6 +1568,9 @@ def _initial_user_message(
             "area_m2": target.area_m2,
             "disposition": target.disposition,
             "floor": target.floor,
+            "condition": cond.get("condition"),
+            "apartment_condition_level": cond.get("apartment_condition_level"),
+            "building_condition_level": cond.get("building_condition_level"),
         },
         "filters": {
             "radius_m": filters.radius_m,
