@@ -6,6 +6,7 @@ import {
   buildingMaterialToValues,
   isoNDaysAgo,
 } from './filters';
+import { applyRegistryFilters } from './registryQueryBuilder';
 import type {
   HealthSummary,
   ImagePublic,
@@ -115,9 +116,20 @@ const escapeIlikePattern = (raw: string): string => {
 
 /* Generic identity-typed helper. Postgrest's filter methods all return the
  * same builder, so passing the chain through any subset of them preserves
- * the input type at runtime. */
+ * the input type at runtime.
+ *
+ * The straight-forward registry filters (min/max numeric ranges,
+ * tristates, single-value enums, multi-value IN lists) are dispatched
+ * automatically by `applyRegistryFilters` from registryQueryBuilder.ts.
+ * What stays hand-coded here is the small set of irregular shapes:
+ * the `status` multi-enum → boolean column predicate, the
+ * days-ago → ISO timestamp translation, the 1-enum → IN-over-many
+ * `building_material` expansion, the multi-chip district ILIKE OR
+ * predicate, and the bbox spatial predicates that aren't registry
+ * filters at all. The drift test in registryQueryBuilder.test.ts
+ * fails CI if a new registry filter is added that fits no path. */
 const applyFilters = <T>(q: T, f: ListingFilters): T => {
-  let r = q as unknown as {
+  let r = applyRegistryFilters(q, f) as unknown as {
     eq:  (c: string, v: unknown) => typeof r;
     gte: (c: string, v: unknown) => typeof r;
     lte: (c: string, v: unknown) => typeof r;
@@ -135,10 +147,6 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.lastSeenMinDays != null) r = r.lte('last_seen_at', isoNDaysAgo(f.lastSeenMinDays));
   if (f.firstSeenMaxDays != null) r = r.gte('first_seen_at', isoNDaysAgo(f.firstSeenMaxDays));
   if (f.firstSeenMinDays != null) r = r.lte('first_seen_at', isoNDaysAgo(f.firstSeenMinDays));
-  if (f.tomDaysMin != null) r = r.gte('tom_days', f.tomDaysMin);
-  if (f.tomDaysMax != null) r = r.lte('tom_days', f.tomDaysMax);
-  r = r.eq('category_main', f.categoryMain);
-  r = r.eq('category_type', f.categoryType);
   if (f.districts.length) {
     /* Each chip becomes:
      *   (district ilike *name* OR locality ilike *name*)
@@ -161,31 +169,9 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     };
     r = r.or(f.districts.map(chipClause).join(','));
   }
-  if (f.dispositions.length) r = r.in('disposition', f.dispositions);
-  if (f.priceMin != null) r = r.gte('price_czk', f.priceMin);
-  if (f.priceMax != null) r = r.lte('price_czk', f.priceMax);
-  if (f.areaMin  != null) r = r.gte('area_m2',  f.areaMin);
-  if (f.areaMax  != null) r = r.lte('area_m2',  f.areaMax);
-  if (f.hasBalcony !== 'any') r = r.eq('has_balcony', f.hasBalcony === 'yes');
-  if (f.hasLift    !== 'any') r = r.eq('has_lift',    f.hasLift    === 'yes');
-  if (f.hasParking !== 'any') r = r.eq('has_parking', f.hasParking === 'yes');
-  if (f.terrace    !== 'any') r = r.eq('terrace',     f.terrace    === 'yes');
-  if (f.cellar     !== 'any') r = r.eq('cellar',      f.cellar     === 'yes');
-  if (f.garage     !== 'any') r = r.eq('garage',      f.garage     === 'yes');
-  if (f.furnished       != null) r = r.eq('furnished',      f.furnished);
-  if (f.ownership       != null) r = r.eq('ownership',      f.ownership);
-  if (f.conditionMatch.length)   r = r.in('condition',      f.conditionMatch);
-  if (f.categorySubCb   != null) r = r.eq('category_sub_cb', f.categorySubCb);
   if (f.buildingMaterial != null) {
     r = r.in('building_type', buildingMaterialToValues(f.buildingMaterial));
   }
-  if (f.estateAreaMin   != null) r = r.gte('estate_area',   f.estateAreaMin);
-  if (f.estateAreaMax   != null) r = r.lte('estate_area',   f.estateAreaMax);
-  if (f.usableAreaMin   != null) r = r.gte('usable_area',   f.usableAreaMin);
-  if (f.usableAreaMax   != null) r = r.lte('usable_area',   f.usableAreaMax);
-  if (f.parkingLotsMin  != null) r = r.gte('parking_lots',  f.parkingLotsMin);
-  if (f.buildingConditionLevelMin  != null) r = r.gte('building_condition_level',  f.buildingConditionLevelMin);
-  if (f.apartmentConditionLevelMin != null) r = r.gte('apartment_condition_level', f.apartmentConditionLevelMin);
   const bbox = effectiveBbox(f);
   if (bbox) {
     r = r.gte('lng', bbox.west)
