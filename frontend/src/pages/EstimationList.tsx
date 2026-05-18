@@ -1,9 +1,10 @@
 import { useMemo } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
-import { useQuery, keepPreviousData } from '@tanstack/react-query';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useMutation, useQuery, keepPreviousData } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchEstimationsList,
+  submitEstimation,
 } from '@/lib/queries';
 import {
   fmtAbsolute,
@@ -18,6 +19,8 @@ import type {
   EstimationSource,
   EstimationStatus,
 } from '@/lib/types';
+import { ApiError } from '@/lib/api';
+import { buildRerunPayload, canRerun } from '@/lib/rerun';
 import { ControlGroup } from '@/components/controls';
 import { useNewEstimationModal } from '@/components/NewEstimationModal';
 
@@ -311,7 +314,7 @@ function Row({ run }: { run: EstimationRun }) {
         <SkillCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle">
-        <StatusPill status={run.status} />
+        <StatusCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle max-w-[200px]">
         <InputCell run={run} />
@@ -440,6 +443,43 @@ function EstimateCell({ run }: { run: EstimationRun }) {
     <>
       {fmtCzk(run.estimated_monthly_rent_czk)}
       <span className="ml-1 text-[var(--color-ink-3)] text-[0.7rem]">/mo</span>
+    </>
+  );
+}
+
+function StatusCell({ run }: { run: EstimationRun }) {
+  if (run.status !== 'failed' || !canRerun(run)) {
+    return <StatusPill status={run.status} />;
+  }
+  return (
+    <div className="flex flex-col items-start gap-1">
+      <StatusPill status={run.status} />
+      <RerunInlineButton run={run} />
+    </div>
+  );
+}
+
+function RerunInlineButton({ run }: { run: EstimationRun }) {
+  const navigate = useNavigate();
+  const mut = useMutation<EstimationRun, ApiError, void>({
+    mutationFn: () => submitEstimation(buildRerunPayload(run)),
+    onSuccess: (next) => navigate(`/estimation/${next.id}`),
+  });
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => mut.mutate()}
+        disabled={mut.isPending}
+        className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)] hover:text-[var(--color-copper)] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {mut.isPending ? 'Re-running…' : 'Re-run'}
+      </button>
+      {mut.error && (
+        <span className="text-[0.7rem] text-[var(--color-brick)]">
+          {mut.error.message || `HTTP ${mut.error.status}`}
+        </span>
+      )}
     </>
   );
 }

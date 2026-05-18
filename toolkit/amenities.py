@@ -101,18 +101,51 @@ def find_anchor_amenities(
     fetched_at_max: datetime | None = None
     total_rows = 0
 
+    # Pass 1: cache-freshness check per category.
+    miss_categories: list[str] = []
     for category in requested:
         is_hit = _cache_is_fresh(conn, lat, lng, radius_m, category, cache_ttl_days)
-        if not is_hit:
-            if client is None:
-                client = OverpassClient()
-            elements = client.fetch(
-                CATEGORY_TAGS[category], lat, lng, radius_m,
-            )
-            _write_cache(conn, lat, lng, radius_m, category, elements)
-
-        rows = _read_amenities(conn, lat, lng, radius_m, category)
         from_cache[category] = is_hit
+        if not is_hit:
+            miss_categories.append(category)
+
+    # Pass 2: one batched Overpass round-trip covering every cache-miss
+    # category. The QL builder ORs across the union of tag dicts, so this
+    # returns the same set of POIs we'd have asked for via N per-category
+    # queries — minus N-1 HTTP round-trips and N-1 throttle gaps.
+    if miss_categories:
+        if client is None:
+            client = OverpassClient()
+        combined_tags: list[dict[str, str | bool]] = []
+        for c in miss_categories:
+            combined_tags.extend(CATEGORY_TAGS[c])
+        all_elements = client.fetch(combined_tags, lat, lng, radius_m)
+
+        # Pass 3: classify each element into exactly one missing category
+        # (first-match-wins, in `miss_categories` order). The amenities
+        # schema's ON CONFLICT (source, source_id) DO UPDATE collapses
+        # rows to one-category-per-source_id; categories in CATEGORY_TAGS
+        # are disjoint in practice so this is rarely ambiguous.
+        per_cat_elements: dict[str, list[dict[str, Any]]] = {
+            c: [] for c in miss_categories
+        }
+        for el in all_elements:
+            tags = el.get("tags") or {}
+            for c in miss_categories:
+                if _matches_category(tags, CATEGORY_TAGS[c]):
+                    per_cat_elements[c].append(el)
+                    break
+
+        # Pass 4: write the cache for every miss category in one
+        # transaction — even ones with zero elements, so the next call
+        # sees the cache as fresh and doesn't re-fetch.
+        _write_cache_batched(
+            conn, lat, lng, radius_m, per_cat_elements,
+        )
+
+    # Pass 5: read amenities back per category (hits and misses both).
+    for category in requested:
+        rows = _read_amenities(conn, lat, lng, radius_m, category)
         for r in rows:
             if r["fetched_at"] is not None and (
                 fetched_at_max is None or r["fetched_at"] > fetched_at_max
@@ -195,7 +228,7 @@ def _cache_is_fresh(
               AND ST_DWithin(
                 center_geom,
                 ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
-                1.0
+                50.0
               )
               AND fetched_at > now() - make_interval(days => %(ttl)s)
             ORDER BY fetched_at DESC
@@ -209,56 +242,76 @@ def _cache_is_fresh(
         return cur.fetchone() is not None
 
 
-def _write_cache(
+def _matches_category(
+    element_tags: dict[str, Any],
+    category_tags: list[dict[str, str | bool]],
+) -> bool:
+    """OR across the list, AND within each dict; value=True means key present."""
+    for tag_dict in category_tags:
+        if all(
+            (k in element_tags) if v is True else (element_tags.get(k) == v)
+            for k, v in tag_dict.items()
+        ):
+            return True
+    return False
+
+
+def _write_cache_batched(
     conn: "psycopg.Connection",
     lat: float,
     lng: float,
     radius_m: int,
-    category: str,
-    elements: list[dict[str, Any]],
+    per_cat_elements: dict[str, list[dict[str, Any]]],
 ) -> None:
+    """Write amenities + amenity_fetches rows for many categories at once.
+
+    One transaction, one INSERT per element + one INSERT per category
+    into amenity_fetches (so zero-result categories still register a
+    cache row).
+    """
     with conn.transaction(), conn.cursor() as cur:
-        for el in elements:
+        for category, elements in per_cat_elements.items():
+            for el in elements:
+                cur.execute(
+                    """
+                    INSERT INTO amenities
+                      (source, source_id, category, name, geom, raw_json, fetched_at)
+                    VALUES (
+                      'osm', %(source_id)s, %(category)s, %(name)s,
+                      ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
+                      %(raw_json)s, now()
+                    )
+                    ON CONFLICT (source, source_id) DO UPDATE SET
+                      category = EXCLUDED.category,
+                      name     = EXCLUDED.name,
+                      geom     = EXCLUDED.geom,
+                      raw_json = EXCLUDED.raw_json,
+                      fetched_at = now()
+                    """,
+                    {
+                        "source_id": el["source_id"],
+                        "category": category,
+                        "name": el["name"],
+                        "lat": el["lat"],
+                        "lng": el["lng"],
+                        "raw_json": Jsonb(el["tags"]),
+                    },
+                )
             cur.execute(
                 """
-                INSERT INTO amenities
-                  (source, source_id, category, name, geom, raw_json, fetched_at)
+                INSERT INTO amenity_fetches
+                  (center_geom, radius_m, category, source, amenity_count)
                 VALUES (
-                  'osm', %(source_id)s, %(category)s, %(name)s,
                   ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
-                  %(raw_json)s, now()
+                  %(radius_m)s, %(category)s, 'osm', %(count)s
                 )
-                ON CONFLICT (source, source_id) DO UPDATE SET
-                  category = EXCLUDED.category,
-                  name     = EXCLUDED.name,
-                  geom     = EXCLUDED.geom,
-                  raw_json = EXCLUDED.raw_json,
-                  fetched_at = now()
                 """,
                 {
-                    "source_id": el["source_id"],
-                    "category": category,
-                    "name": el["name"],
-                    "lat": el["lat"],
-                    "lng": el["lng"],
-                    "raw_json": Jsonb(el["tags"]),
+                    "lat": lat, "lng": lng,
+                    "radius_m": radius_m, "category": category,
+                    "count": len(elements),
                 },
             )
-        cur.execute(
-            """
-            INSERT INTO amenity_fetches
-              (center_geom, radius_m, category, source, amenity_count)
-            VALUES (
-              ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography,
-              %(radius_m)s, %(category)s, 'osm', %(count)s
-            )
-            """,
-            {
-                "lat": lat, "lng": lng,
-                "radius_m": radius_m, "category": category,
-                "count": len(elements),
-            },
-        )
 
 
 def _read_amenities(
