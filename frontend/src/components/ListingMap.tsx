@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
-import type { MapRow } from '@/lib/queries';
+import type { CityIndexDefinition, CuratedCity, MapRow } from '@/lib/queries';
 import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 
@@ -86,6 +86,24 @@ export interface MapFlyToCommand {
   ts: number;
 }
 
+/* Phase QUAL — one city pin's GeoJSON feature properties. `value`
+ * is the active color-by-index reading (or null when no index is
+ * selected). `top_indexes` is a small precomputed string used in the
+ * popup header. */
+type CityFeatureProps = {
+  city_id: number;
+  name: string;
+  kraj_name: string;
+  population: number | null;
+  /* -1 sentinel for "no reading" (MapLibre paint expressions can't
+   * read literal null). The paint expression on `city-pins` gates
+   * on `< 0` to render a neutral grey. */
+  value: number;
+  popup_html: string;
+};
+
+type CityFC = GeoJSON.FeatureCollection<GeoJSON.Point, CityFeatureProps>;
+
 interface Props {
   rows: MapRow[];
   total: number | null;
@@ -118,6 +136,27 @@ interface Props {
    * write back to the URL bbox — the existing chip-based district
    * filter handles cohort narrowing. */
   flyTo?: MapFlyToCommand | null;
+  /* Phase QUAL — curated-city overlay. The Browse page hands in the
+   * subset of `curated_cities_public` that survives the active city-
+   * quality filter (or the full ~206 when no filter is active). The
+   * map renders them as a separate pin layer above the listing dots.
+   * When `showCities` is false the layer is hidden but the source
+   * stays loaded so toggling is instant. */
+  cities?: CuratedCity[];
+  showCities?: boolean;
+  /* If set, paint pins with a linear gradient between
+   * `cityIndexDefinition.scale_min` (red) and `.scale_max` (green).
+   * `cityIndexValues` is `{[city_id]: value}` for the chosen index;
+   * cities missing a value render as a neutral grey dot. */
+  colorByIndex?: CityIndexDefinition | null;
+  cityIndexValues?: Map<number, number>;
+  /* Every-index values for the currently-visible cities, keyed
+   * `${city_id}:${index_name}` → value. Used to render the popup
+   * detail when a pin is clicked. */
+  cityIndexValuesAll?: Map<string, number>;
+  cityIndexDefinitions?: CityIndexDefinition[];
+  onToggleShowCities?: (next: boolean) => void;
+  onColorByIndexChange?: (indexName: string | null) => void;
 }
 
 export default function ListingMap({
@@ -131,6 +170,14 @@ export default function ListingMap({
   onHover,
   centerCircle,
   flyTo,
+  cities,
+  showCities = true,
+  colorByIndex,
+  cityIndexValues,
+  cityIndexValuesAll,
+  cityIndexDefinitions,
+  onToggleShowCities,
+  onColorByIndexChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -182,6 +229,48 @@ export default function ListingMap({
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 
     map.on('load', () => {
+      /* Phase QUAL — curated city pins. Added FIRST so listing dots
+       * render above them. Initially empty; the cities-data effect
+       * below populates the GeoJSON when props arrive. The colour
+       * branch falls back to a neutral grey when no index is selected
+       * or the city is missing a value for the selected index. */
+      map.addSource('cities', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'city-pins',
+        type: 'circle',
+        source: 'cities',
+        paint: {
+          'circle-radius': [
+            'interpolate', ['linear'], ['zoom'],
+            5, 6,
+            10, 10,
+            14, 14,
+          ],
+          /* `value` is null when the city has no reading for the
+           * selected color-by-index OR no index is selected. MapLibre
+           * expressions can't compare against literal null, so we
+           * carry a sentinel out-of-range value (-1) for "no reading"
+           * and gate on that with a numeric test. */
+          'circle-color': [
+            'case',
+            ['<', ['get', 'value'], 0], 'rgba(120, 120, 120, 0.55)',
+            [
+              'interpolate', ['linear'], ['get', 'value'],
+              0,  '#c0392b',
+              5,  '#f1c40f',
+              10, '#2ecc71',
+            ],
+          ],
+          'circle-stroke-color': '#3a3a3a',
+          'circle-stroke-width': 1,
+          'circle-opacity': 0.55,
+          'circle-stroke-opacity': 0.7,
+        },
+      });
+
       map.addSource('listings', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
@@ -387,6 +476,32 @@ export default function ListingMap({
         },
       });
 
+      /* Phase QUAL — city pin interactions. Click pops up the city
+       * card with population + every active index value. Hover shows
+       * pointer cursor; we do NOT push city hovers to onHover (which
+       * is wired to the cross-source listing highlight). */
+      map.on('mouseenter', 'city-pins', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'city-pins', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'city-pins', (e) => {
+        const f = e.features?.[0];
+        if (!f || f.geometry.type !== 'Point') return;
+        const props = f.properties as unknown as CityFeatureProps;
+        popupRef.current?.remove();
+        popupRef.current = new maplibregl.Popup({
+          closeButton: true,
+          closeOnClick: true,
+          maxWidth: '320px',
+          className: 'listing-popup city-popup',
+        })
+          .setLngLat(f.geometry.coordinates as [number, number])
+          .setHTML(props.popup_html)
+          .addTo(map);
+      });
+
       setReady(true);
 
       /* Restore the exact viewport captured in the URL on mount.
@@ -431,6 +546,66 @@ export default function ListingMap({
       mapRef.current = null;
     };
   }, []);
+
+  /* Phase QUAL — push the filtered city set into the `cities` source
+   * whenever the operator changes the city-quality filter, the color-
+   * by-index, or the underlying data. The MapLibre `interpolate` paint
+   * expression on `city-pins` reads `properties.value` so a change of
+   * colorByIndex is implemented as a fresh setData with new values. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const src = map.getSource('cities') as GeoJSONSource | undefined;
+    if (!src) return;
+    const list = cities ?? [];
+    const idxVals = cityIndexValues ?? new Map<number, number>();
+    const allDefs = cityIndexDefinitions ?? [];
+    const allVals = cityIndexValuesAll ?? new Map<string, number>();
+    /* MapLibre paint expressions can't read literal null, so we use
+     * -1 as the "no reading" sentinel. The paint expression on
+     * `city-pins` checks `< 0` and switches to a neutral grey. */
+    const fc: CityFC = {
+      type: 'FeatureCollection',
+      features: list.map((c) => {
+        const v = idxVals.get(c.city_id);
+        const value = typeof v === 'number' && Number.isFinite(v) ? v : -1;
+        return {
+          type: 'Feature',
+          id: c.city_id,
+          geometry: { type: 'Point', coordinates: [c.lng, c.lat] },
+          properties: {
+            city_id: c.city_id,
+            name: c.name,
+            kraj_name: c.kraj_name,
+            population: c.population,
+            value,
+            popup_html: cityPopupHtml(c, allDefs, allVals, colorByIndex ?? null),
+          },
+        };
+      }),
+    };
+    src.setData(fc);
+
+    /* Toggle layer visibility. The source data stays loaded so flipping
+     * `showCities` is instant. Also gate visibility on whether there
+     * are any cities to show — avoids drawing a stale empty layer
+     * during the initial load. */
+    if (map.getLayer('city-pins')) {
+      map.setLayoutProperty(
+        'city-pins',
+        'visibility',
+        showCities && list.length > 0 ? 'visible' : 'none',
+      );
+    }
+  }, [
+    cities,
+    showCities,
+    colorByIndex,
+    cityIndexValues,
+    cityIndexValuesAll,
+    cityIndexDefinitions,
+    ready,
+  ]);
 
   // Sync the centre+radius overlay polygon whenever the prop changes.
   // No-op until the map's `load` event has run — until then there's
@@ -549,6 +724,80 @@ export default function ListingMap({
           </button>
         )}
       </div>
+      {cities && cities.length > 0 && (
+        <CityMapControls
+          showCities={showCities}
+          onToggleShowCities={onToggleShowCities}
+          colorByIndex={colorByIndex ?? null}
+          cityIndexDefinitions={cityIndexDefinitions ?? []}
+          onColorByIndexChange={onColorByIndexChange}
+          cityCount={cities.length}
+        />
+      )}
+    </div>
+  );
+}
+
+function CityMapControls({
+  showCities,
+  onToggleShowCities,
+  colorByIndex,
+  cityIndexDefinitions,
+  onColorByIndexChange,
+  cityCount,
+}: {
+  showCities: boolean;
+  onToggleShowCities?: (next: boolean) => void;
+  colorByIndex: CityIndexDefinition | null;
+  cityIndexDefinitions: ReadonlyArray<CityIndexDefinition>;
+  onColorByIndexChange?: (indexName: string | null) => void;
+  cityCount: number;
+}) {
+  return (
+    <div className="pointer-events-none absolute bottom-3 left-3 flex flex-col gap-2 items-start">
+      <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)]">
+        <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
+          <input
+            type="checkbox"
+            checked={showCities}
+            onChange={(e) => onToggleShowCities?.(e.target.checked)}
+          />
+          <span>Show cities</span>
+          <span className="text-[var(--color-ink-3)] tabular-nums">({cityCount})</span>
+        </label>
+      </div>
+      {showCities && (
+        <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] text-[0.75rem]">
+          <span className="text-[var(--color-ink-2)] font-medium">Color by:</span>
+          <select
+            className="text-[0.75rem] bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded px-1.5 py-0.5 max-w-[200px]"
+            value={colorByIndex?.index_name ?? ''}
+            onChange={(e) => onColorByIndexChange?.(e.target.value || null)}
+          >
+            <option value="">None</option>
+            {cityIndexDefinitions.map((d) => (
+              <option key={d.index_name} value={d.index_name}>
+                {d.label_en ?? d.label_cs}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+      {showCities && colorByIndex && (
+        <div className="pointer-events-auto flex flex-col gap-1 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] min-w-[160px]">
+          <div
+            className="h-1.5 rounded-sm"
+            style={{
+              background: 'linear-gradient(to right, #c0392b 0%, #f1c40f 50%, #2ecc71 100%)',
+            }}
+          />
+          <div className="flex justify-between text-[0.65rem] text-[var(--color-ink-3)] tabular-nums">
+            <span>{colorByIndex.scale_min}</span>
+            <span className="text-[var(--color-ink-2)]">{colorByIndex.label_en ?? colorByIndex.label_cs}</span>
+            <span>{colorByIndex.scale_max}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -594,4 +843,53 @@ function escape(s: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function cityPopupHtml(
+  c: CuratedCity,
+  defs: ReadonlyArray<CityIndexDefinition>,
+  values: Map<string, number>,
+  highlighted: CityIndexDefinition | null,
+): string {
+  const popLabel = c.population != null
+    ? `${c.population.toLocaleString('cs-CZ')} obyv.${c.population_as_of_year ? ` (${c.population_as_of_year})` : ''}`
+    : '';
+  /* Sort: the highlighted index first, then category aggregates, then
+   * sub-indexes by sort_order. Cap at 8 rows so a 33-index popup
+   * doesn't sprawl. */
+  const sortedDefs = [...defs].sort((a, b) => {
+    const aHi = highlighted && a.index_name === highlighted.index_name ? 0 : 1;
+    const bHi = highlighted && b.index_name === highlighted.index_name ? 0 : 1;
+    if (aHi !== bHi) return aHi - bHi;
+    const order: Record<string, number> = {
+      overall: 0, health_env: 1, material_edu: 2, services_relations: 3, sub_index: 4,
+    };
+    if (order[a.category] !== order[b.category]) {
+      return order[a.category] - order[b.category];
+    }
+    return a.sort_order - b.sort_order;
+  });
+  const rows = sortedDefs.slice(0, 8).map((d) => {
+    const key = `${c.city_id}:${d.index_name}`;
+    const v = values.get(key);
+    const label = d.label_en ?? d.label_cs;
+    const valueText = typeof v === 'number'
+      ? v.toFixed(1)
+      : '—';
+    const isHi = highlighted && d.index_name === highlighted.index_name;
+    return `
+      <p class="lp-meta${isHi ? ' lp-strong' : ''}">
+        <span>${escape(label)}</span>
+        <span class="lp-mono">${escape(valueText)}</span>
+      </p>`;
+  }).join('');
+  return `
+    <div class="lp">
+      <div class="lp-row">
+        <p class="lp-price">${escape(c.name)}</p>
+      </div>
+      <p class="lp-district">${escape(c.kraj_name)}${popLabel ? ` · ${escape(popLabel)}` : ''}</p>
+      ${rows}
+    </div>
+  `;
 }

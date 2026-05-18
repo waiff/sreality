@@ -67,6 +67,8 @@ class UiControl(StrEnum):
     CSV_INPUT = "csv_input"            # comma-separated string list
     BOOLEAN = "boolean"                # plain checkbox
     LOCATION = "location"              # composite: districts + map + dot/radius
+    CITY_INDEX_RULES = "city_index_rules"  # repeatable {index, op, threshold} rows
+    NEAR_CITY_RULE = "near_city_rule"  # city_index_rules + radius_km + population
 
 
 class FilterType(StrEnum):
@@ -79,6 +81,8 @@ class FilterType(StrEnum):
     INT_LIST = "int_list"
     LOCATION = "location"            # composite — only used with UiControl.LOCATION
     DISTRICT_CHIP_LIST = "district_chip_list"  # list of {name, context|null} — Browse/Watchdog districts
+    CITY_INDEX_RULE_LIST = "city_index_rule_list"  # list of {index_name, op, value} — Browse/Watchdog city quality
+    NEAR_CITY_PROXIMITY = "near_city_proximity"   # composite {index_rules, population_min, radius_km}
 
 
 # --- value containers -----------------------------------------------------
@@ -238,6 +242,7 @@ CATEGORY_VELOCITY = "Velocity"
 CATEGORY_STATUS = "Status"
 CATEGORY_CURATION = "Curation"
 CATEGORY_COHORT = "Cohort tuning"
+CATEGORY_CITY_QUALITY = "City quality"
 
 
 _ALL_AGENDAS = frozenset(Agenda)
@@ -1069,6 +1074,75 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_CURATION,
             ui_control=UiControl.MULTISELECT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+        ),
+
+        # --- city quality (BROWSE / WATCHDOG only — by design, the
+        # --- estimation agent / comparables tool do not see these) -------
+        FilterDef(
+            id="city_index_rules",
+            type=FilterType.CITY_INDEX_RULE_LIST,
+            pg_column=None,
+            default=None,
+            description=(
+                "Filter listings to those located in a curated city whose "
+                "qualitative indexes meet every rule in the list. Each "
+                "rule is `{index_name: str, op: '>='|'<=', value: float}`. "
+                "Rules are AND'd. `index_name` is a slug from "
+                "`city_index_definitions_public` (e.g. `bezpecnost`, "
+                "`prakticti_lekari`). Listings outside the curated city "
+                "set (matched via ST_DWithin to the nearest curated "
+                "city's centroid using its `default_radius_m`) are "
+                "excluded when this filter is active."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.CITY_INDEX_RULES,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+        ),
+        FilterDef(
+            id="min_city_population",
+            type=FilterType.INT,
+            pg_column=None,
+            default=None,
+            description=(
+                "Lower bound on the listing's curated-city population "
+                "(latest `city_population` row). Applies only to "
+                "listings inside the curated-city footprint; others "
+                "fall through to the city-quality activation check."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 1500000, "step": 1000},
+        ),
+        FilterDef(
+            id="max_city_population",
+            type=FilterType.INT,
+            pg_column=None,
+            default=None,
+            description="Upper bound on curated-city population. See `min_city_population`.",
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 1500000, "step": 1000},
+        ),
+        FilterDef(
+            id="near_city_proximity",
+            type=FilterType.NEAR_CITY_PROXIMITY,
+            pg_column=None,
+            default=None,
+            description=(
+                "Restrict listings to those within `radius_km` km of "
+                "any curated city matching the inner index rules and "
+                "the optional population minimum. Composite shape: "
+                "`{index_rules: [{index_name, op, value}, ...], "
+                "population_min: int|null, radius_km: int}`. Index "
+                "rules are AND'd. Implementation uses "
+                "`ST_DWithin(listing.geom, ST_Union(matching_cities."
+                "centroid), radius_km*1000)`."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NEAR_CITY_RULE,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
         ),
 

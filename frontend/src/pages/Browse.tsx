@@ -18,6 +18,9 @@ import {
   type MapBounds,
 } from '@/lib/filters';
 import {
+  fetchCityIndexDefinitions,
+  fetchCityIndexValues,
+  fetchCuratedCities,
   fetchListingsForCards,
   fetchListingsForMap,
   fetchListingsForTable,
@@ -27,6 +30,9 @@ import {
   DEFAULT_SORT,
   type BrowseStats,
   type CardsResult,
+  type CityIndexDefinition,
+  type CityIndexValue,
+  type CuratedCity,
   type MapResult,
   type SortField,
   type SortSpec,
@@ -46,6 +52,29 @@ export default function Browse() {
   );
   const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10) || 1);
   const tabFromUrl = (searchParams.get('tab') ?? 'map') as TabKey;
+  /* Phase QUAL — map-overlay UI state. Not part of the filter spec
+   * (these don't narrow the cohort, they just paint city pins). Held
+   * in the URL so a shared link reproduces what the operator saw. */
+  const showCities = searchParams.get('cities') !== '0';
+  const colorByIndexName = searchParams.get('colorby') ?? null;
+  const setShowCities = useCallback(
+    (next: boolean) => {
+      const sp = new URLSearchParams(searchParams);
+      if (next) sp.delete('cities');
+      else sp.set('cities', '0');
+      setSearchParams(sp, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+  const setColorByIndex = useCallback(
+    (next: string | null) => {
+      const sp = new URLSearchParams(searchParams);
+      if (next) sp.set('colorby', next);
+      else sp.delete('colorby');
+      setSearchParams(sp, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
 
   const setFilters = useCallback(
     (next: ListingFilters) => {
@@ -163,6 +192,31 @@ export default function Browse() {
     enabled: tabFromUrl === 'map',
   });
 
+  /* Phase QUAL — curated cities + index defs + index values are
+   * small (~206 cities, ~33 defs, ~7K values) so fetch once per
+   * session and cache aggressively. The map and the filter UI
+   * both consume them. `staleTime: Infinity` is safe because the
+   * data only changes on an operator-triggered upload, which
+   * triggers a manual re-fetch via the cities-admin page. */
+  const citiesQuery = useQuery<CuratedCity[], Error>({
+    queryKey: ['curated_cities'],
+    queryFn: fetchCuratedCities,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const cityDefsQuery = useQuery<CityIndexDefinition[], Error>({
+    queryKey: ['city_index_definitions'],
+    queryFn: fetchCityIndexDefinitions,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const cityValuesQuery = useQuery<CityIndexValue[], Error>({
+    queryKey: ['city_index_values'],
+    queryFn: fetchCityIndexValues,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
   const cardsQuery = useQuery<CardsResult, Error>({
     queryKey: ['cards', filters, sort, page],
     queryFn: () => fetchListingsForCards(filters, sort, page),
@@ -183,6 +237,78 @@ export default function Browse() {
     placeholderData: (prev) => prev,
     enabled: tabFromUrl === 'stats',
   });
+
+  /* Build the city overlay payload. Filter the 206 curated cities
+   * client-side based on the active city-quality rules + population
+   * bounds — same predicate the `listings_with_city_quality` RPC
+   * applies server-side, just over a tiny in-memory dataset. The map
+   * shows whichever cities survive (zero pins when nothing matches);
+   * color coding paints them by the operator-selected index. */
+  const cityOverlay = useMemo(() => {
+    const cities = citiesQuery.data;
+    const defs = cityDefsQuery.data;
+    const values = cityValuesQuery.data;
+    if (!cities || !defs || !values) {
+      return {
+        cities: [] as CuratedCity[],
+        cityIndexValues: new Map<number, number>(),
+        cityIndexValuesAll: new Map<string, number>(),
+        colorByIndex: null as CityIndexDefinition | null,
+      };
+    }
+    const allMap = new Map<string, number>();
+    for (const v of values) {
+      allMap.set(`${v.city_id}:${v.index_name}`, v.value);
+    }
+    const colorDef = colorByIndexName
+      ? defs.find((d) => d.index_name === colorByIndexName) ?? null
+      : null;
+    const colorMap = new Map<number, number>();
+    if (colorDef) {
+      for (const v of values) {
+        if (v.index_name === colorDef.index_name) {
+          colorMap.set(v.city_id, v.value);
+        }
+      }
+    }
+    /* Apply the city-quality rules. A city passes when every rule
+     * holds (AND). Population bounds gate the same set. */
+    const rulesPass = (city: CuratedCity): boolean => {
+      for (const r of filters.cityIndexRules) {
+        const v = allMap.get(`${city.city_id}:${r.indexName}`);
+        if (v == null) return false;
+        const op = r.op ?? '>=';
+        if (op === '>='  && !(v >= r.value)) return false;
+        if (op === '<='  && !(v <= r.value)) return false;
+        if (op === '>'   && !(v >  r.value)) return false;
+        if (op === '<'   && !(v <  r.value)) return false;
+        if (op === '=='  && !(v === r.value)) return false;
+        if (op === '!='  && !(v !== r.value)) return false;
+      }
+      if (filters.minCityPopulation != null) {
+        if (city.population == null || city.population < filters.minCityPopulation) return false;
+      }
+      if (filters.maxCityPopulation != null) {
+        if (city.population == null || city.population > filters.maxCityPopulation) return false;
+      }
+      return true;
+    };
+    const matching = cities.filter(rulesPass);
+    return {
+      cities: matching,
+      cityIndexValues: colorMap,
+      cityIndexValuesAll: allMap,
+      colorByIndex: colorDef,
+    };
+  }, [
+    citiesQuery.data,
+    cityDefsQuery.data,
+    cityValuesQuery.data,
+    colorByIndexName,
+    filters.cityIndexRules,
+    filters.minCityPopulation,
+    filters.maxCityPopulation,
+  ]);
 
   const totalForBadge =
     tabFromUrl === 'table'
@@ -268,6 +394,14 @@ export default function Browse() {
                         : null
                     }
                     flyTo={mapFlyTo}
+                    cities={cityOverlay.cities}
+                    showCities={showCities}
+                    onToggleShowCities={setShowCities}
+                    colorByIndex={cityOverlay.colorByIndex}
+                    cityIndexValues={cityOverlay.cityIndexValues}
+                    cityIndexValuesAll={cityOverlay.cityIndexValuesAll}
+                    cityIndexDefinitions={cityDefsQuery.data ?? []}
+                    onColorByIndexChange={setColorByIndex}
                   />
                 </Suspense>
               </div>

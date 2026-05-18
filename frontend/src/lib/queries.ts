@@ -221,11 +221,70 @@ async function resolveTagPrefilter(
   );
 }
 
+/* Phase QUAL — `listings_with_city_quality` RPC prefilter. Same
+ * composition pattern as the tags prefilter above: when ANY city-quality
+ * predicate is active, the RPC returns the sreality_id allowlist and the
+ * main listings query AND's it via `.in('sreality_id', ids)`. Returns
+ * null when no city-quality filter is set so the fast path stays
+ * unchanged. */
+const hasCityQualityFilter = (f: ListingFilters): boolean =>
+  f.cityIndexRules.length > 0
+  || f.minCityPopulation != null
+  || f.maxCityPopulation != null
+  || f.nearCityProximity != null;
+
+async function resolveCityQualityPrefilter(
+  f: ListingFilters,
+): Promise<number[] | null> {
+  if (!hasCityQualityFilter(f)) return null;
+  const rules = f.cityIndexRules.map((r) => ({
+    index_name: r.indexName,
+    value: r.value,
+  }));
+  const proximity = f.nearCityProximity
+    ? {
+        index_rules: f.nearCityProximity.indexRules.map((r) => ({
+          index_name: r.indexName,
+          value: r.value,
+        })),
+        population_min: f.nearCityProximity.populationMin,
+        radius_km: f.nearCityProximity.radiusKm,
+      }
+    : null;
+  const { data, error } = await supabase.rpc('listings_with_city_quality', {
+    p_index_rules: rules.length === 0 ? null : rules,
+    p_pop_min: f.minCityPopulation,
+    p_pop_max: f.maxCityPopulation,
+    p_proximity: proximity,
+  });
+  if (error) throw error;
+  return ((data ?? []) as Array<{ sreality_id: number }>).map(
+    (r) => r.sreality_id,
+  );
+}
+
+/* Intersect two prefilter id sets (null = "no constraint"). Used so a
+ * filter that combines tags + city-quality applies both prefilters
+ * before paging the main query. */
+const intersectPrefilters = (
+  a: number[] | null,
+  b: number[] | null,
+): number[] | null => {
+  if (a == null) return b;
+  if (b == null) return a;
+  const set = new Set(b);
+  return a.filter((id) => set.has(id));
+};
+
 export const fetchListingsForMap = async (
   f: ListingFilters,
 ): Promise<MapResult> => {
-  const tagIds = await resolveTagPrefilter(f);
-  if (tagIds != null && tagIds.length === 0) {
+  const [tagIds, cityIds] = await Promise.all([
+    resolveTagPrefilter(f),
+    resolveCityQualityPrefilter(f),
+  ]);
+  const prefilter = intersectPrefilters(tagIds, cityIds);
+  if (prefilter != null && prefilter.length === 0) {
     return { rows: [], total: 0, capped: false };
   }
   const base = supabase
@@ -234,7 +293,9 @@ export const fetchListingsForMap = async (
     .not('lat', 'is', null)
     .not('lng', 'is', null);
   const filtered = applyFilters(base, f);
-  const scoped = tagIds != null ? filtered.in('sreality_id', tagIds) : filtered;
+  const scoped = prefilter != null
+    ? filtered.in('sreality_id', prefilter)
+    : filtered;
   const { data, count, error } = await scoped.limit(MAP_CAP);
   if (error) throw error;
   const rows = (data ?? []) as unknown as MapRow[];
@@ -274,8 +335,12 @@ export const fetchListingsForTable = async (
   sort: SortSpec,
   page: number,
 ): Promise<TableResult> => {
-  const tagIds = await resolveTagPrefilter(f);
-  if (tagIds != null && tagIds.length === 0) {
+  const [tagIds, cityIds] = await Promise.all([
+    resolveTagPrefilter(f),
+    resolveCityQualityPrefilter(f),
+  ]);
+  const prefilter = intersectPrefilters(tagIds, cityIds);
+  if (prefilter != null && prefilter.length === 0) {
     return { rows: [], total: 0 };
   }
   const from = (page - 1) * TABLE_PAGE_SIZE;
@@ -284,7 +349,9 @@ export const fetchListingsForTable = async (
     .from('listings_public')
     .select(TABLE_COLS, { count: 'exact' });
   const filtered = applyFilters(base, f);
-  const scoped = tagIds != null ? filtered.in('sreality_id', tagIds) : filtered;
+  const scoped = prefilter != null
+    ? filtered.in('sreality_id', prefilter)
+    : filtered;
   const sorted = scoped.order(sort.field, {
     ascending: sort.direction === 'asc',
     nullsFirst: false,
@@ -345,8 +412,12 @@ export const fetchListingsForCards = async (
   sort: SortSpec,
   page: number,
 ): Promise<CardsResult> => {
-  const tagIds = await resolveTagPrefilter(f);
-  if (tagIds != null && tagIds.length === 0) {
+  const [tagIds, cityIds] = await Promise.all([
+    resolveTagPrefilter(f),
+    resolveCityQualityPrefilter(f),
+  ]);
+  const prefilter = intersectPrefilters(tagIds, cityIds);
+  if (prefilter != null && prefilter.length === 0) {
     return { rows: [], total: 0 };
   }
   const from = (page - 1) * CARD_PAGE_SIZE;
@@ -355,7 +426,9 @@ export const fetchListingsForCards = async (
     .from('listings_public')
     .select(CARD_COLS, { count: 'exact' });
   const filtered = applyFilters(base, f);
-  const scoped = tagIds != null ? filtered.in('sreality_id', tagIds) : filtered;
+  const scoped = prefilter != null
+    ? filtered.in('sreality_id', prefilter)
+    : filtered;
   const sorted = scoped.order(sort.field, {
     ascending: sort.direction === 'asc',
     nullsFirst: false,
@@ -594,6 +667,66 @@ export const ping = async (): Promise<{ ok: boolean; count: number | null }> => 
     .from('listings_public')
     .select('*', { count: 'exact', head: true });
   return { ok: !error, count: count ?? null };
+};
+
+/* -------------------------------------------------------------------------- */
+/* Phase QUAL — curated cities (operator-curated qualitative indexes +        */
+/* population). Browse map renders matching cities as a separate pin layer;   */
+/* the filter UI picks rules + an optional color-coding index.                */
+/* -------------------------------------------------------------------------- */
+
+export interface CuratedCity {
+  city_id: number;
+  name: string;
+  kraj_name: string;
+  lat: number;
+  lng: number;
+  default_radius_m: number;
+  population: number | null;
+  population_as_of_year: number | null;
+}
+
+export interface CityIndexDefinition {
+  index_name: string;
+  label_cs: string;
+  label_en: string | null;
+  category: 'overall' | 'health_env' | 'material_edu' | 'services_relations' | 'sub_index';
+  scale_min: number;
+  scale_max: number;
+  higher_is_better: boolean;
+  sort_order: number;
+  description: string | null;
+}
+
+export interface CityIndexValue {
+  city_id: number;
+  index_name: string;
+  value: number;
+}
+
+export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
+  const { data, error } = await supabase
+    .from('curated_cities_public')
+    .select('*')
+    .order('name');
+  if (error) throw error;
+  return (data ?? []) as CuratedCity[];
+};
+
+export const fetchCityIndexDefinitions = async (): Promise<CityIndexDefinition[]> => {
+  const { data, error } = await supabase
+    .from('city_index_definitions_public')
+    .select('*');
+  if (error) throw error;
+  return (data ?? []) as CityIndexDefinition[];
+};
+
+export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
+  const { data, error } = await supabase
+    .from('city_index_values_public')
+    .select('city_id,index_name,value');
+  if (error) throw error;
+  return (data ?? []) as CityIndexValue[];
 };
 
 /* -------------------------------------------------------------------------- */

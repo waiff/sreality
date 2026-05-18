@@ -91,6 +91,22 @@ class ComparableFilters:
     last_seen_max_days: int | None = None
     first_seen_min_days: int | None = None
     first_seen_max_days: int | None = None
+    # City-quality filters (Phase QUAL). Browse + Watchdog only — the
+    # registry's agenda gating keeps these out of the agent's tool
+    # schema. Each entry in `city_index_rules` is a dict
+    # `{"index_name": str, "op": ">="|"<=", "value": float}`. Rules are
+    # AND'd. A listing matches when there exists a curated city C such
+    # that the listing is within C.default_radius_m of C.centroid AND
+    # every index rule holds for C.
+    city_index_rules: list[dict[str, Any]] | None = None
+    min_city_population: int | None = None
+    max_city_population: int | None = None
+    # Proximity: `{"index_rules": [...], "population_min": int|null,
+    # "radius_km": int}`. A listing matches when there exists a curated
+    # city C within `radius_km*1000` of the listing AND the inner rules
+    # all hold for C. `radius_km` defaults to 5 in the UI but the SQL
+    # requires it explicit.
+    near_city_proximity: dict[str, Any] | None = None
 
 
 _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
@@ -107,6 +123,103 @@ _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
 }
 
 _HARD_LIMIT = 500
+
+
+_ALLOWED_OPS: frozenset[str] = frozenset({">=", "<=", "==", "!=", ">", "<"})
+
+
+def _index_rule_predicate(
+    alias: str,
+    rule: dict[str, Any],
+    pname_idx: str,
+    pname_val: str,
+) -> str:
+    """Render one index-rule predicate against a city_index_values_public alias.
+
+    `rule['op']` is sanitised against `_ALLOWED_OPS`; defaults to `>=`.
+    Both rule values are bound; only the operator token is inlined.
+    """
+    op = rule.get("op", ">=")
+    if op not in _ALLOWED_OPS:
+        op = ">="
+    return (
+        f"EXISTS ("
+        f"SELECT 1 FROM city_index_values_public {alias} "
+        f"WHERE {alias}.city_id = c.city_id "
+        f"AND {alias}.index_name = %({pname_idx})s "
+        f"AND {alias}.value {op} %({pname_val})s)"
+    )
+
+
+def _city_quality_clauses(
+    filters: ComparableFilters,
+) -> tuple[list[str], dict[str, Any]]:
+    """Render the Phase QUAL clauses (city quality, population, proximity).
+
+    Three concerns, one helper, isolated from the rest of
+    `_shared_filter_where` so the Watchdog matcher can reuse the same
+    code path. Returns the clause list + parameter additions.
+    """
+    where: list[str] = []
+    params: dict[str, Any] = {}
+
+    rules = filters.city_index_rules or []
+    pop_min = filters.min_city_population
+    pop_max = filters.max_city_population
+
+    if rules or pop_min is not None or pop_max is not None:
+        sub_where: list[str] = [
+            "ST_DWithin("
+            "l.geom, "
+            "ST_SetSRID(ST_MakePoint(c.lng, c.lat), 4326)::geography, "
+            "c.default_radius_m)"
+        ]
+        for i, rule in enumerate(rules):
+            idx_p, val_p = f"ciq_rule_{i}_name", f"ciq_rule_{i}_val"
+            sub_where.append(_index_rule_predicate(f"viq_{i}", rule, idx_p, val_p))
+            params[idx_p] = rule["index_name"]
+            params[val_p] = rule["value"]
+        if pop_min is not None:
+            sub_where.append("c.population >= %(min_city_population)s")
+            params["min_city_population"] = pop_min
+        if pop_max is not None:
+            sub_where.append("c.population <= %(max_city_population)s")
+            params["max_city_population"] = pop_max
+        where.append(
+            "EXISTS (SELECT 1 FROM curated_cities_public c WHERE "
+            + " AND ".join(sub_where)
+            + ")"
+        )
+
+    prox = filters.near_city_proximity
+    if prox:
+        prox_rules = prox.get("index_rules") or []
+        radius_km = prox.get("radius_km")
+        if not isinstance(radius_km, (int, float)) or radius_km <= 0:
+            raise ValueError("near_city_proximity.radius_km must be > 0")
+        sub_where = [
+            "ST_DWithin("
+            "l.geom, "
+            "ST_SetSRID(ST_MakePoint(c.lng, c.lat), 4326)::geography, "
+            "%(near_city_radius_m)s)"
+        ]
+        params["near_city_radius_m"] = int(radius_km) * 1000
+        for i, rule in enumerate(prox_rules):
+            idx_p, val_p = f"ciq_prox_{i}_name", f"ciq_prox_{i}_val"
+            sub_where.append(_index_rule_predicate(f"vp_{i}", rule, idx_p, val_p))
+            params[idx_p] = rule["index_name"]
+            params[val_p] = rule["value"]
+        prox_pop_min = prox.get("population_min")
+        if prox_pop_min is not None:
+            sub_where.append("c.population >= %(near_city_population_min)s")
+            params["near_city_population_min"] = prox_pop_min
+        where.append(
+            "EXISTS (SELECT 1 FROM curated_cities_public c WHERE "
+            + " AND ".join(sub_where)
+            + ")"
+        )
+
+    return where, params
 
 
 def _shared_filter_where(
@@ -280,6 +393,10 @@ def _shared_filter_where(
             "l.first_seen_at <= now() - make_interval(days => %(first_seen_min_days)s)"
         )
         params["first_seen_min_days"] = filters.first_seen_min_days
+
+    city_clauses, city_params = _city_quality_clauses(filters)
+    where.extend(city_clauses)
+    params.update(city_params)
 
     if not filters.include_unreliable:
         where.append(

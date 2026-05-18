@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 11:52 UTC_
+_Last refreshed: 2026-05-18 18:41 UTC_
 
-**Branch:** `claude/rental-estimator-prompt-Beviv`
+**Branch:** `claude/review-qual-roadmap-TutYL`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 79 files, latest `076_rental_estimator_v3_condition_filters.sql`.
+**Migrations on disk:** 81 files, latest `078_curated_cities.sql`.
 
 **Last 10 commits:**
 
 ```
+8be16c4 Merge pull request #148 from waiff/claude/fix-failed-estimation-ogCpV
+fbec766 estimations: tool runtime panel, retry-on-list, batched walkability
+7cb6b20 Merge pull request #147 from waiff/claude/drop-listings-raw-json-idx
+c64603f migrations: drop unused 1.8GB GIN index on listings.raw_json
+234f00f Merge pull request #146 from waiff/claude/browse-condition-filter-wiring
+fed76f5 browse: registry-driven PostgREST filter dispatch + drift guard
+f66db7a browse: actually apply condition-level filters in PostgREST query
+77d8497 Merge pull request #145 from waiff/claude/rental-estimator-prompt-Beviv
+a9a9222 roadmap: refresh auto-status block
 88161c6 estimator: v3 prompt + surface target condition for three-axis matching
-ad2e0d8 Merge pull request #144 from waiff/claude/condition-watchdog-agent-rebased
-8932cbe condition: expose level filters to Watchdog + agent (B3 follow-up)
-bedb966 Merge pull request #142 from waiff/claude/fix-district-filter-AAm5L
-bd5b805 Merge origin/main into claude/fix-district-filter-AAm5L
-ac93d06 roadmap: refresh auto-status block
-d1bf4b0 browse + watchdog: narrow district chips to parent municipality
-d2fe5c8 Merge pull request #141 from waiff/claude/condition-scoring-b4
-d251761 roadmap: refresh auto-status block
-816e458 condition: B4 — scrape pipeline scoring phase + backfill 0-day escape hatch
 ```
 
 <!-- END AUTO-STATUS -->
@@ -332,19 +332,88 @@ Operator-confirmed approach:
   shape (pandas-ready vs pure dicts), whether the agent can
   reference earlier tool outputs by name, soft-cost cap per run.
 
-### Phase QUAL: Qualitative city data + population overlay (proposed)
+### Phase QUAL: Qualitative city data + population overlay (in progress)
 
 Operator-curated qualitative indexes (employment, safety, services,
-amenities, etc. — roughly 30 columns) for ~200 Czech cities, attached
-to the geo data already on each listing, plus an authoritative
-population column sourced from a public registry. Both surfaces feed
-the Browse filters and the U2.7 notification subscriptions so an
-alert can fire when "listing in a city with employment-index > 5 and
-population > 20 000" or on a compound proximity rule ("listing in a
-city with population > 5 000 and within 5 km of a city with
-safety-index > 6, services-index > X and population > 20 000") —
-combinable with the standard listing facets (floor area, disposition,
-price, price per m², etc.).
+amenities, etc. — 33 metrics from `data/obce_v_datech_2025.csv`) for
+206 Czech cities, attached to the geo data already on each listing,
+plus an authoritative population column sourced from ČSÚ. Both
+surfaces feed the Browse filters and the U2.7 notification
+subscriptions so an alert can fire when "listing in a city with
+employment-index > 5 and population > 20 000" or on a compound
+proximity rule ("within 5 km of a city with safety-index > 6,
+services-index > X and population > 20 000") — combinable with the
+standard listing facets (floor area, disposition, price, price per
+m², etc.). Browse map also renders matching cities as a separate pin
+overlay that can be heatmap-color-coded by any chosen index.
+
+**What's shipped** (this commit):
+
+- **Schema** (migrations 078 + 079): `curated_cities`,
+  `city_index_revisions`, `city_index_values`, `city_index_definitions`,
+  `city_population`, plus the three `*_public` views and the
+  `listings_with_city_quality(p_index_rules, p_pop_min, p_pop_max,
+  p_proximity)` RPC. Anon SELECT on the views and EXECUTE on the
+  RPC; SECURITY INVOKER throughout.
+- **Backend**: three new filter defs in `toolkit/filter_registry.py`
+  (`city_index_rules`, `min/max_city_population`,
+  `near_city_proximity`), gated to BROWSE + WATCHDOG agendas only so
+  the estimation agent / comparables tool stay unaware.
+  `toolkit/comparables._shared_filter_where` and
+  `api/notifications._build_match_clauses` both render the new
+  clauses by delegating to the shared `_city_quality_clauses` helper
+  — Browse and Watchdog stay in lockstep.
+- **Browse data path**: `frontend/src/lib/queries.ts` resolves the
+  city-quality sreality_id allowlist via the new RPC and AND's it
+  alongside the existing tag prefilter — same composition pattern as
+  `listings_with_tags`. Map / Table / Cards all honour the new
+  predicate without touching the existing PostgREST fast path.
+- **Filter UI**: new "City quality" `<ControlGroup>` in
+  `Filters.tsx` with the `CityIndexRulesPicker` custom widget
+  (dropdown grouped by category × threshold input, repeatable) plus
+  range inputs for min / max city population.
+- **Map overlay**: `ListingMap.tsx` renders the curated city set as
+  a separate `city-pins` GeoJSON layer above the listing dots, with
+  bottom-left controls for "Show cities" toggle + "Color by:"
+  dropdown + gradient legend. Heatmap paint expression
+  `red(0)→amber(5)→green(10)` matches the data's 0–10 index range.
+  Click pin → popup with city name, kraj, population, and every
+  index value (highlighted index pinned to the top).
+- **Tooling**: `scripts/seed_curated_cities.py` reads the operator
+  CSV, geocodes each (Město, Kraj) pair via Mapy.cz, writes to the
+  DB. Per-city radius is derived from the Mapy.cz bbox (clamped
+  2–25 km). Operator triggers via
+  `.github/workflows/seed_curated_cities.yml` (Mapy.cz + Supabase
+  secrets, geocode cache committed back to the branch for offline
+  reruns). Seed is idempotent: curated_cities upsert by `(name,
+  kraj_name)`, definitions upsert by `index_name`, each run appends
+  a new `city_index_revisions` row.
+
+**What's next** (separate slice):
+
+- **Population CSV**: ČSÚ "Počet obyvatel v obcích k 1.1.2024"
+  snapshot committed at `data/csu_population_2024.csv`. Seed
+  script already loads it on present; an admin-page "Refresh
+  population" button is the next-year follow-up.
+- **Stats tab**: `browse_stats` RPC doesn't yet honour the
+  city-quality predicate, so the Stats counts are unfiltered when
+  a city-quality filter is active. Map and Table tabs are
+  correctly filtered. Migration to extend `browse_stats` is the
+  follow-up.
+- **`/cities` admin page**: in-app uploader for next year's CSV
+  (preview + confirm two-step). Today's flow goes through the
+  GitHub Action.
+- **Watchdog UI surface**: the registry-driven `<FilterForm>` will
+  render the new section in the Watchdog editor automatically once
+  the editor consumes the `CityIndexRulesPicker` custom widget
+  (one-line wire-up in `WatchdogEdit.tsx`).
+- **Operator decisions still open**:
+  - Per-city `default_radius_m` tuning. The current value comes
+    from each city's Mapy.cz bbox half-diagonal (clamped 2–25 km).
+    Major cities like Praha may want a manual override; the column
+    is editable in `curated_cities`.
+  - Whether to expose the `op` operator (currently locked to `>=`
+    in the picker) or keep it simple.
 
 Headline scope:
 - Migration: `cities(city_id, name, csu_code, geom geography(point,

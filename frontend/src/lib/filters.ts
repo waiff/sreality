@@ -42,6 +42,29 @@ export interface CenterRadius {
 
 export type LocationMode = 'viewport' | 'center_radius';
 
+/* Phase QUAL — one entry in `cityIndexRules`. `indexName` is the slug
+ * from `city_index_definitions_public` (e.g. `bezpecnost`,
+ * `prakticti_lekari`); `value` is the threshold the city must meet
+ * under `op` (defaults to `>=`). Multiple rules AND. Browse and the
+ * Watchdog matcher (`api/notifications._build_match_clauses`) share
+ * the same JSON shape. */
+export interface CityIndexRule {
+  indexName: string;
+  op?: '>=' | '<=' | '==' | '!=' | '>' | '<';
+  value: number;
+}
+
+/* Phase QUAL — composite "within X km of a city matching Y" filter.
+ * `indexRules` is the inner per-city criterion (same shape as
+ * `cityIndexRules`); `populationMin` is an optional minimum for the
+ * matching city; `radiusKm` is the spatial range to allow listings
+ * around any matching city. */
+export interface NearCityProximity {
+  indexRules: CityIndexRule[];
+  populationMin: number | null;
+  radiusKm: number;
+}
+
 /* One entry of the district chip list. `name` is the primary phrase
  * to match (`district` / `locality` ILIKE substring); `context` is
  * the parent municipality from Mapy.cz's `regionalStructure` that
@@ -121,6 +144,16 @@ export interface ListingFilters {
    * the spatial predicate; bounds is ignored on the SQL side. */
   locationMode: LocationMode;
   centerRadius: CenterRadius | null;
+  /* Phase QUAL — curated-city quality filters. Browse + Watchdog only;
+   * intentionally not surfaced to the estimation agent / comparables
+   * tool (the registry's agenda gating enforces that). The Browse
+   * map renders matching cities as a separate pin layer on top of
+   * the listing dots, and the listing query is restricted to the
+   * cities' footprints via the `listings_with_city_quality` RPC. */
+  cityIndexRules: CityIndexRule[];
+  minCityPopulation: number | null;
+  maxCityPopulation: number | null;
+  nearCityProximity: NearCityProximity | null;
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -163,6 +196,10 @@ export const DEFAULT_FILTERS: ListingFilters = {
   bounds: null,
   locationMode: 'viewport',
   centerRadius: null,
+  cityIndexRules: [],
+  minCityPopulation: null,
+  maxCityPopulation: null,
+  nearCityProximity: null,
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -320,7 +357,62 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
       ? 'center_radius'
       : 'viewport',
     centerRadius: parseCenterRadius(sp.get('center')),
+    cityIndexRules: parseCityIndexRules(sp.get('cq_rules')),
+    minCityPopulation: parseIntOrNull(sp.get('cq_pop_min')),
+    maxCityPopulation: parseIntOrNull(sp.get('cq_pop_max')),
+    nearCityProximity: parseNearCityProximity(sp.get('cq_prox')),
   };
+};
+
+/* `cq_rules` URL shape: `indexName:value[:op],indexName:value[:op]`.
+ * `op` defaults to `>=` when omitted, which is the only operator the
+ * Browse UI exposes (matches Watchdog parity). */
+const _VALID_OPS = new Set(['>=', '<=', '==', '!=', '>', '<']);
+const parseCityIndexRules = (s: string | null): CityIndexRule[] => {
+  if (!s) return [];
+  const out: CityIndexRule[] = [];
+  for (const raw of s.split(',')) {
+    const parts = raw.split(':');
+    if (parts.length < 2) continue;
+    const [name, valStr, opStr] = parts;
+    if (!name) continue;
+    const value = Number(valStr);
+    if (!Number.isFinite(value)) continue;
+    const op = opStr && _VALID_OPS.has(opStr)
+      ? (opStr as CityIndexRule['op'])
+      : '>=';
+    out.push({ indexName: name, op, value });
+  }
+  return out;
+};
+
+const fmtCityIndexRules = (rules: CityIndexRule[]): string =>
+  rules
+    .map((r) => {
+      const op = r.op && r.op !== '>=' ? `:${r.op}` : '';
+      return `${r.indexName}:${r.value}${op}`;
+    })
+    .join(',');
+
+/* `cq_prox` URL shape: `radiusKm|indexName:value,...|pop_min`.
+ * `pop_min` is empty when null. */
+const parseNearCityProximity = (s: string | null): NearCityProximity | null => {
+  if (!s) return null;
+  const parts = s.split('|');
+  if (parts.length < 2) return null;
+  const radiusKm = Number(parts[0]);
+  if (!Number.isFinite(radiusKm) || radiusKm <= 0) return null;
+  const indexRules = parseCityIndexRules(parts[1] ?? '');
+  const popMin = parts[2] && parts[2] !== ''
+    ? parseIntOrNull(parts[2])
+    : null;
+  return { radiusKm: Math.trunc(radiusKm), indexRules, populationMin: popMin };
+};
+
+const fmtNearCityProximity = (p: NearCityProximity): string => {
+  const rules = fmtCityIndexRules(p.indexRules);
+  const pop = p.populationMin == null ? '' : String(p.populationMin);
+  return `${p.radiusKm}|${rules}|${pop}`;
 };
 
 const parseBounds = (s: string | null): MapBounds | null => {
@@ -429,6 +521,14 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
       `${fmtBoundsCoord(lat)},${fmtBoundsCoord(lng)},${radius_m}`,
     );
   }
+  if (f.cityIndexRules.length) {
+    sp.set('cq_rules', fmtCityIndexRules(f.cityIndexRules));
+  }
+  if (f.minCityPopulation != null) sp.set('cq_pop_min', String(f.minCityPopulation));
+  if (f.maxCityPopulation != null) sp.set('cq_pop_max', String(f.maxCityPopulation));
+  if (f.nearCityProximity) {
+    sp.set('cq_prox', fmtNearCityProximity(f.nearCityProximity));
+  }
   return sp;
 };
 
@@ -521,7 +621,11 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.tags.length === 0 &&
   f.bounds == null &&
   f.locationMode === 'viewport' &&
-  f.centerRadius == null;
+  f.centerRadius == null &&
+  f.cityIndexRules.length === 0 &&
+  f.minCityPopulation == null &&
+  f.maxCityPopulation == null &&
+  f.nearCityProximity == null;
 
 
 /* -------------------------------------------------------------------------- */
@@ -574,6 +678,10 @@ export const REGISTRY_KEY_MAP = {
   last_seen_max_days: 'lastSeenMaxDays',
   first_seen_min_days: 'firstSeenMinDays',
   first_seen_max_days: 'firstSeenMaxDays',
+  city_index_rules: 'cityIndexRules',
+  min_city_population: 'minCityPopulation',
+  max_city_population: 'maxCityPopulation',
+  near_city_proximity: 'nearCityProximity',
 } as const satisfies Record<string, keyof ListingFilters>;
 
 type RegistryKey = keyof typeof REGISTRY_KEY_MAP;
@@ -610,6 +718,9 @@ export function listingFiltersToRegistryView(
       || registryId === 'condition_match'
     ) {
       const arr = v as unknown[];
+      out[registryId] = arr.length === 0 ? null : arr;
+    } else if (registryId === 'city_index_rules') {
+      const arr = v as CityIndexRule[];
       out[registryId] = arr.length === 0 ? null : arr;
     } else {
       out[registryId] = v;
@@ -652,6 +763,10 @@ export function applyRegistryUpdate(
   if (id === 'condition_match') {
     const next = value == null ? [] : (value as string[]);
     return { ...filters, conditionMatch: next };
+  }
+  if (id === 'city_index_rules') {
+    const next = value == null ? [] : (value as CityIndexRule[]);
+    return { ...filters, cityIndexRules: next };
   }
   return { ...filters, [key]: value } as ListingFilters;
 }
