@@ -1,0 +1,27 @@
+-- 077_drop_listings_raw_json_idx.sql
+--
+-- Drop the GIN index on listings.raw_json. It was created in
+-- 001_initial.sql as a "just in case" structural index but no query
+-- in scraper/, toolkit/, api/ or migrations/ has ever used the GIN
+-- containment operators (@>, ?, ?|, ?&) that the index accelerates;
+-- all raw_json access in the codebase is field extraction
+-- (raw_json -> 'k' ->> 'v') which goes through the heap.
+--
+-- pg_stat_user_indexes confirms idx_scan = 0 on a project that has
+-- been ingesting for ~16 days.
+--
+-- The cost of keeping it dead has been catastrophic write
+-- amplification: it grew to 1,821 MB on 24 MB of actual heap data,
+-- ~98% of the table's total index footprint. Because touch_listings
+-- updates columns of the (is_active, last_seen_at) btree, HOT updates
+-- are disabled and every UPDATE has to insert new entries into every
+-- index — including this bloated GIN. That was tipping per-chunk
+-- UPDATEs over the Supabase pooler's 2-minute statement_timeout and
+-- killing the nightly scrape.
+--
+-- Rollback is one statement: CREATE INDEX ON listings USING GIN
+-- (raw_json); — but if a future surface actually needs containment
+-- queries the right shape is a partial GIN with jsonb_path_ops scoped
+-- to a specific subkey, not the original full-document GIN.
+
+drop index if exists listings_raw_json_idx;
