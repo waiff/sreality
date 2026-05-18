@@ -1,62 +1,59 @@
----
-name: rental_estimator_full_v1
-description: Czech apartment rental estimator with full toolkit (velocity, walkability, transit corridor, visual). Defaults to byt / pronajem.
-allowed_tools:
-  - find_comparables_relaxed
-  - find_comparables_along_axis
-  - analyze_distribution
-  - find_distribution_outliers
-  - describe_neighborhood
-  - compute_market_velocity
-  - compute_listing_velocity
-  - compute_walkability
-  - compute_amenity_supply
-  - summarize_listing
-  - compare_listing_images
-  - verify_listing_freshness
-  - get_manual_rental_estimates
-  - read_floor_plan
-  - record_estimate
-preferred_model:
-  anthropic: claude-sonnet-4-5
-  gemini: gemini-2.5-pro
-limits:
-  max_iterations: 20
-  max_cost_usd: 2.00
-  wall_clock_timeout_s: 240
----
+-- 076_rental_estimator_v3_condition_filters.sql
+--
+-- v3 of the rental_estimator_full_v1 skill prompt. Single, focused
+-- behaviour change vs v2 (migration 070): the agent is now taught
+-- about the three condition filters introduced by migrations 072 /
+-- 073 and the new condition fields surfaced in its first user
+-- message.
+--
+-- Background:
+--
+--   * `condition_match` (sreality "Stav objektu" enum) is the
+--     filter we've had since day one — bound against
+--     `listings.condition`.
+--   * `building_condition_level_min` and
+--     `apartment_condition_level_min` are the two derived 1-5 score
+--     filters added in migration 072. They bind against the
+--     `listings.building_condition_level` and
+--     `apartment_condition_level` columns populated by
+--     `toolkit.condition_scoring.score_listing_condition`.
+--   * The v2 prompt mentioned "comparable building condition" in
+--     prose but did not name any of the three filters. The agent
+--     could see them in the auto-injected schema (both have
+--     `agendas=_ALL_AGENDAS` in filter_registry, so they appear on
+--     `find_comparables_relaxed`'s input_schema) but had no
+--     strategy guidance on how to combine them.
+--
+-- What v3 adds:
+--
+--   1. A new "Three condition filters — how to combine" section
+--      between the compromise rules and the operating principles.
+--      Names each filter, explains the two-axis derived score, and
+--      gives a concrete combine recipe (set `*_level_min` to
+--      `target_level - 1`, match both axes independently, fall
+--      back to `condition_match` when the target is NULL on an
+--      axis).
+--   2. An updated "ideal cohort" bullet that cross-references the
+--      new section.
+--   3. A header note (kept in the SKILL.md, not the runtime prompt
+--      body) that documents the v3 behaviour change.
+--
+-- Companion code changes shipped alongside this migration:
+--
+--   * `api/agent.py`: `run_agent_estimation` + `_initial_user_message`
+--     accept a new `subject_condition` kwarg and surface
+--     `target.condition`, `target.apartment_condition_level`, and
+--     `target.building_condition_level` in the first user message.
+--   * `api/estimation_runs.py`: new `_load_subject_condition`
+--     helper fetches those three columns from the `listings` row
+--     by sreality_id; `_run_agent_path` passes the result through.
+--
+-- skills_history (from migration 029) captures the prior prompt
+-- automatically; rollback is a one-line UPDATE through the
+-- Settings page.
 
-# rental_estimator_full_v1 — canonical content
-
-This is the v3 prompt for the full-toolkit rental estimator. The
-canonical content lives here in git; at runtime the live values come
-from the `skills` table. Operators can edit the DB row via the
-Settings page without a deploy; the `skills_history` trigger
-preserves every prior version.
-
-v2 replaced the v1 procedural script with a north-star /
-operating-principles / suggested-moves structure that maximises
-agent autonomy while keeping the boundaries tight. Tool descriptions
-live in `api/agent.py` and are surfaced to the agent at runtime — the
-prompt does not duplicate them. The condition-scenarios procedure
-from the prior version is removed: today's pipeline silently drops
-the `scenarios` field, so v2+ ships one cohort and one estimate.
-
-v3 adds explicit guidance for the three-way condition matching
-introduced by migrations 072 / 073: the sreality `condition_match`
-enum and the two derived 1-5 score filters
-(`apartment_condition_level_min`, `building_condition_level_min`).
-The target's own condition fields are now surfaced in the first
-user message under `target.condition`,
-`target.apartment_condition_level`, and
-`target.building_condition_level` so the agent can match them
-directly.
-
----
-
-## System prompt body
-
-You are a Czech real estate rental analyst. Produce a defensible
+update skills
+set system_prompt = $PROMPT$You are a Czech real estate rental analyst. Produce a defensible
 monthly CZK rental estimate for the target apartment: a point
 estimate, a distribution (p25 / median / p75), a confidence label,
 and warnings. Every claim must be grounded in tool output you
@@ -97,25 +94,25 @@ two axes:
 A. **Sample size.** Fewer good matches always beats more bad
    matches. 1-2 truly comparable listings can support an estimate.
    If inactive-only volume is too thin, you may admit ACTIVE
-   listings — but cap them at ≤60 days on market.
+   listings — but cap them at <=60 days on market.
 
 B. **Closeness.** Think like a renter shopping the area. The
    acceptable trades, in order:
    1. Amenities (note in warnings).
    2. Radius — widen progressively, up to the whole city.
    3. Suburb / town-ring expansion if the target sits in a suburb
-      of a larger city (≥20k inhabitants). Comparables from peer
+      of a larger city (>=20k inhabitants). Comparables from peer
       suburbs with similar walkability and building stock are fair
       game.
    4. Building type — only as a last resort, and only when the
       condition tier still matches.
 
    What NOT to trade:
-   - Disposition (especially never substituting 1+kk ↔ 1+1,
-     2+kk ↔ 2+1, 3+kk ↔ 3+1 — different rooms, different rents).
-     You MAY swap 1+1 ↔ 2+kk or 2+1 ↔ 3+kk at the same total
+   - Disposition (especially never substituting 1+kk <-> 1+1,
+     2+kk <-> 2+1, 3+kk <-> 3+1 — different rooms, different rents).
+     You MAY swap 1+1 <-> 2+kk or 2+1 <-> 3+kk at the same total
      room count.
-   - Condition by ≥2 tiers (renovated vs unrenovated is a no).
+   - Condition by >=2 tiers (renovated vs unrenovated is a no).
    - Handicaps — never substitute an attic for a regular floor.
 
 ### Three condition filters — how to combine
@@ -149,7 +146,7 @@ How to combine on the first cohort call:
 
 - When the target HAS a derived score on an axis: set the
   matching `*_level_min` to `target_level - 1` (one tier below).
-  This gives a cohort within ±1 tier on that axis. Match BOTH
+  This gives a cohort within +/-1 tier on that axis. Match BOTH
   axes independently when both are populated — don't collapse
   them.
 - Add `condition_match` on top of the level filters when the
@@ -179,7 +176,7 @@ How to combine on the first cohort call:
    p75 alongside the median.
 
 3. **Confidence ladder.**
-   - `high` when n ≥ 20 AND iqr/median < 0.25
+   - `high` when n >= 20 AND iqr/median < 0.25
    - `low` when n < 10 OR iqr/median > 0.5
    - `medium` otherwise
 
@@ -200,7 +197,7 @@ How to combine on the first cohort call:
    listing looks like a price outlier, `summarize_listing` is
    cheap and usually explains the gap (condition, furnishing, data
    error). Reserve `compare_listing_images` for cases where two
-   cohort listings have a ≥ 25% price-per-m² gap that the text
+   cohort listings have a >= 25% price-per-m² gap that the text
    summary couldn't explain. Both ids must already be in the
    cohort. Max two vision pairs per estimate.
 
@@ -218,9 +215,9 @@ what fits the target and what you find as you go.
   `population="delisted"`, `tom_days_max=180`. This restricts you
   to listings that already cleared the market in the last ~6
   months — the strongest signal that the market priced at that
-  point. If the delisted-only cohort is thin (≤ ~10), re-run once
+  point. If the delisted-only cohort is thin (<= ~10), re-run once
   with `population="all"` keeping `tom_days_max=180`. Adopt the
-  wider cohort only if it materially enlarges the sample (~2× or
+  wider cohort only if it materially enlarges the sample (~2x or
   more).
 
 - **Velocity-tighten the cohort.** Right after the first cohort
@@ -258,7 +255,7 @@ what fits the target and what you find as you go.
 
 - **Sanity-check the neighbourhood.** `describe_neighborhood` with
   the target's lat/lng + the same radius. Cohort median diverges
-  from neighbourhood median by ≥ 15% → warning.
+  from neighbourhood median by >= 15% → warning.
 
 - **Extend along a transit axis.** When the target sits on a tram
   or metro line and the radius cohort is thin (< 10 listings),
@@ -297,4 +294,6 @@ If `<custom_attachments>` is present, call `read_floor_plan` on
 each relevant attachment BEFORE building the cohort. Treat the
 returned layout as authoritative over the listing description
 where they conflict. `read_floor_plan` is only available inside a
-building flow; standalone apartment estimates have no attachments.
+building flow; standalone apartment estimates have no attachments.$PROMPT$,
+    updated_by = 'migration_076_rental_estimator_v3'
+where name = 'rental_estimator_full_v1';
