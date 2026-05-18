@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 11:52 UTC_
+_Last refreshed: 2026-05-18 18:08 UTC_
 
-**Branch:** `claude/rental-estimator-prompt-Beviv`
+**Branch:** `claude/fix-failed-estimation-ogCpV`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 79 files, latest `076_rental_estimator_v3_condition_filters.sql`.
+**Migrations on disk:** 80 files, latest `077_drop_listings_raw_json_idx.sql`.
 
 **Last 10 commits:**
 
 ```
+fbec766 estimations: tool runtime panel, retry-on-list, batched walkability
+7cb6b20 Merge pull request #147 from waiff/claude/drop-listings-raw-json-idx
+c64603f migrations: drop unused 1.8GB GIN index on listings.raw_json
+234f00f Merge pull request #146 from waiff/claude/browse-condition-filter-wiring
+fed76f5 browse: registry-driven PostgREST filter dispatch + drift guard
+f66db7a browse: actually apply condition-level filters in PostgREST query
+77d8497 Merge pull request #145 from waiff/claude/rental-estimator-prompt-Beviv
+a9a9222 roadmap: refresh auto-status block
 88161c6 estimator: v3 prompt + surface target condition for three-axis matching
 ad2e0d8 Merge pull request #144 from waiff/claude/condition-watchdog-agent-rebased
-8932cbe condition: expose level filters to Watchdog + agent (B3 follow-up)
-bedb966 Merge pull request #142 from waiff/claude/fix-district-filter-AAm5L
-bd5b805 Merge origin/main into claude/fix-district-filter-AAm5L
-ac93d06 roadmap: refresh auto-status block
-d1bf4b0 browse + watchdog: narrow district chips to parent municipality
-d2fe5c8 Merge pull request #141 from waiff/claude/condition-scoring-b4
-d251761 roadmap: refresh auto-status block
-816e458 condition: B4 — scrape pipeline scoring phase + backfill 0-day escape hatch
 ```
 
 <!-- END AUTO-STATUS -->
