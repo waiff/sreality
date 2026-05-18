@@ -83,6 +83,8 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         "garden_area",
         "district",
         "locality_district_id", "locality_region_id",
+        # Migration 072 — derived condition scores.
+        "building_condition_level", "apartment_condition_level",
     }
     for f in fr.all_filters():
         if f.pg_column is None:
@@ -196,7 +198,11 @@ def test_min_max_pairs_have_companion() -> None:
     single number input via the unpaired-range fallthrough.
     """
     import re
-    ONE_SIDED_MINS = frozenset({"min_parking_lots"})
+    ONE_SIDED_MINS = frozenset({
+        "min_parking_lots",
+        "building_condition_level_min",
+        "apartment_condition_level_min",
+    })
     ids = set(fr.REGISTRY.keys())
     for fid in ids:
         if fid in ONE_SIDED_MINS:
