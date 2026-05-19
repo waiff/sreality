@@ -424,6 +424,59 @@ def wipe_table(conn: psycopg.Connection) -> int:
         return cur.rowcount or 0
 
 
+def populate_parent_ids_spatial(conn: psycopg.Connection) -> dict[str, int]:
+    """Backfill admin_boundaries.parent_id via PostGIS containment.
+
+    The DBF-based parent extraction in iter_boundary_rows stays as a
+    no-cost optimisation; when the source column is recognised by
+    FIELD_CANDIDATES, parent_id is set during INSERT and this step
+    does nothing (idempotent on WHERE parent_id IS NULL). When the
+    source column is renamed by ČÚZK and not yet recognised, this
+    step fills the gap so the four-level hierarchy stays walkable.
+
+    Same predicate as migration 083: ST_PointOnSurface (interior
+    point, robust to concave/annular shapes) and ST_Covers
+    (boundary-inclusive, robust to simplification edges).
+    """
+    sql = '''
+        update admin_boundaries c
+           set parent_id = (
+             select p.id
+               from admin_boundaries p
+              where p.level = case c.level
+                                when 'okres' then 'kraj'
+                                when 'obec'  then 'okres'
+                                when 'ku'    then 'obec'
+                              end
+                and st_covers(
+                      p.geom,
+                      st_pointonsurface(c.geom::geometry)::geography)
+              order by st_area(p.geom::geometry) asc
+              limit 1
+           )
+         where c.level <> 'kraj'
+           and c.parent_id is null
+    '''
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        cur.execute('''
+            select level,
+                   count(*) as total,
+                   count(parent_id) as with_parent
+              from admin_boundaries
+             where level <> 'kraj'
+             group by level
+        ''')
+        out: dict[str, int] = {}
+        for level, total, with_parent in cur.fetchall():
+            out[f"{level}_total"] = int(total)
+            out[f"{level}_linked"] = int(with_parent)
+    for lvl in ('okres', 'obec', 'ku'):
+        out.setdefault(f"{lvl}_total", 0)
+        out.setdefault(f"{lvl}_linked", 0)
+    return out
+
+
 def relink_curated_cities(conn: psycopg.Connection) -> dict[str, int]:
     """Re-establish curated_cities.admin_boundary_id after a fresh load.
 
@@ -534,6 +587,16 @@ def run_pipeline(args: argparse.Namespace) -> int:
             n_areas = compute_areas(conn)
             conn.commit()
             LOG.info("AREAS done updated=%d", n_areas)
+
+            LOG.info("PARENTS spatial-backfill starting")
+            parents = populate_parent_ids_spatial(conn)
+            conn.commit()
+            LOG.info(
+                "PARENTS done okres=%d/%d obec=%d/%d ku=%d/%d",
+                parents['okres_linked'], parents['okres_total'],
+                parents['obec_linked'],  parents['obec_total'],
+                parents['ku_linked'],    parents['ku_total'],
+            )
 
             if not args.skip_spatial_join:
                 for lvl in levels:
