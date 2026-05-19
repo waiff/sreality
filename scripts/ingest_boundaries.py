@@ -130,14 +130,23 @@ def extract_zip(zip_path: Path, dest_dir: Path) -> Path:
 def find_shapefile(root: Path, level: str) -> Path:
     """Locate the .shp file in `root` whose name matches the level's tokens."""
     tokens = LEVEL_FILE_TOKENS[level]
+    all_shps = sorted(root.rglob("*.shp"))
     candidates: list[Path] = []
-    for shp in root.rglob("*.shp"):
+    for shp in all_shps:
         upper = shp.name.upper()
         if any(tok.upper() in upper for tok in tokens):
             candidates.append(shp)
     if not candidates:
+        sample = [str(p.relative_to(root)) for p in all_shps[:30]]
+        more = f" (+{len(all_shps) - 30} more)" if len(all_shps) > 30 else ""
         raise FileNotFoundError(
-            f"No .shp file matching {tokens} found under {root}"
+            f"No .shp file matching {tokens} found under {root}. "
+            f"Total .shp files in archive: {len(all_shps)}. "
+            f"Sample filenames: {sample}{more}. "
+            f"If the archive looks partial (e.g. only OBCE_P / ORP_P), "
+            f"the source URL points at a per-obec or per-level chunk "
+            f"rather than the full state pack. Use the URL from ATOM feed "
+            f"https://atom.cuzk.gov.cz/RUIAN-STATY-SHP/datasetFeeds/CZ-00025712-CUZK_RUIAN-STATY-SHP_1.xml"
         )
     candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
     LOG.info("MATCH level=%s file=%s", level, candidates[0].name)
@@ -467,6 +476,21 @@ def run_pipeline(args: argparse.Namespace) -> int:
         else:
             zip_path = fetch_source(args.source_url, tmp_dir)
             extract_dir = extract_zip(zip_path, tmp_dir / "extract")
+
+        inventory = sorted(extract_dir.rglob("*.shp"))
+        if not inventory:
+            LOG.warning(
+                "INVENTORY no .shp files under %s. Archive contents may "
+                "be nested (per-obec sub-zips?) — extraction does NOT recurse "
+                "into nested zips.", extract_dir,
+            )
+        else:
+            preview = [p.name for p in inventory[:20]]
+            more = f" (+{len(inventory) - 20} more)" if len(inventory) > 20 else ""
+            LOG.info(
+                "INVENTORY shp_count=%d sample=%s%s",
+                len(inventory), preview, more,
+            )
 
         if args.dry_run:
             LOG.info("DRY-RUN: would now load %s into admin_boundaries", levels)
