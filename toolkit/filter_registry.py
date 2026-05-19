@@ -905,6 +905,41 @@ def _build_registry() -> dict[str, FilterDef]:
             aliases=("price_max", "priceMax"),
         ),
         FilterDef(
+            id="min_price_per_m2",
+            type=FilterType.FLOAT,
+            pg_column="price_per_m2",
+            default=None,
+            description=(
+                "Lower bound on price per square metre (`price_czk / "
+                "area_m2`). Inclusive. Listings with NULL area_m2 fall "
+                "out when this bound is set. Useful for sale filtering "
+                "where absolute price varies wildly with size but "
+                "unit price is the comparable metric."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.RANGE_SLIDER,
+            agendas=_ALL_AGENDAS,
+            constraints={"min": 0, "max": 500_000, "step": 1_000},
+            unit="CZK/m²",
+            aliases=("price_per_m2_min", "pricePerM2Min"),
+        ),
+        FilterDef(
+            id="max_price_per_m2",
+            type=FilterType.FLOAT,
+            pg_column="price_per_m2",
+            default=None,
+            description=(
+                "Upper bound on price per square metre. See "
+                "`min_price_per_m2`. Inclusive."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.RANGE_SLIDER,
+            agendas=_ALL_AGENDAS,
+            constraints={"min": 0, "max": 500_000, "step": 1_000},
+            unit="CZK/m²",
+            aliases=("price_per_m2_max", "pricePerM2Max"),
+        ),
+        FilterDef(
             id="min_area_m2",
             type=FilterType.FLOAT,
             pg_column="area_m2",

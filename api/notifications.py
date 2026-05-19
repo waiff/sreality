@@ -130,6 +130,10 @@ class WatchdogFilterSpec(BaseModel):
     # Price + area bounds.
     min_price_czk: int | None = None
     max_price_czk: int | None = None
+    # Price per m² (price_czk / NULLIF(area_m2, 0)). NULL area_m2 falls
+    # out when either bound is set.
+    min_price_per_m2: float | None = None
+    max_price_per_m2: float | None = None
     min_area_m2: float | None = None
     max_area_m2: float | None = None
     min_usable_area: float | None = None
@@ -258,6 +262,16 @@ def _build_match_clauses(
     if spec.max_price_czk is not None:
         where.append("l.price_czk <= %(max_price_czk)s")
         params["max_price_czk"] = spec.max_price_czk
+    if spec.min_price_per_m2 is not None:
+        where.append(
+            "l.price_czk::numeric / NULLIF(l.area_m2, 0) >= %(min_price_per_m2)s"
+        )
+        params["min_price_per_m2"] = spec.min_price_per_m2
+    if spec.max_price_per_m2 is not None:
+        where.append(
+            "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
+        )
+        params["max_price_per_m2"] = spec.max_price_per_m2
     if spec.min_area_m2 is not None:
         where.append("l.area_m2 >= %(min_area_m2)s")
         params["min_area_m2"] = spec.min_area_m2
