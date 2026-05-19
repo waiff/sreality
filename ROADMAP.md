@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 04:00 UTC_
+_Last refreshed: 2026-05-19 08:38 UTC_
 
 **Branch:** `claude/review-roadmap-zHm6O`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-19 04:00 UTC_
 **Last 10 commits:**
 
 ```
+dd8369c roadmap: refresh auto-status block
 297d246 Merge pull request #151 from waiff/claude/review-qual-roadmap-TutYL
 4b79c34 phase QUAL fixes: preserve overlay state, pinned indexes, Czech labels, population hint
 157100e Merge pull request #150 from waiff/claude/review-qual-roadmap-TutYL
@@ -25,7 +26,6 @@ b1d4149 phase QUAL: curated city indexes, watchdog parity, map overlay
 8be16c4 Merge pull request #148 from waiff/claude/fix-failed-estimation-ogCpV
 fbec766 estimations: tool runtime panel, retry-on-list, batched walkability
 7cb6b20 Merge pull request #147 from waiff/claude/drop-listings-raw-json-idx
-c64603f migrations: drop unused 1.8GB GIN index on listings.raw_json
 ```
 
 <!-- END AUTO-STATUS -->
