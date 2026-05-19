@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 09:17 UTC_
+_Last refreshed: 2026-05-19 11:37 UTC_
 
-**Branch:** `claude/reorganize-estimation-frontend-FkE3q`
+**Branch:** `claude/admin-boundaries-parent-spatial`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 84 files, latest `081_curated_cities_polygon.sql`.
+**Migrations on disk:** 86 files, latest `083_admin_boundaries_parent_spatial_backfill.sql`.
 
 **Last 10 commits:**
 
 ```
-e0edd32 Merge pull request #153 from waiff/claude/plan-qual-roadmap-FkSTb
-d498a9f Merge origin/main into claude/plan-qual-roadmap-FkSTb
-7221cc8 roadmap: refresh auto-status block
-94ee2ac Merge pull request #152 from waiff/claude/review-roadmap-zHm6O
-2394738 roadmap: refresh auto-status block
-78e1769 roadmap: refresh auto-status block
-cc9bc39 phase QUAL: curated-city polygon containment + per-rule op
-02d3c83 roadmap: refresh auto-status block
-dd8369c roadmap: refresh auto-status block
-297d246 Merge pull request #151 from waiff/claude/review-qual-roadmap-TutYL
+8f641b5 admin_boundaries: spatial backfill of parent_id (migration 083 + script)
+c68a26b Merge pull request #158 from waiff/claude/curated-cities-spatial-relink
+a0ef582 curated_cities: spatial-containment relink (migration 082 + script)
+d0ba3cc Merge pull request #157 from waiff/claude/ingest-boundaries-shp-tokens
+f6194c6 ingest_boundaries: match current ČÚZK filename schema (VUSC, KATUZE)
+24b75b1 Merge pull request #156 from waiff/claude/ingest-boundaries-inventory-log
+a2d50f4 ingest_boundaries: inventory log + diagnostic error on missing .shp
+9262ed6 Merge pull request #155 from waiff/claude/reorganize-estimation-frontend-FkE3q
+c4a9af7 roadmap: refresh auto-status block
+f5353f4 frontend: reorganize the /estimations past-runs table
 ```
 
 <!-- END AUTO-STATUS -->
