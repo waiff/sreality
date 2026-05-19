@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 08:40 UTC_
+_Last refreshed: 2026-05-19 09:00 UTC_
 
 **Branch:** `claude/plan-qual-roadmap-FkSTb`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-19 08:40 UTC_
 **Last 10 commits:**
 
 ```
+2394738 roadmap: refresh auto-status block
 cc9bc39 phase QUAL: curated-city polygon containment + per-rule op
 02d3c83 roadmap: refresh auto-status block
 297d246 Merge pull request #151 from waiff/claude/review-qual-roadmap-TutYL
@@ -25,7 +26,6 @@ a857788 phase QUAL follow-ups: watchdog UI, stats RPC, population fetcher
 617bc2e Merge pull request #149 from waiff/claude/review-qual-roadmap-TutYL
 b1d4149 phase QUAL: curated city indexes, watchdog parity, map overlay
 8be16c4 Merge pull request #148 from waiff/claude/fix-failed-estimation-ogCpV
-fbec766 estimations: tool runtime panel, retry-on-list, batched walkability
 ```
 
 <!-- END AUTO-STATUS -->
