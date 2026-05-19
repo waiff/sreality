@@ -388,14 +388,58 @@ def compute_areas(conn: psycopg.Connection) -> int:
 # ---------- orchestration ----------
 
 
-def truncate_table(conn: psycopg.Connection) -> None:
+def wipe_table(conn: psycopg.Connection) -> int:
     """Wipe admin_boundaries before a fresh load.
 
     Pure-mirror table (no derived state); rebuild rather than diff
     against an unknown prior version. Spatial-join updates run after.
+
+    DELETE rather than TRUNCATE because foreign keys point at this
+    table — admin_boundaries.parent_id (self-FK from migration 017)
+    and curated_cities.admin_boundary_id (from migration 081). Postgres
+    refuses TRUNCATE on a table with inbound FKs unless every
+    referencing table is also truncated. DELETE fires each FK's
+    ON DELETE SET NULL action instead, so curated_cities rows are
+    preserved with NULL admin_boundary_id (re-linked below).
     """
     with conn.cursor() as cur:
-        cur.execute("TRUNCATE TABLE admin_boundaries")
+        cur.execute("DELETE FROM admin_boundaries")
+        return cur.rowcount or 0
+
+
+def relink_curated_cities(conn: psycopg.Connection) -> dict[str, int]:
+    """Re-establish curated_cities.admin_boundary_id after a fresh load.
+
+    Mirrors the backfill from migration 081. Idempotent — only touches
+    rows where admin_boundary_id is currently NULL (which is all of
+    them right after the wipe, because the FK's ON DELETE SET NULL
+    action nulled them when we DELETEd admin_boundaries).
+    """
+    sql = '''
+        update curated_cities c
+           set admin_boundary_id = obec.id
+          from admin_boundaries obec
+          join admin_boundaries okres
+            on okres.id = obec.parent_id and okres.level = 'okres'
+          join admin_boundaries kraj
+            on kraj.id  = okres.parent_id and kraj.level = 'kraj'
+         where c.admin_boundary_id is null
+           and obec.level = 'obec'
+           and lower(obec.name) = lower(c.name)
+           and lower(kraj.name) = lower(c.kraj_name)
+    '''
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        linked = cur.rowcount or 0
+        cur.execute(
+            "select count(*) from curated_cities where admin_boundary_id is null"
+        )
+        row = cur.fetchone()
+        unmatched = int(row[0]) if row else 0
+        cur.execute("select count(*) from curated_cities")
+        row = cur.fetchone()
+        total = int(row[0]) if row else 0
+    return {"linked": linked, "unmatched": unmatched, "total": total}
 
 
 def run_pipeline(args: argparse.Namespace) -> int:
@@ -440,9 +484,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
         ) as conn:
             LOG.info("DB connected")
             if args.truncate:
-                LOG.info("TRUNCATE admin_boundaries")
-                truncate_table(conn)
+                LOG.info("WIPE admin_boundaries starting")
+                deleted = wipe_table(conn)
                 conn.commit()
+                LOG.info("WIPE done deleted=%d", deleted)
 
             for lvl in levels:
                 shp = find_shapefile(extract_dir, lvl)
@@ -467,6 +512,15 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     )
             else:
                 LOG.info("JOIN skipped (--skip-spatial-join)")
+
+            if "obec" in levels:
+                LOG.info("RELINK curated_cities starting")
+                relink = relink_curated_cities(conn)
+                conn.commit()
+                LOG.info(
+                    "RELINK done linked=%d unmatched=%d total=%d",
+                    relink["linked"], relink["unmatched"], relink["total"],
+                )
 
     LOG.info("RUN done")
     return 0
