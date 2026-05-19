@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-18 19:13 UTC_
+_Last refreshed: 2026-05-19 06:41 UTC_
 
-**Branch:** `claude/review-qual-roadmap-TutYL`
+**Branch:** `claude/plan-qual-roadmap-FkSTb`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 82 files, latest `079_listings_with_city_quality.sql`.
+**Migrations on disk:** 83 files, latest `080_browse_stats_city_quality.sql`.
 
 **Last 10 commits:**
 
 ```
+297d246 Merge pull request #151 from waiff/claude/review-qual-roadmap-TutYL
+4b79c34 phase QUAL fixes: preserve overlay state, pinned indexes, Czech labels, population hint
+157100e Merge pull request #150 from waiff/claude/review-qual-roadmap-TutYL
+a857788 phase QUAL follow-ups: watchdog UI, stats RPC, population fetcher
+617bc2e Merge pull request #149 from waiff/claude/review-qual-roadmap-TutYL
 b1d4149 phase QUAL: curated city indexes, watchdog parity, map overlay
 8be16c4 Merge pull request #148 from waiff/claude/fix-failed-estimation-ogCpV
 fbec766 estimations: tool runtime panel, retry-on-list, batched walkability
 7cb6b20 Merge pull request #147 from waiff/claude/drop-listings-raw-json-idx
 c64603f migrations: drop unused 1.8GB GIN index on listings.raw_json
-234f00f Merge pull request #146 from waiff/claude/browse-condition-filter-wiring
-fed76f5 browse: registry-driven PostgREST filter dispatch + drift guard
-f66db7a browse: actually apply condition-level filters in PostgREST query
-77d8497 Merge pull request #145 from waiff/claude/rental-estimator-prompt-Beviv
-a9a9222 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
