@@ -62,16 +62,24 @@ SIMPLIFY_TOLERANCE_DEG: dict[str, float] = {
     "ku": 0.0002,     # ~22 m
 }
 
-# Tokens we look for in shapefile filenames per level. RÚIAN state
-# packs use prefixes like "ST_KR", "ST_OK", "ST_OB", "ST_KU"; older or
-# alternative packs may use the Czech words. Match is case-insensitive
-# substring; among matches we prefer the largest .shp file (heuristic
-# for "actual data, not a metadata variant").
+# Tokens we look for in shapefile filenames per level. Current ČÚZK
+# state packs (services.cuzk.gov.cz/shp/stat/epsg-5514/1.zip) use
+# names like VUSC_P.shp (kraje as Vyšší územní samosprávné celky),
+# OKRESY_P.shp, OBCE_P.shp, KATUZE_P.shp. Older / alternative packs
+# may use ST_KR/ST_OK/ST_OB/ST_KU or the bare Czech words KRAJE/
+# OKRESY/OBCE/KATASTR. Match is case-insensitive substring; among
+# matches we prefer the largest .shp file (heuristic for "actual
+# data, not a metadata variant").
+#
+# `REGION_P.shp` (NUTS-2 cohesion regions, 8 areas like Severozápad)
+# is NOT the same as `VUSC_P.shp` (NUTS-3 kraje, 14 regions) — only
+# the latter maps to what curated_cities.kraj_name expects, so VUSC
+# is the right token for level=kraj.
 LEVEL_FILE_TOKENS: dict[str, tuple[str, ...]] = {
-    "kraj": ("ST_KR", "KRAJE", "KRAJ"),
+    "kraj": ("ST_KR", "KRAJE", "VUSC", "KRAJ"),
     "okres": ("ST_OK", "OKRESY", "OKRES"),
     "obec": ("ST_OB", "OBCE", "OBEC"),
-    "ku": ("ST_KU", "KATASTR", "_KU"),
+    "ku": ("ST_KU", "KATUZE", "KATASTR", "_KU"),
 }
 
 # Candidate DBF column names for each semantic field, in priority order.
