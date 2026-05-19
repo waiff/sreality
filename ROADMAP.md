@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 12:19 UTC_
+_Last refreshed: 2026-05-19 12:40 UTC_
 
 **Branch:** `claude/review-qual-roadmap-TutYL`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-19 12:19 UTC_
 **Last 10 commits:**
 
 ```
+17feec9 phase QUAL: price-per-m² filter, 15-min delta scrape, watchdog poll decouple
 67bfcf6 phase QUAL fixes: PostgREST row-cap bypass + pinning across selectors
 c68a26b Merge pull request #158 from waiff/claude/curated-cities-spatial-relink
 a0ef582 curated_cities: spatial-containment relink (migration 082 + script)
@@ -25,7 +26,6 @@ f6194c6 ingest_boundaries: match current ČÚZK filename schema (VUSC, KATUZE)
 a2d50f4 ingest_boundaries: inventory log + diagnostic error on missing .shp
 9262ed6 Merge pull request #155 from waiff/claude/reorganize-estimation-frontend-FkE3q
 c4a9af7 roadmap: refresh auto-status block
-f5353f4 frontend: reorganize the /estimations past-runs table
 ```
 
 <!-- END AUTO-STATUS -->
