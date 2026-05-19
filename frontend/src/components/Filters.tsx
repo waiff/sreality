@@ -137,8 +137,11 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
             scope="browse"
             state={registryView}
             onChange={handleRegistryChange}
-            includeOnly={['min_price_czk']}
-            labels={{ min_price_czk: 'Price' }}
+            includeOnly={['min_price_czk', 'min_price_per_m2']}
+            labels={{
+              min_price_czk: 'Price',
+              min_price_per_m2: 'Price / m²',
+            }}
             flat
           />
         </ControlGroup>

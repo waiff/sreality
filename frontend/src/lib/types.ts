@@ -423,6 +423,8 @@ export interface EstimationFilters {
   has_parking: boolean | null;
   min_price_czk: number | null;
   max_price_czk: number | null;
+  min_price_per_m2: number | null;
+  max_price_per_m2: number | null;
   category_main: string | null;
   category_type: string | null;
   category_sub_cb: number | null;
@@ -781,6 +783,9 @@ export interface WatchdogFilterSpec {
   districts: DistrictChip[] | null;
   min_price_czk: number | null;
   max_price_czk: number | null;
+  // Price per m² bounds (price_czk / NULLIF(area_m2, 0)).
+  min_price_per_m2: number | null;
+  max_price_per_m2: number | null;
   min_area_m2: number | null;
   max_area_m2: number | null;
   min_usable_area: number | null;
@@ -842,6 +847,8 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   districts: null,
   min_price_czk: null,
   max_price_czk: null,
+  min_price_per_m2: null,
+  max_price_per_m2: null,
   min_area_m2: null,
   max_area_m2: null,
   min_usable_area: null,

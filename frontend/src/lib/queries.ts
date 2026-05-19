@@ -548,6 +548,10 @@ export const fetchBrowseStats = async (
     city_pop_min:            f.minCityPopulation,
     city_pop_max:            f.maxCityPopulation,
     city_proximity:          f.nearCityProximity,
+    /* Migration 083 — price-per-m² bounds. NULL area_m2 listings fall
+     * out when either bound is set. */
+    price_per_m2_min:        f.pricePerM2Min,
+    price_per_m2_max:        f.pricePerM2Max,
   });
   if (error) throw error;
   return data as BrowseStats;
