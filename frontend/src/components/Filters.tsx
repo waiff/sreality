@@ -9,6 +9,8 @@ import {
 } from '@/lib/filters';
 import type { MapySuggestion } from '@/lib/maps';
 import { ControlGroup, Section } from '@/components/controls';
+import { useQuery } from '@tanstack/react-query';
+import { supabase } from '@/lib/supabase';
 import { FilterForm } from '@/components/FilterForm';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import {
@@ -251,9 +253,70 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
             customWidgets={customWidgets}
             flat
           />
+          <CityPopulationHint />
         </ControlGroup>
       </div>
     </aside>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Phase QUAL — population-data status hint                                   */
+/*                                                                            */
+/* The `min_city_population` / `max_city_population` filters compare against  */
+/* the latest `city_population.population` reading. When `city_population` is */
+/* empty (the seed loaded the indexes but the population CSV was missing /    */
+/* the Wikidata fetcher hasn't run yet), every city's `c.population` resolves */
+/* to NULL, so a `min ≥ 1` predicate excludes everything — counter-intuitive  */
+/* enough that the operator filed it as a bug. This banner detects the empty- */
+/* population state via a one-row count query and tells the operator how to  */
+/* unstick it.                                                                */
+/* -------------------------------------------------------------------------- */
+
+function CityPopulationHint() {
+  const { data } = useQuery<{ withPop: number; total: number }, Error>({
+    queryKey: ['curated_cities_population_status'],
+    queryFn: async () => {
+      const total = await supabase
+        .from('curated_cities_public')
+        .select('*', { count: 'exact', head: true });
+      const withPop = await supabase
+        .from('curated_cities_public')
+        .select('*', { count: 'exact', head: true })
+        .not('population', 'is', null);
+      return {
+        withPop: withPop.count ?? 0,
+        total:   total.count   ?? 0,
+      };
+    },
+    staleTime: 60_000,
+    gcTime: Infinity,
+  });
+
+  if (!data) return null;
+  if (data.total === 0) return null;
+
+  /* Hide once at least half the curated cities have populations —
+   * the workflow ran, the filter works as expected, no banner needed. */
+  if (data.withPop >= data.total / 2) {
+    return (
+      <p className="mt-2 text-[0.65rem] leading-snug text-[var(--color-ink-3)]">
+        Pop. údaje: {data.withPop} / {data.total} měst.
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2 p-2 rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] border border-[var(--color-copper)]/30">
+      <p className="text-[0.7rem] leading-snug text-[var(--color-ink-2)]">
+        <strong className="text-[var(--color-copper)]">Pop. data nejsou nahraná</strong>
+        {' '}({data.withPop}/{data.total} měst). Filtr min/max populace bude
+        vždy 0 výsledků. Spusť workflow{' '}
+        <em className="font-mono not-italic">Refresh city populations from Wikidata</em>
+        {' '}a poté{' '}
+        <em className="font-mono not-italic">Seed curated cities</em>.
+      </p>
+    </div>
   );
 }
 
