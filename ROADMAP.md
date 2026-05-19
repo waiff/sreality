@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 13:10 UTC_
+_Last refreshed: 2026-05-19 13:18 UTC_
 
 **Branch:** `claude/fix-missing-listing-images-A7OR5`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-19 13:10 UTC_
 **Last 10 commits:**
 
 ```
+366b42c roadmap: refresh auto-status block
+7c950c3 scraper: add --images-only mode and drain R2 image backlog faster
 eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
 d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
 015c118 migrations: 081 — estimation_runs.scenario jsonb for shared yield state
@@ -24,8 +26,6 @@ d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-p
 ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
 5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
 20fea1c listings: promote sreality "Popis" to typed description column
-67bfcf6 phase QUAL fixes: PostgREST row-cap bypass + pinning across selectors
-8f641b5 admin_boundaries: spatial backfill of parent_id (migration 083 + script)
 ```
 
 <!-- END AUTO-STATUS -->
