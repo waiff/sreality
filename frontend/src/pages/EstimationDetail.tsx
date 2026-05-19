@@ -23,10 +23,12 @@ import {
   fetchListingSummaries,
   getSkill,
   listEstimationFeedback,
+  patchEstimationScenario,
   submitEstimationFeedback,
   updateSkill,
   type FeedbackResponse,
   type Skill,
+  type YieldScenarioUpdate,
 } from '@/lib/api';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
@@ -740,30 +742,31 @@ function YieldBlock({
     run.input_purchase_price_czk ??
     (kind === 'sale' ? run.estimated_sale_price_czk : null);
 
-  /* Hydrate the form from localStorage so an operator returning to the
-   * page sees the same scenario they were modelling last visit. Keyed
-   * on run.id — re-runs spawn a new id, so the new run starts from
-   * defaults rather than carrying scenario state forward. */
-  const storageKey = `sreality.estimation.${run.id}.yield`;
-  const persisted = useMemo(() => readYieldState(storageKey), [storageKey]);
+  /* Scenario state lives on estimation_runs.scenario (migration 085)
+   * and is shared with the Chrome extension. Initial values come from
+   * run.scenario; a non-null field marks that axis as "touched" (owned
+   * by the operator's edit) so the auto-sync to default below skips it. */
+  const persistedRent = run.scenario?.rent_czk ?? null;
+  const persistedCost = run.scenario?.fond_per_m2_czk ?? null;
+  const persistedPrice = run.scenario?.price_czk ?? null;
 
   const [rent, setRent] = useState<number | null>(
-    persisted?.rent !== undefined ? persisted.rent : defaultRent,
+    persistedRent !== null ? persistedRent : defaultRent,
   );
   const [costPerM2, setCostPerM2] = useState<number | null>(
-    persisted?.costPerM2 !== undefined ? persisted.costPerM2 : DEFAULT_FOND_CZK_PER_M2,
+    persistedCost !== null ? persistedCost : DEFAULT_FOND_CZK_PER_M2,
   );
   const [price, setPriceState] = useState<number | null>(
-    persisted?.price !== undefined ? persisted.price : defaultPrice,
+    persistedPrice !== null ? persistedPrice : defaultPrice,
   );
   const [priceTouched, setPriceTouched] = useState<boolean>(
-    persisted?.priceTouched ?? false,
+    persistedPrice !== null,
   );
   const [rentTouched, setRentTouched] = useState<boolean>(
-    persisted?.rentTouched ?? false,
+    persistedRent !== null,
   );
   const [costTouched, setCostTouched] = useState<boolean>(
-    persisted?.costTouched ?? false,
+    persistedCost !== null,
   );
 
   /* Sync untouched inputs to the latest defaults — handles the subject
@@ -774,11 +777,31 @@ function YieldBlock({
     if (!priceTouched) setPriceState(defaultPrice);
   }, [defaultPrice, priceTouched]);
 
+  const qc = useQueryClient();
+  const runId = run.id;
+  const scenarioMut = useMutation<EstimationRun, ApiError, YieldScenarioUpdate>({
+    mutationFn: (body) => patchEstimationScenario(runId, body),
+    onSuccess: (updated) => {
+      qc.setQueryData<EstimationRun>(estimationKeys.detail(runId), updated);
+    },
+  });
+
+  /* Debounce keystrokes so the PATCH fires once a beat after the
+   * operator stops typing. 500ms matches the feel of the SPA's other
+   * inline edits; trades off latency for not hammering the API. */
   useEffect(() => {
-    writeYieldState(storageKey, {
-      rent, costPerM2, price, priceTouched, rentTouched, costTouched,
-    });
-  }, [storageKey, rent, costPerM2, price, priceTouched, rentTouched, costTouched]);
+    const handle = window.setTimeout(() => {
+      scenarioMut.mutate({
+        rent_czk: rentTouched ? rent : null,
+        fond_per_m2_czk: costTouched ? costPerM2 : null,
+        price_czk: priceTouched ? price : null,
+      });
+    }, 500);
+    return () => window.clearTimeout(handle);
+    /* scenarioMut is stable across renders for our purposes; depending
+     * on it would refire the timer when the mutation state churns. */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rent, costPerM2, price, priceTouched, rentTouched, costTouched]);
 
   const setPrice = (v: number | null) => {
     setPriceTouched(true);
@@ -800,11 +823,8 @@ function YieldBlock({
     setRent(defaultRent);
     setCostPerM2(DEFAULT_FOND_CZK_PER_M2);
     setPriceState(defaultPrice);
-    try {
-      window.localStorage.removeItem(storageKey);
-    } catch {
-      /* localStorage unavailable — quiet failure, scenario reset still works in-memory. */
-    }
+    /* The debounce useEffect will pick up the touched=false transitions
+     * and PATCH with all-null automatically. No direct mutate here. */
   };
 
   const hasOverrides = priceTouched || rentTouched || costTouched;
@@ -839,7 +859,7 @@ function YieldBlock({
             </button>
           )}
           <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)]">
-            {hasOverrides ? 'edited · saved locally' : 'live calculation'}
+            {hasOverrides ? 'edited · synced' : 'live calculation'}
           </p>
         </div>
       </div>
@@ -907,47 +927,6 @@ function YieldBlock({
       </div>
     </div>
   );
-}
-
-interface PersistedYieldState {
-  rent: number | null;
-  costPerM2: number | null;
-  price: number | null;
-  priceTouched: boolean;
-  rentTouched: boolean;
-  costTouched: boolean;
-}
-
-function readYieldState(key: string): PersistedYieldState | null {
-  try {
-    const raw = window.localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<PersistedYieldState>;
-    return {
-      rent: numOrNull(parsed.rent),
-      costPerM2: numOrNull(parsed.costPerM2),
-      price: numOrNull(parsed.price),
-      priceTouched: !!parsed.priceTouched,
-      rentTouched: !!parsed.rentTouched,
-      costTouched: !!parsed.costTouched,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function writeYieldState(key: string, state: PersistedYieldState): void {
-  try {
-    window.localStorage.setItem(key, JSON.stringify(state));
-  } catch {
-    /* Quota exceeded or unavailable (private mode) — fall through. */
-  }
-}
-
-function numOrNull(v: unknown): number | null {
-  if (v == null) return null;
-  if (typeof v === 'number' && Number.isFinite(v)) return v;
-  return null;
 }
 
 function YieldNumField({
