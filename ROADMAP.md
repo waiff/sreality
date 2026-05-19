@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 13:29 UTC_
+_Last refreshed: 2026-05-19 13:49 UTC_
 
 **Branch:** `claude/fix-skill-refiner-trigger-SBQDM`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-19 13:29 UTC_
 **Last 10 commits:**
 
 ```
+14ced35 chore: refresh ROADMAP auto-status block
+83aaab8 frontend: scroll to feedback section and auto-expand pending proposal
 eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
 d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
 015c118 migrations: 081 — estimation_runs.scenario jsonb for shared yield state
@@ -24,8 +26,6 @@ d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-p
 ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
 5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
 20fea1c listings: promote sreality "Popis" to typed description column
-67bfcf6 phase QUAL fixes: PostgREST row-cap bypass + pinning across selectors
-8f641b5 admin_boundaries: spatial backfill of parent_id (migration 083 + script)
 ```
 
 <!-- END AUTO-STATUS -->
