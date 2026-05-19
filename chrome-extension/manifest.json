@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Sreality Yield Panel",
+  "version": "0.1.0",
+  "description": "Inline yield-scenario panel on sreality.cz listing pages, backed by the sreality FastAPI service.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.sreality.cz/detail/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
