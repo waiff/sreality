@@ -168,11 +168,17 @@ def _city_quality_clauses(
     pop_max = filters.max_city_population
 
     if rules or pop_min is not None or pop_max is not None:
+        # Polygon containment (migration 081) when the curated city is
+        # wired to an obec admin_boundary; centroid+radius is the
+        # fallback for cities that didn't match a RÚIAN obec by name.
         sub_where: list[str] = [
-            "ST_DWithin("
+            "((c.admin_boundary_id IS NOT NULL "
+            "AND ST_Covers(b.geom, l.geom)) "
+            "OR (c.admin_boundary_id IS NULL "
+            "AND ST_DWithin("
             "l.geom, "
             "ST_SetSRID(ST_MakePoint(c.lng, c.lat), 4326)::geography, "
-            "c.default_radius_m)"
+            "c.default_radius_m)))"
         ]
         for i, rule in enumerate(rules):
             idx_p, val_p = f"ciq_rule_{i}_name", f"ciq_rule_{i}_val"
@@ -186,7 +192,10 @@ def _city_quality_clauses(
             sub_where.append("c.population <= %(max_city_population)s")
             params["max_city_population"] = pop_max
         where.append(
-            "EXISTS (SELECT 1 FROM curated_cities_public c WHERE "
+            "EXISTS (SELECT 1 FROM curated_cities_public c "
+            "LEFT JOIN admin_boundaries_public b "
+            "ON b.id = c.admin_boundary_id "
+            "WHERE "
             + " AND ".join(sub_where)
             + ")"
         )
