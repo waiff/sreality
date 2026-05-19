@@ -1,5 +1,5 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type MouseEvent } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   estimationKeys,
@@ -2020,6 +2020,8 @@ const feedbackKeys = {
 
 function FeedbackBlock({ runId }: { runId: number }) {
   const qc = useQueryClient();
+  const location = useLocation();
+  const openedViaHash = location.hash === '#feedback';
 
   const listQ = useQuery<{ data: EstimationFeedback[] }, ApiError>({
     queryKey: feedbackKeys.list(runId),
@@ -2041,6 +2043,28 @@ function FeedbackBlock({ runId }: { runId: number }) {
 
   const rows = listQ.data?.data ?? [];
 
+  const scrolledRef = useRef(false);
+  useEffect(() => {
+    if (!openedViaHash) return;
+    if (!listQ.isSuccess) return;
+    if (scrolledRef.current) return;
+    scrolledRef.current = true;
+    const raf = requestAnimationFrame(() => {
+      document
+        .getElementById('feedback')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [openedViaHash, listQ.isSuccess]);
+
+  const autoExpandRefinementId = useMemo(() => {
+    if (!openedViaHash) return null;
+    const target = rows.find(
+      (r) => r.status === 'proposed' && r.refinement_id != null,
+    );
+    return target?.refinement_id ?? null;
+  }, [openedViaHash, rows]);
+
   return (
     <div id="feedback">
       <SectionLabel>Feedback history</SectionLabel>
@@ -2059,6 +2083,7 @@ function FeedbackBlock({ runId }: { runId: number }) {
           decideMut.mutate({ refinementId, decision })
         }
         decideError={decideMut.error}
+        autoExpandRefinementId={autoExpandRefinementId}
       />
     </div>
   );
@@ -2380,12 +2405,14 @@ function FeedbackHistory({
   decidePending,
   onDecide,
   decideError,
+  autoExpandRefinementId,
 }: {
   rows: EstimationFeedback[];
   loading: boolean;
   decidePending: boolean;
   onDecide: (refinementId: number, decision: 'apply' | 'dismiss') => void;
   decideError: ApiError | null;
+  autoExpandRefinementId: number | null;
 }) {
   if (loading) {
     return (
@@ -2410,6 +2437,10 @@ function FeedbackHistory({
           decidePending={decidePending}
           onDecide={onDecide}
           decideError={decideError}
+          defaultExpanded={
+            autoExpandRefinementId != null &&
+            row.refinement_id === autoExpandRefinementId
+          }
         />
       ))}
     </ul>
@@ -2421,13 +2452,15 @@ function FeedbackRow({
   decidePending,
   onDecide,
   decideError,
+  defaultExpanded = false,
 }: {
   row: EstimationFeedback;
   decidePending: boolean;
   onDecide: (refinementId: number, decision: 'apply' | 'dismiss') => void;
   decideError: ApiError | null;
+  defaultExpanded?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const refinementQ = useQuery<SkillRefinement, ApiError>({
     queryKey: ['skill-refinement', row.refinement_id],
     queryFn: () =>

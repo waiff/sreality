@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 12:40 UTC_
+_Last refreshed: 2026-05-19 13:53 UTC_
 
-**Branch:** `claude/review-qual-roadmap-TutYL`
+**Branch:** `claude/fix-skill-refiner-trigger-SBQDM`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 86 files, latest `083_browse_stats_price_per_m2.sql`.
+**Migrations on disk:** 89 files, latest `085_estimation_runs_scenario.sql`.
 
 **Last 10 commits:**
 
 ```
-17feec9 phase QUAL: price-per-m² filter, 15-min delta scrape, watchdog poll decouple
-67bfcf6 phase QUAL fixes: PostgREST row-cap bypass + pinning across selectors
-c68a26b Merge pull request #158 from waiff/claude/curated-cities-spatial-relink
-a0ef582 curated_cities: spatial-containment relink (migration 082 + script)
-d0ba3cc Merge pull request #157 from waiff/claude/ingest-boundaries-shp-tokens
-f6194c6 ingest_boundaries: match current ČÚZK filename schema (VUSC, KATUZE)
-24b75b1 Merge pull request #156 from waiff/claude/ingest-boundaries-inventory-log
-a2d50f4 ingest_boundaries: inventory log + diagnostic error on missing .shp
-9262ed6 Merge pull request #155 from waiff/claude/reorganize-estimation-frontend-FkE3q
-c4a9af7 roadmap: refresh auto-status block
+3c3d8eb chore: refresh ROADMAP auto-status block
+14ced35 chore: refresh ROADMAP auto-status block
+83aaab8 frontend: scroll to feedback section and auto-expand pending proposal
+eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
+d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
+015c118 migrations: 081 — estimation_runs.scenario jsonb for shared yield state
+5138b00 Merge pull request #161 from waiff/claude/add-listing-description-Twg1V
+3ab5e96 Merge origin/main into claude/add-listing-description-Twg1V
+ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
+5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
 ```
 
 <!-- END AUTO-STATUS -->
