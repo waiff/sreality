@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 11:34 UTC_
+_Last refreshed: 2026-05-19 09:17 UTC_
 
-**Branch:** `claude/sreality-chrome-plugin-XqcsC`
+**Branch:** `claude/reorganize-estimation-frontend-FkE3q`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 84 files, latest `081_estimation_runs_scenario.sql`.
+**Migrations on disk:** 84 files, latest `081_curated_cities_polygon.sql`.
 
 **Last 10 commits:**
 
 ```
+e0edd32 Merge pull request #153 from waiff/claude/plan-qual-roadmap-FkSTb
+d498a9f Merge origin/main into claude/plan-qual-roadmap-FkSTb
+7221cc8 roadmap: refresh auto-status block
+94ee2ac Merge pull request #152 from waiff/claude/review-roadmap-zHm6O
+2394738 roadmap: refresh auto-status block
+78e1769 roadmap: refresh auto-status block
+cc9bc39 phase QUAL: curated-city polygon containment + per-rule op
+02d3c83 roadmap: refresh auto-status block
+dd8369c roadmap: refresh auto-status block
 297d246 Merge pull request #151 from waiff/claude/review-qual-roadmap-TutYL
-4b79c34 phase QUAL fixes: preserve overlay state, pinned indexes, Czech labels, population hint
-157100e Merge pull request #150 from waiff/claude/review-qual-roadmap-TutYL
-a857788 phase QUAL follow-ups: watchdog UI, stats RPC, population fetcher
-617bc2e Merge pull request #149 from waiff/claude/review-qual-roadmap-TutYL
-b1d4149 phase QUAL: curated city indexes, watchdog parity, map overlay
-8be16c4 Merge pull request #148 from waiff/claude/fix-failed-estimation-ogCpV
-fbec766 estimations: tool runtime panel, retry-on-list, batched walkability
-7cb6b20 Merge pull request #147 from waiff/claude/drop-listings-raw-json-idx
-c64603f migrations: drop unused 1.8GB GIN index on listings.raw_json
 ```
 
 <!-- END AUTO-STATUS -->

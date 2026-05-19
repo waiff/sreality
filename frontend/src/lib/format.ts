@@ -111,3 +111,19 @@ export const fmtAbsolute = (iso: string | null | undefined): string => {
     minute: '2-digit',
   });
 };
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+export const fmtDateSlash = (iso: string | null | undefined): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
+};
+
+export const fmtTime24 = (iso: string | null | undefined): string => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '—';
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+};

@@ -8,9 +8,12 @@ import {
 } from '@/lib/queries';
 import {
   fmtAbsolute,
+  fmtArea,
   fmtCount,
   fmtCzk,
+  fmtDateSlash,
   fmtRelative,
+  fmtTime24,
 } from '@/lib/format';
 import type {
   Confidence,
@@ -250,12 +253,12 @@ function RunsTable({
             <tr>
               <Th align="left">When</Th>
               <Th align="left">Source</Th>
-              <Th align="left">Skill</Th>
+              <Th align="left">City</Th>
+              <Th align="left">Disp · m²</Th>
+              <Th align="left">Listing</Th>
               <Th align="left">Status</Th>
-              <Th align="left">Input</Th>
               <Th align="right">Estimate</Th>
-              <Th align="left">Confidence</Th>
-              <Th align="right">N</Th>
+              <Th align="right">Yield</Th>
               <Th align="left">Feedback</Th>
             </tr>
           </thead>
@@ -293,40 +296,29 @@ function Th({ align, children }: { align: 'left' | 'right'; children: React.Reac
 }
 
 function Row({ run }: { run: EstimationRun }) {
-  const compsCount = run.comparables_used?.length ?? null;
   return (
     <tr className="border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors">
-      <td
-        className="px-4 py-2.5 align-middle text-[var(--color-ink-2)] tabular-nums"
-        title={fmtAbsolute(run.created_at)}
-      >
-        <Link
-          to={`/estimation/${run.id}`}
-          className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
-        >
-          {fmtRelative(run.created_at)}
-        </Link>
-      </td>
+      <WhenCell run={run} />
       <td className="px-4 py-2.5 align-middle">
         <SourceBadge source={run.source} />
       </td>
+      <td className="px-4 py-2.5 align-middle max-w-[160px]">
+        <CityCell run={run} />
+      </td>
       <td className="px-4 py-2.5 align-middle">
-        <SkillCell run={run} />
+        <DispoAreaCell run={run} />
+      </td>
+      <td className="px-4 py-2.5 align-middle">
+        <ListingLinkCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle">
         <StatusCell run={run} />
       </td>
-      <td className="px-4 py-2.5 align-middle max-w-[200px]">
-        <InputCell run={run} />
-      </td>
-      <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
+      <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums">
         <EstimateCell run={run} />
       </td>
-      <td className="px-4 py-2.5 align-middle">
-        {run.confidence ? <ConfidenceBadge confidence={run.confidence} /> : <span className="text-[var(--color-ink-4)]">—</span>}
-      </td>
-      <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-        {compsCount != null ? compsCount : <span className="text-[var(--color-ink-4)]">—</span>}
+      <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums">
+        <YieldCell run={run} />
       </td>
       <td className="px-4 py-2.5 align-middle">
         <FeedbackCell run={run} />
@@ -335,28 +327,60 @@ function Row({ run }: { run: EstimationRun }) {
   );
 }
 
-function SkillCell({ run }: { run: EstimationRun }) {
-  if (!run.skill_name) {
+function WhenCell({ run }: { run: EstimationRun }) {
+  return (
+    <td
+      className="px-4 py-2.5 align-middle tabular-nums"
+      title={`${fmtAbsolute(run.created_at)} · ${fmtRelative(run.created_at)}`}
+    >
+      <Link
+        to={`/estimation/${run.id}`}
+        className="block leading-tight hover:text-[var(--color-copper)]"
+      >
+        <div className="text-[var(--color-ink-2)]">{fmtDateSlash(run.created_at)}</div>
+        <div className="text-[0.7rem] text-[var(--color-ink-4)]">{fmtTime24(run.created_at)}</div>
+      </Link>
+    </td>
+  );
+}
+
+function CityCell({ run }: { run: EstimationRun }) {
+  const city = run.locality_display ?? null;
+  if (!city) {
     return <span className="text-[var(--color-ink-4)]">—</span>;
   }
   return (
-    <span className="inline-flex items-baseline gap-1.5 font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-2)]">
-      <span className="truncate max-w-[120px]" title={run.skill_name}>
-        {shortSkillName(run.skill_name)}
-      </span>
-      {run.skill_version != null && (
-        <span className="text-[0.65rem] tracking-wide text-[var(--color-ink-4)]">
-          v{run.skill_version}
-        </span>
-      )}
+    <span className="text-[var(--color-ink-2)] truncate block" title={city}>
+      {city}
     </span>
   );
 }
 
-function shortSkillName(name: string): string {
-  // rental_estimator_full_v1 → rental_estimator_full. Strip the _vN
-  // suffix because the migration 052 `version` column carries it.
-  return name.replace(/_v\d+$/, '');
+function DispoAreaCell({ run }: { run: EstimationRun }) {
+  const dispo = run.input_spec?.disposition ?? null;
+  const area = run.input_spec?.area_m2 ?? null;
+  if (dispo == null && area == null) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  const parts: string[] = [];
+  if (dispo) parts.push(dispo);
+  if (area != null) parts.push(fmtArea(area));
+  return (
+    <span className="tabular-nums text-[var(--color-ink-2)]">
+      {parts.join(' · ')}
+    </span>
+  );
+}
+
+function YieldCell({ run }: { run: EstimationRun }) {
+  if (run.gross_yield_pct == null) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  return (
+    <span className="text-[var(--color-ink-2)]">
+      {run.gross_yield_pct.toFixed(2)}&nbsp;%
+    </span>
+  );
 }
 
 function FeedbackCell({ run }: { run: EstimationRun }) {
@@ -380,17 +404,17 @@ function FeedbackCell({ run }: { run: EstimationRun }) {
   );
 }
 
-function InputCell({ run }: { run: EstimationRun }) {
+function ListingLinkCell({ run }: { run: EstimationRun }) {
   if (run.input_url) {
     return (
       <a
         href={run.input_url}
         target="_blank"
         rel="noopener noreferrer"
-        className="text-[var(--color-copper)] hover:underline underline-offset-2 truncate block"
+        className="text-[var(--color-copper)] hover:underline underline-offset-2"
         title={run.input_url}
       >
-        {short(run.input_url)}
+        Link
       </a>
     );
   }
@@ -398,22 +422,13 @@ function InputCell({ run }: { run: EstimationRun }) {
     return (
       <Link
         to={`/listing/${run.input_sreality_id}`}
-        className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
+        className="text-[var(--color-copper)] hover:underline underline-offset-2"
       >
-        id {run.input_sreality_id}
+        Link
       </Link>
     );
   }
   return <span className="text-[0.78rem] text-[var(--color-ink-3)]">spec only</span>;
-}
-
-function short(url: string): string {
-  try {
-    const u = new URL(url);
-    return `${u.host}${u.pathname}`.replace(/\/$/, '');
-  } catch {
-    return url;
-  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -430,21 +445,29 @@ function SourceBadge({ source }: { source: EstimationSource }) {
 
 function EstimateCell({ run }: { run: EstimationRun }) {
   const kind = run.estimate_kind ?? 'rent';
+  const tone = estimateTone(run.confidence);
   if (kind === 'sale') {
     if (run.estimated_sale_price_czk == null) {
       return <span className="text-[var(--color-ink-4)]">—</span>;
     }
-    return <>{fmtCzk(run.estimated_sale_price_czk)}</>;
+    return <span className={tone}>{fmtCzk(run.estimated_sale_price_czk)}</span>;
   }
   if (run.estimated_monthly_rent_czk == null) {
     return <span className="text-[var(--color-ink-4)]">—</span>;
   }
   return (
-    <>
+    <span className={tone}>
       {fmtCzk(run.estimated_monthly_rent_czk)}
       <span className="ml-1 text-[var(--color-ink-3)] text-[0.7rem]">/mo</span>
-    </>
+    </span>
   );
+}
+
+function estimateTone(confidence: Confidence | null): string {
+  if (confidence === 'high') return 'text-[var(--color-sage)]';
+  if (confidence === 'medium') return 'text-[var(--color-copper)]';
+  if (confidence === 'low') return 'text-[var(--color-ochre)]';
+  return 'text-[var(--color-ink)]';
 }
 
 function StatusCell({ run }: { run: EstimationRun }) {
@@ -497,21 +520,6 @@ function statusTone(status: EstimationStatus): string {
   if (status === 'success') return 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]';
   if (status === 'failed') return 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]';
   return 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]';
-}
-
-function ConfidenceBadge({ confidence }: { confidence: Confidence }) {
-  const tone =
-    confidence === 'high'
-      ? 'text-[var(--color-sage)]'
-      : confidence === 'medium'
-        ? 'text-[var(--color-copper)]'
-        : 'text-[var(--color-ochre)]';
-  return (
-    <span className={['inline-flex items-center gap-1 text-[0.7rem] tracking-wide', tone].join(' ')}>
-      <span className="w-1.5 h-1.5 rounded-full bg-current opacity-70" aria-hidden />
-      {confidence}
-    </span>
-  );
 }
 
 /* -------------------------------------------------------------------------- */
