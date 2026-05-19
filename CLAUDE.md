@@ -643,6 +643,28 @@ to scrub by regex; if a fixture leaks one, hand-edit the file.
 GitHub repo -> **Actions** tab -> **Daily Sreality scrape** workflow ->
 **Run workflow** button -> pick branch and optional flags -> **Run workflow**.
 
+The scrape runs on a two-tier cadence:
+
+- **Daily Sreality scrape** (`scrape.yml`, cron `0 22 * * *`) — full
+  walk of every category pair's entire index, detail refetches up
+  to the configured caps, image-download phase, condition-scoring
+  phase. The **only** path that runs `mark_inactive`: a listing not
+  seen in the run's index is flipped to `is_active=false`, which is
+  why this step is gated on a complete walk (architectural rule #3).
+- **Sreality delta scrape (15-min)** (`scrape_delta.yml`, cron
+  `*/15 * * * *`) — `--limit 200` per category, so each tick only
+  walks the first ~3 index pages of each of the 6 category pairs.
+  Picks up newly-listed properties within minutes of them appearing
+  on sreality. Skips image downloads and condition scoring (the
+  nightly covers both). Never marks listings inactive, by design
+  (the `--limit`-set guard in `scraper/main.py:main` short-circuits
+  `mark_inactive`).
+
+Concurrency for the delta is set to drop overlapping runs rather
+than queue them — if a 15-min run is still in flight when the next
+cron fires, the new run is skipped. The nightly has no such guard;
+it owns the 22:00 UTC slot.
+
 ## Reading the logs
 
 The scraper emits structured progress lines:

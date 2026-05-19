@@ -15,6 +15,7 @@ Run with:
     python -m scraper.main --dry-run             # log only, no DB writes
     python -m scraper.main --detail-only 28...   # one listing
     python -m scraper.main --no-image-downloads  # skip image phase
+    python -m scraper.main --images-only         # only run image phase
     python -m scraper.main --max-detail-refetches 2000   # global cap
     python -m scraper.main --max-detail-refetches-per-category 500  # per-cat cap
     python -m scraper.main --max-image-downloads 500     # cap images
@@ -63,7 +64,15 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_logging(args.verbose)
 
-    if args.detail_only is not None:
+    if args.images_only:
+        if args.dry_run or args.detail_only is not None or args.no_image_downloads:
+            LOG.error(
+                "--images-only is incompatible with --dry-run, "
+                "--detail-only, and --no-image-downloads"
+            )
+            return 2
+        rc = 0
+    elif args.detail_only is not None:
         rc = _run_detail_only(
             _build_client(CATEGORIES[0][0], CATEGORIES[0][1]),
             args.detail_only,
@@ -91,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         rc == 0
         and not args.dry_run
         and not args.no_condition_scoring
+        and not args.images_only
     ):
         _run_condition_scoring(max_scores=args.max_condition_scores)
 
@@ -125,6 +135,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--no-image-downloads",
         action="store_true",
         help="skip the image-download phase even if R2 is configured",
+    )
+    p.add_argument(
+        "--images-only",
+        action="store_true",
+        help=(
+            "run only the image-download phase; skip the scrape and "
+            "condition-scoring phases. Useful for backfill workflows "
+            "that drain the R2 backlog without re-walking the index."
+        ),
     )
     p.add_argument(
         "--max-detail-refetches",

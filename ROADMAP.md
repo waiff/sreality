@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 13:49 UTC_
+_Last refreshed: 2026-05-19 13:53 UTC_
 
 **Branch:** `claude/fix-skill-refiner-trigger-SBQDM`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 88 files, latest `085_estimation_runs_scenario.sql`.
+**Migrations on disk:** 89 files, latest `085_estimation_runs_scenario.sql`.
 
 **Last 10 commits:**
 
 ```
+3c3d8eb chore: refresh ROADMAP auto-status block
 14ced35 chore: refresh ROADMAP auto-status block
 83aaab8 frontend: scroll to feedback section and auto-expand pending proposal
 eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
@@ -25,7 +26,6 @@ d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-p
 3ab5e96 Merge origin/main into claude/add-listing-description-Twg1V
 ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
 5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
-20fea1c listings: promote sreality "Popis" to typed description column
 ```
 
 <!-- END AUTO-STATUS -->
@@ -418,6 +418,35 @@ overlay that can be heatmap-color-coded by any chosen index.
   `.github/workflows/refresh_population.yml` for operator-triggered
   refresh; no DB access required (the workflow just regenerates
   the committed CSV).
+- **Price-per-m² filter everywhere.** Two new `FilterDef`s in
+  `toolkit/filter_registry.py` (`min/max_price_per_m2`,
+  `pg_column='price_per_m2'`, all-agenda) make per-m² bounds a
+  first-class registry primitive. Toolkit comparables, the Watchdog
+  matcher, `EstimationFilters` / `WatchdogFilterSpec` on the TS side,
+  Browse URL state, the Filters.tsx Price control, and Stats all
+  honour it via one consistent expression
+  (`price_czk::numeric / NULLIF(area_m2, 0)`). Migration 083 extends
+  `browse_stats` to 46 params so the Stats tab stays aligned with
+  Map / Table whenever a per-m² bound is set. The PostgREST direct
+  paths get this for free because `listings_public` already exposes
+  `price_per_m2` as a computed column.
+- **15-minute lightweight delta scrape.** New
+  `.github/workflows/scrape_delta.yml` (cron `*/15 * * * *`,
+  `--limit 200`, image / condition phases skipped) walks the first
+  ~3 index pages of each of the 6 category pairs every 15 minutes so
+  a newly-listed sreality property reaches the Watchdog feed within
+  minutes instead of within a day. The nightly `scrape.yml` still
+  owns `mark_inactive` per architectural rule #3 — the partial walk
+  here can never falsely flip a live listing inactive thanks to the
+  `--limit`-set guard in `scraper/main.py:main`. Concurrency-group
+  drops overlapping runs rather than queueing them.
+- **Watchdog feed polling decoupled from estimation polling.**
+  `frontend/src/pages/Watchdog.tsx` switches from an unconditional
+  5-second `refetchInterval` to a two-tier callback: 30 s for the
+  dispatches feed (matcher ticks every 5 min, so 30 s gives plenty
+  of resolution at 1/6 the request volume), bumped to 5 s only when
+  any visible row carries a non-terminal estimation status. Drops
+  back the moment estimation completes.
 
 **Still next** (separate slice):
 

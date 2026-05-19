@@ -58,6 +58,10 @@ class ComparableFilters:
     has_parking: bool | None = None
     min_price_czk: int | None = None
     max_price_czk: int | None = None
+    # Price per m² (computed: price_czk / NULLIF(area_m2, 0)). NULL area_m2
+    # falls out when either bound is set.
+    min_price_per_m2: float | None = None
+    max_price_per_m2: float | None = None
     category_main: str | None = "byt"
     category_type: str | None = "pronajem"
     category_sub_cb: int | None = None
@@ -315,6 +319,16 @@ def _shared_filter_where(
     if filters.max_price_czk is not None:
         where.append("l.price_czk <= %(max_price_czk)s")
         params["max_price_czk"] = filters.max_price_czk
+    if filters.min_price_per_m2 is not None:
+        where.append(
+            "l.price_czk::numeric / NULLIF(l.area_m2, 0) >= %(min_price_per_m2)s"
+        )
+        params["min_price_per_m2"] = filters.min_price_per_m2
+    if filters.max_price_per_m2 is not None:
+        where.append(
+            "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
+        )
+        params["max_price_per_m2"] = filters.max_price_per_m2
 
     if filters.locality_district_id is not None:
         where.append("l.locality_district_id = %(locality_district_id)s")
@@ -524,6 +538,8 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "has_parking": filters.has_parking,
         "min_price_czk": filters.min_price_czk,
         "max_price_czk": filters.max_price_czk,
+        "min_price_per_m2": filters.min_price_per_m2,
+        "max_price_per_m2": filters.max_price_per_m2,
         "category_main": filters.category_main,
         "category_type": filters.category_type,
         "category_sub_cb": filters.category_sub_cb,
