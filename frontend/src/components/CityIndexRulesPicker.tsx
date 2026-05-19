@@ -20,11 +20,17 @@ interface Props {
   onChange: (next: unknown) => void;
 }
 
-/* `op` is locked to `>=` in the UI for now — that's what the user
- * asked for ("metric > 8") and matches the Watchdog default. The data
- * model and SQL helpers carry the operator already so adding the
- * picker is one prop edit when needed. */
-const FIXED_OP = '>=' as const;
+const OP_OPTIONS: ReadonlyArray<{
+  value: NonNullable<CityIndexRule['op']>;
+  glyph: string;
+}> = [
+  { value: '>=', glyph: '≥' },
+  { value: '<=', glyph: '≤' },
+  { value: '==', glyph: '=' },
+  { value: '>', glyph: '>' },
+  { value: '<', glyph: '<' },
+  { value: '!=', glyph: '≠' },
+];
 
 export default function CityIndexRulesPicker({ value, onChange }: Props) {
   const rules = ((value as CityIndexRule[] | null) ?? []);
@@ -51,7 +57,7 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
     if (!defs || defs.length === 0) return;
     const next: CityIndexRule = {
       index_name: defs[0].index_name,
-      op: FIXED_OP,
+      op: '>=',
       value: 7,
     };
     update([...rules, next]);
@@ -110,7 +116,20 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
                 </optgroup>
               ))}
             </select>
-            <span className="font-mono text-[var(--color-ink-3)]">≥</span>
+            <select
+              className="bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-1.5 py-1 text-[0.75rem] font-mono"
+              value={rule.op ?? '>='}
+              onChange={(e) =>
+                setRule(i, { op: e.target.value as CityIndexRule['op'] })
+              }
+              aria-label="Comparison operator"
+            >
+              {OP_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.glyph}
+                </option>
+              ))}
+            </select>
             <input
               type="number"
               className="w-16 bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-1.5 py-1 text-[0.75rem] tabular-nums"
