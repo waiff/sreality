@@ -14,6 +14,13 @@ import {
   type CityIndexDefinition,
 } from '@/lib/queries';
 import type { CityIndexRule } from '@/lib/filters';
+import { groupForPicker, indexLabel } from '@/lib/cityIndexes';
+
+/* Re-exports kept so existing call sites that imported these helpers
+ * from this file (the pin popup before the shared module was lifted
+ * out) keep working without an import rewrite. The canonical home is
+ * `frontend/src/lib/cityIndexes.ts`. */
+export { indexLabel } from '@/lib/cityIndexes';
 
 interface Props {
   value: unknown;
@@ -165,69 +172,3 @@ export default function CityIndexRulesPicker({ value, onChange }: Props) {
   );
 }
 
-const CATEGORY_LABELS: Record<CityIndexDefinition['category'], string> = {
-  overall: 'Celkové',
-  health_env: 'Zdraví a prostředí',
-  material_edu: 'Práce a vzdělání',
-  services_relations: 'Služby a vztahy',
-  sub_index: 'Ostatní indexy',
-};
-
-/* Operator-curated short list of the indexes that get reached for
- * most often. They render at the top of the dropdown as a "Pinned"
- * optgroup with each label prefixed by `- ` so the pinning is
- * visually obvious. Adding / removing an entry is a one-line edit;
- * unknown slugs are silently ignored if the seed hasn't loaded
- * them. Order in the array is the display order. */
-const PINNED_SLUGS: readonly string[] = [
-  'celkove_hodnoceni',     // Celkové hodnocení
-  'prirustek_obyvatel',    // Index přírůstku obyvatelstva
-  'stehovani_mladych',     // Index stěhování mladých
-  'pracovni_mista',        // Index nabídky pracovních míst
-  'nezamestnanost',        // Index nezaměstnanosti
-  'silnicni_sit',          // Index silniční sítě
-  'zeleznicni_doprava',    // Index železniční dopravy
-];
-
-/** Czech label first; fall back to the English one if `label_cs` is
- *  missing (shouldn't happen post-seed, but the registry typing keeps
- *  `label_en` optional / nullable so we stay defensive). */
-export function indexLabel(d: CityIndexDefinition): string {
-  return d.label_cs || d.label_en || d.index_name;
-}
-
-interface PickerGroup {
-  label: string;
-  defs: ReadonlyArray<CityIndexDefinition>;
-  /** Prefix prepended to each option's label inside this group.
-   *  Used to mark the pinned set with a leading dash. */
-  prefix: string;
-}
-
-function groupForPicker(
-  defs: ReadonlyArray<CityIndexDefinition>,
-): PickerGroup[] {
-  const byName = new Map(defs.map((d) => [d.index_name, d]));
-  const pinnedDefs = PINNED_SLUGS
-    .map((slug) => byName.get(slug))
-    .filter((d): d is CityIndexDefinition => d != null);
-  const pinnedSet = new Set(pinnedDefs.map((d) => d.index_name));
-
-  const groups: PickerGroup[] = [];
-  if (pinnedDefs.length > 0) {
-    groups.push({ label: 'Připnuté', defs: pinnedDefs, prefix: '- ' });
-  }
-
-  const order: CityIndexDefinition['category'][] = [
-    'overall', 'health_env', 'material_edu', 'services_relations', 'sub_index',
-  ];
-  for (const cat of order) {
-    const inCat = defs.filter(
-      (d) => d.category === cat && !pinnedSet.has(d.index_name),
-    );
-    if (inCat.length > 0) {
-      groups.push({ label: CATEGORY_LABELS[cat], defs: inCat, prefix: '' });
-    }
-  }
-  return groups;
-}

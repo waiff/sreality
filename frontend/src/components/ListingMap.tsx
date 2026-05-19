@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import type { CityIndexDefinition, CuratedCity, MapRow } from '@/lib/queries';
 import type { CenterRadius, MapBounds } from '@/lib/filters';
-import { indexLabel } from '@/components/CityIndexRulesPicker';
+import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
 
 /* Polygon approximation of a metres-radius circle around (lat, lng).
@@ -776,10 +776,14 @@ function CityMapControls({
             onChange={(e) => onColorByIndexChange?.(e.target.value || null)}
           >
             <option value="">Žádné</option>
-            {cityIndexDefinitions.map((d) => (
-              <option key={d.index_name} value={d.index_name}>
-                {indexLabel(d)}
-              </option>
+            {groupForPicker(cityIndexDefinitions).map((g) => (
+              <optgroup key={g.label} label={g.label}>
+                {g.defs.map((d) => (
+                  <option key={d.index_name} value={d.index_name}>
+                    {g.prefix}{indexLabel(d)}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </div>
@@ -855,21 +859,13 @@ function cityPopupHtml(
   const popLabel = c.population != null
     ? `${c.population.toLocaleString('cs-CZ')} obyv.${c.population_as_of_year ? ` (${c.population_as_of_year})` : ''}`
     : '';
-  /* Sort: the highlighted index first, then category aggregates, then
-   * sub-indexes by sort_order. Cap at 8 rows so a 33-index popup
-   * doesn't sprawl. */
-  const sortedDefs = [...defs].sort((a, b) => {
-    const aHi = highlighted && a.index_name === highlighted.index_name ? 0 : 1;
-    const bHi = highlighted && b.index_name === highlighted.index_name ? 0 : 1;
-    if (aHi !== bHi) return aHi - bHi;
-    const order: Record<string, number> = {
-      overall: 0, health_env: 1, material_edu: 2, services_relations: 3, sub_index: 4,
-    };
-    if (order[a.category] !== order[b.category]) {
-      return order[a.category] - order[b.category];
-    }
-    return a.sort_order - b.sort_order;
-  });
+  /* Sort: highlighted index first (when the operator colour-codes by
+   * one), then the seven pinned indexes (shared with the rule picker
+   * and the colour-by dropdown), then everything else by category +
+   * registry sort_order. Cap at 8 rows so a 33-index popup doesn't
+   * sprawl — the cap comfortably fits the pinned set, guaranteeing
+   * the operator always sees the headline metrics. */
+  const sortedDefs = pinnedFirst(defs, highlighted);
   const rows = sortedDefs.slice(0, 8).map((d) => {
     const key = `${c.city_id}:${d.index_name}`;
     const v = values.get(key);

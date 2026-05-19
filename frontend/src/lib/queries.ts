@@ -212,9 +212,16 @@ async function resolveTagPrefilter(
   f: ListingFilters,
 ): Promise<number[] | null> {
   if (f.tags.length === 0) return null;
-  const { data, error } = await supabase.rpc('listings_with_tags', {
-    tag_ids: f.tags,
-  });
+  /* PostgREST applies a server-configured `db-max-rows` cap on every
+   * response — Supabase's default is 1,000. With ~62k listings in
+   * the table, a tag matched widely enough would silently truncate
+   * the prefilter id list and bleed listings the operator asked to
+   * exclude back into the cohort. `.range(0, 99999)` bypasses the
+   * cap; the result is capped client-side instead, headroom for any
+   * conceivable future cohort. */
+  const { data, error } = await supabase
+    .rpc('listings_with_tags', { tag_ids: f.tags })
+    .range(0, 99999);
   if (error) throw error;
   return ((data ?? []) as Array<{ sreality_id: number }>).map(
     (r) => r.sreality_id,
@@ -238,13 +245,17 @@ async function resolveCityQualityPrefilter(
 ): Promise<number[] | null> {
   if (!hasCityQualityFilter(f)) return null;
   /* Filters carry the wire shape (snake_case) directly so no
-   * translation layer is needed before calling the RPC. */
-  const { data, error } = await supabase.rpc('listings_with_city_quality', {
-    p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
-    p_pop_min: f.minCityPopulation,
-    p_pop_max: f.maxCityPopulation,
-    p_proximity: f.nearCityProximity,
-  });
+   * translation layer is needed before calling the RPC. `.range`
+   * bypasses PostgREST's default 1,000-row cap on the SETOF
+   * response — same reason `resolveTagPrefilter` does it. */
+  const { data, error } = await supabase
+    .rpc('listings_with_city_quality', {
+      p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
+      p_pop_min: f.minCityPopulation,
+      p_pop_max: f.maxCityPopulation,
+      p_proximity: f.nearCityProximity,
+    })
+    .range(0, 99999);
   if (error) throw error;
   return ((data ?? []) as Array<{ sreality_id: number }>).map(
     (r) => r.sreality_id,
@@ -701,26 +712,39 @@ export interface CityIndexValue {
 }
 
 export const fetchCuratedCities = async (): Promise<CuratedCity[]> => {
+  /* `.range` bypasses PostgREST's default 1,000-row cap. 205 rows
+   * today, headroom for future operator uploads that grow the set. */
   const { data, error } = await supabase
     .from('curated_cities_public')
     .select('*')
-    .order('name');
+    .order('name')
+    .range(0, 4999);
   if (error) throw error;
   return (data ?? []) as CuratedCity[];
 };
 
 export const fetchCityIndexDefinitions = async (): Promise<CityIndexDefinition[]> => {
+  /* `.range` bypasses PostgREST's default 1,000-row cap. 33 rows
+   * today, but defensive against future index additions. */
   const { data, error } = await supabase
     .from('city_index_definitions_public')
-    .select('*');
+    .select('*')
+    .range(0, 999);
   if (error) throw error;
   return (data ?? []) as CityIndexDefinition[];
 };
 
 export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
+  /* `.range` bypasses PostgREST's default 1,000-row cap. The view
+   * has 205 cities × 33 indexes = 6,765 rows; without this override
+   * Supabase returns only the first 1,000, silently truncating to
+   * the first ~32 cities in PK order. That's the bug behind the
+   * "Dobříš popup shows em-dashes for every index" report — Dobříš
+   * (city_id=90) sits well past the truncation point. */
   const { data, error } = await supabase
     .from('city_index_values_public')
-    .select('city_id,index_name,value');
+    .select('city_id,index_name,value')
+    .range(0, 49999);
   if (error) throw error;
   return (data ?? []) as CityIndexValue[];
 };
@@ -841,9 +865,12 @@ export const fetchListingIdsWithAllTags = async (
   tag_ids: number[],
 ): Promise<number[]> => {
   if (tag_ids.length === 0) return [];
-  const { data, error } = await supabase.rpc('listings_with_tags', {
-    tag_ids,
-  });
+  /* `.range` bypasses PostgREST's default 1,000-row cap so a widely-
+   * matched tag set doesn't silently truncate. Mirrors the same
+   * fix in `resolveTagPrefilter` / `resolveCityQualityPrefilter`. */
+  const { data, error } = await supabase
+    .rpc('listings_with_tags', { tag_ids })
+    .range(0, 99999);
   if (error) throw error;
   return ((data ?? []) as Array<{ sreality_id: number }>).map(
     (r) => r.sreality_id,
