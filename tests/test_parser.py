@@ -219,6 +219,34 @@ def test_disposition_falls_back_to_meta_description():
     assert parse_listing(raw)["disposition"] == "3+1"
 
 
+def test_description(sample):
+    assert (
+        parse_listing(sample)["description"]
+        == "Pronájem nově dokončené novostavby bytu s terasou."
+    )
+
+
+def test_description_strips_whitespace():
+    raw = {
+        "recommendations_data": {"hash_id": 1},
+        "text": {"name": "Popis", "value": "  Trimmed.\n\n"},
+    }
+    assert parse_listing(raw)["description"] == "Trimmed."
+
+
+def test_description_missing_text_block_is_none():
+    raw = {"recommendations_data": {"hash_id": 1}}
+    assert parse_listing(raw)["description"] is None
+
+
+def test_description_empty_value_is_none():
+    raw = {
+        "recommendations_data": {"hash_id": 1},
+        "text": {"name": "Popis", "value": "   "},
+    }
+    assert parse_listing(raw)["description"] is None
+
+
 def test_missing_id_raises():
     with pytest.raises(ValueError):
         parse_listing({"items": []})

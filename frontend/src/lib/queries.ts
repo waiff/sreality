@@ -560,7 +560,8 @@ const DETAIL_COLS =
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
   'building_type,condition,energy_rating,' +
   'estate_area,usable_area,garden_area,category_sub_cb,' +
-  'furnished,terrace,cellar,garage,parking_lots,ownership';
+  'furnished,terrace,cellar,garage,parking_lots,ownership,' +
+  'description';
 
 export const fetchListingById = async (
   sreality_id: number,
@@ -579,7 +580,7 @@ export const fetchSnapshotsByListing = async (
 ): Promise<ListingSnapshotPublic[]> => {
   const { data, error } = await supabase
     .from('listing_snapshots_public')
-    .select('id,sreality_id,scraped_at,price_czk')
+    .select('id,sreality_id,scraped_at,price_czk,description')
     .eq('sreality_id', sreality_id)
     .order('scraped_at', { ascending: true });
   if (error) throw error;
