@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo } from 'react';
+import { Suspense, lazy, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -111,6 +111,7 @@ export default function ListingDetail() {
       <Hairline />
       <GalleryBlock images={images} isActive={listing.is_active} loading={imagesQ.isLoading} />
       <Hairline />
+      <DescriptionBlock listing={listing} />
       <KeyFactsBlock listing={listing} />
       <Hairline />
       <Suspense fallback={null}>
@@ -326,6 +327,57 @@ function GalleryBlock({
           <Gallery images={images} isActive={isActive} />
         </Suspense>
       </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Description (original sreality "Popis" free-text)                          */
+/* -------------------------------------------------------------------------- */
+
+function DescriptionBlock({ listing }: { listing: ListingPublic }) {
+  const text = listing.description?.trim() ?? '';
+  if (!text) return null;
+  return (
+    <>
+      <DescriptionBody text={text} />
+      <Hairline />
+    </>
+  );
+}
+
+function DescriptionBody({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const ref = useRef<HTMLParagraphElement | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setOverflows(el.scrollHeight - el.clientHeight > 1);
+  }, [text]);
+
+  return (
+    <div>
+      <SectionLabel>Description</SectionLabel>
+      <p
+        ref={ref}
+        className={
+          'mt-3 text-sm leading-relaxed text-[var(--color-ink)] whitespace-pre-wrap ' +
+          (expanded ? '' : 'line-clamp-4')
+        }
+      >
+        {text}
+      </p>
+      {(overflows || expanded) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-2 inline-flex items-center text-[0.75rem] tracking-wide text-[var(--color-ink-3)] hover:text-[var(--color-copper)] transition-colors"
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
     </div>
   );
 }
@@ -548,12 +600,15 @@ function SnapshotTable({ snapshots }: { snapshots: ListingSnapshotPublic[] }) {
             <th className="px-3 py-2 font-medium">Scraped</th>
             <th className="px-3 py-2 font-medium text-right">Price</th>
             <th className="px-3 py-2 font-medium text-right">Δ</th>
+            <th className="px-3 py-2 font-medium text-right">Desc</th>
           </tr>
         </thead>
         <tbody>
           {snapshots.map((s, i) => {
             const prev = i > 0 ? snapshots[i - 1].price_czk : null;
             const delta = s.price_czk != null && prev != null ? s.price_czk - prev : null;
+            const prevDesc = i > 0 ? snapshots[i - 1].description ?? '' : null;
+            const descChanged = prevDesc != null && prevDesc !== (s.description ?? '');
             return (
               <tr
                 key={s.id}
@@ -571,12 +626,32 @@ function SnapshotTable({ snapshots }: { snapshots: ListingSnapshotPublic[] }) {
                 <td className="px-3 py-2 text-right">
                   <DeltaCell delta={delta} />
                 </td>
+                <td className="px-3 py-2 text-right">
+                  <DescChangeCell changed={descChanged} hasPrior={i > 0} />
+                </td>
               </tr>
             );
           })}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function DescChangeCell({ changed, hasPrior }: { changed: boolean; hasPrior: boolean }) {
+  if (!hasPrior) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  if (!changed) {
+    return <span className="font-mono tabular-nums text-[var(--color-ink-3)]">·</span>;
+  }
+  return (
+    <span
+      className="cursor-help text-[var(--color-copper)]"
+      title="Description changed at this snapshot"
+    >
+      ✎
+    </span>
   );
 }
 

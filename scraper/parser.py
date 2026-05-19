@@ -209,6 +209,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "garage": _bool_or_none(rec.get("garage")),
         "parking_lots": _int_or_none(rec.get("parking_lots")),
         "ownership": OWNERSHIP.get(_int_or_none(rec.get("ownership"))),
+        "description": _description(raw),
     }
 
 
@@ -299,6 +300,14 @@ def _disposition(raw: dict[str, Any]) -> str | None:
 def _locality_value(raw: dict[str, Any]) -> str | None:
     val = (raw.get("locality") or {}).get("value")
     return val if isinstance(val, str) and val else None
+
+
+def _description(raw: dict[str, Any]) -> str | None:
+    val = (raw.get("text") or {}).get("value")
+    if not isinstance(val, str):
+        return None
+    val = val.strip()
+    return val or None
 
 
 def _district(rec: dict[str, Any], raw: dict[str, Any]) -> str | None:
