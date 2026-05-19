@@ -427,23 +427,25 @@ def wipe_table(conn: psycopg.Connection) -> int:
 def relink_curated_cities(conn: psycopg.Connection) -> dict[str, int]:
     """Re-establish curated_cities.admin_boundary_id after a fresh load.
 
-    Mirrors the backfill from migration 081. Idempotent — only touches
-    rows where admin_boundary_id is currently NULL (which is all of
-    them right after the wipe, because the FK's ON DELETE SET NULL
-    action nulled them when we DELETEd admin_boundaries).
+    Matches each curated city to the obec polygon that contains its
+    centroid. Same predicate as migration 082. Direct spatial
+    containment is more robust than the name-walk migration 081 used:
+    it needs neither admin_boundaries.parent_id (which the current
+    ČÚZK DBF schema doesn't expose under the column names
+    FIELD_CANDIDATES looks for) nor name disambiguation. Idempotent —
+    only touches rows where admin_boundary_id is currently NULL.
     """
     sql = '''
         update curated_cities c
-           set admin_boundary_id = obec.id
-          from admin_boundaries obec
-          join admin_boundaries okres
-            on okres.id = obec.parent_id and okres.level = 'okres'
-          join admin_boundaries kraj
-            on kraj.id  = okres.parent_id and kraj.level = 'kraj'
+           set admin_boundary_id = (
+             select b.id
+               from admin_boundaries b
+              where b.level = 'obec'
+                and st_covers(b.geom, c.centroid)
+              order by st_area(b.geom::geometry) asc
+              limit 1
+           )
          where c.admin_boundary_id is null
-           and obec.level = 'obec'
-           and lower(obec.name) = lower(c.name)
-           and lower(kraj.name) = lower(c.kraj_name)
     '''
     with conn.cursor() as cur:
         cur.execute(sql)
