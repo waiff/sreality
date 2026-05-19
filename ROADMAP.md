@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 09:50 UTC_
+_Last refreshed: 2026-05-19 09:59 UTC_
 
 **Branch:** `claude/ingest-boundaries-delete-relink`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-19 09:50 UTC_
 **Last 10 commits:**
 
 ```
+f0e0c50 roadmap: refresh auto-status block
 bf0426c roadmap: refresh auto-status block
 2149b4e roadmap: refresh auto-status block
 4498c7f ingest_boundaries: inventory log + diagnostic error on missing .shp
@@ -25,7 +26,6 @@ d498a9f Merge origin/main into claude/plan-qual-roadmap-FkSTb
 7221cc8 roadmap: refresh auto-status block
 94ee2ac Merge pull request #152 from waiff/claude/review-roadmap-zHm6O
 2394738 roadmap: refresh auto-status block
-78e1769 roadmap: refresh auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
