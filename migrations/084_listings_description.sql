@@ -1,4 +1,4 @@
--- 082_listings_description.sql
+-- 084_listings_description.sql
 --
 -- Promote the free-text Czech "Popis" field (raw.text.value) from
 -- raw_json to a typed `description` column on `listings`, and expose

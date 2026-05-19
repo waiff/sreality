@@ -5,19 +5,17 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 11:11 UTC_
+_Last refreshed: 2026-05-19 09:17 UTC_
 
-**Branch:** `claude/add-listing-description-Twg1V`
+**Branch:** `claude/reorganize-estimation-frontend-FkE3q`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 85 files, latest `082_listings_description.sql`.
+**Migrations on disk:** 84 files, latest `081_curated_cities_polygon.sql`.
 
 **Last 10 commits:**
 
 ```
-701b854 Merge pull request #154 from waiff/claude/ingest-boundaries-delete-relink
-6cfca5d ingest_boundaries: DELETE instead of TRUNCATE, re-link curated_cities
 e0edd32 Merge pull request #153 from waiff/claude/plan-qual-roadmap-FkSTb
 d498a9f Merge origin/main into claude/plan-qual-roadmap-FkSTb
 7221cc8 roadmap: refresh auto-status block
@@ -26,6 +24,8 @@ d498a9f Merge origin/main into claude/plan-qual-roadmap-FkSTb
 78e1769 roadmap: refresh auto-status block
 cc9bc39 phase QUAL: curated-city polygon containment + per-rule op
 02d3c83 roadmap: refresh auto-status block
+dd8369c roadmap: refresh auto-status block
+297d246 Merge pull request #151 from waiff/claude/review-qual-roadmap-TutYL
 ```
 
 <!-- END AUTO-STATUS -->

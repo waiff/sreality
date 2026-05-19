@@ -58,7 +58,7 @@ export interface ListingPublic {
    * first_seen_at for active listings (right-censored, growing);
    * last_seen_at - first_seen_at for delisted. */
   tom_days: number | null;
-  /* Migration 082 — original sreality "Popis" free-text description.
+  /* Migration 084 — original sreality "Popis" free-text description.
    * Promoted from raw_json->'text'->>'value' to a typed column +
    * exposed on listings_public. May be null for older rows that
    * haven't been re-fetched and had no description in their last
@@ -71,7 +71,7 @@ export interface ListingSnapshotPublic {
   sreality_id: number;
   scraped_at: string;
   price_czk: number | null;
-  /* Migration 082 — projected from listing_snapshots.raw_json so the
+  /* Migration 084 — projected from listing_snapshots.raw_json so the
    * HistoryBlock can flag description changes between snapshots
    * without us materialising another typed column on the history
    * table. Null on snapshots whose raw_json lacks a text.value. */
@@ -372,6 +372,11 @@ export interface EstimationRun {
    * a re-run. */
   special_instructions: string | null;
   contextual_text: string | null;
+  /* Server-derived display string emitted only by GET /estimations:
+   * listings.district for sreality runs, else the latest
+   * parsed_url_cache extraction.locality.value for the run's input_url.
+   * Null when neither path resolves. Not returned by GET /estimations/:id. */
+  locality_display?: string | null;
 }
 
 /* Phase AI slice B — one row per operator feedback submission on

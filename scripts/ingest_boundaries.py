@@ -62,16 +62,24 @@ SIMPLIFY_TOLERANCE_DEG: dict[str, float] = {
     "ku": 0.0002,     # ~22 m
 }
 
-# Tokens we look for in shapefile filenames per level. RÚIAN state
-# packs use prefixes like "ST_KR", "ST_OK", "ST_OB", "ST_KU"; older or
-# alternative packs may use the Czech words. Match is case-insensitive
-# substring; among matches we prefer the largest .shp file (heuristic
-# for "actual data, not a metadata variant").
+# Tokens we look for in shapefile filenames per level. Current ČÚZK
+# state packs (services.cuzk.gov.cz/shp/stat/epsg-5514/1.zip) use
+# names like VUSC_P.shp (kraje as Vyšší územní samosprávné celky),
+# OKRESY_P.shp, OBCE_P.shp, KATUZE_P.shp. Older / alternative packs
+# may use ST_KR/ST_OK/ST_OB/ST_KU or the bare Czech words KRAJE/
+# OKRESY/OBCE/KATASTR. Match is case-insensitive substring; among
+# matches we prefer the largest .shp file (heuristic for "actual
+# data, not a metadata variant").
+#
+# `REGION_P.shp` (NUTS-2 cohesion regions, 8 areas like Severozápad)
+# is NOT the same as `VUSC_P.shp` (NUTS-3 kraje, 14 regions) — only
+# the latter maps to what curated_cities.kraj_name expects, so VUSC
+# is the right token for level=kraj.
 LEVEL_FILE_TOKENS: dict[str, tuple[str, ...]] = {
-    "kraj": ("ST_KR", "KRAJE", "KRAJ"),
+    "kraj": ("ST_KR", "KRAJE", "VUSC", "KRAJ"),
     "okres": ("ST_OK", "OKRESY", "OKRES"),
     "obec": ("ST_OB", "OBCE", "OBEC"),
-    "ku": ("ST_KU", "KATASTR", "_KU"),
+    "ku": ("ST_KU", "KATUZE", "KATASTR", "_KU"),
 }
 
 # Candidate DBF column names for each semantic field, in priority order.
@@ -130,14 +138,23 @@ def extract_zip(zip_path: Path, dest_dir: Path) -> Path:
 def find_shapefile(root: Path, level: str) -> Path:
     """Locate the .shp file in `root` whose name matches the level's tokens."""
     tokens = LEVEL_FILE_TOKENS[level]
+    all_shps = sorted(root.rglob("*.shp"))
     candidates: list[Path] = []
-    for shp in root.rglob("*.shp"):
+    for shp in all_shps:
         upper = shp.name.upper()
         if any(tok.upper() in upper for tok in tokens):
             candidates.append(shp)
     if not candidates:
+        sample = [str(p.relative_to(root)) for p in all_shps[:30]]
+        more = f" (+{len(all_shps) - 30} more)" if len(all_shps) > 30 else ""
         raise FileNotFoundError(
-            f"No .shp file matching {tokens} found under {root}"
+            f"No .shp file matching {tokens} found under {root}. "
+            f"Total .shp files in archive: {len(all_shps)}. "
+            f"Sample filenames: {sample}{more}. "
+            f"If the archive looks partial (e.g. only OBCE_P / ORP_P), "
+            f"the source URL points at a per-obec or per-level chunk "
+            f"rather than the full state pack. Use the URL from ATOM feed "
+            f"https://atom.cuzk.gov.cz/RUIAN-STATY-SHP/datasetFeeds/CZ-00025712-CUZK_RUIAN-STATY-SHP_1.xml"
         )
     candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
     LOG.info("MATCH level=%s file=%s", level, candidates[0].name)
@@ -407,26 +424,81 @@ def wipe_table(conn: psycopg.Connection) -> int:
         return cur.rowcount or 0
 
 
+def populate_parent_ids_spatial(conn: psycopg.Connection) -> dict[str, int]:
+    """Backfill admin_boundaries.parent_id via PostGIS containment.
+
+    The DBF-based parent extraction in iter_boundary_rows stays as a
+    no-cost optimisation; when the source column is recognised by
+    FIELD_CANDIDATES, parent_id is set during INSERT and this step
+    does nothing (idempotent on WHERE parent_id IS NULL). When the
+    source column is renamed by ČÚZK and not yet recognised, this
+    step fills the gap so the four-level hierarchy stays walkable.
+
+    Same predicate as migration 083: ST_PointOnSurface (interior
+    point, robust to concave/annular shapes) and ST_Covers
+    (boundary-inclusive, robust to simplification edges).
+    """
+    sql = '''
+        update admin_boundaries c
+           set parent_id = (
+             select p.id
+               from admin_boundaries p
+              where p.level = case c.level
+                                when 'okres' then 'kraj'
+                                when 'obec'  then 'okres'
+                                when 'ku'    then 'obec'
+                              end
+                and st_covers(
+                      p.geom,
+                      st_pointonsurface(c.geom::geometry)::geography)
+              order by st_area(p.geom::geometry) asc
+              limit 1
+           )
+         where c.level <> 'kraj'
+           and c.parent_id is null
+    '''
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        cur.execute('''
+            select level,
+                   count(*) as total,
+                   count(parent_id) as with_parent
+              from admin_boundaries
+             where level <> 'kraj'
+             group by level
+        ''')
+        out: dict[str, int] = {}
+        for level, total, with_parent in cur.fetchall():
+            out[f"{level}_total"] = int(total)
+            out[f"{level}_linked"] = int(with_parent)
+    for lvl in ('okres', 'obec', 'ku'):
+        out.setdefault(f"{lvl}_total", 0)
+        out.setdefault(f"{lvl}_linked", 0)
+    return out
+
+
 def relink_curated_cities(conn: psycopg.Connection) -> dict[str, int]:
     """Re-establish curated_cities.admin_boundary_id after a fresh load.
 
-    Mirrors the backfill from migration 081. Idempotent — only touches
-    rows where admin_boundary_id is currently NULL (which is all of
-    them right after the wipe, because the FK's ON DELETE SET NULL
-    action nulled them when we DELETEd admin_boundaries).
+    Matches each curated city to the obec polygon that contains its
+    centroid. Same predicate as migration 082. Direct spatial
+    containment is more robust than the name-walk migration 081 used:
+    it needs neither admin_boundaries.parent_id (which the current
+    ČÚZK DBF schema doesn't expose under the column names
+    FIELD_CANDIDATES looks for) nor name disambiguation. Idempotent —
+    only touches rows where admin_boundary_id is currently NULL.
     """
     sql = '''
         update curated_cities c
-           set admin_boundary_id = obec.id
-          from admin_boundaries obec
-          join admin_boundaries okres
-            on okres.id = obec.parent_id and okres.level = 'okres'
-          join admin_boundaries kraj
-            on kraj.id  = okres.parent_id and kraj.level = 'kraj'
+           set admin_boundary_id = (
+             select b.id
+               from admin_boundaries b
+              where b.level = 'obec'
+                and st_covers(b.geom, c.centroid)
+              order by st_area(b.geom::geometry) asc
+              limit 1
+           )
          where c.admin_boundary_id is null
-           and obec.level = 'obec'
-           and lower(obec.name) = lower(c.name)
-           and lower(kraj.name) = lower(c.kraj_name)
     '''
     with conn.cursor() as cur:
         cur.execute(sql)
@@ -468,6 +540,21 @@ def run_pipeline(args: argparse.Namespace) -> int:
             zip_path = fetch_source(args.source_url, tmp_dir)
             extract_dir = extract_zip(zip_path, tmp_dir / "extract")
 
+        inventory = sorted(extract_dir.rglob("*.shp"))
+        if not inventory:
+            LOG.warning(
+                "INVENTORY no .shp files under %s. Archive contents may "
+                "be nested (per-obec sub-zips?) — extraction does NOT recurse "
+                "into nested zips.", extract_dir,
+            )
+        else:
+            preview = [p.name for p in inventory[:20]]
+            more = f" (+{len(inventory) - 20} more)" if len(inventory) > 20 else ""
+            LOG.info(
+                "INVENTORY shp_count=%d sample=%s%s",
+                len(inventory), preview, more,
+            )
+
         if args.dry_run:
             LOG.info("DRY-RUN: would now load %s into admin_boundaries", levels)
             for lvl in levels:
@@ -500,6 +587,16 @@ def run_pipeline(args: argparse.Namespace) -> int:
             n_areas = compute_areas(conn)
             conn.commit()
             LOG.info("AREAS done updated=%d", n_areas)
+
+            LOG.info("PARENTS spatial-backfill starting")
+            parents = populate_parent_ids_spatial(conn)
+            conn.commit()
+            LOG.info(
+                "PARENTS done okres=%d/%d obec=%d/%d ku=%d/%d",
+                parents['okres_linked'], parents['okres_total'],
+                parents['obec_linked'],  parents['obec_total'],
+                parents['ku_linked'],    parents['ku_total'],
+            )
 
             if not args.skip_spatial_join:
                 for lvl in levels:
