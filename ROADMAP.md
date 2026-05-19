@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 09:17 UTC_
+_Last refreshed: 2026-05-19 13:29 UTC_
 
-**Branch:** `claude/reorganize-estimation-frontend-FkE3q`
+**Branch:** `claude/fix-skill-refiner-trigger-SBQDM`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 84 files, latest `081_curated_cities_polygon.sql`.
+**Migrations on disk:** 88 files, latest `085_estimation_runs_scenario.sql`.
 
 **Last 10 commits:**
 
 ```
-e0edd32 Merge pull request #153 from waiff/claude/plan-qual-roadmap-FkSTb
-d498a9f Merge origin/main into claude/plan-qual-roadmap-FkSTb
-7221cc8 roadmap: refresh auto-status block
-94ee2ac Merge pull request #152 from waiff/claude/review-roadmap-zHm6O
-2394738 roadmap: refresh auto-status block
-78e1769 roadmap: refresh auto-status block
-cc9bc39 phase QUAL: curated-city polygon containment + per-rule op
-02d3c83 roadmap: refresh auto-status block
-dd8369c roadmap: refresh auto-status block
-297d246 Merge pull request #151 from waiff/claude/review-qual-roadmap-TutYL
+eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
+d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
+015c118 migrations: 081 — estimation_runs.scenario jsonb for shared yield state
+5138b00 Merge pull request #161 from waiff/claude/add-listing-description-Twg1V
+3ab5e96 Merge origin/main into claude/add-listing-description-Twg1V
+ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
+5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
+20fea1c listings: promote sreality "Popis" to typed description column
+67bfcf6 phase QUAL fixes: PostgREST row-cap bypass + pinning across selectors
+8f641b5 admin_boundaries: spatial backfill of parent_id (migration 083 + script)
 ```
 
 <!-- END AUTO-STATUS -->
