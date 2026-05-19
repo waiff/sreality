@@ -85,6 +85,10 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         "locality_district_id", "locality_region_id",
         # Migration 072 — derived condition scores.
         "building_condition_level", "apartment_condition_level",
+        # Derived on listings_public (price_czk / NULLIF(area_m2, 0));
+        # toolkit / matcher re-render the expression against the raw
+        # columns. The PostgREST path treats it as a real column.
+        "price_per_m2",
     }
     for f in fr.all_filters():
         if f.pg_column is None:

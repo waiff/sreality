@@ -1260,6 +1260,64 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ]
     },
     {
+      "id": "min_price_per_m2",
+      "type": "float",
+      "pg_column": "price_per_m2",
+      "default": null,
+      "description": "Lower bound on price per square metre (`price_czk / area_m2`). Inclusive. Listings with NULL area_m2 fall out when this bound is set. Useful for sale filtering where absolute price varies wildly with size but unit price is the comparable metric.",
+      "category": "Property",
+      "ui_control": "range_slider",
+      "agendas": [
+        "browse",
+        "comparables",
+        "defaults",
+        "estimation",
+        "neighborhood",
+        "velocity",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 500000,
+        "step": 1000
+      },
+      "unit": "CZK/m²",
+      "enum_values": null,
+      "aliases": [
+        "price_per_m2_min",
+        "pricePerM2Min"
+      ]
+    },
+    {
+      "id": "max_price_per_m2",
+      "type": "float",
+      "pg_column": "price_per_m2",
+      "default": null,
+      "description": "Upper bound on price per square metre. See `min_price_per_m2`. Inclusive.",
+      "category": "Property",
+      "ui_control": "range_slider",
+      "agendas": [
+        "browse",
+        "comparables",
+        "defaults",
+        "estimation",
+        "neighborhood",
+        "velocity",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 500000,
+        "step": 1000
+      },
+      "unit": "CZK/m²",
+      "enum_values": null,
+      "aliases": [
+        "price_per_m2_max",
+        "pricePerM2Max"
+      ]
+    },
+    {
       "id": "min_area_m2",
       "type": "float",
       "pg_column": "area_m2",
