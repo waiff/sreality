@@ -365,14 +365,35 @@ _HAS_FEEDBACK_SUBSELECT = (
     "SELECT 1 FROM estimation_feedback WHERE estimation_run_id = er.id"
     ") AS has_feedback"
 )
+# Best-available city/locality string for the /estimations list:
+# - sreality runs use listings.district ("Praha 2"-style) via LEFT JOIN
+# - non-sreality runs fall back to the locality the LLM parser stored
+#   in parsed_url_cache.parse_result.extraction.locality.value
+# Scalar subquery (not a join) on parsed_url_cache since source_url
+# isn't unique there — pick the freshest row.
+_LOCALITY_DISPLAY_EXPR = (
+    "coalesce("
+    "l.district, "
+    "(SELECT puc.parse_result->'extraction'->'locality'->>'value' "
+    "FROM parsed_url_cache puc "
+    "WHERE puc.source_url = er.input_url "
+    "ORDER BY puc.parsed_at DESC LIMIT 1)"
+    ") AS locality_display"
+)
 _RUN_PROJECTION = (
     ", ".join(f"er.{c}" for c in _RUN_COLUMNS)
     + ", " + _COST_TOTAL_SUBSELECT
     + ", " + _HAS_FEEDBACK_SUBSELECT
 )
+_LIST_PROJECTION = _RUN_PROJECTION + ", " + _LOCALITY_DISPLAY_EXPR
+_LIST_FROM = (
+    "estimation_runs er "
+    "LEFT JOIN listings l ON l.sreality_id = er.input_sreality_id"
+)
 _RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + (
     "cost_usd_total", "has_feedback",
 )
+_LIST_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS_OUT + ("locality_display",)
 
 
 @dataclass
@@ -775,7 +796,7 @@ def list_estimation_runs(
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
     list_sql = (
-        f"SELECT {_RUN_PROJECTION} FROM estimation_runs er {where_sql} "
+        f"SELECT {_LIST_PROJECTION} FROM {_LIST_FROM} {where_sql} "
         f"ORDER BY er.created_at DESC LIMIT %(limit)s OFFSET %(offset)s"
     )
     count_sql = f"SELECT count(*) FROM estimation_runs er {where_sql}"
@@ -788,7 +809,7 @@ def list_estimation_runs(
         total_row = cur.fetchone()
     total = int(total_row[0]) if total_row else 0
     return {
-        "data": [_row_to_dict(_RUN_COLUMNS_OUT, r) for r in rows],
+        "data": [_row_to_dict(_LIST_COLUMNS_OUT, r) for r in rows],
         "total": total,
         "limit": limit,
         "offset": offset,

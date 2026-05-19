@@ -361,6 +361,11 @@ export interface EstimationRun {
    * a re-run. */
   special_instructions: string | null;
   contextual_text: string | null;
+  /* Server-derived display string emitted only by GET /estimations:
+   * listings.district for sreality runs, else the latest
+   * parsed_url_cache extraction.locality.value for the run's input_url.
+   * Null when neither path resolves. Not returned by GET /estimations/:id. */
+  locality_display?: string | null;
 }
 
 /* Phase AI slice B — one row per operator feedback submission on
