@@ -334,6 +334,20 @@ class CreateEstimationIn(BaseModel):
         return self
 
 
+class ScenarioUpdateIn(BaseModel):
+    """Operator-tunable yield scenario for an estimation_runs row.
+
+    All three numeric fields are optional. Send only the fields the
+    operator actually overrode; missing keys remain at the default
+    (estimated rent, 10 CZK/m², subject sale price). Send a body
+    with all three set to null to clear overrides and re-render
+    defaults.
+    """
+    rent_czk: float | None = None
+    fond_per_m2_czk: float | None = None
+    price_czk: float | None = None
+
+
 class ResolveLocationIn(BaseModel):
     """A Mapy.cz suggestion item picked by the user.
 

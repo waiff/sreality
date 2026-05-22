@@ -1,0 +1,186 @@
+/* Scoped via shadow DOM; safe to use raw selectors without worrying
+ * about sreality.cz's own CSS. Visual tokens approximate the SPA's
+ * civic-archive palette so the panel reads as part of the same
+ * product family without bringing Tailwind along for the ride. */
+
+:host {
+  --bg: #f7f3ec;
+  --ink: #1c1c1c;
+  --ink-3: #555;
+  --ink-4: #8a8a8a;
+  --rule: #d8d3c5;
+  --rule-strong: #1c1c1c;
+  --copper: #b3592d;
+  --copper-soft: #f3eadf;
+  all: initial;
+}
+
+.panel {
+  position: fixed;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  width: 22rem;
+  max-width: calc(100vw - 3rem);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--rule-strong);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  z-index: 2147483646;
+  font-size: 0.85rem;
+}
+
+.panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--copper-soft);
+}
+
+.panel-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--ink-3);
+  margin: 0;
+}
+
+.panel-body {
+  padding: 0.85rem 1rem 1rem;
+}
+
+.yield-display {
+  text-align: center;
+  padding: 0.5rem 0 0.85rem;
+}
+
+.yield-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--ink-3);
+  margin: 0;
+}
+
+.yield-value {
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 2.25rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  margin: 0.25rem 0 0;
+  color: var(--copper);
+}
+
+.yield-value.muted {
+  color: var(--ink-4);
+}
+
+.fields {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.25rem;
+}
+
+.field-label {
+  display: block;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--ink-3);
+  margin-bottom: 0.2rem;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.field-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid var(--rule);
+  background: #fff;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+.field-input:focus {
+  outline: none;
+  border-color: var(--rule-strong);
+}
+
+.field-suffix {
+  font-size: 0.75rem;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+  min-width: 3rem;
+}
+
+.actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.85rem;
+  font-size: 0.7rem;
+  color: var(--ink-4);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+
+.actions a {
+  color: var(--copper);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.actions a:hover { text-decoration: underline; }
+
+.empty-state {
+  padding: 1rem 0.25rem 0.5rem;
+  text-align: center;
+}
+
+.empty-state p {
+  margin: 0 0 0.85rem;
+  color: var(--ink-3);
+  font-size: 0.85rem;
+}
+
+.btn-primary {
+  background: var(--copper);
+  color: #fff;
+  border: 0;
+  padding: 0.55rem 1rem;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.btn-primary:hover { background: #9a4b25; }
+.btn-primary:disabled { background: var(--ink-4); cursor: wait; }
+
+.close-btn {
+  background: transparent;
+  border: 0;
+  color: var(--ink-4);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 0.25rem;
+}
+
+.close-btn:hover { color: var(--ink); }
+
+.error {
+  color: #b34730;
+  font-size: 0.78rem;
+  margin: 0.5rem 0 0;
+}

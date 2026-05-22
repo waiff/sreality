@@ -672,6 +672,96 @@ def test_get_404_when_missing(client, monkeypatch):
 
 
 # ----------------------------------------------------------------------
+# PATCH /estimations/{id}/scenario
+# ----------------------------------------------------------------------
+
+def test_patch_scenario_updates_and_returns_row(client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_update(conn, rid, *, rent_czk, fond_per_m2_czk, price_czk):
+        captured.update(
+            {"rid": rid, "rent_czk": rent_czk,
+             "fond_per_m2_czk": fond_per_m2_czk, "price_czk": price_czk},
+        )
+        return {"id": rid, "status": "success",
+                "scenario": {"rent_czk": rent_czk,
+                             "fond_per_m2_czk": fond_per_m2_czk,
+                             "price_czk": price_czk,
+                             "updated_at": "2026-05-19T11:00:00.000+00:00"}}
+
+    monkeypatch.setattr(api_main, "update_scenario", fake_update)
+
+    res = client.patch(
+        "/estimations/42/scenario",
+        json={"rent_czk": 25000, "fond_per_m2_czk": 12, "price_czk": 7_500_000},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["id"] == 42
+    assert body["scenario"]["rent_czk"] == 25000
+    assert captured == {
+        "rid": 42, "rent_czk": 25000, "fond_per_m2_czk": 12,
+        "price_czk": 7_500_000,
+    }
+
+
+def test_patch_scenario_404_when_missing(client, monkeypatch):
+    monkeypatch.setattr(
+        api_main, "update_scenario",
+        lambda conn, rid, **_kw: None,
+    )
+    res = client.patch(
+        "/estimations/999/scenario", json={"rent_czk": 25000},
+    )
+    assert res.status_code == 404
+
+
+def test_patch_scenario_all_null_clears(client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_update(conn, rid, *, rent_czk, fond_per_m2_czk, price_czk):
+        captured.update(
+            {"rent_czk": rent_czk,
+             "fond_per_m2_czk": fond_per_m2_czk,
+             "price_czk": price_czk},
+        )
+        return {"id": rid, "status": "success", "scenario": None}
+
+    monkeypatch.setattr(api_main, "update_scenario", fake_update)
+
+    res = client.patch(
+        "/estimations/42/scenario",
+        json={"rent_czk": None, "fond_per_m2_czk": None, "price_czk": None},
+    )
+    assert res.status_code == 200
+    assert res.json()["scenario"] is None
+    assert captured == {
+        "rent_czk": None, "fond_per_m2_czk": None, "price_czk": None,
+    }
+
+
+def test_patch_scenario_empty_body_treated_as_clear(client, monkeypatch):
+    """A POST with no fields set: ScenarioUpdateIn defaults all to None."""
+    captured: dict[str, Any] = {}
+
+    def fake_update(conn, rid, *, rent_czk, fond_per_m2_czk, price_czk):
+        captured.update(
+            {"rent_czk": rent_czk,
+             "fond_per_m2_czk": fond_per_m2_czk,
+             "price_czk": price_czk},
+        )
+        return {"id": rid, "status": "success", "scenario": None}
+
+    monkeypatch.setattr(api_main, "update_scenario", fake_update)
+
+    res = client.patch("/estimations/42/scenario", json={})
+    assert res.status_code == 200
+    assert captured == {
+        "rent_czk": None, "fond_per_m2_czk": None, "price_czk": None,
+    }
+
+
+# ----------------------------------------------------------------------
 # GET /estimations (list)
 # ----------------------------------------------------------------------
 
