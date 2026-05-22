@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 13:53 UTC_
+_Last refreshed: 2026-05-22 14:44 UTC_
 
-**Branch:** `claude/fix-skill-refiner-trigger-SBQDM`
+**Branch:** `claude/brave-knuth-8ICa2`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 89 files, latest `085_estimation_runs_scenario.sql`.
+**Migrations on disk:** 90 files, latest `086_scrape_runs.sql`.
 
 **Last 10 commits:**
 
 ```
+07969c7 Merge pull request #165 from waiff/claude/fix-skill-refiner-trigger-SBQDM
+dcb7b29 Merge remote-tracking branch 'origin/main' into claude/fix-skill-refiner-trigger-SBQDM
 3c3d8eb chore: refresh ROADMAP auto-status block
 14ced35 chore: refresh ROADMAP auto-status block
 83aaab8 frontend: scroll to feedback section and auto-expand pending proposal
-eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
-d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
-015c118 migrations: 081 — estimation_runs.scenario jsonb for shared yield state
-5138b00 Merge pull request #161 from waiff/claude/add-listing-description-Twg1V
-3ab5e96 Merge origin/main into claude/add-listing-description-Twg1V
-ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
-5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
+c8e41a3 Merge pull request #164 from waiff/claude/fix-missing-listing-images-A7OR5
+0c29f29 Merge remote-tracking branch 'origin/main' into claude/fix-missing-listing-images-A7OR5
+1910d4d roadmap: refresh auto-status block
+366b42c roadmap: refresh auto-status block
+7c950c3 scraper: add --images-only mode and drain R2 image backlog faster
 ```
 
 <!-- END AUTO-STATUS -->
@@ -606,7 +606,12 @@ numerals, Czech locale formatting).
 - **Health**: operator dashboard. Last-scrape recency (with
   36-hour stale banner), active count + Δ vs 7 days ago, new-listings
   14-day chart, snapshot-density buckets, freshness checks 24h by
-  outcome, fetch-failures table.
+  outcome, fetch-failures table. Per-scrape audit added in
+  migration 086 (`scrape_runs` + `recent_scrape_runs` /
+  `image_storage_overview` RPCs) — Recharts time-series of
+  scraped-new / inactive / images-stored over the last 14 days,
+  expandable per-run table broken out by category pair, image-mirror
+  progress (stored / total), and a static cron schedule card.
 - Migrations 011 (`browse_stats`), 012 (`region_stats` +
   `region_active_by_day`), 013 (`health_summary`), 014 (`browse_stats`
   inactive-only filter), 021 (`region_stats` `ppm2_box` extension).

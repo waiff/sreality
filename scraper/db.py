@@ -295,20 +295,26 @@ def pending_image_downloads(
     conn: psycopg.Connection,
     max_attempts: int = 5,
     limit: int = 1000,
-) -> list[tuple[int, int, int | None, str]]:
-    """Return (image_id, sreality_id, sequence, sreality_url) rows that still need download.
+) -> list[tuple[int, int, int | None, str, str | None, str | None]]:
+    """Return (image_id, sreality_id, sequence, sreality_url, category_main, category_type)
+    rows that still need download.
 
     Filters out images already stored (storage_path IS NOT NULL) and ones
     we have given up on (download_attempts >= max_attempts).
+    The category columns come from the parent listing so the
+    image-download phase can attribute its results per (category_main,
+    category_type) on the scrape_runs row.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, sreality_id, sequence, sreality_url
-            FROM images
-            WHERE storage_path IS NULL
-              AND download_attempts < %s
-            ORDER BY id
+            SELECT i.id, i.sreality_id, i.sequence, i.sreality_url,
+                   l.category_main, l.category_type
+            FROM images i
+            LEFT JOIN listings l ON l.sreality_id = i.sreality_id
+            WHERE i.storage_path IS NULL
+              AND i.download_attempts < %s
+            ORDER BY i.id
             LIMIT %s
             """,
             (max_attempts, limit),
@@ -386,6 +392,70 @@ def clear_fetch_failure(
         cur.execute(
             "DELETE FROM listing_fetch_failures WHERE sreality_id = %s",
             (sreality_id,),
+        )
+
+
+def scrape_run_start(
+    conn: psycopg.Connection,
+    run_type: str,
+) -> int:
+    """Open a new scrape_runs row. Returns the id."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO scrape_runs (run_type)
+            VALUES (%s)
+            RETURNING id
+            """,
+            (run_type,),
+        )
+        result = cur.fetchone()
+        return int(result[0])
+
+
+def scrape_run_finalize(
+    conn: psycopg.Connection,
+    run_id: int,
+    *,
+    index_pages: int = 0,
+    listings_found_new: int = 0,
+    listings_scraped_new: int = 0,
+    listings_updated: int = 0,
+    listings_inactive: int = 0,
+    images_discovered: int = 0,
+    images_stored: int = 0,
+    errors: int = 0,
+    by_category: list[dict[str, Any]] | None = None,
+) -> None:
+    """Close out the scrape_runs row with aggregate counters."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE scrape_runs
+            SET ended_at             = now(),
+                index_pages          = %s,
+                listings_found_new   = %s,
+                listings_scraped_new = %s,
+                listings_updated     = %s,
+                listings_inactive    = %s,
+                images_discovered    = %s,
+                images_stored        = %s,
+                errors               = %s,
+                by_category          = %s
+            WHERE id = %s
+            """,
+            (
+                index_pages,
+                listings_found_new,
+                listings_scraped_new,
+                listings_updated,
+                listings_inactive,
+                images_discovered,
+                images_stored,
+                errors,
+                Jsonb(by_category or []),
+                run_id,
+            ),
         )
 
 
