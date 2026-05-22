@@ -22,7 +22,32 @@ the SPA today (see `frontend/.env.example`).
 If you ever need a publicly-distributable build, see the "Path 3"
 section at the bottom of this README.
 
-## Build
+## Build option A — GitHub Actions (recommended)
+
+No local toolchain required. The repo has a workflow at
+`.github/workflows/build-extension.yml` that builds the extension
+in CI and uploads the result as a downloadable artifact.
+
+One-time setup — repository secrets:
+1. GitHub repo → **Settings** → **Secrets and variables** → **Actions**.
+2. Add `EXT_API_BASE_URL` = the Railway FastAPI URL (no trailing slash).
+3. Add `EXT_API_TOKEN` = the same `API_TOKEN` value the Railway
+   service uses.
+
+Building:
+1. The workflow runs automatically on every push to `main` that
+   touches `chrome-extension/**`, or you can trigger it manually:
+   GitHub → **Actions** → **Build Chrome extension** → **Run
+   workflow**.
+2. Wait for the green check (~1 minute).
+3. On the run page scroll to **Artifacts** at the bottom →
+   download **chrome-extension-dist**.
+4. Unzip it. The unzipped folder is what you "Load unpacked" into
+   Chrome.
+
+## Build option B — Local
+
+If you have Node 20 installed locally:
 
 ```sh
 cd chrome-extension
@@ -32,33 +57,41 @@ npm install
 npm run build
 ```
 
-The output lands in `chrome-extension/dist/` with three files —
-`manifest.json`, `content.js`, `background.js` — plus a sourcemap.
+The output lands in `chrome-extension/dist/`.
 
-## Install (unpacked, recommended for internal distribution)
+## Install in Chrome (unpacked)
 
 1. Open `chrome://extensions` in Chrome.
 2. Toggle **Developer mode** on (top-right).
 3. Click **Load unpacked**.
-4. Pick the `chrome-extension/dist/` folder.
-5. Confirm the extension shows "Sreality Yield Panel".
+4. Pick the `dist/` folder you downloaded (Option A) or built
+   (Option B).
+5. Confirm the extension card shows "Sreality Yield Panel" with
+   the copper "%" icon.
+6. **Copy the 32-character extension ID** shown on the card. You
+   need it for the CORS step below.
 
-## Allow the extension's origin in CORS
+## Allow the extension's origin in CORS (Railway)
 
-After loading the unpacked extension Chrome assigns it a stable ID
-shown on the `chrome://extensions` page (a 32-character hash). The
-extension's fetches run from the background service worker under
-the origin `chrome-extension://<id>`.
+The extension's fetches run from the background service worker
+under the origin `chrome-extension://<id>` (using the ID from
+step 6 above). The FastAPI service must allow that origin or every
+request will be blocked.
 
-Add that origin to the FastAPI service's `CORS_ALLOW_ORIGINS` env
-var on Railway:
-
-```
-CORS_ALLOW_ORIGINS=https://your-spa.up.railway.app,chrome-extension://abcd…ef
-```
-
-Multiple origins are comma-separated. Restart the Railway service
-after the env-var change.
+1. Open the **Railway** dashboard.
+2. Pick the FastAPI service (the one running `api/main.py`).
+3. Open the **Variables** tab.
+4. Find `CORS_ALLOW_ORIGINS`. (If it doesn't exist yet, click
+   **+ New Variable** and add it.)
+5. Set the value to a comma-separated list including the
+   extension's origin. Example:
+   ```
+   https://your-spa.up.railway.app,chrome-extension://abcdefghijklmnopabcdefghijklmnop
+   ```
+   Keep any existing origins (your SPA's URL) and just append the
+   `chrome-extension://...` one. **No spaces** around the comma.
+6. Save. Railway auto-redeploys the service. Wait ~30 seconds for
+   the new deploy to come up.
 
 ## Use
 
