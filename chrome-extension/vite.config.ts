@@ -33,12 +33,14 @@ export default defineConfig({
   },
   plugins: [
     {
-      name: 'copy-manifest',
+      name: 'copy-static',
       closeBundle() {
-        copyFileSync(
-          resolve(__dirname, 'manifest.json'),
-          resolve(__dirname, 'dist/manifest.json'),
-        );
+        for (const name of ['manifest.json', 'icon-128.png']) {
+          copyFileSync(
+            resolve(__dirname, name),
+            resolve(__dirname, 'dist', name),
+          );
+        }
       },
     },
   ],

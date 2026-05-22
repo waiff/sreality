@@ -83,6 +83,34 @@ different rules. Identify which one a task belongs to before you start.
 - Backend rules below (psycopg, no `supabase-py`, stdlib-first, etc.)
   do not apply inside `frontend/`.
 
+**Chrome-extension territory** (`chrome-extension/`):
+- Manifest v3 browser extension that mounts a yield-scenario panel
+  on `sreality.cz/detail/*` pages. Two-entry Vite build
+  (`content.js` + `background.js`) plus a copied-over `manifest.json`
+  and `icon-128.png`; output lands in `chrome-extension/dist/`.
+- **Vanilla TypeScript only — no React, no Tailwind.** The panel
+  lives inside a closed shadow root with its own scoped CSS in
+  `src/styles.css?inline`. Palette mirrors the SPA's civic-archive
+  tokens by hand-coded values (no `@theme` import). Keep the bundle
+  small.
+- Every network call goes through the background service worker via
+  `chrome.runtime.sendMessage` so `host_permissions` covers the API
+  origin and the fetch isn't subject to sreality.cz's CORS posture.
+  The content script never calls `fetch` directly.
+- Build-time secrets: `VITE_API_BASE_URL` + `VITE_API_TOKEN` are
+  inlined into `dist/` — same Path 1 security posture as the SPA.
+  Ship `dist/` only to trusted operators; never upload to the public
+  Chrome Web Store. `chrome-extension/README.md` documents Path 3
+  (no embedded token, writes bounced through the SPA) for when a
+  publicly-shareable build is needed.
+- The extension's origin (`chrome-extension://<id>`) must be added
+  to the FastAPI service's `CORS_ALLOW_ORIGINS` env var. Install
+  unpacked first, copy the assigned ID from `chrome://extensions`,
+  then update the Railway env var.
+- Backend rules (psycopg, stdlib-first, etc.) and SPA conventions
+  (React, Tailwind, design tokens) do NOT apply inside
+  `chrome-extension/`.
+
 When in doubt about which territory a task belongs to, ask the
 operator. Don't import frontend deps into the Python tree or vice
 versa.

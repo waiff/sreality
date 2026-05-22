@@ -15,5 +15,8 @@
       "js": ["content.js"],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "icons": {
+    "128": "icon-128.png"
+  }
 }
