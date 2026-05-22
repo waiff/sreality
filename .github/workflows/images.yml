@@ -1,41 +1,58 @@
 name: Sreality image backlog drain
 
-# Three extra runs per day that only execute the image-download phase
-# (no scrape, no condition scoring). The daily scrape.yml run already
-# does up to 50 000 images at 22:00 UTC; this workflow drains the
-# remaining backlog (~995k untouched rows as of this writing) by
-# adding ~120k more downloads per day across three runs.
+# Backfill workflow that runs only the image-download phase every 2
+# hours. Pairs with scrape.yml (which now also drains to empty after
+# the nightly index walk) to keep "missed images" close to zero.
 #
-# Spaced away from the 22:00 scrape window and from each other so
-# they don't fight for the same DB / sreality / R2 budget.
-# Combined daily throughput target: ~150k successful uploads/day.
-# Expected drain time at 95% success: ~7 days; at 50% success: ~14 days.
+# Configured for the operator's spec:
+#   * --images-active-only so the cap-bounded slice goes to listings
+#     users can still browse — active is the user-visible coverage gap.
+#   * --max-image-downloads 0 → no cap; the loop drains until either
+#     the queue is empty or the suspicious-stop heuristic in
+#     scraper.main._run_image_downloads fires (transient-failure rate
+#     > 30% over the last 100 outcomes). On suspicious stop the next
+#     2-hourly cron tick picks up.
+#   * --image-workers 32 — moderate bump from the historical 16. The
+#     suspicious-stop heuristic gives us early warning if the higher
+#     concurrency makes sreality's CDN throttle harder; dial back via
+#     workflow_dispatch if it does.
+#   * Concurrency group `images-backfill` with cancel-in-progress
+#     false. If a still-draining run is in flight when the next 2h
+#     cron tick arrives, the new run queues and succeeds the old one.
 #
-# Worker count stays at 16. Per recent observation, sreality's CDN
-# throttles unpredictably (success rate ranged from 46% to 100%);
-# raising workers risks making this worse. If success rate falls below
-# 40% across two consecutive runs, drop WORKERS via workflow_dispatch.
+# Image failures that look like the parent listing was taken down
+# trigger an inline freshness check, which flips the listing to
+# is_active = false AND bulk-marks its remaining images as
+# unavailable_reason = 'listing_taken_down'. Those outcomes do NOT
+# count toward the suspicious-stop ratio.
 
 on:
   schedule:
-    - cron: "0 4 * * *"
-    - cron: "0 10 * * *"
-    - cron: "0 16 * * *"
+    - cron: "0 */2 * * *"   # every 2 hours, on the hour
   workflow_dispatch:
     inputs:
       max_image_downloads:
-        description: "Override images-per-run cap (blank = 40000)"
+        description: "Override images-per-run cap (blank = 0 = drain to empty / suspicious-stop)"
         required: false
         type: string
       image_workers:
-        description: "Override concurrent workers (blank = 16)"
+        description: "Override concurrent workers (blank = 32)"
         required: false
         type: string
+      images_active_only:
+        description: "Restrict to active listings (default true). Untick to drain inactive backlog too."
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: images-backfill
+  cancel-in-progress: false
 
 jobs:
   images:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 110   # under the 2h cron interval so we never overlap ourselves
     steps:
       - uses: actions/checkout@v4
 
@@ -58,12 +75,16 @@ jobs:
         run: |
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
-            MAX_IMG="40000"
+            MAX_IMG="0"
           fi
           WORKERS="${{ inputs.image_workers }}"
           if [ -z "$WORKERS" ]; then
-            WORKERS="16"
+            WORKERS="32"
+          fi
+          ARGS="--images-only --max-image-downloads $MAX_IMG --image-workers $WORKERS"
+          if [ "${{ inputs.images_active_only }}" != "false" ]; then
+            ARGS="$ARGS --images-active-only"
           fi
 
-          echo "Running with: --images-only --max-image-downloads $MAX_IMG --image-workers $WORKERS"
-          python -m scraper.main --images-only --max-image-downloads $MAX_IMG --image-workers $WORKERS
+          echo "Running with: $ARGS"
+          python -m scraper.main $ARGS

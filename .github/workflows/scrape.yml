@@ -11,10 +11,12 @@ name: Daily Sreality scrape
 #       high-volume category like byt/prodej from starving the rest
 #       of the categories of the shared global budget — listings the
 #       cap defers drain on subsequent runs)
-#   up to 50 000 image downloads  (= ~80 min at 16 workers, leaves
-#       ~20 min headroom under the 350-min job cap; paired with the
-#       separate images.yml workflow that drains the backlog three
-#       extra times per day)
+#   image phase drains to empty (no cap). The suspicious-stop
+#       heuristic in scraper.main._run_image_downloads bails if
+#       sreality's CDN starts rate-limiting us, in which case the
+#       images.yml workflow's 2-hourly cron picks up the rest. Combined
+#       with that backfill workflow, no image stays pending more than
+#       ~2.5 hours after its detail row is created.
 #
 # Cron triggers cannot pass inputs - they always fall back to the
 # defaults below. workflow_dispatch lets the operator override any
@@ -52,7 +54,7 @@ on:
         required: false
         type: string
       max_image_downloads:
-        description: "Override images-per-run cap (blank = 50000)"
+        description: "Override images-per-run cap (blank = 0 = drain to empty / suspicious-stop)"
         required: false
         type: string
       image_workers:
@@ -122,7 +124,7 @@ jobs:
           fi
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
-            MAX_IMG="50000"
+            MAX_IMG="0"
           fi
           WORKERS="${{ inputs.image_workers }}"
           if [ -z "$WORKERS" ]; then
