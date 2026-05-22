@@ -39,7 +39,17 @@ from typing import Any
 from scraper import db, hashing, image_storage, parser
 from scraper.sreality_client import SrealityClient
 
-DEFAULT_IMAGE_WORKERS = 8
+DEFAULT_IMAGE_WORKERS = 32
+
+# How many of the most recent download outcomes the suspicious-stop
+# heuristic considers. 100 is small enough to react within a minute or
+# two at 32-worker throughput, large enough that a few transient
+# timeouts don't fire it.
+SUSPICIOUS_STOP_WINDOW = 100
+# Transient-failure ratio above which we assume sreality is rate-limiting
+# or blocking us and bail. Confirmed `listing_taken_down` outcomes do
+# NOT count — those are expected on backfill.
+SUSPICIOUS_STOP_THRESHOLD = 0.30
 
 # All sreality category pairs we collect, as (category_main_cb,
 # category_type_cb). Rentals first (the established slice), then sales,
@@ -117,7 +127,14 @@ def main(argv: list[str] | None = None) -> int:
         image_agg = _run_image_downloads(
             max_downloads=args.max_image_downloads,
             workers=args.image_workers,
+            active_only=args.images_active_only,
         )
+        if image_agg.get("stopped_suspicious"):
+            # Exit non-zero so the cron-scheduled backfill workflow
+            # re-schedules immediately on its next tick (every 2h).
+            # Don't crash the nightly scrape itself — the scrape's
+            # other side effects already landed.
+            rc = max(rc, 75)
 
     if (
         rc == 0
@@ -248,7 +265,23 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--max-image-downloads",
         type=int,
         default=1000,
-        help="cap number of images downloaded this run (default: 1000)",
+        help=(
+            "cap number of images downloaded this run (default: 1000). "
+            "Set to 0 for no cap — the phase drains the queue until "
+            "empty or the suspicious-stop heuristic fires."
+        ),
+    )
+    p.add_argument(
+        "--images-active-only",
+        action="store_true",
+        help=(
+            "restrict the image-download phase to images attached to "
+            "currently-active listings, ordered newest-first. Used by "
+            "the backfill workflow to prioritise the user-visible "
+            "coverage gap; the nightly scrape leaves this off so "
+            "inactive listings' photos keep filling in as bandwidth "
+            "allows."
+        ),
     )
     p.add_argument(
         "--image-workers",
@@ -629,67 +662,239 @@ def _clear_failure(conn: Any, sid: int) -> None:
         LOG.warning("could not clear failure for id=%d: %s", sid, e)
 
 
-def _run_image_downloads(max_downloads: int, workers: int) -> dict[str, Any]:
+def _run_image_downloads(
+    max_downloads: int,
+    workers: int,
+    active_only: bool = False,
+) -> dict[str, Any]:
     """Drain pending image downloads. Returns aggregates for scrape_runs.
 
-    Per-category buckets are derived from the (category_main,
-    category_type) attached to each pending image's parent listing,
-    so the image-download phase can populate scrape_runs.by_category
-    even when run standalone via --images-only.
+    Loops in batches until either (a) the pending queue is empty,
+    (b) the per-run cap is reached (if max_downloads > 0), or (c) the
+    transient-failure rate over the last SUSPICIOUS_STOP_WINDOW
+    outcomes exceeds SUSPICIOUS_STOP_THRESHOLD — the operator's
+    "if other failures get suspicious, stop and try again in 2h" rule.
+
+    `max_downloads=0` means "no cap": drain the queue. The nightly
+    `scrape.yml` uses this; the backfill workflow uses a finite cap as
+    a runtime guardrail.
+
+    On a 404 from sreality's CDN, we call `freshness_check` on the
+    parent listing (one HTTP per gone listing, cached within this run)
+    so listings that have actually been taken down get flipped to
+    `is_active = false` and ALL of their remaining pending images get
+    marked `unavailable_reason = 'listing_taken_down'` in one shot.
+    These outcomes don't count toward the suspicious-stop heuristic.
+
+    Per-category buckets are derived from each image's parent listing
+    so the phase populates scrape_runs.by_category even when run
+    standalone via --images-only.
     """
     if not image_storage.is_configured():
         LOG.info("IMAGES skipped (R2 env vars not set)")
-        return {"images_stored": 0, "by_category": {}}
+        return {"images_stored": 0, "by_category": {}, "stopped_suspicious": False}
+
+    from collections import deque
+
+    from scraper.sreality_client import SrealityClient
 
     r2 = image_storage.R2Client.from_env()
-    counts = {"downloaded": 0, "errors": 0, "attempted": 0}
+    counts = {"downloaded": 0, "errors": 0, "attempted": 0, "taken_down": 0}
     by_cat: dict[tuple[str | None, str | None], int] = {}
-    cat_lookup: dict[int, tuple[str | None, str | None]] = {}
+    # Per-listing classification cache for THIS run, so we never call
+    # freshness_check more than once per gone listing.
+    gone_listings: set[int] = set()
+    alive_listings: set[int] = set()
+    outcome_window: deque[str] = deque(maxlen=SUSPICIOUS_STOP_WINDOW)
+    stopped_suspicious = False
+    # One reusable client; SrealityClient is stateless beyond its
+    # category settings, and freshness_check ignores category.
+    freshness_client = SrealityClient(category_main=1, category_type=2)
+    # Batch size — large enough that worker pool stays saturated,
+    # small enough that we re-query often and pick up freshly-discovered
+    # active images during continuous runs.
+    batch_size = 1000
+
+    def _remaining_cap() -> int | None:
+        if max_downloads <= 0:
+            return None
+        return max(0, max_downloads - counts["attempted"])
 
     with db.connect() as conn:
-        pending = db.pending_image_downloads(conn, limit=max_downloads)
-        total = len(pending)
         LOG.info(
-            "IMAGES pending=%d cap=%d workers=%d",
-            total, max_downloads, workers,
+            "IMAGES start cap=%s workers=%d active_only=%s",
+            "unlimited" if max_downloads <= 0 else max_downloads,
+            workers, active_only,
         )
 
-        # Worker threads do the network I/O (download + upload) in
-        # parallel; the main thread serialises DB writes against the
-        # single psycopg connection (psycopg connections are not
-        # thread-safe). boto3 S3 clients are thread-safe.
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_id = {}
+        # Loop draining one batch at a time. Re-querying between
+        # batches picks up rows whose freshness check just classified
+        # them away (we exclude unavailable_reason IS NOT NULL).
+        while True:
+            remaining = _remaining_cap()
+            if remaining == 0:
+                LOG.info("IMAGES cap reached at attempted=%d", counts["attempted"])
+                break
+            this_batch = min(batch_size, remaining or batch_size)
+            pending = db.pending_image_downloads(
+                conn, limit=this_batch, active_only=active_only,
+            )
+            if not pending:
+                break
+
+            cat_lookup: dict[int, tuple[str | None, str | None]] = {}
+            sid_by_image: dict[int, int] = {}
+
+            # Skip images whose parent listing is already known gone
+            # — we'd just re-mark them and waste an HTTP call.
+            filtered_pending: list[tuple[Any, ...]] = []
             for image_id, sid, seq, url, cm, ct in pending:
+                if sid in gone_listings:
+                    continue
                 cat_lookup[image_id] = (cm, ct)
-                future_to_id[pool.submit(
-                    _fetch_one_image, sid, seq, url, r2
-                )] = image_id
-            for future in as_completed(future_to_id):
-                image_id = future_to_id[future]
-                key, error = future.result()
-                counts["attempted"] += 1
-                if error is None:
-                    db.mark_image_stored(conn, image_id, key)
-                    counts["downloaded"] += 1
-                    cat_key = cat_lookup.get(image_id, (None, None))
-                    by_cat[cat_key] = by_cat.get(cat_key, 0) + 1
-                else:
-                    db.mark_image_attempt(conn, image_id)
-                    counts["errors"] += 1
-                    LOG.warning("IMAGE id=%d error: %s", image_id, error)
-                if counts["attempted"] % 50 == 0:
-                    LOG.info(
-                        "IMAGES progress=%d/%d downloaded=%d errors=%d",
-                        counts["attempted"], total,
-                        counts["downloaded"], counts["errors"],
-                    )
+                sid_by_image[image_id] = sid
+                filtered_pending.append((image_id, sid, seq, url, cm, ct))
+
+            if not filtered_pending:
+                continue
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_to_id = {
+                    pool.submit(
+                        _fetch_one_image, sid, seq, url, r2
+                    ): image_id
+                    for image_id, sid, seq, url, _cm, _ct in filtered_pending
+                }
+                for future in as_completed(future_to_id):
+                    image_id = future_to_id[future]
+                    sid = sid_by_image[image_id]
+                    key, error = future.result()
+                    counts["attempted"] += 1
+
+                    if error is None:
+                        db.mark_image_stored(conn, image_id, key)
+                        counts["downloaded"] += 1
+                        outcome_window.append("ok")
+                        cat_key = cat_lookup.get(image_id, (None, None))
+                        by_cat[cat_key] = by_cat.get(cat_key, 0) + 1
+                    else:
+                        kind = _classify_image_failure(
+                            conn, freshness_client, sid, error,
+                            gone_listings=gone_listings,
+                            alive_listings=alive_listings,
+                        )
+                        if kind == "taken_down":
+                            n = db.mark_image_listing_taken_down(conn, sid)
+                            counts["taken_down"] += n
+                            outcome_window.append("taken_down")
+                            LOG.info(
+                                "IMAGE listing_taken_down sid=%d marked=%d",
+                                sid, n,
+                            )
+                        else:
+                            db.mark_image_attempt(conn, image_id, error=str(error))
+                            counts["errors"] += 1
+                            outcome_window.append("transient")
+                            LOG.warning("IMAGE id=%d error: %s", image_id, error)
+
+                    if counts["attempted"] % 50 == 0:
+                        LOG.info(
+                            "IMAGES progress=%d downloaded=%d errors=%d taken_down=%d",
+                            counts["attempted"], counts["downloaded"],
+                            counts["errors"], counts["taken_down"],
+                        )
+
+                    if _suspicious_stop(outcome_window):
+                        stopped_suspicious = True
+                        break
+
+            if stopped_suspicious:
+                LOG.warning(
+                    "IMAGES STOP suspicious — transient-failure rate over "
+                    "last %d outcomes exceeded %.0f%%. Cron will retry.",
+                    SUSPICIOUS_STOP_WINDOW,
+                    SUSPICIOUS_STOP_THRESHOLD * 100,
+                )
+                break
 
     LOG.info(
-        "IMAGES done downloaded=%d errors=%d attempted=%d",
-        counts["downloaded"], counts["errors"], counts["attempted"],
+        "IMAGES done downloaded=%d errors=%d taken_down=%d attempted=%d",
+        counts["downloaded"], counts["errors"],
+        counts["taken_down"], counts["attempted"],
     )
-    return {"images_stored": counts["downloaded"], "by_category": by_cat}
+    return {
+        "images_stored": counts["downloaded"],
+        "by_category": by_cat,
+        "stopped_suspicious": stopped_suspicious,
+    }
+
+
+def _suspicious_stop(outcomes: "Any") -> bool:
+    """True when transient-failure ratio over the window exceeds threshold.
+
+    Requires a full window before firing so a handful of failures
+    early in a run don't trip the wire.
+    """
+    if len(outcomes) < SUSPICIOUS_STOP_WINDOW:
+        return False
+    transient = sum(1 for o in outcomes if o == "transient")
+    return transient / len(outcomes) > SUSPICIOUS_STOP_THRESHOLD
+
+
+def _classify_image_failure(
+    conn: Any,
+    client: "Any",
+    sreality_id: int,
+    error: Exception,
+    *,
+    gone_listings: set[int],
+    alive_listings: set[int],
+) -> str:
+    """Classify an image download failure as 'taken_down' or 'transient'.
+
+    Only 404/410 image responses trigger a freshness check on the
+    parent listing. Other errors (5xx, timeout, connection reset, R2
+    failures) always classify as transient. Per-run caches make sure
+    each gone or alive verdict costs at most one freshness_check.
+    """
+    if sreality_id in gone_listings:
+        return "taken_down"
+    if sreality_id in alive_listings:
+        return "transient"
+    if not _is_gone_image_error(error):
+        return "transient"
+    try:
+        result = client_freshness_check(conn, client, sreality_id)
+    except Exception as exc:
+        LOG.warning(
+            "IMAGE freshness check failed sid=%d: %s — treating as transient",
+            sreality_id, exc,
+        )
+        return "transient"
+    if result == "gone":
+        gone_listings.add(sreality_id)
+        return "taken_down"
+    alive_listings.add(sreality_id)
+    return "transient"
+
+
+def _is_gone_image_error(error: Exception) -> bool:
+    """True iff the exception is an HTTP 404/410 from sreality's CDN."""
+    import requests
+
+    if isinstance(error, requests.HTTPError):
+        resp = getattr(error, "response", None)
+        if resp is not None and resp.status_code in (404, 410):
+            return True
+    return False
+
+
+def client_freshness_check(conn: Any, client: "Any", sreality_id: int) -> str:
+    """Thin wrapper so tests can monkeypatch one symbol."""
+    from scraper.freshness import freshness_check
+
+    result = freshness_check(conn, client, sreality_id)
+    return result["outcome"]
 
 
 def _fetch_one_image(

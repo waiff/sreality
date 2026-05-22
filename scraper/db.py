@@ -295,30 +295,46 @@ def pending_image_downloads(
     conn: psycopg.Connection,
     max_attempts: int = 5,
     limit: int = 1000,
+    active_only: bool = False,
 ) -> list[tuple[int, int, int | None, str, str | None, str | None]]:
     """Return (image_id, sreality_id, sequence, sreality_url, category_main, category_type)
     rows that still need download.
 
-    Filters out images already stored (storage_path IS NOT NULL) and ones
-    we have given up on (download_attempts >= max_attempts).
-    The category columns come from the parent listing so the
-    image-download phase can attribute its results per (category_main,
-    category_type) on the scrape_runs row.
+    Filters out images already stored (storage_path IS NOT NULL),
+    images we have given up on (download_attempts >= max_attempts), and
+    images terminally classified as unavailable (unavailable_reason IS
+    NOT NULL — e.g. the parent listing was taken down).
+
+    With `active_only=True`, restrict to images whose parent listing is
+    `is_active = true` — the backfill workflow's prioritisation knob,
+    so the cap-bounded slice goes to listings users can still browse.
+
+    Ordering puts active listings first (when both kinds are in scope)
+    and newest within each tier so freshly-discovered active images
+    drain before old inactive ones. The category columns come from the
+    parent listing so the image-download phase can attribute its
+    results per (category_main, category_type) on the scrape_runs row.
+    """
+    where_active = "AND l.is_active = true" if active_only else ""
+    order_clause = (
+        "ORDER BY i.id DESC"
+        if active_only
+        else "ORDER BY (l.is_active IS TRUE) DESC NULLS LAST, i.id DESC"
+    )
+    sql = f"""
+        SELECT i.id, i.sreality_id, i.sequence, i.sreality_url,
+               l.category_main, l.category_type
+        FROM images i
+        LEFT JOIN listings l ON l.sreality_id = i.sreality_id
+        WHERE i.storage_path IS NULL
+          AND i.unavailable_reason IS NULL
+          AND i.download_attempts < %s
+          {where_active}
+        {order_clause}
+        LIMIT %s
     """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT i.id, i.sreality_id, i.sequence, i.sreality_url,
-                   l.category_main, l.category_type
-            FROM images i
-            LEFT JOIN listings l ON l.sreality_id = i.sreality_id
-            WHERE i.storage_path IS NULL
-              AND i.download_attempts < %s
-            ORDER BY i.id
-            LIMIT %s
-            """,
-            (max_attempts, limit),
-        )
+        cur.execute(sql, (max_attempts, limit))
         return list(cur.fetchall())
 
 
@@ -343,17 +359,51 @@ def mark_image_stored(
 def mark_image_attempt(
     conn: psycopg.Connection,
     image_id: int,
+    error: str | None = None,
 ) -> None:
+    """Record one failed image-download attempt.
+
+    Persists the exception text on `images.last_error` (truncated to
+    500 chars) so post-hoc diagnosis works without scraping CI logs.
+    """
+    truncated = (error or "")[:500] if error is not None else None
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
             UPDATE images
             SET last_download_attempt_at = now(),
-                download_attempts = download_attempts + 1
+                download_attempts = download_attempts + 1,
+                last_error = COALESCE(%s, last_error)
             WHERE id = %s
             """,
-            (image_id,),
+            (truncated, image_id),
         )
+
+
+def mark_image_listing_taken_down(
+    conn: psycopg.Connection,
+    sreality_id: int,
+) -> int:
+    """Mark every pending image of a gone listing as terminally unavailable.
+
+    Called by the image-download phase after a freshness check confirms
+    the parent listing returns 404/410 from sreality. The reason
+    'listing_taken_down' is the operator's "image not downloaded in
+    time" semantic — it's a state, not a download failure.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE images
+            SET unavailable_reason = 'listing_taken_down',
+                last_download_attempt_at = now()
+            WHERE sreality_id = %s
+              AND storage_path IS NULL
+              AND unavailable_reason IS NULL
+            """,
+            (sreality_id,),
+        )
+        return cur.rowcount or 0
 
 
 FAILURE_GIVE_UP_THRESHOLD = 5
