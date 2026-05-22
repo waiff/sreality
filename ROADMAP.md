@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 18:29 UTC_
+_Last refreshed: 2026-05-22 14:46 UTC_
 
 **Branch:** `claude/review-qual-roadmap-TutYL`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-19 18:29 UTC_
 **Last 10 commits:**
 
 ```
+d82bcf2 roadmap: refresh auto-status block
 423e13a roadmap: refresh auto-status block
 17feec9 phase QUAL: price-per-m² filter, 15-min delta scrape, watchdog poll decouple
 67bfcf6 phase QUAL fixes: PostgREST row-cap bypass + pinning across selectors
@@ -25,7 +26,6 @@ d0ba3cc Merge pull request #157 from waiff/claude/ingest-boundaries-shp-tokens
 f6194c6 ingest_boundaries: match current ČÚZK filename schema (VUSC, KATUZE)
 24b75b1 Merge pull request #156 from waiff/claude/ingest-boundaries-inventory-log
 a2d50f4 ingest_boundaries: inventory log + diagnostic error on missing .shp
-9262ed6 Merge pull request #155 from waiff/claude/reorganize-estimation-frontend-FkE3q
 ```
 
 <!-- END AUTO-STATUS -->
