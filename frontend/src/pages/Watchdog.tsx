@@ -29,7 +29,15 @@ import type {
 } from '@/lib/types';
 
 const PAGE_SIZE = 50;
-const POLL_INTERVAL_MS = 5_000;
+/* Two-tier polling: feed cadence (new dispatches from the background
+ * matcher) is decoupled from estimation cadence (status refresh for
+ * a kicked-off run). The matcher itself ticks every 5 min, so 30 s
+ * for the feed gives plenty of resolution at a fraction of the
+ * request volume; we only flip to 5 s when a row in the visible
+ * page has a non-terminal estimation status, and we drop back to
+ * 30 s the moment it terminates. */
+const POLL_INTERVAL_FEED_MS = 30_000;
+const POLL_INTERVAL_ESTIMATION_MS = 5_000;
 
 const SEEN_OPTIONS: ReadonlyArray<WatchdogSeenFilter> = ['all', 'unseen', 'seen'];
 
@@ -55,11 +63,15 @@ export default function Watchdog() {
     queryKey: watchdogKeys.dispatches(queryParams),
     queryFn: () => listWatchdogDispatches(queryParams),
     placeholderData: keepPreviousData,
-    /* Refresh while a kicked-off estimation is still pending. We could
-     * scope this to "only poll if any visible row has a non-terminal
-     * status", but a single 5-second tick is cheap and keeps the feed
-     * fresh as new matches arrive from the background matcher too. */
-    refetchInterval: POLL_INTERVAL_MS,
+    refetchInterval: (query) => {
+      const rows = query.state.data?.data ?? [];
+      const hasPending = rows.some(
+        (d) =>
+          d.estimation_status === 'pending'
+          || d.estimation_status === 'running',
+      );
+      return hasPending ? POLL_INTERVAL_ESTIMATION_MS : POLL_INTERVAL_FEED_MS;
+    },
   });
 
   const subscriptionsQ = useQuery<

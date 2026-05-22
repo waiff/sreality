@@ -89,6 +89,11 @@ export interface ListingFilters {
   dispositions: Disposition[];
   priceMin: number | null;
   priceMax: number | null;
+  /* Price per m² bounds (price_czk / area_m2). Computed on
+   * listings_public; toolkit / matcher re-derive from the raw columns.
+   * NULL area_m2 rows fall out when either bound is set. */
+  pricePerM2Min: number | null;
+  pricePerM2Max: number | null;
   areaMin: number | null;
   areaMax: number | null;
   status: ListingStatus;
@@ -165,6 +170,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   dispositions: [],
   priceMin: null,
   priceMax: null,
+  pricePerM2Min: null,
+  pricePerM2Max: null,
   areaMin: null,
   areaMax: null,
   status: 'any',
@@ -307,6 +314,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     (ALL_DISPOSITIONS as ReadonlyArray<string>).includes(d),
   );
   const [priceMin, priceMax] = parseRange(sp.get('price'));
+  const [ppm2Min, ppm2Max] = parseRange(sp.get('ppm2'));
   const [areaMin, areaMax] = parseRange(sp.get('area'));
   const [estateMin, estateMax] = parseRange(sp.get('estate'));
   const [usableMin, usableMax] = parseRange(sp.get('usable'));
@@ -322,6 +330,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     dispositions,
     priceMin,
     priceMax,
+    pricePerM2Min: ppm2Min,
+    pricePerM2Max: ppm2Max,
     areaMin,
     areaMax,
     status: enumOr(sp.get('status'), STATUS_VALUES, legacyStatus),
@@ -476,6 +486,9 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.priceMin != null || f.priceMax != null) {
     sp.set('price', fmtRange(f.priceMin, f.priceMax));
   }
+  if (f.pricePerM2Min != null || f.pricePerM2Max != null) {
+    sp.set('ppm2', fmtRange(f.pricePerM2Min, f.pricePerM2Max));
+  }
   if (f.areaMin != null || f.areaMax != null) {
     sp.set('area', fmtRange(f.areaMin, f.areaMax));
   }
@@ -595,6 +608,8 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.dispositions.length === 0 &&
   f.priceMin == null &&
   f.priceMax == null &&
+  f.pricePerM2Min == null &&
+  f.pricePerM2Max == null &&
   f.areaMin == null &&
   f.areaMax == null &&
   f.status === 'any' &&
@@ -656,6 +671,8 @@ export const REGISTRY_KEY_MAP = {
   status: 'status',
   min_price_czk: 'priceMin',
   max_price_czk: 'priceMax',
+  min_price_per_m2: 'pricePerM2Min',
+  max_price_per_m2: 'pricePerM2Max',
   min_area_m2: 'areaMin',
   max_area_m2: 'areaMax',
   min_estate_area: 'estateAreaMin',

@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-22 13:54 UTC_
+_Last refreshed: 2026-05-19 13:53 UTC_
 
-**Branch:** `claude/sreality-chrome-plugin-XqcsC`
+**Branch:** `claude/fix-skill-refiner-trigger-SBQDM`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 88 files, latest `085_estimation_runs_scenario.sql`.
+**Migrations on disk:** 89 files, latest `085_estimation_runs_scenario.sql`.
 
 **Last 10 commits:**
 
 ```
-5d03811 chrome-extension: Path 1 scaffold (build-time API token)
-df1f054 estimations: scenario column + PATCH endpoint + SPA cutover
+3c3d8eb chore: refresh ROADMAP auto-status block
+14ced35 chore: refresh ROADMAP auto-status block
+83aaab8 frontend: scroll to feedback section and auto-expand pending proposal
+eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
 d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
 015c118 migrations: 081 — estimation_runs.scenario jsonb for shared yield state
 5138b00 Merge pull request #161 from waiff/claude/add-listing-description-Twg1V
 3ab5e96 Merge origin/main into claude/add-listing-description-Twg1V
 ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
 5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
-20fea1c listings: promote sreality "Popis" to typed description column
-67bfcf6 phase QUAL fixes: PostgREST row-cap bypass + pinning across selectors
 ```
 
 <!-- END AUTO-STATUS -->
@@ -418,6 +418,35 @@ overlay that can be heatmap-color-coded by any chosen index.
   `.github/workflows/refresh_population.yml` for operator-triggered
   refresh; no DB access required (the workflow just regenerates
   the committed CSV).
+- **Price-per-m² filter everywhere.** Two new `FilterDef`s in
+  `toolkit/filter_registry.py` (`min/max_price_per_m2`,
+  `pg_column='price_per_m2'`, all-agenda) make per-m² bounds a
+  first-class registry primitive. Toolkit comparables, the Watchdog
+  matcher, `EstimationFilters` / `WatchdogFilterSpec` on the TS side,
+  Browse URL state, the Filters.tsx Price control, and Stats all
+  honour it via one consistent expression
+  (`price_czk::numeric / NULLIF(area_m2, 0)`). Migration 083 extends
+  `browse_stats` to 46 params so the Stats tab stays aligned with
+  Map / Table whenever a per-m² bound is set. The PostgREST direct
+  paths get this for free because `listings_public` already exposes
+  `price_per_m2` as a computed column.
+- **15-minute lightweight delta scrape.** New
+  `.github/workflows/scrape_delta.yml` (cron `*/15 * * * *`,
+  `--limit 200`, image / condition phases skipped) walks the first
+  ~3 index pages of each of the 6 category pairs every 15 minutes so
+  a newly-listed sreality property reaches the Watchdog feed within
+  minutes instead of within a day. The nightly `scrape.yml` still
+  owns `mark_inactive` per architectural rule #3 — the partial walk
+  here can never falsely flip a live listing inactive thanks to the
+  `--limit`-set guard in `scraper/main.py:main`. Concurrency-group
+  drops overlapping runs rather than queueing them.
+- **Watchdog feed polling decoupled from estimation polling.**
+  `frontend/src/pages/Watchdog.tsx` switches from an unconditional
+  5-second `refetchInterval` to a two-tier callback: 30 s for the
+  dispatches feed (matcher ticks every 5 min, so 30 s gives plenty
+  of resolution at 1/6 the request volume), bumped to 5 s only when
+  any visible row carries a non-terminal estimation status. Drops
+  back the moment estimation completes.
 
 **Still next** (separate slice):
 
@@ -540,60 +569,6 @@ Headline scope:
   agent, the building decomposition flow, or any other surface; its
   scope is the Browse filter primitives and the U2.7 notification /
   watchdog spec.
-
-### Phase EXT: Chrome extension yield panel (in PR)
-
-A Manifest v3 Chrome extension that injects an inline yield-
-scenario panel on `sreality.cz/detail/*` pages. Lets the operator
-read or trigger an estimation, then tune the yield scenario (rent /
-fond oprav / listing price) inline without leaving the listing
-page.
-
-Schema + API:
-- Migration 085 adds `estimation_runs.scenario jsonb` (NULL means
-  "render defaults"). Shape `{rent_czk, fond_per_m2_czk, price_czk,
-  updated_at}`. Latest-wins; both surfaces PATCH the same row.
-- `PATCH /estimations/{run_id}/scenario` (bearer-gated). A body
-  with all three numbers null clears the column.
-- `scenario` is now in `_RUN_COLUMNS` so `GET /estimations/:id`
-  returns it.
-
-SPA cutover:
-- `frontend/src/pages/EstimationDetail.tsx` YieldBlock reads from
-  `run.scenario` instead of `localStorage`, debounces edits 500ms
-  before PATCH, and `setQueryData`s the detail-key cache with the
-  server's response. The three `readYieldState` / `writeYieldState`
-  / `numOrNull` helpers and the `PersistedYieldState` interface are
-  gone.
-
-Chrome extension (`chrome-extension/`):
-- Two-entry Vite build: `content.js` mounts the panel inside a
-  closed shadow root; `background.js` proxies every API call so
-  `host_permissions` covers the API origin and the fetch isn't
-  subject to sreality.cz's CORS.
-- Build-time `VITE_API_TOKEN` + `VITE_API_BASE_URL` — Path 1
-  internal-distribution model (matches today's SPA security
-  posture). Do not upload to the public Chrome Web Store.
-- Content script extracts the sreality_id from the URL, calls
-  `GET /estimations?sreality_id=…&status=success&limit=1`, and
-  either renders the yield panel (initialised from `run.scenario`
-  with the same touched-axis logic as the SPA) or a **Run
-  estimation** button that POSTs to `/estimations` and polls until
-  the run lands.
-
-Operator setup: add `chrome-extension://<id>` (assigned at unpacked
-install time) to the FastAPI service's `CORS_ALLOW_ORIGINS` env
-var on Railway. See `chrome-extension/README.md` for the full
-build + install walkthrough.
-
-Known limitations:
-- Reload required when sreality.cz's SPA-like in-page navigation
-  hops between listings (no URL-change watcher in the content
-  script yet).
-- Pre-existing browser-side scenarios in `localStorage` are reset
-  on first load after this lands; the DB row is now canonical.
-- No automated tests for the extension; manually verified in
-  Chrome is the v1 standard.
 
 ## UI track (parallel, independent of analytical phases)
 

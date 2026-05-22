@@ -174,6 +174,23 @@ def test_price_bounds_bind_when_set():
     assert params["max_price_czk"] == 30000
 
 
+def test_price_per_m2_bounds_bind_when_set():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(min_price_per_m2=50000, max_price_per_m2=120000),
+    )
+    assert (
+        "l.price_czk::numeric / NULLIF(l.area_m2, 0) >= %(min_price_per_m2)s"
+        in sql
+    )
+    assert (
+        "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
+        in sql
+    )
+    assert params["min_price_per_m2"] == 50000
+    assert params["max_price_per_m2"] == 120000
+
+
 def test_locality_district_id_filter():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),
