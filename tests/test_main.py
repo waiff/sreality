@@ -79,7 +79,7 @@ def patched_db(monkeypatch):
     )
     monkeypatch.setattr(
         scraper_main, "_process_one",
-        lambda *_a, **_kw: "unchanged",
+        lambda *_a, **_kw: ("unchanged", 0),
     )
     # Intercept SrealityClient construction in _build_client.
     monkeypatch.setattr(scraper_main, "SrealityClient", _FakeClient)
@@ -87,7 +87,7 @@ def patched_db(monkeypatch):
 
 
 def test_run_full_calls_mark_inactive_per_category_when_no_limit(patched_db):
-    rc = scraper_main._run_full(limit=None, dry_run=False)
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
     # One mark_inactive call per category in CATEGORIES.
     assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
@@ -112,14 +112,14 @@ def test_run_full_calls_mark_inactive_per_category_when_no_limit(patched_db):
 
 
 def test_run_full_skips_mark_inactive_when_limit_set(patched_db):
-    rc = scraper_main._run_full(limit=3, dry_run=False)
+    rc, _agg = scraper_main._run_full(limit=3, dry_run=False)
     assert rc == 0
     assert patched_db["mark_inactive"] == []
 
 
 def test_run_full_skips_mark_inactive_when_limit_zero(patched_db):
     """limit=0 still means partial view, even if no listings were seen."""
-    rc = scraper_main._run_full(limit=0, dry_run=False)
+    rc, _agg = scraper_main._run_full(limit=0, dry_run=False)
     assert rc == 0
     assert patched_db["mark_inactive"] == []
 
@@ -127,7 +127,7 @@ def test_run_full_skips_mark_inactive_when_limit_zero(patched_db):
 def test_dry_run_never_calls_mark_inactive(patched_db, monkeypatch):
     """dry_run skips the connection altogether, so mark_inactive can't run."""
     monkeypatch.setattr(scraper_main.db, "connect", lambda: None)
-    rc = scraper_main._run_full(limit=None, dry_run=True)
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=True)
     assert rc == 0
     assert patched_db["mark_inactive"] == []
 

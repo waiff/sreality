@@ -10,10 +10,12 @@ import { applyRegistryFilters } from './registryQueryBuilder';
 import type {
   HealthSummary,
   ImagePublic,
+  ImageStorageOverview,
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
   Ppm2Box,
+  ScrapeRun,
 } from './types';
 
 /* Circle → bounding box approximation. Used when the operator picks
@@ -672,6 +674,20 @@ export const fetchHealthSummary = async (): Promise<HealthSummary> => {
   const { data, error } = await supabase.rpc('health_summary');
   if (error) throw error;
   return data as HealthSummary;
+};
+
+export const fetchRecentScrapeRuns = async (
+  days: number = 14,
+): Promise<ScrapeRun[]> => {
+  const { data, error } = await supabase.rpc('recent_scrape_runs', { p_days: days });
+  if (error) throw error;
+  return (data ?? []) as ScrapeRun[];
+};
+
+export const fetchImageStorageOverview = async (): Promise<ImageStorageOverview> => {
+  const { data, error } = await supabase.rpc('image_storage_overview');
+  if (error) throw error;
+  return data as ImageStorageOverview;
 };
 
 export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {

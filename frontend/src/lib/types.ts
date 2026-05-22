@@ -179,6 +179,47 @@ export interface HealthSummary {
   by_category: HealthCategoryBlock[];
 }
 
+/* Per-scrape stats (migration 086): scrape_runs table + recent_scrape_runs RPC. */
+
+export interface ScrapeRunCategory {
+  category_main: string | null;
+  category_type: string | null;
+  listings_found_new: number;
+  listings_scraped_new: number;
+  listings_inactive: number;
+  images_discovered: number;
+  images_stored: number;
+}
+
+export interface ScrapeRun {
+  id: number;
+  started_at: string;
+  ended_at: string | null;
+  run_type: 'full' | 'delta';
+  index_pages: number;
+  listings_found_new: number;
+  listings_scraped_new: number;
+  listings_updated: number;
+  listings_inactive: number;
+  images_discovered: number;
+  images_stored: number;
+  errors: number;
+  by_category: ScrapeRunCategory[];
+}
+
+export interface ImageStorageCategory {
+  category_main: string | null;
+  category_type: string | null;
+  total: number;
+  stored: number;
+}
+
+export interface ImageStorageOverview {
+  total_images: number;
+  stored_images: number;
+  by_category: ImageStorageCategory[];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Estimations (U2). Wire shapes mirror api/schemas.py and api/estimation_runs */
 /* — backend is authoritative.                                                */
