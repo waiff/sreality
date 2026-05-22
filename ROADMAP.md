@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-19 13:53 UTC_
+_Last refreshed: 2026-05-22 14:47 UTC_
 
-**Branch:** `claude/fix-skill-refiner-trigger-SBQDM`
+**Branch:** `claude/sreality-chrome-plugin-XqcsC`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-19 13:53 UTC_
 **Last 10 commits:**
 
 ```
+5ef0368 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
+31ca5b0 chrome-extension: 16/48/128 icons + Actions build workflow
+e614b31 roadmap + CLAUDE.md: Phase EXT (Chrome extension territory + icon)
+07969c7 Merge pull request #165 from waiff/claude/fix-skill-refiner-trigger-SBQDM
+dcb7b29 Merge remote-tracking branch 'origin/main' into claude/fix-skill-refiner-trigger-SBQDM
 3c3d8eb chore: refresh ROADMAP auto-status block
 14ced35 chore: refresh ROADMAP auto-status block
 83aaab8 frontend: scroll to feedback section and auto-expand pending proposal
-eaa7329 Merge pull request #162 from waiff/claude/sreality-chrome-plugin-XqcsC
-d0e3fc7 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
-015c118 migrations: 081 — estimation_runs.scenario jsonb for shared yield state
-5138b00 Merge pull request #161 from waiff/claude/add-listing-description-Twg1V
-3ab5e96 Merge origin/main into claude/add-listing-description-Twg1V
-ce43c9c Merge pull request #159 from waiff/claude/admin-boundaries-parent-spatial
-5a195a5 Merge pull request #160 from waiff/claude/review-qual-roadmap-TutYL
+c8e41a3 Merge pull request #164 from waiff/claude/fix-missing-listing-images-A7OR5
+0c29f29 Merge remote-tracking branch 'origin/main' into claude/fix-missing-listing-images-A7OR5
 ```
 
 <!-- END AUTO-STATUS -->

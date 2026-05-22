@@ -94,13 +94,6 @@ function initialState(run: EstimationRun): PanelState {
   };
 }
 
-function formatCzk(n: number | null): string {
-  if (n == null || !Number.isFinite(n)) return '—';
-  return new Intl.NumberFormat('cs-CZ', {
-    maximumFractionDigits: 0,
-  }).format(Math.round(n));
-}
-
 function formatNumber(n: number | null): string {
   if (n == null || !Number.isFinite(n)) return '';
   return String(n);

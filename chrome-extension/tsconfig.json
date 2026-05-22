@@ -14,7 +14,7 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
-    "types": ["chrome", "vite/client"]
+    "types": ["chrome", "node", "vite/client"]
   },
   "include": ["src", "vite.config.ts"]
 }
