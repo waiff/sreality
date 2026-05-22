@@ -346,6 +346,14 @@ export interface Trace {
   steps: TraceStep[];
 }
 
+export interface YieldScenario {
+  rent_czk: number | null;
+  fond_per_m2_czk: number | null;
+  price_czk: number | null;
+  /* ISO-8601 UTC string written by the API on each PATCH. */
+  updated_at: string;
+}
+
 export interface EstimationRun {
   id: number;
   created_at: string;
@@ -413,6 +421,12 @@ export interface EstimationRun {
    * a re-run. */
   special_instructions: string | null;
   contextual_text: string | null;
+  /* Migration 085 — operator-tunable yield scenario shared between
+   * the SPA's YieldBlock and the Chrome extension's yield panel.
+   * Null means "no overrides yet — render defaults" (estimated rent,
+   * 10 CZK/m² fond, subject sale price). Mutated through PATCH
+   * /estimations/:id/scenario, latest-wins. */
+  scenario: YieldScenario | null;
   /* Server-derived display string emitted only by GET /estimations:
    * listings.district for sreality runs, else the latest
    * parsed_url_cache extraction.locality.value for the run's input_url.

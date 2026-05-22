@@ -205,6 +205,25 @@ export const createEstimation = (
 export const getEstimation = (id: number): Promise<EstimationRun> =>
   request<EstimationRun>(`/estimations/${id}`);
 
+/* PATCH /estimations/:id/scenario — shared yield-scenario state.
+ * Used by YieldBlock and the Chrome extension. All three fields are
+ * optional; sending the body with every field null clears overrides
+ * back to defaults. */
+export interface YieldScenarioUpdate {
+  rent_czk?: number | null;
+  fond_per_m2_czk?: number | null;
+  price_czk?: number | null;
+}
+
+export const patchEstimationScenario = (
+  id: number,
+  body: YieldScenarioUpdate,
+): Promise<EstimationRun> =>
+  request<EstimationRun>(`/estimations/${id}/scenario`, {
+    method: 'PATCH',
+    json: body,
+  });
+
 export interface TracePayload {
   step_n: number;
   full_output: unknown;
