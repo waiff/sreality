@@ -974,13 +974,19 @@ function SchedulePanel() {
         label="Full scrape"
         cron="0 22 * * *"
         human="Daily at 22:00 UTC"
-        note="Walks all six category pairs end-to-end; the only path that marks listings inactive. Runs the image-download phase and condition scoring after the scrape."
+        note="Walks all six category pairs end-to-end; the only path that marks listings inactive. Drains the image-download queue to empty (or until the suspicious-stop heuristic fires) and runs condition scoring."
       />
       <ScheduleRow
         label="Delta scrape"
         cron="*/15 * * * *"
         human="Every 15 minutes"
         note="--limit 200 per category — picks up new listings within minutes. Skips image downloads and condition scoring; never marks listings inactive."
+      />
+      <ScheduleRow
+        label="Image backfill"
+        cron="0 */2 * * *"
+        human="Every 2 hours"
+        note="--images-only --images-active-only — drains the image backlog for currently-active listings, prioritised newest-first. Concurrency-guarded so an in-flight drain is succeeded (not cancelled) by the next tick. Falls back to suspicious-stop if sreality starts rate-limiting."
       />
     </dl>
   );
