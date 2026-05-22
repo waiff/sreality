@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-22 15:02 UTC_
+_Last refreshed: 2026-05-22 15:40 UTC_
 
 **Branch:** `claude/review-qual-roadmap-TutYL`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-22 15:02 UTC_
 **Last 10 commits:**
 
 ```
+e1ce6c8 roadmap: refresh auto-status block
 76cf3ca roadmap: refresh auto-status block
 d82bcf2 roadmap: refresh auto-status block
 423e13a roadmap: refresh auto-status block
@@ -25,7 +26,6 @@ c68a26b Merge pull request #158 from waiff/claude/curated-cities-spatial-relink
 a0ef582 curated_cities: spatial-containment relink (migration 082 + script)
 d0ba3cc Merge pull request #157 from waiff/claude/ingest-boundaries-shp-tokens
 f6194c6 ingest_boundaries: match current ČÚZK filename schema (VUSC, KATUZE)
-24b75b1 Merge pull request #156 from waiff/claude/ingest-boundaries-inventory-log
 ```
 
 <!-- END AUTO-STATUS -->
