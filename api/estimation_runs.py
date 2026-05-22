@@ -415,6 +415,9 @@ class _Resolution:
     parse_confidence_per_field: dict[str, str] | None
     source_html: str | None
     parse_warnings: list[str] = field(default_factory=list)
+    subject_listing_price_czk: int | None = None
+    subject_listing_category_type: str | None = None
+    yield_input_derivation: dict[str, Any] | None = None
 
 
 _EMPTY_RESOLUTION = _Resolution(
@@ -498,6 +501,11 @@ def create_estimation_run(
             error_msg=f"target build failed: {type(exc).__name__}: {exc}"[:1000],
             extra_warnings=[],
         )
+
+    purchase, expected_rent, derivation = _derive_yield_inputs(body, resolution)
+    body.purchase_price_czk = purchase
+    body.expected_monthly_rent_czk = expected_rent
+    resolution.yield_input_derivation = derivation
 
     skill_obj = None
     if body.mode == "agent":
@@ -660,6 +668,7 @@ def _execute_estimation_run(
     from api.estimate_yield import estimate_yield
 
     recorder = TraceRecorder()
+    _record_yield_input_derivation(recorder, resolution)
     try:
         result = estimate_yield(
             conn, target, filters, body.purchase_price_czk,
@@ -883,6 +892,21 @@ def _listing_from_result(
     return {f: None for f in _LISTING_FIELDS}
 
 
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value.replace(",", ".").strip()))
+        except ValueError:
+            return None
+    return None
+
+
 def preview_estimation(
     conn: "psycopg.Connection",
     sreality_client: "SrealityClient",
@@ -946,6 +970,7 @@ def _resolve_input(
         spec = dict(result.spec)
         if body.spec_overrides:
             spec = {**spec, **body.spec_overrides}
+        subject_listing = _listing_from_result(result)
         return _Resolution(
             input_url=body.url,
             input_sreality_id=result.sreality_id,
@@ -955,6 +980,8 @@ def _resolve_input(
             parse_confidence_per_field=result.parse_confidence_per_field,
             source_html=result.source_html,
             parse_warnings=list(result.warnings),
+            subject_listing_price_czk=_coerce_int(subject_listing.get("price_czk")),
+            subject_listing_category_type=subject_listing.get("category_type"),
         )
     assert body.spec is not None
     return _Resolution(
@@ -967,6 +994,53 @@ def _resolve_input(
         source_html=None,
         parse_warnings=[],
     )
+
+
+def _derive_yield_inputs(
+    body: s.CreateEstimationIn, resolution: _Resolution,
+) -> tuple[int | None, int | None, dict[str, Any] | None]:
+    """Fill in yield-formula inputs from the subject listing when the
+    operator didn't supply them.
+
+    Rent estimate + sale listing → use listing.price_czk as purchase price.
+    Sale estimate + rental listing → use listing.price_czk as expected rent.
+    Operator-supplied body values always win.
+
+    Returns (purchase_price_czk, expected_monthly_rent_czk, derivation_log).
+    derivation_log is None when nothing was derived; otherwise a dict
+    describing the source for the trace step.
+    """
+    purchase = body.purchase_price_czk
+    expected_rent = body.expected_monthly_rent_czk
+    listing_price = resolution.subject_listing_price_czk
+    listing_kind = resolution.subject_listing_category_type
+    if listing_price is None or listing_price <= 0:
+        return purchase, expected_rent, None
+    if body.estimate_kind == "rent" and purchase is None and listing_kind == "prodej":
+        return listing_price, expected_rent, {
+            "field": "purchase_price_czk",
+            "value": listing_price,
+            "source": "subject_listing.price_czk",
+            "subject_category_type": listing_kind,
+        }
+    if body.estimate_kind == "sale" and expected_rent is None and listing_kind == "pronajem":
+        return purchase, listing_price, {
+            "field": "expected_monthly_rent_czk",
+            "value": listing_price,
+            "source": "subject_listing.price_czk",
+            "subject_category_type": listing_kind,
+        }
+    return purchase, expected_rent, None
+
+
+def _record_yield_input_derivation(
+    recorder: TraceRecorder, resolution: _Resolution,
+) -> None:
+    derivation = resolution.yield_input_derivation
+    if derivation is None:
+        return
+    with recorder.computation("derive yield inputs from subject listing") as step:
+        step.set_summary(dict(derivation))
 
 
 def _resolution_for_parse_failure(
@@ -1198,6 +1272,7 @@ def _run_agent_path(
     skill = load_skill(conn, body.skill)
 
     recorder = TraceRecorder()
+    _record_yield_input_derivation(recorder, resolution)
 
     try:
         agent_result = run_agent_estimation(
