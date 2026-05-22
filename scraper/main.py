@@ -71,15 +71,38 @@ def main(argv: list[str] | None = None) -> int:
                 "--detail-only, and --no-image-downloads"
             )
             return 2
+
+    # Open a scrape_runs row for any non-dry-run invocation so the
+    # Health page sees the same audit row for the scrape phase, the
+    # image-download phase, and (eventually) the condition-scoring
+    # phase. Dry runs never write — they're for log-only inspection.
+    run_id: int | None = None
+    if not args.dry_run:
+        run_type = "delta" if (
+            args.limit is not None
+            or args.detail_only is not None
+            or args.images_only
+        ) else "full"
+        try:
+            with db.connect() as conn:
+                run_id = db.scrape_run_start(conn, run_type)
+        except Exception as exc:
+            LOG.warning("scrape_run_start failed: %s", exc)
+
+    scrape_agg: dict[str, Any] = {}
+    image_agg: dict[str, Any] = {"images_stored": 0, "by_category": {}}
+    rc = 0
+
+    if args.images_only:
         rc = 0
     elif args.detail_only is not None:
-        rc = _run_detail_only(
+        rc, scrape_agg = _run_detail_only(
             _build_client(CATEGORIES[0][0], CATEGORIES[0][1]),
             args.detail_only,
             dry_run=args.dry_run,
         )
     else:
-        rc = _run_full(
+        rc, scrape_agg = _run_full(
             limit=args.limit,
             dry_run=args.dry_run,
             max_refetches=args.max_detail_refetches,
@@ -91,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
         and not args.dry_run
         and not args.no_image_downloads
     ):
-        _run_image_downloads(
+        image_agg = _run_image_downloads(
             max_downloads=args.max_image_downloads,
             workers=args.image_workers,
         )
@@ -104,7 +127,61 @@ def main(argv: list[str] | None = None) -> int:
     ):
         _run_condition_scoring(max_scores=args.max_condition_scores)
 
+    if run_id is not None:
+        try:
+            with db.connect() as conn:
+                db.scrape_run_finalize(
+                    conn, run_id,
+                    **_combine_aggregates(scrape_agg, image_agg),
+                )
+        except Exception as exc:
+            LOG.warning("scrape_run_finalize failed: %s", exc)
+
     return rc
+
+
+def _combine_aggregates(
+    scrape_agg: dict[str, Any],
+    image_agg: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge scrape-phase + image-phase aggregates into kwargs for finalize."""
+    images_by_cat: dict[tuple[str | None, str | None], int] = image_agg.get(
+        "by_category", {}
+    )
+    by_category: list[dict[str, Any]] = list(scrape_agg.get("by_category", []))
+
+    # Apply images_stored counts to matching entries; create rows for
+    # categories that only appear in the image phase (--images-only).
+    seen_keys = {(c["category_main"], c["category_type"]) for c in by_category}
+    for cat_key, stored in images_by_cat.items():
+        if cat_key in seen_keys:
+            for c in by_category:
+                if (c["category_main"], c["category_type"]) == cat_key:
+                    c["images_stored"] = stored
+                    break
+        else:
+            cm, ct = cat_key
+            by_category.append({
+                "category_main": cm,
+                "category_type": ct,
+                "listings_found_new":   0,
+                "listings_scraped_new": 0,
+                "listings_inactive":    0,
+                "images_discovered":    0,
+                "images_stored":        stored,
+            })
+
+    return {
+        "index_pages":          scrape_agg.get("index_pages", 0),
+        "listings_found_new":   scrape_agg.get("listings_found_new", 0),
+        "listings_scraped_new": scrape_agg.get("listings_scraped_new", 0),
+        "listings_updated":     scrape_agg.get("listings_updated", 0),
+        "listings_inactive":    scrape_agg.get("listings_inactive", 0),
+        "images_discovered":    scrape_agg.get("images_discovered", 0),
+        "images_stored":        image_agg.get("images_stored", 0),
+        "errors":               scrape_agg.get("errors", 0),
+        "by_category":          by_category,
+    }
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -219,11 +296,14 @@ def _run_detail_only(
     client: SrealityClient,
     sreality_id: int,
     dry_run: bool,
-) -> int:
+) -> tuple[int, dict[str, Any]]:
     raw = client.get_detail(sreality_id)
     row = parser.parse_listing(raw)
     images = parser.parse_images(raw)
     h = hashing.content_hash(raw)
+
+    cm_text = row.get("category_main") or "?"
+    ct_text = row.get("category_type") or "?"
 
     if dry_run:
         LOG.info(
@@ -232,9 +312,10 @@ def _run_detail_only(
             row.get("price_czk"), row.get("area_m2"),
         )
         LOG.info("RUN done pages=0 new=0 updated=0 unchanged=0 errors=0")
-        return 0
+        return (0, {})
 
     counts = {"new": 0, "updated": 0, "unchanged": 0}
+    new_imgs = 0
     with db.connect() as conn:
         result = db.upsert_listing(conn, row, raw, h)
         counts[result] = 1
@@ -246,7 +327,25 @@ def _run_detail_only(
         "RUN done pages=0 new=%d updated=%d unchanged=%d errors=0",
         counts["new"], counts["updated"], counts["unchanged"],
     )
-    return 0
+    scrape_agg: dict[str, Any] = {
+        "index_pages":          0,
+        "listings_found_new":   counts["new"],
+        "listings_scraped_new": counts["new"],
+        "listings_updated":     counts["updated"],
+        "listings_inactive":    0,
+        "images_discovered":    new_imgs,
+        "errors":               0,
+        "by_category": [{
+            "category_main": cm_text,
+            "category_type": ct_text,
+            "listings_found_new":   counts["new"],
+            "listings_scraped_new": counts["new"],
+            "listings_inactive":    0,
+            "images_discovered":    new_imgs,
+            "images_stored":        0,
+        }],
+    }
+    return (0, scrape_agg)
 
 
 def _run_full(
@@ -254,7 +353,7 @@ def _run_full(
     dry_run: bool,
     max_refetches: int | None = None,
     max_refetches_per_category: int | None = None,
-) -> int:
+) -> tuple[int, dict[str, Any]]:
     """Walk every category in CATEGORIES sequentially.
 
     Sharing one DB connection and one mutable refetch-budget across
@@ -265,11 +364,16 @@ def _run_full(
     per-category)` as its effective cap. `--limit` is interpreted as
     a global cap on index entries collected across the whole run, not
     per category.
+
+    Returns (rc, scrape_aggregates) where scrape_aggregates carries the
+    scrape-phase counters destined for the scrape_runs row. The image-
+    download phase counters are added by main() after this returns.
     """
     counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
     total_pages = 0
     total_index = 0
     refetch_budget = [max_refetches] if max_refetches is not None else [None]
+    category_aggregates: list[dict[str, Any]] = []
 
     conn = None if dry_run else db.connect()
 
@@ -309,12 +413,23 @@ def _run_full(
             # Commit inactive-marking per category, immediately after
             # the walk that produced its seen_ids. If a later category
             # crashes mid-walk, this category's marking still survives.
+            inactive = 0
             if conn is not None and limit is None:
                 inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
                 LOG.info(
                     "INACTIVE cm=%s ct=%s marked=%d",
                     cm_text, ct_text, inactive,
                 )
+
+            category_aggregates.append({
+                "category_main": cm_text,
+                "category_type": ct_text,
+                "listings_found_new":   cat_counts.get("found_new", 0),
+                "listings_scraped_new": cat_counts.get("new", 0),
+                "listings_inactive":    inactive,
+                "images_discovered":    cat_counts.get("images_discovered", 0),
+                "images_stored":        0,
+            })
 
             if limit is not None and global_collected >= limit:
                 LOG.info(
@@ -344,7 +459,18 @@ def _run_full(
         counts["unchanged"],
         counts["errors"],
     )
-    return 0
+
+    scrape_agg: dict[str, Any] = {
+        "index_pages":          total_pages,
+        "listings_found_new":   counts.get("found_new", 0),
+        "listings_scraped_new": counts["new"],
+        "listings_updated":     counts["updated"],
+        "listings_inactive":    sum(c["listings_inactive"] for c in category_aggregates),
+        "images_discovered":    counts.get("images_discovered", 0),
+        "errors":               counts["errors"],
+        "by_category":          category_aggregates,
+    }
+    return (0, scrape_agg)
 
 
 def _walk_category(
@@ -361,7 +487,10 @@ def _walk_category(
     cap decrements as each category consumes refetches. `cat_refetch_cap`
     is the per-category ceiling (None = no per-category limit).
     """
-    counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
+    counts = {
+        "new": 0, "updated": 0, "unchanged": 0, "errors": 0,
+        "found_new": 0, "images_discovered": 0,
+    }
     index_entries: list[tuple[int, int | None]] = []
     for estate in client.iter_index():
         if cat_limit is not None and len(index_entries) >= cat_limit:
@@ -376,6 +505,8 @@ def _walk_category(
     existing = (
         db.index_summary(conn, seen_ids) if conn is not None else {}
     )
+
+    counts["found_new"] = sum(1 for sid in seen_ids if sid not in existing)
 
     if conn is not None and existing:
         db.touch_listings(conn, list(existing))
@@ -419,8 +550,9 @@ def _walk_category(
     if total_refetch:
         LOG.info("DETAIL starting refetch=%d", total_refetch)
     for i, sid in enumerate(to_refetch, start=1):
-        outcome = _process_one(client, conn, sid, dry_run=dry_run)
+        outcome, new_imgs = _process_one(client, conn, sid, dry_run=dry_run)
         counts[outcome] = counts.get(outcome, 0) + 1
+        counts["images_discovered"] += new_imgs
         if refetch_budget[0] is not None:
             refetch_budget[0] = max(0, refetch_budget[0] - 1)
         if i % 50 == 0:
@@ -438,13 +570,14 @@ def _process_one(
     conn: Any,
     sid: int,
     dry_run: bool,
-) -> str:
+) -> tuple[str, int]:
+    """Returns (outcome, images_inserted)."""
     try:
         raw = client.get_detail(sid)
     except Exception as exc:
         LOG.error("DETAIL id=%d fetch error: %s", sid, exc)
         _record_failure(conn, sid, "fetch", exc)
-        return "errors"
+        return ("errors", 0)
 
     try:
         row = parser.parse_listing(raw)
@@ -453,14 +586,14 @@ def _process_one(
     except Exception as exc:
         LOG.error("DETAIL id=%d parse error: %s", sid, exc)
         _record_failure(conn, sid, "parse", exc)
-        return "errors"
+        return ("errors", 0)
 
     if dry_run:
         LOG.info(
             "DRY-RUN id=%d hash=%s images=%d price=%s",
             sid, h[:8], len(images), row.get("price_czk"),
         )
-        return "unchanged"
+        return ("unchanged", 0)
 
     try:
         result = db.upsert_listing(conn, row, raw, h)
@@ -469,11 +602,11 @@ def _process_one(
         if new_imgs:
             LOG.info("IMAGE id=%d inserted=%d", sid, new_imgs)
         _clear_failure(conn, sid)
-        return result
+        return (result, new_imgs)
     except Exception as exc:
         LOG.exception("DETAIL id=%d db error: %s", sid, exc)
         _record_failure(conn, sid, "db", exc)
-        return "errors"
+        return ("errors", 0)
 
 
 def _record_failure(conn: Any, sid: int, source: str, exc: BaseException) -> None:
@@ -496,13 +629,22 @@ def _clear_failure(conn: Any, sid: int) -> None:
         LOG.warning("could not clear failure for id=%d: %s", sid, e)
 
 
-def _run_image_downloads(max_downloads: int, workers: int) -> None:
+def _run_image_downloads(max_downloads: int, workers: int) -> dict[str, Any]:
+    """Drain pending image downloads. Returns aggregates for scrape_runs.
+
+    Per-category buckets are derived from the (category_main,
+    category_type) attached to each pending image's parent listing,
+    so the image-download phase can populate scrape_runs.by_category
+    even when run standalone via --images-only.
+    """
     if not image_storage.is_configured():
         LOG.info("IMAGES skipped (R2 env vars not set)")
-        return
+        return {"images_stored": 0, "by_category": {}}
 
     r2 = image_storage.R2Client.from_env()
     counts = {"downloaded": 0, "errors": 0, "attempted": 0}
+    by_cat: dict[tuple[str | None, str | None], int] = {}
+    cat_lookup: dict[int, tuple[str | None, str | None]] = {}
 
     with db.connect() as conn:
         pending = db.pending_image_downloads(conn, limit=max_downloads)
@@ -517,12 +659,12 @@ def _run_image_downloads(max_downloads: int, workers: int) -> None:
         # single psycopg connection (psycopg connections are not
         # thread-safe). boto3 S3 clients are thread-safe.
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_id = {
-                pool.submit(
+            future_to_id = {}
+            for image_id, sid, seq, url, cm, ct in pending:
+                cat_lookup[image_id] = (cm, ct)
+                future_to_id[pool.submit(
                     _fetch_one_image, sid, seq, url, r2
-                ): image_id
-                for image_id, sid, seq, url in pending
-            }
+                )] = image_id
             for future in as_completed(future_to_id):
                 image_id = future_to_id[future]
                 key, error = future.result()
@@ -530,6 +672,8 @@ def _run_image_downloads(max_downloads: int, workers: int) -> None:
                 if error is None:
                     db.mark_image_stored(conn, image_id, key)
                     counts["downloaded"] += 1
+                    cat_key = cat_lookup.get(image_id, (None, None))
+                    by_cat[cat_key] = by_cat.get(cat_key, 0) + 1
                 else:
                     db.mark_image_attempt(conn, image_id)
                     counts["errors"] += 1
@@ -545,6 +689,7 @@ def _run_image_downloads(max_downloads: int, workers: int) -> None:
         "IMAGES done downloaded=%d errors=%d attempted=%d",
         counts["downloaded"], counts["errors"], counts["attempted"],
     )
+    return {"images_stored": counts["downloaded"], "by_category": by_cat}
 
 
 def _fetch_one_image(

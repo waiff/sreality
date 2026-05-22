@@ -179,6 +179,47 @@ export interface HealthSummary {
   by_category: HealthCategoryBlock[];
 }
 
+/* Per-scrape stats (migration 086): scrape_runs table + recent_scrape_runs RPC. */
+
+export interface ScrapeRunCategory {
+  category_main: string | null;
+  category_type: string | null;
+  listings_found_new: number;
+  listings_scraped_new: number;
+  listings_inactive: number;
+  images_discovered: number;
+  images_stored: number;
+}
+
+export interface ScrapeRun {
+  id: number;
+  started_at: string;
+  ended_at: string | null;
+  run_type: 'full' | 'delta';
+  index_pages: number;
+  listings_found_new: number;
+  listings_scraped_new: number;
+  listings_updated: number;
+  listings_inactive: number;
+  images_discovered: number;
+  images_stored: number;
+  errors: number;
+  by_category: ScrapeRunCategory[];
+}
+
+export interface ImageStorageCategory {
+  category_main: string | null;
+  category_type: string | null;
+  total: number;
+  stored: number;
+}
+
+export interface ImageStorageOverview {
+  total_images: number;
+  stored_images: number;
+  by_category: ImageStorageCategory[];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Estimations (U2). Wire shapes mirror api/schemas.py and api/estimation_runs */
 /* — backend is authoritative.                                                */
@@ -305,6 +346,14 @@ export interface Trace {
   steps: TraceStep[];
 }
 
+export interface YieldScenario {
+  rent_czk: number | null;
+  fond_per_m2_czk: number | null;
+  price_czk: number | null;
+  /* ISO-8601 UTC string written by the API on each PATCH. */
+  updated_at: string;
+}
+
 export interface EstimationRun {
   id: number;
   created_at: string;
@@ -372,6 +421,12 @@ export interface EstimationRun {
    * a re-run. */
   special_instructions: string | null;
   contextual_text: string | null;
+  /* Migration 085 — operator-tunable yield scenario shared between
+   * the SPA's YieldBlock and the Chrome extension's yield panel.
+   * Null means "no overrides yet — render defaults" (estimated rent,
+   * 10 CZK/m² fond, subject sale price). Mutated through PATCH
+   * /estimations/:id/scenario, latest-wins. */
+  scenario: YieldScenario | null;
   /* Server-derived display string emitted only by GET /estimations:
    * listings.district for sreality runs, else the latest
    * parsed_url_cache extraction.locality.value for the run's input_url.

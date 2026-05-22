@@ -346,6 +346,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "subject_summary",
     "special_instructions", "contextual_text",
     "skill_name", "skill_version",
+    "scenario",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -719,6 +720,49 @@ def _execute_estimation_run(
 def get_estimation_run(
     conn: "psycopg.Connection", run_id: int
 ) -> dict[str, Any] | None:
+    return _fetch_run(conn, run_id)
+
+
+def update_scenario(
+    conn: "psycopg.Connection",
+    run_id: int,
+    *,
+    rent_czk: float | None,
+    fond_per_m2_czk: float | None,
+    price_czk: float | None,
+) -> dict[str, Any] | None:
+    """PATCH the operator-tunable yield scenario on an estimation_runs row.
+
+    A body with all three numbers None clears the column back to NULL
+    (re-render defaults). Otherwise we store the supplied subset plus
+    an `updated_at` stamp so concurrent edits between the SPA and the
+    Chrome extension can be reasoned about.
+
+    Returns the refreshed row, or None when the run id is unknown.
+    """
+    has_any = any(
+        v is not None for v in (rent_czk, fond_per_m2_czk, price_czk)
+    )
+    if has_any:
+        payload: dict[str, Any] = {
+            "rent_czk": rent_czk,
+            "fond_per_m2_czk": fond_per_m2_czk,
+            "price_czk": price_czk,
+            "updated_at": datetime.now(timezone.utc).isoformat(
+                timespec="milliseconds",
+            ),
+        }
+        scenario_value: Any = Jsonb(payload)
+    else:
+        scenario_value = None
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE estimation_runs SET scenario = %s "
+            "WHERE id = %s RETURNING id",
+            (scenario_value, run_id),
+        )
+        if cur.fetchone() is None:
+            return None
     return _fetch_run(conn, run_id)
 
 
@@ -1315,10 +1359,13 @@ def _update_run_terminal(
 
 
 def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
+    for col in _INSERT_COLUMNS:
+        fields.setdefault(col, None)
     for k in (
         "input_spec", "comparables_used", "comparables_excluded",
         "trace", "warnings",
         "parse_confidence_per_field", "subject_summary",
+        "scenario",
     ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])

@@ -46,6 +46,7 @@ from api.estimation_runs import (
     list_estimation_runs,
     preview_estimation,
     sweep_stuck_runs,
+    update_scenario,
 )
 from api import notifications as nf_module
 from api.routes.admin import router as admin_router
@@ -620,6 +621,30 @@ def get_estimation(
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     row = get_estimation_run(conn, run_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="estimation run not found")
+    return row
+
+
+@app.patch("/estimations/{run_id}/scenario")
+def patch_estimation_scenario(
+    run_id: int,
+    body: s.ScenarioUpdateIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Persist the operator's yield-scenario overrides.
+
+    Shared by the SPA's YieldBlock and the Chrome extension's yield
+    panel; latest-wins. A body with all three numbers null clears the
+    column back to NULL — render defaults again.
+    """
+    row = update_scenario(
+        conn, run_id,
+        rent_czk=body.rent_czk,
+        fond_per_m2_czk=body.fond_per_m2_czk,
+        price_czk=body.price_czk,
+    )
     if row is None:
         raise HTTPException(status_code=404, detail="estimation run not found")
     return row

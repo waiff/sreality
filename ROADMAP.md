@@ -11,7 +11,7 @@ _Last refreshed: 2026-05-22 14:59 UTC_
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 89 files, latest `085_estimation_runs_scenario.sql`.
+**Migrations on disk:** 90 files, latest `086_scrape_runs.sql`.
 
 **Last 10 commits:**
 
@@ -606,7 +606,12 @@ numerals, Czech locale formatting).
 - **Health**: operator dashboard. Last-scrape recency (with
   36-hour stale banner), active count + Δ vs 7 days ago, new-listings
   14-day chart, snapshot-density buckets, freshness checks 24h by
-  outcome, fetch-failures table.
+  outcome, fetch-failures table. Per-scrape audit added in
+  migration 086 (`scrape_runs` + `recent_scrape_runs` /
+  `image_storage_overview` RPCs) — Recharts time-series of
+  scraped-new / inactive / images-stored over the last 14 days,
+  expandable per-run table broken out by category pair, image-mirror
+  progress (stored / total), and a static cron schedule card.
 - Migrations 011 (`browse_stats`), 012 (`region_stats` +
   `region_active_by_day`), 013 (`health_summary`), 014 (`browse_stats`
   inactive-only filter), 021 (`region_stats` `ppm2_box` extension).
