@@ -34,14 +34,21 @@ import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from typing import Any
 
 import requests
 
 from scraper import db, hashing, image_storage, parser
+from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import GONE_STATUSES, ListingGoneError, SrealityClient
 
 DEFAULT_IMAGE_WORKERS = 8
+# Detail fetches run on a small thread pool paced by a shared RateLimiter.
+# Conservative defaults: the win is hiding per-request latency, not hammering
+# the (single-egress-IP) API. Tunable per workflow / dialable down on blocks.
+DEFAULT_DETAIL_WORKERS = 4
+DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
 
 # A full index walk that collected at least this fraction of the total the
 # API reported (result_size) is treated as complete enough to drive
@@ -117,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             max_refetches=args.max_detail_refetches,
             max_refetches_per_category=args.max_detail_refetches_per_category,
+            detail_workers=args.detail_workers,
+            detail_rate=args.detail_rate,
         )
 
     if (
@@ -267,6 +276,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help=f"concurrent download/upload workers (default: {DEFAULT_IMAGE_WORKERS})",
     )
     p.add_argument(
+        "--detail-workers",
+        type=int,
+        default=DEFAULT_DETAIL_WORKERS,
+        help=(
+            "concurrent detail-fetch workers (default: "
+            f"{DEFAULT_DETAIL_WORKERS}). Network I/O runs in parallel; DB "
+            "writes stay serial on the main thread."
+        ),
+    )
+    p.add_argument(
+        "--detail-rate",
+        type=float,
+        default=DEFAULT_DETAIL_RATE,
+        help=(
+            "global detail-fetch rate cap in requests/sec across ALL "
+            f"workers (default: {DEFAULT_DETAIL_RATE}). Auto-backs-off on "
+            "HTTP 429/403. Dial down if sreality starts blocking."
+        ),
+    )
+    p.add_argument(
         "--no-condition-scoring",
         action="store_true",
         help=(
@@ -305,11 +334,16 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
-def _build_client(category_main: int, category_type: int) -> SrealityClient:
+def _build_client(
+    category_main: int,
+    category_type: int,
+    limiter: RateLimiter | None = None,
+) -> SrealityClient:
     return SrealityClient(
         category_main=category_main,
         category_type=category_type,
         country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 10001)),
+        limiter=limiter,
     )
 
 
@@ -374,6 +408,8 @@ def _run_full(
     dry_run: bool,
     max_refetches: int | None = None,
     max_refetches_per_category: int | None = None,
+    detail_workers: int = DEFAULT_DETAIL_WORKERS,
+    detail_rate: float = DEFAULT_DETAIL_RATE,
 ) -> tuple[int, dict[str, Any]]:
     """Walk every category in CATEGORIES sequentially.
 
@@ -396,6 +432,10 @@ def _run_full(
     refetch_budget = [max_refetches] if max_refetches is not None else [None]
     category_aggregates: list[dict[str, Any]] = []
 
+    # One shared limiter across all categories' clients + workers, so the
+    # request-rate cap is global. Adapts down on 429/403.
+    limiter = RateLimiter(detail_rate)
+
     conn = None if dry_run else db.connect()
 
     try:
@@ -405,7 +445,7 @@ def _run_full(
             ct_text = parser.CATEGORY_TYPE[category_type]
             LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
 
-            client = _build_client(category_main, category_type)
+            client = _build_client(category_main, category_type, limiter=limiter)
 
             remaining_for_limit = (
                 None if limit is None else max(0, limit - global_collected)
@@ -417,6 +457,7 @@ def _run_full(
                 dry_run=dry_run,
                 refetch_budget=refetch_budget,
                 cat_refetch_cap=max_refetches_per_category,
+                detail_workers=detail_workers,
             )
             global_collected += len(seen_ids)
             total_pages += client.pages_fetched
@@ -531,6 +572,7 @@ def _walk_category(
     dry_run: bool,
     refetch_budget: list[int | None],
     cat_refetch_cap: int | None = None,
+    detail_workers: int = DEFAULT_DETAIL_WORKERS,
 ) -> tuple[set[int], dict[str, int]]:
     """Walk one category's index + refetch loop.
 
@@ -598,22 +640,125 @@ def _walk_category(
             )
 
     total_refetch = len(to_refetch)
-    if total_refetch:
-        LOG.info("DETAIL starting refetch=%d", total_refetch)
-    for i, sid in enumerate(to_refetch, start=1):
-        outcome, new_imgs = _process_one(client, conn, sid, dry_run=dry_run)
-        counts[outcome] = counts.get(outcome, 0) + 1
-        counts["images_discovered"] += new_imgs
-        if refetch_budget[0] is not None:
-            refetch_budget[0] = max(0, refetch_budget[0] - 1)
-        if i % 50 == 0:
-            LOG.info(
-                "DETAIL progress=%d/%d new=%d updated=%d errors=%d",
-                i, total_refetch,
-                counts["new"], counts["updated"], counts["errors"],
-            )
+    if not total_refetch:
+        return seen_ids, counts
+
+    LOG.info(
+        "DETAIL starting refetch=%d workers=%d", total_refetch, detail_workers
+    )
+    # Worker threads do the network I/O (client.get_detail + parse + hash);
+    # the main thread serialises DB writes via _write_result against the
+    # single, not-thread-safe psycopg connection. Same pattern as the
+    # image-download phase. The per-category + global caps were already
+    # applied to to_refetch above, so concurrency only changes completion
+    # order, never which listings run.
+    done = 0
+    with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
+        futures = {pool.submit(_fetch_detail, client, sid): sid for sid in to_refetch}
+        for future in as_completed(futures):
+            fr = future.result()  # _fetch_detail never raises
+            outcome, new_imgs = _write_result(conn, fr, dry_run)
+            counts[outcome] = counts.get(outcome, 0) + 1
+            counts["images_discovered"] += new_imgs
+            if refetch_budget[0] is not None:
+                refetch_budget[0] = max(0, refetch_budget[0] - 1)
+            done += 1
+            if done % 50 == 0:
+                LOG.info(
+                    "DETAIL progress=%d/%d new=%d updated=%d gone=%d errors=%d",
+                    done, total_refetch,
+                    counts["new"], counts["updated"],
+                    counts.get("gone", 0), counts["errors"],
+                )
 
     return seen_ids, counts
+
+
+@dataclass
+class FetchResult:
+    """Outcome of the network+parse stage of one detail fetch (no DB I/O).
+
+    Produced by worker threads; consumed on the main thread by
+    _write_result, which is the only place DB writes happen (psycopg
+    connections are not thread-safe).
+    """
+    sid: int
+    kind: str  # "ok" | "gone" | "error"
+    row: dict[str, Any] | None = None
+    raw: dict[str, Any] | None = None
+    images: list[dict[str, Any]] | None = None
+    content_hash: str | None = None
+    error: BaseException | None = None
+    source: str | None = None  # "fetch" | "parse" for kind == "error"
+
+
+def _fetch_detail(client: SrealityClient, sid: int) -> FetchResult:
+    """Worker: fetch + parse + hash one listing. No DB I/O. Never raises.
+
+    Runs on a pool thread, so it must touch neither the psycopg connection
+    nor any shared mutable state. Returns everything _write_result needs.
+    """
+    try:
+        raw = client.get_detail(sid)
+    except ListingGoneError:
+        return FetchResult(sid, "gone")
+    except requests.HTTPError as exc:
+        status = (
+            exc.response.status_code
+            if getattr(exc, "response", None) is not None
+            else None
+        )
+        if status in GONE_STATUSES:
+            return FetchResult(sid, "gone")
+        return FetchResult(sid, "error", error=exc, source="fetch")
+    except Exception as exc:
+        return FetchResult(sid, "error", error=exc, source="fetch")
+
+    try:
+        row = parser.parse_listing(raw)
+        images = parser.parse_images(raw)
+        h = hashing.content_hash(raw)
+    except Exception as exc:
+        return FetchResult(sid, "error", error=exc, source="parse")
+
+    return FetchResult(
+        sid, "ok", row=row, raw=raw, images=images, content_hash=h
+    )
+
+
+def _write_result(conn: Any, fr: FetchResult, dry_run: bool) -> tuple[str, int]:
+    """Main-thread: apply a FetchResult's DB writes. Returns (outcome, new_imgs).
+
+    The outcome (new/updated/unchanged) is only known after the upsert, so
+    it is determined here rather than in the worker.
+    """
+    if fr.kind == "gone":
+        return _handle_gone(conn, fr.sid)
+    if fr.kind == "error":
+        LOG.error("DETAIL id=%d %s error: %s", fr.sid, fr.source, fr.error)
+        _record_failure(conn, fr.sid, fr.source or "fetch", fr.error)
+        return ("errors", 0)
+
+    if dry_run:
+        LOG.info(
+            "DRY-RUN id=%d hash=%s images=%d price=%s",
+            fr.sid, (fr.content_hash or "")[:8],
+            len(fr.images or []), (fr.row or {}).get("price_czk"),
+        )
+        return ("unchanged", 0)
+
+    try:
+        result = db.upsert_listing(conn, fr.row, fr.raw, fr.content_hash)
+        LOG.info("DETAIL id=%d %s", fr.sid, result)
+        new_imgs = db.record_images(conn, fr.sid, fr.images)
+        if new_imgs:
+            LOG.info("IMAGE id=%d inserted=%d", fr.sid, new_imgs)
+        _clear_failure(conn, fr.sid)
+        return (result, new_imgs)
+    except Exception as exc:
+        LOG.exception("DETAIL id=%d db error: %s", fr.sid, exc)
+        _record_failure(conn, fr.sid, "db", exc)
+        return ("errors", 0)
 
 
 def _process_one(
@@ -622,55 +767,9 @@ def _process_one(
     sid: int,
     dry_run: bool,
 ) -> tuple[str, int]:
-    """Returns (outcome, images_inserted)."""
-    try:
-        raw = client.get_detail(sid)
-    except ListingGoneError:
-        return _handle_gone(conn, sid)
-    except requests.HTTPError as exc:
-        status = (
-            exc.response.status_code
-            if getattr(exc, "response", None) is not None
-            else None
-        )
-        if status in GONE_STATUSES:
-            return _handle_gone(conn, sid)
-        LOG.error("DETAIL id=%d fetch error: %s", sid, exc)
-        _record_failure(conn, sid, "fetch", exc)
-        return ("errors", 0)
-    except Exception as exc:
-        LOG.error("DETAIL id=%d fetch error: %s", sid, exc)
-        _record_failure(conn, sid, "fetch", exc)
-        return ("errors", 0)
-
-    try:
-        row = parser.parse_listing(raw)
-        images = parser.parse_images(raw)
-        h = hashing.content_hash(raw)
-    except Exception as exc:
-        LOG.error("DETAIL id=%d parse error: %s", sid, exc)
-        _record_failure(conn, sid, "parse", exc)
-        return ("errors", 0)
-
-    if dry_run:
-        LOG.info(
-            "DRY-RUN id=%d hash=%s images=%d price=%s",
-            sid, h[:8], len(images), row.get("price_czk"),
-        )
-        return ("unchanged", 0)
-
-    try:
-        result = db.upsert_listing(conn, row, raw, h)
-        LOG.info("DETAIL id=%d %s", sid, result)
-        new_imgs = db.record_images(conn, sid, images)
-        if new_imgs:
-            LOG.info("IMAGE id=%d inserted=%d", sid, new_imgs)
-        _clear_failure(conn, sid)
-        return (result, new_imgs)
-    except Exception as exc:
-        LOG.exception("DETAIL id=%d db error: %s", sid, exc)
-        _record_failure(conn, sid, "db", exc)
-        return ("errors", 0)
+    """Serial fetch+write for one listing. Used by the single-listing paths
+    and tests; the pooled walk calls _fetch_detail / _write_result directly."""
+    return _write_result(conn, _fetch_detail(client, sid), dry_run)
 
 
 def _handle_gone(conn: Any, sid: int) -> tuple[str, int]:

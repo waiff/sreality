@@ -10,9 +10,12 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import requests
+
+if TYPE_CHECKING:
+    from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 
@@ -77,6 +80,7 @@ class SrealityClient:
         detail_delay_s: float = 1.5,
         timeout_s: float = 30.0,
         max_retries: int = 3,
+        limiter: "RateLimiter | None" = None,
     ) -> None:
         self.category_main = category_main
         self.category_type = category_type
@@ -85,6 +89,11 @@ class SrealityClient:
         self.detail_delay_s = detail_delay_s
         self.timeout_s = timeout_s
         self.max_retries = max_retries
+        # When set, a shared RateLimiter paces detail fetches (allowing
+        # concurrency across threads) instead of the per-instance
+        # detail_delay_s spacing. Serial callers (freshness, --detail-only)
+        # pass no limiter and keep the 1.5s self-throttle.
+        self._limiter = limiter
         self._session = requests.Session()
         self._session.headers.update(DEFAULT_HEADERS)
         self._last_detail_at = 0.0
@@ -123,10 +132,17 @@ class SrealityClient:
             page += 1
 
     def get_detail(self, sreality_id: int) -> dict[str, Any]:
-        """Fetch the full detail record for one listing, throttled."""
-        elapsed = time.monotonic() - self._last_detail_at
-        if elapsed < self.detail_delay_s:
-            time.sleep(self.detail_delay_s - elapsed)
+        """Fetch the full detail record for one listing, rate-limited.
+
+        With a shared limiter the spacing is global across worker threads;
+        without one, fall back to the per-instance detail_delay_s spacing.
+        """
+        if self._limiter is not None:
+            self._limiter.acquire()
+        else:
+            elapsed = time.monotonic() - self._last_detail_at
+            if elapsed < self.detail_delay_s:
+                time.sleep(self.detail_delay_s - elapsed)
         url = DETAIL_URL.format(id=sreality_id)
         try:
             return self._get_json(url)
@@ -157,6 +173,11 @@ class SrealityClient:
                 response = self._session.get(
                     url, params=params, timeout=self.timeout_s
                 )
+                if response.status_code in (429, 403) and self._limiter is not None:
+                    LOG.warning(
+                        "RATE penalize status=%d url=%s", response.status_code, url
+                    )
+                    self._limiter.penalize()
                 if (
                     response.status_code >= 400
                     and response.status_code not in RETRYABLE_STATUS

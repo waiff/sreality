@@ -73,5 +73,7 @@ jobs:
             --no-condition-scoring \
             --max-detail-refetches 150 \
             --max-detail-refetches-per-category 60 \
+            --detail-workers 4 \
+            --detail-rate 2.0 \
             --max-image-downloads 400 \
             --image-workers 16

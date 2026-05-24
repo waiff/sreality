@@ -683,8 +683,10 @@ walk depth:
   refetches and image downloads are **capped per tick** (`--max-detail-refetches
   150`, `--max-image-downloads 400`) so a run stays bounded; deferred work
   drains on the next tick (failure-priority retry + newest-first image
-  ordering). Records as `run_type='delta'` via `--run-type`. Skips
-  condition scoring.
+  ordering). Detail fetches run on a small thread pool paced by a shared
+  rate limiter (`--detail-workers` / `--detail-rate`) so the capped budget
+  drains in less wall-clock — fitting the tight tick. Records as
+  `run_type='delta'` via `--run-type`. Skips condition scoring.
 - **Daily Sreality scrape** (`scrape.yml`, cron `0 22 * * *`) — the deep
   nightly. Also a full walk, but its distinct value is the expensive
   backlog work the 15-min ticks skip: the condition-scoring phase (LLM
@@ -717,8 +719,12 @@ The scraper emits structured progress lines:
 - `PLAN unchanged=N refetch=M` once after deciding what to fetch
 - `PLAN priority_retry=N` once if any listings have prior failure rows
 - `PLAN cap=N deferred=M` once if the per-run refetch cap kicks in
-- `DETAIL starting refetch=N` once before the refetch loop
-- `DETAIL progress=N/M new=... updated=... errors=...` every 50 refetches
+- `DETAIL starting refetch=N workers=W` once before the refetch loop
+  (detail fetches run on a `W`-thread pool paced by a shared rate limiter;
+  DB writes stay serial on the main thread)
+- `DETAIL progress=N/M new=... updated=... gone=... errors=...` every 50 refetches
+- `RATE penalize status=429|403 url=...` when sreality throttles us and the
+  limiter widens its interval (auto-recovers on subsequent healthy fetches)
 - `DETAIL id=... new|updated|unchanged` per refetched listing
 - `IMAGE id=... inserted=N` per listing with new image rows recorded
 - `DETAIL id=... gone (is_active=false)` per listing whose detail fetch

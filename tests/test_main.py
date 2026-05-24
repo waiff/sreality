@@ -29,10 +29,12 @@ class _FakeClient:
         category_main: int,
         category_type: int,
         country_id: int = 10001,
+        limiter: object | None = None,
     ) -> None:
         self.category_main = category_main
         self.category_type = category_type
         self.country_id = country_id
+        self.limiter = limiter
 
     def iter_index(self):
         # Distinct id range per (cm, ct) so the per-category seen_ids
@@ -80,9 +82,16 @@ def patched_db(monkeypatch):
             calls["mark_inactive"].append((cm, ct, set(ids))) or 0
         ),
     )
+    # The pooled walk calls _fetch_detail (worker) then _write_result
+    # (main thread); stub both so _run_full exercises planning + the pool
+    # without real network or DB writes.
     monkeypatch.setattr(
-        scraper_main, "_process_one",
-        lambda *_a, **_kw: ("unchanged", 0),
+        scraper_main, "_fetch_detail",
+        lambda _client, sid: scraper_main.FetchResult(sid, "ok"),
+    )
+    monkeypatch.setattr(
+        scraper_main, "_write_result",
+        lambda _conn, _fr, _dry: ("unchanged", 0),
     )
     # Intercept SrealityClient construction in _build_client.
     monkeypatch.setattr(scraper_main, "SrealityClient", _FakeClient)
@@ -271,3 +280,74 @@ def test_process_one_500_http_error_is_failure(monkeypatch):
     assert outcome == "errors"
     assert calls["failed"] == [888]
     assert calls["inactive"] == []
+
+
+# --- pooled detail fetch in _walk_category ---------------------------------
+
+
+class _IdxClient:
+    pages_fetched = 1
+    result_size = None
+
+    def __init__(self, ids: list[int]) -> None:
+        self._ids = ids
+
+    def iter_index(self):
+        for i in self._ids:
+            yield {"hash_id": i, "price_czk": {"value_raw": 1}}
+
+
+def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
+    """The thread pool processes every queued listing (a worker 'error' does
+    NOT abort the loop), outcomes tally correctly, DB writes go only through
+    _write_result, and the global refetch budget decrements once per listing."""
+    monkeypatch.setattr(scraper_main.db, "index_summary", lambda _c, _ids: {})
+    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda _c, _ids: 0)
+    monkeypatch.setattr(scraper_main.db, "active_failure_ids", lambda _c, _ids: set())
+
+    writes: dict[str, list] = {"upsert": [], "gone": [], "fail": []}
+    monkeypatch.setattr(
+        scraper_main.db, "upsert_listing",
+        lambda _c, row, raw, h: (writes["upsert"].append(h) or "new"),
+    )
+    monkeypatch.setattr(scraper_main.db, "record_images", lambda _c, sid, imgs: 0)
+    monkeypatch.setattr(
+        scraper_main.db, "mark_listing_inactive",
+        lambda _c, sid: writes["gone"].append(sid),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "record_fetch_failure",
+        lambda _c, sid, msg: writes["fail"].append(sid),
+    )
+    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, sid: None)
+
+    def fake_fetch(_client, sid):
+        if sid == 11:
+            return scraper_main.FetchResult(sid, "gone")
+        if sid == 13:
+            return scraper_main.FetchResult(
+                sid, "error", error=RuntimeError("boom"), source="fetch"
+            )
+        return scraper_main.FetchResult(
+            sid, "ok", row={"price_czk": 1}, raw={}, images=[], content_hash="h" * 8
+        )
+
+    monkeypatch.setattr(scraper_main, "_fetch_detail", fake_fetch)
+
+    budget: list[int | None] = [10]
+    seen, counts = scraper_main._walk_category(
+        _IdxClient([10, 11, 12, 13]),
+        object(),
+        cat_limit=None,
+        dry_run=False,
+        refetch_budget=budget,
+        detail_workers=3,
+    )
+
+    assert seen == {10, 11, 12, 13}
+    assert counts["new"] == 2      # 10, 12 upserted
+    assert counts["gone"] == 1     # 11
+    assert counts["errors"] == 1   # 13 — error did not abort the pool
+    assert writes["gone"] == [11]
+    assert writes["fail"] == [13]
+    assert budget[0] == 6          # 10 - 4 processed

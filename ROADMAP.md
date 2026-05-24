@@ -918,6 +918,22 @@ page keeps the frequent ticks (`delta`) distinct from the nightly (`full`).
 Operational watch-items: ~10–15× the prior GitHub Actions minutes, and
 continuous full walks raise sreality rate-limit/IP-block exposure.
 
+### Phase 1.7: Parallel detail fetches behind a global rate limiter (done)
+Detail fetching was serial at 1.5s/request (~0.67 req/s) — the engine's
+throughput bottleneck, and the reason the 15-min tick's detail budget is
+small. Now a small `ThreadPoolExecutor` does the network I/O concurrently
+while the main thread serialises DB writes against the single (not
+thread-safe) psycopg connection — the same pattern the image phase already
+uses. A hand-rolled, stdlib-only `scraper/rate_limit.RateLimiter` (shared
+across all per-category clients + workers) caps the *aggregate* request
+rate so concurrency hides per-request latency without raising the politeness
+ceiling; it auto-backs-off on HTTP 429/403 (`RATE penalize` log line) and
+decays back when sreality is quiet. New `--detail-workers` / `--detail-rate`
+knobs (defaults 4 workers @ 2 req/s) are wired into both scrape workflows.
+No new dependency (pure `threading`); the index walk and DB writes stay
+serial by design. `get_detail`'s serial 1.5s self-throttle is retained for
+the no-limiter callers (`freshness`, `--detail-only`).
+
 ### Phase 1.5b: Multi-category UI defaults (next, follow-up)
 The data is now broad, but the analytical and estimation surfaces
 still hardcode `category_main='byt'` / `category_type='pronajem'` as
