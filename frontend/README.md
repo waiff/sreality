@@ -46,6 +46,13 @@ Node 20+ required.
 - `VITE_SUPABASE_ANON_KEY` — same page → "anon public" / "publishable" key.
   Safe to ship to the browser; reads are fenced by the `*_public` views in
   migration 008.
+- `VITE_R2_PUBLIC_BASE` — public base URL of the Cloudflare R2 image bucket.
+  Cloudflare dashboard → R2 → the images bucket → Settings → Public access:
+  either enable the **r2.dev** dev subdomain (`https://pub-<hash>.r2.dev`)
+  or attach a **custom domain**. Listing photos load from
+  `${VITE_R2_PUBLIC_BASE}/${storage_path}`. Leave blank and the UI falls
+  back to sreality's CDN URLs, which expire — images then render as
+  "Unavailable".
 
 ## Project layout
 
@@ -102,6 +109,7 @@ before Railway sees them.
 
 Vite inlines `import.meta.env.VITE_*` into the JS bundle at **build
 time** as string constants — the deployed bundle never reads env at
-runtime.  Practical consequence: rotating either of `VITE_SUPABASE_URL`
-or `VITE_SUPABASE_ANON_KEY` requires a redeploy (push or click
-"Redeploy" in Railway), not just a variable update.
+runtime.  Practical consequence: changing any `VITE_*` value (e.g.
+`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, or `VITE_R2_PUBLIC_BASE`)
+requires a redeploy (push or click "Redeploy" in Railway), not just a
+variable update.
