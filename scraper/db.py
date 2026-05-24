@@ -263,6 +263,23 @@ def mark_inactive(
         return cur.rowcount or 0
 
 
+def mark_listing_inactive(
+    conn: psycopg.Connection,
+    sreality_id: int,
+) -> None:
+    """Flip a single listing to is_active=false.
+
+    Used when a detail fetch reports the listing is gone (404/410 or
+    sreality's 'page does not exist' body) — a delisting detected mid-run,
+    independent of the end-of-walk index-absence sweep in mark_inactive.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listings SET is_active = false WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+
+
 def index_summary(
     conn: psycopg.Connection,
     sreality_ids: Iterable[int],
@@ -304,6 +321,11 @@ def pending_image_downloads(
     The category columns come from the parent listing so the
     image-download phase can attribute its results per (category_main,
     category_type) on the scrape_runs row.
+
+    Newest-first (id DESC): an image row's id increases with insertion, so
+    the photos a run just discovered sort ahead of the older backlog. Under
+    a per-tick cap this means fresh listings get their images downloaded
+    inline in the same run, and leftover budget drains the backlog.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -314,7 +336,7 @@ def pending_image_downloads(
             LEFT JOIN listings l ON l.sreality_id = i.sreality_id
             WHERE i.storage_path IS NULL
               AND i.download_attempts < %s
-            ORDER BY i.id
+            ORDER BY i.id DESC
             LIMIT %s
             """,
             (max_attempts, limit),

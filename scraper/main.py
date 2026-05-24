@@ -36,10 +36,20 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+import requests
+
 from scraper import db, hashing, image_storage, parser
-from scraper.sreality_client import SrealityClient
+from scraper.sreality_client import GONE_STATUSES, ListingGoneError, SrealityClient
 
 DEFAULT_IMAGE_WORKERS = 8
+
+# A full index walk that collected at least this fraction of the total the
+# API reported (result_size) is treated as complete enough to drive
+# mark_inactive. Below it, the walk likely truncated and flipping unseen
+# listings to inactive would falsely delist live ones, so we skip. When
+# result_size is unavailable we fall back to trusting the walk (see
+# _walk_complete) rather than silently disabling delisting detection.
+INDEX_MIN_COMPLETENESS = 0.9
 
 # All sreality category pairs we collect, as (category_main_cb,
 # category_type_cb). Rentals first (the established slice), then sales,
@@ -78,11 +88,11 @@ def main(argv: list[str] | None = None) -> int:
     # phase. Dry runs never write — they're for log-only inspection.
     run_id: int | None = None
     if not args.dry_run:
-        run_type = "delta" if (
+        run_type = args.run_type or ("delta" if (
             args.limit is not None
             or args.detail_only is not None
             or args.images_only
-        ) else "full"
+        ) else "full")
         try:
             with db.connect() as conn:
                 run_id = db.scrape_run_start(conn, run_type)
@@ -273,6 +283,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "200; ~$3/run at the cached rate). Set to 0 to disable."
         ),
     )
+    p.add_argument(
+        "--run-type",
+        choices=("full", "delta"),
+        default=None,
+        help=(
+            "explicit scrape_runs.run_type label. Overrides the "
+            "limit-based heuristic — the unified 15-min job does a full "
+            "index walk (no --limit) but should still record as 'delta' "
+            "so the Health page separates it from the nightly 'full' run."
+        ),
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -413,20 +434,35 @@ def _run_full(
             # Commit inactive-marking per category, immediately after
             # the walk that produced its seen_ids. If a later category
             # crashes mid-walk, this category's marking still survives.
+            # Guard the flip on walk completeness: under the 15-min full-walk
+            # cadence a silently-truncated index page must not flip the
+            # listings it failed to see to inactive.
             inactive = 0
+            result_size = getattr(client, "result_size", None)
             if conn is not None and limit is None:
-                inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
-                LOG.info(
-                    "INACTIVE cm=%s ct=%s marked=%d",
-                    cm_text, ct_text, inactive,
-                )
+                if _walk_complete(len(seen_ids), result_size):
+                    inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
+                    LOG.info(
+                        "INACTIVE cm=%s ct=%s marked=%d collected=%d result_size=%s",
+                        cm_text, ct_text, inactive, len(seen_ids), result_size,
+                    )
+                else:
+                    LOG.warning(
+                        "INACTIVE skipped cm=%s ct=%s: walk looks incomplete "
+                        "(collected=%d result_size=%s); not flipping to avoid "
+                        "false delisting",
+                        cm_text, ct_text, len(seen_ids), result_size,
+                    )
 
+            # Delistings detected mid-walk via a gone detail fetch are
+            # disjoint from mark_inactive's index-absence sweep (that sweep
+            # only flips rows still is_active=true), so summing is safe.
             category_aggregates.append({
                 "category_main": cm_text,
                 "category_type": ct_text,
                 "listings_found_new":   cat_counts.get("found_new", 0),
                 "listings_scraped_new": cat_counts.get("new", 0),
-                "listings_inactive":    inactive,
+                "listings_inactive":    inactive + cat_counts.get("gone", 0),
                 "images_discovered":    cat_counts.get("images_discovered", 0),
                 "images_stored":        0,
             })
@@ -452,11 +488,12 @@ def _run_full(
             conn.close()
 
     LOG.info(
-        "RUN done pages=%d new=%d updated=%d unchanged=%d errors=%d",
+        "RUN done pages=%d new=%d updated=%d unchanged=%d gone=%d errors=%d",
         total_pages,
         counts["new"],
         counts["updated"],
         counts["unchanged"],
+        counts.get("gone", 0),
         counts["errors"],
     )
 
@@ -471,6 +508,20 @@ def _run_full(
         "by_category":          category_aggregates,
     }
     return (0, scrape_agg)
+
+
+def _walk_complete(collected: int, result_size: int | None) -> bool:
+    """Whether an index walk covered enough of the API-reported total to
+    safely drive mark_inactive.
+
+    Only a *positive* signal of incompleteness suppresses the flip: if the
+    API didn't report result_size (or reported <= 0) we fall back to
+    trusting the walk, matching the pre-existing nightly behaviour, rather
+    than silently disabling delisting detection.
+    """
+    if result_size is None or result_size <= 0:
+        return True
+    return collected >= result_size * INDEX_MIN_COMPLETENESS
 
 
 def _walk_category(
@@ -488,7 +539,7 @@ def _walk_category(
     is the per-category ceiling (None = no per-category limit).
     """
     counts = {
-        "new": 0, "updated": 0, "unchanged": 0, "errors": 0,
+        "new": 0, "updated": 0, "unchanged": 0, "errors": 0, "gone": 0,
         "found_new": 0, "images_discovered": 0,
     }
     index_entries: list[tuple[int, int | None]] = []
@@ -574,6 +625,19 @@ def _process_one(
     """Returns (outcome, images_inserted)."""
     try:
         raw = client.get_detail(sid)
+    except ListingGoneError:
+        return _handle_gone(conn, sid)
+    except requests.HTTPError as exc:
+        status = (
+            exc.response.status_code
+            if getattr(exc, "response", None) is not None
+            else None
+        )
+        if status in GONE_STATUSES:
+            return _handle_gone(conn, sid)
+        LOG.error("DETAIL id=%d fetch error: %s", sid, exc)
+        _record_failure(conn, sid, "fetch", exc)
+        return ("errors", 0)
     except Exception as exc:
         LOG.error("DETAIL id=%d fetch error: %s", sid, exc)
         _record_failure(conn, sid, "fetch", exc)
@@ -607,6 +671,25 @@ def _process_one(
         LOG.exception("DETAIL id=%d db error: %s", sid, exc)
         _record_failure(conn, sid, "db", exc)
         return ("errors", 0)
+
+
+def _handle_gone(conn: Any, sid: int) -> tuple[str, int]:
+    """A delisted listing: flip is_active=false and clear any failure row.
+
+    A gone detail fetch is evidence of delisting, not a transient failure,
+    so it must not accumulate in listing_fetch_failures (which would burn
+    the 5-attempt budget and then strand the listing as given_up). Returns
+    the 'gone' outcome so the walk counts it separately from errors.
+    """
+    LOG.info("DETAIL id=%d gone (is_active=false)", sid)
+    if conn is None:
+        return ("gone", 0)
+    try:
+        db.mark_listing_inactive(conn, sid)
+    except Exception as exc:
+        LOG.warning("could not mark id=%d inactive: %s", sid, exc)
+    _clear_failure(conn, sid)
+    return ("gone", 0)
 
 
 def _record_failure(conn: Any, sid: int, source: str, exc: BaseException) -> None:

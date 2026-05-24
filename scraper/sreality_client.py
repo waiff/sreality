@@ -36,6 +36,36 @@ RETRYABLE_STATUS: frozenset[int] = frozenset(
     {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 )
 
+# Statuses that mean "this listing no longer exists" rather than a
+# transient or unexpected error. Mirrors scraper.freshness.GONE_STATUSES.
+GONE_STATUSES: frozenset[int] = frozenset({404, 410})
+
+# Substrings of sreality's HTML "this page does not exist" page. Sreality
+# sometimes serves this (HTTP 200, text/html) for a delisted detail URL
+# instead of a 404/410 JSON error, in which case response.json() would
+# otherwise raise a parse error and the listing would be logged as a fetch
+# failure instead of recognised as gone.
+_NOT_FOUND_MARKERS: tuple[str, ...] = (
+    "tato stránka neexistuje",
+    "stránka nebyla nalezena",
+)
+
+
+class ListingGoneError(Exception):
+    """A listing's detail endpoint signals it no longer exists."""
+
+    def __init__(self, url: str, status: int | None) -> None:
+        self.status = status
+        super().__init__(f"listing gone (status={status}) at {url}")
+
+
+def _is_not_found_body(response: requests.Response) -> bool:
+    """True when a non-JSON 200 body is sreality's 'page does not exist' page."""
+    if "json" in response.headers.get("Content-Type", "").lower():
+        return False
+    text = (response.text or "").lower()
+    return any(marker in text for marker in _NOT_FOUND_MARKERS)
+
 
 class SrealityClient:
     def __init__(
@@ -59,6 +89,11 @@ class SrealityClient:
         self._session.headers.update(DEFAULT_HEADERS)
         self._last_detail_at = 0.0
         self.pages_fetched = 0
+        # Total matching estates as the API reports it on page 1. Used by
+        # the caller to decide whether a walk was complete enough to drive
+        # mark_inactive (a silently-truncated walk must not flip live
+        # listings to inactive).
+        self.result_size: int | None = None
 
     def iter_index(self) -> Iterator[dict[str, Any]]:
         """Yield every estate dict from every index page until exhausted."""
@@ -73,6 +108,10 @@ class SrealityClient:
             }
             payload = self._get_json(INDEX_URL, params=params)
             self.pages_fetched += 1
+            if self.result_size is None:
+                rs = payload.get("result_size")
+                if isinstance(rs, int):
+                    self.result_size = rs
             estates = payload.get("_embedded", {}).get("estates", [])
             LOG.info("INDEX page=%d estates=%d", page, len(estates))
             if not estates:
@@ -91,6 +130,17 @@ class SrealityClient:
         url = DETAIL_URL.format(id=sreality_id)
         try:
             return self._get_json(url)
+        except ListingGoneError:
+            raise
+        except requests.HTTPError as exc:
+            status = (
+                exc.response.status_code
+                if getattr(exc, "response", None) is not None
+                else None
+            )
+            if status in GONE_STATUSES:
+                raise ListingGoneError(url, status) from exc
+            raise
         finally:
             self._last_detail_at = time.monotonic()
 
@@ -117,6 +167,8 @@ class SrealityClient:
                         f"{response.status_code} from {url}",
                         response=response,
                     )
+                if _is_not_found_body(response):
+                    raise ListingGoneError(url, response.status_code)
                 return response.json()
             except (requests.RequestException, ValueError) as exc:
                 error = exc

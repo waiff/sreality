@@ -197,6 +197,24 @@ def test_410_also_treated_as_gone(monkeypatch):
     assert calls["log"][0]["outcome"] == "gone"
 
 
+def test_listing_gone_error_treated_as_gone(monkeypatch):
+    """Production path: get_detail raises ListingGoneError (a wrapped
+    404/410 or sreality's 'page does not exist' body). Must flip inactive
+    and log gone, not record a fetch error."""
+    from scraper.sreality_client import ListingGoneError
+
+    calls = _patch_db(monkeypatch, prev=None)
+    client = _StubClient(
+        exc=ListingGoneError("https://www.sreality.cz/api/.../estates/1", 200)
+    )
+    conn = _FakeConn()
+    res = freshness.freshness_check(conn, client, sreality_id=2836292428)
+
+    assert res["outcome"] == "gone"
+    assert any("is_active = false" in sql for sql, _ in conn.executions)
+    assert calls["log"][0]["outcome"] == "gone"
+
+
 def test_500_treated_as_fetch_error(monkeypatch):
     prev_raw = _load_raw()
     prev_hash = hashing.content_hash(prev_raw)

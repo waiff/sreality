@@ -671,27 +671,42 @@ to scrub by regex; if a fixture leaks one, hand-edit the file.
 GitHub repo -> **Actions** tab -> **Daily Sreality scrape** workflow ->
 **Run workflow** button -> pick branch and optional flags -> **Run workflow**.
 
-The scrape runs on a two-tier cadence:
+The scrape runs on a two-tier cadence. **Both tiers now do a complete
+index walk** — the split is about how much expensive work each does, not
+walk depth:
 
-- **Daily Sreality scrape** (`scrape.yml`, cron `0 22 * * *`) — full
-  walk of every category pair's entire index, detail refetches up
-  to the configured caps, image-download phase, condition-scoring
-  phase. The **only** path that runs `mark_inactive`: a listing not
-  seen in the run's index is flipped to `is_active=false`, which is
-  why this step is gated on a complete walk (architectural rule #3).
-- **Sreality delta scrape (15-min)** (`scrape_delta.yml`, cron
-  `*/15 * * * *`) — `--limit 200` per category, so each tick only
-  walks the first ~3 index pages of each of the 6 category pairs.
-  Picks up newly-listed properties within minutes of them appearing
-  on sreality. Skips image downloads and condition scoring (the
-  nightly covers both). Never marks listings inactive, by design
-  (the `--limit`-set guard in `scraper/main.py:main` short-circuits
-  `mark_inactive`).
+- **Sreality scrape (15-min full walk)** (`scrape_delta.yml`, cron
+  `*/15 * * * *`) — the primary scrape. Walks the **entire** index of
+  every category pair (no `--limit`), so newly-listed properties surface
+  within minutes AND delistings flip to `is_active=false` within minutes.
+  Because the walk is complete it runs `mark_inactive` every tick. Detail
+  refetches and image downloads are **capped per tick** (`--max-detail-refetches
+  150`, `--max-image-downloads 400`) so a run stays bounded; deferred work
+  drains on the next tick (failure-priority retry + newest-first image
+  ordering). Records as `run_type='delta'` via `--run-type`. Skips
+  condition scoring.
+- **Daily Sreality scrape** (`scrape.yml`, cron `0 22 * * *`) — the deep
+  nightly. Also a full walk, but its distinct value is the expensive
+  backlog work the 15-min ticks skip: the condition-scoring phase (LLM
+  cost), a deep image-backlog drain (cap 50 000), and a high-cap detail
+  catch-up (cap 10 000). Records as `run_type='full'`.
 
-Concurrency for the delta is set to drop overlapping runs rather
-than queue them — if a 15-min run is still in flight when the next
-cron fires, the new run is skipped. The nightly has no such guard;
-it owns the 22:00 UTC slot.
+`mark_inactive` is no longer nightly-only. Two safety rails make the
+every-15-min flip safe (architectural rule #3): (1) each per-category
+flip is gated on **walk completeness** — `_walk_complete` compares the
+collected count against the API's `result_size` and skips the flip
+(logging `INACTIVE skipped`) when the walk looks truncated; (2) a gone
+detail fetch (HTTP 404/410 or sreality's "tato stránka neexistuje" body,
+surfaced as `ListingGoneError`) flips that single listing immediately and
+clears any `listing_fetch_failures` row, instead of accumulating failures.
+The `--limit` guard still short-circuits `mark_inactive` for ad-hoc
+partial runs.
+
+Concurrency for the 15-min job is `cancel-in-progress: false` — a long
+tick is never killed mid-walk; the next cron tick queues behind it
+instead of overlapping. Per-category marking commits immediately after
+each category's walk, so even a timed-out tick leaves a consistent
+partial result. The nightly owns the 22:00 UTC slot.
 
 ## Reading the logs
 
@@ -706,8 +721,13 @@ The scraper emits structured progress lines:
 - `DETAIL progress=N/M new=... updated=... errors=...` every 50 refetches
 - `DETAIL id=... new|updated|unchanged` per refetched listing
 - `IMAGE id=... inserted=N` per listing with new image rows recorded
-- `INACTIVE marked=N` once after marking unseen listings
-- `RUN done pages=... new=... updated=... unchanged=... errors=...`
+- `DETAIL id=... gone (is_active=false)` per listing whose detail fetch
+  reported it delisted (404/410 or the not-found body)
+- `INACTIVE cm=... ct=... marked=N collected=M result_size=K` per category
+  after a completeness-checked mark_inactive
+- `INACTIVE skipped cm=... ct=...` per category whose walk looked truncated
+  (flip suppressed to avoid false delistings)
+- `RUN done pages=... new=... updated=... unchanged=... gone=... errors=...`
 - `IMAGES pending=N cap=N workers=N` once before the image-download phase
 - `IMAGES progress=N/M ...` every 50 images during the phase
 - `IMAGES done downloaded=... errors=... attempted=...` after image phase

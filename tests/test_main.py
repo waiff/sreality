@@ -11,8 +11,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import requests
 
 from scraper import main as scraper_main
+from scraper.sreality_client import ListingGoneError
 
 
 class _FakeClient:
@@ -20,6 +22,7 @@ class _FakeClient:
     that mark_inactive is scoped correctly."""
 
     pages_fetched = 1
+    result_size = None  # overridden in completeness-guard tests
 
     def __init__(
         self,
@@ -169,3 +172,102 @@ def test_run_full_preserves_mark_inactive_for_earlier_categories_when_later_walk
     assert ("dum", "prodej") not in marked
     assert ("komercni", "pronajem") not in marked
     assert ("komercni", "prodej") not in marked
+
+
+# --- completeness guard -----------------------------------------------------
+
+
+def test_walk_complete_thresholds():
+    # No reported total → trust the walk (don't silently disable delisting).
+    assert scraper_main._walk_complete(0, None) is True
+    assert scraper_main._walk_complete(0, 0) is True
+    # Covered enough of the reported total → complete.
+    assert scraper_main._walk_complete(100, 100) is True
+    assert scraper_main._walk_complete(90, 100) is True
+    # Truncated walk → incomplete, suppress the flip.
+    assert scraper_main._walk_complete(89, 100) is False
+    assert scraper_main._walk_complete(10, 100) is False
+
+
+def test_run_full_skips_mark_inactive_when_walk_incomplete(patched_db, monkeypatch):
+    """result_size far above the collected count looks like a truncated
+    walk, so mark_inactive must be skipped to avoid false delistings."""
+    monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0
+    assert patched_db["mark_inactive"] == []
+
+
+def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
+    """When the collected count matches the reported total the flip runs."""
+    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0
+    assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+
+
+# --- gone detection in _process_one ----------------------------------------
+
+
+def _patch_failure_helpers(monkeypatch) -> dict[str, list]:
+    calls: dict[str, list] = {"inactive": [], "cleared": [], "failed": []}
+    monkeypatch.setattr(
+        scraper_main.db, "mark_listing_inactive",
+        lambda _c, sid: calls["inactive"].append(sid),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "clear_fetch_failure",
+        lambda _c, sid: calls["cleared"].append(sid),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "record_fetch_failure",
+        lambda _c, sid, msg: calls["failed"].append(sid),
+    )
+    return calls
+
+
+class _RaisingClient:
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def get_detail(self, sid: int) -> Any:
+        raise self._exc
+
+
+def test_process_one_listing_gone_flips_inactive_not_failure(monkeypatch):
+    calls = _patch_failure_helpers(monkeypatch)
+    client = _RaisingClient(ListingGoneError("https://x/estates/1", 200))
+    outcome, imgs = scraper_main._process_one(
+        client, object(), 12345, dry_run=False
+    )
+    assert outcome == "gone"
+    assert imgs == 0
+    assert calls["inactive"] == [12345]
+    assert calls["cleared"] == [12345]
+    assert calls["failed"] == []  # a delisting is not a fetch failure
+
+
+def test_process_one_404_http_error_is_gone(monkeypatch):
+    calls = _patch_failure_helpers(monkeypatch)
+    resp = requests.Response()
+    resp.status_code = 404
+    client = _RaisingClient(requests.HTTPError("404", response=resp))
+    outcome, _imgs = scraper_main._process_one(
+        client, object(), 777, dry_run=False
+    )
+    assert outcome == "gone"
+    assert calls["inactive"] == [777]
+    assert calls["failed"] == []
+
+
+def test_process_one_500_http_error_is_failure(monkeypatch):
+    calls = _patch_failure_helpers(monkeypatch)
+    resp = requests.Response()
+    resp.status_code = 500
+    client = _RaisingClient(requests.HTTPError("500", response=resp))
+    outcome, _imgs = scraper_main._process_one(
+        client, object(), 888, dry_run=False
+    )
+    assert outcome == "errors"
+    assert calls["failed"] == [888]
+    assert calls["inactive"] == []

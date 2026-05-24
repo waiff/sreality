@@ -1,26 +1,32 @@
-name: Sreality delta scrape (15-min)
+name: Sreality scrape (15-min full walk)
 
-# Lightweight companion to scrape.yml (nightly full walk). Walks the
-# first ~3 index pages of each of the 6 category pairs every 15
-# minutes so a newly-listed property surfaces in the database — and
-# downstream in the Watchdog feed — within minutes instead of within
-# a day.
+# Primary scrape. Every 15 minutes it walks the COMPLETE index of all
+# six category pairs, so:
+#   - newly-listed properties surface within minutes (and downstream
+#     in the Watchdog feed), and
+#   - delisted properties flip to is_active=false within minutes too —
+#     a complete walk is what makes that inference valid
+#     (architectural rule #3).
 #
-# Architectural rule #3 ("Never delete listings") still holds: the
-# scraper skips its `mark_inactive` step whenever `--limit` is set
-# (see scraper/main.py around the conn-not-None / limit-is-None
-# guard), so a partial walk can never falsely flip a still-live
-# listing to is_active=false. That inference remains the nightly
-# scrape's job.
+# Because the walk is complete (no --limit), mark_inactive runs every
+# tick. scraper/main.py guards each per-category flip on walk
+# completeness (collected vs the API's result_size), so a silently
+# truncated index page never mass-flips live listings. A gone detail
+# fetch (404/410 or sreality's "page does not exist" body) flips that
+# single listing immediately instead of accumulating fetch failures.
 #
-# Image-download and condition-scoring phases are explicitly skipped
-# here — they're materially the most expensive parts of a run and
-# the nightly already covers them. The delta still records image
-# URLs and snapshot rows for new/updated listings.
+# Detail refetches and image downloads are CAPPED per tick so a run
+# stays bounded; whatever the cap defers drains on the next tick
+# (failure-priority retry + newest-first image ordering). Condition
+# scoring (LLM cost) is left to the thin nightly scrape.yml, which also
+# does a deep image-backlog drain and a high-cap detail catch-up.
 #
-# Concurrency: a long-running delta blocks the next 15-min tick
-# instead of overlapping. Skipping is preferable to two scrapers
-# stomping each other.
+# Recorded as run_type='delta' (via --run-type) so the Health page
+# keeps these frequent ticks distinct from the nightly 'full' run, even
+# though both now do a complete index walk.
+#
+# Concurrency: cancel-in-progress=false so a long tick is never killed
+# mid-walk; the next cron tick queues behind it instead of overlapping.
 
 on:
   schedule:
@@ -34,7 +40,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     steps:
       - uses: actions/checkout@v4
 
@@ -57,13 +63,15 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
-          # --limit 200 caps the per-category index walk (see
-          # _walk_category in scraper/main.py); with 6 categories
-          # that's at most 1200 listings touched per tick, of which
-          # only new/changed listings trigger a detail fetch.
+          # Full index walk (no --limit) so mark_inactive + gone
+          # detection cover every category each tick. Detail refetches
+          # and images are capped so a tick stays bounded; deferred work
+          # drains on the next tick. Condition scoring is the nightly's
+          # job. Recorded as run_type='delta' (see header).
           python -m scraper.main \
-            --limit 200 \
-            --no-image-downloads \
+            --run-type delta \
             --no-condition-scoring \
-            --max-detail-refetches 200 \
-            --max-detail-refetches-per-category 100
+            --max-detail-refetches 150 \
+            --max-detail-refetches-per-category 60 \
+            --max-image-downloads 400 \
+            --image-workers 16

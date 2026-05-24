@@ -1,7 +1,15 @@
 name: Daily Sreality scrape
 
-# Walks all six category pairs sequentially each run:
+# Deep nightly run. Walks all six category pairs sequentially:
 #   byt + dum + komercni  ×  pronajem + prodej
+#
+# Since scrape_delta.yml now does a COMPLETE index walk every 15 minutes
+# (carrying mark_inactive + gone detection + new-listing pickup + inline
+# image downloads), this nightly is no longer the sole freshness driver.
+# Its distinct value is the expensive backlog work the 15-min ticks skip:
+# the condition-scoring phase (LLM cost), a deep image-backlog drain, and
+# a high-cap detail-refetch catch-up for anything the per-tick caps
+# deferred. It records as run_type='full'.
 #
 # Always aggressive (the conservative profile was retired when scope
 # expanded from one category to six):
