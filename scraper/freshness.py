@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 import requests
 
 from scraper import db, hashing, parser
-from scraper.sreality_client import SrealityClient
+from scraper.sreality_client import ListingGoneError, SrealityClient
 
 if TYPE_CHECKING:
     import psycopg
@@ -54,6 +54,8 @@ def freshness_check(
 
     try:
         raw = client.get_detail(sreality_id)
+    except ListingGoneError:
+        return _record_gone(conn, sreality_id, prev)
     except requests.HTTPError as exc:
         status = (
             exc.response.status_code

@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-22 14:59 UTC_
+_Last refreshed: 2026-05-24 16:00 UTC_
 
 **Branch:** `claude/kind-wozniak-LtrOy`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 90 files, latest `086_scrape_runs.sql`.
+**Migrations on disk:** 91 files, latest `087_scrape_runs_public_anon_reads.sql`.
 
 **Last 10 commits:**
 
 ```
+dde44a3 health: fix anon visibility for scrape_runs / image RPCs (migration 087)
+92b0bb6 Merge remote-tracking branch 'origin/main' into claude/brave-knuth-8ICa2
+0bbfe91 Add files via upload
+0e94c28 health: add per-scrape audit + image mirror overview + schedule card
+621b613 Merge pull request #166 from waiff/claude/sreality-chrome-plugin-XqcsC
+19ff4bf chrome-extension: TS type-check fixes for CI
+5ef0368 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
+31ca5b0 chrome-extension: 16/48/128 icons + Actions build workflow
+e614b31 roadmap + CLAUDE.md: Phase EXT (Chrome extension territory + icon)
 07969c7 Merge pull request #165 from waiff/claude/fix-skill-refiner-trigger-SBQDM
-dcb7b29 Merge remote-tracking branch 'origin/main' into claude/fix-skill-refiner-trigger-SBQDM
-3c3d8eb chore: refresh ROADMAP auto-status block
-14ced35 chore: refresh ROADMAP auto-status block
-83aaab8 frontend: scroll to feedback section and auto-expand pending proposal
-c8e41a3 Merge pull request #164 from waiff/claude/fix-missing-listing-images-A7OR5
-0c29f29 Merge remote-tracking branch 'origin/main' into claude/fix-missing-listing-images-A7OR5
-1910d4d roadmap: refresh auto-status block
-366b42c roadmap: refresh auto-status block
-7c950c3 scraper: add --images-only mode and drain R2 image backlog faster
 ```
 
 <!-- END AUTO-STATUS -->
@@ -440,6 +440,8 @@ overlay that can be heatmap-color-coded by any chosen index.
   here can never falsely flip a live listing inactive thanks to the
   `--limit`-set guard in `scraper/main.py:main`. Concurrency-group
   drops overlapping runs rather than queueing them.
+  _(Superseded by Scraper-track Phase 1.6: this job now does a complete
+  walk every tick and runs `mark_inactive` itself.)_
 - **Watchdog feed polling decoupled from estimation polling.**
   `frontend/src/pages/Watchdog.tsx` switches from an unconditional
   5-second `refetchInterval` to a two-tier callback: 30 s for the
@@ -897,6 +899,40 @@ Independent of the analytical, UI, and map tracks.
 Cross-listed under top-level Done above. Headline: all six byt / dum
 / komercni × pronajem / prodej pairs walked nightly with per-category
 refetch cap.
+
+### Phase 1.6: Unified 15-min cadence + immediate delisting (done)
+The 15-min `scrape_delta.yml` was promoted from a `--limit 200` partial
+walk to a **complete** index walk every tick, so both new listings and
+delistings reflect within minutes instead of within a day. `mark_inactive`
+now runs every tick, made safe by two rails: a walk-completeness guard
+(`_walk_complete` compares collected vs the API's `result_size`, skipping
+the flip on a truncated walk) and gone-detection on the detail fetch
+(`ListingGoneError` on 404/410 or sreality's "tato stránka neexistuje"
+body flips the single listing inactive + clears its fetch-failure row
+instead of accumulating failures). Detail/image work is capped per tick;
+deferred work drains next tick (failure-priority + newest-first image
+ordering, so a run's fresh photos download inline). The nightly `scrape.yml`
+became the thin deep run: condition scoring + deep image-backlog drain +
+high-cap detail catch-up. Runs are labelled via `--run-type` so the Health
+page keeps the frequent ticks (`delta`) distinct from the nightly (`full`).
+Operational watch-items: ~10–15× the prior GitHub Actions minutes, and
+continuous full walks raise sreality rate-limit/IP-block exposure.
+
+### Phase 1.7: Parallel detail fetches behind a global rate limiter (done)
+Detail fetching was serial at 1.5s/request (~0.67 req/s) — the engine's
+throughput bottleneck, and the reason the 15-min tick's detail budget is
+small. Now a small `ThreadPoolExecutor` does the network I/O concurrently
+while the main thread serialises DB writes against the single (not
+thread-safe) psycopg connection — the same pattern the image phase already
+uses. A hand-rolled, stdlib-only `scraper/rate_limit.RateLimiter` (shared
+across all per-category clients + workers) caps the *aggregate* request
+rate so concurrency hides per-request latency without raising the politeness
+ceiling; it auto-backs-off on HTTP 429/403 (`RATE penalize` log line) and
+decays back when sreality is quiet. New `--detail-workers` / `--detail-rate`
+knobs (defaults 4 workers @ 2 req/s) are wired into both scrape workflows.
+No new dependency (pure `threading`); the index walk and DB writes stay
+serial by design. `get_detail`'s serial 1.5s self-throttle is retained for
+the no-limiter callers (`freshness`, `--detail-only`).
 
 ### Phase 1.5b: Multi-category UI defaults (next, follow-up)
 The data is now broad, but the analytical and estimation surfaces

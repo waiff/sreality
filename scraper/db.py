@@ -263,6 +263,23 @@ def mark_inactive(
         return cur.rowcount or 0
 
 
+def mark_listing_inactive(
+    conn: psycopg.Connection,
+    sreality_id: int,
+) -> None:
+    """Flip a single listing to is_active=false.
+
+    Used when a detail fetch reports the listing is gone (404/410 or
+    sreality's 'page does not exist' body) — a delisting detected mid-run,
+    independent of the end-of-walk index-absence sweep in mark_inactive.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listings SET is_active = false WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+
+
 def index_summary(
     conn: psycopg.Connection,
     sreality_ids: Iterable[int],

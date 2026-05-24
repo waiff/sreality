@@ -1,13 +1,24 @@
 name: Daily Sreality scrape
 
-# Walks all six category pairs sequentially each run:
+# Deep nightly run. Walks all six category pairs sequentially:
 #   byt + dum + komercni  ×  pronajem + prodej
+#
+# Since scrape_delta.yml now does a COMPLETE index walk every 15 minutes
+# (carrying mark_inactive + gone detection + new-listing pickup + inline
+# image downloads), this nightly is no longer the sole freshness driver.
+# Its distinct value is the expensive backlog work the 15-min ticks skip:
+# the condition-scoring phase (LLM cost), a deep image-backlog drain, and
+# a high-cap detail-refetch catch-up for anything the per-tick caps
+# deferred. It records as run_type='full'.
 #
 # Always aggressive (the conservative profile was retired when scope
 # expanded from one category to six):
 #   timeout 350 min (~5.8 h, just under the 6h GitHub job cap)
 #   up to 10 000 detail refetches global cap, 2 000 per category
-#       (= 250 min at 1.5s/detail; per-category cap stops one
+#       (detail fetches run on a thread pool paced by a shared rate
+#       limiter — --detail-workers/--detail-rate, default 4 workers @
+#       2 req/s — so wall-clock is governed by the rate cap, not the
+#       old serial 1.5s/detail; the per-category cap stops one
 #       high-volume category like byt/prodej from starving the rest
 #       of the categories of the shared global budget — listings the
 #       cap defers drain on subsequent runs)
@@ -59,6 +70,14 @@ on:
         type: string
       image_workers:
         description: "Override concurrent workers (blank = 16)"
+        required: false
+        type: string
+      detail_workers:
+        description: "Override concurrent detail-fetch workers (blank = 4)"
+        required: false
+        type: string
+      detail_rate:
+        description: "Override global detail-fetch rate cap, req/s (blank = 2.0)"
         required: false
         type: string
       no_condition_scoring:
@@ -130,8 +149,18 @@ jobs:
           if [ -z "$WORKERS" ]; then
             WORKERS="16"
           fi
+          DETAIL_WORKERS="${{ inputs.detail_workers }}"
+          if [ -z "$DETAIL_WORKERS" ]; then
+            DETAIL_WORKERS="4"
+          fi
+          DETAIL_RATE="${{ inputs.detail_rate }}"
+          if [ -z "$DETAIL_RATE" ]; then
+            DETAIL_RATE="2.0"
+          fi
           ARGS="$ARGS --max-detail-refetches $MAX_REFETCH"
           ARGS="$ARGS --max-detail-refetches-per-category $MAX_REFETCH_PER_CAT"
+          ARGS="$ARGS --detail-workers $DETAIL_WORKERS"
+          ARGS="$ARGS --detail-rate $DETAIL_RATE"
           ARGS="$ARGS --max-image-downloads $MAX_IMG"
           ARGS="$ARGS --image-workers $WORKERS"
 
