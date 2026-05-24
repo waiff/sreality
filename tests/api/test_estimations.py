@@ -532,6 +532,146 @@ def test_post_with_mode_agent_does_not_500(client, monkeypatch):
     assert inserted["estimated_sale_price_czk"] is None
 
 
+def test_post_rent_estimate_on_sale_listing_derives_purchase_price(
+    client, monkeypatch,
+):
+    """Rent estimate against a sreality SALE listing: the listing's
+    price_czk auto-fills input_purchase_price_czk so yield gets computed
+    without the operator typing a price."""
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    _patch_dispatcher_returns(monkeypatch, _result(
+        sreality_id=2836292428,
+        wide_spec={
+            "price_czk": 8_500_000, "price_unit": "za nemovitost",
+            "category_main": "byt", "category_type": "prodej",
+            "locality": "Praha 2", "district": "Praha 2",
+        },
+    ))
+
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.sreality.cz/detail/x/2836292428"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["input_purchase_price_czk"] == 8_500_000
+    assert body["gross_yield_pct"] is not None
+    inserted = state.inserts[1]
+    assert inserted["input_purchase_price_czk"] == 8_500_000
+    derivation_steps = [
+        s for s in inserted["trace"]["steps"]
+        if s.get("label") == "derive yield inputs from subject listing"
+    ]
+    assert len(derivation_steps) == 1
+    summary = derivation_steps[0]["output_summary"]
+    assert summary["field"] == "purchase_price_czk"
+    assert summary["value"] == 8_500_000
+    assert summary["source"] == "subject_listing.price_czk"
+    assert summary["subject_category_type"] == "prodej"
+
+
+def test_post_sale_estimate_on_rental_listing_derives_expected_rent(
+    client, monkeypatch,
+):
+    """Sale estimate against a sreality RENTAL listing: the listing's
+    monthly rent auto-fills expected_monthly_rent_czk so yield gets
+    computed without the operator typing a rent figure."""
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    _patch_dispatcher_returns(monkeypatch, _result(
+        sreality_id=2836292429,
+        wide_spec={
+            "price_czk": 25_000, "price_unit": "měsíc",
+            "category_main": "byt", "category_type": "pronajem",
+            "locality": "Praha 2", "district": "Praha 2",
+        },
+    ))
+
+    res = client.post(
+        "/estimations",
+        json={
+            "estimate_kind": "sale",
+            "url": "https://www.sreality.cz/detail/x/2836292429",
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["gross_yield_pct"] == 5.0  # (25000 * 12) / 6_000_000 * 100
+    inserted = state.inserts[1]
+    derivation_steps = [
+        s for s in inserted["trace"]["steps"]
+        if s.get("label") == "derive yield inputs from subject listing"
+    ]
+    assert len(derivation_steps) == 1
+    summary = derivation_steps[0]["output_summary"]
+    assert summary["field"] == "expected_monthly_rent_czk"
+    assert summary["value"] == 25_000
+    assert summary["subject_category_type"] == "pronajem"
+
+
+def test_post_rent_estimate_on_rental_listing_skips_derivation(
+    client, monkeypatch,
+):
+    """Negative case: rent-estimating a rental listing leaves
+    input_purchase_price_czk null. A rental's price_czk is monthly rent,
+    not a purchase price, so deriving it would yield nonsense."""
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    _patch_dispatcher_returns(monkeypatch, _result(
+        wide_spec={
+            "price_czk": 25_000, "price_unit": "měsíc",
+            "category_main": "byt", "category_type": "pronajem",
+        },
+    ))
+
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.sreality.cz/detail/x/2836292428"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["input_purchase_price_czk"] is None
+    inserted = state.inserts[1]
+    derivation_steps = [
+        s for s in inserted["trace"]["steps"]
+        if s.get("label") == "derive yield inputs from subject listing"
+    ]
+    assert derivation_steps == []
+
+
+def test_post_operator_purchase_price_wins_over_listing(client, monkeypatch):
+    """If the operator supplies purchase_price_czk explicitly, the
+    auto-derivation must NOT overwrite it."""
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    _patch_dispatcher_returns(monkeypatch, _result(
+        wide_spec={
+            "price_czk": 8_500_000, "price_unit": "za nemovitost",
+            "category_main": "byt", "category_type": "prodej",
+        },
+    ))
+
+    res = client.post(
+        "/estimations",
+        json={
+            "url": "https://www.sreality.cz/detail/x/2836292428",
+            "purchase_price_czk": 5_000_000,
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["input_purchase_price_czk"] == 5_000_000
+    inserted = state.inserts[1]
+    derivation_steps = [
+        s for s in inserted["trace"]["steps"]
+        if s.get("label") == "derive yield inputs from subject listing"
+    ]
+    assert derivation_steps == []
+
+
 def test_post_invalid_source_returns_422(client):
     res = client.post(
         "/estimations",

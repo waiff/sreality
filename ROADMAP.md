@@ -7,7 +7,7 @@
 
 _Last refreshed: 2026-05-24 16:00 UTC_
 
-**Branch:** `claude/brave-knuth-8ICa2`
+**Branch:** `claude/kind-wozniak-LtrOy`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
