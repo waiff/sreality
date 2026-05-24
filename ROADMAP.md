@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-24 16:00 UTC_
+_Last refreshed: 2026-05-24 19:31 UTC_
 
-**Branch:** `claude/kind-wozniak-LtrOy`
+**Branch:** `claude/brave-knuth-8ICa2`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 91 files, latest `087_scrape_runs_public_anon_reads.sql`.
+**Migrations on disk:** 93 files, latest `088_scraper_health_checks.sql`.
 
 **Last 10 commits:**
 
 ```
+cebac7e Merge origin/main into claude/brave-knuth-8ICa2
+c1df43d scraper: parallelize detail fetches behind a global rate limiter
+f322c0c scraper: unified 15-min full walk with immediate, guarded delisting
+6ed32a1 frontend: wire VITE_R2_PUBLIC_BASE so listing images load from R2
+9ca3513 Merge pull request #170 from waiff/claude/brave-knuth-8ICa2
 dde44a3 health: fix anon visibility for scrape_runs / image RPCs (migration 087)
-92b0bb6 Merge remote-tracking branch 'origin/main' into claude/brave-knuth-8ICa2
-0bbfe91 Add files via upload
-0e94c28 health: add per-scrape audit + image mirror overview + schedule card
-621b613 Merge pull request #166 from waiff/claude/sreality-chrome-plugin-XqcsC
-19ff4bf chrome-extension: TS type-check fixes for CI
-5ef0368 Merge remote-tracking branch 'origin/main' into claude/sreality-chrome-plugin-XqcsC
-31ca5b0 chrome-extension: 16/48/128 icons + Actions build workflow
-e614b31 roadmap + CLAUDE.md: Phase EXT (Chrome extension territory + icon)
-07969c7 Merge pull request #165 from waiff/claude/fix-skill-refiner-trigger-SBQDM
+3fe3c23 Merge pull request #169 from waiff/claude/image-pipeline-continuous-backfill
+84c166c images: continuous nightly drain + 2h backfill + taken-down classifier
+8854002 Merge pull request #168 from waiff/claude/kind-wozniak-LtrOy
+053fafe Merge remote-tracking branch 'origin/main' into claude/kind-wozniak-LtrOy
 ```
 
 <!-- END AUTO-STATUS -->
