@@ -41,7 +41,13 @@ import requests
 
 from scraper import db, hashing, image_storage, parser
 from scraper.rate_limit import RateLimiter
-from scraper.sreality_client import GONE_STATUSES, ListingGoneError, SrealityClient
+from scraper.sreality_client import (
+    GONE_STATUSES,
+    REGION_IDS,
+    SPLIT_THRESHOLD,
+    ListingGoneError,
+    SrealityClient,
+)
 
 DEFAULT_IMAGE_WORKERS = 32
 # Detail fetches run on a small thread pool paced by a shared RateLimiter.
@@ -371,12 +377,14 @@ def _build_client(
     category_main: int,
     category_type: int,
     limiter: RateLimiter | None = None,
+    locality_region_id: int | None = None,
 ) -> SrealityClient:
     return SrealityClient(
         category_main=category_main,
         category_type=category_type,
         country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 10001)),
         limiter=limiter,
+        locality_region_id=locality_region_id,
     )
 
 
@@ -478,22 +486,24 @@ def _run_full(
             ct_text = parser.CATEGORY_TYPE[category_type]
             LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
 
-            client = _build_client(category_main, category_type, limiter=limiter)
-
             remaining_for_limit = (
                 None if limit is None else max(0, limit - global_collected)
             )
-            seen_ids, cat_counts = _walk_category(
-                client,
-                conn,
-                cat_limit=remaining_for_limit,
-                dry_run=dry_run,
-                refetch_budget=refetch_budget,
-                cat_refetch_cap=max_refetches_per_category,
-                detail_workers=detail_workers,
+            seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
+                _walk_category_split(
+                    category_main,
+                    category_type,
+                    limiter=limiter,
+                    conn=conn,
+                    cat_limit=remaining_for_limit,
+                    dry_run=dry_run,
+                    refetch_budget=refetch_budget,
+                    cat_refetch_cap=max_refetches_per_category,
+                    detail_workers=detail_workers,
+                )
             )
             global_collected += len(seen_ids)
-            total_pages += client.pages_fetched
+            total_pages += cat_pages
             total_index += len(seen_ids)
             for k, v in cat_counts.items():
                 counts[k] = counts.get(k, 0) + v
@@ -501,32 +511,50 @@ def _run_full(
                 "CATEGORY done cm=%s ct=%s seen=%d new=%d updated=%d "
                 "unchanged=%d errors=%d",
                 cm_text, ct_text, len(seen_ids),
-                cat_counts["new"], cat_counts["updated"],
-                cat_counts["unchanged"], cat_counts["errors"],
+                cat_counts.get("new", 0), cat_counts.get("updated", 0),
+                cat_counts.get("unchanged", 0), cat_counts.get("errors", 0),
             )
 
-            # Commit inactive-marking per category, immediately after
-            # the walk that produced its seen_ids. If a later category
-            # crashes mid-walk, this category's marking still survives.
-            # Guard the flip on walk completeness: under the 15-min full-walk
-            # cadence a silently-truncated index page must not flip the
-            # listings it failed to see to inactive.
+            # Commit inactive-marking per category immediately after its
+            # walk. The `complete` flag already folds in walk-completeness
+            # (and, for region-split categories, every region being complete),
+            # so a truncated walk never flips live listings to inactive.
             inactive = 0
-            result_size = getattr(client, "result_size", None)
             if conn is not None and limit is None:
-                if _walk_complete(len(seen_ids), result_size):
+                if complete:
                     inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
                     LOG.info(
                         "INACTIVE cm=%s ct=%s marked=%d collected=%d result_size=%s",
-                        cm_text, ct_text, inactive, len(seen_ids), result_size,
+                        cm_text, ct_text, inactive, len(seen_ids), cat_result_size,
                     )
                 else:
                     LOG.warning(
                         "INACTIVE skipped cm=%s ct=%s: walk looks incomplete "
                         "(collected=%d result_size=%s); not flipping to avoid "
                         "false delisting",
-                        cm_text, ct_text, len(seen_ids), result_size,
+                        cm_text, ct_text, len(seen_ids), cat_result_size,
                     )
+
+            # Reconciliation: record sreality's reported total vs what we
+            # collected vs our active DB count so the Health page can surface
+            # drift. active_db reflects the post-inactivation state.
+            active_db: int | None = None
+            if conn is not None:
+                try:
+                    active_db = db.active_count(conn, cm_text, ct_text)
+                except Exception as exc:
+                    LOG.warning(
+                        "active_count failed cm=%s ct=%s: %s", cm_text, ct_text, exc
+                    )
+            drift_txt = "n/a"
+            if cat_result_size and active_db is not None:
+                drift_txt = (
+                    f"{100.0 * (active_db - cat_result_size) / cat_result_size:.1f}%"
+                )
+            LOG.info(
+                "RECONCILE cm=%s ct=%s sreality=%s collected=%d active=%s drift=%s",
+                cm_text, ct_text, cat_result_size, len(seen_ids), active_db, drift_txt,
+            )
 
             # Delistings detected mid-walk via a gone detail fetch are
             # disjoint from mark_inactive's index-absence sweep (that sweep
@@ -539,6 +567,9 @@ def _run_full(
                 "listings_inactive":    inactive + cat_counts.get("gone", 0),
                 "images_discovered":    cat_counts.get("images_discovered", 0),
                 "images_stored":        0,
+                "sreality_result_size": cat_result_size,
+                "collected":            len(seen_ids),
+                "active_db":            active_db,
             })
 
             if limit is not None and global_collected >= limit:
@@ -596,6 +627,99 @@ def _walk_complete(collected: int, result_size: int | None) -> bool:
     if result_size is None or result_size <= 0:
         return True
     return collected >= result_size * INDEX_MIN_COMPLETENESS
+
+
+_REFETCH_OUTCOMES = ("new", "updated", "unchanged", "gone", "errors")
+
+
+def _walk_category_split(
+    category_main: int,
+    category_type: int,
+    *,
+    limiter: RateLimiter | None,
+    conn: Any,
+    cat_limit: int | None,
+    dry_run: bool,
+    refetch_budget: list[int | None],
+    cat_refetch_cap: int | None,
+    detail_workers: int,
+) -> tuple[set[int], dict[str, int], int | None, int, bool]:
+    """Walk one category, splitting large ones by region (kraj).
+
+    Sreality caps deep pagination per filter, so a category bigger than
+    SPLIT_THRESHOLD can't be retrieved whole in one walk. We probe its total
+    and, if over the threshold, walk each region separately and union the
+    results — every region is well under the cap, so the union is complete.
+
+    Returns (seen_ids, counts, result_size, pages_fetched, complete) where
+    `complete` is True only when the walk covered enough of the category to
+    safely drive mark_inactive — for a split walk that means EVERY region's
+    own walk was complete AND the union clears the completeness bar. A
+    truncated region suppresses inactivation for the whole category rather
+    than risk a false delisting (architectural rule #3).
+    """
+    cm_text = parser.CATEGORY_MAIN[category_main]
+    ct_text = parser.CATEGORY_TYPE[category_type]
+
+    # --limit runs are partial by definition and never mark_inactive, so
+    # there's no reason to split them.
+    result_size: int | None = None
+    if cat_limit is None:
+        probe = _build_client(category_main, category_type, limiter=limiter)
+        try:
+            result_size = probe.probe_result_size()
+        except Exception as exc:
+            LOG.warning("PROBE failed cm=%s ct=%s: %s", cm_text, ct_text, exc)
+
+    if cat_limit is not None or result_size is None or result_size <= SPLIT_THRESHOLD:
+        client = _build_client(category_main, category_type, limiter=limiter)
+        seen, counts = _walk_category(
+            client, conn, cat_limit, dry_run, refetch_budget,
+            cat_refetch_cap, detail_workers,
+        )
+        rs = client.result_size if client.result_size is not None else result_size
+        complete = cat_limit is None and _walk_complete(len(seen), rs)
+        return seen, counts, rs, client.pages_fetched, complete
+
+    LOG.info(
+        "SPLIT cm=%s ct=%s result_size=%d > %d: walking %d regions",
+        cm_text, ct_text, result_size, SPLIT_THRESHOLD, len(REGION_IDS),
+    )
+    union: set[int] = set()
+    counts: dict[str, int] = {}
+    summed_rs = 0
+    pages = 0
+    all_regions_complete = True
+    cat_refetched = 0
+    for region in REGION_IDS:
+        region_cap = (
+            None if cat_refetch_cap is None
+            else max(0, cat_refetch_cap - cat_refetched)
+        )
+        rclient = _build_client(
+            category_main, category_type, limiter=limiter,
+            locality_region_id=region,
+        )
+        rseen, rcounts = _walk_category(
+            rclient, conn, None, dry_run, refetch_budget,
+            region_cap, detail_workers,
+        )
+        union |= rseen
+        for k, v in rcounts.items():
+            counts[k] = counts.get(k, 0) + v
+        rrs = rclient.result_size
+        if rrs is not None:
+            summed_rs += rrs
+        pages += rclient.pages_fetched
+        cat_refetched += sum(rcounts.get(o, 0) for o in _REFETCH_OUTCOMES)
+        if rrs is None or len(rseen) < rrs * INDEX_MIN_COMPLETENESS:
+            all_regions_complete = False
+            LOG.warning(
+                "SPLIT region incomplete cm=%s ct=%s region=%d collected=%d result_size=%s",
+                cm_text, ct_text, region, len(rseen), rrs,
+            )
+    complete = all_regions_complete and _walk_complete(len(union), summed_rs)
+    return union, counts, summed_rs, pages, complete
 
 
 def _walk_category(

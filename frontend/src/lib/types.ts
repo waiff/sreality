@@ -189,6 +189,10 @@ export interface ScrapeRunCategory {
   listings_inactive: number;
   images_discovered: number;
   images_stored: number;
+  // Reconciliation (recorded by the region-split scraper; absent on older runs).
+  sreality_result_size?: number | null;
+  collected?: number | null;
+  active_db?: number | null;
 }
 
 export interface ScrapeRun {

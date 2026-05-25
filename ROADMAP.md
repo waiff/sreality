@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-24 19:46 UTC_
+_Last refreshed: 2026-05-25 04:52 UTC_
 
 **Branch:** `claude/brave-knuth-8ICa2`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-24 19:46 UTC_
 **Last 10 commits:**
 
 ```
+5f1946d chore: refresh ROADMAP auto-status block
 2e519bf chore: refresh ROADMAP auto-status block
 ac4bdf3 health: scraper health checks (pass/warn/fail) on the Health page
 cebac7e Merge origin/main into claude/brave-knuth-8ICa2
@@ -25,7 +26,6 @@ f322c0c scraper: unified 15-min full walk with immediate, guarded delisting
 9ca3513 Merge pull request #170 from waiff/claude/brave-knuth-8ICa2
 dde44a3 health: fix anon visibility for scrape_runs / image RPCs (migration 087)
 3fe3c23 Merge pull request #169 from waiff/claude/image-pipeline-continuous-backfill
-84c166c images: continuous nightly drain + 2h backfill + taken-down classifier
 ```
 
 <!-- END AUTO-STATUS -->
