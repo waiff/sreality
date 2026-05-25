@@ -1,29 +1,28 @@
-name: "Scraping: diagnose sreality IP block (probe)"
+name: "Scraping: recon sreality new API (probe)"
 
-# Free, zero-secret diagnostic for the sreality scrape failure. Each matrix job
-# runs on its own runner VM -> its own Azure egress IP, so one dispatch samples
-# many distinct GitHub IPs at once. Per IP it now compares THREE things:
-#   - old_v2 : the legacy /api/cs/v2/estates endpoint our scraper currently uses
-#   - html   : the live Next.js search page (used to read the current buildId)
-#   - new_next: the NEW /_next/data/<buildId>/.../byty.json route the rebuilt
-#              sreality site actually serves listings from today
+# Free, zero-secret reconnaissance for the scraper rewrite. We already proved the
+# old /api/cs/v2/estates API is gone (404) and the new Next.js site is reachable
+# from GitHub IPs. This run pins down the two open questions for the new client,
+# from a real GitHub runner IP (this sandbox's own IP is 403'd by sreality):
 #
-# Read the per-job "::notice::" lines on the run summary:
-#   - old_v2=404 + new_next=200 + results=yes  -> the old API was REMOVED in a
-#     site rewrite (not an IP ban); fix = rebuild the scraper against _next/data,
-#     no proxy needed.
-#   - new_next also 403/404 (and html 403/404) -> there is ALSO an IP-level block
-#     on the new site from GitHub ranges; a rewrite alone won't be enough.
-#   - real ip= + html=200 -> this runner reaches sreality fine (rules out "no
-#     network" / total IP ban).
-# total= echoes the result_size the new route reports, proving real data came back.
+#   A) Does the clean JSON API /api/v1/estates/search work WITHOUT cookies, and
+#      what is the max page size it honours (limit=999 -> how many returned)?
+#   B) Deep-pagination cap: can offset reach a 15k offset and the very last page,
+#      or does it cap (~14k) like the old API (which forced district-splitting)?
+#   C) Is there a clean detail sibling /api/v1/estates/<id> (JSON), or must the
+#      rewrite read detail from the /_next/data/<buildId>/.../<id>.json route?
+#
+# Read the per-job "::notice::" lines:
+#   search=200 + page<=limit  -> clean endpoint works; page = max page size.
+#   deep15k / deepEnd got>0    -> no cap; district-split can be retired.
+#   detailAPI=200              -> use /api/v1/estates/<id> (simple); else _next/data.
 
 on:
   workflow_dispatch:
     inputs:
       samples:
-        description: "Number of parallel IP samples (1-30)"
-        default: "8"
+        description: "Number of parallel IP samples (1-10)"
+        default: "3"
         type: string
 
 jobs:
@@ -36,58 +35,55 @@ jobs:
         id: gen
         run: |
           N="${{ inputs.samples }}"
-          case "$N" in (*[!0-9]*|'') N=8 ;; esac
-          [ "$N" -lt 1 ] && N=8
-          [ "$N" -gt 30 ] && N=30
+          case "$N" in (*[!0-9]*|'') N=3 ;; esac
+          [ "$N" -lt 1 ] && N=3
+          [ "$N" -gt 10 ] && N=10
           LIST=$(seq 1 "$N" | jq -R 'tonumber' | jq -cs '.')
           echo "list=$LIST" >> "$GITHUB_OUTPUT"
           echo "Sampling $N parallel runner IPs."
 
-  probe:
+  recon:
     needs: setup
     strategy:
       fail-fast: false
       matrix:
         n: ${{ fromJSON(needs.setup.outputs.list) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
-      - name: Probe old vs new sreality endpoints from this runner's IP
+      - name: Recon the new /api/v1/estates API from this runner's IP
         run: |
           set +e
-          UA_BROWSER='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
-          IP=$(curl -s --max-time 10 https://api.ipify.org)
-          [ -z "$IP" ] && IP="unknown"
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
+          E="https://www.sreality.cz/api/v1/estates"
+          IP=$(curl -s --max-time 10 https://api.ipify.org); [ -z "$IP" ] && IP="unknown"
 
-          # 1) Legacy API the scraper currently uses (expected gone -> 404).
-          OLD_URL="https://www.sreality.cz/api/cs/v2/estates?category_main_cb=1&category_type_cb=2&locality_country_id=10001&per_page=20&page=1"
-          OLD=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
-            -H 'User-Agent: Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36' \
-            -H 'Accept: application/json, text/plain, */*' \
-            -H 'Referer: https://www.sreality.cz/hledani/pronajem/byty' \
-            "$OLD_URL")
-          [ -z "$OLD" ] && OLD="000"
+          # A) Clean search endpoint, NO cookie, big limit. byty/prodej = main 1, type 1.
+          A_URL="$E/search?category_main_cb=1&category_type_cb=1&locality_country_id=112&limit=999&offset=0"
+          A=$(curl -s -o /tmp/a.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' "$A_URL")
+          [ -z "$A" ] && A="000"
+          A_TOTAL=$(jq -r '.pagination.total // empty' /tmp/a.json 2>/dev/null); [ -z "$A_TOTAL" ] && A_TOTAL=0
+          A_N=$(jq -r 'if .results then (.results|length) else 0 end' /tmp/a.json 2>/dev/null); [ -z "$A_N" ] && A_N=0
 
-          # 2) Live search page HTML -> read the current Next.js buildId.
-          HTML=$(curl -s -o /tmp/page.html -w '%{http_code}' --max-time 25 \
-            -H "User-Agent: $UA_BROWSER" -H 'Accept-Language: cs,en;q=0.9' \
-            "https://www.sreality.cz/hledani/pronajem/byty")
-          [ -z "$HTML" ] && HTML="000"
-          BUILDID=$(grep -o '"buildId":"[^"]*"' /tmp/page.html 2>/dev/null | head -1 | sed 's/.*:"//; s/"$//')
-          [ -z "$BUILDID" ] && BUILDID="unknown"
+          # B) Deep-pagination cap probes: a fixed deep offset and the very last page.
+          B1=$(curl -s -o /tmp/b1.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' \
+            "$E/search?category_main_cb=1&category_type_cb=1&locality_country_id=112&limit=60&offset=15000")
+          [ -z "$B1" ] && B1="000"
+          B1_N=$(jq -r 'if .results then (.results|length) else 0 end' /tmp/b1.json 2>/dev/null); [ -z "$B1_N" ] && B1_N=0
+          DEEP=$(( A_TOTAL > 60 ? A_TOTAL - 60 : 0 ))
+          B2=$(curl -s -o /tmp/b2.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' \
+            "$E/search?category_main_cb=1&category_type_cb=1&locality_country_id=112&limit=60&offset=$DEEP")
+          [ -z "$B2" ] && B2="000"
+          B2_N=$(jq -r 'if .results then (.results|length) else 0 end' /tmp/b2.json 2>/dev/null); [ -z "$B2_N" ] && B2_N=0
 
-          # 3) The NEW route the rebuilt site serves listings from.
-          NEW_URL="https://www.sreality.cz/_next/data/$BUILDID/cs/hledani/pronajem/byty.json?slug=pronajem&slug=byty"
-          NEW=$(curl -s -o /tmp/new.json -w '%{http_code}' --max-time 25 \
-            -H "User-Agent: $UA_BROWSER" -H 'x-nextjs-data: 1' -H 'Accept: */*' \
-            -H 'Referer: https://www.sreality.cz/hledani/pronajem/byty' \
-            "$NEW_URL")
-          [ -z "$NEW" ] && NEW="000"
-          RESULTS=no
-          grep -q '"results"' /tmp/new.json 2>/dev/null && RESULTS=yes
-          TOTAL=$(grep -o '"total":[0-9]*' /tmp/new.json 2>/dev/null | head -1)
-          [ -z "$TOTAL" ] && TOTAL='"total":?'
+          # C) Is there a clean detail sibling /api/v1/estates/<id>? (3386655564 = a real Praha flat)
+          C=$(curl -s -o /tmp/c.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' "$E/3386655564")
+          [ -z "$C" ] && C="000"
+          C_KEYS=$(jq -r 'if type=="object" then (keys|join(",")) else empty end' /tmp/c.json 2>/dev/null | head -c 220)
+          [ -z "$C_KEYS" ] && C_KEYS="(not json) $(head -c 120 /tmp/c.json | tr '\n\r' '  ')"
 
-          echo "PROBE sample=${{ matrix.n }} ip=$IP old_v2=$OLD html=$HTML buildId=$BUILDID new_next=$NEW results=$RESULTS $TOTAL"
-          echo "head(new.json): $(head -c 200 /tmp/new.json | tr '\n\r' '  ')"
-          echo "::notice title=Probe ${{ matrix.n }}::ip=$IP old_v2=$OLD html=$HTML new_next=$NEW results=$RESULTS $TOTAL buildId=$BUILDID"
+          echo "RECON sample=${{ matrix.n }} ip=$IP"
+          echo "  A  search byty/prodej: status=$A total=$A_TOTAL page_returned=$A_N (= max page size honoured)"
+          echo "  B  cap: offset15000 status=$B1 got=$B1_N | lastpage(offset=$DEEP) status=$B2 got=$B2_N"
+          echo "  C  detail /estates/3386655564: status=$C keys=$C_KEYS"
+          echo "::notice title=Recon ${{ matrix.n }}::ip=$IP search=$A total=$A_TOTAL page=$A_N deep15k=$B1/$B1_N deepEnd=$B2/$B2_N detailAPI=$C"
