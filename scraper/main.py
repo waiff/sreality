@@ -1003,8 +1003,11 @@ def _run_image_downloads(
 
     from scraper.sreality_client import SrealityClient
 
-    r2 = image_storage.R2Client.from_env()
-    counts = {"downloaded": 0, "errors": 0, "attempted": 0, "taken_down": 0}
+    r2 = image_storage.R2Client.from_env(max_pool_connections=workers)
+    counts = {
+        "downloaded": 0, "errors": 0, "attempted": 0,
+        "taken_down": 0, "source_unavailable": 0,
+    }
     by_cat: dict[tuple[str | None, str | None], int] = {}
     # Per-listing classification cache for THIS run, so we never call
     # freshness_check more than once per gone listing.
@@ -1096,6 +1099,19 @@ def _run_image_downloads(
                                 "IMAGE listing_taken_down sid=%d marked=%d",
                                 sid, n,
                             )
+                        elif kind == "source_unavailable":
+                            # Permanently-dead CDN URL on a live listing —
+                            # mark this image so it leaves the queue; NOT a
+                            # transient failure (doesn't trip suspicious-stop).
+                            db.mark_image_unavailable(
+                                conn, image_id, "source_unavailable",
+                                error=str(error),
+                            )
+                            counts["source_unavailable"] += 1
+                            outcome_window.append("source_unavailable")
+                            LOG.info(
+                                "IMAGE source_unavailable id=%d", image_id
+                            )
                         else:
                             db.mark_image_attempt(conn, image_id, error=str(error))
                             counts["errors"] += 1
@@ -1104,9 +1120,11 @@ def _run_image_downloads(
 
                     if counts["attempted"] % 50 == 0:
                         LOG.info(
-                            "IMAGES progress=%d downloaded=%d errors=%d taken_down=%d",
+                            "IMAGES progress=%d downloaded=%d errors=%d "
+                            "taken_down=%d source_unavailable=%d",
                             counts["attempted"], counts["downloaded"],
                             counts["errors"], counts["taken_down"],
+                            counts["source_unavailable"],
                         )
 
                     if _suspicious_stop(outcome_window):
@@ -1123,9 +1141,10 @@ def _run_image_downloads(
                 break
 
     LOG.info(
-        "IMAGES done downloaded=%d errors=%d taken_down=%d attempted=%d",
+        "IMAGES done downloaded=%d errors=%d taken_down=%d "
+        "source_unavailable=%d attempted=%d",
         counts["downloaded"], counts["errors"],
-        counts["taken_down"], counts["attempted"],
+        counts["taken_down"], counts["source_unavailable"], counts["attempted"],
     )
     return {
         "images_stored": counts["downloaded"],
@@ -1155,19 +1174,24 @@ def _classify_image_failure(
     gone_listings: set[int],
     alive_listings: set[int],
 ) -> str:
-    """Classify an image download failure as 'taken_down' or 'transient'.
+    """Classify an image download failure as 'taken_down', 'source_unavailable',
+    or 'transient'.
 
-    Only 404/410 image responses trigger a freshness check on the
-    parent listing. Other errors (5xx, timeout, connection reset, R2
-    failures) always classify as transient. Per-run caches make sure
-    each gone or alive verdict costs at most one freshness_check.
+    A 404/410 on the image URL means that URL is permanently dead (sreality
+    CDN URLs expire). If the parent listing is also gone we bulk-mark all its
+    images 'taken_down'; if the listing is still alive it's just this one URL
+    that expired → 'source_unavailable' (mark this image only). Either way it
+    is NOT a transient failure: retrying never succeeds and it must not count
+    toward the suspicious-stop ratio. Other errors (5xx, timeout, connection
+    reset, R2 failures) are 'transient'. Per-run caches keep each liveness
+    verdict to at most one freshness_check.
     """
+    if not _is_gone_image_error(error):
+        return "transient"
     if sreality_id in gone_listings:
         return "taken_down"
     if sreality_id in alive_listings:
-        return "transient"
-    if not _is_gone_image_error(error):
-        return "transient"
+        return "source_unavailable"
     try:
         result = client_freshness_check(conn, client, sreality_id)
     except Exception as exc:
@@ -1180,7 +1204,7 @@ def _classify_image_failure(
         gone_listings.add(sreality_id)
         return "taken_down"
     alive_listings.add(sreality_id)
-    return "transient"
+    return "source_unavailable"
 
 
 def _is_gone_image_error(error: Exception) -> bool:

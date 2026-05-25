@@ -71,9 +71,10 @@ def test_classify_404_gone_marks_taken_down(monkeypatch):
     assert alive == set()
 
 
-def test_classify_404_alive_is_transient(monkeypatch):
-    """Image URL expired but the listing's detail still returns 200 —
-    not a taken-down case. Increment attempts and retry."""
+def test_classify_404_alive_is_source_unavailable(monkeypatch):
+    """Image URL 404s but the listing's detail still returns 200 — that one
+    CDN URL has expired (permanently dead), not a taken-down listing and not
+    a transient failure. Mark the image unavailable; don't retry it forever."""
     monkeypatch.setattr(
         scraper_main, "client_freshness_check",
         lambda *_a, **_kw: "unchanged",
@@ -86,9 +87,31 @@ def test_classify_404_alive_is_transient(monkeypatch):
         error=_http_error(404),
         gone_listings=gone, alive_listings=alive,
     )
-    assert kind == "transient"
+    assert kind == "source_unavailable"
     assert gone == set()
     assert alive == {42}
+
+
+def test_classify_404_alive_cached_is_source_unavailable(monkeypatch):
+    """A listing already cached alive: a 404 image is source_unavailable
+    (dead URL), but a non-404 error stays transient."""
+    called = []
+    monkeypatch.setattr(
+        scraper_main, "client_freshness_check",
+        lambda *_a, **_kw: (called.append(1), "unchanged")[1],
+    )
+    gone: set[int] = set()
+    alive: set[int] = {42}
+
+    assert scraper_main._classify_image_failure(
+        conn=None, client=None, sreality_id=42, error=_http_error(404),
+        gone_listings=gone, alive_listings=alive,
+    ) == "source_unavailable"
+    assert scraper_main._classify_image_failure(
+        conn=None, client=None, sreality_id=42, error=_http_error(500),
+        gone_listings=gone, alive_listings=alive,
+    ) == "transient"
+    assert called == []  # cache short-circuits; no freshness call
 
 
 def test_classify_per_run_cache_short_circuits(monkeypatch):
