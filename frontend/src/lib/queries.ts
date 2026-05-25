@@ -278,6 +278,19 @@ const intersectPrefilters = (
   return a.filter((id) => set.has(id));
 };
 
+/* Browse cohort fetchers (Map / Table / Cards) read the property grain
+ * (properties_public), so Browse is one-dot-per-property. `sreality_id` on
+ * properties_public is the representative child, so detail links, image /
+ * snapshot / tag lookups, and the sreality_id-keyed prefilters all carry over
+ * unchanged. Today every property is a singleton, so the surface is visually
+ * identical to listings_public; multi-source collapsing arrives with the
+ * portal scrapers.
+ *
+ * fetchBrowseStats stays on the listing-grain browse_stats RPC for now: the
+ * property-grain clone (browse_stats_properties, migration 094) is a heavy
+ * aggregate over a join view and needs the Slice 2 perf pass before it backs
+ * the user-facing Stats tab. While properties are 1:1 with listings the two
+ * RPCs return identical numbers, so Stats is correct either way. */
 export const fetchListingsForMap = async (
   f: ListingFilters,
 ): Promise<MapResult> => {
@@ -290,7 +303,7 @@ export const fetchListingsForMap = async (
     return { rows: [], total: 0, capped: false };
   }
   const base = supabase
-    .from('listings_public')
+    .from('properties_public')
     .select(MAP_COLS, { count: 'exact' })
     .not('lat', 'is', null)
     .not('lng', 'is', null);
@@ -348,7 +361,7 @@ export const fetchListingsForTable = async (
   const from = (page - 1) * TABLE_PAGE_SIZE;
   const to = from + TABLE_PAGE_SIZE - 1;
   const base = supabase
-    .from('listings_public')
+    .from('properties_public')
     .select(TABLE_COLS, { count: 'exact' });
   const filtered = applyFilters(base, f);
   const scoped = prefilter != null
@@ -425,7 +438,7 @@ export const fetchListingsForCards = async (
   const from = (page - 1) * CARD_PAGE_SIZE;
   const to = from + CARD_PAGE_SIZE - 1;
   const base = supabase
-    .from('listings_public')
+    .from('properties_public')
     .select(CARD_COLS, { count: 'exact' });
   const filtered = applyFilters(base, f);
   const scoped = prefilter != null

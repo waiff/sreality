@@ -149,26 +149,40 @@ operator approval, committed in the same change (CLAUDE.md flow).
   is tightened in a follow-up migration once the wrapper is confirmed live
   on main. Apply-time reconciliation assertion
   `count(properties) == count(listings)` (mirrors `migrations/089`).
-- ~~**093_property_stats.sql**~~ — **dropped.** Per decision #2 the derived
-  aggregates are columns on `properties` (added in 091), not a separate
-  table. The async recompute job (Slice 1) populates them.
-- **094_property_identity_candidates.sql** — D2 review queue
+- ~~**093_property_stats.sql**~~ (the table) — **dropped.** Per decision #2 the
+  derived aggregates are columns on `properties` (added in 091), not a separate
+  table. The async recompute job (Slice 1) populates them — it is a Python
+  script + GitHub Actions cron (`scripts/recompute_property_stats.py` /
+  `.github/workflows/recompute_property_stats.yml`), not a migration. The 093
+  *number* was reused for the public views below (no gap on disk).
+- **093_property_public_views.sql** *(built, Slice 1)* — `properties_public`
+  (mirrors `listings_public` columns sourced from `properties` for the
+  canonical lifecycle/price/geo + the representative listing for the richer
+  filter attributes, plus the six derived-aggregate columns + `tom_days` /
+  `price_per_m2` computed as in `migrations/054`/`083`; exposes `property_id`
+  and `sreality_id`=representative for frontend parity), `property_sources_public`
+  (link history: one row per child listing with source/url/active/price).
+  `grant select ... to anon`, plain views (anon reads through the owner, same
+  as `migrations/008`).
+- **094_browse_stats_properties.sql** *(built, Slice 1)* — property-grain
+  Browse stats RPC, a verbatim clone of the current `browse_stats` (083
+  lineage) pointed `FROM properties_public`. Same signature/WHERE/return.
+  **Created but NOT yet wired to the frontend:** it is a heavy aggregate over
+  a join view and runs materially slower than the already-borderline
+  listing-grain `browse_stats` under the function's generic plan, so Slice 1's
+  `fetchBrowseStats` stays on `browse_stats` (identical numbers while properties
+  are 1:1 with listings). The Slice 2 perf pass (precomputed property stats /
+  predicate restructuring) makes it safe to back the Stats tab, and adds the
+  four derived predicates (distinct_site_count, price_drop/rise_count,
+  max_price_drop_pct).
+- **095_property_identity_candidates.sql** — D2 review queue
   `(left_property_id, right_property_id, confidence, markers_matched jsonb,
   tier, status proposed|merged|dismissed, reviewed_at, reviewed_action)`,
   ordered-pair CHECK + UNIQUE. RLS enabled.
-- **095_image_phash.sql** — `images.phash bigint` (D2 cheap pass).
+- **096_image_phash.sql** — `images.phash bigint` (D2 cheap pass).
   Pillow approved (add to `pyproject.toml` with the Slice 5 work). Hamming
   via `bit_count(a # b)`.
-- **096_property_public_views.sql** — `properties_public` (mirrors
-  `listings_public` columns + `property_stats` derived columns + `tom_days`
-  computed as in `migrations/054`), `property_sources_public` (link history:
-  one row per child listing with source/url/active/price). `grant select
-  ... to anon`. SECURITY INVOKER, anon reads only (CLAUDE.md frontend rule).
-- **097_browse_stats_properties.sql** — property-grain Browse stats RPC,
-  a clone of the latest `browse_stats` successor pointed `FROM
-  properties_public`, reusing the same WHERE shape + the new derived
-  predicates.
-- **098_notification_grain.sql** — `notification_dispatches` gains
+- **097_notification_grain.sql** — `notification_dispatches` gains
   `property_id` + `change_kind`; new `UNIQUE(subscription_id, property_id,
   change_kind)`. Migrate `match_once` / `_build_match_clauses` /
   `list_dispatches` to property grain.
@@ -245,24 +259,33 @@ at a `listings` column). So:
   Apply-time count-reconciliation assertion. Nothing in Browse /
   notifications / toolkit / frontend changes. Safe, reversible, unblocks
   everything.
-- **Slice 1 — Property-grain read path.** Migrations 093+096+097. Daily
-  job computing `property_stats` + `is_active` rollup. `queries.ts`
-  repointed to `properties_public` (one dot per property; still 1:1 so
-  visually identical, but plumbing is property-grain). Headline frontend
-  work.
-- **Slice 2 — Notification grain → property.** Migration 098. Migrate the
-  matcher to property grain. Add the daily property-change matcher + the 4
-  `FilterDef`s wired through registry + `browse_stats_properties` +
-  watchdog.
+- **Slice 1 — Property-grain read path.** *(built — migrations 093+094
+  applied, recompute job + hourly workflow shipped, `queries.ts` Map/Table/
+  Cards repointed.)* The async recompute job
+  (`scripts/recompute_property_stats.py`, hourly cron) attaches stragglers and
+  computes the `is_active` rollup + source/site counts + price-history
+  aggregates from the union of each property's children's snapshots.
+  `queries.ts` Map/Table/Cards repointed to `properties_public` (one dot per
+  property; still 1:1 so visually identical, but plumbing is property-grain).
+  **`fetchBrowseStats` deliberately stays on `browse_stats`** — the
+  property-grain clone (094) is created but too slow under its generic plan to
+  back the Stats tab; while 1:1 the numbers are identical. Wiring + perf belong
+  to Slice 2. Headline frontend work.
+- **Slice 2 — Notification grain → property + Stats repoint.** Migration 097
+  (notification grain). Migrate the matcher to property grain. Add the daily
+  property-change matcher + the 4 `FilterDef`s wired through registry +
+  `browse_stats_properties` + watchdog. Includes the `browse_stats_properties`
+  perf pass (precomputed property stats / predicate restructuring) and the
+  `fetchBrowseStats` repoint that Slice 1 deferred.
 - **Slice 3 — D1 multi-portal ingestion + insert-time Tier 1.** First
   non-sreality scraper on the `ScrapedListing` contract (+ raw-capture
   staging only for crawler sources). Geo+price+area Tier 1 matcher. Now
   properties genuinely have multiple children; slice 1/2 plumbing lights up.
-- **Slice 4 — D2 fuzzy sweep + review UI.** Migration 094.
-  `toolkit/addresses.py` + background sweep + `/dedup/candidates` page +
-  merge action.
-- **Slice 5 — D2 image tier.** Migration 095 + Pillow pHash (dependency
-  pre-approved) + vision escalation reusing `compare_listing_images`.
+- **Slice 4 — D2 fuzzy sweep + review UI.** Migration 095
+  (`property_identity_candidates`). `toolkit/addresses.py` + background sweep +
+  `/dedup/candidates` page + merge action.
+- **Slice 5 — D2 image tier.** Migration 096 (`image_phash`) + Pillow pHash
+  (dependency pre-approved) + vision escalation reusing `compare_listing_images`.
 
 ## Operator sign-off needed before each migration lands
 

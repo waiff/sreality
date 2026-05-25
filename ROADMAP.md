@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 15:16 UTC_
+_Last refreshed: 2026-05-25 17:35 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 97 files, latest `092_properties_backfill.sql`.
+**Migrations on disk:** 99 files, latest `094_browse_stats_properties.sql`.
 
 **Last 10 commits:**
 
 ```
+fe2a8ab chore: refresh ROADMAP auto-status block
 4503c8d properties Slice 0: canonical parent table + scraper linkage
 b807918 docs: capture approved multi-portal + dedup design (Shape B)
 1276679 chore: refresh ROADMAP auto-status block
@@ -25,7 +26,6 @@ e48a8eb chore: refresh ROADMAP auto-status block
 ceb7fc3 ci: prefix scraping workflows with "Scraping:" so they group in Actions
 5d4d002 Merge pull request #175 from waiff/claude/brave-knuth-8ICa2
 b7166f8 chore: refresh ROADMAP auto-status block
-8ffc13d Merge pull request #174 from waiff/claude/brave-knuth-8ICa2
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1024,6 +1024,18 @@ shape (see D1 below).
 > D1/D2 subsections below is **superseded** and kept for history. Each
 > slice still needs the per-slice operator sign-off listed in the doc
 > before its migration lands.
+>
+> **Progress:** Slice 0 (foundation, migrations 091+092 + scraper wrapper)
+> and Slice 1 (property-grain read path) are **built and applied**. Slice 1
+> shipped migrations 093 (`properties_public` + `property_sources_public`)
+> and 094 (`browse_stats_properties`), the async recompute job
+> (`scripts/recompute_property_stats.py` + hourly
+> `recompute_property_stats.yml`), and repointed the Browse Map/Table/Cards
+> fetchers to `properties_public`. The Stats tab stays on the listing-grain
+> `browse_stats` RPC (identical numbers while 1:1); wiring + perf for
+> `browse_stats_properties` are deferred to Slice 2. **Next: Slice 2** —
+> notification grain → property + the four derived `FilterDef`s + the
+> `browse_stats_properties` perf pass.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
