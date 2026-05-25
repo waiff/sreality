@@ -28,11 +28,11 @@ class _FakeClient:
     # and (optionally) -> collected count (defaults to the reported total).
     region_result_size: dict[int, int] = {}
     region_collected: dict[int, int] = {}
-    # District-split simulation (opt-in): when a region's result_size exceeds
-    # REGION_SUB_THRESHOLD it's walked per district; these map
-    # (region_id, district_id) -> reported total and -> collected count.
-    district_result_size: dict[tuple[int, int], int] = {}
-    district_collected: dict[tuple[int, int], int] = {}
+    # District-split simulation (opt-in): when result_size > SPLIT_THRESHOLD
+    # the category is walked per district (locality_district_id); these map
+    # district_id -> reported total and -> collected count.
+    district_result_size: dict[int, int] = {}
+    district_collected: dict[int, int] = {}
 
     def __init__(
         self,
@@ -51,7 +51,7 @@ class _FakeClient:
         self.locality_district_id = locality_district_id
         if locality_district_id is not None:
             self.result_size = _FakeClient.district_result_size.get(
-                (locality_region_id, locality_district_id), 0
+                locality_district_id, 0
             )
         elif locality_region_id is not None:
             self.result_size = _FakeClient.region_result_size.get(
@@ -65,14 +65,14 @@ class _FakeClient:
 
     def iter_index(self):
         if self.locality_district_id is not None:
-            key = (self.locality_region_id, self.locality_district_id)
+            d = self.locality_district_id
             n = _FakeClient.district_collected.get(
-                key, _FakeClient.district_result_size.get(key, 0)
+                d, _FakeClient.district_result_size.get(d, 0)
             )
             base = (
                 self.category_main * 10**10
                 + self.category_type * 10**9
-                + self.locality_district_id * 10**5
+                + d * 10**5
             )
             for i in range(n):
                 yield {"hash_id": base + i, "price_czk": {"value_raw": 1}}
@@ -199,20 +199,16 @@ def test_dry_run_never_calls_mark_inactive(patched_db, monkeypatch):
     assert patched_db["mark_inactive"] == []
 
 
-def test_run_full_preserves_mark_inactive_for_earlier_categories_when_later_walk_crashes(
+def test_run_full_isolates_one_crashing_category_marks_the_rest(
     patched_db, monkeypatch
 ):
-    """Regression: a later category crashing mid-walk must NOT discard the
-    mark_inactive work for categories that already walked successfully.
-
-    Previously mark_inactive ran in a single post-loop block, so any
-    exception inside the per-category loop dropped the marking step for
-    every category — including the ones that walked cleanly. The fix
-    moves mark_inactive into the per-category body so each category's
-    marking commits before the next walk starts.
+    """A single category crashing mid-walk must neither propagate (taking the
+    whole run down) nor discard the other categories' work: the crash is
+    caught, that category's sweep is skipped, and every other category still
+    walks and runs mark_inactive.
     """
     # CATEGORIES order: (1,2) byt/pronajem, (1,1) byt/prodej,
-    # (2,2) dum/pronajem, ... — make the 3rd one raise during iteration.
+    # (2,2) dum/pronajem, ... — make dum/pronajem raise during iteration.
     def crashing_iter_index(self):
         if (self.category_main, self.category_type) == (2, 2):
             yield {"hash_id": 99999, "price_czk": {"value_raw": 1}}
@@ -226,16 +222,18 @@ def test_run_full_preserves_mark_inactive_for_earlier_categories_when_later_walk
 
     monkeypatch.setattr(_FakeClient, "iter_index", crashing_iter_index)
 
-    with pytest.raises(RuntimeError):
-        scraper_main._run_full(limit=None, dry_run=False)
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0  # the crash did NOT propagate
 
     marked = {(cm, ct) for cm, ct, _ in patched_db["mark_inactive"]}
+    # Only the crashing category is skipped; all others (before AND after it)
+    # still get swept.
+    assert ("dum", "pronajem") not in marked
     assert ("byt", "pronajem") in marked
     assert ("byt", "prodej") in marked
-    assert ("dum", "pronajem") not in marked
-    assert ("dum", "prodej") not in marked
-    assert ("komercni", "pronajem") not in marked
-    assert ("komercni", "prodej") not in marked
+    assert ("dum", "prodej") in marked
+    assert ("komercni", "pronajem") in marked
+    assert ("komercni", "prodej") in marked
 
 
 # --- completeness guard -----------------------------------------------------
@@ -423,29 +421,54 @@ def _split_args(conn=None):
     )
 
 
-def test_walk_category_split_unions_regions(patched_db, monkeypatch):
-    """A category over SPLIT_THRESHOLD is walked per region; the union of
-    region seen_ids and the summed result_size feed mark_inactive."""
+def test_walk_category_split_unions_districts(patched_db, monkeypatch):
+    """A category over SPLIT_THRESHOLD is walked per district; the union of
+    district seen_ids and the summed result_size feed mark_inactive. Complete
+    when every district is complete and the union covers the national total."""
     monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_result_size", {1: 3, 2: 2}, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_collected", {}, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 6000, 2: 6000}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
 
-    seen, counts, rs, pages, complete = scraper_main._walk_category_split(
+    seen, _counts, rs, _pages, complete = scraper_main._walk_category_split(
         1, 2, **_split_args()
     )
-    assert len(seen) == 5          # 3 (region 1) + 2 (region 2), disjoint ids
-    assert rs == 5                 # summed per-region result_size (others 0)
+    assert len(seen) == 12000      # 6000 (district 1) + 6000 (district 2)
+    assert rs == 12000             # summed district result_size
     assert complete is True
 
 
-def test_walk_category_split_truncated_region_suppresses_inactivation(
+def test_walk_category_split_truncated_district_suppresses_inactivation(
     patched_db, monkeypatch
 ):
-    """If any region's own walk is incomplete, the whole category is treated
+    """If any district's own walk is incomplete, the whole category is treated
     as incomplete so mark_inactive is skipped (no false delisting)."""
     monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_result_size", {1: 10}, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_collected", {1: 5}, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 6000, 2: 6000}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {1: 3000}, raising=False)
+
+    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert complete is False
+
+
+def test_walk_category_split_missing_district_suppresses_inactivation(
+    patched_db, monkeypatch
+):
+    """If the walked districts don't cover the national total (a district
+    missing from DISTRICT_IDS), the union falls short of the national probe so
+    the category is incomplete — guards against false mass-delisting even when
+    every district we DID walk was itself complete."""
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    # Only one district populated; union (6000) << national (12000).
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 6000}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
 
     _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
         1, 2, **_split_args()
@@ -454,80 +477,31 @@ def test_walk_category_split_truncated_region_suppresses_inactivation(
 
 
 def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
-    """Below the threshold there's a single unfiltered walk; per-region
-    config is never consulted."""
+    """Below the threshold there's a single unfiltered walk; district config
+    is never consulted."""
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_result_size", {1: 999}, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 999}, raising=False,
+    )
 
     seen, _counts, rs, _pages, complete = scraper_main._walk_category_split(
         1, 2, **_split_args()
     )
-    assert len(seen) == 5          # total_entries, NOT region 1's 999
+    assert len(seen) == 5          # total_entries, NOT district 1's 999
     assert rs == 5
     assert complete is True
 
 
-def test_walk_region_district_split_completes_big_region(patched_db, monkeypatch):
-    """A region over REGION_SUB_THRESHOLD is walked per district; when every
-    district's own walk is complete and they sum to the region total, the
-    region (and category) is complete so mark_inactive can run."""
-    # REGION_DISTRICTS[3] == (9, 10, 16)
-    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_result_size", {3: 3000}, raising=False)
-    monkeypatch.setattr(
-        _FakeClient, "district_result_size",
-        {(3, 9): 1000, (3, 10): 1000, (3, 16): 1000}, raising=False,
-    )
-    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
+def test_run_full_isolates_a_crashing_category(patched_db, monkeypatch):
+    """A category whose walk raises must not crash the whole run — it's logged,
+    its sweep skipped, and the remaining categories still walk + finalize."""
+    def _boom(*_a, **_kw):
+        raise RuntimeError("simulated sreality outage")
 
-    seen, _counts, rs, _pages, complete = scraper_main._walk_category_split(
-        1, 2, **_split_args()
-    )
-    assert len(seen) == 3000        # union of the three districts
-    assert rs == 3000               # summed district result_size
-    assert complete is True
-
-
-def test_walk_region_district_incomplete_suppresses_inactivation(
-    patched_db, monkeypatch
-):
-    """If a single district's own walk is truncated, the whole category is
-    treated as incomplete (no false delisting)."""
-    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_result_size", {3: 3000}, raising=False)
-    monkeypatch.setattr(
-        _FakeClient, "district_result_size",
-        {(3, 9): 1000, (3, 10): 1000, (3, 16): 1000}, raising=False,
-    )
-    monkeypatch.setattr(
-        _FakeClient, "district_collected", {(3, 9): 500}, raising=False,
-    )
-
-    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
-        1, 2, **_split_args()
-    )
-    assert complete is False
-
-
-def test_walk_region_missing_district_suppresses_inactivation(
-    patched_db, monkeypatch
-):
-    """If the districts we walk don't sum up to the region's reported total
-    (a district missing from REGION_DISTRICTS), the region is incomplete so
-    mark_inactive is skipped — guards against false mass-delisting."""
-    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
-    monkeypatch.setattr(_FakeClient, "region_result_size", {3: 3000}, raising=False)
-    # Each district fully collected, but they only sum to 2400 << 3000.
-    monkeypatch.setattr(
-        _FakeClient, "district_result_size",
-        {(3, 9): 800, (3, 10): 800, (3, 16): 800}, raising=False,
-    )
-    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
-
-    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
-        1, 2, **_split_args()
-    )
-    assert complete is False
+    monkeypatch.setattr(scraper_main, "_walk_category_split", _boom)
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0                          # run completed, did not propagate
+    assert patched_db["mark_inactive"] == []  # no sweep on a failed walk
 
 
 def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):
@@ -579,3 +553,27 @@ def test_images_only_does_not_open_scrape_run(monkeypatch):
     assert rc == 0
     assert calls["start"] == 0
     assert calls["finalize"] == 0
+
+
+def test_main_finalizes_run_even_when_scrape_crashes(monkeypatch):
+    """If the scrape work raises, main() must still finalize the run row in its
+    `finally` — otherwise the row is orphaned ('stuck') and freezes Health."""
+    calls = {"start": 0, "finalize": 0}
+    monkeypatch.setattr(scraper_main.db, "connect", lambda: _NoopConn())
+    monkeypatch.setattr(
+        scraper_main.db, "scrape_run_start",
+        lambda *a, **k: (calls.__setitem__("start", calls["start"] + 1) or 1),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "scrape_run_finalize",
+        lambda *a, **k: calls.__setitem__("finalize", calls["finalize"] + 1),
+    )
+
+    def _boom(**_k):
+        raise RuntimeError("simulated scrape crash")
+
+    monkeypatch.setattr(scraper_main, "_run_full", _boom)
+    with pytest.raises(RuntimeError):
+        scraper_main.main(["--no-image-downloads", "--no-condition-scoring"])
+    assert calls["start"] == 1
+    assert calls["finalize"] == 1   # finalized despite the crash — no stuck row
