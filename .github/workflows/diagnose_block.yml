@@ -1,19 +1,22 @@
 name: "Scraping: diagnose sreality IP block (probe)"
 
-# Free, zero-secret diagnostic for the sreality anti-bot block. Each matrix job
+# Free, zero-secret diagnostic for the sreality scrape failure. Each matrix job
 # runs on its own runner VM -> its own Azure egress IP, so one dispatch samples
-# many distinct GitHub IPs at once. Per job it logs the public egress IP and the
-# HTTP status sreality returns for the exact index request the scraper makes
-# (with the scraper's real browser headers), plus a header-less comparison.
+# many distinct GitHub IPs at once. Per IP it now compares THREE things:
+#   - old_v2 : the legacy /api/cs/v2/estates endpoint our scraper currently uses
+#   - html   : the live Next.js search page (used to read the current buildId)
+#   - new_next: the NEW /_next/data/<buildId>/.../byty.json route the rebuilt
+#              sreality site actually serves listings from today
 #
 # Read the per-job "::notice::" lines on the run summary:
-#   - distinct ip= across jobs, all sreality=404 -> range/datacenter block; a new
-#     GitHub account or Railway won't help (same cloud ranges), a residential/
-#     mobile proxy is the fix.
-#   - any job sreality=200 -> narrow/per-IP; rotation/waiting helps.
-#   - bare= differing from sreality= -> headers still matter; both 404 -> the
-#     block is purely at the IP layer.
-# Every job should reach ipify (real ip=) confirming the runner has egress.
+#   - old_v2=404 + new_next=200 + results=yes  -> the old API was REMOVED in a
+#     site rewrite (not an IP ban); fix = rebuild the scraper against _next/data,
+#     no proxy needed.
+#   - new_next also 403/404 (and html 403/404) -> there is ALSO an IP-level block
+#     on the new site from GitHub ranges; a rewrite alone won't be enough.
+#   - real ip= + html=200 -> this runner reaches sreality fine (rules out "no
+#     network" / total IP ban).
+# total= echoes the result_size the new route reports, proving real data came back.
 
 on:
   workflow_dispatch:
@@ -49,18 +52,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Probe sreality from this runner's IP
+      - name: Probe old vs new sreality endpoints from this runner's IP
         run: |
-          IP=$(curl -s --max-time 10 https://api.ipify.org || echo "unknown")
-          URL="https://www.sreality.cz/api/cs/v2/estates?category_main_cb=1&category_type_cb=2&locality_country_id=10001&per_page=100&page=1"
-          STATUS=$(curl -s -o /tmp/body -w '%{http_code}' --max-time 20 \
+          set +e
+          UA_BROWSER='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
+          IP=$(curl -s --max-time 10 https://api.ipify.org)
+          [ -z "$IP" ] && IP="unknown"
+
+          # 1) Legacy API the scraper currently uses (expected gone -> 404).
+          OLD_URL="https://www.sreality.cz/api/cs/v2/estates?category_main_cb=1&category_type_cb=2&locality_country_id=10001&per_page=20&page=1"
+          OLD=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
             -H 'User-Agent: Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36' \
             -H 'Accept: application/json, text/plain, */*' \
-            -H 'Accept-Language: en,cs;q=0.9' \
             -H 'Referer: https://www.sreality.cz/hledani/pronajem/byty' \
-            "$URL" || echo "000")
-          BARE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL" || echo "000")
-          HEAD=$(head -c 200 /tmp/body | tr '\n\r' '  ')
-          echo "PROBE sample=${{ matrix.n }} ip=$IP sreality=$STATUS bare=$BARE"
-          echo "body: $HEAD"
-          echo "::notice title=IP probe ${{ matrix.n }}::ip=$IP sreality=$STATUS bare=$BARE"
+            "$OLD_URL")
+          [ -z "$OLD" ] && OLD="000"
+
+          # 2) Live search page HTML -> read the current Next.js buildId.
+          HTML=$(curl -s -o /tmp/page.html -w '%{http_code}' --max-time 25 \
+            -H "User-Agent: $UA_BROWSER" -H 'Accept-Language: cs,en;q=0.9' \
+            "https://www.sreality.cz/hledani/pronajem/byty")
+          [ -z "$HTML" ] && HTML="000"
+          BUILDID=$(grep -o '"buildId":"[^"]*"' /tmp/page.html 2>/dev/null | head -1 | sed 's/.*:"//; s/"$//')
+          [ -z "$BUILDID" ] && BUILDID="unknown"
+
+          # 3) The NEW route the rebuilt site serves listings from.
+          NEW_URL="https://www.sreality.cz/_next/data/$BUILDID/cs/hledani/pronajem/byty.json?slug=pronajem&slug=byty"
+          NEW=$(curl -s -o /tmp/new.json -w '%{http_code}' --max-time 25 \
+            -H "User-Agent: $UA_BROWSER" -H 'x-nextjs-data: 1' -H 'Accept: */*' \
+            -H 'Referer: https://www.sreality.cz/hledani/pronajem/byty' \
+            "$NEW_URL")
+          [ -z "$NEW" ] && NEW="000"
+          RESULTS=no
+          grep -q '"results"' /tmp/new.json 2>/dev/null && RESULTS=yes
+          TOTAL=$(grep -o '"total":[0-9]*' /tmp/new.json 2>/dev/null | head -1)
+          [ -z "$TOTAL" ] && TOTAL='"total":?'
+
+          echo "PROBE sample=${{ matrix.n }} ip=$IP old_v2=$OLD html=$HTML buildId=$BUILDID new_next=$NEW results=$RESULTS $TOTAL"
+          echo "head(new.json): $(head -c 200 /tmp/new.json | tr '\n\r' '  ')"
+          echo "::notice title=Probe ${{ matrix.n }}::ip=$IP old_v2=$OLD html=$HTML new_next=$NEW results=$RESULTS $TOTAL buildId=$BUILDID"
