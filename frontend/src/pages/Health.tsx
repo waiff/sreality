@@ -15,6 +15,7 @@ import {
   fetchHealthSummary,
   fetchImageStorageOverview,
   fetchRecentScrapeRuns,
+  fetchScraperHealthChecks,
 } from '@/lib/queries';
 import type {
   HealthSummary,
@@ -23,10 +24,13 @@ import type {
   HealthFreshnessRow,
   HealthFailureRow,
   HealthCategoryBlock,
+  HealthCheckStatus,
   ImageStorageCategory,
   ImageStorageOverview,
   ScrapeRun,
   ScrapeRunCategory,
+  ScraperHealthCheck,
+  ScraperHealthChecks,
 } from '@/lib/types';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
 
@@ -93,6 +97,12 @@ export default function Health() {
 /* -------------------------------------------------------------------------- */
 
 function Body({ data }: { data: HealthSummary }) {
+  const healthChecksQuery = useQuery<ScraperHealthChecks, Error>({
+    queryKey: ['scraper-health-checks'],
+    queryFn: fetchScraperHealthChecks,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
   const scrapeRunsQuery = useQuery<ScrapeRun[], Error>({
     queryKey: ['scrape-runs', 14],
     queryFn: () => fetchRecentScrapeRuns(14),
@@ -108,6 +118,14 @@ function Body({ data }: { data: HealthSummary }) {
 
   return (
     <div className="mt-5 space-y-5">
+      <Card label="Scraper health checks">
+        <HealthChecksPanel
+          checks={healthChecksQuery.data}
+          isLoading={healthChecksQuery.isLoading}
+          error={healthChecksQuery.error}
+        />
+      </Card>
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <LastScrapeTile lastScrapeAt={data.last_scrape_at} />
         {data.by_category.map((c) => (
@@ -314,6 +332,113 @@ function Card({
       </h3>
       <div className="mt-3">{children}</div>
     </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Scraper health checks                                                       */
+/* -------------------------------------------------------------------------- */
+
+const STATUS_STYLES: Record<HealthCheckStatus, { pill: string; dot: string; label: string }> = {
+  pass: {
+    pill: 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]',
+    dot: 'bg-[var(--color-sage)]',
+    label: 'OK',
+  },
+  warn: {
+    pill: 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]',
+    dot: 'bg-[var(--color-ochre)]',
+    label: 'Watch',
+  },
+  fail: {
+    pill: 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]',
+    dot: 'bg-[var(--color-brick)]',
+    label: 'Problem',
+  },
+};
+
+function HealthChecksPanel({
+  checks,
+  isLoading,
+  error,
+}: {
+  checks: ScraperHealthChecks | undefined;
+  isLoading: boolean;
+  error: Error | null;
+}) {
+  if (error) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        scraper_health_checks failed: {error.message}
+      </p>
+    );
+  }
+  if (isLoading && !checks) {
+    return <p className="text-sm text-[var(--color-ink-3)]">Loading checks…</p>;
+  }
+  if (!checks || checks.checks.length === 0) {
+    return <p className="text-sm text-[var(--color-ink-3)]">No checks available.</p>;
+  }
+
+  const counts = checks.checks.reduce(
+    (acc, c) => ({ ...acc, [c.status]: acc[c.status] + 1 }),
+    { pass: 0, warn: 0, fail: 0 } as Record<HealthCheckStatus, number>,
+  );
+  const order: Record<HealthCheckStatus, number> = { fail: 0, warn: 1, pass: 2 };
+  const sorted = [...checks.checks].sort((a, b) => order[a.status] - order[b.status]);
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 text-xs text-[var(--color-ink-2)]">
+        <span className="inline-flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-sage)]" />
+          {counts.pass} OK
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-ochre)]" />
+          {counts.warn} watch
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-brick)]" />
+          {counts.fail} problem
+        </span>
+        <span className="ml-auto text-[var(--color-ink-3)]">
+          checked {fmtRelative(checks.generated_at)}
+        </span>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        {sorted.map((c) => (
+          <HealthCheckCard key={c.key} check={c} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HealthCheckCard({ check }: { check: ScraperHealthCheck }) {
+  const s = STATUS_STYLES[check.status] ?? STATUS_STYLES.warn;
+  return (
+    <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-sm font-medium text-[var(--color-ink)]">{check.label}</span>
+        <span
+          className={
+            'inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium ' +
+            s.pill
+          }
+        >
+          {s.label}
+        </span>
+      </div>
+      <div className="mt-1 flex items-baseline gap-2">
+        <span className={'inline-block h-2 w-2 rounded-full shrink-0 ' + s.dot} />
+        <span className="text-base tabular-nums text-[var(--color-ink)]">{check.value}</span>
+      </div>
+      <p className="mt-1.5 text-[0.7rem] leading-snug text-[var(--color-ink-3)]">
+        {check.detail}
+      </p>
+    </div>
   );
 }
 

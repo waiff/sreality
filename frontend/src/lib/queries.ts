@@ -16,6 +16,7 @@ import type {
   ListingSnapshotPublic,
   Ppm2Box,
   ScrapeRun,
+  ScraperHealthChecks,
 } from './types';
 
 /* Circle → bounding box approximation. Used when the operator picks
@@ -688,6 +689,12 @@ export const fetchImageStorageOverview = async (): Promise<ImageStorageOverview>
   const { data, error } = await supabase.rpc('image_storage_overview');
   if (error) throw error;
   return data as ImageStorageOverview;
+};
+
+export const fetchScraperHealthChecks = async (): Promise<ScraperHealthChecks> => {
+  const { data, error } = await supabase.rpc('scraper_health_checks');
+  if (error) throw error;
+  return data as ScraperHealthChecks;
 };
 
 export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {

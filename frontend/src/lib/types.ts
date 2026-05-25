@@ -1046,3 +1046,19 @@ export interface UpdateManualEstimateIn {
   notes?: string | null;
   updated_by?: string | null;
 }
+
+// scraper_health_checks() RPC (migration 088)
+export type HealthCheckStatus = 'pass' | 'warn' | 'fail';
+
+export interface ScraperHealthCheck {
+  key: string;
+  label: string;
+  status: HealthCheckStatus;
+  value: string;
+  detail: string;
+}
+
+export interface ScraperHealthChecks {
+  generated_at: string;
+  checks: ScraperHealthCheck[];
+}
