@@ -105,16 +105,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-    # Open a scrape_runs row for any non-dry-run invocation so the
-    # Health page sees the same audit row for the scrape phase, the
-    # image-download phase, and (eventually) the condition-scoring
-    # phase. Dry runs never write — they're for log-only inspection.
+    # Open a scrape_runs row for any non-dry-run invocation that actually
+    # scrapes the index. The image-only backfill (images.yml) is NOT a
+    # scrape run — recording it here polluted "last scrape" / the liveness
+    # check / reconciliation with index_pages=0 rows, so it's excluded.
     run_id: int | None = None
-    if not args.dry_run:
+    if not args.dry_run and not args.images_only:
         run_type = args.run_type or ("delta" if (
             args.limit is not None
             or args.detail_only is not None
-            or args.images_only
         ) else "full")
         try:
             with db.connect() as conn:

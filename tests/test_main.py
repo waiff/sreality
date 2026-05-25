@@ -455,3 +455,40 @@ def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):
         assert c["sreality_result_size"] == 5
         assert c["collected"] == 5
         assert c["active_db"] == 42
+
+
+# --- images-only runs are not scrape runs ----------------------------------
+
+
+class _NoopConn:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def close(self):
+        pass
+
+
+def test_images_only_does_not_open_scrape_run(monkeypatch):
+    """The image-only backfill must not write a scrape_runs row — it has no
+    index walk and was polluting 'last scrape' / liveness / reconciliation."""
+    calls = {"start": 0, "finalize": 0}
+    monkeypatch.setattr(scraper_main.db, "connect", lambda: _NoopConn())
+    monkeypatch.setattr(
+        scraper_main.db, "scrape_run_start",
+        lambda *a, **k: (calls.__setitem__("start", calls["start"] + 1) or 1),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "scrape_run_finalize",
+        lambda *a, **k: calls.__setitem__("finalize", calls["finalize"] + 1),
+    )
+    monkeypatch.setattr(
+        scraper_main, "_run_image_downloads",
+        lambda **k: {"images_stored": 0, "by_category": {}},
+    )
+    rc = scraper_main.main(["--images-only"])
+    assert rc == 0
+    assert calls["start"] == 0
+    assert calls["finalize"] == 0
