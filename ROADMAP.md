@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 09:14 UTC_
+_Last refreshed: 2026-05-25 11:06 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-25 09:14 UTC_
 **Last 10 commits:**
 
 ```
+1276679 chore: refresh ROADMAP auto-status block
 00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
 6d1a8ca scraper: district-split big regions so the delisting sweep can run
 e48a8eb chore: refresh ROADMAP auto-status block
@@ -25,7 +26,6 @@ b7166f8 chore: refresh ROADMAP auto-status block
 8ffc13d Merge pull request #174 from waiff/claude/brave-knuth-8ICa2
 f223990 chore: refresh ROADMAP auto-status block
 b2a92a7 scrape cadence: document the GitHub-throttling reality + optional chaining
-7cf32a1 images: stop expired-CDN 404s from blocking the backfill
 ```
 
 <!-- END AUTO-STATUS -->
@@ -952,6 +952,14 @@ Small, high leverage; unblocks end-to-end house and commercial
 estimations using data that already exists in the database.
 
 ### Phase 2: Multi-portal ingestion (later, larger)
+> **Design locked (2026-05-25): see
+> [`docs/design/multi-portal-dedup.md`](docs/design/multi-portal-dedup.md).**
+> Multi-portal ingestion is now unified with the Dedup track into one
+> sliced feature. Chosen target portals: **bezrealitky, bazos,
+> reality.idnes**. Ingestion arrives in Slice 3 (after the Shape-B
+> property foundation + property-grain read/notification slices). The
+> scope notes below are background; the doc is the source of truth.
+
 Today's non-sreality flow is *parse on demand* via
 `source_dispatcher` (LLM call per URL, cached 7 days). To make
 bezrealitky / idnes / remax / maxima comparables (and other portals
@@ -1003,7 +1011,21 @@ The migration is significant; this track plans the path but does
 not commit to it without an operator decision on the canonical
 shape (see D1 below).
 
-### Phase D1: Strict cross-source dedup (proposed)
+> **Design locked (2026-05-25): see
+> [`docs/design/multi-portal-dedup.md`](docs/design/multi-portal-dedup.md).**
+> The operator's expanded requirements (cross-portal price-history
+> chart, link history, all-sources-inactive lifecycle, "listed on 3+
+> sites" / "price dropped 10%+" filters, daily property-change
+> notifications) outgrew Shape A. We now adopt **Shape B** (a thin
+> `properties` parent + existing `listings` as per-source children) and
+> treat D1 + D2 + Scraper Phase 2 as **one feature** shipped in six
+> independently-signed-off slices (0 foundation → 5 image tier). The
+> design doc is the source of truth; the Shape-A-as-default text in the
+> D1/D2 subsections below is **superseded** and kept for history. Each
+> slice still needs the per-slice operator sign-off listed in the doc
+> before its migration lands.
+
+### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
 Catch the obvious duplicates: the same listing observed on two
 portals at once, or the same source-listing re-fetched under a
