@@ -1,12 +1,19 @@
-name: Sreality scrape (15-min full walk)
+name: Sreality scrape (full walk)
 
-# Primary scrape. Every 15 minutes it walks the COMPLETE index of all
-# six category pairs, so:
-#   - newly-listed properties surface within minutes (and downstream
-#     in the Watchdog feed), and
-#   - delisted properties flip to is_active=false within minutes too —
-#     a complete walk is what makes that inference valid
-#     (architectural rule #3).
+# Primary scrape. Each run walks the COMPLETE index of all six category
+# pairs, so:
+#   - newly-listed properties surface (and downstream in the Watchdog
+#     feed), and
+#   - delisted properties flip to is_active=false — a complete walk is
+#     what makes that inference valid (architectural rule #3).
+#
+# CADENCE REALITY: the cron is */15, but GitHub throttles scheduled
+# workflows heavily (best-effort, worse overnight), and each run takes
+# 10-16 min, so the real cadence is ~hourly, NOT every 15 min. That is a
+# GitHub platform limit, not a bug. For tighter cadence configure the
+# optional SCRAPE_CHAIN_TOKEN PAT (see the "Chain next run" step below);
+# otherwise accept ~hourly. The Health liveness check is tuned to this
+# reality (warn >90 min, fail >180 min).
 #
 # Because the walk is complete (no --limit), mark_inactive runs every
 # tick. scraper/main.py guards each per-category flip on walk
@@ -77,3 +84,28 @@ jobs:
             --detail-rate 2.0 \
             --max-image-downloads 400 \
             --image-workers 16
+
+      # GitHub throttles the */15 schedule to ~hourly (worse overnight), so
+      # the real cadence is far slower than 15 min. OPTIONAL tighter cadence:
+      # if a chain PAT is configured, re-dispatch this workflow on success for
+      # back-to-back runs (~every run-duration, 15-18 min). The */15 cron stays
+      # the safety net that restarts the chain if a run fails or the PAT is
+      # absent. GITHUB_TOKEN cannot re-trigger a workflow (GitHub blocks
+      # recursion), so this needs a separate PAT secret SCRAPE_CHAIN_TOKEN
+      # (fine-grained: this repo, Actions: read+write). No-op without it.
+      - name: Chain next run (optional, tighter cadence)
+        if: ${{ success() }}
+        env:
+          CHAIN_TOKEN: ${{ secrets.SCRAPE_CHAIN_TOKEN }}
+        run: |
+          if [ -z "$CHAIN_TOKEN" ]; then
+            echo "SCRAPE_CHAIN_TOKEN not set — cadence stays cron-driven (~hourly)."
+            exit 0
+          fi
+          echo "Re-dispatching scrape_delta.yml for tighter cadence."
+          curl -sS -X POST \
+            -H "Authorization: Bearer $CHAIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/scrape_delta.yml/dispatches" \
+            -d "{\"ref\":\"${{ github.ref_name }}\"}"

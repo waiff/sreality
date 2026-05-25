@@ -12,6 +12,7 @@ from typing import Any
 
 import boto3
 import requests
+from botocore.config import Config as BotoConfig
 
 LOG = logging.getLogger(__name__)
 
@@ -46,23 +47,29 @@ class R2Client:
         access_key_id: str,
         secret_access_key: str,
         bucket: str,
+        max_pool_connections: int = 32,
     ) -> None:
         self.bucket = bucket
+        # Pool sized to the download worker count — the default of 10 caused
+        # constant "Connection pool is full, discarding connection" churn
+        # under the 32-worker image phase.
         self._client = boto3.client(
             "s3",
             endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
             region_name="auto",
+            config=BotoConfig(max_pool_connections=max(10, max_pool_connections)),
         )
 
     @classmethod
-    def from_env(cls) -> R2Client:
+    def from_env(cls, max_pool_connections: int = 32) -> R2Client:
         return cls(
             account_id=_required("R2_ACCOUNT_ID"),
             access_key_id=_required("R2_ACCESS_KEY_ID"),
             secret_access_key=_required("R2_SECRET_ACCESS_KEY"),
             bucket=_required("R2_BUCKET_NAME"),
+            max_pool_connections=max_pool_connections,
         )
 
     def upload_bytes(

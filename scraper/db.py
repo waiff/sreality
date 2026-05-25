@@ -417,6 +417,35 @@ def mark_image_attempt(
         )
 
 
+def mark_image_unavailable(
+    conn: psycopg.Connection,
+    image_id: int,
+    reason: str,
+    error: str | None = None,
+) -> None:
+    """Terminally mark ONE image unavailable so it drops out of the
+    pending-downloads queue.
+
+    Used when the image's sreality CDN URL returns 404/410 — an expired,
+    permanently-dead URL, not a transient failure worth retrying. Distinct
+    from mark_image_listing_taken_down (which marks every image of a gone
+    listing); here only this one URL is dead while the listing lives on.
+    """
+    truncated = (error or "")[:500] if error is not None else None
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE images
+            SET unavailable_reason = %s,
+                last_error = COALESCE(%s, last_error),
+                last_download_attempt_at = now(),
+                download_attempts = download_attempts + 1
+            WHERE id = %s
+            """,
+            (reason, truncated, image_id),
+        )
+
+
 def mark_image_listing_taken_down(
     conn: psycopg.Connection,
     sreality_id: int,
