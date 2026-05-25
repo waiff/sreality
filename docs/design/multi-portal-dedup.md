@@ -61,25 +61,40 @@ backend read surfaces:
   `properties_public` for "one dot per property"), the `browse_stats` RPC
   family, and the notification matcher grain (`api/notifications.py`).
 
-### Three locked design decisions
+### Three locked design decisions (operator sign-off 2026-05-25)
 
-1. **`sreality_id` stays the PK, untouched.** Non-sreality sources get a
-   synthetic id from a high-band sequence (`start 9_000_000_000_000`,
-   above any real sreality id). The real per-source identity is a new
-   `UNIQUE(source, source_id_native)`. This avoids migrating every FK and
-   join. The column name becomes a mild misnomer (documented in a comment).
-2. **Derived filter aggregates live in a separate `property_stats` table,
-   recomputed by the daily job — not eager columns on `properties`
-   maintained by the scraper/matcher.** Computing "price dropped 2+ times"
-   walks the union of a property's source snapshots; that belongs in a
-   batch job, not the hot insert path or a per-query subquery over 50k map
-   pins. A stats bug is then fixable by re-running the job.
-3. **Property `is_active` rollup happens in the daily job, not inside
-   `mark_inactive`.** `mark_inactive` is per-`(category_main,
+1. **`sreality_id` stays the PK, untouched. The native id is stored
+   verbatim; `properties` gets its own surrogate id.** The real per-source
+   identity is a new `UNIQUE(source, source_id_native)`, and
+   `source_id_native` holds each portal's own listing id exactly as the
+   portal issues it (e.g. bazos `218865547`); for sreality it is
+   `sreality_id::text`. The canonical `properties.id` is a fresh `bigserial`
+   ("our own numbering"). Operator's instinct — use the portal's native id,
+   number properties ourselves — is adopted. Because raw native ids from
+   different portals can collide numerically and the `listings` PK is a
+   single `bigint` with ~9 FK tables hanging off it, the global PK is *not*
+   made equal to the native id; for sreality rows it already coincides, and
+   **the synthetic-id mechanics for non-sreality rows are deferred to Slice
+   3** (the first non-sreality scraper) — no such rows exist today, so the
+   question is moot for Slice 0.
+2. **Derived filter aggregates live as COLUMNS on `properties`, maintained
+   by an async recompute job — not a separate `property_stats` table, and
+   not eager on the insert path.** (Operator chose columns-on-properties
+   over the originally-recommended separate table.) Computing "price dropped
+   2+ times" walks the union of a property's source snapshots; that belongs
+   in a batch job, not the hot insert path or a per-query subquery over 50k
+   map pins. Columns: `source_count`, `distinct_site_count`,
+   `price_drop_count`, `price_rise_count`, `max_price_drop_pct`,
+   `stats_computed_at`. A stats bug is fixable by re-running the job.
+3. **Property `is_active` rollup happens in the async recompute job, not
+   inside `mark_inactive`.** `mark_inactive` is per-`(category_main,
    category_type)` and runs mid-walk; an eager cross-source rollup would
-   race. The daily job recomputes `bool_or(children.is_active)` atomically.
-   Consequence: a property's inactive flag lags ≤ 1 day — acceptable given
-   notifications are daily.
+   race. The job recomputes `bool_or(children.is_active)` atomically.
+   **The job's schedule is configurable and can run more often than daily**
+   (its own GitHub Actions cron, separate from the scrape) — operator asked
+   for simple, tunable periodicity. Consequence: a property's inactive flag
+   lags by at most one job interval — acceptable given notifications are
+   (at most) daily.
 
 ### Approved tooling/dependencies
 
@@ -113,23 +128,30 @@ Operator pre-approved the new deps, satisfying CLAUDE.md rule #7
 DDL sketches; finalized per-slice. All applied via Supabase MCP after
 operator approval, committed in the same change (CLAUDE.md flow).
 
-- **091_properties_foundation.sql** — `properties` parent (identity +
-  representative display columns: `geom`, `district`, `disposition`,
-  `area_m2`, `category_*`, `is_active`, `first/last_seen_at`,
-  `current_price_czk`, `repr_listing_id`). `non_sreality_listing_id_seq`.
-  `listings` ALTERs: `property_id` (FK, nullable during backfill), `source`
-  (default `'sreality'`), `source_url`, `source_id_native`; backfill
-  `source_id_native = sreality_id::text`; `UNIQUE(source, source_id_native)`;
-  index `(property_id)`. GiST on `properties.geom`. RLS enabled.
-- **092_properties_backfill.sql** — one `properties` row per existing
-  listing (singleton), link `listings.property_id`, then
-  `SET NOT NULL`. Data-only/additive ⇒ reversible before any merge.
-  Health-check assertion `count(properties) == count(listings)` (mirror
-  `migrations/089` reconciliation pattern).
-- **093_property_stats.sql** — `property_stats(property_id PK,
-  source_count, distinct_site_count, price_drop_count, price_rise_count,
-  max_price_drop_pct, current_price_czk, computed_at)`; indexes on the
-  filterable columns. Populated by the daily job (slice 1).
+- **091_properties_foundation.sql** *(built)* — `properties` parent
+  (surrogate `id bigserial` + representative display columns: `geom`,
+  `district`, `disposition`, `area_m2`, `category_*`, `is_active`,
+  `first/last_seen_at`, `current_price_czk`, `repr_listing_id`) **plus the
+  derived-aggregate columns** (`source_count`, `distinct_site_count`,
+  `price_drop_count`, `price_rise_count`, `max_price_drop_pct`,
+  `stats_computed_at`) per decision #2. `listings` ALTERs: `property_id`
+  (FK, nullable), `source` (default `'sreality'`), `source_url`,
+  `source_id_native`; backfill `source_id_native = sreality_id::text`;
+  `UNIQUE(source, source_id_native)`; index `(property_id)`. GiST on
+  `properties.geom`. RLS enabled. **No `non_sreality_listing_id_seq`** —
+  deferred to Slice 3 (decision #1).
+- **092_properties_backfill.sql** *(built)* — one `properties` row per
+  existing listing (singleton), link `listings.property_id`. Data-only /
+  additive ⇒ reversible before any merge. **`property_id` is left NULLABLE
+  here, not `SET NOT NULL`**: the production scraper runs old code on `main`
+  until the wrapper merges, and an old-code INSERT supplies no `property_id`,
+  so a NOT NULL constraint would break live inserts at apply time. NOT NULL
+  is tightened in a follow-up migration once the wrapper is confirmed live
+  on main. Apply-time reconciliation assertion
+  `count(properties) == count(listings)` (mirrors `migrations/089`).
+- ~~**093_property_stats.sql**~~ — **dropped.** Per decision #2 the derived
+  aggregates are columns on `properties` (added in 091), not a separate
+  table. The async recompute job (Slice 1) populates them.
 - **094_property_identity_candidates.sql** — D2 review queue
   `(left_property_id, right_property_id, confidence, markers_matched jsonb,
   tier, status proposed|merged|dismissed, reviewed_at, reviewed_action)`,
@@ -210,9 +232,17 @@ at a `listings` column). So:
 
 ## Slice sequence (multi-session)
 
-- **Slice 0 — Foundation, zero behavior change.** Migrations 091+092.
-  `upsert_listing_with_property` maintaining `property_id` + rollups for
-  sreality only. Count-reconciliation health check. Nothing in Browse /
+- **Slice 0 — Foundation, zero behavior change.** *(built — migrations
+  091+092 written, wrapper wired, awaiting apply + merge.)*
+  `upsert_listing_with_property` (in `scraper/db.py`) wraps `upsert_listing`
+  in one transaction and maintains the singleton `property_id` + display /
+  lifecycle mirror for sreality. Wired into the two scraper write paths
+  (`main.py` `_write_result` + `_run_detail_only`); the on-demand paths
+  (`freshness.py`, `url_parser.py`) intentionally stay on plain
+  `upsert_listing` — they touch existing rows (already linked by 092) or
+  create the rare estimation-paste row that the async job reconciles.
+  `property_id` stays NULLABLE until the wrapper is live on main (see 092).
+  Apply-time count-reconciliation assertion. Nothing in Browse /
   notifications / toolkit / frontend changes. Safe, reversible, unblocks
   everything.
 - **Slice 1 — Property-grain read path.** Migrations 093+096+097. Daily
@@ -236,10 +266,12 @@ at a `listings` column). So:
 
 ## Operator sign-off needed before each migration lands
 
-- **Slice 0:** (a) synthetic high-band id sequence for non-sreality
-  sources; (b) `property_stats` as a separate table vs columns on
-  `properties` (recommend separate); (c) daily-job `is_active` rollup vs
-  eager (recommend daily, ≤1-day lag).
+- **Slice 0:** ✅ signed off 2026-05-25. (a) Native id stored verbatim in
+  `source_id_native`; `properties` gets its own surrogate id; non-sreality
+  synthetic-id mechanics deferred to Slice 3. (b) Derived aggregates are
+  **columns on `properties`**, not a separate table. (c) `is_active` rollup
+  via the async recompute job, on a **configurable schedule that can run
+  more often than daily**.
 - **Slice 4/5:** conservative (queue + approve) vs aggressive auto-merge
   (recommend conservative); whether Browse defaults to one-row-per-property
   with a "show all source observations" toggle. (Pillow already approved.)

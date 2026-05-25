@@ -166,6 +166,94 @@ def upsert_listing(
     return "unchanged" if unchanged else "updated"
 
 
+def upsert_listing_with_property(
+    conn: psycopg.Connection,
+    row: dict[str, Any],
+    raw_json: dict[str, Any],
+    content_hash: str,
+) -> UpsertResult:
+    """upsert_listing + maintain the listing's canonical `properties` parent.
+
+    Slice 0 of the multi-portal dedup track: every sreality listing maps 1:1
+    to a singleton property. The listing write and its property linkage commit
+    in one transaction so a partial failure can't leave a listing unlinked.
+
+    For non-singleton properties (Slice 3+, once a portal scraper lands) the
+    Tier-1 spatial matcher and the async rollup job take over; here the
+    property simply mirrors its sole child.
+    """
+    sreality_id = row["sreality_id"]
+    with conn.transaction():
+        result = upsert_listing(conn, row, raw_json, content_hash)
+        _ensure_singleton_property(conn, sreality_id)
+    return result
+
+
+def _ensure_singleton_property(conn: psycopg.Connection, sreality_id: int) -> None:
+    """Attach a singleton property to one listing, or refresh it if linked.
+
+    Runs inside the caller's transaction (no own transaction block). Derives
+    every property column from the just-written listings row so geom and the
+    display fields stay consistent without re-deriving from lon/lat.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listings SET source_id_native = sreality_id::text
+            WHERE sreality_id = %s AND source_id_native IS NULL
+            """,
+            (sreality_id,),
+        )
+        cur.execute(
+            "SELECT property_id FROM listings WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+        found = cur.fetchone()
+        property_id = found[0] if found else None
+
+        if property_id is None:
+            cur.execute(
+                """
+                INSERT INTO properties (
+                    repr_listing_id, category_main, category_type, disposition,
+                    area_m2, district, geom, current_price_czk,
+                    is_active, first_seen_at, last_seen_at,
+                    source_count, distinct_site_count
+                )
+                SELECT
+                    sreality_id, category_main, category_type, disposition,
+                    area_m2, district, geom, price_czk,
+                    is_active, first_seen_at, last_seen_at, 1, 1
+                FROM listings WHERE sreality_id = %s
+                RETURNING id
+                """,
+                (sreality_id,),
+            )
+            new_id = cur.fetchone()[0]
+            cur.execute(
+                "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
+                (new_id, sreality_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE properties p
+                SET is_active         = l.is_active,
+                    last_seen_at      = l.last_seen_at,
+                    current_price_czk = l.price_czk,
+                    area_m2           = l.area_m2,
+                    district          = l.district,
+                    disposition       = l.disposition,
+                    geom              = l.geom,
+                    category_main     = l.category_main,
+                    category_type     = l.category_type
+                FROM listings l
+                WHERE p.id = l.property_id AND l.sreality_id = %s
+                """,
+                (sreality_id,),
+            )
+
+
 def record_images(
     conn: psycopg.Connection,
     sreality_id: int,
