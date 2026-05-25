@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 06:54 UTC_
+_Last refreshed: 2026-05-25 07:20 UTC_
 
 **Branch:** `claude/brave-knuth-8ICa2`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 94 files, latest `089_count_reconciliation_check.sql`.
+**Migrations on disk:** 95 files, latest `090_health_checks_index_walks_only.sql`.
 
 **Last 10 commits:**
 
 ```
+f223990 chore: refresh ROADMAP auto-status block
+b2a92a7 scrape cadence: document the GitHub-throttling reality + optional chaining
+7cf32a1 images: stop expired-CDN 404s from blocking the backfill
+bf856fd scraper/health: image-only backfills are not scrape runs
+8f8a0b9 Merge pull request #173 from waiff/claude/brave-knuth-8ICa2
 c18831b chore: refresh ROADMAP auto-status block
 beaae7d scraper: region-split large categories + count reconciliation
+ec7a835 Merge pull request #172 from waiff/claude/brave-knuth-8ICa2
 5f1946d chore: refresh ROADMAP auto-status block
 2e519bf chore: refresh ROADMAP auto-status block
-ac4bdf3 health: scraper health checks (pass/warn/fail) on the Health page
-cebac7e Merge origin/main into claude/brave-knuth-8ICa2
-c1df43d scraper: parallelize detail fetches behind a global rate limiter
-f322c0c scraper: unified 15-min full walk with immediate, guarded delisting
-6ed32a1 frontend: wire VITE_R2_PUBLIC_BASE so listing images load from R2
-9ca3513 Merge pull request #170 from waiff/claude/brave-knuth-8ICa2
 ```
 
 <!-- END AUTO-STATUS -->
