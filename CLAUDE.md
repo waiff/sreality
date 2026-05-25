@@ -675,26 +675,38 @@ The scrape runs on a two-tier cadence. **Both tiers now do a complete
 index walk** — the split is about how much expensive work each does, not
 walk depth:
 
-- **Sreality scrape (15-min full walk)** (`scrape_delta.yml`, cron
+- **Sreality scrape (full walk)** (`scrape_delta.yml`, cron
   `*/15 * * * *`) — the primary scrape. Walks the **entire** index of
   every category pair (no `--limit`), so newly-listed properties surface
-  within minutes AND delistings flip to `is_active=false` within minutes.
-  Because the walk is complete it runs `mark_inactive` every tick. Detail
-  refetches and image downloads are **capped per tick** (`--max-detail-refetches
-  150`, `--max-image-downloads 400`) so a run stays bounded; deferred work
-  drains on the next tick (failure-priority retry + newest-first image
-  ordering). Detail fetches run on a small thread pool paced by a shared
-  rate limiter (`--detail-workers` / `--detail-rate`) so the capped budget
-  drains in less wall-clock — fitting the tight tick. Records as
-  `run_type='delta'` via `--run-type`. Skips condition scoring.
+  AND delistings flip to `is_active=false`. Because the walk is complete
+  it runs `mark_inactive` every run. Detail refetches and image downloads
+  are **capped per run** (`--max-detail-refetches 150`,
+  `--max-image-downloads 400`) so it stays bounded; deferred work drains on
+  the next run (failure-priority retry + newest-first image ordering).
+  Detail fetches run on a small thread pool paced by a shared rate limiter
+  (`--detail-workers` / `--detail-rate`). Records as `run_type='delta'` via
+  `--run-type`. Skips condition scoring.
+  **Cadence reality:** the cron is `*/15`, but GitHub throttles scheduled
+  workflows heavily (best-effort, worse overnight) and each run is 10-16 min,
+  so the *real* cadence is **~hourly, not 15 min** — a GitHub platform limit,
+  not a bug. The Health liveness check is tuned to this (warn >90 min, fail
+  >180 min). For tighter, near-back-to-back cadence, set the optional
+  `SCRAPE_CHAIN_TOKEN` PAT secret (fine-grained: this repo, Actions
+  read+write): the workflow's "Chain next run" step then re-dispatches itself
+  on success (GITHUB_TOKEN can't, GitHub blocks recursion). The `*/15` cron
+  remains the safety net that restarts the chain. No-op without the PAT.
 - **Daily Sreality scrape** (`scrape.yml`, cron `0 22 * * *`) — the deep
   nightly. Also a full walk, but its distinct value is the expensive
   backlog work the 15-min ticks skip: the condition-scoring phase (LLM
   cost), a deep image-backlog drain (cap 50 000), and a high-cap detail
   catch-up (cap 10 000). Records as `run_type='full'`.
 
+The image backfill (`images.yml`, `--images-only`) is NOT a scrape run and
+does **not** write a `scrape_runs` row — only index walks do — so "last
+scrape", the liveness check, and reconciliation track real walks.
+
 `mark_inactive` is no longer nightly-only. Two safety rails make the
-every-15-min flip safe (architectural rule #3): (1) each per-category
+every-run flip safe (architectural rule #3): (1) each per-category
 flip is gated on **walk completeness** — `_walk_complete` compares the
 collected count against the API's `result_size` and skips the flip
 (logging `INACTIVE skipped`) when the walk looks truncated; (2) a gone
