@@ -1,4 +1,4 @@
-name: Daily Sreality scrape
+name: "Scraping: Sreality nightly deep run"
 
 # Deep nightly run. Walks all six category pairs sequentially:
 #   byt + dum + komercni  ×  pronajem + prodej

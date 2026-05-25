@@ -668,14 +668,16 @@ to scrub by regex; if a fixture leaks one, hand-edit the file.
 
 ## How to manually trigger the scraper
 
-GitHub repo -> **Actions** tab -> **Daily Sreality scrape** workflow ->
-**Run workflow** button -> pick branch and optional flags -> **Run workflow**.
+GitHub repo -> **Actions** tab -> **Scraping: Sreality nightly deep run**
+workflow (`scrape.yml`) -> **Run workflow** button -> pick branch and optional
+flags -> **Run workflow**. (All three scraping workflows are prefixed
+`Scraping:` in the Actions list so they group together.)
 
 The scrape runs on a two-tier cadence. **Both tiers now do a complete
 index walk** — the split is about how much expensive work each does, not
 walk depth:
 
-- **Sreality scrape (full walk)** (`scrape_delta.yml`, cron
+- **Scraping: Sreality full index walk** (`scrape_delta.yml`, cron
   `*/15 * * * *`) — the primary scrape. Walks the **entire** index of
   every category pair (no `--limit`), so newly-listed properties surface
   AND delistings flip to `is_active=false`. Because the walk is complete
@@ -695,8 +697,8 @@ walk depth:
   read+write): the workflow's "Chain next run" step then re-dispatches itself
   on success (GITHUB_TOKEN can't, GitHub blocks recursion). The `*/15` cron
   remains the safety net that restarts the chain. No-op without the PAT.
-- **Daily Sreality scrape** (`scrape.yml`, cron `0 22 * * *`) — the deep
-  nightly. Also a full walk, but its distinct value is the expensive
+- **Scraping: Sreality nightly deep run** (`scrape.yml`, cron `0 22 * * *`) —
+  the deep nightly. Also a full walk, but its distinct value is the expensive
   backlog work the 15-min ticks skip: the condition-scoring phase (LLM
   cost), a deep image-backlog drain (cap 50 000), and a high-cap detail
   catch-up (cap 10 000). Records as `run_type='full'`.

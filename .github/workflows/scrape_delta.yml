@@ -1,4 +1,4 @@
-name: Sreality scrape (full walk)
+name: "Scraping: Sreality full index walk (primary, ~hourly)"
 
 # Primary scrape. Each run walks the COMPLETE index of all six category
 # pairs, so:
