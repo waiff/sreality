@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 09:14 UTC_
+_Last refreshed: 2026-05-25 17:35 UTC_
 
-**Branch:** `claude/eloquent-heisenberg-gXR9k`
+**Branch:** `claude/brave-knuth-8ICa2`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-25 09:14 UTC_
 **Last 10 commits:**
 
 ```
+4f80b6b chore: refresh ROADMAP auto-status block
+20f8b52 scraper: back off request volume to recover from sreality anti-bot block
+af4bf9d chore: refresh ROADMAP auto-status block
+309ff2b chore: refresh ROADMAP auto-status block
+0dab683 scraper: fix the district-split regression at the root (crash-proof + paced)
+1efb830 Merge pull request #177 from waiff/claude/eloquent-heisenberg-gXR9k
+1276679 chore: refresh ROADMAP auto-status block
 00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
 6d1a8ca scraper: district-split big regions so the delisting sweep can run
 e48a8eb chore: refresh ROADMAP auto-status block
-ceb7fc3 ci: prefix scraping workflows with "Scraping:" so they group in Actions
-5d4d002 Merge pull request #175 from waiff/claude/brave-knuth-8ICa2
-b7166f8 chore: refresh ROADMAP auto-status block
-8ffc13d Merge pull request #174 from waiff/claude/brave-knuth-8ICa2
-f223990 chore: refresh ROADMAP auto-status block
-b2a92a7 scrape cadence: document the GitHub-throttling reality + optional chaining
-7cf32a1 images: stop expired-CDN 404s from blocking the backfill
 ```
 
 <!-- END AUTO-STATUS -->

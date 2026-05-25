@@ -32,6 +32,15 @@ name: "Scraping: Sreality nightly deep run"
 # Cron triggers cannot pass inputs - they always fall back to the
 # defaults below. workflow_dispatch lets the operator override any
 # cap or skip the image phase for ad-hoc runs.
+#
+# ANTI-BOT BACKOFF (2026-05-25): sreality is 404-blocking the runner IP (see
+# scrape_delta.yml header). While that holds, this nightly also runs --no-split
+# and with sharply reduced detail caps/rate so its API portion can't re-trip
+# the block — the index walk, detail catch-up, and gone-detection all hit the
+# blocked endpoint and would otherwise hammer it. The image drain (different
+# CDN) and condition scoring (DB-only, LLM) still do useful work. Restore the
+# higher defaults (10000/2000 refetch caps, 2.0 rate) and drop --no-split once
+# the block clears.
 
 on:
   schedule:
@@ -133,13 +142,15 @@ jobs:
             ARGS="$ARGS --no-image-downloads"
           fi
 
+          # Backoff defaults (see header): low caps so the blocked detail
+          # endpoint isn't hammered. Pre-backoff values were 10000 / 2000.
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
           if [ -z "$MAX_REFETCH" ]; then
-            MAX_REFETCH="10000"
+            MAX_REFETCH="200"
           fi
           MAX_REFETCH_PER_CAT="${{ inputs.max_detail_refetches_per_category }}"
           if [ -z "$MAX_REFETCH_PER_CAT" ]; then
-            MAX_REFETCH_PER_CAT="2000"
+            MAX_REFETCH_PER_CAT="100"
           fi
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
@@ -151,11 +162,11 @@ jobs:
           fi
           DETAIL_WORKERS="${{ inputs.detail_workers }}"
           if [ -z "$DETAIL_WORKERS" ]; then
-            DETAIL_WORKERS="4"
+            DETAIL_WORKERS="2"
           fi
           DETAIL_RATE="${{ inputs.detail_rate }}"
           if [ -z "$DETAIL_RATE" ]; then
-            DETAIL_RATE="2.0"
+            DETAIL_RATE="1.0"
           fi
           ARGS="$ARGS --max-detail-refetches $MAX_REFETCH"
           ARGS="$ARGS --max-detail-refetches-per-category $MAX_REFETCH_PER_CAT"
@@ -163,6 +174,10 @@ jobs:
           ARGS="$ARGS --detail-rate $DETAIL_RATE"
           ARGS="$ARGS --max-image-downloads $MAX_IMG"
           ARGS="$ARGS --image-workers $WORKERS"
+
+          # Anti-bot backoff (see header): single-pass walk, no district
+          # fan-out. Remove this line once the block clears.
+          ARGS="$ARGS --no-split"
 
           if [ "${{ inputs.no_condition_scoring }}" = "true" ]; then
             ARGS="$ARGS --no-condition-scoring"
