@@ -278,19 +278,19 @@ const intersectPrefilters = (
   return a.filter((id) => set.has(id));
 };
 
-/* Browse cohort fetchers (Map / Table / Cards) read the property grain
- * (properties_public), so Browse is one-dot-per-property. `sreality_id` on
- * properties_public is the representative child, so detail links, image /
- * snapshot / tag lookups, and the sreality_id-keyed prefilters all carry over
- * unchanged. Today every property is a singleton, so the surface is visually
- * identical to listings_public; multi-source collapsing arrives with the
- * portal scrapers.
+/* Browse cohort fetchers (Map / Table / Cards) AND fetchBrowseStats read the
+ * property grain (properties_public / browse_stats_properties), so Browse is
+ * one-dot-per-property. `sreality_id` on properties_public is the
+ * representative child, so detail links, image / snapshot / tag lookups, and
+ * the sreality_id-keyed prefilters all carry over unchanged. Today every
+ * property is a singleton, so the surface is visually identical to
+ * listings_public; multi-source collapsing arrives with the portal scrapers.
  *
- * fetchBrowseStats stays on the listing-grain browse_stats RPC for now: the
- * property-grain clone (browse_stats_properties, migration 094) is a heavy
- * aggregate over a join view and needs the Slice 2 perf pass before it backs
- * the user-facing Stats tab. While properties are 1:1 with listings the two
- * RPCs return identical numbers, so Stats is correct either way. */
+ * The Stats RPC was repointed in Slice 2a once migration 095 denormalised the
+ * filter columns onto `properties` — that drops the listings join from the
+ * function's plan, making browse_stats_properties perf-equivalent to the
+ * listing-grain browse_stats. It also gained the four derived predicates
+ * (distinct_site_count_min / price_{drop,rise}_count_min / max_price_drop_pct_min). */
 export const fetchListingsForMap = async (
   f: ListingFilters,
 ): Promise<MapResult> => {
@@ -521,7 +521,7 @@ export const fetchBrowseStats = async (
 
   const effBbox = effectiveBbox(f);
 
-  const { data, error } = await supabase.rpc('browse_stats', {
+  const { data, error } = await supabase.rpc('browse_stats_properties', {
     category_main_filter:    f.categoryMain,
     category_type_filter:    f.categoryType,
     districts_filter:        f.districts.length ? f.districts.map((d) => d.name) : null,
@@ -568,6 +568,12 @@ export const fetchBrowseStats = async (
      * out when either bound is set. */
     price_per_m2_min:        f.pricePerM2Min,
     price_per_m2_max:        f.pricePerM2Max,
+    /* Migration 095 — multi-portal / price-history derived predicates.
+     * Property grain only; columns maintained by the recompute job. */
+    distinct_site_count_min: f.distinctSiteCountMin,
+    price_drop_count_min:    f.priceDropCountMin,
+    price_rise_count_min:    f.priceRiseCountMin,
+    max_price_drop_pct_min:  f.maxPriceDropPctMin,
   });
   if (error) throw error;
   return data as BrowseStats;

@@ -1661,6 +1661,86 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": []
     },
     {
+      "id": "distinct_site_count_min",
+      "type": "int",
+      "pg_column": "distinct_site_count",
+      "default": null,
+      "description": "Minimum number of distinct source sites a property is listed on (`distinct_site_count >= N`). 1 today for every property (sreality-only); lights up once multi-portal ingestion lands. Use 2+ for 'listed on multiple sites'.",
+      "category": "Velocity",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": {
+        "min": 1
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "distinctSiteCountMin"
+      ]
+    },
+    {
+      "id": "price_drop_count_min",
+      "type": "int",
+      "pg_column": "price_drop_count",
+      "default": null,
+      "description": "Minimum number of price decreases across the property's combined snapshot history (`price_drop_count >= N`). One count per consecutive snapshot pair where the asking price fell. Use 2+ for repeatedly-cut listings.",
+      "category": "Velocity",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": {
+        "min": 1
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "priceDropCountMin"
+      ]
+    },
+    {
+      "id": "price_rise_count_min",
+      "type": "int",
+      "pg_column": "price_rise_count",
+      "default": null,
+      "description": "Minimum number of price increases across the property's combined snapshot history (`price_rise_count >= N`).",
+      "category": "Velocity",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": {
+        "min": 1
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "priceRiseCountMin"
+      ]
+    },
+    {
+      "id": "max_price_drop_pct_min",
+      "type": "float",
+      "pg_column": "max_price_drop_pct",
+      "default": null,
+      "description": "Minimum largest single-step price drop, as a percent (`max_price_drop_pct >= X`). The biggest one-change cut in the property's combined snapshot history. Use 10 for 'price dropped 10%+ at some point'.",
+      "category": "Velocity",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": {
+        "min": 0
+      },
+      "unit": "%",
+      "enum_values": null,
+      "aliases": [
+        "maxPriceDropPctMin"
+      ]
+    },
+    {
       "id": "include_unreliable",
       "type": "bool",
       "pg_column": null,

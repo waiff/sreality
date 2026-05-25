@@ -182,6 +182,27 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
           />
         </ControlGroup>
 
+        <ControlGroup title="Price history & sources">
+          <FilterForm
+            scope="browse"
+            state={registryView}
+            onChange={handleRegistryChange}
+            includeOnly={[
+              'distinct_site_count_min',
+              'price_drop_count_min',
+              'price_rise_count_min',
+              'max_price_drop_pct_min',
+            ]}
+            labels={{
+              distinct_site_count_min: 'Listed on N+ sites',
+              price_drop_count_min: 'Price cut N+ times',
+              price_rise_count_min: 'Price raised N+ times',
+              max_price_drop_pct_min: 'Biggest price drop ≥ %',
+            }}
+            flat
+          />
+        </ControlGroup>
+
         <ControlGroup title="Building">
           <FilterForm
             scope="browse"

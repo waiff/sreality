@@ -1181,6 +1181,78 @@ def _build_registry() -> dict[str, FilterDef]:
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
         ),
 
+        # --- multi-portal / price-history signals (Slice 2a) ------------
+        # Derived columns on `properties`, maintained by the recompute job
+        # (scripts/recompute_property_stats.py). BROWSE only for now; the
+        # WATCHDOG agenda lands with the property-grain matcher (Slice 2b).
+        FilterDef(
+            id="distinct_site_count_min",
+            type=FilterType.INT,
+            pg_column="distinct_site_count",
+            default=None,
+            description=(
+                "Minimum number of distinct source sites a property is "
+                "listed on (`distinct_site_count >= N`). 1 today for every "
+                "property (sreality-only); lights up once multi-portal "
+                "ingestion lands. Use 2+ for 'listed on multiple sites'."
+            ),
+            category=CATEGORY_VELOCITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE}),
+            constraints={"min": 1},
+            aliases=("distinctSiteCountMin",),
+        ),
+        FilterDef(
+            id="price_drop_count_min",
+            type=FilterType.INT,
+            pg_column="price_drop_count",
+            default=None,
+            description=(
+                "Minimum number of price decreases across the property's "
+                "combined snapshot history (`price_drop_count >= N`). One "
+                "count per consecutive snapshot pair where the asking price "
+                "fell. Use 2+ for repeatedly-cut listings."
+            ),
+            category=CATEGORY_VELOCITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE}),
+            constraints={"min": 1},
+            aliases=("priceDropCountMin",),
+        ),
+        FilterDef(
+            id="price_rise_count_min",
+            type=FilterType.INT,
+            pg_column="price_rise_count",
+            default=None,
+            description=(
+                "Minimum number of price increases across the property's "
+                "combined snapshot history (`price_rise_count >= N`)."
+            ),
+            category=CATEGORY_VELOCITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE}),
+            constraints={"min": 1},
+            aliases=("priceRiseCountMin",),
+        ),
+        FilterDef(
+            id="max_price_drop_pct_min",
+            type=FilterType.FLOAT,
+            pg_column="max_price_drop_pct",
+            default=None,
+            description=(
+                "Minimum largest single-step price drop, as a percent "
+                "(`max_price_drop_pct >= X`). The biggest one-change cut in "
+                "the property's combined snapshot history. Use 10 for "
+                "'price dropped 10%+ at some point'."
+            ),
+            category=CATEGORY_VELOCITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE}),
+            constraints={"min": 0},
+            unit="%",
+            aliases=("maxPriceDropPctMin",),
+        ),
+
         # --- reliability flag --------------------------------------------
         FilterDef(
             id="include_unreliable",

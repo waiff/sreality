@@ -167,25 +167,34 @@ operator approval, committed in the same change (CLAUDE.md flow).
 - **094_browse_stats_properties.sql** *(built, Slice 1)* — property-grain
   Browse stats RPC, a verbatim clone of the current `browse_stats` (083
   lineage) pointed `FROM properties_public`. Same signature/WHERE/return.
-  **Created but NOT yet wired to the frontend:** it is a heavy aggregate over
-  a join view and runs materially slower than the already-borderline
-  listing-grain `browse_stats` under the function's generic plan, so Slice 1's
-  `fetchBrowseStats` stays on `browse_stats` (identical numbers while properties
-  are 1:1 with listings). The Slice 2 perf pass (precomputed property stats /
-  predicate restructuring) makes it safe to back the Stats tab, and adds the
-  four derived predicates (distinct_site_count, price_drop/rise_count,
-  max_price_drop_pct).
-- **095_property_identity_candidates.sql** — D2 review queue
+  Created in Slice 1 but left unwired (slow over the join view); Slice 2a's
+  095 fixes the perf and wires it.
+- **095_property_grain_stats.sql** *(built, Slice 2a)* — the perf pass that
+  makes browse_stats_properties usable. Denormalises the 16 filter columns
+  browse_stats touches (locality, has_*, furnished, condition, building_type,
+  estate/usable/garden_area, parking_lots, ...) onto `properties` (maintained
+  by the recompute job from the representative listing), backfills them
+  in-migration, and re-sources them in properties_public from `properties` so
+  the function no longer forces the listings join — making it perf-equivalent
+  to the single-table listing-grain `browse_stats`. Also drops the 094
+  signature and recreates browse_stats_properties with four new derived
+  predicates (`distinct_site_count_min`, `price_drop_count_min`,
+  `price_rise_count_min`, `max_price_drop_pct_min`). `fetchBrowseStats` is
+  repointed to it in the same slice.
+- **096_notification_grain.sql** *(next, Slice 2b)* — `notification_dispatches`
+  gains `property_id` + `change_kind`; new `UNIQUE(subscription_id,
+  property_id, change_kind)`. Migrate `match_once` / `_build_match_clauses` /
+  `list_dispatches` to property grain, and extend the four derived FilterDefs'
+  agendas to include WATCHDOG (they are BROWSE-only until the matcher is
+  property-grain).
+- **097_property_identity_candidates.sql** *(Slice 4)* — D2 review queue
   `(left_property_id, right_property_id, confidence, markers_matched jsonb,
   tier, status proposed|merged|dismissed, reviewed_at, reviewed_action)`,
   ordered-pair CHECK + UNIQUE. RLS enabled.
-- **096_image_phash.sql** — `images.phash bigint` (D2 cheap pass).
+- **098_image_phash.sql** *(Slice 5)* — `images.phash bigint` (D2 cheap pass).
   Pillow approved (add to `pyproject.toml` with the Slice 5 work). Hamming
-  via `bit_count(a # b)`.
-- **097_notification_grain.sql** — `notification_dispatches` gains
-  `property_id` + `change_kind`; new `UNIQUE(subscription_id, property_id,
-  change_kind)`. Migrate `match_once` / `_build_match_clauses` /
-  `list_dispatches` to property grain.
+  via `bit_count(a # b)`. (Migration numbers past 095 are indicative; each is
+  assigned the next free number when its slice lands.)
 
 ## Matcher + ingestion design
 
@@ -271,12 +280,18 @@ at a `listings` column). So:
   property-grain clone (094) is created but too slow under its generic plan to
   back the Stats tab; while 1:1 the numbers are identical. Wiring + perf belong
   to Slice 2. Headline frontend work.
-- **Slice 2 — Notification grain → property + Stats repoint.** Migration 097
-  (notification grain). Migrate the matcher to property grain. Add the daily
-  property-change matcher + the 4 `FilterDef`s wired through registry +
-  `browse_stats_properties` + watchdog. Includes the `browse_stats_properties`
-  perf pass (precomputed property stats / predicate restructuring) and the
-  `fetchBrowseStats` repoint that Slice 1 deferred.
+- **Slice 2a — Stats perf + derived filters in Browse.** *(built — migration
+  095, recompute job extended, registry + frontend wired.)* Denormalised the
+  filter columns onto `properties` so `browse_stats_properties` drops the join
+  and is perf-equivalent to the listing-grain `browse_stats`; repointed
+  `fetchBrowseStats` to it; added the four derived `FilterDef`s
+  (`distinct_site_count_min`, `price_drop_count_min`, `price_rise_count_min`,
+  `max_price_drop_pct_min`) through the registry → Browse Map/Table/Cards
+  (auto-dispatch) + Stats RPC. BROWSE agenda only for now.
+- **Slice 2b — Notification grain → property.** Migration 096 (notification
+  grain). Migrate the matcher to property grain, add the daily property-change
+  matcher, and extend the four derived `FilterDef`s' agendas to WATCHDOG (they
+  can't apply in the listing-grain matcher until it reads property columns).
 - **Slice 3 — D1 multi-portal ingestion + insert-time Tier 1.** First
   non-sreality scraper on the `ScrapedListing` contract (+ raw-capture
   staging only for crawler sources). Geo+price+area Tier 1 matcher. Now

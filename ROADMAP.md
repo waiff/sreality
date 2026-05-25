@@ -1025,17 +1025,17 @@ shape (see D1 below).
 > slice still needs the per-slice operator sign-off listed in the doc
 > before its migration lands.
 >
-> **Progress:** Slice 0 (foundation, migrations 091+092 + scraper wrapper)
-> and Slice 1 (property-grain read path) are **built and applied**. Slice 1
-> shipped migrations 093 (`properties_public` + `property_sources_public`)
-> and 094 (`browse_stats_properties`), the async recompute job
-> (`scripts/recompute_property_stats.py` + hourly
-> `recompute_property_stats.yml`), and repointed the Browse Map/Table/Cards
-> fetchers to `properties_public`. The Stats tab stays on the listing-grain
-> `browse_stats` RPC (identical numbers while 1:1); wiring + perf for
-> `browse_stats_properties` are deferred to Slice 2. **Next: Slice 2** —
-> notification grain → property + the four derived `FilterDef`s + the
-> `browse_stats_properties` perf pass.
+> **Progress:** Slices 0, 1, and 2a are **built and applied**. Slice 0
+> (migrations 091+092 + scraper wrapper) + Slice 1 (migrations 093+094, the
+> recompute job + hourly workflow, Browse Map/Table/Cards on
+> `properties_public`). Slice 2a (migration 095) denormalised the filter
+> columns onto `properties` so `browse_stats_properties` is perf-equivalent to
+> the listing-grain RPC, repointed the Stats tab to it, and added the four
+> derived filters (`distinct_site_count_min`, `price_drop_count_min`,
+> `price_rise_count_min`, `max_price_drop_pct_min`) through the registry into
+> Browse (Map/Table/Cards + Stats). **Next: Slice 2b** — migration 096
+> (notification grain → property), property-grain matcher, and extending those
+> four filters' agendas to Watchdog.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 

@@ -94,7 +94,11 @@ _RECOMPUTE_BATCH_SQL = """
     repr AS (
       SELECT DISTINCT ON (l.property_id)
         l.property_id AS pid, l.sreality_id, l.category_main, l.category_type,
-        l.disposition, l.area_m2, l.district, l.geom, l.price_czk
+        l.disposition, l.area_m2, l.district, l.geom, l.price_czk,
+        l.locality, l.has_balcony, l.has_parking, l.has_lift, l.building_type,
+        l.condition, l.ownership, l.furnished, l.terrace, l.cellar, l.garage,
+        l.category_sub_cb, l.estate_area, l.usable_area, l.garden_area,
+        l.parking_lots
       FROM listings l
       JOIN batch b ON b.id = l.property_id
       ORDER BY l.property_id, l.is_active DESC, l.last_seen_at DESC NULLS LAST,
@@ -142,6 +146,22 @@ _RECOMPUTE_BATCH_SQL = """
       district            = r.district,
       geom                = r.geom,
       current_price_czk   = r.price_czk,
+      locality            = r.locality,
+      has_balcony         = r.has_balcony,
+      has_parking         = r.has_parking,
+      has_lift            = r.has_lift,
+      building_type       = r.building_type,
+      condition           = r.condition,
+      ownership           = r.ownership,
+      furnished           = r.furnished,
+      terrace             = r.terrace,
+      cellar              = r.cellar,
+      garage              = r.garage,
+      category_sub_cb     = r.category_sub_cb,
+      estate_area         = r.estate_area,
+      usable_area         = r.usable_area,
+      garden_area         = r.garden_area,
+      parking_lots        = r.parking_lots,
       price_drop_count    = coalesce(ph.drops, 0),
       price_rise_count    = coalesce(ph.rises, 0),
       max_price_drop_pct  = ph.max_drop_pct,
