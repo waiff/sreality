@@ -36,45 +36,25 @@ DEFAULT_HEADERS: dict[str, str] = {
 }
 
 RETRYABLE_STATUS: frozenset[int] = frozenset(
-    {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+    # 403/429 are how sreality throttles a too-fast egress IP; treat them as
+    # retryable (penalize + back off + retry) rather than a fatal error, so a
+    # transient block can't crash a whole run.
+    {403, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 )
 
-# Sreality's index API caps deep pagination (~14k results per filter) and
-# the accessible window rotates between runs, so a single walk of a large
-# category never retrieves the whole set. Categories whose result_size
-# exceeds SPLIT_THRESHOLD are walked once per region (kraj) instead — each
-# region is well under the cap, so the union is complete. Czech kraj ids are
-# 1..14 (a `-1` in our DB is a parse-gap sentinel, not an API value; those
-# listings still carry a real region on sreality and are covered here).
-REGION_IDS: tuple[int, ...] = tuple(range(1, 15))
+# Sreality's index API caps deep pagination (~14k results per filter) and the
+# accessible window rotates between runs, so a single walk of a large category
+# never retrieves the whole set. Categories whose result_size exceeds
+# SPLIT_THRESHOLD are walked once per DISTRICT (okres) instead — each district
+# is well under the cap, so the union is complete and mark_inactive can run.
+# A coarser region (kraj) split only reached ~86%, below the completeness bar.
+# DISTRICT_IDS is the canonical sreality locality_district_id set: okresy
+# 1..77 (47 = Praha city) plus the Praha sub-district codes 5001..5022. A
+# district that has no listings for a given category costs one empty page and
+# is skipped. (A `-1` in our DB is a parse-gap sentinel, not an API value;
+# those listings carry a real district on sreality and are covered here.)
 SPLIT_THRESHOLD: int = 10000
-
-# Region-split alone still leaves the biggest krajs (Praha, Středočeský,
-# Jihomoravský, Moravskoslezský) above sreality's per-filter pagination
-# window, so a single pass of them lands ~86% and the mark_inactive sweep is
-# skipped. Any region whose own result_size exceeds this is split one level
-# finer — by district (okres) — so each sub-query is small enough to return
-# its COMPLETE set in one pass. REGION_DISTRICTS maps each kraj id to its
-# okres ids (derived from observed locality_region_id/locality_district_id
-# pairs in our own data); Praha (region 10) is addressed both by the
-# city-level code 47 and the per-district 5001..5022 codes.
-REGION_SUB_THRESHOLD: int = 2500
-REGION_DISTRICTS: dict[int, tuple[int, ...]] = {
-    1:  (1, 2, 3, 4, 5, 6, 7),
-    2:  (8, 11, 12, 13, 14, 15, 17),
-    3:  (9, 10, 16),
-    4:  (19, 20, 23, 24, 25, 26, 27),
-    5:  (18, 21, 22, 34),
-    6:  (28, 30, 31, 33, 36),
-    7:  (29, 32, 35, 37),
-    8:  (40, 42, 43, 44, 46),
-    9:  (38, 39, 41, 45),
-    10: (47, *range(5001, 5023)),
-    11: (48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59),
-    12: (60, 61, 62, 63, 64, 65),
-    13: (66, 67, 68, 69, 70),
-    14: (71, 72, 73, 74, 75, 76, 77),
-}
+DISTRICT_IDS: tuple[int, ...] = (*range(1, 78), *range(5001, 5023))
 
 # Statuses that mean "this listing no longer exists" rather than a
 # transient or unexpected error. Mirrors scraper.freshness.GONE_STATUSES.
@@ -166,9 +146,12 @@ class SrealityClient:
     def probe_result_size(self) -> int | None:
         """Fetch page 1 only and return the API's reported result_size.
 
-        Cheap pre-walk probe used to decide whether a category is large
-        enough to warrant a region-split walk. Also latches self.result_size.
+        Cheap pre-walk probe used to decide whether a category is large enough
+        to warrant a district-split walk. Also latches self.result_size. Paced
+        by the shared limiter so a split walk's many probes don't burst.
         """
+        if self._limiter is not None:
+            self._limiter.acquire()
         payload = self._get_json(INDEX_URL, params=self._index_params(1))
         rs = payload.get("result_size")
         if isinstance(rs, int):
@@ -176,9 +159,16 @@ class SrealityClient:
         return self.result_size
 
     def iter_index(self) -> Iterator[dict[str, Any]]:
-        """Yield every estate dict from every index page until exhausted."""
+        """Yield every estate dict from every index page until exhausted.
+
+        Each page fetch is paced by the shared limiter when present — index
+        requests are no longer unthrottled, so a district-split walk's extra
+        pages don't flood sreality into a 403 burst.
+        """
         page = 1
         while True:
+            if self._limiter is not None:
+                self._limiter.acquire()
             payload = self._get_json(INDEX_URL, params=self._index_params(page))
             self.pages_fetched += 1
             if self.result_size is None:
