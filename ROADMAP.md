@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 17:35 UTC_
+_Last refreshed: 2026-05-25 19:44 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-25 17:35 UTC_
 **Last 10 commits:**
 
 ```
+51868cd properties Slice 1: property-grain read path + recompute job
 fe2a8ab chore: refresh ROADMAP auto-status block
 4503c8d properties Slice 0: canonical parent table + scraper linkage
 b807918 docs: capture approved multi-portal + dedup design (Shape B)
@@ -25,7 +26,6 @@ b807918 docs: capture approved multi-portal + dedup design (Shape B)
 e48a8eb chore: refresh ROADMAP auto-status block
 ceb7fc3 ci: prefix scraping workflows with "Scraping:" so they group in Actions
 5d4d002 Merge pull request #175 from waiff/claude/brave-knuth-8ICa2
-b7166f8 chore: refresh ROADMAP auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
