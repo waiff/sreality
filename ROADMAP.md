@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 17:09 UTC_
+_Last refreshed: 2026-05-25 17:35 UTC_
 
 **Branch:** `claude/brave-knuth-8ICa2`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-25 17:09 UTC_
 **Last 10 commits:**
 
 ```
+4f80b6b chore: refresh ROADMAP auto-status block
+20f8b52 scraper: back off request volume to recover from sreality anti-bot block
 af4bf9d chore: refresh ROADMAP auto-status block
 309ff2b chore: refresh ROADMAP auto-status block
 0dab683 scraper: fix the district-split regression at the root (crash-proof + paced)
@@ -24,8 +26,6 @@ af4bf9d chore: refresh ROADMAP auto-status block
 00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
 6d1a8ca scraper: district-split big regions so the delisting sweep can run
 e48a8eb chore: refresh ROADMAP auto-status block
-ceb7fc3 ci: prefix scraping workflows with "Scraping:" so they group in Actions
-5d4d002 Merge pull request #175 from waiff/claude/brave-knuth-8ICa2
 ```
 
 <!-- END AUTO-STATUS -->
