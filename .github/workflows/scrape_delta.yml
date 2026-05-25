@@ -47,7 +47,10 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 18
+    # District-splitting the biggest krajs adds per-sub-query index probes, so
+    # a complete walk takes longer than the old region-only walk. The
+    # self-chain re-dispatch keeps cadence steady regardless.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
