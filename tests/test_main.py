@@ -492,6 +492,31 @@ def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
     assert complete is True
 
 
+def test_walk_category_split_no_split_forces_single_walk(patched_db, monkeypatch):
+    """--no-split (split=False) walks the category in a single pass even when
+    it's over SPLIT_THRESHOLD, skips the result-size probe entirely, and never
+    consults the district config. The big single walk falls short of the total
+    so the sweep is (correctly) suppressed."""
+    probe_calls: list[int] = []
+    monkeypatch.setattr(
+        _FakeClient, "probe_result_size",
+        lambda self: probe_calls.append(1),
+        raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 6000, 2: 6000}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
+
+    seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, split=False, **_split_args()
+    )
+    assert len(seen) == 5          # single unfiltered walk, NOT the 12000 split
+    assert probe_calls == []       # probe skipped — no extra request
+    assert complete is False       # 5 << 12000 → sweep suppressed, no false delisting
+
+
 def test_run_full_isolates_a_crashing_category(patched_db, monkeypatch):
     """A category whose walk raises must not crash the whole run — it's logged,
     its sweep skipped, and the remaining categories still walk + finalize."""
@@ -502,6 +527,48 @@ def test_run_full_isolates_a_crashing_category(patched_db, monkeypatch):
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0                          # run completed, did not propagate
     assert patched_db["mark_inactive"] == []  # no sweep on a failed walk
+
+
+def test_run_full_split_off_still_sweeps_small_categories(patched_db, monkeypatch):
+    """split=False (--no-split) walks every category in a single pass and, for
+    categories small enough to walk whole, still runs mark_inactive — only the
+    too-large-to-walk-whole categories lose the sweep."""
+    probe_calls: list[int] = []
+    monkeypatch.setattr(
+        _FakeClient, "probe_result_size",
+        lambda self: probe_calls.append(1),
+        raising=False,
+    )
+    rc, _agg = scraper_main._run_full(limit=None, dry_run=False, split=False)
+    assert rc == 0
+    assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+    assert probe_calls == []                # no probe requests with split off
+
+
+def test_run_full_http_block_logs_cleanly_without_traceback(
+    patched_db, monkeypatch, caplog
+):
+    """A blocked index walk (HTTP error per category) is isolated, logged as a
+    one-line 'blocked' warning (never a stack trace), and surfaces a single
+    'RUN blocked' summary — without crashing the run or marking anything."""
+    def _blocked(*_a, **_kw):
+        raise requests.HTTPError("404 from sreality")
+
+    monkeypatch.setattr(scraper_main, "_walk_category_split", _blocked)
+    with caplog.at_level("WARNING", logger="scraper"):
+        rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
+
+    assert rc == 0
+    assert patched_db["mark_inactive"] == []   # nothing collected → nothing swept
+    n_cats = len(scraper_main.CATEGORIES)
+    blocked = [r for r in caplog.records if "CATEGORY walk blocked" in r.getMessage()]
+    assert len(blocked) == n_cats
+    summary = [r for r in caplog.records if "RUN blocked" in r.getMessage()]
+    assert len(summary) == 1
+    assert f"categories={n_cats}/{n_cats}" in summary[0].getMessage()
+    # An expected HTTP block is logged via LOG.warning, never LOG.exception, so
+    # no record carries traceback info.
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):

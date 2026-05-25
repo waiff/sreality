@@ -35,9 +35,18 @@ name: "Scraping: Sreality full index walk (primary, ~hourly)"
 # Concurrency: cancel-in-progress=false so a long tick is never killed
 # mid-walk; the next cron tick queues behind it instead of overlapping.
 
+# ANTI-BOT BACKOFF (2026-05-25): sreality started returning HTTP 404 to the
+# GitHub-runner IP — an anti-bot block, almost certainly tripped by the volume
+# spike from district-splitting big categories ~99x on a */15 cron. Until the
+# block clears we are deliberately backed off to the lightest footprint that
+# still probes for recovery: a single (no-split) walk, a slow cron, a gentle
+# request rate, and the self-chain re-dispatch DISABLED. Re-enable the prior
+# settings (drop --no-split, restore */15 + the chain + faster rate) once the
+# index walk returns 200s again — visible as "INDEX page=1 estates=..." lines
+# reappearing in the log (and "RUN blocked" disappearing).
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 */3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -47,9 +56,9 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    # District-splitting the biggest krajs adds per-sub-query index probes, so
-    # a complete walk takes longer than the old region-only walk. The
-    # self-chain re-dispatch keeps cadence steady regardless.
+    # During the anti-bot backoff the walk is single-pass (--no-split) so it's
+    # far shorter than the district-split walk; the generous timeout is kept as
+    # headroom and costs nothing when the run finishes early.
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
@@ -73,18 +82,21 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
         run: |
-          # Full index walk (no --limit) so mark_inactive + gone
-          # detection cover every category each tick. Detail refetches
-          # and images are capped so a tick stays bounded; deferred work
-          # drains on the next tick. Condition scoring is the nightly's
-          # job. Recorded as run_type='delta' (see header).
+          # Full index walk (no --limit) so mark_inactive + gone detection
+          # cover every category. ANTI-BOT BACKOFF (see header): --no-split
+          # forces a single pass per category (no ~99x district fan-out), and
+          # the detail rate/workers/cap are dialled right down to the lightest
+          # footprint while we wait for the block to clear. Big categories that
+          # can't be walked whole simply skip the sweep (completeness guard) —
+          # no false delistings. Recorded as run_type='delta'.
           python -m scraper.main \
             --run-type delta \
+            --no-split \
             --no-condition-scoring \
-            --max-detail-refetches 150 \
-            --max-detail-refetches-per-category 60 \
-            --detail-workers 4 \
-            --detail-rate 2.0 \
+            --max-detail-refetches 50 \
+            --max-detail-refetches-per-category 30 \
+            --detail-workers 2 \
+            --detail-rate 1.0 \
             --max-image-downloads 400 \
             --image-workers 16
 
@@ -96,8 +108,12 @@ jobs:
       # absent. GITHUB_TOKEN cannot re-trigger a workflow (GitHub blocks
       # recursion), so this needs a separate PAT secret SCRAPE_CHAIN_TOKEN
       # (fine-grained: this repo, Actions: read+write). No-op without it.
+      # DISABLED during the anti-bot backoff (if: false). This step exists to
+      # tighten cadence (back-to-back runs) — the opposite of what we want
+      # while letting an IP block decay. Restore `if: ${{ success() }}` once
+      # the block clears.
       - name: Chain next run (optional, tighter cadence)
-        if: ${{ success() }}
+        if: ${{ false }}
         env:
           CHAIN_TOKEN: ${{ secrets.SCRAPE_CHAIN_TOKEN }}
         run: |
