@@ -126,6 +126,14 @@ function Body({ data }: { data: HealthSummary }) {
         />
       </Card>
 
+      <Card label="Count reconciliation · sreality vs us">
+        <ReconciliationPanel
+          rows={scrapeRunsQuery.data}
+          isLoading={scrapeRunsQuery.isLoading}
+          error={scrapeRunsQuery.error}
+        />
+      </Card>
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         <LastScrapeTile lastScrapeAt={data.last_scrape_at} />
         {data.by_category.map((c) => (
@@ -438,6 +446,106 @@ function HealthCheckCard({ check }: { check: ScraperHealthCheck }) {
       <p className="mt-1.5 text-[0.7rem] leading-snug text-[var(--color-ink-3)]">
         {check.detail}
       </p>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Count reconciliation (sreality result_size vs our active count)             */
+/* -------------------------------------------------------------------------- */
+
+function categoryDriftPct(c: ScrapeRunCategory): number {
+  const srs = c.sreality_result_size ?? 0;
+  const act = c.active_db ?? 0;
+  return srs > 0 ? (100 * (act - srs)) / srs : 0;
+}
+
+function ReconciliationPanel({
+  rows,
+  isLoading,
+  error,
+}: {
+  rows: ScrapeRun[] | undefined;
+  isLoading: boolean;
+  error: Error | null;
+}) {
+  if (error) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        recent_scrape_runs failed: {error.message}
+      </p>
+    );
+  }
+  if (isLoading && !rows) {
+    return <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>;
+  }
+  const run = (rows ?? []).find((r) =>
+    r.by_category?.some(
+      (c) => c.sreality_result_size != null && c.active_db != null,
+    ),
+  );
+  if (!run) {
+    return (
+      <p className="text-sm text-[var(--color-ink-3)]">
+        Awaiting data — populates after the next scrape on the region-split scraper.
+      </p>
+    );
+  }
+  const cats = run.by_category
+    .filter((c) => c.sreality_result_size != null && c.active_db != null)
+    .sort((a, b) => Math.abs(categoryDriftPct(b)) - Math.abs(categoryDriftPct(a)));
+
+  return (
+    <div>
+      <p className="mb-2 text-xs text-[var(--color-ink-3)]">
+        Latest run {fmtRelative(run.started_at)} · sreality&rsquo;s reported total
+        vs our active count, per category. Drift &gt;5% is flagged.
+      </p>
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr className="text-left text-[0.7rem] uppercase tracking-wide text-[var(--color-ink-3)]">
+            <th className="py-1 px-1.5">Category</th>
+            <th className="py-1 px-1.5 text-right">sreality</th>
+            <th className="py-1 px-1.5 text-right">we have</th>
+            <th className="py-1 px-1.5 text-right">drift</th>
+          </tr>
+        </thead>
+        <tbody>
+          {cats.map((c) => {
+            const drift = categoryDriftPct(c);
+            const adrift = Math.abs(drift);
+            const color =
+              adrift < 2
+                ? 'var(--color-sage)'
+                : adrift < 5
+                  ? 'var(--color-ochre)'
+                  : 'var(--color-brick)';
+            return (
+              <tr
+                key={`${c.category_main}-${c.category_type}`}
+                className="border-t border-[var(--color-rule-soft)]"
+              >
+                <td className="py-1 px-1.5 text-[var(--color-ink-2)]">
+                  {categoryPairLabel(c.category_main, c.category_type)}
+                </td>
+                <td className="py-1 px-1.5 text-right font-mono tabular-nums">
+                  {fmtCount(c.sreality_result_size ?? 0)}
+                </td>
+                <td className="py-1 px-1.5 text-right font-mono tabular-nums">
+                  {fmtCount(c.active_db ?? 0)}
+                </td>
+                <td
+                  className="py-1 px-1.5 text-right font-mono tabular-nums"
+                  style={{ color }}
+                >
+                  {drift > 0 ? '+' : ''}
+                  {drift.toFixed(1)}%
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

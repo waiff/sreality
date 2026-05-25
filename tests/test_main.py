@@ -22,7 +22,12 @@ class _FakeClient:
     that mark_inactive is scoped correctly."""
 
     pages_fetched = 1
-    result_size = None  # overridden in completeness-guard tests
+    result_size = None  # unfiltered total reported by probe_result_size
+    # Region-split simulation (opt-in): when result_size > SPLIT_THRESHOLD a
+    # region client is built per kraj; these map region_id -> reported total
+    # and (optionally) -> collected count (defaults to the reported total).
+    region_result_size: dict[int, int] = {}
+    region_collected: dict[int, int] = {}
 
     def __init__(
         self,
@@ -30,18 +35,41 @@ class _FakeClient:
         category_type: int,
         country_id: int = 10001,
         limiter: object | None = None,
+        locality_region_id: int | None = None,
     ) -> None:
         self.category_main = category_main
         self.category_type = category_type
         self.country_id = country_id
         self.limiter = limiter
+        self.locality_region_id = locality_region_id
+        if locality_region_id is not None:
+            self.result_size = _FakeClient.region_result_size.get(
+                locality_region_id, 0
+            )
+        else:
+            self.result_size = _FakeClient.result_size
+
+    def probe_result_size(self):
+        return self.result_size
 
     def iter_index(self):
+        if self.locality_region_id is not None:
+            n = _FakeClient.region_collected.get(
+                self.locality_region_id,
+                _FakeClient.region_result_size.get(self.locality_region_id, 0),
+            )
+            base = (
+                self.category_main * 1_000_000
+                + self.category_type * 100_000
+                + self.locality_region_id * 1_000
+            )
+            for i in range(n):
+                yield {"hash_id": base + i, "price_czk": {"value_raw": 1}}
+            return
         # Distinct id range per (cm, ct) so the per-category seen_ids
         # set is observable in mark_inactive call args.
         base = self.category_main * 10000 + self.category_type * 1000
-        total = _FakeClient.total_entries
-        for i in range(total):
+        for i in range(_FakeClient.total_entries):
             yield {
                 "hash_id": base + i,
                 "price_czk": {"value_raw": 10000 + i},
@@ -81,6 +109,9 @@ def patched_db(monkeypatch):
         lambda _conn, cm, ct, ids: (
             calls["mark_inactive"].append((cm, ct, set(ids))) or 0
         ),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "active_count", lambda _conn, _cm, _ct: 0,
     )
     # The pooled walk calls _fetch_detail (worker) then _write_result
     # (main thread); stub both so _run_full exercises planning + the pool
@@ -351,3 +382,76 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
     assert writes["gone"] == [11]
     assert writes["fail"] == [13]
     assert budget[0] == 6          # 10 - 4 processed
+
+
+# --- region-split walk (_walk_category_split) ------------------------------
+
+
+def _split_args(conn=None):
+    return dict(
+        limiter=None,
+        conn=conn if conn is not None else object(),
+        cat_limit=None,
+        dry_run=False,
+        refetch_budget=[None],
+        cat_refetch_cap=None,
+        detail_workers=2,
+    )
+
+
+def test_walk_category_split_unions_regions(patched_db, monkeypatch):
+    """A category over SPLIT_THRESHOLD is walked per region; the union of
+    region seen_ids and the summed result_size feed mark_inactive."""
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_result_size", {1: 3, 2: 2}, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_collected", {}, raising=False)
+
+    seen, counts, rs, pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert len(seen) == 5          # 3 (region 1) + 2 (region 2), disjoint ids
+    assert rs == 5                 # summed per-region result_size (others 0)
+    assert complete is True
+
+
+def test_walk_category_split_truncated_region_suppresses_inactivation(
+    patched_db, monkeypatch
+):
+    """If any region's own walk is incomplete, the whole category is treated
+    as incomplete so mark_inactive is skipped (no false delisting)."""
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_result_size", {1: 10}, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_collected", {1: 5}, raising=False)
+
+    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert complete is False
+
+
+def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
+    """Below the threshold there's a single unfiltered walk; per-region
+    config is never consulted."""
+    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_result_size", {1: 999}, raising=False)
+
+    seen, _counts, rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert len(seen) == 5          # total_entries, NOT region 1's 999
+    assert rs == 5
+    assert complete is True
+
+
+def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):
+    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
+    monkeypatch.setattr(scraper_main.db, "active_count", lambda _c, _cm, _ct: 42)
+
+    rc, agg = scraper_main._run_full(limit=None, dry_run=False)
+    assert rc == 0
+    cats = agg["by_category"]
+    assert cats
+    for c in cats:
+        assert c["sreality_result_size"] == 5
+        assert c["collected"] == 5
+        assert c["active_db"] == 42

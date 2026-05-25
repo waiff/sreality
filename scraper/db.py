@@ -308,6 +308,26 @@ def index_summary(
         }
 
 
+def active_count(
+    conn: psycopg.Connection,
+    category_main: str,
+    category_type: str,
+) -> int:
+    """Current active-listing count for one (category_main, category_type)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM listings
+            WHERE is_active = true
+              AND category_main = %s
+              AND category_type = %s
+            """,
+            (category_main, category_type),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
 def pending_image_downloads(
     conn: psycopg.Connection,
     max_attempts: int = 5,
