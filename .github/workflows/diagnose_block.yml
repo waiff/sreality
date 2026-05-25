@@ -1,0 +1,66 @@
+name: "Scraping: diagnose sreality IP block (probe)"
+
+# Free, zero-secret diagnostic for the sreality anti-bot block. Each matrix job
+# runs on its own runner VM -> its own Azure egress IP, so one dispatch samples
+# many distinct GitHub IPs at once. Per job it logs the public egress IP and the
+# HTTP status sreality returns for the exact index request the scraper makes
+# (with the scraper's real browser headers), plus a header-less comparison.
+#
+# Read the per-job "::notice::" lines on the run summary:
+#   - distinct ip= across jobs, all sreality=404 -> range/datacenter block; a new
+#     GitHub account or Railway won't help (same cloud ranges), a residential/
+#     mobile proxy is the fix.
+#   - any job sreality=200 -> narrow/per-IP; rotation/waiting helps.
+#   - bare= differing from sreality= -> headers still matter; both 404 -> the
+#     block is purely at the IP layer.
+# Every job should reach ipify (real ip=) confirming the runner has egress.
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: "Number of parallel IP samples (1-30)"
+        default: "8"
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.gen.outputs.list }}
+    steps:
+      - name: Build sample matrix
+        id: gen
+        run: |
+          N="${{ inputs.samples }}"
+          case "$N" in (*[!0-9]*|'') N=8 ;; esac
+          [ "$N" -lt 1 ] && N=8
+          [ "$N" -gt 30 ] && N=30
+          LIST=$(seq 1 "$N" | jq -R 'tonumber' | jq -cs '.')
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "Sampling $N parallel runner IPs."
+
+  probe:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        n: ${{ fromJSON(needs.setup.outputs.list) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe sreality from this runner's IP
+        run: |
+          IP=$(curl -s --max-time 10 https://api.ipify.org || echo "unknown")
+          URL="https://www.sreality.cz/api/cs/v2/estates?category_main_cb=1&category_type_cb=2&locality_country_id=10001&per_page=100&page=1"
+          STATUS=$(curl -s -o /tmp/body -w '%{http_code}' --max-time 20 \
+            -H 'User-Agent: Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36' \
+            -H 'Accept: application/json, text/plain, */*' \
+            -H 'Accept-Language: en,cs;q=0.9' \
+            -H 'Referer: https://www.sreality.cz/hledani/pronajem/byty' \
+            "$URL" || echo "000")
+          BARE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$URL" || echo "000")
+          HEAD=$(head -c 200 /tmp/body | tr '\n\r' '  ')
+          echo "PROBE sample=${{ matrix.n }} ip=$IP sreality=$STATUS bare=$BARE"
+          echo "body: $HEAD"
+          echo "::notice title=IP probe ${{ matrix.n }}::ip=$IP sreality=$STATUS bare=$BARE"
