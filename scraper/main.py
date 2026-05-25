@@ -145,7 +145,6 @@ def main(argv: list[str] | None = None) -> int:
                 max_refetches_per_category=args.max_detail_refetches_per_category,
                 detail_workers=args.detail_workers,
                 detail_rate=args.detail_rate,
-                split=not args.no_split,
             )
 
         if (
@@ -339,20 +338,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--no-split",
-        action="store_true",
-        help=(
-            "disable district-splitting of large categories: walk each "
-            "category in a single pass even when it exceeds SPLIT_THRESHOLD, "
-            "skipping the per-category result-size probe. Cuts request "
-            "volume dramatically (a big category goes from ~99 district "
-            "walks to one) at the cost of leaving the delisting sweep "
-            "disabled for categories too large to walk whole — the "
-            "completeness guard simply skips mark_inactive for them. Use to "
-            "back off when sreality is rate-limiting or blocking the runner."
-        ),
-    )
-    p.add_argument(
         "--no-condition-scoring",
         action="store_true",
         help=(
@@ -471,7 +456,6 @@ def _run_full(
     max_refetches_per_category: int | None = None,
     detail_workers: int = DEFAULT_DETAIL_WORKERS,
     detail_rate: float = DEFAULT_DETAIL_RATE,
-    split: bool = True,
 ) -> tuple[int, dict[str, Any]]:
     """Walk every category in CATEGORIES sequentially.
 
@@ -491,7 +475,6 @@ def _run_full(
     counts = {"new": 0, "updated": 0, "unchanged": 0, "errors": 0}
     total_pages = 0
     total_index = 0
-    blocked_categories = 0
     refetch_budget = [max_refetches] if max_refetches is not None else [None]
     category_aggregates: list[dict[str, Any]] = []
 
@@ -523,7 +506,6 @@ def _run_full(
                         refetch_budget=refetch_budget,
                         cat_refetch_cap=max_refetches_per_category,
                         detail_workers=detail_workers,
-                        split=split,
                     )
                 )
             except Exception as exc:
@@ -531,24 +513,10 @@ def _run_full(
                 # outlasts the retries) must not kill the whole run. Record it
                 # as incomplete — the sweep is skipped (no false delisting) and
                 # the remaining categories still walk and finalize.
-                #
-                # An HTTP error here is almost always sreality refusing the
-                # request (404/403 anti-bot block on the runner IP), not a code
-                # fault, so log it as a one-line warning rather than a stack
-                # trace — a blocked run otherwise spams six tracebacks. Genuine
-                # unexpected errors still get a full LOG.exception.
-                if isinstance(exc, (requests.HTTPError, ListingGoneError)):
-                    blocked_categories += 1
-                    LOG.warning(
-                        "CATEGORY walk blocked cm=%s ct=%s: %s — skipping sweep "
-                        "(sreality refused the request; data left untouched)",
-                        cm_text, ct_text, exc,
-                    )
-                else:
-                    LOG.exception(
-                        "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
-                        cm_text, ct_text, exc,
-                    )
+                LOG.exception(
+                    "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
+                    cm_text, ct_text, exc,
+                )
                 seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
                     set(), {}, None, 0, False,
                 )
@@ -642,15 +610,6 @@ def _run_full(
         if conn is not None:
             conn.close()
 
-    if blocked_categories:
-        LOG.warning(
-            "RUN blocked categories=%d/%d: sreality refused the index walk "
-            "(likely anti-bot IP block on the runner); nothing collected for "
-            "those categories and nothing marked inactive. Recovery shows as "
-            "'INDEX page=1 estates=...' lines reappearing on a later run.",
-            blocked_categories, len(CATEGORIES),
-        )
-
     LOG.info(
         "RUN done pages=%d new=%d updated=%d unchanged=%d gone=%d errors=%d",
         total_pages,
@@ -702,7 +661,6 @@ def _walk_category_split(
     refetch_budget: list[int | None],
     cat_refetch_cap: int | None,
     detail_workers: int,
-    split: bool = True,
 ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
     """Walk one category, splitting large ones by district (okres).
 
@@ -724,20 +682,16 @@ def _walk_category_split(
     ct_text = parser.CATEGORY_TYPE[category_type]
 
     # --limit runs are partial by definition and never mark_inactive, so
-    # there's no reason to split them. --no-split (split=False) forces a
-    # single walk too, and skips the probe entirely — with no split decision
-    # to make, probing is just an extra request against a possibly-blocked
-    # host (client.result_size still latches from page 1 during the walk, so
-    # completeness checking is unaffected).
+    # there's no reason to split them.
     result_size: int | None = None
-    if cat_limit is None and split:
+    if cat_limit is None:
         probe = _build_client(category_main, category_type, limiter=limiter)
         try:
             result_size = probe.probe_result_size()
         except Exception as exc:
             LOG.warning("PROBE failed cm=%s ct=%s: %s", cm_text, ct_text, exc)
 
-    if not split or cat_limit is not None or result_size is None or result_size <= SPLIT_THRESHOLD:
+    if cat_limit is not None or result_size is None or result_size <= SPLIT_THRESHOLD:
         client = _build_client(category_main, category_type, limiter=limiter)
         seen, counts = _walk_category(
             client, conn, cat_limit, dry_run, refetch_budget,
