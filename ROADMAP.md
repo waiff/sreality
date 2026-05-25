@@ -5,17 +5,19 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 11:06 UTC_
+_Last refreshed: 2026-05-25 15:16 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 95 files, latest `090_health_checks_index_walks_only.sql`.
+**Migrations on disk:** 97 files, latest `092_properties_backfill.sql`.
 
 **Last 10 commits:**
 
 ```
+4503c8d properties Slice 0: canonical parent table + scraper linkage
+b807918 docs: capture approved multi-portal + dedup design (Shape B)
 1276679 chore: refresh ROADMAP auto-status block
 00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
 6d1a8ca scraper: district-split big regions so the delisting sweep can run
@@ -24,8 +26,6 @@ ceb7fc3 ci: prefix scraping workflows with "Scraping:" so they group in Actions
 5d4d002 Merge pull request #175 from waiff/claude/brave-knuth-8ICa2
 b7166f8 chore: refresh ROADMAP auto-status block
 8ffc13d Merge pull request #174 from waiff/claude/brave-knuth-8ICa2
-f223990 chore: refresh ROADMAP auto-status block
-b2a92a7 scrape cadence: document the GitHub-throttling reality + optional chaining
 ```
 
 <!-- END AUTO-STATUS -->
