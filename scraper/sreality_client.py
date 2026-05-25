@@ -49,6 +49,33 @@ RETRYABLE_STATUS: frozenset[int] = frozenset(
 REGION_IDS: tuple[int, ...] = tuple(range(1, 15))
 SPLIT_THRESHOLD: int = 10000
 
+# Region-split alone still leaves the biggest krajs (Praha, Středočeský,
+# Jihomoravský, Moravskoslezský) above sreality's per-filter pagination
+# window, so a single pass of them lands ~86% and the mark_inactive sweep is
+# skipped. Any region whose own result_size exceeds this is split one level
+# finer — by district (okres) — so each sub-query is small enough to return
+# its COMPLETE set in one pass. REGION_DISTRICTS maps each kraj id to its
+# okres ids (derived from observed locality_region_id/locality_district_id
+# pairs in our own data); Praha (region 10) is addressed both by the
+# city-level code 47 and the per-district 5001..5022 codes.
+REGION_SUB_THRESHOLD: int = 2500
+REGION_DISTRICTS: dict[int, tuple[int, ...]] = {
+    1:  (1, 2, 3, 4, 5, 6, 7),
+    2:  (8, 11, 12, 13, 14, 15, 17),
+    3:  (9, 10, 16),
+    4:  (19, 20, 23, 24, 25, 26, 27),
+    5:  (18, 21, 22, 34),
+    6:  (28, 30, 31, 33, 36),
+    7:  (29, 32, 35, 37),
+    8:  (40, 42, 43, 44, 46),
+    9:  (38, 39, 41, 45),
+    10: (47, *range(5001, 5023)),
+    11: (48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59),
+    12: (60, 61, 62, 63, 64, 65),
+    13: (66, 67, 68, 69, 70),
+    14: (71, 72, 73, 74, 75, 76, 77),
+}
+
 # Statuses that mean "this listing no longer exists" rather than a
 # transient or unexpected error. Mirrors scraper.freshness.GONE_STATUSES.
 GONE_STATUSES: frozenset[int] = frozenset({404, 410})
@@ -92,14 +119,17 @@ class SrealityClient:
         max_retries: int = 3,
         limiter: "RateLimiter | None" = None,
         locality_region_id: int | None = None,
+        locality_district_id: int | None = None,
     ) -> None:
         self.category_main = category_main
         self.category_type = category_type
         self.country_id = country_id
         # When set, the index walk is restricted to one kraj — used to walk
         # large categories region-by-region so each sub-query stays under
-        # sreality's deep-pagination cap.
+        # sreality's deep-pagination cap. locality_district_id narrows one
+        # level further (okres) for regions that are still too big.
         self.locality_region_id = locality_region_id
+        self.locality_district_id = locality_district_id
         self.per_page = per_page
         self.detail_delay_s = detail_delay_s
         self.timeout_s = timeout_s
@@ -129,6 +159,8 @@ class SrealityClient:
         }
         if self.locality_region_id is not None:
             params["locality_region_id"] = self.locality_region_id
+        if self.locality_district_id is not None:
+            params["locality_district_id"] = self.locality_district_id
         return params
 
     def probe_result_size(self) -> int | None:

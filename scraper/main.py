@@ -43,7 +43,9 @@ from scraper import db, hashing, image_storage, parser
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import (
     GONE_STATUSES,
+    REGION_DISTRICTS,
     REGION_IDS,
+    REGION_SUB_THRESHOLD,
     SPLIT_THRESHOLD,
     ListingGoneError,
     SrealityClient,
@@ -377,6 +379,7 @@ def _build_client(
     category_type: int,
     limiter: RateLimiter | None = None,
     locality_region_id: int | None = None,
+    locality_district_id: int | None = None,
 ) -> SrealityClient:
     return SrealityClient(
         category_main=category_main,
@@ -384,6 +387,7 @@ def _build_client(
         country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 10001)),
         limiter=limiter,
         locality_region_id=locality_region_id,
+        locality_district_id=locality_district_id,
     )
 
 
@@ -631,6 +635,110 @@ def _walk_complete(collected: int, result_size: int | None) -> bool:
 _REFETCH_OUTCOMES = ("new", "updated", "unchanged", "gone", "errors")
 
 
+def _walk_region(
+    category_main: int,
+    category_type: int,
+    region: int,
+    *,
+    limiter: RateLimiter | None,
+    conn: Any,
+    dry_run: bool,
+    refetch_budget: list[int | None],
+    region_cap: int | None,
+    detail_workers: int,
+) -> tuple[set[int], dict[str, int], int, int, bool]:
+    """Walk one region of a category, splitting it by district (okres) when
+    the region itself is still too big for a single complete pass.
+
+    Returns (seen_ids, counts, result_size, pages_fetched, complete). For a
+    district-split region `complete` requires EVERY district's own walk to be
+    complete AND the summed district sizes to cover the region probe (so a
+    district missing from REGION_DISTRICTS can't masquerade as complete). The
+    returned result_size is the summed district size (the finer, truer total)
+    when split, else the region's own reported total.
+    """
+    cm_text = parser.CATEGORY_MAIN[category_main]
+    ct_text = parser.CATEGORY_TYPE[category_type]
+
+    probe = _build_client(
+        category_main, category_type, limiter=limiter, locality_region_id=region,
+    )
+    try:
+        region_rs = probe.probe_result_size()
+    except Exception as exc:
+        LOG.warning(
+            "PROBE region failed cm=%s ct=%s region=%d: %s",
+            cm_text, ct_text, region, exc,
+        )
+        region_rs = None
+    pages = probe.pages_fetched
+    districts = REGION_DISTRICTS.get(region, ())
+
+    if region_rs is None or region_rs <= REGION_SUB_THRESHOLD or not districts:
+        client = _build_client(
+            category_main, category_type, limiter=limiter,
+            locality_region_id=region,
+        )
+        seen, counts = _walk_category(
+            client, conn, None, dry_run, refetch_budget,
+            region_cap, detail_workers,
+        )
+        rrs = client.result_size if client.result_size is not None else region_rs
+        pages += client.pages_fetched
+        complete = rrs is not None and len(seen) >= rrs * INDEX_MIN_COMPLETENESS
+        if not complete:
+            LOG.warning(
+                "SPLIT region incomplete cm=%s ct=%s region=%d collected=%d result_size=%s",
+                cm_text, ct_text, region, len(seen), rrs,
+            )
+        return seen, counts, (rrs or 0), pages, complete
+
+    LOG.info(
+        "SPLIT region->districts cm=%s ct=%s region=%d result_size=%d > %d: walking %d districts",
+        cm_text, ct_text, region, region_rs, REGION_SUB_THRESHOLD, len(districts),
+    )
+    union: set[int] = set()
+    counts: dict[str, int] = {}
+    summed_drs = 0
+    all_districts_complete = True
+    refetched = 0
+    for district in districts:
+        district_cap = (
+            None if region_cap is None else max(0, region_cap - refetched)
+        )
+        dclient = _build_client(
+            category_main, category_type, limiter=limiter,
+            locality_region_id=region, locality_district_id=district,
+        )
+        dseen, dcounts = _walk_category(
+            dclient, conn, None, dry_run, refetch_budget,
+            district_cap, detail_workers,
+        )
+        union |= dseen
+        for k, v in dcounts.items():
+            counts[k] = counts.get(k, 0) + v
+        drs = dclient.result_size
+        if drs is not None:
+            summed_drs += drs
+        pages += dclient.pages_fetched
+        refetched += sum(dcounts.get(o, 0) for o in _REFETCH_OUTCOMES)
+        if drs is None or len(dseen) < drs * INDEX_MIN_COMPLETENESS:
+            all_districts_complete = False
+            LOG.warning(
+                "SPLIT district incomplete cm=%s ct=%s region=%d district=%d collected=%d result_size=%s",
+                cm_text, ct_text, region, district, len(dseen), drs,
+            )
+    no_missing_district = summed_drs >= region_rs * INDEX_MIN_COMPLETENESS
+    complete = all_districts_complete and no_missing_district
+    if not complete:
+        LOG.warning(
+            "SPLIT region incomplete cm=%s ct=%s region=%d collected=%d "
+            "summed_district_rs=%d region_rs=%d",
+            cm_text, ct_text, region, len(union), summed_drs, region_rs,
+        )
+    return union, counts, (summed_drs or region_rs), pages, complete
+
+
 def _walk_category_split(
     category_main: int,
     category_type: int,
@@ -643,12 +751,14 @@ def _walk_category_split(
     cat_refetch_cap: int | None,
     detail_workers: int,
 ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
-    """Walk one category, splitting large ones by region (kraj).
+    """Walk one category, splitting large ones by region (kraj) and, for
+    regions still over REGION_SUB_THRESHOLD, one level finer by district.
 
     Sreality caps deep pagination per filter, so a category bigger than
     SPLIT_THRESHOLD can't be retrieved whole in one walk. We probe its total
-    and, if over the threshold, walk each region separately and union the
-    results — every region is well under the cap, so the union is complete.
+    and, if over the threshold, walk each region separately (`_walk_region`,
+    which district-splits the biggest krajs) and union the results — every
+    sub-query is well under the cap, so the union is complete.
 
     Returns (seen_ids, counts, result_size, pages_fetched, complete) where
     `complete` is True only when the walk covered enough of the category to
@@ -695,28 +805,20 @@ def _walk_category_split(
             None if cat_refetch_cap is None
             else max(0, cat_refetch_cap - cat_refetched)
         )
-        rclient = _build_client(
-            category_main, category_type, limiter=limiter,
-            locality_region_id=region,
-        )
-        rseen, rcounts = _walk_category(
-            rclient, conn, None, dry_run, refetch_budget,
-            region_cap, detail_workers,
+        rseen, rcounts, rrs, rpages, rcomplete = _walk_region(
+            category_main, category_type, region,
+            limiter=limiter, conn=conn, dry_run=dry_run,
+            refetch_budget=refetch_budget, region_cap=region_cap,
+            detail_workers=detail_workers,
         )
         union |= rseen
         for k, v in rcounts.items():
             counts[k] = counts.get(k, 0) + v
-        rrs = rclient.result_size
-        if rrs is not None:
-            summed_rs += rrs
-        pages += rclient.pages_fetched
+        summed_rs += rrs
+        pages += rpages
         cat_refetched += sum(rcounts.get(o, 0) for o in _REFETCH_OUTCOMES)
-        if rrs is None or len(rseen) < rrs * INDEX_MIN_COMPLETENESS:
+        if not rcomplete:
             all_regions_complete = False
-            LOG.warning(
-                "SPLIT region incomplete cm=%s ct=%s region=%d collected=%d result_size=%s",
-                cm_text, ct_text, region, len(rseen), rrs,
-            )
     complete = all_regions_complete and _walk_complete(len(union), summed_rs)
     return union, counts, summed_rs, pages, complete
 

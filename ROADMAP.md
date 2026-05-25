@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 07:20 UTC_
+_Last refreshed: 2026-05-25 07:43 UTC_
 
 **Branch:** `claude/brave-knuth-8ICa2`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-25 07:20 UTC_
 **Last 10 commits:**
 
 ```
+b7166f8 chore: refresh ROADMAP auto-status block
 f223990 chore: refresh ROADMAP auto-status block
 b2a92a7 scrape cadence: document the GitHub-throttling reality + optional chaining
 7cf32a1 images: stop expired-CDN 404s from blocking the backfill
@@ -25,7 +26,6 @@ c18831b chore: refresh ROADMAP auto-status block
 beaae7d scraper: region-split large categories + count reconciliation
 ec7a835 Merge pull request #172 from waiff/claude/brave-knuth-8ICa2
 5f1946d chore: refresh ROADMAP auto-status block
-2e519bf chore: refresh ROADMAP auto-status block
 ```
 
 <!-- END AUTO-STATUS -->

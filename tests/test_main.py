@@ -28,6 +28,11 @@ class _FakeClient:
     # and (optionally) -> collected count (defaults to the reported total).
     region_result_size: dict[int, int] = {}
     region_collected: dict[int, int] = {}
+    # District-split simulation (opt-in): when a region's result_size exceeds
+    # REGION_SUB_THRESHOLD it's walked per district; these map
+    # (region_id, district_id) -> reported total and -> collected count.
+    district_result_size: dict[tuple[int, int], int] = {}
+    district_collected: dict[tuple[int, int], int] = {}
 
     def __init__(
         self,
@@ -36,13 +41,19 @@ class _FakeClient:
         country_id: int = 10001,
         limiter: object | None = None,
         locality_region_id: int | None = None,
+        locality_district_id: int | None = None,
     ) -> None:
         self.category_main = category_main
         self.category_type = category_type
         self.country_id = country_id
         self.limiter = limiter
         self.locality_region_id = locality_region_id
-        if locality_region_id is not None:
+        self.locality_district_id = locality_district_id
+        if locality_district_id is not None:
+            self.result_size = _FakeClient.district_result_size.get(
+                (locality_region_id, locality_district_id), 0
+            )
+        elif locality_region_id is not None:
             self.result_size = _FakeClient.region_result_size.get(
                 locality_region_id, 0
             )
@@ -53,6 +64,19 @@ class _FakeClient:
         return self.result_size
 
     def iter_index(self):
+        if self.locality_district_id is not None:
+            key = (self.locality_region_id, self.locality_district_id)
+            n = _FakeClient.district_collected.get(
+                key, _FakeClient.district_result_size.get(key, 0)
+            )
+            base = (
+                self.category_main * 10**10
+                + self.category_type * 10**9
+                + self.locality_district_id * 10**5
+            )
+            for i in range(n):
+                yield {"hash_id": base + i, "price_czk": {"value_raw": 1}}
+            return
         if self.locality_region_id is not None:
             n = _FakeClient.region_collected.get(
                 self.locality_region_id,
@@ -441,6 +465,69 @@ def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
     assert len(seen) == 5          # total_entries, NOT region 1's 999
     assert rs == 5
     assert complete is True
+
+
+def test_walk_region_district_split_completes_big_region(patched_db, monkeypatch):
+    """A region over REGION_SUB_THRESHOLD is walked per district; when every
+    district's own walk is complete and they sum to the region total, the
+    region (and category) is complete so mark_inactive can run."""
+    # REGION_DISTRICTS[3] == (9, 10, 16)
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_result_size", {3: 3000}, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size",
+        {(3, 9): 1000, (3, 10): 1000, (3, 16): 1000}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
+
+    seen, _counts, rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert len(seen) == 3000        # union of the three districts
+    assert rs == 3000               # summed district result_size
+    assert complete is True
+
+
+def test_walk_region_district_incomplete_suppresses_inactivation(
+    patched_db, monkeypatch
+):
+    """If a single district's own walk is truncated, the whole category is
+    treated as incomplete (no false delisting)."""
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_result_size", {3: 3000}, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size",
+        {(3, 9): 1000, (3, 10): 1000, (3, 16): 1000}, raising=False,
+    )
+    monkeypatch.setattr(
+        _FakeClient, "district_collected", {(3, 9): 500}, raising=False,
+    )
+
+    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert complete is False
+
+
+def test_walk_region_missing_district_suppresses_inactivation(
+    patched_db, monkeypatch
+):
+    """If the districts we walk don't sum up to the region's reported total
+    (a district missing from REGION_DISTRICTS), the region is incomplete so
+    mark_inactive is skipped — guards against false mass-delisting."""
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(_FakeClient, "region_result_size", {3: 3000}, raising=False)
+    # Each district fully collected, but they only sum to 2400 << 3000.
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size",
+        {(3, 9): 800, (3, 10): 800, (3, 16): 800}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
+
+    _seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert complete is False
 
 
 def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):

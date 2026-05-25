@@ -1,4 +1,4 @@
-name: Sreality image backlog drain
+name: "Scraping: Sreality image backlog drain"
 
 # Backfill workflow that runs only the image-download phase every 2
 # hours. Pairs with scrape.yml (which now also drains to empty after
