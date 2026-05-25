@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 13:24 UTC_
+_Last refreshed: 2026-05-25 15:39 UTC_
 
 **Branch:** `claude/brave-knuth-8ICa2`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-25 13:24 UTC_
 **Last 10 commits:**
 
 ```
+309ff2b chore: refresh ROADMAP auto-status block
 0dab683 scraper: fix the district-split regression at the root (crash-proof + paced)
 1efb830 Merge pull request #177 from waiff/claude/eloquent-heisenberg-gXR9k
 1276679 chore: refresh ROADMAP auto-status block
@@ -25,7 +26,6 @@ e48a8eb chore: refresh ROADMAP auto-status block
 ceb7fc3 ci: prefix scraping workflows with "Scraping:" so they group in Actions
 5d4d002 Merge pull request #175 from waiff/claude/brave-knuth-8ICa2
 b7166f8 chore: refresh ROADMAP auto-status block
-8ffc13d Merge pull request #174 from waiff/claude/brave-knuth-8ICa2
 ```
 
 <!-- END AUTO-STATUS -->
