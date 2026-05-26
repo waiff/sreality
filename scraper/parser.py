@@ -1,9 +1,12 @@
 """Map a Sreality v1 detail JSON response to a row dict matching the schema.
 
-The detail endpoint (`/api/v1/estates/{id}`) returns a single estate object
-whose structured `params` block holds the typed attributes, with `locality`
-for geo and `images` for the gallery. Enum fields arrive as `{name, value}`
-objects; sreality uses `value == 0` for "not specified", treated as None.
+The detail endpoint (`/api/v1/estates/{id}`) returns a wrapped estate object
+(`{result, status_code, status_message}`, unwrapped by the client). The estate
+is flat snake_case: typed attributes sit at the top level (`usable_area`,
+`floor_number`, `building_condition`, …), `locality` holds geo, and
+`advert_images` is the gallery. Enum fields arrive as `{name, value}` objects;
+sreality uses `value == 0` for "not specified", treated as None. The id field
+is `hash_id`.
 """
 
 from __future__ import annotations
@@ -148,55 +151,58 @@ _BUILDING_TYPE_TEXT: dict[str, str] = {
 
 
 def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
-    sreality_id = _int_or_none(raw.get("id"))
+    sreality_id = _int_or_none(raw.get("hash_id"))
+    if sreality_id is None:
+        sreality_id = _int_or_none(raw.get("id"))
     if sreality_id is None:
         raise ValueError("could not determine sreality_id from response")
 
-    params = raw.get("params") or {}
     loc = raw.get("locality") or {}
 
     return {
         "sreality_id": sreality_id,
-        "category_main": CATEGORY_MAIN.get(_cb_value(raw.get("categoryMainCb"))),
-        "category_type": CATEGORY_TYPE.get(_cb_value(raw.get("categoryTypeCb"))),
+        "category_main": CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb"))),
+        "category_type": CATEGORY_TYPE.get(_cb_value(raw.get("category_type_cb"))),
         "price_czk": _price_czk(raw),
         "price_unit": _price_unit(raw),
-        "area_m2": _numeric_or_none(params.get("usableArea")),
+        "area_m2": _numeric_or_none(raw.get("usable_area")),
         "disposition": _disposition(raw),
         "locality": _locality_value(loc),
         "district": _district(loc),
-        "locality_district_id": _id_or_none(loc.get("districtId")),
-        "locality_region_id": _id_or_none(loc.get("regionId")),
-        "locality_municipality_id": _id_or_none(loc.get("municipalityId")),
-        "locality_quarter_id": _id_or_none(loc.get("quarterId")),
-        "locality_ward_id": _id_or_none(loc.get("wardId")),
-        "lon": _coord(loc.get("longitude")),
-        "lat": _coord(loc.get("latitude")),
-        "floor": _int_or_none(params.get("floorNumber")),
-        "total_floors": _int_or_none(params.get("floors")),
-        "has_balcony": _has_balcony(params),
-        "has_parking": _has_parking(params),
-        "has_lift": _elevator(params.get("elevator")),
-        "building_type": _building_type(params.get("buildingType")),
-        "condition": _condition(params.get("buildingCondition")),
-        "energy_rating": _energy_rating(params.get("energyEfficiencyRating")),
-        "estate_area": _numeric_or_none(params.get("estateArea")),
-        "usable_area": _numeric_or_none(params.get("usableArea")),
-        "garden_area": _numeric_or_none(params.get("gardenArea")),
-        "category_sub_cb": _cb_value(raw.get("categorySubCb")),
-        "furnished": FURNISHED.get(_cb_value(params.get("furnished"))),
-        "terrace": _bool_or_none(params.get("terrace")),
-        "cellar": _bool_or_none(params.get("cellar")),
-        "garage": _bool_or_none(params.get("garage")),
-        "parking_lots": _int_or_none(params.get("parking")),
-        "ownership": OWNERSHIP.get(_cb_value(params.get("ownership"))),
+        "locality_district_id": _id_or_none(loc.get("district_id")),
+        "locality_region_id": _id_or_none(loc.get("region_id")),
+        "locality_municipality_id": _id_or_none(loc.get("municipality_id")),
+        "locality_quarter_id": _id_or_none(loc.get("quarter_id")),
+        "locality_ward_id": _id_or_none(loc.get("ward_id")),
+        "lon": _coord(loc.get("gps_lon")),
+        "lat": _coord(loc.get("gps_lat")),
+        "floor": _int_or_none(raw.get("floor_number")),
+        "total_floors": _int_or_none(raw.get("floors")),
+        "has_balcony": _has_balcony(raw),
+        "has_parking": _has_parking(raw),
+        "has_lift": _elevator(raw.get("elevator")),
+        "building_type": _building_type(raw.get("building_type")),
+        "condition": _condition(raw.get("building_condition")),
+        "energy_rating": _energy_rating(raw.get("energy_efficiency_rating_cb")),
+        "estate_area": _numeric_or_none(raw.get("estate_area")),
+        "usable_area": _numeric_or_none(raw.get("usable_area")),
+        "garden_area": _numeric_or_none(raw.get("garden_area")),
+        "category_sub_cb": _cb_value(raw.get("category_sub_cb")),
+        "furnished": FURNISHED.get(_cb_value(raw.get("furnished"))),
+        "terrace": _bool_or_none(raw.get("terrace")),
+        "cellar": _bool_or_none(raw.get("cellar")),
+        "garage": _bool_or_none(raw.get("garage")),
+        "parking_lots": _int_or_none(raw.get("parking")),
+        "ownership": OWNERSHIP.get(_cb_value(raw.get("ownership"))),
         "description": _description(raw),
     }
 
 
 def parse_images(raw: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for img in raw.get("images") or []:
+    for img in raw.get("advert_images") or []:
+        if not isinstance(img, dict):
+            continue
         url = img.get("url")
         if not isinstance(url, str) or not url:
             continue
@@ -220,7 +226,7 @@ def _coord(value: Any) -> float | None:
 
 
 def _price_czk(raw: dict[str, Any]) -> int | None:
-    for key in ("priceSummaryCzk", "priceCzk"):
+    for key in ("price_summary_czk", "price_czk"):
         v = raw.get(key)
         if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
             return int(v)
@@ -228,7 +234,7 @@ def _price_czk(raw: dict[str, Any]) -> int | None:
 
 
 def _price_unit(raw: dict[str, Any]) -> str | None:
-    for key in ("priceSummaryUnitCb", "priceUnitCb"):
+    for key in ("price_summary_unit_cb", "price_unit_cb"):
         obj = raw.get(key)
         if isinstance(obj, dict):
             name = obj.get("name")
@@ -243,8 +249,8 @@ def _price_unit(raw: dict[str, Any]) -> str | None:
 
 def _disposition(raw: dict[str, Any]) -> str | None:
     for source in (
-        (raw.get("categorySubCb") or {}).get("name"),
-        raw.get("name"),
+        (raw.get("category_sub_cb") or {}).get("name"),
+        raw.get("advert_name"),
     ):
         if isinstance(source, str):
             match = _DISPOSITION_RE.search(source)
@@ -254,7 +260,7 @@ def _disposition(raw: dict[str, Any]) -> str | None:
 
 
 def _locality_value(loc: dict[str, Any]) -> str | None:
-    parts = [p for p in (loc.get("city"), loc.get("cityPart")) if isinstance(p, str) and p]
+    parts = [p for p in (loc.get("city"), loc.get("citypart")) if isinstance(p, str) and p]
     if not parts:
         return None
     if len(parts) == 2 and parts[0] == parts[1]:
@@ -263,7 +269,7 @@ def _locality_value(loc: dict[str, Any]) -> str | None:
 
 
 def _district(loc: dict[str, Any]) -> str | None:
-    did = _int_or_none(loc.get("districtId"))
+    did = _int_or_none(loc.get("district_id"))
     if did is not None:
         label = DISTRICTS.get(did)
         if label:
@@ -273,27 +279,25 @@ def _district(loc: dict[str, Any]) -> str | None:
 
 
 def _description(raw: dict[str, Any]) -> str | None:
-    val = raw.get("description")
+    val = raw.get("advert_description")
     if not isinstance(val, str):
         return None
     val = val.strip()
     return val or None
 
 
-def _has_balcony(params: dict[str, Any]) -> bool | None:
-    for key in ("balcony", "terrace", "loggia"):
-        if params.get(key):
-            return True
-    return False if params else None
+def _has_balcony(raw: dict[str, Any]) -> bool | None:
+    vals = [raw.get(k) for k in ("balcony", "terrace", "loggia")]
+    if all(v is None for v in vals):
+        return None
+    return any(bool(v) for v in vals)
 
 
-def _has_parking(params: dict[str, Any]) -> bool | None:
-    if params.get("parkingLots") or params.get("garage"):
-        return True
-    p = params.get("parking")
-    if isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0:
-        return True
-    return False if params else None
+def _has_parking(raw: dict[str, Any]) -> bool | None:
+    vals = [raw.get(k) for k in ("parking_lots", "garage", "parking")]
+    if all(v is None for v in vals):
+        return None
+    return any(bool(v) for v in vals)
 
 
 def _elevator(obj: Any) -> bool | None:

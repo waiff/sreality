@@ -26,7 +26,7 @@ def test_hash_is_stable(sample):
 def test_hash_unchanged_when_view_counter_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)
-    mutated["params"]["stats"] = (mutated["params"].get("stats") or 0) + 123
+    mutated["stats"] = {"views": 999, "anything": True}
     assert content_hash(mutated) == base
 
 
@@ -35,20 +35,20 @@ def test_hash_unchanged_when_session_state_changes(sample):
     mutated = copy.deepcopy(sample)
     mutated["note"] = "a personal note"
     mutated["rus"] = {"anything": True}
-    mutated["rusReply"] = "x"
+    mutated["rus_reply"] = "x"
     assert content_hash(mutated) == base
 
 
 def test_hash_changes_when_price_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)
-    mutated["priceCzk"] = 18000
-    mutated["priceSummaryCzk"] = 18000
+    mutated["price_czk"] = 18000
+    mutated["price_summary_czk"] = 18000
     assert content_hash(mutated) != base
 
 
 def test_hash_changes_when_a_real_attribute_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)
-    mutated["params"]["buildingCondition"] = {"name": "Po rekonstrukci", "value": 4}
+    mutated["building_condition"] = {"name": "Po rekonstrukci", "value": 4}
     assert content_hash(mutated) != base

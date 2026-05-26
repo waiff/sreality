@@ -1367,16 +1367,17 @@ def _pending_condition_scores(conn: Any, *, limit: int) -> list[int]:
 
 
 def _extract_id(estate: dict[str, Any]) -> int | None:
-    eid = estate.get("id")
-    if isinstance(eid, int) and not isinstance(eid, bool):
-        return eid
-    if isinstance(eid, str) and eid.isdigit():
-        return int(eid)
+    for key in ("hash_id", "id"):
+        eid = estate.get(key)
+        if isinstance(eid, int) and not isinstance(eid, bool):
+            return eid
+        if isinstance(eid, str) and eid.isdigit():
+            return int(eid)
     return None
 
 
 def _extract_price(estate: dict[str, Any]) -> int | None:
-    for key in ("priceCzk", "priceSummaryCzk"):
+    for key in ("price_czk", "price_summary_czk"):
         p = estate.get(key)
         if isinstance(p, (int, float)) and not isinstance(p, bool):
             return int(p)
