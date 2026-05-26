@@ -875,6 +875,12 @@ export interface WatchdogFilterSpec {
   // `>= N` semantics as the Browse filter.
   building_condition_level_min: number | null;
   apartment_condition_level_min: number | null;
+  // Multi-portal / price-history aggregates (migrations 091 / 093 / 095).
+  // Property grain; the matcher reads them off properties_public.
+  distinct_site_count_min: number | null;
+  price_drop_count_min: number | null;
+  price_rise_count_min: number | null;
+  max_price_drop_pct_min: number | null;
   // Added with migration 060 / PR 2: backend now honours these,
   // matching the Browse sidebar filter set. The Watchdog form
   // surfaces them in a later PR — until then, API callers can set
@@ -936,6 +942,10 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   min_parking_lots: null,
   building_condition_level_min: null,
   apartment_condition_level_min: null,
+  distinct_site_count_min: null,
+  price_drop_count_min: null,
+  price_rise_count_min: null,
+  max_price_drop_pct_min: null,
   building_material: null,
   min_garden_area: null,
   max_garden_area: null,
@@ -961,6 +971,12 @@ export interface WatchdogDispatch {
   subscription_id: string;
   subscription_name: string;
   sreality_id: number;
+  /* Property grain (Slice 2b). `property_id` is the canonical property;
+   * `change_kind` is why this dispatch fired ('new' = newly matched the
+   * filter, 'price_drop' = a recent price decrease). `sreality_id` is the
+   * property's representative listing (what the feed links to). */
+  property_id: number | null;
+  change_kind: string;
   dispatched_at: string;
   seen_at: string | null;
   estimation_run_id: number | null;

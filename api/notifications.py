@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
@@ -163,6 +164,15 @@ class WatchdogFilterSpec(BaseModel):
     building_condition_level_min: int | None = None
     apartment_condition_level_min: int | None = None
 
+    # Multi-portal / price-history aggregates (migrations 091 / 093 / 095).
+    # Property-grain columns maintained by the recompute job; the matcher
+    # reads them off properties_public. Min-threshold, same `>= N`
+    # semantics as the Browse filter (and registry ids match 1:1).
+    distinct_site_count_min: int | None = None
+    price_drop_count_min: int | None = None
+    price_rise_count_min: int | None = None
+    max_price_drop_pct_min: float | None = None
+
     # Phase QUAL — curated-city quality predicates. Browse + Watchdog
     # only; not exposed to the estimation agent.
     city_index_rules: list[dict[str, Any]] | None = None
@@ -213,10 +223,14 @@ def _build_match_clauses(
         and spec.lng is not None
         and spec.radius_m is not None
     ):
-        where.append("l.geom IS NOT NULL")
+        # properties_public projects lat/lng (ST_Y/ST_X of the geom); it does
+        # not expose the raw geom column, so build the target point from
+        # lat/lng rather than referencing l.geom.
+        where.append("l.lat IS NOT NULL")
+        where.append("l.lng IS NOT NULL")
         where.append(
             "ST_DWithin("
-            "l.geom, "
+            "ST_SetSRID(ST_MakePoint(l.lng, l.lat), 4326)::geography, "
             "ST_SetSRID(ST_MakePoint(%(lng)s, %(lat)s), 4326)::geography, "
             "%(radius_m)s)"
         )
@@ -330,6 +344,21 @@ def _build_match_clauses(
     if spec.apartment_condition_level_min is not None:
         where.append("l.apartment_condition_level >= %(apartment_condition_level_min)s")
         params["apartment_condition_level_min"] = spec.apartment_condition_level_min
+
+    # Property-grain derived aggregates (only meaningful against
+    # properties_public, which the matcher reads). NULL rows excluded by `>=`.
+    if spec.distinct_site_count_min is not None:
+        where.append("l.distinct_site_count >= %(distinct_site_count_min)s")
+        params["distinct_site_count_min"] = spec.distinct_site_count_min
+    if spec.price_drop_count_min is not None:
+        where.append("l.price_drop_count >= %(price_drop_count_min)s")
+        params["price_drop_count_min"] = spec.price_drop_count_min
+    if spec.price_rise_count_min is not None:
+        where.append("l.price_rise_count >= %(price_rise_count_min)s")
+        params["price_rise_count_min"] = spec.price_rise_count_min
+    if spec.max_price_drop_pct_min is not None:
+        where.append("l.max_price_drop_pct >= %(max_price_drop_pct_min)s")
+        params["max_price_drop_pct_min"] = spec.max_price_drop_pct_min
 
     # Phase QUAL — city quality predicates. Delegated to the same helper
     # `_shared_filter_where` calls so Browse and Watchdog stay in lockstep.
@@ -519,7 +548,8 @@ def list_dispatches(
 
     sql = (
         "SELECT d.id, d.subscription_id, s.name AS subscription_name, "
-        "       d.sreality_id, d.dispatched_at, d.seen_at, "
+        "       d.sreality_id, d.property_id, d.change_kind, "
+        "       d.dispatched_at, d.seen_at, "
         "       d.estimation_run_id, "
         "       er.status AS estimation_status, "
         "       er.estimate_kind AS estimation_kind, "
@@ -591,7 +621,8 @@ def _fetch_dispatch(
 ) -> dict[str, Any] | None:
     sql = (
         "SELECT d.id, d.subscription_id, s.name AS subscription_name, "
-        "       d.sreality_id, d.dispatched_at, d.seen_at, "
+        "       d.sreality_id, d.property_id, d.change_kind, "
+        "       d.dispatched_at, d.seen_at, "
         "       d.estimation_run_id, "
         "       er.status AS estimation_status, "
         "       er.estimate_kind AS estimation_kind, "
@@ -939,11 +970,17 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
 
     Cheap to call directly — used by both the lifespan loop and the
     operator-facing "run matcher now" button. Idempotent against the
-    (subscription_id, sreality_id) UNIQUE constraint.
+    (subscription_id, property_id, change_kind) UNIQUE constraint;
+    emits change_kind='new'.
+
+    Property grain (Slice 2b): the matcher walks `properties_public`, so a
+    property listed on several portals fires once, not once per source. The
+    stored sreality_id is the property's representative listing (for the feed
+    + the run-estimation path).
 
     Per-subscription cursor model (migration 065). Each subscription
     has its own `last_matched_first_seen_at`; the matcher considers
-    listings with `first_seen_at > cursor` for that subscription only,
+    properties with `first_seen_at > cursor` for that subscription only,
     then advances the cursor to the max first_seen_at of the evaluated
     window. New watchdogs default the cursor to `now() - 24h` so the
     feed shows immediate backfill matches rather than sitting empty
@@ -987,7 +1024,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT max(first_seen_at), count(*) FROM ("
-                "  SELECT l.first_seen_at FROM listings l "
+                "  SELECT l.first_seen_at FROM properties_public l "
                 f"  WHERE {joined_where} "
                 "  ORDER BY l.first_seen_at ASC "
                 "  LIMIT %(window_size)s"
@@ -1012,11 +1049,13 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO notification_dispatches "
-                "  (subscription_id, sreality_id, status, channel) "
-                "SELECT %(subscription_id)s, l.sreality_id, 'sent', 'in_app' "
-                "FROM listings l "
+                "  (subscription_id, property_id, sreality_id, "
+                "   change_kind, status, channel) "
+                "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
+                "       'new', 'sent', 'in_app' "
+                "FROM properties_public l "
                 f"WHERE {' AND '.join(insert_where)} "
-                "ON CONFLICT (subscription_id, sreality_id) DO NOTHING",
+                "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
                 insert_params,
             )
             total_inserted += cur.rowcount or 0
@@ -1043,13 +1082,128 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     }
 
 
+def _recent_price_drop_property_ids(
+    conn: "psycopg.Connection", *, window_days: int,
+) -> list[int]:
+    """Property ids whose combined snapshot history shows a price decrease
+    whose later snapshot landed inside the window.
+
+    The window function runs over the full per-property price series (so the
+    `prev` of an in-window snapshot is correct even if it predates the
+    window), but the candidate set is pre-narrowed to properties touched in
+    the window so the scan stays bounded.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "WITH steps AS ("
+            "  SELECT c.property_id, s.scraped_at, s.price_czk, "
+            "         lag(s.price_czk) OVER w AS prev "
+            "  FROM listing_snapshots s "
+            "  JOIN listings c ON c.sreality_id = s.sreality_id "
+            "  WHERE c.property_id IS NOT NULL AND s.price_czk IS NOT NULL "
+            "    AND c.property_id IN ("
+            "      SELECT c2.property_id FROM listing_snapshots s2 "
+            "      JOIN listings c2 ON c2.sreality_id = s2.sreality_id "
+            "      WHERE s2.scraped_at > now() - %(win)s::interval "
+            "        AND c2.property_id IS NOT NULL"
+            "    ) "
+            "  WINDOW w AS (PARTITION BY c.property_id ORDER BY s.scraped_at, s.id)"
+            ") "
+            "SELECT DISTINCT property_id FROM steps "
+            "WHERE prev IS NOT NULL AND price_czk < prev "
+            "  AND scraped_at > now() - %(win)s::interval",
+            {"win": f"{window_days} days"},
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
+    """One pass of the property-change matcher (Slice 2b).
+
+    Emits `change_kind='price_drop'` dispatches for properties that had a
+    price decrease observed within the lookback window
+    (`notifications_price_drop_window_days`, default 2) AND match an active
+    subscription's spec. Deduped on (subscription_id, property_id,
+    change_kind), so a property fires `price_drop` at most once per
+    subscription. Reuses `_build_match_clauses` against properties_public so
+    Browse / Watchdog stay in lockstep on what every filter means.
+
+    Distinct from `match_once` (`change_kind='new'`, fires on newly-seen
+    properties via the first_seen_at cursor): this fires on EXISTING
+    properties that change, so it has no cursor — the window bounds the scan
+    and the UNIQUE constraint makes re-scans idempotent. Meant to run on a
+    ~daily cadence; the matcher loop gates it.
+    """
+    window_days = _read_int_setting(
+        conn, "notifications_price_drop_window_days", default=2,
+    )
+    drop_ids = _recent_price_drop_property_ids(conn, window_days=window_days)
+    if not drop_ids:
+        return {
+            "subscriptions_evaluated": 0,
+            "price_drops_in_window": 0,
+            "changes_inserted": 0,
+        }
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, filter_spec FROM notification_subscriptions "
+            "WHERE is_active = true"
+        )
+        sub_rows = cur.fetchall()
+
+    total_inserted = 0
+    for sub_id, raw_spec in sub_rows:
+        try:
+            spec = WatchdogFilterSpec(**(raw_spec or {}))
+        except Exception as exc:  # noqa: BLE001 — bad spec, skip but keep loop alive
+            LOG.warning(
+                "change matcher: subscription %s has invalid filter_spec: %s",
+                sub_id, exc,
+            )
+            continue
+
+        where, params = _build_match_clauses(spec)
+        joined_where = " AND ".join(where) if where else "true"
+        params["subscription_id"] = str(sub_id)
+        params["drop_ids"] = drop_ids
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO notification_dispatches "
+                "  (subscription_id, property_id, sreality_id, "
+                "   change_kind, status, channel) "
+                "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
+                "       'price_drop', 'sent', 'in_app' "
+                "FROM properties_public l "
+                f"WHERE l.property_id = ANY(%(drop_ids)s) AND {joined_where} "
+                "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
+                params,
+            )
+            total_inserted += cur.rowcount or 0
+
+    return {
+        "subscriptions_evaluated": len(sub_rows),
+        "price_drops_in_window": len(drop_ids),
+        "changes_inserted": total_inserted,
+    }
+
+
 async def matcher_loop(stop_event: asyncio.Event) -> None:
     """The forever-running async matcher. Reads its own DB connection
     each pass; idle waits respect `notifications_matcher_interval_seconds`
     so an operator who edits the row only needs to wait for the current
     sleep to elapse.
+
+    Each pass runs the new-listing matcher (`match_once`). The property-change
+    matcher (`match_changes_once`) runs at most once per
+    `notifications_change_match_interval_seconds` (default 86400 = daily); the
+    gate is in-memory, so a process restart simply runs it once on the next
+    pass — harmless, the UNIQUE constraint dedups.
     """
     LOG.info("notification matcher loop starting")
+    # monotonic timestamp of the last property-change pass; 0 => run on the
+    # first pass after (re)start.
+    last_change_run = 0.0
     while not stop_event.is_set():
         # Read interval each pass so live edits to app_settings take
         # effect without a restart.
@@ -1077,6 +1231,23 @@ async def matcher_loop(stop_event: asyncio.Event) -> None:
         except Exception as exc:  # noqa: BLE001
             LOG.exception("notification matcher pass failed: %s", exc)
 
+        # Property-change matcher, gated to ~daily. interval<=0 disables it.
+        change_interval = 86400
+        try:
+            change_interval = await asyncio.to_thread(_read_change_interval_seconds)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("change matcher: failed to read interval: %s", exc)
+        if change_interval > 0 and (time.monotonic() - last_change_run) >= change_interval:
+            try:
+                cstats = await asyncio.to_thread(_match_changes_in_thread)
+                last_change_run = time.monotonic()
+                if cstats.get("changes_inserted", 0) > 0:
+                    LOG.info("notification change matcher: %s", cstats)
+                else:
+                    LOG.debug("notification change matcher: %s", cstats)
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("notification change matcher pass failed: %s", exc)
+
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=float(interval))
         except asyncio.TimeoutError:
@@ -1097,10 +1268,30 @@ def _read_interval_seconds() -> int:
             conn.close()
 
 
+def _read_change_interval_seconds() -> int:
+    conn = scraper_db.connect()
+    try:
+        return _read_int_setting(
+            conn, "notifications_change_match_interval_seconds", default=86400,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
 def _match_once_in_thread() -> dict[str, int]:
     conn = scraper_db.connect()
     try:
         return match_once(conn)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _match_changes_in_thread() -> dict[str, int]:
+    conn = scraper_db.connect()
+    try:
+        return match_changes_once(conn)
     finally:
         with contextlib.suppress(Exception):
             conn.close()

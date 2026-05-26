@@ -1181,10 +1181,10 @@ def _build_registry() -> dict[str, FilterDef]:
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
         ),
 
-        # --- multi-portal / price-history signals (Slice 2a) ------------
+        # --- multi-portal / price-history signals (Slice 2a/2b) ---------
         # Derived columns on `properties`, maintained by the recompute job
-        # (scripts/recompute_property_stats.py). BROWSE only for now; the
-        # WATCHDOG agenda lands with the property-grain matcher (Slice 2b).
+        # (scripts/recompute_property_stats.py). BROWSE (2a) + WATCHDOG (2b):
+        # the property-grain matcher reads them off properties_public.
         FilterDef(
             id="distinct_site_count_min",
             type=FilterType.INT,
@@ -1198,7 +1198,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,
-            agendas=frozenset({Agenda.BROWSE}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 1},
             aliases=("distinctSiteCountMin",),
         ),
@@ -1215,7 +1215,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,
-            agendas=frozenset({Agenda.BROWSE}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 1},
             aliases=("priceDropCountMin",),
         ),
@@ -1230,7 +1230,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,
-            agendas=frozenset({Agenda.BROWSE}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 1},
             aliases=("priceRiseCountMin",),
         ),
@@ -1247,7 +1247,7 @@ def _build_registry() -> dict[str, FilterDef]:
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,
-            agendas=frozenset({Agenda.BROWSE}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 0},
             unit="%",
             aliases=("maxPriceDropPctMin",),

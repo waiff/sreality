@@ -1669,7 +1669,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
-        "browse"
+        "browse",
+        "watchdog"
       ],
       "constraints": {
         "min": 1
@@ -1689,7 +1690,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
-        "browse"
+        "browse",
+        "watchdog"
       ],
       "constraints": {
         "min": 1
@@ -1709,7 +1711,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
-        "browse"
+        "browse",
+        "watchdog"
       ],
       "constraints": {
         "min": 1
@@ -1729,7 +1732,8 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
-        "browse"
+        "browse",
+        "watchdog"
       ],
       "constraints": {
         "min": 0

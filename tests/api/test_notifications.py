@@ -54,10 +54,34 @@ def test_build_clauses_emits_spatial_when_set() -> None:
     spec = WatchdogFilterSpec(lat=50.08, lng=14.42, radius_m=1500)
     where, params = _build_match_clauses(spec)
     assert any("ST_DWithin" in w for w in where)
-    assert any("l.geom IS NOT NULL" in w for w in where)
+    # properties_public exposes lat/lng, not the raw geom column, so the
+    # spatial predicate builds the point from lat/lng (Slice 2b).
+    assert any("l.lat IS NOT NULL" in w for w in where)
+    assert any("ST_MakePoint(l.lng, l.lat)" in w for w in where)
+    assert not any("l.geom" in w for w in where)
     assert params["lat"] == 50.08
     assert params["lng"] == 14.42
     assert params["radius_m"] == 1500
+
+
+def test_build_clauses_property_grain_derived_predicates() -> None:
+    """Slice 2b derived filters render as `>= N` predicates against the
+    property-grain columns properties_public exposes."""
+    spec = WatchdogFilterSpec(
+        distinct_site_count_min=2,
+        price_drop_count_min=3,
+        price_rise_count_min=1,
+        max_price_drop_pct_min=10.0,
+    )
+    where, params = _build_match_clauses(spec)
+    assert "l.distinct_site_count >= %(distinct_site_count_min)s" in where
+    assert "l.price_drop_count >= %(price_drop_count_min)s" in where
+    assert "l.price_rise_count >= %(price_rise_count_min)s" in where
+    assert "l.max_price_drop_pct >= %(max_price_drop_pct_min)s" in where
+    assert params["distinct_site_count_min"] == 2
+    assert params["price_drop_count_min"] == 3
+    assert params["price_rise_count_min"] == 1
+    assert params["max_price_drop_pct_min"] == 10.0
 
 
 def test_build_clauses_handles_price_and_area_bounds() -> None:
@@ -413,3 +437,66 @@ def test_match_once_skips_invalid_filter_spec() -> None:
     # and skipped, but the surviving one fired one dispatch.
     assert stats["subscriptions_evaluated"] == 2
     assert stats["matches_inserted"] == 1
+
+
+# --- match_changes_once (the property-change matcher, Slice 2b) ----------
+
+
+from api.notifications import match_changes_once
+
+
+def test_match_changes_once_emits_price_drop_for_matching_subs() -> None:
+    """The change matcher resolves recently-dropped property ids once, then
+    fires a `price_drop` dispatch per matching active subscription, scoped to
+    those ids and deduped by the (sub, property, change_kind) constraint."""
+    sub_id = UUID("12121212-1212-1212-1212-121212121212")
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        # window-days app_settings read → default
+        (lambda s: "FROM app_settings" in s, [], 0),
+        # recent price-drop property ids
+        (lambda s: "SELECT DISTINCT property_id FROM steps" in s, [(101,), (102,)], 0),
+        # active subscriptions
+        (
+            lambda s: "FROM notification_subscriptions WHERE is_active" in s,
+            [(sub_id, {"category_main": "byt", "category_type": "pronajem"})],
+            1,
+        ),
+        # INSERT price_drop dispatches — 2 inserted
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 2),
+    ]
+    conn = _FakeConn(script)
+
+    stats = match_changes_once(conn)  # type: ignore[arg-type]
+
+    assert stats["subscriptions_evaluated"] == 1
+    assert stats["price_drops_in_window"] == 2
+    assert stats["changes_inserted"] == 2
+
+    insert_sql, insert_params = next(
+        (sql, p) for sql, p in conn.executed
+        if "INSERT INTO notification_dispatches" in sql
+    )
+    assert "'price_drop'" in insert_sql
+    assert "l.property_id = ANY(%(drop_ids)s)" in insert_sql
+    assert "ON CONFLICT (subscription_id, property_id, change_kind)" in insert_sql
+    assert insert_params["drop_ids"] == [101, 102]
+
+
+def test_match_changes_once_noops_when_no_recent_drops() -> None:
+    """No recent price drops → no subscription scan, no inserts."""
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "FROM app_settings" in s, [], 0),
+        (lambda s: "SELECT DISTINCT property_id FROM steps" in s, [], 0),
+    ]
+    conn = _FakeConn(script)
+
+    stats = match_changes_once(conn)  # type: ignore[arg-type]
+
+    assert stats == {
+        "subscriptions_evaluated": 0,
+        "price_drops_in_window": 0,
+        "changes_inserted": 0,
+    }
+    assert not any(
+        "INSERT INTO notification_dispatches" in sql for sql, _ in conn.executed
+    )

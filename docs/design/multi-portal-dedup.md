@@ -181,12 +181,20 @@ operator approval, committed in the same change (CLAUDE.md flow).
   predicates (`distinct_site_count_min`, `price_drop_count_min`,
   `price_rise_count_min`, `max_price_drop_pct_min`). `fetchBrowseStats` is
   repointed to it in the same slice.
-- **096_notification_grain.sql** *(next, Slice 2b)* — `notification_dispatches`
-  gains `property_id` + `change_kind`; new `UNIQUE(subscription_id,
-  property_id, change_kind)`. Migrate `match_once` / `_build_match_clauses` /
-  `list_dispatches` to property grain, and extend the four derived FilterDefs'
-  agendas to include WATCHDOG (they are BROWSE-only until the matcher is
-  property-grain).
+- **096_notification_grain.sql** *(built, Slice 2b)* — `notification_dispatches`
+  gains `property_id` (FK) + `change_kind` (default `'new'`); the old
+  `UNIQUE(subscription_id, sreality_id)` is dropped for the new
+  `UNIQUE(subscription_id, property_id, change_kind)`. `match_once` /
+  `_build_match_clauses` / `list_dispatches` moved to property grain (read
+  `properties_public`; the spatial clause builds the point from lat/lng since
+  the view doesn't expose raw geom). The four derived FilterDefs gained the
+  WATCHDOG agenda. A second matcher `match_changes_once` emits
+  `change_kind='price_drop'` for properties with a price decrease in the
+  lookback window (`notifications_price_drop_window_days`, default 2),
+  gated to ~daily in `matcher_loop`
+  (`notifications_change_match_interval_seconds`, default 86400). `new_site` /
+  `now_3plus_sites` change kinds are reserved for when multi-portal ingestion
+  (Slice 3) makes them meaningful.
 - **097_property_identity_candidates.sql** *(Slice 4)* — D2 review queue
   `(left_property_id, right_property_id, confidence, markers_matched jsonb,
   tier, status proposed|merged|dismissed, reviewed_at, reviewed_action)`,
@@ -288,10 +296,12 @@ at a `listings` column). So:
   (`distinct_site_count_min`, `price_drop_count_min`, `price_rise_count_min`,
   `max_price_drop_pct_min`) through the registry → Browse Map/Table/Cards
   (auto-dispatch) + Stats RPC. BROWSE agenda only for now.
-- **Slice 2b — Notification grain → property.** Migration 096 (notification
-  grain). Migrate the matcher to property grain, add the daily property-change
-  matcher, and extend the four derived `FilterDef`s' agendas to WATCHDOG (they
-  can't apply in the listing-grain matcher until it reads property columns).
+- **Slice 2b — Notification grain → property.** *(built — migration 096,
+  matcher property-grain, change-event matcher, WATCHDOG agenda + form
+  fields.)* `match_once` dispatches once per real property (not per portal
+  listing); `match_changes_once` fires `price_drop` events for properties that
+  drop in the lookback window; the four derived filters work in Watchdog. The
+  `POST /notifications/matcher/run` button runs both matchers.
 - **Slice 3 — D1 multi-portal ingestion + insert-time Tier 1.** First
   non-sreality scraper on the `ScrapedListing` contract (+ raw-capture
   staging only for crawler sources). Geo+price+area Tier 1 matcher. Now

@@ -5,17 +5,19 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 19:44 UTC_
+_Last refreshed: 2026-05-26 03:32 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 99 files, latest `094_browse_stats_properties.sql`.
+**Migrations on disk:** 100 files, latest `095_property_grain_stats.sql`.
 
 **Last 10 commits:**
 
 ```
+121f64c properties Slice 2a: property-grain Stats perf + four derived filters
+ba34e86 chore: refresh ROADMAP auto-status block
 51868cd properties Slice 1: property-grain read path + recompute job
 fe2a8ab chore: refresh ROADMAP auto-status block
 4503c8d properties Slice 0: canonical parent table + scraper linkage
@@ -24,8 +26,6 @@ b807918 docs: capture approved multi-portal + dedup design (Shape B)
 00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
 6d1a8ca scraper: district-split big regions so the delisting sweep can run
 e48a8eb chore: refresh ROADMAP auto-status block
-ceb7fc3 ci: prefix scraping workflows with "Scraping:" so they group in Actions
-5d4d002 Merge pull request #175 from waiff/claude/brave-knuth-8ICa2
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1033,9 +1033,14 @@ shape (see D1 below).
 > the listing-grain RPC, repointed the Stats tab to it, and added the four
 > derived filters (`distinct_site_count_min`, `price_drop_count_min`,
 > `price_rise_count_min`, `max_price_drop_pct_min`) through the registry into
-> Browse (Map/Table/Cards + Stats). **Next: Slice 2b** — migration 096
-> (notification grain → property), property-grain matcher, and extending those
-> four filters' agendas to Watchdog.
+> Browse (Map/Table/Cards + Stats). Slice 2b (migration 096) moved
+> notifications to the property grain (dispatch once per real property, not per
+> portal listing), added a second matcher (`match_changes_once`) that fires
+> `price_drop` change-events for properties dropping in the lookback window,
+> and surfaced the four derived filters in Watchdog. **Next: Slice 3** — first
+> non-sreality portal scraper + insert-time Tier-1 spatial matcher; that's when
+> properties gain multiple children and the Slice 1/2 plumbing (dedup, one dot
+> per property, `new_site` events) actually lights up.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
