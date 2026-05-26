@@ -20,7 +20,8 @@ Two phases, both idempotent:
      stats_computed_at   = now()
 
    For today's singleton properties this reproduces exactly what the
-   insert-time wrapper (`scraper.db._ensure_singleton_property`) maintains,
+   insert-time path (`scraper.db._ensure_property` / `_cheap_property_rollup`)
+   maintains,
    plus the price-history aggregates the wrapper does not compute.
 
 Batched by property-id range so each statement stays well under the

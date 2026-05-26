@@ -195,14 +195,17 @@ operator approval, committed in the same change (CLAUDE.md flow).
   (`notifications_change_match_interval_seconds`, default 86400). `new_site` /
   `now_3plus_sites` change kinds are reserved for when multi-portal ingestion
   (Slice 3) makes them meaningful.
-- **097_property_identity_candidates.sql** *(Slice 4)* — D2 review queue
-  `(left_property_id, right_property_id, confidence, markers_matched jsonb,
-  tier, status proposed|merged|dismissed, reviewed_at, reviewed_action)`,
-  ordered-pair CHECK + UNIQUE. RLS enabled.
+- **097_property_matcher_foundation.sql** *(built, Slice 3a)* — the
+  insert-time Tier-1 matcher foundation, portal-agnostic: `synthetic_listing_id_seq`
+  (negative, descending — non-sreality `listings.sreality_id` PKs that can't
+  collide with sreality's positive hash ids) + `property_identity_candidates`
+  (the D2 review queue, brought forward because the insert-time matcher's
+  "multiple hits -> never guess" branch enqueues ordered (left<right) pairs
+  here now). RLS enabled, ordered-pair CHECK + UNIQUE.
 - **098_image_phash.sql** *(Slice 5)* — `images.phash bigint` (D2 cheap pass).
   Pillow approved (add to `pyproject.toml` with the Slice 5 work). Hamming
-  via `bit_count(a # b)`. (Migration numbers past 095 are indicative; each is
-  assigned the next free number when its slice lands.)
+  via `bit_count(a # b)`. (Migration numbers are assigned the next free number
+  when each slice lands.)
 
 ## Matcher + ingestion design
 
@@ -302,13 +305,24 @@ at a `listings` column). So:
   listing); `match_changes_once` fires `price_drop` events for properties that
   drop in the lookback window; the four derived filters work in Watchdog. The
   `POST /notifications/matcher/run` button runs both matchers.
-- **Slice 3 — D1 multi-portal ingestion + insert-time Tier 1.** First
-  non-sreality scraper on the `ScrapedListing` contract (+ raw-capture
-  staging only for crawler sources). Geo+price+area Tier 1 matcher. Now
-  properties genuinely have multiple children; slice 1/2 plumbing lights up.
-- **Slice 4 — D2 fuzzy sweep + review UI.** Migration 095
-  (`property_identity_candidates`). `toolkit/addresses.py` + background sweep +
-  `/dedup/candidates` page + merge action.
+- **Slice 3a — Tier-1 matcher engine.** *(built — migration 097, matcher in
+  `scraper.db`, `ScrapedListing` contract, hermetic tests.)* Portal-agnostic:
+  `upsert_listing_with_property` / `ingest_scraped_listing` run the geo+price+
+  area probe (`ST_DWithin 20m`, price ±2%, area ±1m², same-source excluded) →
+  attach on a unique hit, new singleton on zero, candidate-row on ambiguous.
+  Inert for sreality-only data (same-source exclusion), verified against live
+  data. `_cheap_property_rollup` keeps counts/lifecycle current inline; the
+  async recompute job owns the representative + stats.
+- **Slice 3b — First portal scraper (bazos).** *(next)* Crawl bazos's index +
+  detail pages into `ScrapedListing`s fed through `ingest_scraped_listing`.
+  Needs an HTML parser (+ Playwright if anti-bot), saved fixtures, and the
+  raw-capture staging table for the crawler. This is where properties gain
+  multiple children and the Slice 1/2 plumbing lights up. Native ids like
+  bazos `218865547` land in `source_id_native`; the synthetic PK comes from
+  `synthetic_listing_id_seq`.
+- **Slice 4 — D2 fuzzy sweep + review UI.** `toolkit/addresses.py` + background
+  sweep + `/dedup/candidates` page + merge action (the
+  `property_identity_candidates` table already exists from 097).
 - **Slice 5 — D2 image tier.** Migration 096 (`image_phash`) + Pillow pHash
   (dependency pre-approved) + vision escalation reusing `compare_listing_images`.
 

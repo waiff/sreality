@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 03:32 UTC_
+_Last refreshed: 2026-05-26 06:33 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 100 files, latest `095_property_grain_stats.sql`.
+**Migrations on disk:** 101 files, latest `096_notification_grain.sql`.
 
 **Last 10 commits:**
 
 ```
+2f03094 properties Slice 2b: property-grain notifications + change-event matcher
 121f64c properties Slice 2a: property-grain Stats perf + four derived filters
 ba34e86 chore: refresh ROADMAP auto-status block
 51868cd properties Slice 1: property-grain read path + recompute job
@@ -25,7 +26,6 @@ b807918 docs: capture approved multi-portal + dedup design (Shape B)
 1276679 chore: refresh ROADMAP auto-status block
 00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
 6d1a8ca scraper: district-split big regions so the delisting sweep can run
-e48a8eb chore: refresh ROADMAP auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1037,10 +1037,17 @@ shape (see D1 below).
 > notifications to the property grain (dispatch once per real property, not per
 > portal listing), added a second matcher (`match_changes_once`) that fires
 > `price_drop` change-events for properties dropping in the lookback window,
-> and surfaced the four derived filters in Watchdog. **Next: Slice 3** — first
-> non-sreality portal scraper + insert-time Tier-1 spatial matcher; that's when
-> properties gain multiple children and the Slice 1/2 plumbing (dedup, one dot
-> per property, `new_site` events) actually lights up.
+> and surfaced the four derived filters in Watchdog. Slice 3a (migration 097)
+> built the portal-agnostic insert-time Tier-1 matcher: a geo+price+area probe
+> (`ST_DWithin 20m`, price ±2%, area ±1m², same-source excluded) that attaches
+> a new listing to a near-matching property, creates a singleton on no match,
+> or enqueues a `property_identity_candidates` row on ambiguity — plus the
+> `ScrapedListing` contract + a negative synthetic-id sequence for non-sreality
+> rows. It's inert for today's sreality-only data (verified). **Next: Slice 3b**
+> — the first portal scraper (operator chose **bazos**): crawl its index/detail
+> into `ScrapedListing`s through `ingest_scraped_listing`. That's when
+> properties gain multiple children and the dedup/one-dot-per-property plumbing
+> from Slices 1–2 lights up.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
