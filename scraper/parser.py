@@ -334,7 +334,10 @@ def _condition(obj: Any) -> str | None:
     key = _strip_diacritics(name.strip().lower())
     if key.startswith("-") or "vyber" in key:
         return None
-    return name.strip().lower()
+    # Diacritic-free, underscore-joined to match the schema convention and the
+    # existing canonical values (e.g. "velmi_dobry", "po_rekonstrukci"); the
+    # legacy condition filter binds against this column.
+    return key.replace(" ", "_")
 
 
 def _energy_rating(obj: Any) -> str | None:
