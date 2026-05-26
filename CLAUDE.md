@@ -16,6 +16,20 @@ read-only browser UI (also Railway, separate service). Still out of
 scope until explicitly opened: ClickUp integration, MCP wrapping the
 toolkit, per-user identity.
 
+**Data source (sreality v1 API).** In 2026 sreality rebuilt their site
+on Next.js and removed the old `/api/cs/v2/estates` API the scraper was
+born on. The scraper now reads the public JSON v1 API:
+`GET /api/v1/estates/search` (filters `category_main_cb` /
+`category_type_cb` / `locality_country_id=112`, **offset/limit** paging,
+`pagination.total` for completeness) for the index, and
+`GET /api/v1/estates/{id}` for detail (a `{categoryMainCb, locality,
+params{…}, images, price…}` object; `params` holds the typed
+attributes). No cookies needed. The deep-pagination cap still applies
+(HTTP 422 past the window), so large categories are walked per-district
+(`SPLIT_THRESHOLD` / `DISTRICT_IDS`). `parser.parse_listing` maps that
+object to the same row contract; `scraper/hashing.py` strips the new
+volatile fields (`params.stats` view counter, `note`/`rus`/`rusReply`).
+
 ## Territories
 
 The repo is split into two top-level territories with deliberately
@@ -728,7 +742,7 @@ partial result. The nightly owns the 22:00 UTC slot.
 
 The scraper emits structured progress lines:
 
-- `INDEX page=N estates=M` per index page
+- `INDEX offset=N estates=M total=K` per search page (offset/limit paging)
 - `INDEX total=N pages=M` once at end of index walk
 - `PLAN unchanged=N refetch=M` once after deciding what to fetch
 - `PLAN priority_retry=N` once if any listings have prior failure rows

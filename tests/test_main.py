@@ -8,6 +8,8 @@ category pair so a rental walk doesn't clobber sale listings.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,6 +17,15 @@ import requests
 
 from scraper import main as scraper_main
 from scraper.sreality_client import ListingGoneError
+
+_FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_extract_id_and_price_from_real_search_result():
+    search = json.loads((_FIXTURES / "sample_search.json").read_text("utf-8"))
+    item = search["results"][0]
+    assert scraper_main._extract_id(item) == item["id"]
+    assert scraper_main._extract_price(item) == item["priceCzk"]
 
 
 class _FakeClient:
@@ -75,7 +86,7 @@ class _FakeClient:
                 + d * 10**5
             )
             for i in range(n):
-                yield {"hash_id": base + i, "price_czk": {"value_raw": 1}}
+                yield {"id": base + i, "priceCzk": 1}
             return
         if self.locality_region_id is not None:
             n = _FakeClient.region_collected.get(
@@ -88,16 +99,13 @@ class _FakeClient:
                 + self.locality_region_id * 1_000
             )
             for i in range(n):
-                yield {"hash_id": base + i, "price_czk": {"value_raw": 1}}
+                yield {"id": base + i, "priceCzk": 1}
             return
         # Distinct id range per (cm, ct) so the per-category seen_ids
         # set is observable in mark_inactive call args.
         base = self.category_main * 10000 + self.category_type * 1000
         for i in range(_FakeClient.total_entries):
-            yield {
-                "hash_id": base + i,
-                "price_czk": {"value_raw": 10000 + i},
-            }
+            yield {"id": base + i, "priceCzk": 10000 + i}
 
 
 _FakeClient.total_entries = 5  # type: ignore[attr-defined]
@@ -211,14 +219,11 @@ def test_run_full_isolates_one_crashing_category_marks_the_rest(
     # (2,2) dum/pronajem, ... — make dum/pronajem raise during iteration.
     def crashing_iter_index(self):
         if (self.category_main, self.category_type) == (2, 2):
-            yield {"hash_id": 99999, "price_czk": {"value_raw": 1}}
+            yield {"id": 99999, "priceCzk": 1}
             raise RuntimeError("simulated outage mid-iteration")
         base = self.category_main * 10000 + self.category_type * 1000
         for i in range(_FakeClient.total_entries):
-            yield {
-                "hash_id": base + i,
-                "price_czk": {"value_raw": 10000 + i},
-            }
+            yield {"id": base + i, "priceCzk": 10000 + i}
 
     monkeypatch.setattr(_FakeClient, "iter_index", crashing_iter_index)
 
@@ -347,7 +352,7 @@ class _IdxClient:
 
     def iter_index(self):
         for i in self._ids:
-            yield {"hash_id": i, "price_czk": {"value_raw": 1}}
+            yield {"id": i, "priceCzk": 1}
 
 
 def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):

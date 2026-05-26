@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -89,8 +88,6 @@ CATEGORIES: tuple[tuple[int, int], ...] = (
 )
 
 LOG = logging.getLogger("scraper")
-
-_HREF_ID_RE = re.compile(r"/estates/(\d+)")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -386,7 +383,7 @@ def _build_client(
     return SrealityClient(
         category_main=category_main,
         category_type=category_type,
-        country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 10001)),
+        country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 112)),
         limiter=limiter,
         locality_region_id=locality_region_id,
         locality_district_id=locality_district_id,
@@ -1370,25 +1367,19 @@ def _pending_condition_scores(conn: Any, *, limit: int) -> list[int]:
 
 
 def _extract_id(estate: dict[str, Any]) -> int | None:
-    hid = estate.get("hash_id")
-    if isinstance(hid, int):
-        return hid
-    if isinstance(hid, str) and hid.isdigit():
-        return int(hid)
-    href = ((estate.get("_links") or {}).get("self") or {}).get("href", "")
-    match = _HREF_ID_RE.search(href)
-    return int(match.group(1)) if match else None
+    eid = estate.get("id")
+    if isinstance(eid, int) and not isinstance(eid, bool):
+        return eid
+    if isinstance(eid, str) and eid.isdigit():
+        return int(eid)
+    return None
 
 
 def _extract_price(estate: dict[str, Any]) -> int | None:
-    pc = estate.get("price_czk")
-    if isinstance(pc, dict):
-        v = pc.get("value_raw")
-        if isinstance(v, (int, float)):
-            return int(v)
-    p = estate.get("price")
-    if isinstance(p, (int, float)):
-        return int(p)
+    for key in ("priceCzk", "priceSummaryCzk"):
+        p = estate.get(key)
+        if isinstance(p, (int, float)) and not isinstance(p, bool):
+            return int(p)
     return None
 
 
