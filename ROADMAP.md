@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 08:03 UTC_
+_Last refreshed: 2026-05-26 18:40 UTC_
 
-**Branch:** `claude/zealous-heisenberg-WFmCL`
+**Branch:** `claude/serene-ptolemy-7nt9s`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,9 @@ _Last refreshed: 2026-05-26 08:03 UTC_
 **Last 10 commits:**
 
 ```
+b87ac22 Add bazos index/detail fixtures to the fetch-fixtures pipeline
+e2df70e Merge pull request #185 from waiff/claude/zealous-heisenberg-WFmCL
+6d06375 chore: refresh ROADMAP auto-status block
 453e236 chore: refresh ROADMAP auto-status block
 5d857ca ci: dump live search result-item shape in recon probe
 b87a4ff chore: refresh ROADMAP auto-status block
@@ -23,9 +26,6 @@ fbcb296 Merge pull request #184 from waiff/claude/sreality-v1-rewrite
 1ea1838 scraper: rebuild against sreality's v1 JSON API
 6bc0f94 Merge pull request #182 from waiff/claude/scraper-new-api-rewrite
 c79feff ci: repurpose probe into new-API reconnaissance
-3d09e5c Revert anti-block request-volume backoff
-d45f416 Merge pull request #181 from waiff/claude/probe-next-data-endpoint
-e789bed ci: extend IP probe to test sreality's new _next/data endpoint
 ```
 
 <!-- END AUTO-STATUS -->
