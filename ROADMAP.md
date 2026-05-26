@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 11:55 UTC_
+_Last refreshed: 2026-05-26 12:36 UTC_
 
 **Branch:** `claude/zealous-heisenberg-WFmCL`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-26 11:55 UTC_
 **Last 10 commits:**
 
 ```
+d05bdbc chore: refresh ROADMAP auto-status block
 1c2f7a5 chore: refresh ROADMAP auto-status block
 4506ecc chore: refresh ROADMAP auto-status block
 baf3ca4 scraper: rewrite parser/client for the live snake_case v1 API
@@ -25,7 +26,6 @@ baf3ca4 scraper: rewrite parser/client for the live snake_case v1 API
 e2df70e Merge pull request #185 from waiff/claude/zealous-heisenberg-WFmCL
 6d06375 chore: refresh ROADMAP auto-status block
 453e236 chore: refresh ROADMAP auto-status block
-5d857ca ci: dump live search result-item shape in recon probe
 ```
 
 <!-- END AUTO-STATUS -->
