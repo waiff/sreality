@@ -103,9 +103,11 @@ def test_price_change_stats_total_is_last_minus_first():
 # field changes — using the real fixture
 def test_field_changes_emits_one_row_per_changed_field():
     raw_a = _load_raw()
+    raw_a["price_czk"] = 15690000
+    raw_a["price_summary_czk"] = 15690000
     raw_b = copy.deepcopy(raw_a)
-    raw_b["priceCzk"] = 22500
-    raw_b["priceSummaryCzk"] = 22500
+    raw_b["price_czk"] = 22500
+    raw_b["price_summary_czk"] = 22500
 
     snaps = [
         {"id": 1, "scraped_at": _ts(2), "price_czk": 15690000, "raw_json": raw_a},
@@ -123,7 +125,7 @@ def test_field_changes_emits_one_row_per_changed_field():
 def test_field_changes_image_url_diff_emits_images_field():
     raw_a = _load_raw()
     raw_b = copy.deepcopy(raw_a)
-    images = raw_b.get("images") or []
+    images = raw_b.get("advert_images") or []
     if images:
         images[0]["url"] = images[0]["url"] + "?v=2"
 
@@ -138,7 +140,7 @@ def test_field_changes_image_url_diff_emits_images_field():
 def test_field_changes_skips_sreality_id_lon_lat():
     raw_a = _load_raw()
     raw_b = copy.deepcopy(raw_a)
-    raw_b["locality"] = {**(raw_b.get("locality") or {}), "longitude": 99.9, "latitude": 99.9}
+    raw_b["locality"] = {**(raw_b.get("locality") or {}), "gps_lon": 99.9, "gps_lat": 99.9}
     snaps = [
         {"id": 1, "scraped_at": _ts(2), "price_czk": 16900, "raw_json": raw_a},
         {"id": 2, "scraped_at": _ts(1), "price_czk": 16900, "raw_json": raw_b},
@@ -187,8 +189,8 @@ class _FakeConn:
 def test_compare_snapshots_envelope_with_two_snapshots():
     raw_a = _load_raw()
     raw_b = copy.deepcopy(raw_a)
-    raw_b["priceCzk"] = 18500
-    raw_b["priceSummaryCzk"] = 18500
+    raw_b["price_czk"] = 18500
+    raw_b["price_summary_czk"] = 18500
 
     snap_rows = [
         (1, _ts(3), 16900, raw_a),

@@ -17,13 +17,17 @@ VOLATILE_TOP_KEYS: frozenset[str] = frozenset({
     "is_topped",
     "is_topped_today",
     "logged_in",
-    # v1: per-session / per-user / recommendation state, not listing content
+    # per-session / per-user / recommendation state, not listing content
     "note",
     "rus",
-    "rusReply",
+    "rusReply",  # legacy camelCase form (kept for old raw_json)
+    "rus_reply",
+    "stats",  # view counter — increments on every visit (top-level in v1)
 })
 
-# v1: keys inside the `params` block that change without the listing changing.
+# Legacy: keys inside a `params` block (old camelCase raw_json) that change
+# without the listing changing. The live snake_case API puts `stats` at the
+# top level instead (see VOLATILE_TOP_KEYS).
 VOLATILE_PARAM_KEYS: frozenset[str] = frozenset({
     "stats",  # view counter — increments on every visit
 })

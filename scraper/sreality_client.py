@@ -95,14 +95,15 @@ def _is_not_found_body(response: requests.Response) -> bool:
 def _unwrap_estate(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the estate object from a detail response.
 
-    The detail endpoint returns the estate object directly; tolerate a future
-    envelope by unwrapping a single nested object that carries the marker key.
+    The detail endpoint wraps the estate as `{result, status_code,
+    status_message}`; unwrap the nested object that carries the marker key.
+    Tolerate a flat payload (estate at the top level) too.
     """
-    if "categoryMainCb" in payload:
+    if "category_main_cb" in payload:
         return payload
     for key in ("result", "estate", "data"):
         inner = payload.get(key)
-        if isinstance(inner, dict) and "categoryMainCb" in inner:
+        if isinstance(inner, dict) and "category_main_cb" in inner:
             return inner
     return payload
 
@@ -238,9 +239,9 @@ class SrealityClient:
             payload = self._get_json(url)
             if isinstance(payload, dict):
                 estate = _unwrap_estate(payload)
-                # The detail object omits its own id (it keys the request, not
-                # the body); inject the known id so the parser can rely on it.
-                estate.setdefault("id", sreality_id)
+                # The estate carries its id as `hash_id`; inject the known id
+                # if a payload ever omits it so the parser can rely on it.
+                estate.setdefault("hash_id", sreality_id)
                 return estate
             return payload
         except ListingGoneError:

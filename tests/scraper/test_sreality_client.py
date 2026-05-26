@@ -91,9 +91,25 @@ def test_get_detail_reraises_non_gone_http_error(monkeypatch):
 def test_get_detail_injects_id(monkeypatch):
     client = SrealityClient()
     monkeypatch.setattr(
-        client, "_get_json", lambda url, params=None: {"categoryMainCb": {"value": 1}}
+        client, "_get_json", lambda url, params=None: {"category_main_cb": {"value": 1}}
     )
-    assert client.get_detail(777)["id"] == 777
+    assert client.get_detail(777)["hash_id"] == 777
+
+
+def test_get_detail_unwraps_result_envelope(monkeypatch):
+    client = SrealityClient()
+    monkeypatch.setattr(
+        client, "_get_json",
+        lambda url, params=None: {
+            "result": {"category_main_cb": {"value": 1}, "hash_id": 555},
+            "status_code": 200,
+            "status_message": "OK",
+        },
+    )
+    estate = client.get_detail(555)
+    assert estate["hash_id"] == 555
+    assert estate["category_main_cb"] == {"value": 1}
+    assert "status_code" not in estate
 
 
 def test_probe_result_size_reads_pagination_total(monkeypatch):
