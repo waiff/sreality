@@ -11,11 +11,17 @@ name: "Scraping: recon sreality new API (probe)"
 #      or does it cap (~14k) like the old API (which forced district-splitting)?
 #   C) Is there a clean detail sibling /api/v1/estates/<id> (JSON), or must the
 #      rewrite read detail from the /_next/data/<buildId>/.../<id>.json route?
+#   D) What is the SEARCH result-item id key? The live run drops every entry
+#      ("INDEX skipped entry without id") because _extract_id can't find the id;
+#      the HAR-derived fixture said top-level int `id`, but live disagrees. Dump
+#      the first item's keys + every id-bearing field so we learn the real key.
 #
 # Read the per-job "::notice::" lines:
 #   search=200 + page<=limit  -> clean endpoint works; page = max page size.
 #   deep15k / deepEnd got>0    -> no cap; district-split can be retired.
 #   detailAPI=200              -> use /api/v1/estates/<id> (simple); else _next/data.
+#   r0_has_id=false            -> id is NOT top-level `id`; see the "D result[0]
+#                                 id-bearing fields" log lines for the real key.
 
 on:
   workflow_dispatch:
@@ -82,8 +88,23 @@ jobs:
           C_KEYS=$(jq -r 'if type=="object" then (keys|join(",")) else empty end' /tmp/c.json 2>/dev/null | head -c 220)
           [ -z "$C_KEYS" ] && C_KEYS="(not json) $(head -c 120 /tmp/c.json | tr '\n\r' '  ')"
 
+          # D) Search RESULT-ITEM shape — the one thing recon never checked. The
+          #    live run drops every entry ("INDEX skipped entry without id"),
+          #    so _extract_id can't find the id key. Reveal the real shape:
+          #    full key list, every *id*-bearing field with its value, and a
+          #    compact sample (bulky images/locality stripped).
+          D_KEYS=$(jq -rc 'if (.results|length)>0 then (.results[0]|keys) else "NO RESULTS" end' /tmp/a.json 2>/dev/null)
+          R0_HASID=$(jq -r 'if (.results|length)>0 then (.results[0]|has("id")) else "noresults" end' /tmp/a.json 2>/dev/null)
+
           echo "RECON sample=${{ matrix.n }} ip=$IP"
           echo "  A  search byty/prodej: status=$A total=$A_TOTAL page_returned=$A_N (= max page size honoured)"
           echo "  B  cap: offset15000 status=$B1 got=$B1_N | lastpage(offset=$DEEP) status=$B2 got=$B2_N"
           echo "  C  detail /estates/3386655564: status=$C keys=$C_KEYS"
-          echo "::notice title=Recon ${{ matrix.n }}::ip=$IP search=$A total=$A_TOTAL page=$A_N deep15k=$B1/$B1_N deepEnd=$B2/$B2_N detailAPI=$C"
+          echo "  D  result[0] has top-level \"id\"? $R0_HASID"
+          echo "  D  result[0] keys: $D_KEYS"
+          echo "  D  result[0] id-bearing fields (key matches /id/i):"
+          jq -r 'if (.results|length)>0 then (.results[0] | to_entries[] | select(.key|test("id";"i")) | "       \(.key) = \(.value|tojson)") else "       (no results)" end' /tmp/a.json 2>/dev/null
+          echo "  D  result[0] sample (images+locality stripped):"
+          jq -rc 'if (.results|length)>0 then (.results[0] | del(.images) | del(.locality)) else empty end' /tmp/a.json 2>/dev/null | head -c 1000
+          echo ""
+          echo "::notice title=Recon ${{ matrix.n }}::ip=$IP search=$A total=$A_TOTAL page=$A_N deep15k=$B1/$B1_N deepEnd=$B2/$B2_N detailAPI=$C r0_has_id=$R0_HASID"
