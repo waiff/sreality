@@ -24,6 +24,16 @@ on:
         required: false
         default: https://www.remax-czech.cz/reality/detail/438735/pronajem-bytu-1-kk-v-osobnim-vlastnictvi-31-m2-praha-8-liben
         type: string
+      bazos_index_url:
+        description: reality.bazos.cz search/index URL (leave blank to skip)
+        required: false
+        default: https://reality.bazos.cz/prodam/byt/
+        type: string
+      bazos_detail_url:
+        description: reality.bazos.cz single-listing detail URL (leave blank to skip)
+        required: false
+        default: ""
+        type: string
 
 jobs:
   fetch:
@@ -49,7 +59,9 @@ jobs:
             --output-dir tests/fixtures/source_html \
             --bezrealitky "${{ inputs.bezrealitky_url }}" \
             --idnes "${{ inputs.idnes_url }}" \
-            --remax "${{ inputs.remax_url }}"
+            --remax "${{ inputs.remax_url }}" \
+            --bazos-index "${{ inputs.bazos_index_url }}" \
+            --bazos-detail "${{ inputs.bazos_detail_url }}"
 
       - name: Commit fixtures
         run: |

@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 10:00 UTC_
+_Last refreshed: 2026-05-26 18:40 UTC_
 
-**Branch:** `claude/zealous-heisenberg-WFmCL`
+**Branch:** `claude/serene-ptolemy-7nt9s`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-26 10:00 UTC_
 **Last 10 commits:**
 
 ```
+b87ac22 Add bazos index/detail fixtures to the fetch-fixtures pipeline
 baf3ca4 scraper: rewrite parser/client for the live snake_case v1 API
 66c4456 Refresh sreality v1 JSON fixtures (real snake_case API shape)
 8d24939 Merge pull request #187 from waiff/claude/zealous-heisenberg-WFmCL
@@ -25,7 +26,6 @@ e2df70e Merge pull request #185 from waiff/claude/zealous-heisenberg-WFmCL
 453e236 chore: refresh ROADMAP auto-status block
 5d857ca ci: dump live search result-item shape in recon probe
 b87a4ff chore: refresh ROADMAP auto-status block
-fbcb296 Merge pull request #184 from waiff/claude/sreality-v1-rewrite
 ```
 
 <!-- END AUTO-STATUS -->
