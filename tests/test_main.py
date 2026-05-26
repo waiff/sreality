@@ -23,9 +23,14 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 
 def test_extract_id_and_price_from_real_search_result():
     search = json.loads((_FIXTURES / "sample_search.json").read_text("utf-8"))
-    item = search["results"][0]
-    assert scraper_main._extract_id(item) == item["hash_id"]
-    assert scraper_main._extract_price(item) == int(item["price_czk"])
+    results = search["results"]
+    # results[0] is a hidden-price listing (price 0) → None, matching the parser.
+    assert scraper_main._extract_id(results[0]) == results[0]["hash_id"]
+    assert scraper_main._extract_price(results[0]) is None
+    # A priced result extracts its summary price (same key order as the parser).
+    priced = next(r for r in results if (r.get("price_summary_czk") or 0) > 0)
+    assert scraper_main._extract_id(priced) == priced["hash_id"]
+    assert scraper_main._extract_price(priced) == int(priced["price_summary_czk"])
 
 
 class _FakeClient:
