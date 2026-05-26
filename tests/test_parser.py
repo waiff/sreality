@@ -171,7 +171,8 @@ def test_building_type_unspecified_is_none():
 
 
 def test_condition(sample):
-    assert parse_listing(sample)["condition"] == "velmi dobrý"
+    # Diacritic-free + underscore-joined, matching the schema convention.
+    assert parse_listing(sample)["condition"] == "velmi_dobry"
 
 
 def test_condition_unspecified_is_none():

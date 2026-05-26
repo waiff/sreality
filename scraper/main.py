@@ -1377,9 +1377,12 @@ def _extract_id(estate: dict[str, Any]) -> int | None:
 
 
 def _extract_price(estate: dict[str, Any]) -> int | None:
-    for key in ("price_czk", "price_summary_czk"):
+    # Mirror parser._price_czk exactly (same key order + positivity) so the
+    # index-price compared in _walk_category equals the stored listings.price_czk
+    # for an unchanged listing — otherwise every such listing refetches forever.
+    for key in ("price_summary_czk", "price_czk"):
         p = estate.get(key)
-        if isinstance(p, (int, float)) and not isinstance(p, bool):
+        if isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0:
             return int(p)
     return None
 

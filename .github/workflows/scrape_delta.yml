@@ -7,13 +7,14 @@ name: "Scraping: Sreality full index walk (primary, ~hourly)"
 #   - delisted properties flip to is_active=false — a complete walk is
 #     what makes that inference valid (architectural rule #3).
 #
-# CADENCE REALITY: the cron is */15, but GitHub throttles scheduled
-# workflows heavily (best-effort, worse overnight), and each run takes
-# 10-16 min, so the real cadence is ~hourly, NOT every 15 min. That is a
-# GitHub platform limit, not a bug. For tighter cadence configure the
-# optional SCRAPE_CHAIN_TOKEN PAT (see the "Chain next run" step below);
-# otherwise accept ~hourly. The Health liveness check is tuned to this
-# reality (warn >90 min, fail >180 min).
+# CADENCE: the cron is hourly (0 * * * *), deliberately. Each run takes
+# 10-16 min and does a complete index walk, so hourly keeps a steady,
+# polite request volume against sreality (a too-aggressive schedule is a
+# plausible abuse-flag trigger). GitHub also throttles scheduled
+# workflows (worse overnight), so effective cadence may be slightly
+# slower; the Health liveness check is tuned to this (warn >90 min, fail
+# >180 min). For tighter cadence configure the optional SCRAPE_CHAIN_TOKEN
+# PAT (see the "Chain next run" step below).
 #
 # Because the walk is complete (no --limit), mark_inactive runs every
 # tick. scraper/main.py guards each per-category flip on walk
@@ -37,7 +38,7 @@ name: "Scraping: Sreality full index walk (primary, ~hourly)"
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -88,11 +89,10 @@ jobs:
             --max-image-downloads 400 \
             --image-workers 16
 
-      # GitHub throttles the */15 schedule to ~hourly (worse overnight), so
-      # the real cadence is far slower than 15 min. OPTIONAL tighter cadence:
-      # if a chain PAT is configured, re-dispatch this workflow on success for
-      # back-to-back runs (~every run-duration, 15-18 min). The */15 cron stays
-      # the safety net that restarts the chain if a run fails or the PAT is
+      # The cron is hourly. OPTIONAL tighter cadence: if a chain PAT is
+      # configured, re-dispatch this workflow on success for back-to-back
+      # runs (~every run-duration, 15-18 min). The hourly cron stays the
+      # safety net that restarts the chain if a run fails or the PAT is
       # absent. GITHUB_TOKEN cannot re-trigger a workflow (GitHub blocks
       # recursion), so this needs a separate PAT secret SCRAPE_CHAIN_TOKEN
       # (fine-grained: this repo, Actions: read+write). No-op without it.

@@ -692,7 +692,7 @@ index walk** — the split is about how much expensive work each does, not
 walk depth:
 
 - **Scraping: Sreality full index walk** (`scrape_delta.yml`, cron
-  `*/15 * * * *`) — the primary scrape. Walks the **entire** index of
+  `0 * * * *`) — the primary scrape. Walks the **entire** index of
   every category pair (no `--limit`), so newly-listed properties surface
   AND delistings flip to `is_active=false`. Because the walk is complete
   it runs `mark_inactive` every run. Detail refetches and image downloads
@@ -702,18 +702,20 @@ walk depth:
   Detail fetches run on a small thread pool paced by a shared rate limiter
   (`--detail-workers` / `--detail-rate`). Records as `run_type='delta'` via
   `--run-type`. Skips condition scoring.
-  **Cadence reality:** the cron is `*/15`, but GitHub throttles scheduled
-  workflows heavily (best-effort, worse overnight) and each run is 10-16 min,
-  so the *real* cadence is **~hourly, not 15 min** — a GitHub platform limit,
-  not a bug. The Health liveness check is tuned to this (warn >90 min, fail
-  >180 min). For tighter, near-back-to-back cadence, set the optional
-  `SCRAPE_CHAIN_TOKEN` PAT secret (fine-grained: this repo, Actions
-  read+write): the workflow's "Chain next run" step then re-dispatches itself
-  on success (GITHUB_TOKEN can't, GitHub blocks recursion). The `*/15` cron
-  remains the safety net that restarts the chain. No-op without the PAT.
+  **Cadence:** the cron is **hourly** (`0 * * * *`), deliberately — each run
+  is a complete walk taking 10-16 min, and hourly keeps a steady, polite
+  request volume against sreality (a too-aggressive schedule is a plausible
+  abuse-flag trigger). GitHub also throttles scheduled workflows (worse
+  overnight), so effective cadence can be slightly slower; the Health
+  liveness check is tuned to this (warn >90 min, fail >180 min). For tighter,
+  near-back-to-back cadence, set the optional `SCRAPE_CHAIN_TOKEN` PAT secret
+  (fine-grained: this repo, Actions read+write): the workflow's "Chain next
+  run" step then re-dispatches itself on success (GITHUB_TOKEN can't, GitHub
+  blocks recursion). The hourly cron remains the safety net that restarts the
+  chain. No-op without the PAT.
 - **Scraping: Sreality nightly deep run** (`scrape.yml`, cron `0 22 * * *`) —
   the deep nightly. Also a full walk, but its distinct value is the expensive
-  backlog work the 15-min ticks skip: the condition-scoring phase (LLM
+  backlog work the hourly ticks skip: the condition-scoring phase (LLM
   cost), a deep image-backlog drain (cap 50 000), and a high-cap detail
   catch-up (cap 10 000). Records as `run_type='full'`.
 
