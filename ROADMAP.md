@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 06:33 UTC_
+_Last refreshed: 2026-05-26 08:09 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 101 files, latest `096_notification_grain.sql`.
+**Migrations on disk:** 102 files, latest `097_property_matcher_foundation.sql`.
 
 **Last 10 commits:**
 
 ```
+4cdd4ce properties Slice 3a: insert-time Tier-1 matcher engine
 2f03094 properties Slice 2b: property-grain notifications + change-event matcher
 121f64c properties Slice 2a: property-grain Stats perf + four derived filters
 ba34e86 chore: refresh ROADMAP auto-status block
@@ -25,7 +26,6 @@ fe2a8ab chore: refresh ROADMAP auto-status block
 b807918 docs: capture approved multi-portal + dedup design (Shape B)
 1276679 chore: refresh ROADMAP auto-status block
 00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
-6d1a8ca scraper: district-split big regions so the delisting sweep can run
 ```
 
 <!-- END AUTO-STATUS -->
