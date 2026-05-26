@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 07:38 UTC_
+_Last refreshed: 2026-05-26 07:56 UTC_
 
 **Branch:** `claude/zealous-heisenberg-WFmCL`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-26 07:38 UTC_
 **Last 10 commits:**
 
 ```
+b87a4ff chore: refresh ROADMAP auto-status block
 fbcb296 Merge pull request #184 from waiff/claude/sreality-v1-rewrite
 1ea1838 scraper: rebuild against sreality's v1 JSON API
 6bc0f94 Merge pull request #182 from waiff/claude/scraper-new-api-rewrite
@@ -25,7 +26,6 @@ d45f416 Merge pull request #181 from waiff/claude/probe-next-data-endpoint
 e789bed ci: extend IP probe to test sreality's new _next/data endpoint
 d9752e9 Merge pull request #180 from waiff/claude/brave-knuth-8ICa2
 93e4c18 chore: refresh ROADMAP auto-status block
-3156354 ci: add free GitHub-Actions IP probe to diagnose the sreality block
 ```
 
 <!-- END AUTO-STATUS -->
