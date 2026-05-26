@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-25 20:26 UTC_
+_Last refreshed: 2026-05-26 03:31 UTC_
 
-**Branch:** `claude/brave-knuth-8ICa2`
+**Branch:** `claude/scraper-new-api-rewrite`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-25 20:26 UTC_
 **Last 10 commits:**
 
 ```
+c79feff ci: repurpose probe into new-API reconnaissance
+3d09e5c Revert anti-block request-volume backoff
+d45f416 Merge pull request #181 from waiff/claude/probe-next-data-endpoint
+e789bed ci: extend IP probe to test sreality's new _next/data endpoint
+d9752e9 Merge pull request #180 from waiff/claude/brave-knuth-8ICa2
+93e4c18 chore: refresh ROADMAP auto-status block
+3156354 ci: add free GitHub-Actions IP probe to diagnose the sreality block
+027a622 Merge pull request #179 from waiff/claude/brave-knuth-8ICa2
 13f9400 chore: refresh ROADMAP auto-status block
 4f80b6b chore: refresh ROADMAP auto-status block
-20f8b52 scraper: back off request volume to recover from sreality anti-bot block
-af4bf9d chore: refresh ROADMAP auto-status block
-309ff2b chore: refresh ROADMAP auto-status block
-0dab683 scraper: fix the district-split regression at the root (crash-proof + paced)
-1efb830 Merge pull request #177 from waiff/claude/eloquent-heisenberg-gXR9k
-1276679 chore: refresh ROADMAP auto-status block
-00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
-6d1a8ca scraper: district-split big regions so the delisting sweep can run
 ```
 
 <!-- END AUTO-STATUS -->
@@ -35,6 +35,16 @@ tools within a phase are independent. CLAUDE.md is the authoritative
 source for active rules; ROADMAP is for sequencing.
 
 ## Done
+
+### Maintenance 2026-05: sreality v1 API migration
+sreality rebuilt on Next.js and removed the old `/api/cs/v2/estates` API
+(returned 404 from every GitHub IP). A free runner-IP probe confirmed it
+was an endpoint removal, not an IP block. Rewrote `scraper/sreality_client.py`
+(now `/api/v1/estates/search` + `/api/v1/estates/{id}`, offset/limit paging,
+`locality_country_id=112`) and `scraper/parser.py` (new estate-object shape)
+against the same row + snapshot contract — listing IDs are unchanged so
+history is preserved. Updated `scraper/hashing.py` for the new volatile
+fields. Reverted the temporary anti-block request-volume backoff.
 
 ### Phase 1: Scraper
 Daily index + on-demand detail scrape of sreality.cz. Image mirroring to

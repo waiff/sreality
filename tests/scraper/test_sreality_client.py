@@ -86,3 +86,45 @@ def test_get_detail_reraises_non_gone_http_error(monkeypatch):
     monkeypatch.setattr(client, "_get_json", boom)
     with pytest.raises(requests.HTTPError):
         client.get_detail(12345)
+
+
+def test_get_detail_injects_id(monkeypatch):
+    client = SrealityClient()
+    monkeypatch.setattr(
+        client, "_get_json", lambda url, params=None: {"categoryMainCb": {"value": 1}}
+    )
+    assert client.get_detail(777)["id"] == 777
+
+
+def test_probe_result_size_reads_pagination_total(monkeypatch):
+    client = SrealityClient()
+    monkeypatch.setattr(
+        client, "_get_json",
+        lambda url, params=None: {"pagination": {"total": 42}, "results": []},
+    )
+    assert client.probe_result_size() == 42
+
+
+def test_iter_index_pages_by_offset(monkeypatch):
+    client = SrealityClient(per_page=2)
+    pages = {
+        0: {"pagination": {"total": 3}, "results": [{"id": 1}, {"id": 2}]},
+        2: {"pagination": {"total": 3}, "results": [{"id": 3}]},
+    }
+    monkeypatch.setattr(client, "_get_json", lambda url, params=None: pages[params["offset"]])
+    assert [e["id"] for e in client.iter_index()] == [1, 2, 3]
+    assert client.result_size == 3
+
+
+def test_iter_index_stops_cleanly_at_cap(monkeypatch):
+    client = SrealityClient(per_page=2)
+
+    def fake(url, params=None):
+        if params["offset"] == 0:
+            return {"pagination": {"total": 100}, "results": [{"id": 1}, {"id": 2}]}
+        resp = requests.Response()
+        resp.status_code = 422
+        raise requests.HTTPError("422", response=resp)
+
+    monkeypatch.setattr(client, "_get_json", fake)
+    assert [e["id"] for e in client.iter_index()] == [1, 2]

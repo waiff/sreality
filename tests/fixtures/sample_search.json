@@ -1,0 +1,477 @@
+{
+  "pagination": {
+    "limit": 500,
+    "offset": 0,
+    "total": 17210
+  },
+  "results": [
+    {
+      "categoryMainCb": {
+        "name": "Byty",
+        "value": 1
+      },
+      "categorySubCb": {
+        "name": "3+1",
+        "value": 7
+      },
+      "categoryTypeCb": {
+        "name": "Prodej",
+        "value": 1
+      },
+      "discountShow": false,
+      "id": 837521484,
+      "hasMatterport": false,
+      "hasVideo": true,
+      "images": [
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQqqsKBnoGt5aFY/5fcc.jpeg",
+          "restbType": 1,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5Do9kXBZFRGt5aGh/8f6b.jpeg",
+          "restbType": 28,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQD6SgjCYKGt5aHn/8ad5.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQqqsKBnnGt5aIn/fe73.jpeg",
+          "restbType": 1,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQD6SgjCYBGt5aJq/2ce5.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5CGpNZBZRXGt5aKt/e5a2.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQCsFBPBchGt5aLy/5394.jpeg",
+          "restbType": 10,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5CoHumBZkkGt5aMt/0b6c.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5CNPfpB38FGt5aNs/6e0c.jpeg",
+          "restbType": 5,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQCHBj1BqPGt5aOx/223d.jpeg",
+          "restbType": 5,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5BWZuTBYbOGt5aPo/fd4b.jpeg",
+          "restbType": 16,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQKMBjCsqGt5aQh/e3ea.jpeg",
+          "restbType": 28,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQCoja0BhrGt5aRr/b1ad.jpeg",
+          "restbType": 26,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5CNPfpB4AKGt5aSu/e412.jpeg",
+          "restbType": 6,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQJGKyBqlGt5aTp/67a0.jpeg",
+          "restbType": 6,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQD6SgjCaRGt5aUo/13c4.jpeg",
+          "restbType": 6,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5CGpNZBZOrGt5aVh/91ee.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQCoja0BhqGt5aWc/616d.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQCsFBPBdhGt5aXb/101e.jpeg",
+          "restbType": 10,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5BWZuTBYayGt5aYh/9580.jpeg",
+          "restbType": 19,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQCHBj1BmOGt5aZs/af46.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQBNc3lBoKGt5abB/67bd.jpeg",
+          "restbType": 19,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/kO7neTVgOQCHBj1BqgGt5acU/4c6e.jpeg",
+          "restbType": 19,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5CNPfpB38FGt5adK/b50b.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_E/nCTUX1iX5CGpNZBZOrGt5aeL/101e.jpeg",
+          "restbType": 28,
+          "order": null
+        }
+      ],
+      "locality": {
+        "city": "Praha",
+        "citySeoName": "praha",
+        "cityPart": "Letňany",
+        "cityPartSeoName": "letnany",
+        "country": "Česká republika",
+        "countryId": 112,
+        "district": "Praha 9",
+        "districtId": 5009,
+        "districtSeoName": "praha-9",
+        "entityType": "address",
+        "geoHash": "u2fm4psxnd",
+        "houseNumber": null,
+        "inaccuracyType": "street",
+        "latitude": 50.140072342214,
+        "longitude": 14.5084149336502,
+        "municipality": null,
+        "municipalityId": 3468,
+        "municipalitySeoName": null,
+        "quarter": "Praha 18",
+        "quarterId": 128,
+        "region": "Hlavní město Praha",
+        "regionId": 10,
+        "regionSeoName": "hlavni-mesto-praha",
+        "street": "Místecká",
+        "streetId": 124405,
+        "streetNumber": null,
+        "streetSeoName": "mistecka",
+        "ward": null,
+        "wardId": 13717,
+        "wardSeoName": null,
+        "zip": null
+      },
+      "name": "Prodej bytu 3+1 68 m²",
+      "premiseLogo": "",
+      "premiseId": 7908,
+      "premise": {
+        "seoName": "remax-atrium",
+        "wardSeoName": "podoli",
+        "quarterSeoName": "praha-4",
+        "citySeoName": "praha"
+      },
+      "priceCzk": 8690000,
+      "priceCzkPerSqM": 127794,
+      "priceSummaryCzk": 8690000,
+      "priceSummaryUnitCb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "priceUnitCb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "watchdogBadge": "none"
+    },
+    {
+      "categoryMainCb": {
+        "name": "Byty",
+        "value": 1
+      },
+      "categorySubCb": {
+        "name": "1+kk",
+        "value": 2
+      },
+      "categoryTypeCb": {
+        "name": "Prodej",
+        "value": 1
+      },
+      "discountShow": false,
+      "id": 3979120716,
+      "hasMatterport": false,
+      "hasVideo": false,
+      "images": [
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CFdAHBV13GqXhbR/0a93.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CNPfpBydeGqXhby/9e57.jpeg",
+          "restbType": 2,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWZuTBVHpGqXhcY/0fe1.jpeg",
+          "restbType": 2,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBWIaGqXhdb/5dd3.jpeg",
+          "restbType": 4,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_C/kcHp2YdDtBwNES19GqXheZ/5676.jpeg",
+          "restbType": 22,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CGpNZBVvPGqXhfu/7315.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWLrlBV3cGqXhgb/e187.jpeg",
+          "restbType": 5,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBWIaGqXhhF/b177.jpeg",
+          "restbType": 5,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtBM3KVgqGqXhhs/d364.jpeg",
+          "restbType": 6,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5Do9kXBVj8GqXhjB/c374.jpeg",
+          "restbType": 6,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5bIUBBXh6GqXhkV/7d52.jpeg",
+          "restbType": 6,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CFdAHBV4BGqXhk6/1a64.jpeg",
+          "restbType": 10,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtzYqGeaGqXhmL/3f56.jpeg",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_C/kcHp2YdDtBwNES19GqXhm5/665b.jpeg",
+          "restbType": 8,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5bIUBBXd1GqXhnj/ea45.jpeg",
+          "restbType": 10,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5bIUBBXkTGqXhoK/4f22.jpeg",
+          "restbType": 26,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtDgLT0aRGqXhpC/0c11.jpeg",
+          "restbType": 28,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtEBMvIf4GqXhp0/0c55.jpeg",
+          "restbType": 28,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtBRc2UbYGqXhqi/6eb6.jpeg",
+          "restbType": 28,
+          "order": null
+        }
+      ],
+      "locality": {
+        "city": "Praha",
+        "citySeoName": "praha",
+        "cityPart": "Motol",
+        "cityPartSeoName": "motol",
+        "country": "Česká republika",
+        "countryId": 112,
+        "district": "Praha 5",
+        "districtId": 5005,
+        "districtSeoName": "praha-5",
+        "entityType": "address",
+        "geoHash": "u2fhy7hmh4",
+        "houseNumber": "91",
+        "inaccuracyType": "gps",
+        "latitude": 50.0710618497,
+        "longitude": 14.3431744402,
+        "municipality": null,
+        "municipalityId": 3468,
+        "municipalitySeoName": null,
+        "quarter": "Praha 5",
+        "quarterId": 97,
+        "region": "Hlavní město Praha",
+        "regionId": 10,
+        "regionSeoName": "hlavni-mesto-praha",
+        "street": "Podhorská",
+        "streetId": 121506,
+        "streetNumber": "13",
+        "streetSeoName": "podhorska",
+        "ward": null,
+        "wardId": 13689,
+        "wardSeoName": null,
+        "zip": null
+      },
+      "name": "Prodej bytu 1+kk 29 m²",
+      "premiseLogo": "https://d48-a.sdn.cz/d_48/c_img_og_A/nDJ4VEZEqxQDMFPxFHTitc/d071.png",
+      "premiseId": 20941,
+      "premise": {
+        "seoName": "100-klicu",
+        "wardSeoName": "nove-mesto",
+        "quarterSeoName": "praha-1",
+        "citySeoName": "praha"
+      },
+      "priceCzk": 5990000,
+      "priceCzkPerSqM": 206552,
+      "priceSummaryCzk": 5990000,
+      "priceSummaryUnitCb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "priceUnitCb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "watchdogBadge": "none"
+    },
+    {
+      "categoryMainCb": {
+        "name": "Byty",
+        "value": 1
+      },
+      "categorySubCb": {
+        "name": "1+kk",
+        "value": 2
+      },
+      "categoryTypeCb": {
+        "name": "Prodej",
+        "value": 1
+      },
+      "discountShow": false,
+      "id": 1655862092,
+      "hasMatterport": false,
+      "hasVideo": false,
+      "images": [
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_p8_A/nPXMbbUsvqCrBESFY4FrA72n/b322.png",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_p8_A/nPXMbbUsvqW7e6FaoFrA8Cf/2a0f.png",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_p8_A/nPXMbbUsvqW7e6FaqFrA8I7/06f7.png",
+          "restbType": 0,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_p8_A/nPXMbbUsvqW7e6FaqFrA8O7/82aa.png",
+          "restbType": 28,
+          "order": null
+        },
+        {
+          "url": "//d18-a.sdn.cz/d_18/c_img_p8_A/kBfrbpoeNCsCVHEJ9FrA8VC/0259.png",
+          "restbType": 22,
+          "order": null
+        }
+      ],
+      "locality": {
+        "city": "Praha",
+        "citySeoName": "praha",
+        "cityPart": "Chodov",
+        "cityPartSeoName": "chodov",
+        "country": "Česká republika",
+        "countryId": 112,
+        "district": "Praha 4",
+        "districtId": 5004,
+        "districtSeoName": "praha-4",
+        "entityType": "street",
+        "geoHash": "u2fk9uxmqc",
+        "houseNumber": null,
+        "inaccuracyType": "street",
+        "latitude": 50.03539554914699,
+        "longitude": 14.501217872850717,
+        "municipality": null,
+        "municipalityId": 3468,
+        "municipalitySeoName": null,
+        "quarter": "Praha 11",
+        "quarterId": 91,
+        "region": "Hlavní město Praha",
+        "regionId": 10,
+        "regionSeoName": "hlavni-mesto-praha",
+        "street": "Benkova",
+        "streetId": 121150,
+        "streetNumber": null,
+        "streetSeoName": "benkova",
+        "ward": null,
+        "wardId": 13679,
+        "wardSeoName": null,
+        "zip": null
+      },
+      "name": "Prodej bytu 1+kk 37 m²",
+      "premiseLogo": "https://d48-a.sdn.cz/d_48/c_img_QN_c/nX4C4.png",
+      "premiseId": 26858,
+      "premise": {
+        "seoName": "ceska-realitni",
+        "wardSeoName": "nove-mesto",
+        "quarterSeoName": "praha-1",
+        "citySeoName": "praha"
+      },
+      "priceCzk": 6299000,
+      "priceCzkPerSqM": 170243,
+      "priceSummaryCzk": 6299000,
+      "priceSummaryUnitCb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "priceUnitCb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "watchdogBadge": "none"
+    }
+  ],
+  "status_code": 200
+}
