@@ -1,0 +1,64 @@
+name: "Scraping: fetch sreality v1 JSON fixtures"
+
+# Manual trigger only. Fetches a real search response + one real detail
+# response from a GitHub runner IP (this repo's dev sandbox is 403'd by
+# sreality), scrubs emails/phone numbers, and commits the result as
+# tests/fixtures/sample_search.json + sample_listing.json on the current
+# branch. The live /api/v1/estates API is snake_case (id key `hash_id`,
+# detail wrapped under `result`); these fixtures pin the true shape so the
+# parser tests guard reality instead of the HAR-derived camelCase guess.
+
+on:
+  workflow_dispatch:
+    inputs:
+      category_main:
+        description: "category_main_cb (1=byt, 2=dum, 4=komercni)"
+        default: "1"
+        type: string
+      category_type:
+        description: "category_type_cb (1=prodej, 2=pronajem)"
+        default: "1"
+        type: string
+      detail_id:
+        description: "Override detail hash_id (blank = first search result)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requests
+        run: pip install "requests>=2.32"
+
+      - name: Fetch + anonymize JSON fixtures
+        run: |
+          ARGS="--category-main ${{ inputs.category_main }} --category-type ${{ inputs.category_type }}"
+          if [ -n "${{ inputs.detail_id }}" ]; then
+            ARGS="$ARGS --detail-id ${{ inputs.detail_id }}"
+          fi
+          python scripts/fetch_sreality_json_fixtures.py $ARGS
+
+      - name: Commit fixtures
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/fixtures/sample_search.json tests/fixtures/sample_listing.json
+          if git diff --cached --quiet; then
+            echo "No fixture changes to commit"
+          else
+            git commit -m "Refresh sreality v1 JSON fixtures (real snake_case API shape)"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
