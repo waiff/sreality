@@ -17,11 +17,20 @@ Usage (from a workflow runner):
         --output-dir tests/fixtures/source_html \\
         --bezrealitky https://www.bezrealitky.cz/... \\
         --idnes https://reality.idnes.cz/detail/... \\
-        --remax https://www.remax-czech.cz/reality/...
+        --remax https://www.remax-czech.cz/reality/... \\
+        --bazos-index https://reality.bazos.cz/prodam/byt/ \\
+        --bazos-detail https://reality.bazos.cz/inzerat/.../...php
 
 Each URL is optional; missing ones are skipped. Output filenames are
 fixed (bezrealitky_sample.html etc.) so the per-source tests can find
-them.
+them. Bazos is a bulk crawler source (not an LLM URL parser), so it
+needs two fixtures — a search/index page and a single detail page.
+
+Note: the regex anonymizer below scrubs phones/emails/street-numbers
+but not agent/seller names (too varied for a safe regex). Bazos index
+and detail pages embed real seller names in `odeslatakci('rating',…)`
+onclicks and the "Jméno" field; hand-scrub those in the committed
+fixture if present.
 """
 
 from __future__ import annotations
@@ -121,6 +130,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--bezrealitky", default=None)
     p.add_argument("--idnes", default=None)
     p.add_argument("--remax", default=None)
+    p.add_argument("--bazos-index", default=None)
+    p.add_argument("--bazos-detail", default=None)
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -140,6 +151,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         args.remax,
         args.output_dir / "remax_sample.html",
         "remax", errors,
+    )
+    _process(
+        args.bazos_index,
+        args.output_dir / "bazos_index_sample.html",
+        "bazos_index", errors,
+    )
+    _process(
+        args.bazos_detail,
+        args.output_dir / "bazos_detail_sample.html",
+        "bazos_detail", errors,
     )
 
     if errors:
