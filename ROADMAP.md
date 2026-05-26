@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 08:09 UTC_
+_Last refreshed: 2026-05-26 08:15 UTC_
 
 **Branch:** `claude/eloquent-heisenberg-gXR9k`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-26 08:09 UTC_
 **Last 10 commits:**
 
 ```
+3133c9d chore: refresh ROADMAP auto-status block
 4cdd4ce properties Slice 3a: insert-time Tier-1 matcher engine
 2f03094 properties Slice 2b: property-grain notifications + change-event matcher
 121f64c properties Slice 2a: property-grain Stats perf + four derived filters
@@ -25,7 +26,6 @@ fe2a8ab chore: refresh ROADMAP auto-status block
 4503c8d properties Slice 0: canonical parent table + scraper linkage
 b807918 docs: capture approved multi-portal + dedup design (Shape B)
 1276679 chore: refresh ROADMAP auto-status block
-00d5153 Merge pull request #176 from waiff/claude/brave-knuth-8ICa2
 ```
 
 <!-- END AUTO-STATUS -->
