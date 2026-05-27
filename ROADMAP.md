@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 08:12 UTC_
+_Last refreshed: 2026-05-27 08:22 UTC_
 
 **Branch:** `claude/serene-thompson-7AlGZ`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-27 08:12 UTC_
 **Last 10 commits:**
 
 ```
+ae35da8 chore: refresh ROADMAP auto-status block
 3bd48b4 Merge pull request #192 from waiff/claude/trusting-turing-PFYte
 adb8760 chore: refresh ROADMAP auto-status block
 72f180e chore: refresh ROADMAP auto-status block
@@ -25,7 +26,6 @@ c97207d Add self-maintaining GitHub Actions docs to Settings
 a0dbba7 chore: refresh ROADMAP auto-status block
 b4b8bf0 scraper: close the drift — new-listing budget reserve, split coverage, image cap
 fc8bae9 Merge pull request #186 from waiff/claude/eloquent-heisenberg-gXR9k
-af4def2 Merge origin/main into slices 0-3a (live v1 parser + property layer)
 ```
 
 <!-- END AUTO-STATUS -->
