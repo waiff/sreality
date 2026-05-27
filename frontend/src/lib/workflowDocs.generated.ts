@@ -761,6 +761,76 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape.yml"
   },
   {
+    "filename": "scrape_bazos.yml",
+    "name": "Scraping: Bazos crawler (manual pilot)",
+    "description": "Manual-only crawler for reality.bazos.cz (multi-portal slice 3b). Walks one bazos category's index, fetches each listing detail, stages the raw HTML in portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "sale_type",
+        "description": "prodam (sale) or pronajmu (rent)",
+        "required": false,
+        "type": "choice",
+        "default": "prodam",
+        "options": [
+          "prodam",
+          "pronajmu"
+        ]
+      },
+      {
+        "name": "category",
+        "description": "bazos category segment",
+        "required": false,
+        "type": "choice",
+        "default": "byt",
+        "options": [
+          "byt",
+          "dum",
+          "pozemky",
+          "nebytove",
+          "ostatni"
+        ]
+      },
+      {
+        "name": "locality",
+        "description": "locality filter (e.g. Praha); blank = nationwide",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "radius_km",
+        "description": "radius around locality in km (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_pages",
+        "description": "cap index pages walked (pilot safety)",
+        "required": false,
+        "type": "string",
+        "default": "2",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "bazos-scrape",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bazos.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bazos.yml"
+  },
+  {
     "filename": "seed_condition_settings.yml",
     "name": "Seed condition settings (Phase B init)",
     "description": "One-shot workflow that populates the two large app_settings rows created by migration 072 — `llm_condition_rubric` and `llm_condition_marker_dictionary` — from the committed JSON files (data/condition_rubric_v1.json + data/condition_markers_curated.json).",
