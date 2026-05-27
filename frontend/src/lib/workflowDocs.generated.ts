@@ -565,6 +565,28 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ingest_boundaries.yml"
   },
   {
+    "filename": "migrations.yml",
+    "name": "CI: migration smoke-test",
+    "description": "Applies the full migrations/ chain (001 -> latest) to a throwaway Postgres + PostGIS container whenever anything under migrations/ changes, catching a migration that does not apply cleanly before it reaches the production Supabase database (there is no staging DB). It pre-creates the Supabase roles the migrations GRANT to (anon / authenticated / service_role) and the pg_trgm extension migrations 067 / 074 rely on, applies every *.sql in numeric order, then runs a small sanity query. Hermetic: no secrets, never touches production.",
+    "manual": true,
+    "schedules": [],
+    "onPush": true,
+    "onPullRequest": true,
+    "paths": [
+      ".github/workflows/migrations.yml",
+      "migrations/**",
+      "scripts/ci_db_bootstrap.sql"
+    ],
+    "inputs": [],
+    "secrets": [],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 10,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/migrations.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/migrations.yml"
+  },
+  {
     "filename": "recompute_property_stats.yml",
     "name": "Recompute property stats (Slice 1)",
     "description": "Async recompute job for the canonical `properties` parent (multi-portal dedup track, Slice 1). Attaches any straggler unlinked listings, then recomputes every property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots.",
