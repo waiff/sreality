@@ -129,6 +129,7 @@ function Body({ data }: { data: HealthSummary }) {
       <Card label="Count reconciliation · sreality vs us">
         <ReconciliationPanel
           rows={scrapeRunsQuery.data}
+          liveByCategory={data.by_category}
           isLoading={scrapeRunsQuery.isLoading}
           error={scrapeRunsQuery.error}
         />
@@ -454,18 +455,20 @@ function HealthCheckCard({ check }: { check: ScraperHealthCheck }) {
 /* Count reconciliation (sreality result_size vs our active count)             */
 /* -------------------------------------------------------------------------- */
 
-function categoryDriftPct(c: ScrapeRunCategory): number {
-  const srs = c.sreality_result_size ?? 0;
-  const act = c.active_db ?? 0;
-  return srs > 0 ? (100 * (act - srs)) / srs : 0;
+function categoryDriftPct(srealityResultSize: number, activeNow: number): number {
+  return srealityResultSize > 0
+    ? (100 * (activeNow - srealityResultSize)) / srealityResultSize
+    : 0;
 }
 
 function ReconciliationPanel({
   rows,
+  liveByCategory,
   isLoading,
   error,
 }: {
   rows: ScrapeRun[] | undefined;
+  liveByCategory: HealthCategoryBlock[];
   isLoading: boolean;
   error: Error | null;
 }) {
@@ -479,10 +482,14 @@ function ReconciliationPanel({
   if (isLoading && !rows) {
     return <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>;
   }
+  // "we have" is the SAME live active_now the per-category tiles show, keyed by
+  // category, so the two panels can never disagree. The scrape run supplies
+  // only sreality_result_size (the per-category total it probed during the walk).
+  const activeByCategory = new Map(
+    liveByCategory.map((b) => [`${b.category_main}-${b.category_type}`, b.active_now]),
+  );
   const run = (rows ?? []).find((r) =>
-    r.by_category?.some(
-      (c) => c.sreality_result_size != null && c.active_db != null,
-    ),
+    r.by_category?.some((c) => c.sreality_result_size != null),
   );
   if (!run) {
     return (
@@ -492,14 +499,22 @@ function ReconciliationPanel({
     );
   }
   const cats = run.by_category
-    .filter((c) => c.sreality_result_size != null && c.active_db != null)
-    .sort((a, b) => Math.abs(categoryDriftPct(b)) - Math.abs(categoryDriftPct(a)));
+    .filter((c) => c.sreality_result_size != null)
+    .map((c) => ({
+      cat: c,
+      activeNow: activeByCategory.get(`${c.category_main}-${c.category_type}`) ?? 0,
+    }))
+    .sort(
+      (a, b) =>
+        Math.abs(categoryDriftPct(b.cat.sreality_result_size ?? 0, b.activeNow)) -
+        Math.abs(categoryDriftPct(a.cat.sreality_result_size ?? 0, a.activeNow)),
+    );
 
   return (
     <div>
       <p className="mb-2 text-xs text-[var(--color-ink-3)]">
-        Latest run {fmtRelative(run.started_at)} · sreality&rsquo;s reported total
-        vs our active count, per category. Drift &gt;5% is flagged.
+        sreality&rsquo;s reported total (probed {fmtRelative(run.started_at)}) vs our
+        current active count, per category. Drift &gt;5% is flagged.
       </p>
       <table className="w-full text-sm border-collapse">
         <thead>
@@ -511,8 +526,8 @@ function ReconciliationPanel({
           </tr>
         </thead>
         <tbody>
-          {cats.map((c) => {
-            const drift = categoryDriftPct(c);
+          {cats.map(({ cat: c, activeNow }) => {
+            const drift = categoryDriftPct(c.sreality_result_size ?? 0, activeNow);
             const adrift = Math.abs(drift);
             const color =
               adrift < 2
@@ -532,7 +547,7 @@ function ReconciliationPanel({
                   {fmtCount(c.sreality_result_size ?? 0)}
                 </td>
                 <td className="py-1 px-1.5 text-right font-mono tabular-nums">
-                  {fmtCount(c.active_db ?? 0)}
+                  {fmtCount(activeNow)}
                 </td>
                 <td
                   className="py-1 px-1.5 text-right font-mono tabular-nums"
