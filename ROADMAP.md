@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 10:10 UTC_
+_Last refreshed: 2026-05-27 10:45 UTC_
 
 **Branch:** `claude/serene-thompson-7AlGZ`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-27 10:10 UTC_
 **Last 10 commits:**
 
 ```
+6fe3560 chore: refresh ROADMAP auto-status block
 d9e07a0 scoring: add async Batch API backend for condition scoring (Phase 1.8b)
 1effeaa scraper: consolidate into one hourly pipeline + decouple condition scoring
 9375973 Merge pull request #193 from waiff/claude/serene-thompson-7AlGZ
@@ -25,7 +26,6 @@ ae35da8 chore: refresh ROADMAP auto-status block
 adb8760 chore: refresh ROADMAP auto-status block
 72f180e chore: refresh ROADMAP auto-status block
 c97207d Add self-maintaining GitHub Actions docs to Settings
-9bf13fa Merge pull request #191 from waiff/claude/zealous-heisenberg-WFmCL
 ```
 
 <!-- END AUTO-STATUS -->
