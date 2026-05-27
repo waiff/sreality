@@ -1,4 +1,4 @@
-name: Fetch + anonymize source HTML fixtures
+name: "Fixtures: source HTML (anonymized)"
 
 # Manual trigger only. Fetches each listing URL, runs the anonymization
 # in scripts/fetch_and_anonymize_fixtures.py, and commits the resulting

@@ -1,4 +1,4 @@
-name: Agent smoke test
+name: "Dev: agent smoke test"
 
 # Manual invocation only. Runs scripts/smoke_agent.py against the real
 # Supabase DB and a real LLM provider. Picks a recent Prague 2+kk

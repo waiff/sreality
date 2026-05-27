@@ -1,4 +1,4 @@
-name: Seed curated cities (Phase QUAL init)
+name: "Data: seed curated cities"
 
 # One-shot workflow that geocodes the 206 cities in
 # data/obce_v_datech_2025.csv via Mapy.cz, then writes them into

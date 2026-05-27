@@ -1,4 +1,4 @@
-name: Ingest admin boundaries
+name: "Data: ingest admin boundaries"
 
 # Loads ČÚZK RÚIAN administrative-unit polygons (kraj / okres / obec / KÚ)
 # into the admin_boundaries table. Manual-only; boundaries change rarely

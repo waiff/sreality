@@ -1,4 +1,4 @@
-name: tests
+name: "CI: tests"
 
 # CI test suite, runs on every push and pull request. Two parallel jobs:
 # a Python job (verifies the filter-registry and workflow-docs codegen are

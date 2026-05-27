@@ -1,4 +1,4 @@
-name: Aggregate condition markers (Phase A review prep)
+name: "Dev: aggregate condition markers (one-off Phase A bootstrap)"
 
 # Runs scripts/aggregate_condition_markers.py against the live
 # `listing_marker_extractions` rows to produce

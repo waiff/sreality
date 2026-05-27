@@ -1,4 +1,4 @@
-name: Refresh city populations from Wikidata
+name: "Data: refresh city populations (Wikidata)"
 
 # Pulls the latest population reading for every curated city from
 # Wikidata's public SPARQL endpoint, writes

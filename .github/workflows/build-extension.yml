@@ -1,4 +1,4 @@
-name: Build Chrome extension
+name: "CI: build Chrome extension"
 
 # Builds the chrome-extension/ bundle and uploads dist/ as a workflow
 # artifact you can download from the Actions tab. Keeps the build off
