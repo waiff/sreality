@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 18:40 UTC_
+_Last refreshed: 2026-05-27 06:55 UTC_
 
 **Branch:** `claude/serene-ptolemy-7nt9s`
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-26 18:40 UTC_
 **Last 10 commits:**
 
 ```
-4cdd4ce properties Slice 3a: insert-time Tier-1 matcher engine
-2f03094 properties Slice 2b: property-grain notifications + change-event matcher
-121f64c properties Slice 2a: property-grain Stats perf + four derived filters
-51868cd properties Slice 1: property-grain read path + recompute job
-4503c8d properties Slice 0: canonical parent table + scraper linkage
-b807918 docs: capture approved multi-portal + dedup design (Shape B)
-baf3ca4 scraper: rewrite parser/client for the live snake_case v1 API
-66c4456 Refresh sreality v1 JSON fixtures (real snake_case API shape)
-8d24939 Merge pull request #187 from waiff/claude/zealous-heisenberg-WFmCL
-e2df70e Merge pull request #185 from waiff/claude/zealous-heisenberg-WFmCL
+fc8bae9 Merge pull request #186 from waiff/claude/eloquent-heisenberg-gXR9k
+af4def2 Merge origin/main into slices 0-3a (live v1 parser + property layer)
+4e6e555 Merge pull request #190 from waiff/claude/zealous-heisenberg-WFmCL
+c54dd1e Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
+520282a ci: ease the delta scrape cron from */15 to hourly
+d51de6b Merge pull request #189 from waiff/claude/serene-ptolemy-7nt9s
+d51c3ef scraper: normalize condition to diacritic-free underscore form
+00568c6 chore: refresh ROADMAP auto-status block
+45c1e3d scraper: align index price extraction with the parser
+f660f0d Merge remote-tracking branch 'origin/main' into claude/serene-ptolemy-7nt9s
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1053,11 +1053,18 @@ shape (see D1 below).
 > a new listing to a near-matching property, creates a singleton on no match,
 > or enqueues a `property_identity_candidates` row on ambiguity — plus the
 > `ScrapedListing` contract + a negative synthetic-id sequence for non-sreality
-> rows. It's inert for today's sreality-only data (verified). **Next: Slice 3b**
-> — the first portal scraper (operator chose **bazos**): crawl its index/detail
-> into `ScrapedListing`s through `ingest_scraped_listing`. That's when
-> properties gain multiple children and the dedup/one-dot-per-property plumbing
-> from Slices 1–2 lights up.
+> rows. It's inert for today's sreality-only data (verified). Slice 3b
+> (migration 098) shipped the first portal scraper (operator chose **bazos**):
+> `scraper/bazos_parser.py` (deterministic selectolax HTML→`ScrapedListing`),
+> `scraper/bazos_client.py` (adaptive-throttle fetch reusing `RateLimiter`),
+> `scraper/bazos_main.py` (index→detail→stage-in-`portal_raw_pages`→parse→
+> `ingest_scraped_listing`, no `mark_inactive` on a partial walk), and the
+> manual `scrape_bazos.yml` workflow. `portal_raw_pages` decouples fetch from
+> parse so pages re-parse without re-fetching. **Next: run the capped bazos
+> pilot** (prodej/byty), confirm rows land with `source='bazos'` and that the
+> Tier-1 matcher's cross-source attaches behave as expected (bazos's
+> approximate coords/free-text area mostly form singletons at first), then
+> widen scope + add a cron cadence.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 

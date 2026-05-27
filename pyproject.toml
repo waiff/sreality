@@ -7,6 +7,10 @@ dependencies = [
   "requests>=2.32",
   "psycopg[binary]>=3.2",
   "boto3>=1.34",
+  # Deterministic HTML parsing for the bazos crawler (scraper/bazos_parser.py).
+  # Single lexbor wheel, CSS selectors; stdlib html.parser is too low-level for
+  # bazos's class-based markup. Not needed by the sreality JSON path.
+  "selectolax>=0.3",
 ]
 
 [project.optional-dependencies]

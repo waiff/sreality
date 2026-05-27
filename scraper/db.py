@@ -825,3 +825,52 @@ def active_failure_ids(
             (ids,),
         )
         return {row[0] for row in cur.fetchall()}
+
+
+def upsert_portal_raw_page(
+    conn: psycopg.Connection,
+    *,
+    source: str,
+    source_id_native: str,
+    source_url: str,
+    page_kind: str,
+    html: str,
+    http_status: int | None,
+) -> int:
+    """Latest-wins upsert of one fetched HTML page into portal_raw_pages.
+
+    Decouples fetch from parse so a page can be re-parsed without re-fetching.
+    Returns the staging row id; a re-fetch overwrites the HTML and clears the
+    previous parse state.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO portal_raw_pages
+                (source, source_id_native, source_url, page_kind,
+                 html, http_status, fetched_at, parsed_at, parse_error)
+            VALUES (%s, %s, %s, %s, %s, %s, now(), NULL, NULL)
+            ON CONFLICT (source, source_id_native, page_kind) DO UPDATE SET
+                source_url  = EXCLUDED.source_url,
+                html        = EXCLUDED.html,
+                http_status = EXCLUDED.http_status,
+                fetched_at  = now(),
+                parsed_at   = NULL,
+                parse_error = NULL
+            RETURNING id
+            """,
+            (source, source_id_native, source_url, page_kind, html, http_status),
+        )
+        return int(cur.fetchone()[0])
+
+
+def mark_portal_page_parsed(
+    conn: psycopg.Connection, page_id: int, *, parse_error: str | None = None
+) -> None:
+    """Stamp a portal_raw_pages row parsed (or record why parsing failed)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE portal_raw_pages SET parsed_at = now(), parse_error = %s "
+            "WHERE id = %s",
+            (parse_error, page_id),
+        )
