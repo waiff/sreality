@@ -173,6 +173,42 @@ _RECOMPUTE_BATCH_SQL = """
     WHERE p.id = ca.pid
 """
 
+# Single-property recompute, derived from the batch SQL by narrowing the `batch`
+# CTE to one id. Deriving it (rather than re-writing the body) guarantees the
+# inline merge recompute and the hourly batch can never drift apart.
+_RECOMPUTE_ONE_SQL = _RECOMPUTE_BATCH_SQL.replace(
+    "SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s",
+    "SELECT id FROM properties WHERE id = %(pid)s",
+)
+
+# A merge re-points a retired property's children onto the survivor, leaving the
+# loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
+# property drops out of the UPDATE and keeps stale columns -- merge_properties
+# sets the loser is_active=false explicitly, but this guards the general case
+# (a partially-failed merge, or any childless active property) so Browse never
+# shows a ghost active dot.
+_RECONCILE_CHILDLESS_SQL = """
+    UPDATE properties p SET is_active = false
+    WHERE p.is_active = true
+      AND NOT EXISTS (SELECT 1 FROM listings l WHERE l.property_id = p.id)
+"""
+
+
+def recompute_one(conn: Any, property_id: int) -> None:
+    """Recompute one property's rollup + stats using the batch job's exact SQL.
+
+    No transaction wrapper, so it nests inside a caller's open transaction
+    (e.g. the inline survivor recompute in toolkit.property_identity.merge_properties).
+    """
+    with conn.cursor() as cur:
+        cur.execute(_RECOMPUTE_ONE_SQL, {"pid": property_id})
+
+
+def _reconcile_childless(conn: Any) -> int:
+    with conn.cursor() as cur:
+        cur.execute(_RECONCILE_CHILDLESS_SQL)
+        return cur.rowcount or 0
+
 
 def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
     """Yield half-open [lo, hi) id ranges covering 1..max_id inclusive."""
@@ -255,6 +291,12 @@ def main() -> int:
                 cur.execute(_RECOMPUTE_BATCH_SQL, {"lo": lo, "hi": hi})
             batches += 1
             LOG.debug("RECOMPUTE batch=%d-%d done", lo, hi)
+
+        reconciled = _reconcile_childless(conn)
+        if reconciled:
+            LOG.info(
+                "RECOMPUTE reconciled childless=%d (set is_active=false)", reconciled,
+            )
 
     elapsed = time.monotonic() - started_at
     LOG.info(

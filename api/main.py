@@ -50,6 +50,7 @@ from api.estimation_runs import (
 )
 from api import notifications as nf_module
 from api.routes.admin import router as admin_router
+from api.routes.dedup import router as dedup_router
 from api.routes.notifications import router as notifications_router
 from scraper.db import sweep_stuck_scrape_runs
 from scraper.source_dispatcher import ParseError
@@ -171,6 +172,9 @@ app.include_router(admin_router)
 # /notifications/* (Watchdog feed + subscription CRUD) goes through
 # the standard bearer gate — operator content, not configuration.
 app.include_router(notifications_router)
+# /dedup/* (cross-source merge review: list candidates, merge/dismiss/unmerge)
+# — mutating operator actions, standard bearer gate.
+app.include_router(dedup_router)
 
 
 @app.get("/health")
