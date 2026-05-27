@@ -1,0 +1,79 @@
+name: "Scraping: idnes crawler (manual pilot)"
+
+# Crawler for reality.idnes.cz (multi-portal). Walks one idnes category's
+# index (?page=N), fetches each listing detail, stages the raw HTML in
+# portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing
+# (Tier-0 idempotency + Tier-1 property matching).
+#
+# This is NOT a sreality scrape: it writes NO scrape_runs row and does not
+# touch sreality liveness / reconciliation. A one-category crawl is a partial
+# walk, so the orchestrator never runs mark_inactive (architectural rule #3).
+#
+# Cadence: a conservative every-6h schedule, offset to :45 (off bazos's :30
+# and the hourly recompute's :00 so a crawl's Tier-1 attaches are picked up by
+# the next recompute within the hour). A scheduled run has no workflow inputs,
+# so the run step falls back to prodej/byty (the roadmap's pilot scope) bounded
+# by --max-pages 2 — small enough to stay well inside the 20-min timeout. Widen
+# / shard once the pilot proves the full-category run time; workflow_dispatch
+# stays the manual escape hatch with its own inputs.
+
+on:
+  schedule:
+    - cron: "45 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      sale_type:
+        description: prodej (sale) or pronajem (rent)
+        type: choice
+        default: prodej
+        options: [prodej, pronajem]
+      category:
+        description: idnes search category segment
+        type: choice
+        default: byty
+        options: [byty, domy, pozemky, komercni-objekty, ostatni]
+      max_pages:
+        description: cap index pages walked (pilot safety)
+        required: false
+        default: "2"
+        type: string
+      dry_run:
+        description: fetch + parse + log but write nothing to the DB
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: idnes-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run idnes crawl
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # inputs.* are empty on a scheduled run, so fall back to the pilot scope.
+          SALE_TYPE: ${{ inputs.sale_type || 'prodej' }}
+          CATEGORY: ${{ inputs.category || 'byty' }}
+          MAX_PAGES: ${{ inputs.max_pages || '2' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS="--sale-type $SALE_TYPE --category $CATEGORY"
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "python -m scraper.idnes_main $ARGS"
+          eval "python -m scraper.idnes_main $ARGS"

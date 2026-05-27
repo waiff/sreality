@@ -19,12 +19,16 @@ Usage (from a workflow runner):
         --idnes https://reality.idnes.cz/detail/... \\
         --remax https://www.remax-czech.cz/reality/... \\
         --bazos-index https://reality.bazos.cz/prodam/byt/ \\
-        --bazos-detail https://reality.bazos.cz/inzerat/.../...php
+        --bazos-detail https://reality.bazos.cz/inzerat/.../...php \\
+        --idnes-index https://reality.idnes.cz/s/prodej/byty/ \\
+        --idnes-detail https://reality.idnes.cz/detail/prodej/byt/.../
 
 Each URL is optional; missing ones are skipped. Output filenames are
 fixed (bezrealitky_sample.html etc.) so the per-source tests can find
-them. Bazos is a bulk crawler source (not an LLM URL parser), so it
-needs two fixtures — a search/index page and a single detail page.
+them. Bazos and idnes are bulk crawler sources (not LLM URL parsers),
+so each needs two fixtures — a search/index page and a single detail
+page. (The separate --idnes flag still feeds the LLM URL parser's
+idnes_reality_sample.html; the crawler uses its own pair.)
 
 Note: the regex anonymizer below scrubs phones/emails/street-numbers
 but not agent/seller names (too varied for a safe regex). Bazos index
@@ -132,6 +136,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     p.add_argument("--remax", default=None)
     p.add_argument("--bazos-index", default=None)
     p.add_argument("--bazos-detail", default=None)
+    p.add_argument("--idnes-index", default=None)
+    p.add_argument("--idnes-detail", default=None)
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -161,6 +167,16 @@ def main(argv: Iterable[str] | None = None) -> int:
         args.bazos_detail,
         args.output_dir / "bazos_detail_sample.html",
         "bazos_detail", errors,
+    )
+    _process(
+        args.idnes_index,
+        args.output_dir / "idnes_index_sample.html",
+        "idnes_index", errors,
+    )
+    _process(
+        args.idnes_detail,
+        args.output_dir / "idnes_detail_sample.html",
+        "idnes_detail", errors,
     )
 
     if errors:

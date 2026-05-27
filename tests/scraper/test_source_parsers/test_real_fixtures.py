@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from scraper import idnes_parser
 from scraper.source_parsers import bezrealitky, common, idnes_reality, remax
 
 _FIXTURE_DIR = (
@@ -109,3 +110,35 @@ def test_build_messages_renders_against_real_html(module, fixture_name, url):
     assert truncated in content
     if was_truncated:
         assert "truncated" in content
+
+
+# ----------------------------------------------------------------------
+# idnes crawler fixtures (deterministic parser, two pages: index + detail)
+# ----------------------------------------------------------------------
+
+def test_idnes_index_fixture_parses():
+    html = _fixture_or_skip("idnes_index_sample.html")
+    _assert_fixture_well_formed(html)
+    _assert_no_common_pii(html)
+    page = idnes_parser.parse_index(html)
+    # A real search page lists many cards and a total; the PII anonymizer can
+    # corrupt the hex id of a few hrefs, so we only require the bulk to parse.
+    assert len(page.items) >= 10
+    assert page.total and page.total > len(page.items)
+    assert all(len(it.source_id_native) == 24 for it in page.items)
+
+
+def test_idnes_detail_fixture_parses():
+    html = _fixture_or_skip("idnes_detail_sample.html")
+    _assert_fixture_well_formed(html)
+    _assert_no_common_pii(html)
+    url = "https://reality.idnes.cz/detail/prodej/byt/sample/6a16ab1da57ad6e19a0377e7/"
+    listing = idnes_parser.parse_detail(
+        html, source_url=url, category_main="byt", category_type="prodej"
+    )
+    assert listing.source == "idnes"
+    assert listing.source_id_native == "6a16ab1da57ad6e19a0377e7"
+    assert len(listing.content_hash()) == 64
+    # The structured spec list yields at least area + price on a live listing.
+    assert listing.area_m2 is not None
+    assert listing.price_czk is not None

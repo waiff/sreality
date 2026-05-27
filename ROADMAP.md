@@ -1069,7 +1069,19 @@ shape (see D1 below).
 > pilot** (prodej/byty), confirm rows land with `source='bazos'` and that the
 > Tier-1 matcher's cross-source attaches behave as expected (bazos's
 > approximate coords/free-text area mostly form singletons at first), then
-> widen scope + add a cron cadence.
+> widen scope + add a cron cadence. Slice 3c shipped the **second** portal
+> scraper, **reality.idnes.cz** (`source='idnes'`): `scraper/idnes_parser.py`
+> (deterministic selectolax HTML→`ScrapedListing`), `scraper/idnes_client.py`,
+> `scraper/idnes_main.py`, and `scrape_idnes.yml` (every-6h, :45-offset).
+> Unlike bazos's free-text classifieds, idnes is a structured portal — the
+> detail page's `<dl><dt>/<dd>` spec list yields typed area/floor/condition/
+> building-type/energy/ownership/furnished, and an embedded map config +
+> GeoJSON Point give **exact coordinates**, so idnes listings carry `geom` and
+> can actually Tier-1-match colocated sreality properties. The fetch-fixtures
+> pipeline gained `--idnes-index` / `--idnes-detail` (and an `if:always()` fix
+> so one stale source URL no longer discards every fetched fixture). **Next:
+> run the capped idnes pilot** (prodej/byty), confirm rows land with
+> `source='idnes'` + populated `geom`, then widen scope.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
