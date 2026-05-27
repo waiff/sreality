@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 06:52 UTC_
+_Last refreshed: 2026-05-27 07:14 UTC_
 
 **Branch:** `claude/trusting-turing-PFYte`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-27 06:52 UTC_
 **Last 10 commits:**
 
 ```
+72f180e chore: refresh ROADMAP auto-status block
+c97207d Add self-maintaining GitHub Actions docs to Settings
 9bf13fa Merge pull request #191 from waiff/claude/zealous-heisenberg-WFmCL
 248b044 Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
 a0dbba7 chore: refresh ROADMAP auto-status block
@@ -24,8 +26,6 @@ fc8bae9 Merge pull request #186 from waiff/claude/eloquent-heisenberg-gXR9k
 af4def2 Merge origin/main into slices 0-3a (live v1 parser + property layer)
 4e6e555 Merge pull request #190 from waiff/claude/zealous-heisenberg-WFmCL
 c54dd1e Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
-520282a ci: ease the delta scrape cron from */15 to hourly
-d51de6b Merge pull request #189 from waiff/claude/serene-ptolemy-7nt9s
 ```
 
 <!-- END AUTO-STATUS -->
