@@ -34,6 +34,16 @@ on:
         required: false
         default: ""
         type: string
+      idnes_index_url:
+        description: reality.idnes.cz search/index URL for the crawler (leave blank to skip)
+        required: false
+        default: https://reality.idnes.cz/s/prodej/byty/
+        type: string
+      idnes_detail_url:
+        description: reality.idnes.cz single-listing detail URL for the crawler (leave blank to skip)
+        required: false
+        default: ""
+        type: string
 
 jobs:
   fetch:
@@ -61,7 +71,9 @@ jobs:
             --idnes "${{ inputs.idnes_url }}" \
             --remax "${{ inputs.remax_url }}" \
             --bazos-index "${{ inputs.bazos_index_url }}" \
-            --bazos-detail "${{ inputs.bazos_detail_url }}"
+            --bazos-detail "${{ inputs.bazos_detail_url }}" \
+            --idnes-index "${{ inputs.idnes_index_url }}" \
+            --idnes-detail "${{ inputs.idnes_detail_url }}"
 
       - name: Commit fixtures
         run: |
