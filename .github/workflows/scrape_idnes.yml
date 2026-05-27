@@ -37,6 +37,11 @@ on:
         required: false
         default: "2"
         type: string
+      dry_run:
+        description: fetch + parse + log but write nothing to the DB
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: idnes-scrape
@@ -65,8 +70,10 @@ jobs:
           SALE_TYPE: ${{ inputs.sale_type || 'prodej' }}
           CATEGORY: ${{ inputs.category || 'byty' }}
           MAX_PAGES: ${{ inputs.max_pages || '2' }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           ARGS="--sale-type $SALE_TYPE --category $CATEGORY"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           echo "python -m scraper.idnes_main $ARGS"
           eval "python -m scraper.idnes_main $ARGS"

@@ -920,6 +920,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "2",
         "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "fetch + parse + log but write nothing to the DB",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
       }
     ],
     "secrets": [
