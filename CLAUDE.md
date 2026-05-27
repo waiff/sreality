@@ -5,8 +5,8 @@ Read this before changing anything.
 
 ## What this project is
 
-A daily scraper for Czech real estate listings from sreality.cz. Each
-nightly run walks all six meaningful category pairs in sequence —
+An hourly scraper for Czech real estate listings from sreality.cz. Each
+run walks all six meaningful category pairs in sequence —
 apartments, houses, and commercial properties, each in both rental
 and sale variants (defined as `CATEGORIES` in `scraper/main.py`). The
 output is a Postgres database (Supabase, Frankfurt region, PostGIS
@@ -682,63 +682,91 @@ to scrub by regex; if a fixture leaks one, hand-edit the file.
 
 ## How to manually trigger the scraper
 
-GitHub repo -> **Actions** tab -> **Scraping: Sreality nightly deep run**
+GitHub repo -> **Actions** tab -> **Scraping: Sreality hourly run**
 workflow (`scrape.yml`) -> **Run workflow** button -> pick branch and optional
-flags -> **Run workflow**. (All three scraping workflows are prefixed
+flags -> **Run workflow**. (All scraping workflows are prefixed
 `Scraping:` in the Actions list so they group together.)
 
-The scrape runs on a two-tier cadence. **Both tiers now do a complete
-index walk** — the split is about how much expensive work each does, not
-walk depth:
+There is **one scrape pipeline**, not a two-tier split. `scrape.yml`
+(cron `0 * * * *`, hourly) walks the **entire** index of every category
+pair (no `--limit`) every run, so newly-listed properties surface AND
+delistings flip to `is_active=false`. Because the walk is complete it runs
+`mark_inactive` every run. It records `run_type='full'` (auto-derived,
+since there's no `--limit`).
 
-- **Scraping: Sreality full index walk** (`scrape_delta.yml`, cron
-  `0 * * * *`) — the primary scrape. Walks the **entire** index of
-  every category pair (no `--limit`), so newly-listed properties surface
-  AND delistings flip to `is_active=false`. Because the walk is complete
-  it runs `mark_inactive` every run. Detail refetches and image downloads
-  are **capped per run** (`--max-detail-refetches 150`,
-  `--max-image-downloads 400`) so it stays bounded; deferred work drains on
-  the next run (failure-priority retry + newest-first image ordering).
-  Detail fetches run on a small thread pool paced by a shared rate limiter
-  (`--detail-workers` / `--detail-rate`). Records as `run_type='delta'` via
-  `--run-type`. Skips condition scoring.
-  **Cadence:** the cron is **hourly** (`0 * * * *`), deliberately — each run
-  is a complete walk taking 10-16 min, and hourly keeps a steady, polite
-  request volume against sreality (a too-aggressive schedule is a plausible
-  abuse-flag trigger). GitHub also throttles scheduled workflows (worse
-  overnight), so effective cadence can be slightly slower; the Health
-  liveness check is tuned to this (warn >90 min, fail >180 min). For tighter,
-  near-back-to-back cadence, set the optional `SCRAPE_CHAIN_TOKEN` PAT secret
-  (fine-grained: this repo, Actions read+write): the workflow's "Chain next
-  run" step then re-dispatches itself on success (GITHUB_TOKEN can't, GitHub
-  blocks recursion). The hourly cron remains the safety net that restarts the
-  chain. No-op without the PAT.
-- **Scraping: Sreality nightly deep run** (`scrape.yml`, cron `0 22 * * *`) —
-  the deep nightly. Also a full walk, but its distinct value is the expensive
-  backlog work the hourly ticks skip: the condition-scoring phase (LLM
-  cost), a deep image-backlog drain (cap 50 000), and a high-cap detail
-  catch-up (cap 10 000). Records as `run_type='full'`.
+- **Detail refetches** are capped per run (`--max-detail-refetches 4000`,
+  `--max-detail-refetches-per-category 1200`) — generous caps comfortably
+  above hourly churn so details don't perpetually lag, while still bounding
+  worst-case run time. Deferred work drains on the next run (failure-priority
+  retry). Fetches run on a thread pool paced by a shared rate limiter
+  (`--detail-workers 8` / `--detail-rate 6.0` — a moderate bump from the
+  historical 4 @ 2 req/s; the 429/403 auto-backoff stays the safety net).
+- **Images:** the run drains ACTIVE-listing images newest-first to empty
+  (`--images-active-only`, no cap) — active is the user-visible coverage gap.
+  The 2-hourly `images.yml` backfill is the deeper drain that also reaches
+  the INACTIVE/historical backlog.
+- **Condition scoring is NOT part of the scrape.** It lives in its own
+  decoupled workflow `condition_scores.yml` (see below) so the LLM phase can
+  never slow the scrape. The hourly scrape always passes
+  `--no-condition-scoring`.
+
+**Cadence:** hourly, deliberately — each run is a complete walk, and hourly
+keeps a steady, polite request volume against sreality (a too-aggressive
+schedule is a plausible abuse-flag trigger). GitHub also throttles scheduled
+workflows (worse overnight), so effective cadence can be slightly slower; the
+Health liveness check is tuned to this (warn >90 min, fail >180 min). For
+tighter, near-back-to-back cadence, set the optional `SCRAPE_CHAIN_TOKEN` PAT
+secret (fine-grained: this repo, Actions read+write): the workflow's "Chain
+next run" step then re-dispatches itself on success (GITHUB_TOKEN can't,
+GitHub blocks recursion; the chain skips one-off `--limit`/`--detail-only`/
+dry-run test dispatches). The hourly cron remains the safety net that restarts
+the chain. No-op without the PAT.
+
+**Condition scoring** (`condition_scores.yml`) runs hourly at `:30`,
+decoupled from the scrape, reading the freshly-committed snapshots the
+`:00` walk produced. It scores every active listing whose latest snapshot
+lacks a condition-score row (no region filter on the scheduled path; limit
+2000, cost cap $15), and is resumable + cost-capped. The same workflow's
+`workflow_dispatch` is the manual backfill (defaults to the operator's four
+kraje, limit 500, cap $10). Wraps `scripts/backfill_condition_scores.py`.
+The selection is portal-agnostic, so a future scraper landing rows in
+`listings`/`listing_snapshots` is scored by the same job.
+
+**Optional batch backend (Phase 1.8b).** `condition_score_batches.yml`
+runs the same scoring through the Anthropic **Message Batches API** (50%
+cheaper, async) in two modes: `submit` builds one batch from the pending
+selection (`scripts/submit_condition_batch.py`), `ingest` polls in-flight
+batches and writes completed results through the **shared**
+`toolkit.condition_scoring.persist_scoring_result` (identical cache row +
+guarded `listings.*` UPDATE as the synchronous scorer) plus one
+`llm_calls` row at the discounted cost (`scripts/ingest_condition_batch.py`).
+Tracking lives in `condition_score_batches` / `condition_score_batch_requests`
+(migration 098); re-ingest is idempotent. The workflow is **dispatch-only**
+until migration 098 is applied and a manual submit→ingest round-trip is
+confirmed; the synchronous `condition_scores.yml` remains the default
+steady-state path. The two scorers share one request builder
+(`build_scoring_request`) so the cached system+tools prefix is identical
+across both.
 
 The image backfill (`images.yml`, `--images-only`) is NOT a scrape run and
 does **not** write a `scrape_runs` row — only index walks do — so "last
 scrape", the liveness check, and reconciliation track real walks.
 
-`mark_inactive` is no longer nightly-only. Two safety rails make the
-every-run flip safe (architectural rule #3): (1) each per-category
-flip is gated on **walk completeness** — `_walk_complete` compares the
-collected count against the API's `result_size` and skips the flip
-(logging `INACTIVE skipped`) when the walk looks truncated; (2) a gone
-detail fetch (HTTP 404/410 or sreality's "tato stránka neexistuje" body,
-surfaced as `ListingGoneError`) flips that single listing immediately and
-clears any `listing_fetch_failures` row, instead of accumulating failures.
-The `--limit` guard still short-circuits `mark_inactive` for ad-hoc
-partial runs.
+`mark_inactive` runs every walk. Two safety rails make the every-run flip
+safe (architectural rule #3): (1) each per-category flip is gated on **walk
+completeness** — `_walk_complete` compares the collected count against the
+API's `result_size` and skips the flip (logging `INACTIVE skipped`) when the
+walk looks truncated; (2) a gone detail fetch (HTTP 404/410 or sreality's
+"tato stránka neexistuje" body, surfaced as `ListingGoneError`) flips that
+single listing immediately and clears any `listing_fetch_failures` row,
+instead of accumulating failures. The `--limit` guard still short-circuits
+`mark_inactive` for ad-hoc partial runs (a `--limit` run records
+`run_type='delta'`).
 
-Concurrency for the 15-min job is `cancel-in-progress: false` — a long
-tick is never killed mid-walk; the next cron tick queues behind it
-instead of overlapping. Per-category marking commits immediately after
-each category's walk, so even a timed-out tick leaves a consistent
-partial result. The nightly owns the 22:00 UTC slot.
+Concurrency for the scrape is `cancel-in-progress: false` — a long tick is
+never killed mid-walk; the next cron tick queues behind it instead of
+overlapping. Per-category marking commits immediately after each category's
+walk, so even a timed-out tick leaves a consistent partial result.
 
 ## Reading the logs
 
