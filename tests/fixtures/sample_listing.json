@@ -1,124 +1,3397 @@
 {
-  "text": {
-    "name": "Popis",
-    "value": "Pronájem nově dokončené novostavby bytu s terasou."
+  "acceptance_year": 1970,
+  "advert_code": "N2617152",
+  "advert_description": "Prodej samostatné bytové jednotky 3+kk o užitné ploše 85 m², (obytná 71 m2) v domě po částečné revitalizaci. Byt je v rodinném domě s novými okny a fasádou a je se samostatným vchodem do domu. V bytě je obývací pokoj s krbem propojený s kuchyní a dva neprůchozí pokoje. V kuchyni je kuchyňská linka a el. sporák. Koupelna s vanou, společně s WC. V suterénu je sklep, kde je umístěn plynový kondenzační kotel na vytápění a el. bojler na teplou vodu, samostatně pro bytovou jednotku. Pozemek (zahrada), která náleží k bytové jednotce je oplocená o celkové ploše 174 m2. Aktuálně probíhají úpravy – vybudování terasy k posezení.\r\nJedná se o klidnou lokalitu s dostupností veškeré občanské vybavenosti v městské části Petřkovice na okraji města Ostravy.",
+  "advert_images": [
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859108,
+      "kind": 2,
+      "order": 1,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CDciVBzu1Gttzfn/bda2.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859111,
+      "kind": 2,
+      "order": 4,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5DwDWzB0ZVGttzgJ/fee9.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859114,
+      "kind": 2,
+      "order": 5,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5Do9kXBY36Gttzgr/c69a.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859117,
+      "kind": 2,
+      "order": 6,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBZUyGttzhg/13ec.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859126,
+      "kind": 2,
+      "order": 7,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQqqsKBeAGttziX/b8ec.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859135,
+      "kind": 2,
+      "order": 8,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCHBj1BZfGttzj6/e125.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 868,
+      "id": 993859138,
+      "kind": 2,
+      "order": 9,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CDciVBzvAGttzkW/84a6.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859144,
+      "kind": 2,
+      "order": 10,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQy2O9ByMGttzm9/c2ec.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859147,
+      "kind": 2,
+      "order": 11,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQBJBNzBXQGttzoS/bc83.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859150,
+      "kind": 2,
+      "order": 12,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CFdAHBY52Gttzow/2291.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 1200,
+      "id": 993859156,
+      "kind": 2,
+      "order": 13,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBZUyGttzpP/7ba3.jpeg",
+      "width": 799
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859159,
+      "kind": 2,
+      "order": 14,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5DwDWzB0ZmGttzpp/c46c.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859162,
+      "kind": 2,
+      "order": 15,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBZVOGttzqE/87ba.jpeg",
+      "width": 1280
+    },
+    {
+      "alt": "",
+      "height": 853,
+      "id": 993859165,
+      "kind": 2,
+      "order": 16,
+      "url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWLrlBZCiGttzqk/84c4.jpeg",
+      "width": 1280
+    }
+  ],
+  "advert_name": "Prodej bytu 3+kk 85 m²",
+  "annuity": null,
+  "balcony": false,
+  "balcony_area": null,
+  "basin": false,
+  "basin_area": null,
+  "beginning_date": null,
+  "building_area": null,
+  "building_condition": {
+    "name": "Velmi dobrý",
+    "value": 1
   },
-  "seo": {
-    "category_main_cb": 1,
-    "category_sub_cb": 4,
-    "category_type_cb": 2,
-    "locality": "olomouc-slavonin-jizni"
+  "building_type": {
+    "name": "Smíšená",
+    "value": 7
   },
-  "meta_description": "Byt 2+kk 65 m² k pronájmu Jižní, Olomouc - Slavonín; 16 900 Kč za měsíc.",
-  "name": {
-    "name": "Název",
-    "value": "Pronájem bytu 2+kk 65 m²"
+  "category_main_cb": {
+    "name": "Byty",
+    "value": 1
   },
-  "price_czk": {
-    "unit": "za měsíc",
-    "name": "Celková cena",
-    "value": "16 900",
-    "value_raw": 16900
+  "category_sub_cb": {
+    "name": "3+kk",
+    "value": 6
   },
-  "locality": {
-    "name": "Adresa",
-    "value": "Jižní, Olomouc - Slavonín",
-    "accuracy": "not_address"
+  "category_type_cb": {
+    "name": "Prodej",
+    "value": 1
   },
-  "map": {
-    "lon": 17.2413190872989,
-    "lat": 49.569219632103,
-    "zoom": 15,
-    "type": "geometry"
+  "cellar": false,
+  "cellar_area": null,
+  "circuit_breaker_cb": null,
+  "cost_of_living": "",
+  "discount_show": false,
+  "easy_access": {
+    "name": "- vyber možnost",
+    "value": 0
   },
-  "_links": {
-    "self": {
-      "profile": "/estates/1/doc",
-      "href": "/cs/v2/estates/2836292428",
-      "title": "Detail inzeratu"
+  "edited": "2026-05-26",
+  "electricity_set": [
+    {
+      "name": "230V",
+      "value": 2
+    }
+  ],
+  "elevator": {
+    "name": "- nezadáno",
+    "value": 0
+  },
+  "energy_efficiency_rating_cb": {
+    "name": "F - Velmi nehospodárná",
+    "value": 6
+  },
+  "energy_performance_certificate": {
+    "name": "č. 264/2020 Sb.",
+    "value": 3
+  },
+  "energy_performance_summary": null,
+  "exclusively_at_rk": true,
+  "finish_date": null,
+  "first_tour_date": null,
+  "first_tour_date_to": null,
+  "flat_class": {
+    "name": "- vyber typ",
+    "value": 0
+  },
+  "floor_area": null,
+  "floor_number": 1,
+  "floors": 2,
+  "furnished": {
+    "name": "Částečně",
+    "value": 3
+  },
+  "garage": false,
+  "garage_count": null,
+  "garden_area": 174,
+  "garret": false,
+  "gas_set": [],
+  "gully_set": [
+    {
+      "name": "Veřejná kanalizace",
+      "value": 1
+    }
+  ],
+  "hash_id": 3292504140,
+  "heating_element_set": [
+    {
+      "name": "Radiátory",
+      "value": 3
+    },
+    {
+      "name": "Krb",
+      "value": 7
+    },
+    {
+      "name": "Kotel na tuhá paliva",
+      "value": 8
+    }
+  ],
+  "heating_set": [],
+  "heating_source_set": [],
+  "internet_connection_provider": null,
+  "internet_connection_speed": null,
+  "internet_connection_type_set": [
+    {
+      "name": "Vzduchem",
+      "value": 4
+    }
+  ],
+  "keywords": [
+    ""
+  ],
+  "labels": [
+    {
+      "description": "Cukrárna Marie",
+      "distance": 323.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/38",
+      "lat": 49.873870849609375,
+      "lines": [],
+      "lon": 18.260129928588867,
+      "name": "candy_shop",
+      "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWLrlBXrZGsTnEf/8fb4.jpeg",
+      "rating": 5,
+      "review_count": 9,
+      "source": "firm",
+      "source_id": 13124554,
+      "url": "https://www.firmy.cz/detail/13124554-cukrarna-marie-ostrava.html"
+    },
+    {
+      "description": "U DLOUHÝCH est.1892",
+      "distance": 2493.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/362",
+      "lat": 49.85188293457031,
+      "lines": [],
+      "lon": 18.277996063232422,
+      "name": "tavern",
+      "photo_url": "https://d48-a.sdn.cz/d_48/c_img_of_A/kPRtHkVQLlCIYXkBjRE3Jxcp/ef1a.jpeg",
+      "rating": 4,
+      "review_count": 4,
+      "source": "firm",
+      "source_id": 13131845,
+      "url": "https://www.firmy.cz/detail/13131845-u-dlouhych-est-1892-ostrava-privoz.html"
+    },
+    {
+      "description": "LandekVet",
+      "distance": 291.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/164",
+      "lat": 49.87031555175781,
+      "lines": [],
+      "lon": 18.25585174560547,
+      "name": "vet",
+      "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQy2O9laGsTnAr/628f.jpeg",
+      "rating": 5,
+      "review_count": 20,
+      "source": "firm",
+      "source_id": 12781028,
+      "url": "https://www.firmy.cz/detail/12781028-landekvet-ostrava-petrkovice.html"
+    },
+    {
+      "description": "Potraviny U Jana",
+      "distance": 540.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/423",
+      "lat": 49.86687088012695,
+      "lines": [],
+      "lon": 18.25577163696289,
+      "name": "small_shop",
+      "photo_url": "https://d48-a.sdn.cz/d_48/c_img_QO_n/DvEDqS.jpeg",
+      "rating": 5,
+      "review_count": 7,
+      "source": "firm",
+      "source_id": 12885088,
+      "url": "https://www.firmy.cz/detail/12885088-potraviny-u-jana-ostrava-petrkovice.html"
+    },
+    {
+      "description": "Kino vesmír",
+      "distance": 4290.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/62",
+      "lat": 49.83671951293945,
+      "lines": [],
+      "lon": 18.287294387817383,
+      "name": "movies",
+      "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CGpNZBXKaGr4EZE/f11f.jpeg",
+      "rating": 4,
+      "review_count": 4,
+      "source": "firm",
+      "source_id": 12980428,
+      "url": "https://www.firmy.cz/detail/12980428-kino-vesmir-ostrava-moravska-ostrava.html"
+    },
+    {
+      "description": "STUDIO G",
+      "distance": 4128.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/39",
+      "lat": 49.83805847167969,
+      "lines": [],
+      "lon": 18.28638458251953,
+      "name": "theater",
+      "photo_url": "//d48-a.sdn.cz/d_48/c_img_E_G/1LqQcf.jpeg",
+      "rating": 5,
+      "review_count": 6,
+      "source": "firm",
+      "source_id": 13216203,
+      "url": "https://www.firmy.cz/detail/13216203-studio-g-ostrava-moravska-ostrava.html"
+    },
+    {
+      "description": "Dětské hřiště Mamut",
+      "distance": 371.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/204",
+      "lat": 49.8682458963,
+      "lines": [],
+      "lon": 18.2627563339,
+      "name": "playground",
+      "photo_url": "https://d34-a.sdn.cz/d_34/c_img_F_I/PhtKtd.jpeg",
+      "rating": -1,
+      "review_count": 0,
+      "source": "base",
+      "source_id": 2119383,
+      "url": "https://mapy.cz/zakladni?x=18.2627563339&y=49.8682458963&z=17&source=base&id=2119383"
+    },
+    {
+      "description": "Uhelná sloj v Landeku",
+      "distance": 793.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/368",
+      "lat": 49.8672338889,
+      "lines": [],
+      "lon": 18.2692044444,
+      "name": "natural_attraction",
+      "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QR_b/PjTse.jpeg",
+      "rating": -1,
+      "review_count": 0,
+      "source": "base",
+      "source_id": 1981598,
+      "url": "https://mapy.cz/zakladni?x=18.2692044444&y=49.8672338889&z=17&source=base&id=1981598"
+    },
+    {
+      "description": "Katedrála Božského Spasitele",
+      "distance": 4414.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/66",
+      "lat": 49.8359849435674,
+      "lines": [],
+      "lon": 18.2888497573251,
+      "name": "sightseeing",
+      "photo_url": "https://d34-a.sdn.cz/d_34/c_img_od_A/kOy0N9usHcCZypM4kEV2fEY/bc95.jpeg",
+      "rating": -1,
+      "review_count": 0,
+      "source": "base",
+      "source_id": 1701177,
+      "url": "https://mapy.cz/zakladni?x=18.2888497573251&y=49.8359849435674&z=17&source=base&id=1701177"
+    },
+    {
+      "description": "Ostrava hlavní nádraží",
+      "distance": 2175.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/169",
+      "lat": 49.85201947014058,
+      "lines": [
+        {
+          "departure_direction": 1,
+          "line_id": "341",
+          "line_label": "LE",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "341",
+          "line_label": "LE",
+          "poi_id": 15212374,
+          "terminus": "Bohumín",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "EN_406",
+          "line_label": "EN 406",
+          "poi_id": 15212374,
+          "terminus": "Chałupki",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "EN_407",
+          "line_label": "EN 407",
+          "poi_id": 15212374,
+          "terminus": "Břeclav",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "EN_442",
+          "line_label": "EN 442",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "EN_443",
+          "line_label": "EN 443",
+          "poi_id": 15212374,
+          "terminus": "Čadca, žst.",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "Ex1",
+          "line_label": "Ex1",
+          "poi_id": 15212374,
+          "terminus": "Ostrava-Svinov",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "Ex1",
+          "line_label": "Ex1",
+          "poi_id": 15212374,
+          "terminus": "Čadca, žst.",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "Ex4",
+          "line_label": "Ex4",
+          "poi_id": 15212374,
+          "terminus": "Břeclav",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "Ex4",
+          "line_label": "Ex4",
+          "poi_id": 15212374,
+          "terminus": "Zebrzydowice",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "Ex_508",
+          "line_label": "Ex 508",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-R61",
+          "line_label": "R61",
+          "poi_id": 15212374,
+          "terminus": "Návsí (Nawsie) ",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "MS-R61",
+          "line_label": "R61",
+          "poi_id": 15212374,
+          "terminus": "Ostrava-Svinov",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-R61",
+          "line_label": "R61",
+          "poi_id": 15212374,
+          "terminus": "Český Těšín (Czeski Cieszyn)",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "MS-S2",
+          "line_label": "S2",
+          "poi_id": 15212374,
+          "terminus": "Ostrava-Svinov",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-S2",
+          "line_label": "S2",
+          "poi_id": 15212374,
+          "terminus": "Mosty u Jablunkova",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-S3",
+          "line_label": "S3",
+          "poi_id": 15212374,
+          "terminus": "Ostrava střed",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-S3",
+          "line_label": "S3",
+          "poi_id": 15212374,
+          "terminus": "Bohumín",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "MS-S3",
+          "line_label": "S3",
+          "poi_id": 15212374,
+          "terminus": "Hranice na Moravě",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-S4",
+          "line_label": "S4",
+          "poi_id": 15212374,
+          "terminus": "Mošnov, Ostrava Airport",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "MS-S4",
+          "line_label": "S4",
+          "poi_id": 15212374,
+          "terminus": "Bohumín",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-S6",
+          "line_label": "S6",
+          "poi_id": 15212374,
+          "terminus": "Frýdlant nad Ostravicí",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "MS-S8",
+          "line_label": "S8",
+          "poi_id": 15212374,
+          "terminus": "Ostrava střed",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "MS-S8",
+          "line_label": "S8",
+          "poi_id": 15212374,
+          "terminus": "Veřovice",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "R8",
+          "line_label": "R8",
+          "poi_id": 15212374,
+          "terminus": "Bohumín",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "R8",
+          "line_label": "R8",
+          "poi_id": 15212374,
+          "terminus": "Brno hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1000",
+          "line_label": "RJ 1000",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1001",
+          "line_label": "RJ 1001",
+          "poi_id": 15212374,
+          "terminus": "Havířov",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1002",
+          "line_label": "RJ 1002",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1003",
+          "line_label": "RJ 1003",
+          "poi_id": 15212374,
+          "terminus": "Čadca, žst.",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1005",
+          "line_label": "RJ 1005",
+          "poi_id": 15212374,
+          "terminus": "Bohumín",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1006",
+          "line_label": "RJ 1006",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1007",
+          "line_label": "RJ 1007",
+          "poi_id": 15212374,
+          "terminus": "Havířov",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1008",
+          "line_label": "RJ 1008",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1009",
+          "line_label": "RJ 1009",
+          "poi_id": 15212374,
+          "terminus": "Havířov",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1010",
+          "line_label": "RJ 1010",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1011",
+          "line_label": "RJ 1011",
+          "poi_id": 15212374,
+          "terminus": "Čadca, žst.",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1012",
+          "line_label": "RJ 1012",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1014",
+          "line_label": "RJ 1014",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1015",
+          "line_label": "RJ 1015",
+          "poi_id": 15212374,
+          "terminus": "Návsí (Nawsie) ",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1016",
+          "line_label": "RJ 1016",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1017",
+          "line_label": "RJ 1017",
+          "poi_id": 15212374,
+          "terminus": "Návsí (Nawsie) ",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1018",
+          "line_label": "RJ 1018",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1019",
+          "line_label": "RJ 1019",
+          "poi_id": 15212374,
+          "terminus": "Bohumín",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "RJ_1020",
+          "line_label": "RJ 1020",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1021",
+          "line_label": "RJ 1021",
+          "poi_id": 15212374,
+          "terminus": "Čadca, žst.",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1024",
+          "line_label": "RJ 1024",
+          "poi_id": 15212374,
+          "terminus": "Praha-Zahradní Město",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "RJ_1028",
+          "line_label": "RJ 1028",
+          "poi_id": 15212374,
+          "terminus": "Chałupki",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "SC_240",
+          "line_label": "SC 240",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "SC_241",
+          "line_label": "SC 241",
+          "poi_id": 15212374,
+          "terminus": "Čadca, žst.",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "SC_500",
+          "line_label": "SC 500",
+          "poi_id": 15212374,
+          "terminus": "České Budějovice",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "SC_504",
+          "line_label": "SC 504",
+          "poi_id": 15212374,
+          "terminus": "Karlovy Vary",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "SC_506",
+          "line_label": "SC 506",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "SC_510",
+          "line_label": "SC 510",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "SC_516",
+          "line_label": "SC 516",
+          "poi_id": 15212374,
+          "terminus": "Praha hlavní nádraží",
+          "type": "vlak"
+        },
+        {
+          "departure_direction": 1,
+          "line_id": "rj_512",
+          "line_label": "rj 512",
+          "poi_id": 15212374,
+          "terminus": "Františkovy Lázně",
+          "type": "vlak"
+        }
+      ],
+      "lon": 18.26724176561302,
+      "name": "train",
+      "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QI_x/no63kR.mpo",
+      "rating": -1,
+      "review_count": 0,
+      "source": "pubt",
+      "source_id": 15212374,
+      "time": 3409,
+      "url": "https://mapy.cz/zakladni?x=18.26724176561302&y=49.85201947014058&z=17&source=pubt&id=15212374",
+      "walkDistance": 3703
+    },
+    {
+      "description": "Bankomat České spořitelny",
+      "distance": 2316.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/28",
+      "lat": 49.8507080078125,
+      "lines": [],
+      "lon": 18.267187118530273,
+      "name": "atm",
+      "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQJGKykHGsTmqk/5de5.jpeg",
+      "rating": 4,
+      "review_count": 2,
+      "source": "firm",
+      "source_id": 2464823,
+      "time": 3181,
+      "url": "https://www.firmy.cz/detail/2464823-bankomat-ceske-sporitelny-ostrava-privoz.html",
+      "walkDistance": 3464
+    },
+    {
+      "description": "Harenda",
+      "distance": 445.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/133",
+      "lat": 49.868194580078125,
+      "lines": [],
+      "lon": 18.264249801635742,
+      "name": "restaurant",
+      "photo_url": "https://d34-a.sdn.cz/d_34/c_img_oe_A/kOzmiQlmfoDdPdoEmXEtU4A0/0139.mpo",
+      "rating": 4,
+      "review_count": 79,
+      "source": "firm",
+      "source_id": 13733517,
+      "time": 922,
+      "url": "https://www.firmy.cz/detail/13733517-harenda-ostrava-petrkovice.html",
+      "walkDistance": 741
+    },
+    {
+      "description": "Lékárna Petřkovice",
+      "distance": 278.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/72",
+      "lat": 49.873451232910156,
+      "lines": [],
+      "lon": 18.260385513305664,
+      "name": "drugstore",
+      "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_H/UbRj4k.jpeg",
+      "rating": 5,
+      "review_count": 10,
+      "source": "firm",
+      "source_id": 12958576,
+      "time": 306,
+      "url": "https://www.firmy.cz/detail/12958576-lekarna-petrkovice-ostrava-petrkovice.html",
+      "walkDistance": 301
+    },
+    {
+      "description": "Outlet Arena Moravia",
+      "distance": 1211.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/419",
+      "lat": 49.86031723022461,
+      "lines": [],
+      "lon": 18.256330490112305,
+      "name": "shop",
+      "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gX_f/87xPzN.jpeg",
+      "rating": 4,
+      "review_count": 189,
+      "source": "firm",
+      "source_id": 13181729,
+      "time": 1401,
+      "url": "https://www.firmy.cz/detail/13181729-outlet-arena-moravia-ostrava-privoz.html",
+      "walkDistance": 1557
+    },
+    {
+      "description": "ZŠ Ostrava-Petřkovice, Hlučínská",
+      "distance": 453.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/142",
+      "lat": 49.87488555908203,
+      "lines": [],
+      "lon": 18.257986068725586,
+      "name": "school",
+      "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/jjT8AF.jpeg",
+      "rating": 5,
+      "review_count": 6,
+      "source": "firm",
+      "source_id": 358695,
+      "time": 587,
+      "url": "https://www.firmy.cz/detail/358695-zs-ostrava-petrkovice-hlucinska-ostrava-petrkovice.html",
+      "walkDistance": 613
+    },
+    {
+      "description": "Pošta Ostrava 29 - Česká pošta, s.p.",
+      "distance": 454.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/122",
+      "lat": 49.87501907348633,
+      "lines": [],
+      "lon": 18.258865356445312,
+      "name": "post_office",
+      "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/1ye8AB.jpeg",
+      "rating": 4,
+      "review_count": 8,
+      "source": "firm",
+      "source_id": 433453,
+      "time": 534,
+      "url": "https://www.firmy.cz/detail/433453-posta-ostrava-29-ostrava-petrkovice.html",
+      "walkDistance": 554
+    },
+    {
+      "description": "Veřejná lezecká stěna",
+      "distance": 359.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/144",
+      "lat": 49.8741954511,
+      "lines": [],
+      "lon": 18.2601361803,
+      "name": "sports",
+      "photo_url": "https://d34-a.sdn.cz/d_34/c_img_gZ_8/6fXCh4.jpeg",
+      "rating": -1,
+      "review_count": 0,
+      "source": "base",
+      "source_id": 2129019,
+      "time": 412,
+      "url": "https://mapy.cz/zakladni?x=18.2601361803&y=49.8741954511&z=17&source=base&id=2129019",
+      "walkDistance": 418
+    },
+    {
+      "description": "Petřkovice kaple",
+      "distance": 99.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/198",
+      "lat": 49.8715578417,
+      "lines": [
+        {
+          "departure_direction": -1,
+          "line_id": "L52D1",
+          "line_label": "52",
+          "poi_id": 15202103,
+          "terminus": "Šilheřovice, Paseky",
+          "type": "bus"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "L56D1",
+          "line_label": "56",
+          "poi_id": 15202103,
+          "terminus": "Hlučín, aut.nádr.",
+          "type": "bus"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "L67D1",
+          "line_label": "67",
+          "poi_id": 15202103,
+          "terminus": "Hlučín, aut.nádr.",
+          "type": "bus"
+        },
+        {
+          "departure_direction": -1,
+          "line_id": "L68D1",
+          "line_label": "68",
+          "poi_id": 15202103,
+          "terminus": "Šilheřovice, Ricka",
+          "type": "bus"
+        }
+      ],
+      "lon": 18.2587373111,
+      "name": "bus_public_transport",
+      "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWZuTBW2bGsT6IL/6cb9.jpeg",
+      "rating": -1,
+      "review_count": 0,
+      "source": "pubt",
+      "source_id": 15202103,
+      "time": 225,
+      "url": "https://mapy.cz/zakladni?x=18.2587373111&y=49.8715578417&z=17&source=pubt&id=15202103",
+      "walkDistance": 210
+    },
+    {
+      "description": "Přívoz, Hlučínská",
+      "distance": 1224.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/155",
+      "lat": 49.860596,
+      "lines": [],
+      "lon": 18.265446,
+      "name": "tram",
+      "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCsFBPhdGsTm4m/e502.jpeg",
+      "rating": -1,
+      "review_count": 0,
+      "source": "pubt",
+      "source_id": 15201863,
+      "time": 1659,
+      "url": "https://mapy.cz/zakladni?x=18.265446&y=49.860596&z=17&source=pubt&id=15201863",
+      "walkDistance": 1805
+    },
+    {
+      "description": "AD Landek klinika, s.r.o.",
+      "distance": 222.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/418",
+      "lat": 49.87226104736328,
+      "lines": [],
+      "lon": 18.257402420043945,
+      "name": "medic",
+      "photo_url": "image_placeholder",
+      "rating": 4,
+      "review_count": 2,
+      "source": "firm",
+      "source_id": 13267192,
+      "time": 432,
+      "url": "https://www.firmy.cz/detail/13267192-ad-landek-klinika-ostrava-petrkovice.html",
+      "walkDistance": 360
+    },
+    {
+      "description": "Mateřská škola Ostrava-Petřkovice, U Kaple 670, příspěvková organizace",
+      "distance": 283.0,
+      "imgUrl": "https://api.mapy.cz/poiimg/icon/412",
+      "lat": 49.872894287109375,
+      "lines": [],
+      "lon": 18.257177352905273,
+      "name": "kindergarten",
+      "photo_url": "https://d48-a.sdn.cz/d_48/c_img_F_G/Iirb16.jpeg",
+      "rating": 5,
+      "review_count": 1,
+      "source": "firm",
+      "source_id": 13059996,
+      "time": 688,
+      "url": "https://www.firmy.cz/detail/13059996-materska-skola-ostrava-petrkovice-u-kaple-670-prispevkova-organizace-ostrava-petrkovice.html",
+      "walkDistance": 632
+    }
+  ],
+  "labels_extended": {
+    "doctors": {
+      "data": [
+        {
+          "description": "AD Landek klinika, s.r.o.",
+          "distance": 222.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/418",
+          "lat": 49.87226104736328,
+          "lines": [],
+          "lon": 18.257402420043945,
+          "name": "medic",
+          "photo_url": "image_placeholder",
+          "rating": 4,
+          "review_count": 2,
+          "source": "firm",
+          "source_id": 13267192,
+          "time": 432,
+          "url": "https://www.firmy.cz/detail/13267192-ad-landek-klinika-ostrava-petrkovice.html",
+          "walkDistance": 360
+        },
+        {
+          "description": "LandekVet",
+          "distance": 291.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/164",
+          "lat": 49.87031555175781,
+          "lines": [],
+          "lon": 18.25585174560547,
+          "name": "vet",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQy2O9laGsTnAr/628f.jpeg",
+          "rating": 5,
+          "review_count": 20,
+          "source": "firm",
+          "source_id": 12781028,
+          "url": "https://www.firmy.cz/detail/12781028-landekvet-ostrava-petrkovice.html"
+        },
+        {
+          "description": "MOJE AMBULANCE mini",
+          "distance": 703.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/405",
+          "lat": 49.876983642578125,
+          "lines": [],
+          "lon": 18.256704330444336,
+          "name": "medic_2",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_G_C/g29B3Ln.jpeg",
+          "rating": 4,
+          "review_count": 8,
+          "source": "firm",
+          "source_id": 13025000,
+          "url": "https://www.firmy.cz/detail/13025000-moje-ambulance-mini-ostrava-petrkovice.html"
+        },
+        {
+          "description": "MUDr. Petr Kuběna",
+          "distance": 2390.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/405",
+          "lat": 49.85055160522461,
+          "lines": [],
+          "lon": 18.270143508911133,
+          "name": "medic_3",
+          "photo_url": "//d48-a.sdn.cz/d_48/c_img_p7_A/kOzkBkwYBTDq3nMLysFa5Btu/88bd.jpeg",
+          "rating": 5,
+          "review_count": 7,
+          "source": "firm",
+          "source_id": 13005403,
+          "url": "https://www.firmy.cz/detail/13005403-mudr-petr-kubena-ostrava-privoz.html"
+        },
+        {
+          "description": "MUDr. PUDICH, s.r.o.",
+          "distance": 2683.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/405",
+          "lat": 49.8914680480957,
+          "lines": [],
+          "lon": 18.240013122558594,
+          "name": "medic_4",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5bIUBBZQZGr7KN0/1e95.jpeg",
+          "rating": 5,
+          "review_count": 17,
+          "source": "firm",
+          "source_id": 2536760,
+          "url": "https://www.firmy.cz/detail/2536760-mudr-pudich-ludgerovice.html"
+        },
+        {
+          "description": "Ordinace praktického lékaře u kostela",
+          "distance": 2683.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/405",
+          "lat": 49.89147186279297,
+          "lines": [],
+          "lon": 18.240013122558594,
+          "name": "medic_5",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5Do9kXBXJWGr7KNE/3f50.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 13285027,
+          "url": "https://www.firmy.cz/detail/13285027-ordinace-praktickeho-lekare-u-kostela-ludgerovice.html"
+        },
+        {
+          "description": "VETPARK Ostrava, s.r.o.",
+          "distance": 3203.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/164",
+          "lat": 49.849002838134766,
+          "lines": [],
+          "lon": 18.288679122924805,
+          "name": "vet_2",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_oV_A/kO5SPc8MrY3f8HTrCJiKNe/bc21.mpo",
+          "rating": 4,
+          "review_count": 38,
+          "source": "firm",
+          "source_id": 13308555,
+          "url": "https://www.firmy.cz/detail/13308555-vetpark-ostrava-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "VETERINÁRNÍ ORDINACE -MVDr. Barbora Jelonková",
+          "distance": 4163.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/164",
+          "lat": 49.84989547729492,
+          "lines": [],
+          "lon": 18.30776596069336,
+          "name": "vet_3",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QQ_y/MC1Bosj.jpeg",
+          "rating": 5,
+          "review_count": 15,
+          "source": "firm",
+          "source_id": 1346648,
+          "url": "https://www.firmy.cz/detail/1346648-veterinarni-ordinace-mvdr-barbora-jelonkova-ostrava-muglinov.html"
+        },
+        {
+          "description": "Veterinární ordinace - MVDr. Richard Saviola",
+          "distance": 4578.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/164",
+          "lat": 49.830970764160156,
+          "lines": [],
+          "lon": 18.27483558654785,
+          "name": "vet_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/Q0hFqu.jpeg",
+          "rating": 5,
+          "review_count": 58,
+          "source": "firm",
+          "source_id": 477150,
+          "url": "https://www.firmy.cz/detail/477150-veterinarni-ordinace-mvdr-richard-saviola-ostrava-moravska-ostrava.html"
+        }
+      ],
+      "url": "https://www.firmy.cz/Prvni-pomoc-a-zdravotnictvi/Zdravotnicke-sluzby/Zdravotnicka-zarizeni?x=18.2552141715043&y=49.8726804390449&rt=adresa"
+    },
+    "grocery": {
+      "data": [
+        {
+          "description": "Potraviny U Jana",
+          "distance": 540.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/423",
+          "lat": 49.86687088012695,
+          "lines": [],
+          "lon": 18.25577163696289,
+          "name": "small_shop",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_QO_n/DvEDqS.jpeg",
+          "rating": 5,
+          "review_count": 7,
+          "source": "firm",
+          "source_id": 12885088,
+          "url": "https://www.firmy.cz/detail/12885088-potraviny-u-jana-ostrava-petrkovice.html"
+        },
+        {
+          "description": "HRUŠKA",
+          "distance": 560.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/423",
+          "lat": 49.87587356567383,
+          "lines": [],
+          "lon": 18.2579402923584,
+          "name": "small_shop_2",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_G_C/m6a8Ub.jpeg",
+          "rating": 3,
+          "review_count": 8,
+          "source": "firm",
+          "source_id": 12820262,
+          "url": "https://www.firmy.cz/detail/12820262-hruska-ostrava-petrkovice.html"
+        },
+        {
+          "description": "Potraviny a textil u školy",
+          "distance": 588.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/423",
+          "lat": 49.87610626220703,
+          "lines": [],
+          "lon": 18.25779151916504,
+          "name": "small_shop_3",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_oZ_A/nsLxLojIBcrvYGAZDLRAcV/6db1.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 13477634,
+          "url": "https://www.firmy.cz/detail/13477634-potraviny-a-textil-u-skoly-ostrava-petrkovice.html"
+        },
+        {
+          "description": "Outlet Arena Moravia",
+          "distance": 1211.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/419",
+          "lat": 49.86031723022461,
+          "lines": [],
+          "lon": 18.256330490112305,
+          "name": "shop",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gX_f/87xPzN.jpeg",
+          "rating": 4,
+          "review_count": 189,
+          "source": "firm",
+          "source_id": 13181729,
+          "time": 1401,
+          "url": "https://www.firmy.cz/detail/13181729-outlet-arena-moravia-ostrava-privoz.html",
+          "walkDistance": 1557
+        },
+        {
+          "description": "Potraviny na Vrablovci",
+          "distance": 1445.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/423",
+          "lat": 49.88040542602539,
+          "lines": [],
+          "lon": 18.24590492248535,
+          "name": "small_shop_4",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CGpNZBXoLGsT6t4/71cb.jpeg",
+          "rating": 5,
+          "review_count": 1,
+          "source": "firm",
+          "source_id": 13575768,
+          "url": "https://www.firmy.cz/detail/13575768-potraviny-na-vrablovci-ludgerovice.html"
+        },
+        {
+          "description": "Potraviny Dunaj",
+          "distance": 1643.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/423",
+          "lat": 49.857765197753906,
+          "lines": [],
+          "lon": 18.2700252532959,
+          "name": "small_shop_5",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCHBj17GGs0tjp/fc61.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 2555977,
+          "url": "https://www.firmy.cz/detail/2555977-potraviny-dunaj-ostrava-privoz.html"
+        },
+        {
+          "description": "Obchodní centrum KOKSOVNA",
+          "distance": 2046.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/419",
+          "lat": 49.85569381713867,
+          "lines": [],
+          "lon": 18.27567481994629,
+          "name": "shop_2",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gS_r/toPT7u.jpeg",
+          "rating": 5,
+          "review_count": 11,
+          "source": "firm",
+          "source_id": 13375600,
+          "url": "https://www.firmy.cz/detail/13375600-obchodni-centrum-koksovna-ostrava-privoz.html"
+        },
+        {
+          "description": "Kaufland",
+          "distance": 3940.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/101",
+          "lat": 49.836299896240234,
+          "lines": [],
+          "lon": 18.248489379882812,
+          "name": "shop_3",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gU_g/o6iTb.jpeg",
+          "rating": 4,
+          "review_count": 38,
+          "source": "firm",
+          "source_id": 1477277,
+          "url": "https://www.firmy.cz/detail/1477277-kaufland-ostrava-marianske-hory.html"
+        },
+        {
+          "description": "OC FUTURUM Ostrava",
+          "distance": 4247.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/419",
+          "lat": 49.8328971862793,
+          "lines": [],
+          "lon": 18.264257431030273,
+          "name": "shop_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_G_C/tlDgXB.jpeg",
+          "rating": 4,
+          "review_count": 185,
+          "source": "firm",
+          "source_id": 13359035,
+          "url": "https://www.firmy.cz/detail/13359035-oc-futurum-ostrava-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Tesco",
+          "distance": 4255.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/101",
+          "lat": 49.832801818847656,
+          "lines": [],
+          "lon": 18.263925552368164,
+          "name": "shop_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/YWWgI0.jpeg",
+          "rating": 3,
+          "review_count": 25,
+          "source": "firm",
+          "source_id": 733902,
+          "url": "https://www.firmy.cz/detail/733902-tesco-ostrava-moravska-ostrava.html"
+        }
+      ],
+      "url": "https://www.firmy.cz/Obchody-a-obchudky/Prodejci-potravin?x=18.2552141715043&y=49.8726804390449&rt=adresa"
+    },
+    "leisure": {
+      "data": [
+        {
+          "description": "Veřejná lezecká stěna",
+          "distance": 359.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/144",
+          "lat": 49.8741954511,
+          "lines": [],
+          "lon": 18.2601361803,
+          "name": "sports",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_gZ_8/6fXCh4.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 2129019,
+          "time": 412,
+          "url": "https://mapy.cz/zakladni?x=18.2601361803&y=49.8741954511&z=17&source=base&id=2129019",
+          "walkDistance": 418
+        },
+        {
+          "description": "Dětské hřiště Mamut",
+          "distance": 371.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/204",
+          "lat": 49.8682458963,
+          "lines": [],
+          "lon": 18.2627563339,
+          "name": "playground",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_F_I/PhtKtd.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 2119383,
+          "url": "https://mapy.cz/zakladni?x=18.2627563339&y=49.8682458963&z=17&source=base&id=2119383"
+        },
+        {
+          "description": "",
+          "distance": 395.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/204",
+          "lat": 49.8745197222,
+          "lines": [],
+          "lon": 18.2593622222,
+          "name": "playground_2",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QK_9/mo95yl.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 2067788,
+          "url": "https://mapy.cz/zakladni?x=18.2593622222&y=49.8745197222&z=17&source=base&id=2067788"
+        },
+        {
+          "description": "Dětské hřiště u Harendy",
+          "distance": 464.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/204",
+          "lat": 49.8680974492,
+          "lines": [],
+          "lon": 18.2644618125,
+          "name": "playground_3",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_E_I/DdfKtB.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 2119385,
+          "url": "https://mapy.cz/zakladni?x=18.2644618125&y=49.8680974492&z=17&source=base&id=2119385"
+        },
+        {
+          "description": "Víceúčelová hala Landek",
+          "distance": 490.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/144",
+          "lat": 49.867740631103516,
+          "lines": [],
+          "lon": 18.264419555664062,
+          "name": "sports_2",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5DwDWzByt9GsTn6C/65de.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 12955267,
+          "url": "https://www.firmy.cz/detail/12955267-viceucelova-hala-landek-ostrava.html"
+        },
+        {
+          "description": "Tenisové kurty Landek",
+          "distance": 510.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/153",
+          "lat": 49.86716842651367,
+          "lines": [],
+          "lon": 18.263750076293945,
+          "name": "sports_3",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_p8_A/nPVpfd5QLLDhCZlF6CF3EoVi/2dcb.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 12955271,
+          "url": "https://www.firmy.cz/detail/12955271-tenisove-kurty-landek-ostrava.html"
+        },
+        {
+          "description": "Lanové bludiště Landek",
+          "distance": 611.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/144",
+          "lat": 49.866573333740234,
+          "lines": [],
+          "lon": 18.264877319335938,
+          "name": "sports_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gR_4/m5EFd.jpeg",
+          "rating": 5,
+          "review_count": 9,
+          "source": "firm",
+          "source_id": 13594180,
+          "url": "https://www.firmy.cz/detail/13594180-lanove-bludiste-landek-ostrava.html"
+        },
+        {
+          "description": "Yoga point Landek",
+          "distance": 615.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/144",
+          "lat": 49.86667251586914,
+          "lines": [],
+          "lon": 18.265169143676758,
+          "name": "sports_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gR_m/DvyGeq.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 13353818,
+          "url": "https://www.firmy.cz/detail/13353818-yoga-point-landek-ostrava.html"
+        },
+        {
+          "description": "Uhelná sloj v Landeku",
+          "distance": 793.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/368",
+          "lat": 49.8672338889,
+          "lines": [],
+          "lon": 18.2692044444,
+          "name": "natural_attraction",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QR_b/PjTse.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 1981598,
+          "url": "https://mapy.cz/zakladni?x=18.2692044444&y=49.8672338889&z=17&source=base&id=1981598"
+        },
+        {
+          "description": "Dětské hřiště Outlet arena Moravia",
+          "distance": 1329.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/204",
+          "lat": 49.85948563913135,
+          "lines": [],
+          "lon": 18.254710141086008,
+          "name": "playground_4",
+          "photo_url": "image_placeholder",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 2551466,
+          "url": "https://mapy.cz/zakladni?x=18.254710141086008&y=49.85948563913135&z=17&source=base&id=2551466"
+        },
+        {
+          "description": "Dětské hřiště Ludgeřovice",
+          "distance": 2699.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/204",
+          "lat": 49.89185683008318,
+          "lines": [],
+          "lon": 18.2405824808842,
+          "name": "playground_5",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QR_l/LOtIMy.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 2335282,
+          "url": "https://mapy.cz/zakladni?x=18.2405824808842&y=49.89185683008318&z=17&source=base&id=2335282"
+        },
+        {
+          "description": "STUDIO G",
+          "distance": 4128.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/39",
+          "lat": 49.83805847167969,
+          "lines": [],
+          "lon": 18.28638458251953,
+          "name": "theater",
+          "photo_url": "//d48-a.sdn.cz/d_48/c_img_E_G/1LqQcf.jpeg",
+          "rating": 5,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 13216203,
+          "url": "https://www.firmy.cz/detail/13216203-studio-g-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Divadlo improvizace Odvaz",
+          "distance": 4128.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/39",
+          "lat": 49.83805847167969,
+          "lines": [],
+          "lon": 18.28638458251953,
+          "name": "theater_2",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5Do9kXBXGlGr4N9b/7b1c.jpeg",
+          "rating": 5,
+          "review_count": 3,
+          "source": "firm",
+          "source_id": 13216364,
+          "url": "https://www.firmy.cz/detail/13216364-divadlo-improvizace-odvaz-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Kino vesmír",
+          "distance": 4290.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/62",
+          "lat": 49.83671951293945,
+          "lines": [],
+          "lon": 18.287294387817383,
+          "name": "movies",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CGpNZBXKaGr4EZE/f11f.jpeg",
+          "rating": 4,
+          "review_count": 4,
+          "source": "firm",
+          "source_id": 12980428,
+          "url": "https://www.firmy.cz/detail/12980428-kino-vesmir-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Janáčkova filharmonie Ostrava - Kino Vesmír",
+          "distance": 4290.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/62",
+          "lat": 49.83671951293945,
+          "lines": [],
+          "lon": 18.287294387817383,
+          "name": "movies_2",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCsFBPTYGr4DxR/88a8.jpeg",
+          "rating": 5,
+          "review_count": 2,
+          "source": "firm",
+          "source_id": 13457372,
+          "url": "https://www.firmy.cz/detail/13457372-janackova-filharmonie-ostrava-kino-vesmir-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "CineStar Ostrava",
+          "distance": 4312.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/62",
+          "lat": 49.83244705200195,
+          "lines": [],
+          "lon": 18.26655387878418,
+          "name": "movies_3",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/Pvct47.jpeg",
+          "rating": 4,
+          "review_count": 98,
+          "source": "firm",
+          "source_id": 661182,
+          "url": "https://www.firmy.cz/detail/661182-cinestar-ostrava-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Divadlo 12",
+          "distance": 4348.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/39",
+          "lat": 49.83658218383789,
+          "lines": [],
+          "lon": 18.288623809814453,
+          "name": "theater_3",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_QI_y/Vsm4wV.jpeg",
+          "rating": 5,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 13216354,
+          "url": "https://www.firmy.cz/detail/13216354-divadlo-12-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Divadlo Jiřího Myrona",
+          "distance": 4365.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/39",
+          "lat": 49.83629608154297,
+          "lines": [],
+          "lon": 18.288291931152344,
+          "name": "theater_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_QK_3/Le0b66.jpeg",
+          "rating": 5,
+          "review_count": 112,
+          "source": "firm",
+          "source_id": 401503,
+          "url": "https://www.firmy.cz/detail/401503-divadlo-jiriho-myrona-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Katedrála Božského Spasitele",
+          "distance": 4414.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/66",
+          "lat": 49.8359849435674,
+          "lines": [],
+          "lon": 18.2888497573251,
+          "name": "sightseeing",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_od_A/kOy0N9usHcCZypM4kEV2fEY/bc95.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "base",
+          "source_id": 1701177,
+          "url": "https://mapy.cz/zakladni?x=18.2888497573251&y=49.8359849435674&z=17&source=base&id=1701177"
+        },
+        {
+          "description": "Komorní scéna Aréna",
+          "distance": 4503.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/39",
+          "lat": 49.83759689331055,
+          "lines": [],
+          "lon": 18.295333862304688,
+          "name": "theater_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/J3ZBUo.jpeg",
+          "rating": 5,
+          "review_count": 13,
+          "source": "firm",
+          "source_id": 396926,
+          "url": "https://www.firmy.cz/detail/396926-komorni-scena-arena-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Minikino",
+          "distance": 4602.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/62",
+          "lat": 49.835853576660156,
+          "lines": [],
+          "lon": 18.293720245361328,
+          "name": "movies_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/jKkBed.jpeg",
+          "rating": 4,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 669940,
+          "url": "https://www.firmy.cz/detail/669940-minikino-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "5D Cinema MAXIM",
+          "distance": 4772.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/62",
+          "lat": 49.83121871948242,
+          "lines": [],
+          "lon": 18.28483772277832,
+          "name": "movies_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_QJ_v/jn8BZ8s.jpeg",
+          "rating": 5,
+          "review_count": 1,
+          "source": "firm",
+          "source_id": 13567507,
+          "url": "https://www.firmy.cz/detail/13567507-5d-cinema-maxim-ostrava-moravska-ostrava.html"
+        }
+      ],
+      "url": "https://mapy.cz/zakladni?x=18.2552141715043&y=49.8726804390449&z=16&q=volny%20%C4%8Das"
+    },
+    "restaurants": {
+      "data": [
+        {
+          "description": "Cukrárna Marie",
+          "distance": 323.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/38",
+          "lat": 49.873870849609375,
+          "lines": [],
+          "lon": 18.260129928588867,
+          "name": "candy_shop",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWLrlBXrZGsTnEf/8fb4.jpeg",
+          "rating": 5,
+          "review_count": 9,
+          "source": "firm",
+          "source_id": 13124554,
+          "url": "https://www.firmy.cz/detail/13124554-cukrarna-marie-ostrava.html"
+        },
+        {
+          "description": "Harenda",
+          "distance": 445.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/133",
+          "lat": 49.868194580078125,
+          "lines": [],
+          "lon": 18.264249801635742,
+          "name": "restaurant",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_oe_A/kOzmiQlmfoDdPdoEmXEtU4A0/0139.mpo",
+          "rating": 4,
+          "review_count": 79,
+          "source": "firm",
+          "source_id": 13733517,
+          "time": 922,
+          "url": "https://www.firmy.cz/detail/13733517-harenda-ostrava-petrkovice.html",
+          "walkDistance": 741
+        },
+        {
+          "description": "Petřkovická restaurace",
+          "distance": 529.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/133",
+          "lat": 49.875648498535156,
+          "lines": [],
+          "lon": 18.258363723754883,
+          "name": "restaurant_2",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_gY_5/hfkYnY.jpeg",
+          "rating": 5,
+          "review_count": 50,
+          "source": "firm",
+          "source_id": 13364000,
+          "url": "https://www.firmy.cz/detail/13364000-petrkovicka-restaurace-ostrava-petrkovice.html"
+        },
+        {
+          "description": "Bistropen",
+          "distance": 554.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/133",
+          "lat": 49.867645263671875,
+          "lines": [],
+          "lon": 18.265518188476562,
+          "name": "restaurant_3",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gW_4/ni8GpB.jpeg",
+          "rating": 4,
+          "review_count": 64,
+          "source": "firm",
+          "source_id": 12997556,
+          "url": "https://www.firmy.cz/detail/12997556-bistropen-ostrava-petrkovice.html"
+        },
+        {
+          "description": "Hospoda u Jana",
+          "distance": 584.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/133",
+          "lat": 49.86699295043945,
+          "lines": [],
+          "lon": 18.254470825195312,
+          "name": "restaurant_4",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CGpNZBXnkGsT7NM/3598.jpeg",
+          "rating": 3,
+          "review_count": 12,
+          "source": "firm",
+          "source_id": 13108343,
+          "url": "https://www.firmy.cz/detail/13108343-hospoda-u-jana-ostrava-petrkovice.html"
+        },
+        {
+          "description": "Výletní restaurace U Sněhoty",
+          "distance": 727.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/133",
+          "lat": 49.875247955322266,
+          "lines": [],
+          "lon": 18.2674617767334,
+          "name": "restaurant_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gU_z/lZ1BF1.jpeg",
+          "rating": 5,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 13600210,
+          "url": "https://www.firmy.cz/detail/13600210-vyletni-restaurace-u-snehoty-ostrava-petrkovice.html"
+        },
+        {
+          "description": "Cukrárna Vanilka",
+          "distance": 2024.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/38",
+          "lat": 49.88640213012695,
+          "lines": [],
+          "lon": 18.244773864746094,
+          "name": "candy_shop_2",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBZGSGtclN4/8ab9.jpeg",
+          "rating": 4,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 13893898,
+          "url": "https://www.firmy.cz/detail/13893898-cukrarna-vanilka-ludgerovice.html"
+        },
+        {
+          "description": "U DLOUHÝCH est.1892",
+          "distance": 2493.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/362",
+          "lat": 49.85188293457031,
+          "lines": [],
+          "lon": 18.277996063232422,
+          "name": "tavern",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_of_A/kPRtHkVQLlCIYXkBjRE3Jxcp/ef1a.jpeg",
+          "rating": 4,
+          "review_count": 4,
+          "source": "firm",
+          "source_id": 13131845,
+          "url": "https://www.firmy.cz/detail/13131845-u-dlouhych-est-1892-ostrava-privoz.html"
+        },
+        {
+          "description": "Hostinec u Holbergů",
+          "distance": 2590.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/362",
+          "lat": 49.88434982299805,
+          "lines": [],
+          "lon": 18.289379119873047,
+          "name": "tavern_2",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gV_v/SmyKEV.jpeg",
+          "rating": 5,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 13113760,
+          "url": "https://www.firmy.cz/detail/13113760-hostinec-u-holbergu-ostrava-koblov.html"
+        },
+        {
+          "description": "Hospůdka Pod Věží",
+          "distance": 2679.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/362",
+          "lat": 49.85783004760742,
+          "lines": [],
+          "lon": 18.228456497192383,
+          "name": "tavern_3",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_QR_u/vjddPZ.jpeg",
+          "rating": 5,
+          "review_count": 7,
+          "source": "firm",
+          "source_id": 13490705,
+          "url": "https://www.firmy.cz/detail/13490705-hospudka-pod-vezi-ostrava-lhotka.html"
+        },
+        {
+          "description": "Kurnik Šopa Hospoda®",
+          "distance": 2742.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/362",
+          "lat": 49.8499870300293,
+          "lines": [],
+          "lon": 18.27985954284668,
+          "name": "tavern_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_E_D/4GII0J.jpeg",
+          "rating": 5,
+          "review_count": 41,
+          "source": "firm",
+          "source_id": 13107855,
+          "url": "https://www.firmy.cz/detail/13107855-kurnik-sopa-hospoda-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "WW Klub Ostrava",
+          "distance": 3301.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/362",
+          "lat": 49.84656524658203,
+          "lines": [],
+          "lon": 18.285985946655273,
+          "name": "tavern_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_QO_BC/pSYCyf.jpeg",
+          "rating": 5,
+          "review_count": 3,
+          "source": "firm",
+          "source_id": 13614653,
+          "url": "https://www.firmy.cz/detail/13614653-ww-klub-ostrava-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Orchard I",
+          "distance": 3326.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/38",
+          "lat": 49.841773986816406,
+          "lines": [],
+          "lon": 18.26978874206543,
+          "name": "candy_shop_3",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCHBj1gzGsQdcL/7798.jpeg",
+          "rating": 5,
+          "review_count": 2,
+          "source": "firm",
+          "source_id": 12956520,
+          "url": "https://www.firmy.cz/detail/12956520-orchard-i-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "Čauky mňauky cafe",
+          "distance": 3977.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/38",
+          "lat": 49.838985443115234,
+          "lines": [],
+          "lon": 18.284595489501953,
+          "name": "candy_shop_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gX_I/JISFD.jpeg",
+          "rating": 4,
+          "review_count": 69,
+          "source": "firm",
+          "source_id": 13057787,
+          "url": "https://www.firmy.cz/detail/13057787-cauky-mnauky-cafe-ostrava-moravska-ostrava.html"
+        },
+        {
+          "description": "KIDS & caffe",
+          "distance": 4076.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/38",
+          "lat": 49.838584899902344,
+          "lines": [],
+          "lon": 18.286386489868164,
+          "name": "candy_shop_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/axlCACU.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 13052197,
+          "url": "https://www.firmy.cz/detail/13052197-kids-caffe-ostrava-moravska-ostrava.html"
+        }
+      ],
+      "url": "https://www.firmy.cz/Restauracni-a-pohostinske-sluzby?x=18.2552141715043&y=49.8726804390449&rt=adresa"
+    },
+    "schools": {
+      "data": [
+        {
+          "description": "Mateřská škola Ostrava-Petřkovice, U Kaple 670, příspěvková organizace",
+          "distance": 283.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/412",
+          "lat": 49.872894287109375,
+          "lines": [],
+          "lon": 18.257177352905273,
+          "name": "kindergarten",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_F_G/Iirb16.jpeg",
+          "rating": 5,
+          "review_count": 1,
+          "source": "firm",
+          "source_id": 13059996,
+          "time": 688,
+          "url": "https://www.firmy.cz/detail/13059996-materska-skola-ostrava-petrkovice-u-kaple-670-prispevkova-organizace-ostrava-petrkovice.html",
+          "walkDistance": 632
+        },
+        {
+          "description": "ZŠ Ostrava-Petřkovice, Hlučínská",
+          "distance": 453.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/142",
+          "lat": 49.87488555908203,
+          "lines": [],
+          "lon": 18.257986068725586,
+          "name": "school",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/jjT8AF.jpeg",
+          "rating": 5,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 358695,
+          "time": 587,
+          "url": "https://www.firmy.cz/detail/358695-zs-ostrava-petrkovice-hlucinska-ostrava-petrkovice.html",
+          "walkDistance": 613
+        },
+        {
+          "description": "ZUŠ Ostrava, Hlučínská",
+          "distance": 546.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/142",
+          "lat": 49.8758544921875,
+          "lines": [],
+          "lon": 18.25882911682129,
+          "name": "school_2",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_G_C/jrq8UU.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 430079,
+          "url": "https://www.firmy.cz/detail/430079-zus-ostrava-hlucinska-ostrava-petrkovice.html"
+        },
+        {
+          "description": "MŠ Ludgeřovice - LEDŇÁČCI",
+          "distance": 989.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/412",
+          "lat": 49.878822326660156,
+          "lines": [],
+          "lon": 18.253276824951172,
+          "name": "kindergarten_2",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQJGKykiGsTnCy/a9a9.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 13313903,
+          "url": "https://www.firmy.cz/detail/13313903-ms-ludgerovice-lednacci-ludgerovice.html"
+        },
+        {
+          "description": "Mateřská škola Ludgeřovice, příspěvková organizace",
+          "distance": 1502.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/412",
+          "lat": 49.88243865966797,
+          "lines": [],
+          "lon": 18.24869728088379,
+          "name": "kindergarten_3",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQJGKykQGsTnTN/8c84.jpeg",
+          "rating": 3,
+          "review_count": 2,
+          "source": "firm",
+          "source_id": 2280097,
+          "url": "https://www.firmy.cz/detail/2280097-materska-skola-ludgerovice-prispevkova-organizace-ludgerovice.html"
+        },
+        {
+          "description": "Waldorfská ZŠ a MŠ Ostrava",
+          "distance": 1747.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/142",
+          "lat": 49.856632232666016,
+          "lines": [],
+          "lon": 18.269704818725586,
+          "name": "school_3",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CGpNZBXn3GsTnHX/8575.jpeg",
+          "rating": 3,
+          "review_count": 3,
+          "source": "firm",
+          "source_id": 358664,
+          "url": "https://www.firmy.cz/detail/358664-waldorfska-zs-a-ms-ostrava-ostrava-privoz.html"
+        },
+        {
+          "description": "MŠ Kulíšci",
+          "distance": 1844.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/412",
+          "lat": 49.88182067871094,
+          "lines": [],
+          "lon": 18.240306854248047,
+          "name": "kindergarten_4",
+          "photo_url": "//d48-a.sdn.cz/d_48/c_img_og_A/nDJ4VEZEqCs9CyM3IFW0CNe/afda.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 13935501,
+          "url": "https://www.firmy.cz/detail/13935501-ms-kulisci-ludgerovice.html"
+        },
+        {
+          "description": "AGEL Střední zdravotnická škola a Vyšší odborná škola zdravotnická s.r.o.",
+          "distance": 2038.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/142",
+          "lat": 49.878536224365234,
+          "lines": [],
+          "lon": 18.285690307617188,
+          "name": "school_4",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_gQ_l/Qg0TQG.jpeg",
+          "rating": 4,
+          "review_count": 6,
+          "source": "firm",
+          "source_id": 13345382,
+          "url": "https://www.firmy.cz/detail/13345382-agel-stredni-zdravotnicka-skola-a-vyssi-odborna-skola-zdravotnicka-s-r-o-ostrava-koblov.html"
+        },
+        {
+          "description": "Lidová konzervatoř a Múzická škola Ostrava",
+          "distance": 2164.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/142",
+          "lat": 49.854225158691406,
+          "lines": [],
+          "lon": 18.275148391723633,
+          "name": "school_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_H_D/jkABMlJ.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 2640977,
+          "url": "https://www.firmy.cz/detail/2640977-lidova-konzervator-a-muzicka-skola-ostrava-ostrava-privoz.html"
+        },
+        {
+          "description": "Církevní MŠ Přemysla Pittra",
+          "distance": 2254.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/412",
+          "lat": 49.852455139160156,
+          "lines": [],
+          "lon": 18.27256965637207,
+          "name": "kindergarten_5",
+          "photo_url": "https://d48-a.sdn.cz/d_48/c_img_F_B/ot7U0.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "firm",
+          "source_id": 2154001,
+          "url": "https://www.firmy.cz/detail/2154001-cirkevni-ms-premysla-pittra-ostrava-privoz.html"
+        }
+      ],
+      "url": "https://www.firmy.cz/Instituce-a-urady/Vzdelavaci-instituce?x=18.2552141715043&y=49.8726804390449&rt=adresa"
+    },
+    "transport": {
+      "data": [
+        {
+          "description": "Petřkovice kaple",
+          "distance": 99.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/198",
+          "lat": 49.8715578417,
+          "lines": [
+            {
+              "departure_direction": -1,
+              "line_id": "L52D1",
+              "line_label": "52",
+              "poi_id": 15202103,
+              "terminus": "Šilheřovice, Paseky",
+              "type": "bus"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "L56D1",
+              "line_label": "56",
+              "poi_id": 15202103,
+              "terminus": "Hlučín, aut.nádr.",
+              "type": "bus"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "L67D1",
+              "line_label": "67",
+              "poi_id": 15202103,
+              "terminus": "Hlučín, aut.nádr.",
+              "type": "bus"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "L68D1",
+              "line_label": "68",
+              "poi_id": 15202103,
+              "terminus": "Šilheřovice, Ricka",
+              "type": "bus"
+            }
+          ],
+          "lon": 18.2587373111,
+          "name": "bus_public_transport",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWZuTBW2bGsT6IL/6cb9.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15202103,
+          "time": 225,
+          "url": "https://mapy.cz/zakladni?x=18.2587373111&y=49.8715578417&z=17&source=pubt&id=15202103",
+          "walkDistance": 210
+        },
+        {
+          "description": "Petřkovice kaple",
+          "distance": 154.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/198",
+          "lat": 49.8711185531,
+          "lines": [
+            {
+              "departure_direction": 1,
+              "line_id": "L52D1",
+              "line_label": "52",
+              "poi_id": 15202102,
+              "terminus": "Křižíkova",
+              "type": "bus"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L56D1",
+              "line_label": "56",
+              "poi_id": 15202102,
+              "terminus": "Křižíkova",
+              "type": "bus"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L67D1",
+              "line_label": "67",
+              "poi_id": 15202102,
+              "terminus": "Křižíkova",
+              "type": "bus"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L68D1",
+              "line_label": "68",
+              "poi_id": 15202102,
+              "terminus": "Křižíkova",
+              "type": "bus"
+            }
+          ],
+          "lon": 18.2576428383,
+          "name": "bus_public_transport_2",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCsFBPhdGsT7Lt/add8.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15202102,
+          "url": "https://mapy.cz/zakladni?x=18.2576428383&y=49.8711185531&z=17&source=pubt&id=15202102"
+        },
+        {
+          "description": "Petřkovice lékárna",
+          "distance": 293.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/198",
+          "lat": 49.8736151242,
+          "lines": [
+            {
+              "departure_direction": 1,
+              "line_id": "L52D1",
+              "line_label": "52",
+              "poi_id": 15202101,
+              "terminus": "Křižíkova",
+              "type": "bus"
+            }
+          ],
+          "lon": 18.2598816701,
+          "name": "bus_public_transport_3",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCsFBPhJGsT6i4/22ad.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15202101,
+          "url": "https://mapy.cz/zakladni?x=18.2598816701&y=49.8736151242&z=17&source=pubt&id=15202101"
+        },
+        {
+          "description": "Petřkovice lékárna",
+          "distance": 331.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/198",
+          "lat": 49.8739525427,
+          "lines": [
+            {
+              "departure_direction": -1,
+              "line_id": "L52D1",
+              "line_label": "52",
+              "poi_id": 15202100,
+              "terminus": "Šilheřovice, Paseky",
+              "type": "bus"
+            }
+          ],
+          "lon": 18.2599600915,
+          "name": "bus_public_transport_4",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QI_O/5eFJI.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15202100,
+          "url": "https://mapy.cz/zakladni?x=18.2599600915&y=49.8739525427&z=17&source=pubt&id=15202100"
+        },
+        {
+          "description": "Petřkovice náměstí",
+          "distance": 494.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/198",
+          "lat": 49.8753634356,
+          "lines": [
+            {
+              "departure_direction": 1,
+              "line_id": "L98D1",
+              "line_label": "98",
+              "poi_id": 15202099,
+              "terminus": "Petřkovice, Nordpól",
+              "type": "bus"
+            }
+          ],
+          "lon": 18.258697851,
+          "name": "bus_public_transport_5",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_od_A/kOes7N5Ni6DuE0oD4mESb0Ze/68b4.mpo",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15202099,
+          "url": "https://mapy.cz/zakladni?x=18.+420 XXX XXX XXX&y=49.8753634356&z=17&source=pubt&id=15202099"
+        },
+        {
+          "description": "Přívoz, Hlučínská",
+          "distance": 1224.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/155",
+          "lat": 49.860596,
+          "lines": [],
+          "lon": 18.265446,
+          "name": "tram",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCsFBPhdGsTm4m/e502.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15201863,
+          "time": 1659,
+          "url": "https://mapy.cz/zakladni?x=18.265446&y=49.860596&z=17&source=pubt&id=15201863",
+          "walkDistance": 1805
+        },
+        {
+          "description": "Přívoz, Hlučínská",
+          "distance": 1245.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/155",
+          "lat": 49.8603135384,
+          "lines": [],
+          "lon": 18.2650690909,
+          "name": "tram_2",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_F_S/RRCOpO.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15201864,
+          "url": "https://mapy.cz/zakladni?x=18.2650690909&y=49.8603135384&z=17&source=pubt&id=15201864"
+        },
+        {
+          "description": "Ostrava hlavní nádraží",
+          "distance": 2175.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/169",
+          "lat": 49.85201947014058,
+          "lines": [
+            {
+              "departure_direction": 1,
+              "line_id": "341",
+              "line_label": "LE",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "341",
+              "line_label": "LE",
+              "poi_id": 15212374,
+              "terminus": "Bohumín",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "EN_406",
+              "line_label": "EN 406",
+              "poi_id": 15212374,
+              "terminus": "Chałupki",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "EN_407",
+              "line_label": "EN 407",
+              "poi_id": 15212374,
+              "terminus": "Břeclav",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "EN_442",
+              "line_label": "EN 442",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "EN_443",
+              "line_label": "EN 443",
+              "poi_id": 15212374,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "Ex1",
+              "line_label": "Ex1",
+              "poi_id": 15212374,
+              "terminus": "Ostrava-Svinov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "Ex1",
+              "line_label": "Ex1",
+              "poi_id": 15212374,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "Ex4",
+              "line_label": "Ex4",
+              "poi_id": 15212374,
+              "terminus": "Břeclav",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "Ex4",
+              "line_label": "Ex4",
+              "poi_id": 15212374,
+              "terminus": "Zebrzydowice",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "Ex_508",
+              "line_label": "Ex 508",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-R61",
+              "line_label": "R61",
+              "poi_id": 15212374,
+              "terminus": "Návsí (Nawsie) ",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-R61",
+              "line_label": "R61",
+              "poi_id": 15212374,
+              "terminus": "Ostrava-Svinov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-R61",
+              "line_label": "R61",
+              "poi_id": 15212374,
+              "terminus": "Český Těšín (Czeski Cieszyn)",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S2",
+              "line_label": "S2",
+              "poi_id": 15212374,
+              "terminus": "Ostrava-Svinov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S2",
+              "line_label": "S2",
+              "poi_id": 15212374,
+              "terminus": "Mosty u Jablunkova",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S3",
+              "line_label": "S3",
+              "poi_id": 15212374,
+              "terminus": "Ostrava střed",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S3",
+              "line_label": "S3",
+              "poi_id": 15212374,
+              "terminus": "Bohumín",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S3",
+              "line_label": "S3",
+              "poi_id": 15212374,
+              "terminus": "Hranice na Moravě",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S4",
+              "line_label": "S4",
+              "poi_id": 15212374,
+              "terminus": "Mošnov, Ostrava Airport",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S4",
+              "line_label": "S4",
+              "poi_id": 15212374,
+              "terminus": "Bohumín",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S6",
+              "line_label": "S6",
+              "poi_id": 15212374,
+              "terminus": "Frýdlant nad Ostravicí",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S8",
+              "line_label": "S8",
+              "poi_id": 15212374,
+              "terminus": "Ostrava střed",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S8",
+              "line_label": "S8",
+              "poi_id": 15212374,
+              "terminus": "Veřovice",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "R8",
+              "line_label": "R8",
+              "poi_id": 15212374,
+              "terminus": "Bohumín",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "R8",
+              "line_label": "R8",
+              "poi_id": 15212374,
+              "terminus": "Brno hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1000",
+              "line_label": "RJ 1000",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1001",
+              "line_label": "RJ 1001",
+              "poi_id": 15212374,
+              "terminus": "Havířov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1002",
+              "line_label": "RJ 1002",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1003",
+              "line_label": "RJ 1003",
+              "poi_id": 15212374,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1005",
+              "line_label": "RJ 1005",
+              "poi_id": 15212374,
+              "terminus": "Bohumín",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1006",
+              "line_label": "RJ 1006",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1007",
+              "line_label": "RJ 1007",
+              "poi_id": 15212374,
+              "terminus": "Havířov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1008",
+              "line_label": "RJ 1008",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1009",
+              "line_label": "RJ 1009",
+              "poi_id": 15212374,
+              "terminus": "Havířov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1010",
+              "line_label": "RJ 1010",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1011",
+              "line_label": "RJ 1011",
+              "poi_id": 15212374,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1012",
+              "line_label": "RJ 1012",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1014",
+              "line_label": "RJ 1014",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1015",
+              "line_label": "RJ 1015",
+              "poi_id": 15212374,
+              "terminus": "Návsí (Nawsie) ",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1016",
+              "line_label": "RJ 1016",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1017",
+              "line_label": "RJ 1017",
+              "poi_id": 15212374,
+              "terminus": "Návsí (Nawsie) ",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1018",
+              "line_label": "RJ 1018",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1019",
+              "line_label": "RJ 1019",
+              "poi_id": 15212374,
+              "terminus": "Bohumín",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "RJ_1020",
+              "line_label": "RJ 1020",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1021",
+              "line_label": "RJ 1021",
+              "poi_id": 15212374,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1024",
+              "line_label": "RJ 1024",
+              "poi_id": 15212374,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1028",
+              "line_label": "RJ 1028",
+              "poi_id": 15212374,
+              "terminus": "Chałupki",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "SC_240",
+              "line_label": "SC 240",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "SC_241",
+              "line_label": "SC 241",
+              "poi_id": 15212374,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "SC_500",
+              "line_label": "SC 500",
+              "poi_id": 15212374,
+              "terminus": "České Budějovice",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "SC_504",
+              "line_label": "SC 504",
+              "poi_id": 15212374,
+              "terminus": "Karlovy Vary",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "SC_506",
+              "line_label": "SC 506",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "SC_510",
+              "line_label": "SC 510",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "SC_516",
+              "line_label": "SC 516",
+              "poi_id": 15212374,
+              "terminus": "Praha hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "rj_512",
+              "line_label": "rj 512",
+              "poi_id": 15212374,
+              "terminus": "Františkovy Lázně",
+              "type": "vlak"
+            }
+          ],
+          "lon": 18.26724176561302,
+          "name": "train",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_QI_x/no63kR.mpo",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15212374,
+          "time": 3409,
+          "url": "https://mapy.cz/zakladni?x=18.26724176561302&y=49.85201947014058&z=17&source=pubt&id=15212374",
+          "walkDistance": 3703
+        },
+        {
+          "description": "Hlavní nádraží",
+          "distance": 2270.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/155",
+          "lat": 49.8513095176,
+          "lines": [],
+          "lon": 18.2682509239,
+          "name": "tram_3",
+          "photo_url": "https://d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQBJBNzkOGsT58X/de19.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15732028,
+          "url": "https://mapy.cz/zakladni?x=18.2682509239&y=49.8513095176&z=17&source=pubt&id=15732028"
+        },
+        {
+          "description": "Hlavní nádraží",
+          "distance": 2355.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/155",
+          "lat": 49.850552,
+          "lines": [
+            {
+              "departure_direction": 1,
+              "line_id": "L14D1",
+              "line_label": "14",
+              "poi_id": 15732029,
+              "terminus": "Nová Huť jižní brána",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L18D1",
+              "line_label": "18",
+              "poi_id": 15732029,
+              "terminus": "Dubina",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L1D1",
+              "line_label": "1",
+              "poi_id": 15732029,
+              "terminus": "Dubina",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L2D1",
+              "line_label": "2",
+              "poi_id": 15732029,
+              "terminus": "Výškovice",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L8D1",
+              "line_label": "8",
+              "poi_id": 15732029,
+              "terminus": "Poruba, Vřesinská",
+              "type": "tram"
+            }
+          ],
+          "lon": 18.268441,
+          "name": "tram_4",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_p8_A/nPVpfd5QLLBPLz5DR7Fz0XG6/6da1.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15732029,
+          "url": "https://mapy.cz/zakladni?x=18.268441&y=49.850552&z=17&source=pubt&id=15732029"
+        },
+        {
+          "description": "Náměstí S. Čecha",
+          "distance": 2502.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/155",
+          "lat": 49.8500162845,
+          "lines": [
+            {
+              "departure_direction": 1,
+              "line_id": "L14D1",
+              "line_label": "14",
+              "poi_id": 15202707,
+              "terminus": "Nová Huť jižní brána",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L18D1",
+              "line_label": "18",
+              "poi_id": 15202707,
+              "terminus": "Dubina",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L1D1",
+              "line_label": "1",
+              "poi_id": 15202707,
+              "terminus": "Dubina",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L2D1",
+              "line_label": "2",
+              "poi_id": 15202707,
+              "terminus": "Výškovice",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L8D1",
+              "line_label": "8",
+              "poi_id": 15202707,
+              "terminus": "Poruba, Vřesinská",
+              "type": "tram"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L101D1",
+              "line_label": "101",
+              "poi_id": 15202707,
+              "terminus": "Hranečník",
+              "type": "trolejbus"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L102D1",
+              "line_label": "102",
+              "poi_id": 15202707,
+              "terminus": "Ahepjukova",
+              "type": "trolejbus"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "L106D1",
+              "line_label": "106",
+              "poi_id": 15202707,
+              "terminus": "Důl Heřmanice",
+              "type": "trolejbus"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L108D1",
+              "line_label": "108",
+              "poi_id": 15202707,
+              "terminus": "Sídliště Fifejdy",
+              "type": "trolejbus"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L111D1",
+              "line_label": "111",
+              "poi_id": 15202707,
+              "terminus": "Michálkovice",
+              "type": "trolejbus"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "L112D1",
+              "line_label": "112",
+              "poi_id": 15202707,
+              "terminus": "Hulváky",
+              "type": "trolejbus"
+            }
+          ],
+          "lon": 18.2724568995,
+          "name": "tram_5",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_og_A/kOzkBkwYBTQzPhIbGFTeRb5/0d87.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15202707,
+          "url": "https://mapy.cz/zakladni?x=18.2724568995&y=49.8500162845&z=17&source=pubt&id=15202707"
+        },
+        {
+          "description": "Ostrava-Mariánské Hory",
+          "distance": 4010.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/169",
+          "lat": 49.837274789086,
+          "lines": [
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S2",
+              "line_label": "S2",
+              "poi_id": 15212379,
+              "terminus": "Ostrava-Svinov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S2",
+              "line_label": "S2",
+              "poi_id": 15212379,
+              "terminus": "Mosty u Jablunkova",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S3",
+              "line_label": "S3",
+              "poi_id": 15212379,
+              "terminus": "Bohumín",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S3",
+              "line_label": "S3",
+              "poi_id": 15212379,
+              "terminus": "Hranice na Moravě",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S4",
+              "line_label": "S4",
+              "poi_id": 15212379,
+              "terminus": "Mošnov, Ostrava Airport",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S4",
+              "line_label": "S4",
+              "poi_id": 15212379,
+              "terminus": "Petrovice u Karviné",
+              "type": "vlak"
+            }
+          ],
+          "lon": 18.2398639247774,
+          "name": "train_2",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_gV_3/xTLLs7.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15212379,
+          "url": "https://mapy.cz/zakladni?x=18.2398639247774&y=49.837274789086&z=17&source=pubt&id=15212379"
+        },
+        {
+          "description": "Ostrava-Stodolní",
+          "distance": 4338.0,
+          "imgUrl": "https://api.mapy.cz/poiimg/icon/169",
+          "lat": 49.8344412946,
+          "lines": [
+            {
+              "departure_direction": -1,
+              "line_id": "MS-R61",
+              "line_label": "R61",
+              "poi_id": 15213504,
+              "terminus": "Ostrava-Svinov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-R61",
+              "line_label": "R61",
+              "poi_id": 15213504,
+              "terminus": "Český Těšín (Czeski Cieszyn)",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S3",
+              "line_label": "S3",
+              "poi_id": 15213504,
+              "terminus": "Ostrava střed",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S6",
+              "line_label": "S6",
+              "poi_id": 15213504,
+              "terminus": "Frýdlant nad Ostravicí",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S6",
+              "line_label": "S6",
+              "poi_id": 15213504,
+              "terminus": "Ostrava hlavní nádraží",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": -1,
+              "line_id": "MS-S8",
+              "line_label": "S8",
+              "poi_id": 15213504,
+              "terminus": "Ostrava střed",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "MS-S8",
+              "line_label": "S8",
+              "poi_id": 15213504,
+              "terminus": "Veřovice",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1001",
+              "line_label": "RJ 1001",
+              "poi_id": 15213504,
+              "terminus": "Havířov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1002",
+              "line_label": "RJ 1002",
+              "poi_id": 15213504,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1003",
+              "line_label": "RJ 1003",
+              "poi_id": 15213504,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1006",
+              "line_label": "RJ 1006",
+              "poi_id": 15213504,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1007",
+              "line_label": "RJ 1007",
+              "poi_id": 15213504,
+              "terminus": "Havířov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1008",
+              "line_label": "RJ 1008",
+              "poi_id": 15213504,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1009",
+              "line_label": "RJ 1009",
+              "poi_id": 15213504,
+              "terminus": "Havířov",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1010",
+              "line_label": "RJ 1010",
+              "poi_id": 15213504,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1011",
+              "line_label": "RJ 1011",
+              "poi_id": 15213504,
+              "terminus": "Čadca, žst.",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1012",
+              "line_label": "RJ 1012",
+              "poi_id": 15213504,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1015",
+              "line_label": "RJ 1015",
+              "poi_id": 15213504,
+              "terminus": "Návsí (Nawsie) ",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1016",
+              "line_label": "RJ 1016",
+              "poi_id": 15213504,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1017",
+              "line_label": "RJ 1017",
+              "poi_id": 15213504,
+              "terminus": "Návsí (Nawsie) ",
+              "type": "vlak"
+            },
+            {
+              "departure_direction": 1,
+              "line_id": "RJ_1018",
+              "line_label": "RJ 1018",
+              "poi_id": 15213504,
+              "terminus": "Praha-Zahradní Město",
+              "type": "vlak"
+            }
+          ],
+          "lon": 18.2809778624,
+          "name": "train_3",
+          "photo_url": "https://d34-a.sdn.cz/d_34/c_img_gX_p/o0RLsU.jpeg",
+          "rating": -1,
+          "review_count": 0,
+          "source": "pubt",
+          "source_id": 15213504,
+          "url": "https://mapy.cz/zakladni?x=18.2809778624&y=49.8344412946&z=17&source=pubt&id=15213504"
+        }
+      ],
+      "url": "https://mapy.cz/zakladni?x=18.2552141715043&y=49.8726804390449&z=16&q=zast%C3%A1vky"
     }
   },
-  "recommendations_data": {
-    "category_main_cb": 1,
-    "category_sub_cb": 4,
-    "category_type_cb": 2,
-    "hash_id": 2836292428,
-    "usable_area": 65,
-    "building_type": 2,
-    "building_condition": 6,
-    "energy_efficiency_rating_cb": 2,
-    "elevator": 1,
-    "balcony": 0,
-    "terrace": 1,
-    "loggia": 0,
-    "garage": 0,
-    "parking_lots": 1,
-    "cellar": 1,
-    "furnished": 3,
-    "ownership": 1,
-    "estate_area": 240,
-    "garden_area": 60,
-    "price_summary_czk": 16900,
-    "price_summary_unit_cb": 2,
-    "locality_gps_lat": 49.569219632103,
-    "locality_gps_lon": 17.2413190872989,
-    "locality_district_id": 42,
-    "locality_region_id": 8,
-    "locality_municipality_id": 500496,
-    "locality_quarter_id": -1,
-    "locality_ward_id": 750140
+  "locality": {
+    "city": "Ostrava",
+    "city_seo_name": "ostrava",
+    "citypart": "Petřkovice",
+    "citypart_seo_name": "petrkovice",
+    "country": "Česká republika",
+    "country_id": 112,
+    "country_seo_name": "ceska-republika",
+    "district": "Ostrava-město",
+    "district_id": 65,
+    "district_seo_name": "ostrava-mesto",
+    "entity_type": "address",
+    "geometry": {
+      "bounding_box": {
+        "leftBottomLatitude": 49.86009907528406,
+        "leftBottomLongitude": 18.23525508281715,
+        "rightTopLatitude": 49.88320765158501,
+        "rightTopLongitude": 18.276861350856247
+      },
+      "geometry": [
+        "9pxr-xW7jMTeJr6s6QQV6dPuNtPuLF6tLVVODiQTIe-UHWQiLAPQLeOrLpQjL0Q1LEP6LfNXMq6CMdNOM98RJYTQJuQ9KxgNFHGW2IOgPrG4ONO6NWKdN5JJNLK4NM4yNJIpNVFgNnD7NJL8MUJlMmLbMfKYMdKcMhL8MRKeMmLmMfLBMyMnMNITMiKzMiKyMsLzMVKQMnMGMOKkMqMNM5LuMtMdMCKLM4KhMeMKM6M0MQMSM0MNLaM4LgM8LLMRMkMuLKM3MmMxMHMpMlMxLIMgLiMdMAM1MGNCM8NBM.MvM5LhMuMcMQKLMwMlLn4uMMJyKsFTISflZJ3BIJf2kK.ImMALy4JM7KBNK4VL64YL8ExJRKsLxJgKpJyJgJOJxH3JB4hJyIjJsNrMYOXL86yKw6YLEN.LQN8MTTx44R6J2RoIcSHIbPRKjLdf1FMxLULPflNK4farMX4CgRjIzXD6YWfPhStRdTpSeNTMSODN5NSMn6-LwO1LJ6ZL9fkwfffGe2hFU2nMOMHIW4d2DE947JOGlI5IbKzI4KpMmMtMtMyGeJ.JVLwLwMiFqKy2uLXBwMR0cNkH6Nt2BOEFBNvGcNLEpMJDcKzDpJp2cIsFFIpHA4sLiL5M3M32T2N2TCfBXflSI64oHp4RF1HTEKH9AT47GeLKF.LtCSMmf5gN8NOQtNE6a49T2InRtMiNYL56sKN6lL26YKq6vL46XJgPSLWO6Lw6bL4PNMbNsMkMsLbQHN0N0JVMJ2.LIF-L-40MKMpMzIVMUIYL1J4LPLZMILvMXLDRdK7QyfmLg3NKJQ7M5NgLmORIvTbLdM5MXM9H3LZD2XzJzPQ6kOrNo6OPjSFO3QRNRNcPARE6yPLPGQzOB6g6FNu8VHeOCKfPIJPOKKW6wPM6wPMNv63606h6wPK6vPNNy6gNz6e6B6nNu6Z6NOGPqSXU2-JN3NzVTg6bP5SIOOPSNiNz8vX.TpW-UEYWWrXQNSNTNWNXV4VpURVNNOMh8STwTKS9N7NmNWNWXXZvVAZuQ2RkQRSB838IQeR8PbQ9PjRnNfNv6VO6NSNcN76L6tO.NKNSO4P5NMNUOPQGNt6ARjRTQFOnQb6jPr6xO.OoOaO4O76y6p6p6TNzO.6eNMNJ6P64NGNGNSN6ObOBNZN8N1N8MvNKMwNGMcNxMzNDMlN3M9N6MjNhNANAO2676N6CNbNYNDNCNLNKNeNWN1NTN4NG616EN6NJN6NJNRNOPDOQNdNu6YO86ZOVNBNBNIN3MtNWLLQ.MDOgQxOnJfSlQsPhRaQoMtNRMd64MV61M66pMxNIMa6IMpN-MgNuM5NqMT6dLIM3IZWa44Y3PsRUNcN76jOT6465NRNYOPPONkN.NgNq6S6nQdRvOTPB6xOGNkNoPIPZNf6J6kPRNKN36SQCNLNg6TPmNON7Ni6s6kQj6RPX6LP4X.4dUXJBRNKr6.MIRhK5"
+      ],
+      "geometry_type": "multipolygon"
+    },
+    "gps_lat": 49.8726804390449,
+    "gps_lon": 18.2552141715043,
+    "housenumber": null,
+    "inaccuracy_type": "ward",
+    "municipality": null,
+    "municipality_id": 4730,
+    "municipality_seo_name": null,
+    "quarter": "Petřkovice",
+    "quarter_id": 45,
+    "quarter_seo_name": "petrkovice",
+    "region": "Moravskoslezský kraj",
+    "region_id": 12,
+    "region_seo_name": "moravskoslezsky-kraj",
+    "street": "",
+    "street_id": -1,
+    "street_seo_name": null,
+    "streetnumber": null,
+    "ward": null,
+    "ward_id": 8277,
+    "ward_seo_name": null,
+    "zip": 72529
   },
-  "_embedded": {
-    "favourite": {"is_favourite": false},
-    "note": {"note": "", "has_note": false},
-    "images": [
+  "loggia": false,
+  "loggia_area": null,
+  "low_energy": false,
+  "matterport_url": "",
+  "object_age": null,
+  "object_location": {
+    "name": "- vyber umístění",
+    "value": 0
+  },
+  "ownership": {
+    "name": "Osobní",
+    "value": 1
+  },
+  "panorama": true,
+  "panorama_data": {
+    "distance": null,
+    "has_panorama": false,
+    "pid": null,
+    "yaw": null
+  },
+  "parking": null,
+  "parking_lots": false,
+  "personal": {
+    "name": "- vyber možnost",
+    "value": 0
+  },
+  "phase_distributions_cb": null,
+  "premise": {
+    "ask_id": 12904966,
+    "company": {
+      "company_ic": 24787108,
+      "company_subject_id": 2673554,
+      "sos_custom_advert_card": false
+    },
+    "id": 12824,
+    "locality": {
+      "city": "Ostrava",
+      "city_seo_name": "ostrava",
+      "citypart": null,
+      "citypart_seo_name": null,
+      "country": null,
+      "country_seo_name": null,
+      "district": "Ostrava-město",
+      "district_id": 65,
+      "district_seo_name": "ostrava-mesto",
+      "entity_id": 8849002,
+      "entity_type": "address",
+      "gps_lat": 49.8282949555903,
+      "gps_lon": 18.2622899588373,
+      "housenumber": "68",
+      "municipality": null,
+      "municipality_id": 4730,
+      "municipality_seo_name": null,
+      "quarter": "Mariánské Hory a Hulváky",
+      "quarter_id": 44,
+      "quarter_seo_name": "marianske-hory-a-hulvaky",
+      "region": "Moravskoslezský kraj",
+      "region_id": 12,
+      "region_seo_name": "moravskoslezsky-kraj",
+      "street": "28. října",
+      "street_id": 110793,
+      "street_seo_name": "28-rijna",
+      "streetnumber": "165",
+      "ward": "Mariánské Hory",
+      "ward_id": 14831,
+      "ward_seo_name": "marianske-hory",
+      "zip": 70900
+    },
+    "logo": "https://d48-a.sdn.cz/d_48/c_img_G_C/GqaBvgk.png",
+    "name": "HVB Real Estate s.r.o.",
+    "premise_paid_firmy": 1,
+    "premise_retargeting_id": null,
+    "review_count": 191,
+    "review_score": 5.0,
+    "seo_name": "hvb-real-estate-s-r-o",
+    "web_url": "https://hvbreal.cz",
+    "web_visible_url": "https://hvbreal.cz"
+  },
+  "price": 0.0,
+  "price_currency_cb": {
+    "name": "Kč",
+    "value": 1
+  },
+  "price_czk": 0.0,
+  "price_czk_m2": 0,
+  "price_flag_negotiation_cb": false,
+  "price_note": "Info v RK (Včetně advokátní úschovy, právního servisu a provize).",
+  "price_summary": 0.0,
+  "price_summary_czk": 0.0,
+  "price_summary_old": 0.0,
+  "price_summary_old_czk": null,
+  "price_summary_unit_cb": {
+    "name": "za nemovitost",
+    "value": 1
+  },
+  "price_unit_cb": {
+    "name": "za nemovitost",
+    "value": 1
+  },
+  "project": null,
+  "protection": {
+    "name": "- vyber ochranu",
+    "value": 0
+  },
+  "ready_date": null,
+  "reconstruction_year": null,
+  "road_type_set": [],
+  "rus": null,
+  "rus_reply": null,
+  "sale_date": null,
+  "sdn_energy_performance_attachment_url": null,
+  "since": "2026-04-26",
+  "state_cb": {
+    "name": "- vyber stav",
+    "value": 0
+  },
+  "stats": 3276,
+  "surroundings_type": {
+    "name": "- vyber zástavbu",
+    "value": 0
+  },
+  "telecommunication_set": [],
+  "terrace": false,
+  "terrace_area": null,
+  "transport_set": [],
+  "underground_floors": 1,
+  "usable_area": 85,
+  "user": {
+    "broker_rating": null,
+    "broker_review_count": null,
+    "image": "//d18-a.sdn.cz/d_18/c_img_ob_E/kBj94XhVwO1LYBYDD3owgE/733b.jpeg",
+    "user_email": "agent@example.cz",
+    "user_id": 22787,
+    "user_name": "Halina Hrubá",
+    "user_phones": [
       {
-        "kind": 2,
-        "id": 977967514,
-        "order": 1,
-        "_links": {
-          "view": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example1.jpeg?fl=res,749,562,3"},
-          "self": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example1.jpeg?fl=res,1920,1080,1"},
-          "gallery": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example1.jpeg?fl=res,221,166,3"}
-        }
+        "phone": "+420 XXX XXX XXX",
+        "phone_type": "TEL"
       },
       {
-        "kind": 2,
-        "id": 977967517,
-        "order": 4,
-        "_links": {
-          "view": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example2.jpeg?fl=res,749,562,3"}
-        }
-      },
-      {
-        "kind": 2,
-        "id": 977967523,
-        "order": 5,
-        "_links": {
-          "view": {"href": "https://d18-a.sdn.cz/d_18/c_img_p8_B/example3.jpeg?fl=res,749,562,3"}
-        }
+        "phone": "+420 XXX XXX XXX",
+        "phone_type": "MOB"
       }
     ]
   },
-  "items": [
-    {"negotiation": false, "name": "Celková cena", "value": "16 900", "currency": "Kč", "type": "price_czk", "unit": "za měsíc"},
-    {"type": "string", "name": "ID zakázky", "value": "14/26"},
-    {"type": "edited", "name": "Aktualizace", "value": "Dnes", "topped": true},
-    {"type": "string", "name": "Stavba", "value": "Cihlová"},
-    {"type": "string", "name": "Stav objektu", "value": "Novostavba"},
-    {"type": "string", "name": "Vlastnictví", "value": "Osobní"},
-    {"type": "string", "name": "Podlaží", "value": "5. podlaží z celkem 1"},
-    {"unit": "m2", "type": "area", "name": "Užitná ploch", "value": "65"},
-    {"unit": "m2", "type": "area", "name": "Celková plocha", "value": "65"},
-    {"unit": "m2", "type": "area", "name": "Terasa", "value": "12"},
-    {"type": "boolean", "name": "Sklep", "value": true},
-    {"type": "boolean", "name": "Parkování", "value": true},
-    {"type": "string", "name": "Datum nastěhování", "value": "Ihned"},
-    {"value_type": "B", "type": "energy_efficiency_rating", "name": "Energetická náročnost budovy", "value": "Třída B - Velmi úsporná"},
-    {"type": "boolean", "name": "Bezbariérový", "value": false},
-    {"type": "boolean", "name": "Výtah", "value": true}
+  "videos": [],
+  "water_heat_source_set": [
+    {
+      "name": "Bojler - elektro",
+      "value": 7
+    }
   ],
-  "is_topped": true,
-  "is_topped_today": true,
-  "logged_in": true
+  "water_set": [
+    {
+      "name": "Vodovod",
+      "value": 2
+    }
+  ],
+  "well_type_set": []
 }

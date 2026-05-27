@@ -1,8 +1,12 @@
-"""HTTP layer for the Sreality public JSON API.
+"""HTTP layer for the Sreality public JSON API (v1).
 
-Paginates the index endpoint, fetches per-listing detail records, and
-handles retries, polite throttling, and the browser-like headers that
-Sreality requires (raw cloud IPs get 403 without them).
+Sreality rebuilt their site on Next.js in 2026; the old
+`/api/cs/v2/estates` API was removed. Listings now come from
+`/api/v1/estates/search` (offset/limit paging, `locality_country_id=112`)
+and per-listing detail from `/api/v1/estates/{id}`. Both are public JSON
+endpoints reachable without cookies. This module paginates the search
+endpoint, fetches detail records, and handles retries, polite throttling,
+and browser-like headers.
 """
 
 from __future__ import annotations
@@ -19,62 +23,43 @@ if TYPE_CHECKING:
 
 LOG = logging.getLogger(__name__)
 
-INDEX_URL = "https://www.sreality.cz/api/cs/v2/estates"
-DETAIL_URL = "https://www.sreality.cz/api/cs/v2/estates/{id}"
+INDEX_URL = "https://www.sreality.cz/api/v1/estates/search"
+DETAIL_URL = "https://www.sreality.cz/api/v1/estates/{id}"
 
-# Mobile Chrome on Android - the same UA the karlosmatos reference
-# scraper uses successfully against this API.
+# Czech Republic in the new API's locality scheme (the old API used 10001).
+CZ_COUNTRY_ID = 112
+
 DEFAULT_HEADERS: dict[str, str] = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en,cs;q=0.9",
-    "Referer": "https://www.sreality.cz/hledani/pronajem/byty",
+    "Accept": "application/json",
+    "Accept-Language": "cs,en;q=0.9",
     "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/121.0.0.0 Mobile Safari/537.36"
+        "Chrome/148.0.0.0 Safari/537.36"
     ),
 }
 
 RETRYABLE_STATUS: frozenset[int] = frozenset(
-    {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+    # 403/429 are how sreality throttles a too-fast egress IP; treat them as
+    # retryable (penalize + back off + retry) rather than a fatal error, so a
+    # transient block can't crash a whole run.
+    {403, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 )
 
-# Sreality's index API caps deep pagination (~14k results per filter) and
-# the accessible window rotates between runs, so a single walk of a large
-# category never retrieves the whole set. Categories whose result_size
-# exceeds SPLIT_THRESHOLD are walked once per region (kraj) instead — each
-# region is well under the cap, so the union is complete. Czech kraj ids are
-# 1..14 (a `-1` in our DB is a parse-gap sentinel, not an API value; those
-# listings still carry a real region on sreality and are covered here).
-REGION_IDS: tuple[int, ...] = tuple(range(1, 15))
-SPLIT_THRESHOLD: int = 10000
+# The search endpoint refuses offsets past its deep-pagination window with
+# HTTP 422. We stop the walk cleanly when we hit it (the completeness guard
+# in main.py then declines to mark_inactive for that truncated slice); large
+# categories are walked per-district so each slice stays under the window.
+CAP_STATUSES: frozenset[int] = frozenset({422})
 
-# Region-split alone still leaves the biggest krajs (Praha, Středočeský,
-# Jihomoravský, Moravskoslezský) above sreality's per-filter pagination
-# window, so a single pass of them lands ~86% and the mark_inactive sweep is
-# skipped. Any region whose own result_size exceeds this is split one level
-# finer — by district (okres) — so each sub-query is small enough to return
-# its COMPLETE set in one pass. REGION_DISTRICTS maps each kraj id to its
-# okres ids (derived from observed locality_region_id/locality_district_id
-# pairs in our own data); Praha (region 10) is addressed both by the
-# city-level code 47 and the per-district 5001..5022 codes.
-REGION_SUB_THRESHOLD: int = 2500
-REGION_DISTRICTS: dict[int, tuple[int, ...]] = {
-    1:  (1, 2, 3, 4, 5, 6, 7),
-    2:  (8, 11, 12, 13, 14, 15, 17),
-    3:  (9, 10, 16),
-    4:  (19, 20, 23, 24, 25, 26, 27),
-    5:  (18, 21, 22, 34),
-    6:  (28, 30, 31, 33, 36),
-    7:  (29, 32, 35, 37),
-    8:  (40, 42, 43, 44, 46),
-    9:  (38, 39, 41, 45),
-    10: (47, *range(5001, 5023)),
-    11: (48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59),
-    12: (60, 61, 62, 63, 64, 65),
-    13: (66, 67, 68, 69, 70),
-    14: (71, 72, 73, 74, 75, 76, 77),
-}
+# Sreality's search caps deep pagination per filter, so a single walk of a
+# large category never retrieves the whole set. Categories whose total
+# exceeds SPLIT_THRESHOLD are walked once per DISTRICT (okres) instead — each
+# district is well under the cap, so the union is complete and mark_inactive
+# can run. DISTRICT_IDS is the canonical sreality locality_district_id set:
+# okresy 1..77 (47 = Praha city) plus the Praha sub-district codes 5001..5022.
+SPLIT_THRESHOLD: int = 10000
+DISTRICT_IDS: tuple[int, ...] = (*range(1, 78), *range(5001, 5023))
 
 # Statuses that mean "this listing no longer exists" rather than a
 # transient or unexpected error. Mirrors scraper.freshness.GONE_STATUSES.
@@ -103,8 +88,24 @@ def _is_not_found_body(response: requests.Response) -> bool:
     """True when a non-JSON 200 body is sreality's 'page does not exist' page."""
     if "json" in response.headers.get("Content-Type", "").lower():
         return False
-    text = (response.text or "").lower()
-    return any(marker in text for marker in _NOT_FOUND_MARKERS)
+    body = response.text.lower()
+    return any(marker in body for marker in _NOT_FOUND_MARKERS)
+
+
+def _unwrap_estate(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the estate object from a detail response.
+
+    The detail endpoint wraps the estate as `{result, status_code,
+    status_message}`; unwrap the nested object that carries the marker key.
+    Tolerate a flat payload (estate at the top level) too.
+    """
+    if "category_main_cb" in payload:
+        return payload
+    for key in ("result", "estate", "data"):
+        inner = payload.get(key)
+        if isinstance(inner, dict) and "category_main_cb" in inner:
+            return inner
+    return payload
 
 
 class SrealityClient:
@@ -112,8 +113,8 @@ class SrealityClient:
         self,
         category_main: int = 1,
         category_type: int = 2,
-        country_id: int = 10001,
-        per_page: int = 100,
+        country_id: int = CZ_COUNTRY_ID,
+        per_page: int = 500,
         detail_delay_s: float = 1.5,
         timeout_s: float = 30.0,
         max_retries: int = 3,
@@ -124,10 +125,9 @@ class SrealityClient:
         self.category_main = category_main
         self.category_type = category_type
         self.country_id = country_id
-        # When set, the index walk is restricted to one kraj — used to walk
-        # large categories region-by-region so each sub-query stays under
-        # sreality's deep-pagination cap. locality_district_id narrows one
-        # level further (okres) for regions that are still too big.
+        # When set, the walk is restricted to one okres — used to walk large
+        # categories district-by-district so each slice stays under the
+        # search endpoint's deep-pagination cap.
         self.locality_region_id = locality_region_id
         self.locality_district_id = locality_district_id
         self.per_page = per_page
@@ -143,19 +143,19 @@ class SrealityClient:
         self._session.headers.update(DEFAULT_HEADERS)
         self._last_detail_at = 0.0
         self.pages_fetched = 0
-        # Total matching estates as the API reports it on page 1. Used by
-        # the caller to decide whether a walk was complete enough to drive
-        # mark_inactive (a silently-truncated walk must not flip live
+        # Total matching estates as the API reports it (pagination.total).
+        # Used by the caller to decide whether a walk was complete enough to
+        # drive mark_inactive (a silently-truncated walk must not flip live
         # listings to inactive).
         self.result_size: int | None = None
 
-    def _index_params(self, page: int) -> dict[str, Any]:
-        params = {
+    def _index_params(self, offset: int, limit: int | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {
             "category_main_cb": self.category_main,
             "category_type_cb": self.category_type,
             "locality_country_id": self.country_id,
-            "per_page": self.per_page,
-            "page": page,
+            "limit": self.per_page if limit is None else limit,
+            "offset": offset,
         }
         if self.locality_region_id is not None:
             params["locality_region_id"] = self.locality_region_id
@@ -164,36 +164,63 @@ class SrealityClient:
         return params
 
     def probe_result_size(self) -> int | None:
-        """Fetch page 1 only and return the API's reported result_size.
+        """Fetch pagination.total only (limit=0) and return it.
 
-        Cheap pre-walk probe used to decide whether a category is large
-        enough to warrant a region-split walk. Also latches self.result_size.
+        Cheap pre-walk probe used to decide whether a category is large enough
+        to warrant a district-split walk. Also latches self.result_size. Paced
+        by the shared limiter so a split walk's many probes don't burst.
         """
-        payload = self._get_json(INDEX_URL, params=self._index_params(1))
-        rs = payload.get("result_size")
-        if isinstance(rs, int):
-            self.result_size = rs
+        if self._limiter is not None:
+            self._limiter.acquire()
+        payload = self._get_json(INDEX_URL, params=self._index_params(0, limit=0))
+        total = (payload.get("pagination") or {}).get("total")
+        if isinstance(total, int):
+            self.result_size = total
         return self.result_size
 
     def iter_index(self) -> Iterator[dict[str, Any]]:
-        """Yield every estate dict from every index page until exhausted."""
-        page = 1
+        """Yield every estate dict from every search page until exhausted.
+
+        Paged by offset/limit. Each page fetch is paced by the shared limiter
+        when present. Stops cleanly at the deep-pagination cap (HTTP 422).
+        """
+        offset = 0
         while True:
-            payload = self._get_json(INDEX_URL, params=self._index_params(page))
+            if self._limiter is not None:
+                self._limiter.acquire()
+            try:
+                payload = self._get_json(INDEX_URL, params=self._index_params(offset))
+            except requests.HTTPError as exc:
+                status = (
+                    exc.response.status_code
+                    if getattr(exc, "response", None) is not None
+                    else None
+                )
+                if status in CAP_STATUSES:
+                    LOG.info(
+                        "INDEX cap reached offset=%d status=%s; stopping walk",
+                        offset, status,
+                    )
+                    return
+                raise
             self.pages_fetched += 1
-            if self.result_size is None:
-                rs = payload.get("result_size")
-                if isinstance(rs, int):
-                    self.result_size = rs
-            estates = payload.get("_embedded", {}).get("estates", [])
-            LOG.info("INDEX page=%d estates=%d", page, len(estates))
-            if not estates:
+            total = (payload.get("pagination") or {}).get("total")
+            if isinstance(total, int):
+                self.result_size = total
+            results = payload.get("results") or []
+            LOG.info(
+                "INDEX offset=%d estates=%d total=%s", offset, len(results),
+                self.result_size,
+            )
+            if not results:
                 return
-            for estate in estates:
+            for estate in results:
                 yield estate
-            if len(estates) < self.per_page:
+            offset += self.per_page
+            if self.result_size is not None and offset >= self.result_size:
                 return
-            page += 1
+            if len(results) < self.per_page:
+                return
 
     def get_detail(self, sreality_id: int) -> dict[str, Any]:
         """Fetch the full detail record for one listing, rate-limited.
@@ -209,7 +236,14 @@ class SrealityClient:
                 time.sleep(self.detail_delay_s - elapsed)
         url = DETAIL_URL.format(id=sreality_id)
         try:
-            return self._get_json(url)
+            payload = self._get_json(url)
+            if isinstance(payload, dict):
+                estate = _unwrap_estate(payload)
+                # The estate carries its id as `hash_id`; inject the known id
+                # if a payload ever omits it so the parser can rely on it.
+                estate.setdefault("hash_id", sreality_id)
+                return estate
+            return payload
         except ListingGoneError:
             raise
         except requests.HTTPError as exc:

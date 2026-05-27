@@ -1,4 +1,4 @@
-"""Tests for the content_hash function."""
+"""Tests for the content_hash function (v1 estate shape)."""
 
 from __future__ import annotations
 
@@ -23,42 +23,32 @@ def test_hash_is_stable(sample):
     assert content_hash(sample) == content_hash(sample)
 
 
-def test_hash_unchanged_when_only_topped_flips(sample):
+def test_hash_unchanged_when_view_counter_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)
-    mutated["is_topped"] = not mutated["is_topped"]
-    mutated["is_topped_today"] = not mutated["is_topped_today"]
+    mutated["stats"] = {"views": 999, "anything": True}
     assert content_hash(mutated) == base
 
 
-def test_hash_unchanged_when_aktualizace_value_changes(sample):
+def test_hash_unchanged_when_session_state_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)
-    for item in mutated["items"]:
-        if item.get("name") == "Aktualizace":
-            item["value"] = "Před týdnem"
-    assert content_hash(mutated) == base
-
-
-def test_hash_unchanged_when_user_session_changes(sample):
-    base = content_hash(sample)
-    mutated = copy.deepcopy(sample)
-    mutated["_embedded"]["favourite"]["is_favourite"] = True
-    mutated["logged_in"] = False
+    mutated["note"] = "a personal note"
+    mutated["rus"] = {"anything": True}
+    mutated["rus_reply"] = "x"
     assert content_hash(mutated) == base
 
 
 def test_hash_changes_when_price_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)
-    mutated["price_czk"]["value_raw"] = 18000
+    mutated["price_czk"] = 18000
+    mutated["price_summary_czk"] = 18000
     assert content_hash(mutated) != base
 
 
 def test_hash_changes_when_a_real_attribute_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)
-    for item in mutated["items"]:
-        if item.get("name") == "Stav objektu":
-            item["value"] = "Po rekonstrukci"
+    mutated["building_condition"] = {"name": "Po rekonstrukci", "value": 4}
     assert content_hash(mutated) != base

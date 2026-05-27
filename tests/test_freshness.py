@@ -135,7 +135,8 @@ def test_updated_writes_snapshot_and_reports_diff(monkeypatch):
     prev_hash = hashing.content_hash(prev_raw)
 
     new_raw = copy.deepcopy(prev_raw)
-    new_raw["price_czk"] = {**new_raw["price_czk"], "value_raw": 22500}
+    new_raw["price_czk"] = 22500
+    new_raw["price_summary_czk"] = 22500
     new_hash = hashing.content_hash(new_raw)
     assert new_hash != prev_hash
 
@@ -252,7 +253,8 @@ def test_generic_exception_is_fetch_error(monkeypatch):
 def test_db_write_failure_is_fetch_error(monkeypatch):
     prev_raw = _load_raw()
     new_raw = copy.deepcopy(prev_raw)
-    new_raw["price_czk"] = {**new_raw["price_czk"], "value_raw": 22500}
+    new_raw["price_czk"] = 22500
+    new_raw["price_summary_czk"] = 22500
 
     prev = {
         "id": 7,
@@ -294,12 +296,10 @@ def test_no_prior_snapshot_treats_as_updated(monkeypatch):
 def test_image_changes_appear_in_what_changed(monkeypatch):
     prev_raw = _load_raw()
     new_raw = copy.deepcopy(prev_raw)
-    images = ((new_raw.get("_embedded") or {}).get("images")) or []
+    images = new_raw.get("advert_images") or []
     if not images:
         pytest.skip("fixture has no images to mutate")
-    images[0]["_links"]["view"]["href"] = (
-        images[0]["_links"]["view"]["href"] + "?changed"
-    )
+    images[0]["url"] = images[0]["url"] + "?changed"
 
     prev = {
         "id": 7,

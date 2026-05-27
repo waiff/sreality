@@ -31,7 +31,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -42,10 +41,8 @@ import requests
 from scraper import db, hashing, image_storage, parser
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import (
+    DISTRICT_IDS,
     GONE_STATUSES,
-    REGION_DISTRICTS,
-    REGION_IDS,
-    REGION_SUB_THRESHOLD,
     SPLIT_THRESHOLD,
     ListingGoneError,
     SrealityClient,
@@ -92,8 +89,6 @@ CATEGORIES: tuple[tuple[int, int], ...] = (
 
 LOG = logging.getLogger("scraper")
 
-_HREF_ID_RE = re.compile(r"/estates/(\d+)")
-
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
@@ -127,58 +122,62 @@ def main(argv: list[str] | None = None) -> int:
     image_agg: dict[str, Any] = {"images_stored": 0, "by_category": {}}
     rc = 0
 
-    if args.images_only:
-        rc = 0
-    elif args.detail_only is not None:
-        rc, scrape_agg = _run_detail_only(
-            _build_client(CATEGORIES[0][0], CATEGORIES[0][1]),
-            args.detail_only,
-            dry_run=args.dry_run,
-        )
-    else:
-        rc, scrape_agg = _run_full(
-            limit=args.limit,
-            dry_run=args.dry_run,
-            max_refetches=args.max_detail_refetches,
-            max_refetches_per_category=args.max_detail_refetches_per_category,
-            detail_workers=args.detail_workers,
-            detail_rate=args.detail_rate,
-        )
+    # Finalize in a `finally` so a crash mid-run still records a terminal
+    # state on the scrape_runs row instead of leaving it orphaned ("stuck"),
+    # which freezes the Health liveness + reconciliation.
+    try:
+        if args.images_only:
+            rc = 0
+        elif args.detail_only is not None:
+            rc, scrape_agg = _run_detail_only(
+                _build_client(CATEGORIES[0][0], CATEGORIES[0][1]),
+                args.detail_only,
+                dry_run=args.dry_run,
+            )
+        else:
+            rc, scrape_agg = _run_full(
+                limit=args.limit,
+                dry_run=args.dry_run,
+                max_refetches=args.max_detail_refetches,
+                max_refetches_per_category=args.max_detail_refetches_per_category,
+                detail_workers=args.detail_workers,
+                detail_rate=args.detail_rate,
+            )
 
-    if (
-        rc == 0
-        and not args.dry_run
-        and not args.no_image_downloads
-    ):
-        image_agg = _run_image_downloads(
-            max_downloads=args.max_image_downloads,
-            workers=args.image_workers,
-            active_only=args.images_active_only,
-        )
-        if image_agg.get("stopped_suspicious"):
-            # Exit non-zero so the cron-scheduled backfill workflow
-            # re-schedules immediately on its next tick (every 2h).
-            # Don't crash the nightly scrape itself — the scrape's
-            # other side effects already landed.
-            rc = max(rc, 75)
+        if (
+            rc == 0
+            and not args.dry_run
+            and not args.no_image_downloads
+        ):
+            image_agg = _run_image_downloads(
+                max_downloads=args.max_image_downloads,
+                workers=args.image_workers,
+                active_only=args.images_active_only,
+            )
+            if image_agg.get("stopped_suspicious"):
+                # Exit non-zero so the cron-scheduled backfill workflow
+                # re-schedules immediately on its next tick (every 2h).
+                # Don't crash the nightly scrape itself — the scrape's
+                # other side effects already landed.
+                rc = max(rc, 75)
 
-    if (
-        rc == 0
-        and not args.dry_run
-        and not args.no_condition_scoring
-        and not args.images_only
-    ):
-        _run_condition_scoring(max_scores=args.max_condition_scores)
-
-    if run_id is not None:
-        try:
-            with db.connect() as conn:
-                db.scrape_run_finalize(
-                    conn, run_id,
-                    **_combine_aggregates(scrape_agg, image_agg),
-                )
-        except Exception as exc:
-            LOG.warning("scrape_run_finalize failed: %s", exc)
+        if (
+            rc == 0
+            and not args.dry_run
+            and not args.no_condition_scoring
+            and not args.images_only
+        ):
+            _run_condition_scoring(max_scores=args.max_condition_scores)
+    finally:
+        if run_id is not None:
+            try:
+                with db.connect() as conn:
+                    db.scrape_run_finalize(
+                        conn, run_id,
+                        **_combine_aggregates(scrape_agg, image_agg),
+                    )
+            except Exception as exc:
+                LOG.warning("scrape_run_finalize failed: %s", exc)
 
     return rc
 
@@ -384,7 +383,7 @@ def _build_client(
     return SrealityClient(
         category_main=category_main,
         category_type=category_type,
-        country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 10001)),
+        country_id=int(os.environ.get("SREALITY_COUNTRY_ID", 112)),
         limiter=limiter,
         locality_region_id=locality_region_id,
         locality_district_id=locality_district_id,
@@ -492,19 +491,32 @@ def _run_full(
             remaining_for_limit = (
                 None if limit is None else max(0, limit - global_collected)
             )
-            seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
-                _walk_category_split(
-                    category_main,
-                    category_type,
-                    limiter=limiter,
-                    conn=conn,
-                    cat_limit=remaining_for_limit,
-                    dry_run=dry_run,
-                    refetch_budget=refetch_budget,
-                    cat_refetch_cap=max_refetches_per_category,
-                    detail_workers=detail_workers,
+            try:
+                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
+                    _walk_category_split(
+                        category_main,
+                        category_type,
+                        limiter=limiter,
+                        conn=conn,
+                        cat_limit=remaining_for_limit,
+                        dry_run=dry_run,
+                        refetch_budget=refetch_budget,
+                        cat_refetch_cap=max_refetches_per_category,
+                        detail_workers=detail_workers,
+                    )
                 )
-            )
+            except Exception as exc:
+                # A category's walk failing (e.g. sreality throttling that
+                # outlasts the retries) must not kill the whole run. Record it
+                # as incomplete — the sweep is skipped (no false delisting) and
+                # the remaining categories still walk and finalize.
+                LOG.exception(
+                    "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
+                    cm_text, ct_text, exc,
+                )
+                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
+                    set(), {}, None, 0, False,
+                )
             global_collected += len(seen_ids)
             total_pages += cat_pages
             total_index += len(seen_ids)
@@ -635,110 +647,6 @@ def _walk_complete(collected: int, result_size: int | None) -> bool:
 _REFETCH_OUTCOMES = ("new", "updated", "unchanged", "gone", "errors")
 
 
-def _walk_region(
-    category_main: int,
-    category_type: int,
-    region: int,
-    *,
-    limiter: RateLimiter | None,
-    conn: Any,
-    dry_run: bool,
-    refetch_budget: list[int | None],
-    region_cap: int | None,
-    detail_workers: int,
-) -> tuple[set[int], dict[str, int], int, int, bool]:
-    """Walk one region of a category, splitting it by district (okres) when
-    the region itself is still too big for a single complete pass.
-
-    Returns (seen_ids, counts, result_size, pages_fetched, complete). For a
-    district-split region `complete` requires EVERY district's own walk to be
-    complete AND the summed district sizes to cover the region probe (so a
-    district missing from REGION_DISTRICTS can't masquerade as complete). The
-    returned result_size is the summed district size (the finer, truer total)
-    when split, else the region's own reported total.
-    """
-    cm_text = parser.CATEGORY_MAIN[category_main]
-    ct_text = parser.CATEGORY_TYPE[category_type]
-
-    probe = _build_client(
-        category_main, category_type, limiter=limiter, locality_region_id=region,
-    )
-    try:
-        region_rs = probe.probe_result_size()
-    except Exception as exc:
-        LOG.warning(
-            "PROBE region failed cm=%s ct=%s region=%d: %s",
-            cm_text, ct_text, region, exc,
-        )
-        region_rs = None
-    pages = probe.pages_fetched
-    districts = REGION_DISTRICTS.get(region, ())
-
-    if region_rs is None or region_rs <= REGION_SUB_THRESHOLD or not districts:
-        client = _build_client(
-            category_main, category_type, limiter=limiter,
-            locality_region_id=region,
-        )
-        seen, counts = _walk_category(
-            client, conn, None, dry_run, refetch_budget,
-            region_cap, detail_workers,
-        )
-        rrs = client.result_size if client.result_size is not None else region_rs
-        pages += client.pages_fetched
-        complete = rrs is not None and len(seen) >= rrs * INDEX_MIN_COMPLETENESS
-        if not complete:
-            LOG.warning(
-                "SPLIT region incomplete cm=%s ct=%s region=%d collected=%d result_size=%s",
-                cm_text, ct_text, region, len(seen), rrs,
-            )
-        return seen, counts, (rrs or 0), pages, complete
-
-    LOG.info(
-        "SPLIT region->districts cm=%s ct=%s region=%d result_size=%d > %d: walking %d districts",
-        cm_text, ct_text, region, region_rs, REGION_SUB_THRESHOLD, len(districts),
-    )
-    union: set[int] = set()
-    counts: dict[str, int] = {}
-    summed_drs = 0
-    all_districts_complete = True
-    refetched = 0
-    for district in districts:
-        district_cap = (
-            None if region_cap is None else max(0, region_cap - refetched)
-        )
-        dclient = _build_client(
-            category_main, category_type, limiter=limiter,
-            locality_region_id=region, locality_district_id=district,
-        )
-        dseen, dcounts = _walk_category(
-            dclient, conn, None, dry_run, refetch_budget,
-            district_cap, detail_workers,
-        )
-        union |= dseen
-        for k, v in dcounts.items():
-            counts[k] = counts.get(k, 0) + v
-        drs = dclient.result_size
-        if drs is not None:
-            summed_drs += drs
-        pages += dclient.pages_fetched
-        refetched += sum(dcounts.get(o, 0) for o in _REFETCH_OUTCOMES)
-        if drs is None or len(dseen) < drs * INDEX_MIN_COMPLETENESS:
-            all_districts_complete = False
-            LOG.warning(
-                "SPLIT district incomplete cm=%s ct=%s region=%d district=%d collected=%d result_size=%s",
-                cm_text, ct_text, region, district, len(dseen), drs,
-            )
-    no_missing_district = summed_drs >= region_rs * INDEX_MIN_COMPLETENESS
-    complete = all_districts_complete and no_missing_district
-    if not complete:
-        LOG.warning(
-            "SPLIT region incomplete cm=%s ct=%s region=%d collected=%d "
-            "summed_district_rs=%d region_rs=%d",
-            cm_text, ct_text, region, len(union), summed_drs, region_rs,
-        )
-    return union, counts, (summed_drs or region_rs), pages, complete
-
-
 def _walk_category_split(
     category_main: int,
     category_type: int,
@@ -751,21 +659,21 @@ def _walk_category_split(
     cat_refetch_cap: int | None,
     detail_workers: int,
 ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
-    """Walk one category, splitting large ones by region (kraj) and, for
-    regions still over REGION_SUB_THRESHOLD, one level finer by district.
+    """Walk one category, splitting large ones by district (okres).
 
     Sreality caps deep pagination per filter, so a category bigger than
-    SPLIT_THRESHOLD can't be retrieved whole in one walk. We probe its total
-    and, if over the threshold, walk each region separately (`_walk_region`,
-    which district-splits the biggest krajs) and union the results — every
-    sub-query is well under the cap, so the union is complete.
+    SPLIT_THRESHOLD can't be retrieved whole in one pass (a coarser region
+    split only reached ~86%, below the completeness bar). We probe the
+    national total and, if over the threshold, walk each district separately
+    and union — every district is well under the cap, so the union is complete
+    and mark_inactive can run.
 
-    Returns (seen_ids, counts, result_size, pages_fetched, complete) where
-    `complete` is True only when the walk covered enough of the category to
-    safely drive mark_inactive — for a split walk that means EVERY region's
-    own walk was complete AND the union clears the completeness bar. A
-    truncated region suppresses inactivation for the whole category rather
-    than risk a false delisting (architectural rule #3).
+    Returns (seen_ids, counts, result_size, pages_fetched, complete). For a
+    split walk `complete` requires EVERY district's own walk to be complete
+    AND the union to cover the national probe (so a district missing from
+    DISTRICT_IDS can't masquerade as complete — architectural rule #3). A
+    single district that errors out is isolated: it marks the category
+    incomplete (sweep skipped) but never crashes the run.
     """
     cm_text = parser.CATEGORY_MAIN[category_main]
     ct_text = parser.CATEGORY_TYPE[category_type]
@@ -791,36 +699,57 @@ def _walk_category_split(
         return seen, counts, rs, client.pages_fetched, complete
 
     LOG.info(
-        "SPLIT cm=%s ct=%s result_size=%d > %d: walking %d regions",
-        cm_text, ct_text, result_size, SPLIT_THRESHOLD, len(REGION_IDS),
+        "SPLIT cm=%s ct=%s result_size=%d > %d: walking %d districts",
+        cm_text, ct_text, result_size, SPLIT_THRESHOLD, len(DISTRICT_IDS),
     )
     union: set[int] = set()
     counts: dict[str, int] = {}
-    summed_rs = 0
+    summed_drs = 0
     pages = 0
-    all_regions_complete = True
+    all_districts_complete = True
     cat_refetched = 0
-    for region in REGION_IDS:
-        region_cap = (
+    for district in DISTRICT_IDS:
+        district_cap = (
             None if cat_refetch_cap is None
             else max(0, cat_refetch_cap - cat_refetched)
         )
-        rseen, rcounts, rrs, rpages, rcomplete = _walk_region(
-            category_main, category_type, region,
-            limiter=limiter, conn=conn, dry_run=dry_run,
-            refetch_budget=refetch_budget, region_cap=region_cap,
-            detail_workers=detail_workers,
+        dclient = _build_client(
+            category_main, category_type, limiter=limiter,
+            locality_district_id=district,
         )
-        union |= rseen
-        for k, v in rcounts.items():
+        try:
+            dseen, dcounts = _walk_category(
+                dclient, conn, None, dry_run, refetch_budget,
+                district_cap, detail_workers,
+            )
+        except Exception as exc:
+            all_districts_complete = False
+            LOG.warning(
+                "SPLIT district failed cm=%s ct=%s district=%d: %s",
+                cm_text, ct_text, district, exc,
+            )
+            continue
+        union |= dseen
+        for k, v in dcounts.items():
             counts[k] = counts.get(k, 0) + v
-        summed_rs += rrs
-        pages += rpages
-        cat_refetched += sum(rcounts.get(o, 0) for o in _REFETCH_OUTCOMES)
-        if not rcomplete:
-            all_regions_complete = False
-    complete = all_regions_complete and _walk_complete(len(union), summed_rs)
-    return union, counts, summed_rs, pages, complete
+        drs = dclient.result_size
+        if drs is not None:
+            summed_drs += drs
+        pages += dclient.pages_fetched
+        cat_refetched += sum(dcounts.get(o, 0) for o in _REFETCH_OUTCOMES)
+        # Empty district (drs 0) is trivially complete; a populated district
+        # whose own walk fell short is a truncation.
+        if drs is None or len(dseen) < drs * INDEX_MIN_COMPLETENESS:
+            all_districts_complete = False
+            LOG.warning(
+                "SPLIT district incomplete cm=%s ct=%s district=%d collected=%d result_size=%s",
+                cm_text, ct_text, district, len(dseen), drs,
+            )
+    # Complete only if every district fully walked AND the union covers the
+    # national total — the latter catches a district missing from DISTRICT_IDS
+    # (both union and summed sizes would otherwise drop together).
+    complete = all_districts_complete and _walk_complete(len(union), result_size)
+    return union, counts, (summed_drs or result_size), pages, complete
 
 
 def _walk_category(
@@ -1438,25 +1367,23 @@ def _pending_condition_scores(conn: Any, *, limit: int) -> list[int]:
 
 
 def _extract_id(estate: dict[str, Any]) -> int | None:
-    hid = estate.get("hash_id")
-    if isinstance(hid, int):
-        return hid
-    if isinstance(hid, str) and hid.isdigit():
-        return int(hid)
-    href = ((estate.get("_links") or {}).get("self") or {}).get("href", "")
-    match = _HREF_ID_RE.search(href)
-    return int(match.group(1)) if match else None
+    for key in ("hash_id", "id"):
+        eid = estate.get(key)
+        if isinstance(eid, int) and not isinstance(eid, bool):
+            return eid
+        if isinstance(eid, str) and eid.isdigit():
+            return int(eid)
+    return None
 
 
 def _extract_price(estate: dict[str, Any]) -> int | None:
-    pc = estate.get("price_czk")
-    if isinstance(pc, dict):
-        v = pc.get("value_raw")
-        if isinstance(v, (int, float)):
-            return int(v)
-    p = estate.get("price")
-    if isinstance(p, (int, float)):
-        return int(p)
+    # Mirror parser._price_czk exactly (same key order + positivity) so the
+    # index-price compared in _walk_category equals the stored listings.price_czk
+    # for an unchanged listing — otherwise every such listing refetches forever.
+    for key in ("price_summary_czk", "price_czk"):
+        p = estate.get(key)
+        if isinstance(p, (int, float)) and not isinstance(p, bool) and p > 0:
+            return int(p)
     return None
 
 

@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 08:15 UTC_
+_Last refreshed: 2026-05-26 18:40 UTC_
 
-**Branch:** `claude/eloquent-heisenberg-gXR9k`
+**Branch:** `claude/serene-ptolemy-7nt9s`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-26 08:15 UTC_
 **Last 10 commits:**
 
 ```
-3133c9d chore: refresh ROADMAP auto-status block
 4cdd4ce properties Slice 3a: insert-time Tier-1 matcher engine
 2f03094 properties Slice 2b: property-grain notifications + change-event matcher
 121f64c properties Slice 2a: property-grain Stats perf + four derived filters
-ba34e86 chore: refresh ROADMAP auto-status block
 51868cd properties Slice 1: property-grain read path + recompute job
-fe2a8ab chore: refresh ROADMAP auto-status block
 4503c8d properties Slice 0: canonical parent table + scraper linkage
 b807918 docs: capture approved multi-portal + dedup design (Shape B)
-1276679 chore: refresh ROADMAP auto-status block
+baf3ca4 scraper: rewrite parser/client for the live snake_case v1 API
+66c4456 Refresh sreality v1 JSON fixtures (real snake_case API shape)
+8d24939 Merge pull request #187 from waiff/claude/zealous-heisenberg-WFmCL
+e2df70e Merge pull request #185 from waiff/claude/zealous-heisenberg-WFmCL
 ```
 
 <!-- END AUTO-STATUS -->
@@ -35,6 +35,16 @@ tools within a phase are independent. CLAUDE.md is the authoritative
 source for active rules; ROADMAP is for sequencing.
 
 ## Done
+
+### Maintenance 2026-05: sreality v1 API migration
+sreality rebuilt on Next.js and removed the old `/api/cs/v2/estates` API
+(returned 404 from every GitHub IP). A free runner-IP probe confirmed it
+was an endpoint removal, not an IP block. Rewrote `scraper/sreality_client.py`
+(now `/api/v1/estates/search` + `/api/v1/estates/{id}`, offset/limit paging,
+`locality_country_id=112`) and `scraper/parser.py` (new estate-object shape)
+against the same row + snapshot contract — listing IDs are unchanged so
+history is preserved. Updated `scraper/hashing.py` for the new volatile
+fields. Reverted the temporary anti-block request-volume backoff.
 
 ### Phase 1: Scraper
 Daily index + on-demand detail scrape of sreality.cz. Image mirroring to

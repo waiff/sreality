@@ -16,6 +16,20 @@ read-only browser UI (also Railway, separate service). Still out of
 scope until explicitly opened: ClickUp integration, MCP wrapping the
 toolkit, per-user identity.
 
+**Data source (sreality v1 API).** In 2026 sreality rebuilt their site
+on Next.js and removed the old `/api/cs/v2/estates` API the scraper was
+born on. The scraper now reads the public JSON v1 API:
+`GET /api/v1/estates/search` (filters `category_main_cb` /
+`category_type_cb` / `locality_country_id=112`, **offset/limit** paging,
+`pagination.total` for completeness) for the index, and
+`GET /api/v1/estates/{id}` for detail (a `{categoryMainCb, locality,
+params{…}, images, price…}` object; `params` holds the typed
+attributes). No cookies needed. The deep-pagination cap still applies
+(HTTP 422 past the window), so large categories are walked per-district
+(`SPLIT_THRESHOLD` / `DISTRICT_IDS`). `parser.parse_listing` maps that
+object to the same row contract; `scraper/hashing.py` strips the new
+volatile fields (`params.stats` view counter, `note`/`rus`/`rusReply`).
+
 ## Territories
 
 The repo is split into two top-level territories with deliberately
@@ -678,7 +692,7 @@ index walk** — the split is about how much expensive work each does, not
 walk depth:
 
 - **Scraping: Sreality full index walk** (`scrape_delta.yml`, cron
-  `*/15 * * * *`) — the primary scrape. Walks the **entire** index of
+  `0 * * * *`) — the primary scrape. Walks the **entire** index of
   every category pair (no `--limit`), so newly-listed properties surface
   AND delistings flip to `is_active=false`. Because the walk is complete
   it runs `mark_inactive` every run. Detail refetches and image downloads
@@ -688,18 +702,20 @@ walk depth:
   Detail fetches run on a small thread pool paced by a shared rate limiter
   (`--detail-workers` / `--detail-rate`). Records as `run_type='delta'` via
   `--run-type`. Skips condition scoring.
-  **Cadence reality:** the cron is `*/15`, but GitHub throttles scheduled
-  workflows heavily (best-effort, worse overnight) and each run is 10-16 min,
-  so the *real* cadence is **~hourly, not 15 min** — a GitHub platform limit,
-  not a bug. The Health liveness check is tuned to this (warn >90 min, fail
-  >180 min). For tighter, near-back-to-back cadence, set the optional
-  `SCRAPE_CHAIN_TOKEN` PAT secret (fine-grained: this repo, Actions
-  read+write): the workflow's "Chain next run" step then re-dispatches itself
-  on success (GITHUB_TOKEN can't, GitHub blocks recursion). The `*/15` cron
-  remains the safety net that restarts the chain. No-op without the PAT.
+  **Cadence:** the cron is **hourly** (`0 * * * *`), deliberately — each run
+  is a complete walk taking 10-16 min, and hourly keeps a steady, polite
+  request volume against sreality (a too-aggressive schedule is a plausible
+  abuse-flag trigger). GitHub also throttles scheduled workflows (worse
+  overnight), so effective cadence can be slightly slower; the Health
+  liveness check is tuned to this (warn >90 min, fail >180 min). For tighter,
+  near-back-to-back cadence, set the optional `SCRAPE_CHAIN_TOKEN` PAT secret
+  (fine-grained: this repo, Actions read+write): the workflow's "Chain next
+  run" step then re-dispatches itself on success (GITHUB_TOKEN can't, GitHub
+  blocks recursion). The hourly cron remains the safety net that restarts the
+  chain. No-op without the PAT.
 - **Scraping: Sreality nightly deep run** (`scrape.yml`, cron `0 22 * * *`) —
   the deep nightly. Also a full walk, but its distinct value is the expensive
-  backlog work the 15-min ticks skip: the condition-scoring phase (LLM
+  backlog work the hourly ticks skip: the condition-scoring phase (LLM
   cost), a deep image-backlog drain (cap 50 000), and a high-cap detail
   catch-up (cap 10 000). Records as `run_type='full'`.
 
@@ -728,7 +744,7 @@ partial result. The nightly owns the 22:00 UTC slot.
 
 The scraper emits structured progress lines:
 
-- `INDEX page=N estates=M` per index page
+- `INDEX offset=N estates=M total=K` per search page (offset/limit paging)
 - `INDEX total=N pages=M` once at end of index walk
 - `PLAN unchanged=N refetch=M` once after deciding what to fetch
 - `PLAN priority_retry=N` once if any listings have prior failure rows

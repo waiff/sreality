@@ -1,9 +1,12 @@
-"""Map a Sreality detail JSON response to a row dict matching the schema.
+"""Map a Sreality v1 detail JSON response to a row dict matching the schema.
 
-Primary source for structured fields is the `recommendations_data` block,
-which is cleaner than the free-text `items[]` array. We fall back to
-`items[]` for fields that only appear as Czech strings (building type,
-condition, floor) and regex `name.value` for disposition.
+The detail endpoint (`/api/v1/estates/{id}`) returns a wrapped estate object
+(`{result, status_code, status_message}`, unwrapped by the client). The estate
+is flat snake_case: typed attributes sit at the top level (`usable_area`,
+`floor_number`, `building_condition`, …), `locality` holds geo, and
+`advert_images` is the gallery. Enum fields arrive as `{name, value}` objects;
+sreality uses `value == 0` for "not specified", treated as None. The id field
+is `hash_id`.
 """
 
 from __future__ import annotations
@@ -29,17 +32,10 @@ CATEGORY_TYPE: dict[int, str] = {
     4: "podil",
 }
 
-PRICE_UNIT_BY_CODE: dict[int, str] = {
-    1: "celkem",
-    2: "měsíc",
-}
-
-# Sreality enum codes for the structured fields we promote to typed
-# columns in migration 022. Same forgiving pattern as CATEGORY_TYPE:
-# unknown codes (including 0, which sreality uses for "not specified")
-# return None instead of raising. Czech labels are stored without
-# diacritics to match the existing convention for category_main /
-# category_type values.
+# Sreality enum codes for the structured fields we promote to typed columns.
+# Unknown codes (including 0, which sreality uses for "not specified") return
+# None instead of raising. Czech labels stored without diacritics to match
+# the convention for category_main / category_type values.
 FURNISHED: dict[int, str] = {
     1: "ano",       # vybaveno
     2: "ne",        # nevybaveno
@@ -53,15 +49,11 @@ OWNERSHIP: dict[int, str] = {
 }
 
 # Canonical district labels keyed by sreality's locality_district_id.
-# Mirrors the seed in migration 041_district_canonical_label.sql; the
-# DB row is the runtime source of truth for the backfilled column,
-# this dict feeds the parser on new rows. IDs 1..77 are the 76 Czech
-# okresy outside Prague (47 is the city of Prague). 5001..5022 are
-# Praha 1..22 — all collapsed to a single "Praha" label per operator
-# preference; the locality_district_id column still carries the
-# finer value. Unknown IDs (including -1 used for foreign listings)
-# return None so the trailing-locality-segment fallback still labels
-# them with their country name.
+# IDs 1..77 are the 76 Czech okresy outside Prague (47 is the city of
+# Prague). 5001..5022 are Praha 1..22 — all collapsed to a single "Praha"
+# label per operator preference; the locality_district_id column still
+# carries the finer value. Unknown IDs return None so the locality.district
+# text fallback still labels them.
 DISTRICTS: dict[int, str] = {
     1:  "okres České Budějovice",
     2:  "okres Český Krumlov",
@@ -144,9 +136,7 @@ DISTRICTS: dict[int, str] = {
 }
 
 _DISPOSITION_RE = re.compile(r"\b(\d\+(?:kk|\d))\b", re.IGNORECASE)
-_FLOOR_RE = re.compile(r"\s*(-?\d+)\.\s*podla", re.IGNORECASE)
-_TOTAL_FLOORS_RE = re.compile(r"z\s*celkem\s*(\d+)", re.IGNORECASE)
-_ENERGY_CLASS_RE = re.compile(r"Třída\s+([A-G])", re.IGNORECASE)
+_ENERGY_CLASS_RE = re.compile(r"\s*([A-G])\b")
 
 _BUILDING_TYPE_TEXT: dict[str, str] = {
     "cihlova": "cihla",
@@ -161,273 +151,203 @@ _BUILDING_TYPE_TEXT: dict[str, str] = {
 
 
 def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
-    rec = raw.get("recommendations_data") or {}
-    items_by_name: dict[str, dict[str, Any]] = {
-        item.get("name", ""): item for item in (raw.get("items") or [])
-    }
-
-    sreality_id = _coalesce_id(raw, rec)
+    sreality_id = _int_or_none(raw.get("hash_id"))
+    if sreality_id is None:
+        sreality_id = _int_or_none(raw.get("id"))
     if sreality_id is None:
         raise ValueError("could not determine sreality_id from response")
 
-    map_obj = raw.get("map") or {}
-    lon = map_obj.get("lon") or rec.get("locality_gps_lon")
-    lat = map_obj.get("lat") or rec.get("locality_gps_lat")
+    loc = raw.get("locality") or {}
 
     return {
         "sreality_id": sreality_id,
-        "category_main": CATEGORY_MAIN.get(rec.get("category_main_cb")),
-        "category_type": CATEGORY_TYPE.get(rec.get("category_type_cb")),
-        "price_czk": _price_czk(raw, rec),
-        "price_unit": _price_unit(raw, rec),
-        "area_m2": _area_m2(rec, items_by_name),
+        "category_main": CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb"))),
+        "category_type": CATEGORY_TYPE.get(_cb_value(raw.get("category_type_cb"))),
+        "price_czk": _price_czk(raw),
+        "price_unit": _price_unit(raw),
+        "area_m2": _numeric_or_none(raw.get("usable_area")),
         "disposition": _disposition(raw),
-        "locality": _locality_value(raw),
-        "district": _district(rec, raw),
-        "locality_district_id": _int_or_none(rec.get("locality_district_id")),
-        "locality_region_id": _int_or_none(rec.get("locality_region_id")),
-        "locality_municipality_id": _id_or_none(rec.get("locality_municipality_id")),
-        "locality_quarter_id": _id_or_none(rec.get("locality_quarter_id")),
-        "locality_ward_id": _id_or_none(rec.get("locality_ward_id")),
-        "lon": float(lon) if isinstance(lon, (int, float)) else None,
-        "lat": float(lat) if isinstance(lat, (int, float)) else None,
-        "floor": _floor(items_by_name),
-        "total_floors": _total_floors(items_by_name),
-        "has_balcony": _has_balcony(rec, items_by_name),
-        "has_parking": _has_parking(rec, items_by_name),
-        "has_lift": _has_lift(rec, items_by_name),
-        "building_type": _building_type(items_by_name),
-        "condition": _condition(items_by_name),
-        "energy_rating": _energy_rating(items_by_name),
-        "estate_area": _numeric_or_none(rec.get("estate_area")),
-        "usable_area": _numeric_or_none(rec.get("usable_area")),
-        "garden_area": _numeric_or_none(rec.get("garden_area")),
-        "category_sub_cb": _int_or_none(rec.get("category_sub_cb")),
-        "furnished": FURNISHED.get(_int_or_none(rec.get("furnished"))),
-        "terrace": _bool_or_none(rec.get("terrace")),
-        "cellar": _bool_or_none(rec.get("cellar")),
-        "garage": _bool_or_none(rec.get("garage")),
-        "parking_lots": _int_or_none(rec.get("parking_lots")),
-        "ownership": OWNERSHIP.get(_int_or_none(rec.get("ownership"))),
+        "locality": _locality_value(loc),
+        "district": _district(loc),
+        "locality_district_id": _id_or_none(loc.get("district_id")),
+        "locality_region_id": _id_or_none(loc.get("region_id")),
+        "locality_municipality_id": _id_or_none(loc.get("municipality_id")),
+        "locality_quarter_id": _id_or_none(loc.get("quarter_id")),
+        "locality_ward_id": _id_or_none(loc.get("ward_id")),
+        "lon": _coord(loc.get("gps_lon")),
+        "lat": _coord(loc.get("gps_lat")),
+        "floor": _int_or_none(raw.get("floor_number")),
+        "total_floors": _int_or_none(raw.get("floors")),
+        "has_balcony": _has_balcony(raw),
+        "has_parking": _has_parking(raw),
+        "has_lift": _elevator(raw.get("elevator")),
+        "building_type": _building_type(raw.get("building_type")),
+        "condition": _condition(raw.get("building_condition")),
+        "energy_rating": _energy_rating(raw.get("energy_efficiency_rating_cb")),
+        "estate_area": _numeric_or_none(raw.get("estate_area")),
+        "usable_area": _numeric_or_none(raw.get("usable_area")),
+        "garden_area": _numeric_or_none(raw.get("garden_area")),
+        "category_sub_cb": _cb_value(raw.get("category_sub_cb")),
+        "furnished": FURNISHED.get(_cb_value(raw.get("furnished"))),
+        "terrace": _bool_or_none(raw.get("terrace")),
+        "cellar": _bool_or_none(raw.get("cellar")),
+        "garage": _bool_or_none(raw.get("garage")),
+        "parking_lots": _int_or_none(raw.get("parking")),
+        "ownership": OWNERSHIP.get(_cb_value(raw.get("ownership"))),
         "description": _description(raw),
     }
 
 
 def parse_images(raw: dict[str, Any]) -> list[dict[str, Any]]:
-    images = ((raw.get("_embedded") or {}).get("images")) or []
     out: list[dict[str, Any]] = []
-    for img in images:
-        links = img.get("_links") or {}
-        href = (
-            (links.get("view") or {}).get("href")
-            or (links.get("self") or {}).get("href")
-            or (links.get("gallery") or {}).get("href")
-        )
-        if not href:
+    for img in raw.get("advert_images") or []:
+        if not isinstance(img, dict):
             continue
-        out.append({"url": href, "sequence": img.get("order")})
+        url = img.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        if url.startswith("//"):
+            url = "https:" + url
+        out.append({"url": url, "sequence": img.get("order")})
     return out
 
 
-def _coalesce_id(
-    raw: dict[str, Any], rec: dict[str, Any]
-) -> int | None:
-    hid = rec.get("hash_id") or raw.get("hash_id")
-    if isinstance(hid, (int, str)) and str(hid).isdigit():
-        return int(hid)
-    href = ((raw.get("_links") or {}).get("self") or {}).get("href", "")
-    match = re.search(r"/estates/(\d+)", href)
-    return int(match.group(1)) if match else None
+def _cb_value(obj: Any) -> int | None:
+    """Integer enum code from a {name, value} object; 0 ('not specified') → None."""
+    if isinstance(obj, dict):
+        v = obj.get("value")
+        if isinstance(v, int) and not isinstance(v, bool) and v != 0:
+            return v
+    return None
 
 
-def _price_czk(
-    raw: dict[str, Any], rec: dict[str, Any]
-) -> int | None:
-    p = (raw.get("price_czk") or {}).get("value_raw")
-    if isinstance(p, (int, float)):
-        return int(p)
-    p = rec.get("price_summary_czk")
-    return int(p) if isinstance(p, (int, float)) else None
+def _coord(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def _price_unit(
-    raw: dict[str, Any], rec: dict[str, Any]
-) -> str | None:
-    text = (raw.get("price_czk") or {}).get("unit")
-    if isinstance(text, str):
-        ascii_text = _strip_diacritics(text.lower())
-        if "mesic" in ascii_text:
-            return "měsíc"
-        if "celkem" in ascii_text:
-            return "celkem"
-    return PRICE_UNIT_BY_CODE.get(rec.get("price_summary_unit_cb"))
+def _price_czk(raw: dict[str, Any]) -> int | None:
+    for key in ("price_summary_czk", "price_czk"):
+        v = raw.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return int(v)
+    return None
 
 
-def _area_m2(
-    rec: dict[str, Any], items_by_name: dict[str, dict[str, Any]]
-) -> float | None:
-    ua = rec.get("usable_area")
-    if isinstance(ua, (int, float)) and ua > 0:
-        return float(ua)
-    item = _find_item(
-        items_by_name,
-        "Užitná ploch",  # API typo, omits final "a"
-        "Užitná plocha",
-        "Plocha podlahová",
-        "Plocha užitná",
-    )
-    if item is None:
-        return None
-    try:
-        return float(str(item.get("value", "")).replace(",", "."))
-    except (ValueError, TypeError):
-        return None
+def _price_unit(raw: dict[str, Any]) -> str | None:
+    for key in ("price_summary_unit_cb", "price_unit_cb"):
+        obj = raw.get(key)
+        if isinstance(obj, dict):
+            name = obj.get("name")
+            if isinstance(name, str):
+                ascii_name = _strip_diacritics(name.lower())
+                if "mesic" in ascii_name:
+                    return "měsíc"
+                if "nemovitost" in ascii_name or "celkem" in ascii_name:
+                    return "celkem"
+    return None
 
 
 def _disposition(raw: dict[str, Any]) -> str | None:
     for source in (
-        (raw.get("name") or {}).get("value"),
-        raw.get("meta_description"),
+        (raw.get("category_sub_cb") or {}).get("name"),
+        raw.get("advert_name"),
     ):
-        if not isinstance(source, str):
-            continue
-        match = _DISPOSITION_RE.search(source)
-        if match:
-            return match.group(1).lower()
+        if isinstance(source, str):
+            match = _DISPOSITION_RE.search(source)
+            if match:
+                return match.group(1).lower()
     return None
 
 
-def _locality_value(raw: dict[str, Any]) -> str | None:
-    val = (raw.get("locality") or {}).get("value")
-    return val if isinstance(val, str) and val else None
+def _locality_value(loc: dict[str, Any]) -> str | None:
+    parts = [p for p in (loc.get("city"), loc.get("citypart")) if isinstance(p, str) and p]
+    if not parts:
+        return None
+    if len(parts) == 2 and parts[0] == parts[1]:
+        parts = parts[:1]
+    return " - ".join(parts)
+
+
+def _district(loc: dict[str, Any]) -> str | None:
+    did = _int_or_none(loc.get("district_id"))
+    if did is not None:
+        label = DISTRICTS.get(did)
+        if label:
+            return label
+    text = loc.get("district")
+    return text if isinstance(text, str) and text else None
 
 
 def _description(raw: dict[str, Any]) -> str | None:
-    val = (raw.get("text") or {}).get("value")
+    val = raw.get("advert_description")
     if not isinstance(val, str):
         return None
     val = val.strip()
     return val or None
 
 
-def _district(rec: dict[str, Any], raw: dict[str, Any]) -> str | None:
-    """Canonical district label derived from locality_district_id, with
-    a trailing-locality-segment fallback for IDs we don't map (today
-    only `-1`, used by sreality for foreign listings — preserves the
-    country name in `district`)."""
-    label = DISTRICTS.get(_int_or_none(rec.get("locality_district_id")) or 0)
-    if label is not None:
-        return label
-    text = _locality_value(raw)
-    if not text:
+def _has_balcony(raw: dict[str, Any]) -> bool | None:
+    vals = [raw.get(k) for k in ("balcony", "terrace", "loggia")]
+    if all(v is None for v in vals):
         return None
-    parts = [p.strip() for p in text.split(",")]
-    return parts[-1] if len(parts) >= 2 else None
+    return any(bool(v) for v in vals)
 
 
-def _floor(items_by_name: dict[str, dict[str, Any]]) -> int | None:
-    item = _find_item(items_by_name, "Podlaží")
-    if item is None:
+def _has_parking(raw: dict[str, Any]) -> bool | None:
+    vals = [raw.get(k) for k in ("parking_lots", "garage", "parking")]
+    if all(v is None for v in vals):
         return None
-    match = _FLOOR_RE.match(str(item.get("value", "")))
-    return int(match.group(1)) if match else None
+    return any(bool(v) for v in vals)
 
 
-def _total_floors(items_by_name: dict[str, dict[str, Any]]) -> int | None:
-    item = _find_item(items_by_name, "Podlaží")
-    if item is None:
+def _elevator(obj: Any) -> bool | None:
+    if not isinstance(obj, dict):
         return None
-    match = _TOTAL_FLOORS_RE.search(str(item.get("value", "")))
-    return int(match.group(1)) if match else None
-
-
-def _has_balcony(
-    rec: dict[str, Any], items_by_name: dict[str, dict[str, Any]]
-) -> bool | None:
-    for key in ("balcony", "terrace", "loggia"):
-        if rec.get(key):
-            return True
-    if rec:
+    if _cb_value(obj) is None:  # value 0 / unspecified
+        return None
+    name = _strip_diacritics(str(obj.get("name", "")).lower())
+    if name.startswith("ano"):
+        return True
+    if name.startswith("ne"):
         return False
-    for needle in ("Balkón", "Lodžie", "Terasa"):
-        if needle in items_by_name:
-            if items_by_name[needle].get("value"):
-                return True
     return None
 
 
-def _has_parking(
-    rec: dict[str, Any], items_by_name: dict[str, dict[str, Any]]
-) -> bool | None:
-    for key in ("parking_lots", "garage"):
-        if rec.get(key):
-            return True
-    if rec:
-        return False
-    item = _find_item(items_by_name, "Parkování", "Garáž")
-    return bool(item.get("value")) if item else None
-
-
-def _has_lift(
-    rec: dict[str, Any], items_by_name: dict[str, dict[str, Any]]
-) -> bool | None:
-    if rec.get("elevator") is not None:
-        return bool(rec.get("elevator"))
-    item = _find_item(items_by_name, "Výtah")
-    return bool(item.get("value")) if item else None
-
-
-def _building_type(
-    items_by_name: dict[str, dict[str, Any]]
-) -> str | None:
-    item = _find_item(items_by_name, "Stavba", "Konstrukce budovy")
-    if item is None:
+def _building_type(obj: Any) -> str | None:
+    if not isinstance(obj, dict):
         return None
-    raw_value = str(item.get("value", "")).strip()
-    if not raw_value:
+    name = obj.get("name")
+    if not isinstance(name, str) or not name.strip():
         return None
-    key = _strip_diacritics(raw_value.lower())
-    return _BUILDING_TYPE_TEXT.get(key, raw_value.lower())
-
-
-def _condition(
-    items_by_name: dict[str, dict[str, Any]]
-) -> str | None:
-    item = _find_item(items_by_name, "Stav objektu")
-    if item is None:
+    key = _strip_diacritics(name.strip().lower())
+    if key.startswith("-") or "vyber" in key or "nezadano" in key:
         return None
-    val = str(item.get("value", "")).strip()
-    return val.lower() if val else None
+    return _BUILDING_TYPE_TEXT.get(key, name.strip().lower())
 
 
-def _energy_rating(
-    items_by_name: dict[str, dict[str, Any]]
-) -> str | None:
-    item = _find_item(items_by_name, "Energetická náročnost")
-    if item is None:
+def _condition(obj: Any) -> str | None:
+    if not isinstance(obj, dict):
         return None
-    code = item.get("value_type")
-    if isinstance(code, str) and 1 <= len(code) <= 2:
-        return code.upper()
-    match = _ENERGY_CLASS_RE.search(str(item.get("value", "")))
-    return match.group(1).upper() if match else None
+    name = obj.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    key = _strip_diacritics(name.strip().lower())
+    if key.startswith("-") or "vyber" in key:
+        return None
+    # Diacritic-free, underscore-joined to match the schema convention and the
+    # existing canonical values (e.g. "velmi_dobry", "po_rekonstrukci"); the
+    # legacy condition filter binds against this column.
+    return key.replace(" ", "_")
 
 
-def _find_item(
-    items_by_name: dict[str, dict[str, Any]],
-    *needles: str,
-) -> dict[str, Any] | None:
-    """Return the first item whose name starts with any of the needles.
-
-    Case-insensitive and tolerates the API's occasional typos
-    (e.g. "Užitná ploch" matches a "Užitná plocha" needle if we add it).
-    """
-    lowered = {name.lower(): item for name, item in items_by_name.items()}
-    for needle in needles:
-        nl = needle.lower()
-        for name, item in lowered.items():
-            if name.startswith(nl) or nl.startswith(name):
-                return item
+def _energy_rating(obj: Any) -> str | None:
+    if not isinstance(obj, dict):
+        return None
+    name = obj.get("name")
+    if isinstance(name, str):
+        match = _ENERGY_CLASS_RE.match(name)
+        if match:
+            return match.group(1).upper()
     return None
 
 
@@ -465,7 +385,7 @@ def _numeric_or_none(value: Any) -> float | None:
 
 
 def _bool_or_none(value: Any) -> bool | None:
-    """Sreality returns 0/1 for amenity flags; missing key → None."""
+    """Sreality returns true/false (or 0/1) for amenity flags; missing → None."""
     if value is None:
         return None
     if isinstance(value, bool):

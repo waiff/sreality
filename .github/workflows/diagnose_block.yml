@@ -1,0 +1,110 @@
+name: "Scraping: recon sreality new API (probe)"
+
+# Free, zero-secret reconnaissance for the scraper rewrite. We already proved the
+# old /api/cs/v2/estates API is gone (404) and the new Next.js site is reachable
+# from GitHub IPs. This run pins down the two open questions for the new client,
+# from a real GitHub runner IP (this sandbox's own IP is 403'd by sreality):
+#
+#   A) Does the clean JSON API /api/v1/estates/search work WITHOUT cookies, and
+#      what is the max page size it honours (limit=999 -> how many returned)?
+#   B) Deep-pagination cap: can offset reach a 15k offset and the very last page,
+#      or does it cap (~14k) like the old API (which forced district-splitting)?
+#   C) Is there a clean detail sibling /api/v1/estates/<id> (JSON), or must the
+#      rewrite read detail from the /_next/data/<buildId>/.../<id>.json route?
+#   D) What is the SEARCH result-item id key? The live run drops every entry
+#      ("INDEX skipped entry without id") because _extract_id can't find the id;
+#      the HAR-derived fixture said top-level int `id`, but live disagrees. Dump
+#      the first item's keys + every id-bearing field so we learn the real key.
+#
+# Read the per-job "::notice::" lines:
+#   search=200 + page<=limit  -> clean endpoint works; page = max page size.
+#   deep15k / deepEnd got>0    -> no cap; district-split can be retired.
+#   detailAPI=200              -> use /api/v1/estates/<id> (simple); else _next/data.
+#   r0_has_id=false            -> id is NOT top-level `id`; see the "D result[0]
+#                                 id-bearing fields" log lines for the real key.
+
+on:
+  workflow_dispatch:
+    inputs:
+      samples:
+        description: "Number of parallel IP samples (1-10)"
+        default: "3"
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.gen.outputs.list }}
+    steps:
+      - name: Build sample matrix
+        id: gen
+        run: |
+          N="${{ inputs.samples }}"
+          case "$N" in (*[!0-9]*|'') N=3 ;; esac
+          [ "$N" -lt 1 ] && N=3
+          [ "$N" -gt 10 ] && N=10
+          LIST=$(seq 1 "$N" | jq -R 'tonumber' | jq -cs '.')
+          echo "list=$LIST" >> "$GITHUB_OUTPUT"
+          echo "Sampling $N parallel runner IPs."
+
+  recon:
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        n: ${{ fromJSON(needs.setup.outputs.list) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Recon the new /api/v1/estates API from this runner's IP
+        run: |
+          set +e
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36'
+          E="https://www.sreality.cz/api/v1/estates"
+          IP=$(curl -s --max-time 10 https://api.ipify.org); [ -z "$IP" ] && IP="unknown"
+
+          # A) Clean search endpoint, NO cookie, big limit. byty/prodej = main 1, type 1.
+          A_URL="$E/search?category_main_cb=1&category_type_cb=1&locality_country_id=112&limit=999&offset=0"
+          A=$(curl -s -o /tmp/a.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' "$A_URL")
+          [ -z "$A" ] && A="000"
+          A_TOTAL=$(jq -r '.pagination.total // empty' /tmp/a.json 2>/dev/null); [ -z "$A_TOTAL" ] && A_TOTAL=0
+          A_N=$(jq -r 'if .results then (.results|length) else 0 end' /tmp/a.json 2>/dev/null); [ -z "$A_N" ] && A_N=0
+
+          # B) Deep-pagination cap probes: a fixed deep offset and the very last page.
+          B1=$(curl -s -o /tmp/b1.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' \
+            "$E/search?category_main_cb=1&category_type_cb=1&locality_country_id=112&limit=60&offset=15000")
+          [ -z "$B1" ] && B1="000"
+          B1_N=$(jq -r 'if .results then (.results|length) else 0 end' /tmp/b1.json 2>/dev/null); [ -z "$B1_N" ] && B1_N=0
+          DEEP=$(( A_TOTAL > 60 ? A_TOTAL - 60 : 0 ))
+          B2=$(curl -s -o /tmp/b2.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' \
+            "$E/search?category_main_cb=1&category_type_cb=1&locality_country_id=112&limit=60&offset=$DEEP")
+          [ -z "$B2" ] && B2="000"
+          B2_N=$(jq -r 'if .results then (.results|length) else 0 end' /tmp/b2.json 2>/dev/null); [ -z "$B2_N" ] && B2_N=0
+
+          # C) Is there a clean detail sibling /api/v1/estates/<id>? (3386655564 = a real Praha flat)
+          C=$(curl -s -o /tmp/c.json -w '%{http_code}' --max-time 30 -H "User-Agent: $UA" -H 'Accept: application/json' "$E/3386655564")
+          [ -z "$C" ] && C="000"
+          C_KEYS=$(jq -r 'if type=="object" then (keys|join(",")) else empty end' /tmp/c.json 2>/dev/null | head -c 220)
+          [ -z "$C_KEYS" ] && C_KEYS="(not json) $(head -c 120 /tmp/c.json | tr '\n\r' '  ')"
+
+          # D) Search RESULT-ITEM shape — the one thing recon never checked. The
+          #    live run drops every entry ("INDEX skipped entry without id"),
+          #    so _extract_id can't find the id key. Reveal the real shape:
+          #    full key list, every *id*-bearing field with its value, and a
+          #    compact sample (bulky images/locality stripped).
+          D_KEYS=$(jq -rc 'if (.results|length)>0 then (.results[0]|keys) else "NO RESULTS" end' /tmp/a.json 2>/dev/null)
+          R0_HASID=$(jq -r 'if (.results|length)>0 then (.results[0]|has("id")) else "noresults" end' /tmp/a.json 2>/dev/null)
+
+          echo "RECON sample=${{ matrix.n }} ip=$IP"
+          echo "  A  search byty/prodej: status=$A total=$A_TOTAL page_returned=$A_N (= max page size honoured)"
+          echo "  B  cap: offset15000 status=$B1 got=$B1_N | lastpage(offset=$DEEP) status=$B2 got=$B2_N"
+          echo "  C  detail /estates/3386655564: status=$C keys=$C_KEYS"
+          echo "  D  result[0] has top-level \"id\"? $R0_HASID"
+          echo "  D  result[0] keys: $D_KEYS"
+          echo "  D  result[0] id-bearing fields (key matches /id/i):"
+          jq -r 'if (.results|length)>0 then (.results[0] | to_entries[] | select(.key|test("id";"i")) | "       \(.key) = \(.value|tojson)") else "       (no results)" end' /tmp/a.json 2>/dev/null
+          echo "  D  result[0] sample (images+locality stripped):"
+          jq -rc 'if (.results|length)>0 then (.results[0] | del(.images) | del(.locality)) else empty end' /tmp/a.json 2>/dev/null | head -c 1000
+          echo ""
+          echo "::notice title=Recon ${{ matrix.n }}::ip=$IP search=$A total=$A_TOTAL page=$A_N deep15k=$B1/$B1_N deepEnd=$B2/$B2_N detailAPI=$C r0_has_id=$R0_HASID"

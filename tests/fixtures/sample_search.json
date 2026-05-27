@@ -1,0 +1,459 @@
+{
+  "meta_description": "17 156 bytů v aktuální nabídce Byty k prodeji ✓ Parametry hledání: Byty ✓ Největší nabídka nemovitostí v Česku (105 748 inzerátů) s hledáním na mapě a filtrováním s desítkami parametrů ✓",
+  "meta_title": "Prodej bytu • Sreality.cz",
+  "pagination": {
+    "limit": 3,
+    "offset": 0,
+    "total": 17156
+  },
+  "results": [
+    {
+      "advert_images": [
+        "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CDciVBzu1Gttzfn/bda2.jpeg",
+        "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5DwDWzB0ZVGttzgJ/fee9.jpeg",
+        "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5Do9kXBY36Gttzgr/c69a.jpeg"
+      ],
+      "advert_images_all": [
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CDciVBzu1Gttzfn/bda2.jpeg",
+          "restb_room_type": 29
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5DwDWzB0ZVGttzgJ/fee9.jpeg",
+          "restb_room_type": 19
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5Do9kXBY36Gttzgr/c69a.jpeg",
+          "restb_room_type": 29
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBZUyGttzhg/13ec.jpeg",
+          "restb_room_type": 0
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQqqsKBeAGttziX/b8ec.jpeg",
+          "restb_room_type": 0
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQCHBj1BZfGttzj6/e125.jpeg",
+          "restb_room_type": 0
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CDciVBzvAGttzkW/84a6.jpeg",
+          "restb_room_type": 0
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQy2O9ByMGttzm9/c2ec.jpeg",
+          "restb_room_type": 10
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kO7neTVgOQBJBNzBXQGttzoS/bc83.jpeg",
+          "restb_room_type": 0
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CFdAHBY52Gttzow/2291.jpeg",
+          "restb_room_type": 8
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBZUyGttzpP/7ba3.jpeg",
+          "restb_room_type": 10
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5DwDWzB0ZmGttzpp/c46c.jpeg",
+          "restb_room_type": 0
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CoHumBZVOGttzqE/87ba.jpeg",
+          "restb_room_type": 15
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5BWLrlBZCiGttzqk/84c4.jpeg",
+          "restb_room_type": 19
+        }
+      ],
+      "advert_name": "Prodej bytu 3+kk 85 m²",
+      "category_main_cb": {
+        "name": "Byty",
+        "value": 1
+      },
+      "category_sub_cb": {
+        "name": "3+kk",
+        "value": 6
+      },
+      "category_type_cb": {
+        "name": "Prodej",
+        "value": 1
+      },
+      "discount_show": false,
+      "has_matterport_url": false,
+      "has_video": false,
+      "hash_id": 3292504140,
+      "locality": {
+        "city": "Ostrava",
+        "city_seo_name": "ostrava",
+        "citypart": "Petřkovice",
+        "citypart_seo_name": "petrkovice",
+        "country": "Česká republika",
+        "country_id": 112,
+        "country_seo_name": "ceska-republika",
+        "district": "Ostrava-město",
+        "district_id": 65,
+        "district_seo_name": "ostrava-mesto",
+        "entity_type": "address",
+        "geohash": "u2ugxrj13m",
+        "gps_lat": 49.8726804390449,
+        "gps_lon": 18.2552141715043,
+        "housenumber": null,
+        "inaccuracy_type": "ward",
+        "municipality": null,
+        "municipality_id": 4730,
+        "municipality_seo_name": null,
+        "quarter": "Petřkovice",
+        "quarter_id": 45,
+        "quarter_seo_name": "petrkovice",
+        "region": "Moravskoslezský kraj",
+        "region_id": 12,
+        "region_seo_name": "moravskoslezsky-kraj",
+        "street": "",
+        "street_id": -1,
+        "street_seo_name": null,
+        "streetnumber": null,
+        "ward": null,
+        "ward_id": 8277,
+        "ward_seo_name": null
+      },
+      "poi_atm_distance": 2316,
+      "poi_bus_public_transport_distance": 99,
+      "poi_kindergarten_distance": 283,
+      "poi_medic_distance": 222,
+      "poi_metro_distance": 100000,
+      "poi_playground_distance": 371,
+      "poi_post_office_distance": 454,
+      "poi_restaurant_distance": 445,
+      "poi_school_distance": 453,
+      "poi_shop_distance": 1211,
+      "poi_small_shop_distance": 540,
+      "poi_train_distance": 2175,
+      "poi_vet_distance": 291,
+      "premise": {
+        "city_seo_name": "ostrava",
+        "quarter_seo_name": "marianske-hory-a-hulvaky",
+        "seo_name": "hvb-real-estate-s-r-o",
+        "ward_seo_name": "marianske-hory"
+      },
+      "premise_id": 12824,
+      "premise_logo": "https://d48-a.sdn.cz/d_48/c_img_G_C/GqaBvgk.png",
+      "price": 0.0,
+      "price_currency_cb": {
+        "name": "Kč",
+        "value": 1
+      },
+      "price_czk": 0.0,
+      "price_czk_m2": 0,
+      "price_summary": 0.0,
+      "price_summary_czk": 0.0,
+      "price_summary_unit_cb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "price_unit_cb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "user_id": 22787
+    },
+    {
+      "advert_images": [
+        "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtBRc2UpMRGZXvtI/d0d5.jpeg",
+        "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5bIUBBB43GZXvtg/d41b.jpeg",
+        "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5CoHumBBBHGZXvt2/a71f.jpeg"
+      ],
+      "advert_images_all": [
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtBRc2UpMRGZXvtI/d0d5.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5bIUBBB43GZXvtg/d41b.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5CoHumBBBHGZXvt2/a71f.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5CDciVBTNqGZXvuJ/89a1.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtDgLT020OGZXvuc/8775.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtEDuRmBOppGZXvuw/171b.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5DwDWzBSaZGZXvvL/d3d3.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5CFdAH99jGZXvvg/ac66.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtBM3KV2M1GZXvv9/a23f.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5DwDWzBSaiGZXvwP/f2a2.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtEDuRmBOppGZXvwj/a14a.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtDrxR23CrGZXvw6/fae4.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtBRc2UpNqGZXvxV/d238.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/kcHp2YdDtEDuRmBOppGZXvxt/9659.jpeg",
+          "restb_room_type": 4
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qA_D/nCTUX1iX5CNPfpBRlCGZXvyF/c4a3.jpeg",
+          "restb_room_type": 4
+        }
+      ],
+      "advert_name": "Prodej bytu 3+kk 71 m²",
+      "category_main_cb": {
+        "name": "Byty",
+        "value": 1
+      },
+      "category_sub_cb": {
+        "name": "3+kk",
+        "value": 6
+      },
+      "category_type_cb": {
+        "name": "Prodej",
+        "value": 1
+      },
+      "discount_show": false,
+      "has_matterport_url": false,
+      "has_video": false,
+      "hash_id": 3853889612,
+      "locality": {
+        "city": "Praha",
+        "city_seo_name": "praha",
+        "citypart": "Troja",
+        "citypart_seo_name": "troja",
+        "country": "Česká republika",
+        "country_id": 112,
+        "country_seo_name": "ceska-republika",
+        "district": "Praha 8",
+        "district_id": 5008,
+        "district_seo_name": "praha-8",
+        "entity_type": "address",
+        "geohash": "u2fm0sg2j9",
+        "gps_lat": 50.1237571609843,
+        "gps_lon": 14.4407391603066,
+        "housenumber": "398",
+        "inaccuracy_type": "address",
+        "municipality": null,
+        "municipality_id": 3468,
+        "municipality_seo_name": null,
+        "quarter": "Praha 8",
+        "quarter_id": 115,
+        "quarter_seo_name": "praha-8",
+        "region": "Hlavní město Praha",
+        "region_id": 10,
+        "region_seo_name": "hlavni-mesto-praha",
+        "street": "Na Šutce",
+        "street_id": 120883,
+        "street_seo_name": "na-sutce",
+        "streetnumber": "2",
+        "ward": null,
+        "ward_id": 14965,
+        "ward_seo_name": null
+      },
+      "poi_atm_distance": 794,
+      "poi_bus_public_transport_distance": 279,
+      "poi_kindergarten_distance": 250,
+      "poi_medic_distance": 846,
+      "poi_metro_distance": 791,
+      "poi_playground_distance": 205,
+      "poi_post_office_distance": 1576,
+      "poi_restaurant_distance": 337,
+      "poi_school_distance": 415,
+      "poi_shop_distance": 1451,
+      "poi_small_shop_distance": 661,
+      "poi_train_distance": 1459,
+      "poi_vet_distance": 848,
+      "premise": {
+        "city_seo_name": "praha",
+        "quarter_seo_name": "praha-5",
+        "seo_name": "jiri-navratil",
+        "ward_seo_name": "kosire"
+      },
+      "premise_id": 16219,
+      "premise_logo": "https://d48-a.sdn.cz/d_48/c_img_QR_R/sqgIcz.png",
+      "price": 7990000.0,
+      "price_currency_cb": {
+        "name": "Kč",
+        "value": 1
+      },
+      "price_czk": 7990000.0,
+      "price_czk_m2": 112535,
+      "price_summary": 7990000.0,
+      "price_summary_czk": 7990000.0,
+      "price_summary_unit_cb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "price_unit_cb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "user_id": 313595
+    },
+    {
+      "advert_images": [
+        "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtBM3KVy1GqyyAz/593b.jpeg",
+        "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtzYqGvGGqyyBm/4b16.jpeg",
+        "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtzYqGvGGqyyCV/e5c0.jpeg"
+      ],
+      "advert_images_all": [
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtBM3KVy1GqyyAz/593b.jpeg",
+          "restb_room_type": 5
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtzYqGvGGqyyBm/4b16.jpeg",
+          "restb_room_type": 1
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtzYqGvGGqyyCV/e5c0.jpeg",
+          "restb_room_type": 6
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/kcHp2YdDtBEw5wS3GqyyDd/44f0.jpeg",
+          "restb_room_type": 23
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CNPfpBzOEGqyyEY/8854.jpeg",
+          "restb_room_type": 23
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5bIUBBYCCGqyyFO/ae2b.jpeg",
+          "restb_room_type": 29
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5CNPfpBzQwGqyyGr/a38a.jpeg",
+          "restb_room_type": 0
+        },
+        {
+          "advert_image_sdn_url": "//d18-a.sdn.cz/d_18/c_img_qB_D/nCTUX1iX5Do9kXBWCGGqyyHn/c3ce.jpeg",
+          "restb_room_type": 29
+        }
+      ],
+      "advert_name": "Prodej bytu 5+1 120 m²",
+      "category_main_cb": {
+        "name": "Byty",
+        "value": 1
+      },
+      "category_sub_cb": {
+        "name": "5+1",
+        "value": 11
+      },
+      "category_type_cb": {
+        "name": "Prodej",
+        "value": 1
+      },
+      "discount_show": false,
+      "has_matterport_url": false,
+      "has_video": false,
+      "hash_id": 3071778892,
+      "locality": {
+        "city": "Milín",
+        "city_seo_name": "milin",
+        "citypart": "Stěžov",
+        "citypart_seo_name": "stezov",
+        "country": "Česká republika",
+        "country_id": 112,
+        "country_seo_name": "ceska-republika",
+        "district": "Příbram",
+        "district_id": 58,
+        "district_seo_name": "pribram",
+        "entity_type": "ward",
+        "geohash": "u2f42vcjgs",
+        "gps_lat": 49.6468551483718,
+        "gps_lon": 14.0969852121996,
+        "housenumber": null,
+        "inaccuracy_type": "ward",
+        "municipality": null,
+        "municipality_id": 4018,
+        "municipality_seo_name": null,
+        "quarter": null,
+        "quarter_id": -1,
+        "quarter_seo_name": null,
+        "region": "Středočeský kraj",
+        "region_id": 11,
+        "region_seo_name": "stredocesky-kraj",
+        "street": "",
+        "street_id": -1,
+        "street_seo_name": null,
+        "streetnumber": null,
+        "ward": null,
+        "ward_id": 10409,
+        "ward_seo_name": null
+      },
+      "poi_atm_distance": 100000,
+      "poi_bus_public_transport_distance": 3,
+      "poi_kindergarten_distance": 4648,
+      "poi_medic_distance": 4195,
+      "poi_metro_distance": 100000,
+      "poi_playground_distance": 120,
+      "poi_post_office_distance": 4029,
+      "poi_restaurant_distance": 3524,
+      "poi_school_distance": 4337,
+      "poi_shop_distance": 100000,
+      "poi_small_shop_distance": 1550,
+      "poi_train_distance": 100000,
+      "poi_vet_distance": 3363,
+      "premise": {
+        "city_seo_name": "pribram",
+        "quarter_seo_name": "",
+        "seo_name": "kofareal",
+        "ward_seo_name": "pribram-iii"
+      },
+      "premise_id": 6009,
+      "premise_logo": "",
+      "price": 4500000.0,
+      "price_currency_cb": {
+        "name": "Kč",
+        "value": 1
+      },
+      "price_czk": 4500000.0,
+      "price_czk_m2": 37500,
+      "price_summary": 4500000.0,
+      "price_summary_czk": 4500000.0,
+      "price_summary_unit_cb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "price_unit_cb": {
+        "name": "za nemovitost",
+        "value": 1
+      },
+      "user_id": 44852
+    }
+  ],
+  "search_title": "Byty na prodej v České republice",
+  "status_code": 200,
+  "status_message": "OK"
+}

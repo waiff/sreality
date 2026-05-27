@@ -112,17 +112,17 @@ def test_parse_sreality_url_returns_spec_and_metadata() -> None:
     client = _StubClient(raw=raw)
     conn = _FakeConn(fetchone_value=None)
     res = url_parser.parse_sreality_url(
-        "https://www.sreality.cz/detail/pronajem/byt/2+kk/praha-1-stare-mesto/2836292428",
+        "https://www.sreality.cz/detail/prodej/byt/3+kk/praha-smichov-na-cisarce/3292504140",
         client=client,
         conn=conn,
     )
-    assert res["sreality_id"] == 2836292428
-    assert client.calls == [2836292428]
-    assert res["source_url"].endswith("2836292428")
+    assert res["sreality_id"] == 3292504140
+    assert client.calls == [3292504140]
+    assert res["source_url"].endswith("3292504140")
     assert "fetched_at" in res
     assert res["in_database"] is False
     spec = res["spec"]
-    assert spec["sreality_id"] == 2836292428
+    assert spec["sreality_id"] == 3292504140
     assert "area_m2" in spec
     assert "disposition" in spec
     assert "lat" in spec
