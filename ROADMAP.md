@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 05:55 UTC_
+_Last refreshed: 2026-05-27 06:22 UTC_
 
 **Branch:** `claude/zealous-heisenberg-WFmCL`
 
@@ -16,6 +16,7 @@ _Last refreshed: 2026-05-27 05:55 UTC_
 **Last 10 commits:**
 
 ```
+b4b8bf0 scraper: close the drift — new-listing budget reserve, split coverage, image cap
 c54dd1e Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
 520282a ci: ease the delta scrape cron from */15 to hourly
 d51de6b Merge pull request #189 from waiff/claude/serene-ptolemy-7nt9s
@@ -25,7 +26,6 @@ d51c3ef scraper: normalize condition to diacritic-free underscore form
 f660f0d Merge remote-tracking branch 'origin/main' into claude/serene-ptolemy-7nt9s
 b1a0c78 chore: refresh ROADMAP auto-status block
 b87ac22 Add bazos index/detail fixtures to the fetch-fixtures pipeline
-831b411 chore: refresh ROADMAP auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
