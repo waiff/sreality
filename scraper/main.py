@@ -745,6 +745,40 @@ def _walk_category_split(
                 "SPLIT district incomplete cm=%s ct=%s district=%d collected=%d result_size=%s",
                 cm_text, ct_text, district, len(dseen), drs,
             )
+    # If the per-district union still falls short of the national total, some
+    # listings aren't reachable via any single locality_district_id filter
+    # (e.g. a null/uncovered district). One un-split national pass catches that
+    # remainder. The deep-pagination cap truncates it, but the union only grows
+    # — it can never cause a false delisting, and the completeness guard still
+    # compares the final union against the national probe below.
+    if not _walk_complete(len(union), result_size):
+        LOG.info(
+            "SPLIT national-fallback cm=%s ct=%s union=%d result_size=%d",
+            cm_text, ct_text, len(union), result_size,
+        )
+        nclient = _build_client(category_main, category_type, limiter=limiter)
+        national_cap = (
+            None if cat_refetch_cap is None
+            else max(0, cat_refetch_cap - cat_refetched)
+        )
+        try:
+            nseen, ncounts = _walk_category(
+                nclient, conn, None, dry_run, refetch_budget,
+                national_cap, detail_workers,
+            )
+            added = len(nseen - union)
+            union |= nseen
+            for k, v in ncounts.items():
+                counts[k] = counts.get(k, 0) + v
+            pages += nclient.pages_fetched
+            LOG.info("SPLIT national-fallback added=%d union=%d", added, len(union))
+        except Exception as exc:
+            all_districts_complete = False
+            LOG.warning(
+                "SPLIT national-fallback failed cm=%s ct=%s: %s",
+                cm_text, ct_text, exc,
+            )
+
     # Complete only if every district fully walked AND the union covers the
     # national total — the latter catches a district missing from DISTRICT_IDS
     # (both union and summed sizes would otherwise drop together).
@@ -807,24 +841,35 @@ def _walk_category(
     counts["unchanged"] = unchanged
     LOG.info("PLAN unchanged=%d refetch=%d", unchanged, len(to_refetch))
 
-    if conn is not None and to_refetch:
-        failed_ids = db.active_failure_ids(conn, set(to_refetch))
-        if failed_ids:
-            priority = [s for s in to_refetch if s in failed_ids]
-            rest = [s for s in to_refetch if s not in failed_ids]
-            to_refetch = priority + rest
-            LOG.info("PLAN priority_retry=%d", len(priority))
+    # Partition the refetch list so a large failure / price-change backlog
+    # can't starve genuinely-new listings under the per-run cap (which would
+    # let found_new accumulate forever and the drift never close).
+    new_ids = [s for s in to_refetch if s not in existing]
+    known_ids = [s for s in to_refetch if s in existing]
+    failed_ids: set[int] = set()
+    if conn is not None and known_ids:
+        failed_ids = db.active_failure_ids(conn, set(known_ids))
+    priority = [s for s in known_ids if s in failed_ids]
+    changed = [s for s in known_ids if s not in failed_ids]
+    if priority:
+        LOG.info("PLAN priority_retry=%d", len(priority))
 
     caps = [c for c in (refetch_budget[0], cat_refetch_cap) if c is not None]
-    if caps:
+    if caps and len(to_refetch) > min(caps):
         cap = min(caps)
-        if len(to_refetch) > cap:
-            deferred = len(to_refetch) - cap
-            to_refetch = to_refetch[:cap]
-            LOG.info(
-                "PLAN cap=%d deferred=%d (remaining listings will be picked up next run)",
-                cap, deferred,
-            )
+        # Reserve up to half the budget for new listings; the rest goes to
+        # failure retries then price-changed listings. Deferred work drains
+        # next run (and a one-off uncapped run clears the backlog at once).
+        new_reserve = min(len(new_ids), max(1, cap // 2))
+        ordered = new_ids[:new_reserve] + priority + changed + new_ids[new_reserve:]
+        deferred = len(to_refetch) - cap
+        to_refetch = ordered[:cap]
+        LOG.info(
+            "PLAN cap=%d deferred=%d new_reserved=%d (remaining picked up next run)",
+            cap, deferred, min(new_reserve, cap),
+        )
+    else:
+        to_refetch = priority + changed + new_ids
 
     total_refetch = len(to_refetch)
     if not total_refetch:

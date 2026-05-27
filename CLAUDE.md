@@ -697,8 +697,11 @@ walk depth:
   AND delistings flip to `is_active=false`. Because the walk is complete
   it runs `mark_inactive` every run. Detail refetches and image downloads
   are **capped per run** (`--max-detail-refetches 150`,
-  `--max-image-downloads 400`) so it stays bounded; deferred work drains on
-  the next run (failure-priority retry + newest-first image ordering).
+  `--max-image-downloads 2500`) so it stays bounded; deferred work drains on
+  the next run (failure-priority retry + newest-first image ordering). The
+  image cap is set above the hourly new-image intake (~2k/h) so the
+  newest-first ordering keeps freshly-scraped listings image-complete each
+  run; the 2-hourly `images.yml` backfill drains the historical pending set.
   Detail fetches run on a small thread pool paced by a shared rate limiter
   (`--detail-workers` / `--detail-rate`). Records as `run_type='delta'` via
   `--run-type`. Skips condition scoring.

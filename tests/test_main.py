@@ -416,6 +416,41 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
     assert budget[0] == 6          # 10 - 4 processed
 
 
+def test_walk_category_reserves_budget_for_new_listings(monkeypatch):
+    """Under the per-run cap, new listings get a reserved share of the budget
+    so a large failure-retry backlog can't starve new-listing intake."""
+    # 100-103 already exist with a stored price differing from the index price
+    # (so they qualify for refetch) AND are flagged as active failures (so they
+    # take retry priority). 1-4 are genuinely new.
+    existing = {s: {"price_czk": 2, "last_seen_at": None} for s in (100, 101, 102, 103)}
+    monkeypatch.setattr(scraper_main.db, "index_summary", lambda _c, _ids: existing)
+    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda _c, _ids: 0)
+    monkeypatch.setattr(
+        scraper_main.db, "active_failure_ids", lambda _c, ids: {s for s in ids if s >= 100}
+    )
+    monkeypatch.setattr(scraper_main.db, "upsert_listing", lambda _c, r, raw, h: "updated")
+    monkeypatch.setattr(scraper_main.db, "record_images", lambda _c, s, i: 0)
+    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, s: None)
+
+    fetched: list[int] = []
+
+    def fake_fetch(_client, sid):
+        fetched.append(sid)
+        return scraper_main.FetchResult(
+            sid, "ok", row={"price_czk": 9}, raw={}, images=[], content_hash="h" * 8
+        )
+
+    monkeypatch.setattr(scraper_main, "_fetch_detail", fake_fetch)
+
+    _seen, _counts = scraper_main._walk_category(
+        _IdxClient([1, 2, 3, 4, 100, 101, 102, 103]),
+        object(), cat_limit=None, dry_run=False,
+        refetch_budget=[4], detail_workers=2,
+    )
+    assert len(fetched) == 4            # cap respected
+    assert {1, 2}.issubset(set(fetched))  # new listings kept their reserved slots
+
+
 # --- region-split walk (_walk_category_split) ------------------------------
 
 
@@ -484,6 +519,28 @@ def test_walk_category_split_missing_district_suppresses_inactivation(
         1, 2, **_split_args()
     )
     assert complete is False
+
+
+def test_walk_category_split_national_fallback_closes_gap(patched_db, monkeypatch):
+    """Every walked district is complete but the union still falls short of the
+    national total (listings with no covered district_id). A national un-split
+    fallback pass unions in the remainder so the category can complete."""
+    # Over SPLIT_THRESHOLD (10000) so the split runs; districts sum to only
+    # 6000, far below the 12000 national total → the fallback must fire.
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 3000, 2: 3000}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
+    # The un-split national walk (no district/region) yields total_entries ids,
+    # in an id range disjoint from the district walks.
+    monkeypatch.setattr(_FakeClient, "total_entries", 6000, raising=False)
+
+    seen, _counts, _rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert len(seen) == 12000      # 3000 + 3000 districts + 6000 national-fallback
+    assert complete is True        # union now >= 90% of national result_size
 
 
 def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
