@@ -70,8 +70,18 @@ def _walk_index(
         html, status = client.fetch_index(args.sale_type, args.category, page)
         parsed = parse_index(html)
         pages += 1
+        # idnes's SSR "next" link is JS-hydrated and unreliable, so we drive
+        # paging by incrementing and stop when a page yields no new listing ids
+        # (the last page either repeats or comes back empty).
+        new = 0
+        for item in parsed.items:
+            if item.source_id_native not in seen:
+                seen.add(item.source_id_native)
+                details.append((item.source_id_native, item.detail_path))
+                new += 1
         LOG.info(
-            "INDEX page=%d items=%d total=%s", page, len(parsed.items), parsed.total
+            "INDEX page=%d items=%d new=%d total=%s",
+            page, len(parsed.items), new, parsed.total,
         )
         if conn is not None:
             db.upsert_portal_raw_page(
@@ -80,15 +90,11 @@ def _walk_index(
                 source_url=index_url(args.sale_type, args.category, page),
                 page_kind="index", html=html, http_status=status,
             )
-        for item in parsed.items:
-            if item.source_id_native not in seen:
-                seen.add(item.source_id_native)
-                details.append((item.source_id_native, item.detail_path))
         if args.max_pages and pages >= args.max_pages:
             break
-        if not parsed.items or parsed.next_page is None:
+        if not parsed.items or new == 0:
             break
-        page = parsed.next_page
+        page += 1
     return details
 
 

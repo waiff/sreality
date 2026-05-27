@@ -88,10 +88,9 @@ ON_REQUEST_HTML = """
 """
 
 
-def test_parse_index_total_items_and_next_page():
+def test_parse_index_total_and_items():
     page = parse_index(INDEX_HTML)
     assert page.total == 24607
-    assert page.next_page == 2
     assert len(page.items) == 2
 
     first = page.items[0]

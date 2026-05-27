@@ -63,7 +63,6 @@ class IndexItem:
 class IndexPage:
     total: int | None
     items: list[IndexItem] = field(default_factory=list)
-    next_page: int | None = None
 
 
 def _text(node: Node | None) -> str | None:
@@ -89,8 +88,8 @@ def _id_from_url(url: str | None) -> str | None:
 
 
 def _parse_total(text: str) -> int | None:
-    # "Zobrazujeme 1 - 25 z 24 607 inzerátů"
-    m = re.search(r"z\s+(\d[\d\s ]*\d|\d)\s+inzer", text)
+    # "24 607 inzerátů" — number immediately precedes the word.
+    m = re.search(r"(\d[\d\s ]*\d|\d)\s*inzer", text)
     if not m:
         return None
     digits = re.sub(r"\D", "", m.group(1))
@@ -117,19 +116,7 @@ def parse_index(html: str) -> IndexPage:
                 locality_text=_text(card.css_first(".c-products__info")),
             )
         )
-    return IndexPage(
-        total=_parse_total(_page_text(tree)),
-        items=items,
-        next_page=_next_page(tree),
-    )
-
-
-def _next_page(tree: HTMLParser) -> int | None:
-    link = tree.css_first("a.paging__item.next")
-    if link is None:
-        return None
-    m = re.search(r"[?&]page=(\d+)", link.attributes.get("href") or "")
-    return int(m.group(1)) if m else None
+    return IndexPage(total=_parse_total(_page_text(tree)), items=items)
 
 
 def _detail_params(tree: HTMLParser) -> dict[str, str | None]:
