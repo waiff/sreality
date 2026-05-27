@@ -1,45 +1,52 @@
-name: "Scraping: Sreality nightly deep run"
+name: "Scraping: Sreality hourly run"
 
-# Deep nightly run. Walks all six category pairs sequentially:
-#   byt + dum + komercni  ×  pronajem + prodej
+# The single scrape pipeline. Each run walks the COMPLETE index of all six
+# category pairs (byt + dum + komercni × pronajem + prodej), so:
+#   - newly-listed properties surface, and
+#   - delisted properties flip to is_active=false — a complete walk is what
+#     makes that inference valid (architectural rule #3).
 #
-# Since scrape_delta.yml now does a COMPLETE index walk every 15 minutes
-# (carrying mark_inactive + gone detection + new-listing pickup + inline
-# image downloads), this nightly is no longer the sole freshness driver.
-# Its distinct value is the expensive backlog work the 15-min ticks skip:
-# the condition-scoring phase (LLM cost), a deep image-backlog drain, and
-# a high-cap detail-refetch catch-up for anything the per-tick caps
-# deferred. It records as run_type='full'.
+# This replaces the former two-tier split (scrape_delta.yml hourly +
+# scrape.yml nightly). Both tiers already did a complete walk; the only real
+# differences were caps, concurrency, and the condition-scoring phase. Caps
+# and concurrency are folded in here; condition scoring moved to its own
+# decoupled hourly workflow (condition_scores.yml) so the LLM phase can never
+# slow the scrape.
 #
-# Always aggressive (the conservative profile was retired when scope
-# expanded from one category to six):
-#   timeout 350 min (~5.8 h, just under the 6h GitHub job cap)
-#   up to 10 000 detail refetches global cap, 2 000 per category
-#       (detail fetches run on a thread pool paced by a shared rate
-#       limiter — --detail-workers/--detail-rate, default 4 workers @
-#       2 req/s — so wall-clock is governed by the rate cap, not the
-#       old serial 1.5s/detail; the per-category cap stops one
-#       high-volume category like byt/prodej from starving the rest
-#       of the categories of the shared global budget — listings the
-#       cap defers drain on subsequent runs)
-#   image phase drains to empty (no cap). The suspicious-stop
-#       heuristic in scraper.main._run_image_downloads bails if
-#       sreality's CDN starts rate-limiting us, in which case the
-#       images.yml workflow's 2-hourly cron picks up the rest. Combined
-#       with that backfill workflow, no image stays pending more than
-#       ~2.5 hours after its detail row is created.
+# Because the walk is complete (no --limit), mark_inactive runs every tick.
+# scraper/main.py guards each per-category flip on walk completeness
+# (collected vs the API's result_size), so a silently truncated index page
+# never mass-flips live listings. A gone detail fetch (404/410 or sreality's
+# "page does not exist" body) flips that single listing immediately instead
+# of accumulating fetch failures.
 #
-# Cron triggers cannot pass inputs - they always fall back to the
-# defaults below. workflow_dispatch lets the operator override any
-# cap or skip the image phase for ad-hoc runs.
+# Detail refetches are capped per run (generous caps comfortably above hourly
+# churn, so details don't perpetually lag, while still bounding worst-case
+# run time). The image phase drains ACTIVE listings newest-first to empty
+# (--images-active-only, no cap) — the user-visible coverage gap. The deep
+# image-backlog drain (including inactive listings) stays in images.yml.
+#
+# CADENCE: hourly (0 * * * *). Each run is a complete walk; hourly keeps a
+# steady, polite request volume against sreality. GitHub throttles scheduled
+# workflows (worse overnight), so effective cadence may be slightly slower;
+# the Health liveness check is tuned to this (warn >90 min, fail >180 min).
+# For tighter cadence configure the optional SCRAPE_CHAIN_TOKEN PAT (see the
+# "Chain next run" step). Recorded as run_type='full' (auto, since no --limit).
+#
+# Concurrency: cancel-in-progress=false so a long tick is never killed
+# mid-walk; the next cron tick queues behind it instead of overlapping.
+#
+# Cron triggers cannot pass inputs — they always fall back to the defaults
+# below. workflow_dispatch lets the operator override any cap, bump
+# concurrency, or skip the image phase for ad-hoc runs.
 
 on:
   schedule:
-    - cron: "0 22 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       limit:
-        description: "Cap number of listings scraped (blank = all). Applies across the whole run, not per category. Tick 'Skip image download phase' for isolated tests."
+        description: "Cap number of listings scraped (blank = all). Applies across the whole run, not per category. A capped run records run_type='delta' and skips mark_inactive."
         required: false
         type: string
       dry_run:
@@ -57,43 +64,41 @@ on:
         type: boolean
         default: false
       max_detail_refetches:
-        description: "Override global detail-refetches-per-run cap (blank = 10000)"
+        description: "Override global detail-refetches-per-run cap (blank = 4000)"
         required: false
         type: string
       max_detail_refetches_per_category:
-        description: "Override per-category detail-refetches cap (blank = 2000)"
+        description: "Override per-category detail-refetches cap (blank = 1200)"
         required: false
         type: string
       max_image_downloads:
-        description: "Override images-per-run cap (blank = 0 = drain to empty / suspicious-stop)"
+        description: "Override images-per-run cap (blank = 0 = drain active to empty / suspicious-stop)"
         required: false
         type: string
       image_workers:
-        description: "Override concurrent workers (blank = 16)"
+        description: "Override concurrent image workers (blank = 16)"
         required: false
         type: string
       detail_workers:
-        description: "Override concurrent detail-fetch workers (blank = 4)"
+        description: "Override concurrent detail-fetch workers (blank = 8)"
         required: false
         type: string
       detail_rate:
-        description: "Override global detail-fetch rate cap, req/s (blank = 2.0)"
+        description: "Override global detail-fetch rate cap, req/s (blank = 6.0)"
         required: false
         type: string
-      no_condition_scoring:
-        description: "Skip the condition-scoring phase"
-        required: false
-        type: boolean
-        default: false
-      max_condition_scores:
-        description: "Override condition-scores-per-run cap (blank = 200; ~$3 at cached rate)"
-        required: false
-        type: string
+
+concurrency:
+  group: sreality-scrape
+  cancel-in-progress: false
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    # A complete walk + capped detail refetch + active-image drain at the
+    # bumped concurrency runs ~15-25 min. 50 gives headroom under the hourly
+    # cadence; the self-chain re-dispatch keeps cadence steady if configured.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -115,9 +120,6 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
-          # Optional. Condition-scoring phase no-ops when this is unset
-          # (mirrors the image-download phase's R2 env gate).
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           ARGS=""
           if [ -n "${{ inputs.limit }}" ]; then
@@ -135,11 +137,11 @@ jobs:
 
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
           if [ -z "$MAX_REFETCH" ]; then
-            MAX_REFETCH="10000"
+            MAX_REFETCH="4000"
           fi
           MAX_REFETCH_PER_CAT="${{ inputs.max_detail_refetches_per_category }}"
           if [ -z "$MAX_REFETCH_PER_CAT" ]; then
-            MAX_REFETCH_PER_CAT="2000"
+            MAX_REFETCH_PER_CAT="1200"
           fi
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
@@ -151,11 +153,11 @@ jobs:
           fi
           DETAIL_WORKERS="${{ inputs.detail_workers }}"
           if [ -z "$DETAIL_WORKERS" ]; then
-            DETAIL_WORKERS="4"
+            DETAIL_WORKERS="8"
           fi
           DETAIL_RATE="${{ inputs.detail_rate }}"
           if [ -z "$DETAIL_RATE" ]; then
-            DETAIL_RATE="2.0"
+            DETAIL_RATE="6.0"
           fi
           ARGS="$ARGS --max-detail-refetches $MAX_REFETCH"
           ARGS="$ARGS --max-detail-refetches-per-category $MAX_REFETCH_PER_CAT"
@@ -164,14 +166,42 @@ jobs:
           ARGS="$ARGS --max-image-downloads $MAX_IMG"
           ARGS="$ARGS --image-workers $WORKERS"
 
-          if [ "${{ inputs.no_condition_scoring }}" = "true" ]; then
-            ARGS="$ARGS --no-condition-scoring"
+          # Condition scoring is a separate decoupled workflow now
+          # (condition_scores.yml); never run it inline with the scrape.
+          ARGS="$ARGS --no-condition-scoring"
+          # Drain active-listing images newest-first; images.yml handles the
+          # deep inactive/historical backlog. Skip when isolating a test run.
+          if [ "${{ inputs.no_image_downloads }}" != "true" ]; then
+            ARGS="$ARGS --images-active-only"
           fi
-          MAX_SCORES="${{ inputs.max_condition_scores }}"
-          if [ -z "$MAX_SCORES" ]; then
-            MAX_SCORES="200"
-          fi
-          ARGS="$ARGS --max-condition-scores $MAX_SCORES"
 
           echo "Running with: $ARGS"
           python -m scraper.main $ARGS
+
+      # The cron is hourly. OPTIONAL tighter cadence: if a chain PAT is
+      # configured, re-dispatch this workflow on success for back-to-back
+      # runs. The hourly cron stays the safety net that restarts the chain if
+      # a run fails or the PAT is absent. GITHUB_TOKEN cannot re-trigger a
+      # workflow (GitHub blocks recursion), so this needs a separate PAT
+      # secret SCRAPE_CHAIN_TOKEN (fine-grained: this repo, Actions:
+      # read+write). No-op without it.
+      # Chain on schedule and on full manual/chained dispatches; skip for
+      # one-off test runs (--limit / --detail-only / dry-run / no-images) so a
+      # test doesn't kick off an endless full-run chain. For schedule events
+      # the inputs.* are null, which == '' and is falsy, so the chain fires.
+      - name: Chain next run (optional, tighter cadence)
+        if: ${{ success() && inputs.limit == '' && inputs.detail_only == '' && !inputs.dry_run && !inputs.no_image_downloads }}
+        env:
+          CHAIN_TOKEN: ${{ secrets.SCRAPE_CHAIN_TOKEN }}
+        run: |
+          if [ -z "$CHAIN_TOKEN" ]; then
+            echo "SCRAPE_CHAIN_TOKEN not set — cadence stays cron-driven (~hourly)."
+            exit 0
+          fi
+          echo "Re-dispatching scrape.yml for tighter cadence."
+          curl -sS -X POST \
+            -H "Authorization: Bearer $CHAIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/scrape.yml/dispatches" \
+            -d "{\"ref\":\"${{ github.ref_name }}\"}"

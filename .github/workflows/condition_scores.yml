@@ -1,0 +1,135 @@
+name: "Scraping: Sreality condition scoring (hourly + manual backfill)"
+
+# Decoupled condition-scoring job. Scores building/apartment condition
+# (1..5) for active listings whose latest snapshot doesn't yet have a row in
+# `listing_condition_scores`, writing both the cache row AND the two
+# listings.*_condition_level columns in one transaction per listing
+# (autocommit — every successful score commits independently, so a timeout
+# or cancel preserves the rows already done). Resumable: scored listings drop
+# out of the next selection.
+#
+# Runs on two triggers:
+#   * schedule (hourly, :30) — the steady-state driver, deliberately
+#     DECOUPLED from the scrape (scrape.yml runs the index walk at :00; this
+#     reads the freshly-committed snapshots 30 min later) so the LLM phase
+#     can never slow the scrape. Scheduled runs use NO region filter (score
+#     everywhere), limit 2000, cost cap $15.
+#   * workflow_dispatch — manual backfill. Defaults to the operator's four
+#     kraje (10 Praha · 11 Středočeský · 2 Plzeňský · 13 Vysočina), limit
+#     500, cost cap $10. Clear region_ids to score every region.
+#
+# The selection is portal-agnostic (a DB predicate over listings /
+# listing_snapshots), so any future scraper that lands rows in those tables
+# is scored by this same job.
+#
+# Cost-capped via max_cost_usd so a single run can't blow the budget. Reach
+# the cap mid-run and the script logs a SCORE cost cap reached line and exits
+# 0 with the rows scored so far preserved.
+#
+# Concurrency group condition-scoring, cancel-in-progress=false: a long run
+# is never killed mid-scoring; the next tick queues behind it.
+#
+# Required GitHub secrets:
+#   SUPABASE_DB_URL    — same one used by every other workflow
+#   ANTHROPIC_API_KEY  — Sonnet 4.5 by default; see
+#                        app_settings.llm_condition_model
+#   R2_*               — optional; only needed when `n_images > 0`.
+
+on:
+  schedule:
+    - cron: "30 * * * *"
+  workflow_dispatch:
+    inputs:
+      region_ids:
+        description: Comma-separated locality_region_id list (empty = no region filter)
+        required: false
+        default: "10,11,2,13"
+        type: string
+      limit:
+        description: Maximum number of listings to score in this run
+        required: true
+        default: "500"
+        type: string
+      n_images:
+        description: Images per listing (0 disables vision; default 0 matches discovery)
+        required: true
+        default: "0"
+        type: string
+      max_cost_usd:
+        description: Stop early when this run's LLM cost exceeds this cap (USD)
+        required: true
+        default: "10"
+        type: string
+      max_age_days:
+        description: Only score listings whose last_seen_at is within this many days (0 = no freshness filter)
+        required: true
+        default: "30"
+        type: string
+      dry_run:
+        description: Print first 20 pending IDs and exit without calling the LLM
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: condition-scoring
+  cancel-in-progress: false
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "psycopg[binary]>=3.2" \
+            "requests>=2.32" \
+            "boto3>=1.35" \
+            "anthropic>=0.40"
+
+      - name: Run condition scoring
+        run: |
+          # Scheduled runs pass no inputs (inputs.* are empty): fall back to
+          # the hourly defaults — no region filter, larger limit, higher cost
+          # cap. Manual dispatch carries the form's own defaults/overrides.
+          REGION='${{ inputs.region_ids }}'
+          LIMIT='${{ inputs.limit }}'
+          if [ -z "$LIMIT" ]; then LIMIT="2000"; fi
+          NIMG='${{ inputs.n_images }}'
+          if [ -z "$NIMG" ]; then NIMG="0"; fi
+          COST='${{ inputs.max_cost_usd }}'
+          if [ -z "$COST" ]; then COST="15"; fi
+          AGE='${{ inputs.max_age_days }}'
+          if [ -z "$AGE" ]; then AGE="30"; fi
+
+          ARGS="--region-ids '$REGION'"
+          ARGS="$ARGS --limit $LIMIT"
+          ARGS="$ARGS --n-images $NIMG"
+          ARGS="$ARGS --max-cost-usd $COST"
+          ARGS="$ARGS --max-age-days $AGE"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          echo "Running with: $ARGS"
+          eval python -m scripts.backfill_condition_scores $ARGS

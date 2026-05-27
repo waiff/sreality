@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 08:22 UTC_
+_Last refreshed: 2026-05-27 10:45 UTC_
 
 **Branch:** `claude/serene-thompson-7AlGZ`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 102 files, latest `097_property_matcher_foundation.sql`.
+**Migrations on disk:** 103 files, latest `098_condition_score_batches.sql`.
 
 **Last 10 commits:**
 
 ```
+6fe3560 chore: refresh ROADMAP auto-status block
+d9e07a0 scoring: add async Batch API backend for condition scoring (Phase 1.8b)
+1effeaa scraper: consolidate into one hourly pipeline + decouple condition scoring
+9375973 Merge pull request #193 from waiff/claude/serene-thompson-7AlGZ
+6d855b3 chore: refresh ROADMAP auto-status block
 ae35da8 chore: refresh ROADMAP auto-status block
 3bd48b4 Merge pull request #192 from waiff/claude/trusting-turing-PFYte
 adb8760 chore: refresh ROADMAP auto-status block
 72f180e chore: refresh ROADMAP auto-status block
 c97207d Add self-maintaining GitHub Actions docs to Settings
-9bf13fa Merge pull request #191 from waiff/claude/zealous-heisenberg-WFmCL
-248b044 Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
-a0dbba7 chore: refresh ROADMAP auto-status block
-b4b8bf0 scraper: close the drift — new-listing budget reserve, split coverage, image cap
-fc8bae9 Merge pull request #186 from waiff/claude/eloquent-heisenberg-gXR9k
 ```
 
 <!-- END AUTO-STATUS -->
@@ -943,6 +943,41 @@ knobs (defaults 4 workers @ 2 req/s) are wired into both scrape workflows.
 No new dependency (pure `threading`); the index walk and DB writes stay
 serial by design. `get_detail`'s serial 1.5s self-throttle is retained for
 the no-limiter callers (`freshness`, `--detail-only`).
+
+### Phase 1.8: Single hourly pipeline + decoupled scoring (done)
+Collapsed the two-tier scrape into **one** hourly workflow. The
+former `scrape_delta.yml` (hourly walk) and `scrape.yml` (nightly deep
+run) were folded into a single `scrape.yml` "Scraping: Sreality hourly
+run" (cron `0 * * * *`, `run_type='full'`): complete index walk +
+`mark_inactive` + capped detail refetch (4000 global / 1200 per category)
++ active-image drain, at a moderate concurrency bump (8 detail workers
+@ 6 req/s, up from 4 @ 2). `scrape_delta.yml` deleted. Condition scoring
+moved OUT of the scrape into its own decoupled hourly workflow
+`condition_scores.yml` (cron `30 * * * *`, repurposed from the manual
+backfill, wrapping `scripts/backfill_condition_scores.py`) so the LLM
+phase can never slow the walk; its selection is portal-agnostic, ready to
+score future scrapers. `images.yml` repurposed as the deep backlog drain
+that also reaches inactive/historical images (the hourly run covers
+active). Liveness (migration 090) keys off any `index_pages>0` walk, not
+`run_type`, so no schema change was needed.
+
+### Phase 1.8b: Async condition scoring via the Batch API (code shipped; migration pending)
+Optional second scoring backend on the Anthropic **Message Batches API**
+(50% cheaper, async). `score_listing_condition` was split into a shared
+`build_scoring_request` (one request builder, so the cached system+tools
+prefix is identical across sync and batch) and `persist_scoring_result`
+(the cache row + guarded `listings.*` UPDATE). `AnthropicProvider` gained
+`submit_batch` / `poll_batch` / `iter_batch_results` (+ neutral
+`BatchStatus` / `BatchResultItem` types). Two scripts —
+`submit_condition_batch.py` (build + submit a batch, dedup against
+in-flight requests) and `ingest_condition_batch.py` (poll, persist
+results idempotently, record `llm_calls` at the discounted cost) — drive
+the new `condition_score_batches.yml` workflow (dispatch-only:
+`submit` / `ingest` modes). Tracking tables are migration **098**
+(`condition_score_batches`, `condition_score_batch_requests`). **Pending:**
+apply migration 098 + confirm a manual submit→ingest round-trip before
+enabling a scheduled `ingest`; the synchronous `condition_scores.yml`
+stays the default steady-state path.
 
 ### Phase 1.5b: Multi-category UI defaults (next, follow-up)
 The data is now broad, but the analytical and estimation surfaces

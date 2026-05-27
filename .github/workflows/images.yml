@@ -1,12 +1,14 @@
 name: "Scraping: Sreality image backlog drain"
 
-# Backfill workflow that runs only the image-download phase every 2
-# hours. Pairs with scrape.yml (which now also drains to empty after
-# the nightly index walk) to keep "missed images" close to zero.
+# Deep image-backlog drain that runs only the image-download phase every
+# 2 hours. The hourly scrape.yml drains ACTIVE-listing images newest-first
+# to empty each run (the user-visible coverage gap); this workflow is the
+# deeper safety net that also reaches the INACTIVE/historical backlog the
+# hourly active-only drain never touches.
 #
 # Configured for the operator's spec:
-#   * --images-active-only so the cap-bounded slice goes to listings
-#     users can still browse — active is the user-visible coverage gap.
+#   * Drains ALL pending images by default (active + inactive); tick
+#     images_active_only to restrict to active listings only.
 #   * --max-image-downloads 0 → no cap; the loop drains until either
 #     the queue is empty or the suspicious-stop heuristic in
 #     scraper.main._run_image_downloads fires (transient-failure rate
@@ -40,10 +42,10 @@ on:
         required: false
         type: string
       images_active_only:
-        description: "Restrict to active listings (default true). Untick to drain inactive backlog too."
+        description: "Restrict to active listings only. Default false: drain the full backlog incl. inactive (the hourly scrape already covers active)."
         required: false
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: images-backfill
@@ -82,7 +84,9 @@ jobs:
             WORKERS="32"
           fi
           ARGS="--images-only --max-image-downloads $MAX_IMG --image-workers $WORKERS"
-          if [ "${{ inputs.images_active_only }}" != "false" ]; then
+          # Default (scheduled / unticked) drains the full backlog incl.
+          # inactive; only restrict when the operator explicitly ticks it.
+          if [ "${{ inputs.images_active_only }}" = "true" ]; then
             ARGS="$ARGS --images-active-only"
           fi
 

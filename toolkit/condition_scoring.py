@@ -208,6 +208,74 @@ def score_listing_condition(
     }
 
 
+def build_scoring_request(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    *,
+    sreality_id: int,
+    snapshot: dict[str, Any],
+    n_images: int,
+) -> dict[str, Any]:
+    """Assemble the LLM request for one listing's condition score.
+
+    Returns Anthropic-shaped `system` (str) / `messages` / `tools`
+    dicts plus the resolved `model` and the effective `n_images`. The
+    synchronous path feeds this straight to `LLMClient.call` (which
+    accepts dict messages); the batch submitter feeds it to
+    `AnthropicProvider.build_batch_request_params`. Keeping one builder
+    guarantees both paths share an identical cached system+tools prefix.
+    """
+    listing = _fetch_listing(conn, sreality_id)
+    text_payload = _build_text_payload(listing, snapshot)
+    image_blocks = _build_image_blocks_if_available(conn, sreality_id, n_images)
+
+    system_template = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
+    model = llm_client.resolve_model(_MODEL_KEY)
+    rubric = _resolve_jsonb_setting(conn, _RUBRIC_KEY)
+    dictionary = _resolve_jsonb_setting(conn, _DICTIONARY_KEY)
+    system = _build_system_prompt(system_template, rubric=rubric, dictionary=dictionary)
+
+    return {
+        "system": system,
+        "messages": [
+            {"role": "user", "content": _build_content(text_payload, image_blocks)}
+        ],
+        "tools": [RECORD_LISTING_CONDITION_TOOL],
+        "model": model,
+        "n_images": len(image_blocks),
+    }
+
+
+def persist_scoring_result(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id: int,
+    snapshot: dict[str, Any],
+    parsed: dict[str, Any],
+    n_images: int,
+    model: str,
+    llm_call_id: int,
+    cost_usd: float,
+) -> None:
+    """Write the cache row + guarded listings UPDATE for a parsed score.
+
+    Shared terminal step for both the synchronous scorer and the batch
+    ingester. `parsed` must already be validated via
+    `extract_condition_tool_call`.
+    """
+    _cache_store_and_update_listings(
+        conn,
+        sreality_id=sreality_id,
+        snapshot_id=snapshot["id"],
+        snapshot_scraped_at=snapshot["scraped_at"],
+        parsed=parsed,
+        n_images=n_images,
+        model=model,
+        llm_call_id=llm_call_id,
+        cost_usd=cost_usd,
+    )
+
+
 def _produce_score(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
@@ -217,52 +285,45 @@ def _produce_score(
 ) -> dict[str, Any]:
     from api.providers.base import ProviderError
 
-    listing = _fetch_listing(conn, sreality_id)
-    text_payload = _build_text_payload(listing, snapshot)
-    image_blocks = _build_image_blocks_if_available(conn, sreality_id, n_images)
-
-    system_template = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
-    model = llm_client.resolve_model(_MODEL_KEY)
-    rubric = _resolve_jsonb_setting(conn, _RUBRIC_KEY)
-    dictionary = _resolve_jsonb_setting(conn, _DICTIONARY_KEY)
-
-    system = _build_system_prompt(system_template, rubric=rubric, dictionary=dictionary)
-
+    req = build_scoring_request(
+        conn, llm_client, sreality_id=sreality_id, snapshot=snapshot, n_images=n_images,
+    )
     try:
         response = llm_client.call(
             called_for=_CALLED_FOR,
-            messages=[{"role": "user", "content": _build_content(text_payload, image_blocks)}],
-            system=system,
-            tools=[RECORD_LISTING_CONDITION_TOOL],
-            model=model,
+            messages=req["messages"],
+            system=req["system"],
+            tools=req["tools"],
+            model=req["model"],
         )
     except ProviderError as exc:
-        if image_blocks and "prompt is too long" in str(exc):
+        if req["n_images"] and "prompt is too long" in str(exc):
             LOG.warning(
                 "score_listing_condition: prompt too long for "
                 "sreality_id=%d with %d images; retrying without images",
-                sreality_id, len(image_blocks),
+                sreality_id, req["n_images"],
             )
-            image_blocks = []
+            req = build_scoring_request(
+                conn, llm_client, sreality_id=sreality_id, snapshot=snapshot, n_images=0,
+            )
             response = llm_client.call(
                 called_for=_CALLED_FOR,
-                messages=[{"role": "user", "content": _build_content(text_payload, image_blocks)}],
-                system=system,
-                tools=[RECORD_LISTING_CONDITION_TOOL],
-                model=model,
+                messages=req["messages"],
+                system=req["system"],
+                tools=req["tools"],
+                model=req["model"],
             )
         else:
             raise
 
-    parsed = _extract_tool_call(response.tool_calls)
+    parsed = extract_condition_tool_call(response.tool_calls)
 
-    _cache_store_and_update_listings(
+    persist_scoring_result(
         conn,
         sreality_id=sreality_id,
-        snapshot_id=snapshot["id"],
-        snapshot_scraped_at=snapshot["scraped_at"],
+        snapshot=snapshot,
         parsed=parsed,
-        n_images=len(image_blocks),
+        n_images=req["n_images"],
         model=response.model,
         llm_call_id=response.llm_call_id,
         cost_usd=response.cost_usd,
@@ -270,7 +331,7 @@ def _produce_score(
 
     return {
         **parsed,
-        "n_images": len(image_blocks),
+        "n_images": req["n_images"],
         "model": response.model,
         "cost_usd": response.cost_usd,
     }
@@ -299,6 +360,11 @@ def _resolve_snapshot(
     if row is None:
         return None
     return {"id": row[0], "scraped_at": row[1], "raw_json": row[2]}
+
+
+# Public alias for the batch scripts (submit / ingest) which resolve a
+# listing's snapshot outside the synchronous scorer.
+resolve_snapshot = _resolve_snapshot
 
 
 def _fetch_listing(
@@ -501,7 +567,7 @@ def _resolve_jsonb_setting(
     return value
 
 
-def _extract_tool_call(
+def extract_condition_tool_call(
     tool_calls: list[dict[str, Any]],
 ) -> dict[str, Any]:
     matching = [
