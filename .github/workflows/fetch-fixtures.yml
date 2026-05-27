@@ -75,7 +75,10 @@ jobs:
             --idnes-index "${{ inputs.idnes_index_url }}" \
             --idnes-detail "${{ inputs.idnes_detail_url }}"
 
+      # always(): a single stale source URL (listings get taken down — the very
+      # reason this refresh exists) must not discard the fixtures that did fetch.
       - name: Commit fixtures
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
