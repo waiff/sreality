@@ -87,11 +87,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/aggregate_condition_markers.yml"
   },
   {
-    "filename": "backfill_condition_scores.yml",
-    "name": "Backfill condition scores (Phase B2)",
-    "description": "Manual workflow that backfills building/apartment condition scores for active listings. Resumable — each invocation processes only listings whose latest snapshot doesn't yet have a row in `listing_condition_scores`. The script writes to both the cache table AND the two listings.*_condition_level columns in one transaction per listing (autocommit=True on the connection means every successful score commits independently — a workflow timeout or cancel preserves the rows already done).",
+    "filename": "build-extension.yml",
+    "name": "Build Chrome extension",
+    "description": "Builds the chrome-extension/ bundle and uploads dist/ as a workflow artifact you can download from the Actions tab. Keeps the build off the operator's laptop (no local Node install needed).",
     "manual": true,
     "schedules": [],
+    "onPush": true,
+    "onPullRequest": true,
+    "paths": [
+      ".github/workflows/build-extension.yml",
+      "chrome-extension/**"
+    ],
+    "inputs": [],
+    "secrets": [
+      "EXT_API_BASE_URL",
+      "EXT_API_TOKEN"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": null,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/build-extension.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
+  },
+  {
+    "filename": "condition_scores.yml",
+    "name": "Scraping: Sreality condition scoring (hourly + manual backfill)",
+    "description": "Decoupled condition-scoring job. Scores building/apartment condition (1..5) for active listings whose latest snapshot doesn't yet have a row in `listing_condition_scores`, writing both the cache row AND the two listings.*_condition_level columns in one transaction per listing (autocommit — every successful score commits independently, so a timeout or cancel preserves the rows already done). Resumable: scored listings drop out of the next selection.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "30 * * * *",
+        "human": "Every hour at :30"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
@@ -156,36 +185,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": null,
-    "cancelInProgress": null,
+    "concurrencyGroup": "condition-scoring",
+    "cancelInProgress": false,
     "timeoutMinutes": 350,
     "permissions": "contents: read",
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_condition_scores.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_condition_scores.yml"
-  },
-  {
-    "filename": "build-extension.yml",
-    "name": "Build Chrome extension",
-    "description": "Builds the chrome-extension/ bundle and uploads dist/ as a workflow artifact you can download from the Actions tab. Keeps the build off the operator's laptop (no local Node install needed).",
-    "manual": true,
-    "schedules": [],
-    "onPush": true,
-    "onPullRequest": true,
-    "paths": [
-      ".github/workflows/build-extension.yml",
-      "chrome-extension/**"
-    ],
-    "inputs": [],
-    "secrets": [
-      "EXT_API_BASE_URL",
-      "EXT_API_TOKEN"
-    ],
-    "concurrencyGroup": null,
-    "cancelInProgress": null,
-    "timeoutMinutes": null,
-    "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/build-extension.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/condition_scores.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_scores.yml"
   },
   {
     "filename": "diagnose_block.yml",
@@ -409,7 +414,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "images.yml",
     "name": "Scraping: Sreality image backlog drain",
-    "description": "Backfill workflow that runs only the image-download phase every 2 hours. Pairs with scrape.yml (which now also drains to empty after the nightly index walk) to keep \"missed images\" close to zero.",
+    "description": "Deep image-backlog drain that runs only the image-download phase every 2 hours. The hourly scrape.yml drains ACTIVE-listing images newest-first to empty each run (the user-visible coverage gap); this workflow is the deeper safety net that also reaches the INACTIVE/historical backlog the hourly active-only drain never touches.",
     "manual": true,
     "schedules": [
       {
@@ -439,10 +444,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "images_active_only",
-        "description": "Restrict to active listings (default true). Untick to drain inactive backlog too.",
+        "description": "Restrict to active listings only. Default false: drain the full backlog incl. inactive (the hourly scrape already covers active).",
         "required": false,
         "type": "boolean",
-        "default": "true",
+        "default": "false",
         "options": null
       }
     ],
@@ -606,13 +611,13 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "scrape.yml",
-    "name": "Scraping: Sreality nightly deep run",
-    "description": "Deep nightly run. Walks all six category pairs sequentially: byt + dum + komercni  ×  pronajem + prodej",
+    "name": "Scraping: Sreality hourly run",
+    "description": "The single scrape pipeline. Each run walks the COMPLETE index of all six category pairs (byt + dum + komercni × pronajem + prodej), so: - newly-listed properties surface, and - delisted properties flip to is_active=false — a complete walk is what makes that inference valid (architectural rule #3).",
     "manual": true,
     "schedules": [
       {
-        "cron": "0 22 * * *",
-        "human": "Daily at 22:00 UTC"
+        "cron": "0 * * * *",
+        "human": "Every hour (on the hour)"
       }
     ],
     "onPush": false,
@@ -621,7 +626,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "limit",
-        "description": "Cap number of listings scraped (blank = all). Applies across the whole run, not per category. Tick 'Skip image download phase' for isolated tests.",
+        "description": "Cap number of listings scraped (blank = all). Applies across the whole run, not per category. A capped run records run_type='delta' and skips mark_inactive.",
         "required": false,
         "type": "string",
         "default": null,
@@ -653,7 +658,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_detail_refetches",
-        "description": "Override global detail-refetches-per-run cap (blank = 10000)",
+        "description": "Override global detail-refetches-per-run cap (blank = 4000)",
         "required": false,
         "type": "string",
         "default": null,
@@ -661,7 +666,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_detail_refetches_per_category",
-        "description": "Override per-category detail-refetches cap (blank = 2000)",
+        "description": "Override per-category detail-refetches cap (blank = 1200)",
         "required": false,
         "type": "string",
         "default": null,
@@ -669,7 +674,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_image_downloads",
-        "description": "Override images-per-run cap (blank = 0 = drain to empty / suspicious-stop)",
+        "description": "Override images-per-run cap (blank = 0 = drain active to empty / suspicious-stop)",
         "required": false,
         "type": "string",
         "default": null,
@@ -677,7 +682,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "image_workers",
-        "description": "Override concurrent workers (blank = 16)",
+        "description": "Override concurrent image workers (blank = 16)",
         "required": false,
         "type": "string",
         "default": null,
@@ -685,7 +690,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "detail_workers",
-        "description": "Override concurrent detail-fetch workers (blank = 4)",
+        "description": "Override concurrent detail-fetch workers (blank = 8)",
         "required": false,
         "type": "string",
         "default": null,
@@ -693,61 +698,13 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "detail_rate",
-        "description": "Override global detail-fetch rate cap, req/s (blank = 2.0)",
-        "required": false,
-        "type": "string",
-        "default": null,
-        "options": null
-      },
-      {
-        "name": "no_condition_scoring",
-        "description": "Skip the condition-scoring phase",
-        "required": false,
-        "type": "boolean",
-        "default": "false",
-        "options": null
-      },
-      {
-        "name": "max_condition_scores",
-        "description": "Override condition-scores-per-run cap (blank = 200; ~$3 at cached rate)",
+        "description": "Override global detail-fetch rate cap, req/s (blank = 6.0)",
         "required": false,
         "type": "string",
         "default": null,
         "options": null
       }
     ],
-    "secrets": [
-      "ANTHROPIC_API_KEY",
-      "R2_ACCESS_KEY_ID",
-      "R2_ACCOUNT_ID",
-      "R2_BUCKET_NAME",
-      "R2_SECRET_ACCESS_KEY",
-      "SUPABASE_DB_URL",
-      "SUPABASE_SERVICE_ROLE_KEY",
-      "SUPABASE_URL"
-    ],
-    "concurrencyGroup": null,
-    "cancelInProgress": null,
-    "timeoutMinutes": 350,
-    "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape.yml"
-  },
-  {
-    "filename": "scrape_delta.yml",
-    "name": "Scraping: Sreality full index walk (primary, ~hourly)",
-    "description": "Primary scrape. Each run walks the COMPLETE index of all six category pairs, so: - newly-listed properties surface (and downstream in the Watchdog feed), and - delisted properties flip to is_active=false — a complete walk is what makes that inference valid (architectural rule #3).",
-    "manual": true,
-    "schedules": [
-      {
-        "cron": "0 * * * *",
-        "human": "Every hour (on the hour)"
-      }
-    ],
-    "onPush": false,
-    "onPullRequest": false,
-    "paths": null,
-    "inputs": [],
     "secrets": [
       "R2_ACCESS_KEY_ID",
       "R2_ACCOUNT_ID",
@@ -758,12 +715,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "SUPABASE_SERVICE_ROLE_KEY",
       "SUPABASE_URL"
     ],
-    "concurrencyGroup": "sreality-delta-scrape",
+    "concurrencyGroup": "sreality-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 35,
+    "timeoutMinutes": 50,
     "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_delta.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_delta.yml"
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape.yml"
   },
   {
     "filename": "seed_condition_settings.yml",
