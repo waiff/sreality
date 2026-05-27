@@ -784,10 +784,15 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "scrape_bazos.yml",
-    "name": "Scraping: Bazos crawler (manual pilot)",
-    "description": "Manual-only crawler for reality.bazos.cz (multi-portal slice 3b). Walks one bazos category's index, fetches each listing detail, stages the raw HTML in portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "name": "Scraping: Bazos crawler (pilot)",
+    "description": "Scheduled (every 6h) + manual crawler for reality.bazos.cz (multi-portal slice 3b). Walks one bazos category's index, fetches each listing detail, stages the raw HTML in portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "30 */6 * * *",
+        "human": "Every 6 hours at :30"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,

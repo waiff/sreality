@@ -1,6 +1,7 @@
-name: "Scraping: Bazos crawler (manual pilot)"
+name: "Scraping: Bazos crawler (pilot)"
 
-# Manual-only crawler for reality.bazos.cz (multi-portal slice 3b). Walks one
+# Scheduled (every 6h) + manual crawler for reality.bazos.cz (multi-portal
+# slice 3b). Walks one
 # bazos category's index, fetches each listing detail, stages the raw HTML in
 # portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing
 # (Tier-0 idempotency + Tier-1 property matching).
@@ -8,10 +9,18 @@ name: "Scraping: Bazos crawler (manual pilot)"
 # This is NOT a sreality scrape: it writes NO scrape_runs row and does not
 # touch sreality liveness / reconciliation. A one-category crawl is a partial
 # walk, so the orchestrator never runs mark_inactive (architectural rule #3).
-# Cron cadence is deferred until the pilot proves out — keep it
-# workflow_dispatch only for now and use --max-pages to bound a pilot run.
+#
+# Cadence: a conservative every-6h schedule (offset off the hourly recompute's
+# :00 so a crawl's Tier-1 attaches are picked up by the next recompute within
+# the hour). A scheduled run has no workflow inputs, so the run step falls back
+# to prodam/byt (the roadmap's pilot scope) bounded by --max-pages 2 — small
+# enough to stay well inside the 20-min timeout. Widen / shard once the pilot
+# proves the full-category run time; workflow_dispatch stays the manual escape
+# hatch with its own inputs.
 
 on:
+  schedule:
+    - cron: "30 */6 * * *"
   workflow_dispatch:
     inputs:
       sale_type:
@@ -63,10 +72,16 @@ jobs:
       - name: Run bazos crawl
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # inputs.* are empty on a scheduled run, so fall back to the pilot scope.
+          SALE_TYPE: ${{ inputs.sale_type || 'prodam' }}
+          CATEGORY: ${{ inputs.category || 'byt' }}
+          LOCALITY: ${{ inputs.locality }}
+          RADIUS_KM: ${{ inputs.radius_km }}
+          MAX_PAGES: ${{ inputs.max_pages || '2' }}
         run: |
-          ARGS="--sale-type ${{ inputs.sale_type }} --category ${{ inputs.category }}"
-          if [ -n "${{ inputs.locality }}" ]; then ARGS="$ARGS --locality '${{ inputs.locality }}'"; fi
-          if [ -n "${{ inputs.radius_km }}" ]; then ARGS="$ARGS --radius-km ${{ inputs.radius_km }}"; fi
-          if [ -n "${{ inputs.max_pages }}" ]; then ARGS="$ARGS --max-pages ${{ inputs.max_pages }}"; fi
+          ARGS="--sale-type $SALE_TYPE --category $CATEGORY"
+          if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi
+          if [ -n "$RADIUS_KM" ]; then ARGS="$ARGS --radius-km $RADIUS_KM"; fi
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
           echo "python -m scraper.bazos_main $ARGS"
           eval "python -m scraper.bazos_main $ARGS"
