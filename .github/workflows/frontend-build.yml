@@ -1,4 +1,4 @@
-name: Frontend build
+name: "CI: frontend build"
 
 # Builds the frontend/ Vite SPA on every push or pull request that touches
 # frontend code, to catch build/type errors before deploy. Type-checks,

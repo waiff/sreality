@@ -1,4 +1,4 @@
-name: Discover condition markers (Phase A)
+name: "Dev: discover condition markers (one-off Phase A bootstrap)"
 
 # One-off Phase A driver for the building/apartment condition-scoring
 # feature. Runs scripts/discover_condition_markers.py against the

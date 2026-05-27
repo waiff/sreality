@@ -1,4 +1,4 @@
-name: Recompute property stats (Slice 1)
+name: "Jobs: recompute property stats"
 
 # Async recompute job for the canonical `properties` parent (multi-portal
 # dedup track, Slice 1). Attaches any straggler unlinked listings, then

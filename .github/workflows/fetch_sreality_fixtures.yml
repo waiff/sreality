@@ -1,4 +1,4 @@
-name: "Scraping: fetch sreality v1 JSON fixtures"
+name: "Fixtures: sreality v1 JSON"
 
 # Manual trigger only. Fetches a real search response + one real detail
 # response from a GitHub runner IP (this repo's dev sandbox is 403'd by

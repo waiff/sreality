@@ -1,4 +1,4 @@
-name: Seed condition settings (Phase B init)
+name: "Data: seed condition settings (rubric + markers)"
 
 # One-shot workflow that populates the two large app_settings rows
 # created by migration 072 — `llm_condition_rubric` and
