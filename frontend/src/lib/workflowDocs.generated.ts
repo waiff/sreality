@@ -43,7 +43,7 @@ export interface WorkflowDoc {
 export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "aggregate_condition_markers.yml",
-    "name": "Aggregate condition markers (Phase A review prep)",
+    "name": "Dev: aggregate condition markers (one-off Phase A bootstrap)",
     "description": "Runs scripts/aggregate_condition_markers.py against the live `listing_marker_extractions` rows to produce data/condition_markers_v1.json, then commits the JSON back to the running branch so the operator can review it in the PR diff.",
     "manual": true,
     "schedules": [],
@@ -88,7 +88,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "build-extension.yml",
-    "name": "Build Chrome extension",
+    "name": "CI: build Chrome extension",
     "description": "Builds the chrome-extension/ bundle and uploads dist/ as a workflow artifact you can download from the Actions tab. Keeps the build off the operator's laptop (no local Node install needed).",
     "manual": true,
     "schedules": [],
@@ -259,7 +259,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "discover_condition_markers.yml",
-    "name": "Discover condition markers (Phase A)",
+    "name": "Dev: discover condition markers (one-off Phase A bootstrap)",
     "description": "One-off Phase A driver for the building/apartment condition-scoring feature. Runs scripts/discover_condition_markers.py against the real Supabase DB and the Anthropic API to mine Czech condition markers from a stratified sample of listings.",
     "manual": true,
     "schedules": [],
@@ -328,7 +328,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "fetch-fixtures.yml",
-    "name": "Fetch + anonymize source HTML fixtures",
+    "name": "Fixtures: source HTML (anonymized)",
     "description": "Manual trigger only. Fetches each listing URL, runs the anonymization in scripts/fetch_and_anonymize_fixtures.py, and commits the resulting fixtures to the current branch. Operator runs this once per source refresh; tests then read the saved files instead of hitting the internet.",
     "manual": true,
     "schedules": [],
@@ -387,7 +387,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "fetch_sreality_fixtures.yml",
-    "name": "Scraping: fetch sreality v1 JSON fixtures",
+    "name": "Fixtures: sreality v1 JSON",
     "description": "Manual trigger only. Fetches a real search response + one real detail response from a GitHub runner IP (this repo's dev sandbox is 403'd by sreality), scrubs emails/phone numbers, and commits the result as tests/fixtures/sample_search.json + sample_listing.json on the current branch. The live /api/v1/estates API is snake_case (id key `hash_id`, detail wrapped under `result`); these fixtures pin the true shape so the parser tests guard reality instead of the HAR-derived camelCase guess.",
     "manual": true,
     "schedules": [],
@@ -430,7 +430,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "frontend-build.yml",
-    "name": "Frontend build",
+    "name": "CI: frontend build",
     "description": "Builds the frontend/ Vite SPA on every push or pull request that touches frontend code, to catch build/type errors before deploy. Type-checks, builds the production bundle, and reports gzipped chunk sizes (warning if the initial JS chunk exceeds the 500 kB budget). Does not deploy.",
     "manual": false,
     "schedules": [],
@@ -505,7 +505,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "ingest_boundaries.yml",
-    "name": "Ingest admin boundaries",
+    "name": "Data: ingest admin boundaries",
     "description": "Loads ČÚZK RÚIAN administrative-unit polygons (kraj / okres / obec / KÚ) into the admin_boundaries table. Manual-only; boundaries change rarely (a few municipal mergers / cadastral re-alignments per year), so there is no cron. Re-run when ČÚZK publishes a notable update or when the operator wants to bring in newly-created units.",
     "manual": true,
     "schedules": [],
@@ -588,7 +588,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "recompute_property_stats.yml",
-    "name": "Recompute property stats (Slice 1)",
+    "name": "Jobs: recompute property stats",
     "description": "Async recompute job for the canonical `properties` parent (multi-portal dedup track, Slice 1). Attaches any straggler unlinked listings, then recomputes every property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots.",
     "manual": true,
     "schedules": [
@@ -633,7 +633,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "refresh_population.yml",
-    "name": "Refresh city populations from Wikidata",
+    "name": "Data: refresh city populations (Wikidata)",
     "description": "Pulls the latest population reading for every curated city from Wikidata's public SPARQL endpoint, writes data/csu_population_<year>.csv, and commits it back to the branch. The next run of `Seed curated cities` will pick the CSV up and upsert into `city_population`.",
     "manual": true,
     "schedules": [],
@@ -859,7 +859,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "seed_condition_settings.yml",
-    "name": "Seed condition settings (Phase B init)",
+    "name": "Data: seed condition settings (rubric + markers)",
     "description": "One-shot workflow that populates the two large app_settings rows created by migration 072 — `llm_condition_rubric` and `llm_condition_marker_dictionary` — from the committed JSON files (data/condition_rubric_v1.json + data/condition_markers_curated.json).",
     "manual": true,
     "schedules": [],
@@ -891,7 +891,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "seed_curated_cities.yml",
-    "name": "Seed curated cities (Phase QUAL init)",
+    "name": "Data: seed curated cities",
     "description": "One-shot workflow that geocodes the 206 cities in data/obce_v_datech_2025.csv via Mapy.cz, then writes them into curated_cities + city_index_definitions + city_index_revisions + city_index_values (+ city_population if the CSV is present).",
     "manual": true,
     "schedules": [],
@@ -935,7 +935,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "smoke_agent.yml",
-    "name": "Agent smoke test",
+    "name": "Dev: agent smoke test",
     "description": "Manual invocation only. Runs scripts/smoke_agent.py against the real Supabase DB and a real LLM provider. Picks a recent Prague 2+kk rental by default; --sreality-id overrides. Real LLM credits are spent — typically under $0.10 per run.",
     "manual": true,
     "schedules": [],
@@ -985,7 +985,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "test.yml",
-    "name": "tests",
+    "name": "CI: tests",
     "description": "CI test suite, runs on every push and pull request. Two parallel jobs: a Python job (verifies the filter-registry and workflow-docs codegen are fresh, then runs pytest) and a frontend job (TypeScript type-check + vitest pure-function tests). This is the build gate for every branch.",
     "manual": false,
     "schedules": [],
