@@ -51,6 +51,7 @@ from api.estimation_runs import (
 from api import notifications as nf_module
 from api.routes.admin import router as admin_router
 from api.routes.notifications import router as notifications_router
+from scraper.db import sweep_stuck_scrape_runs
 from scraper.source_dispatcher import ParseError
 from toolkit import (
     ComparableFilters,
@@ -83,7 +84,9 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
     in a non-terminal status by a server crash mid-background-task,
     flipping rows older than 10 minutes to 'failed' with a clear
     error_message so the operator isn't left looking at a forever-
-    pending row.
+    pending row. scrape_runs hard-killed at the GitHub-Actions job
+    timeout (which can't self-finalize) are likewise stamped with an
+    ended_at so they stop reading as 'stuck' on the Health page.
 
     The loop opens its own per-pass DB connection and respects the
     `notifications_matcher_interval_seconds` knob in `app_settings`.
@@ -99,10 +102,12 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
             with deps.open_background_conn() as conn:
                 est = sweep_stuck_runs(conn)
                 bld = sweep_stuck_buildings(conn)
-            if est or bld:
+                scr = sweep_stuck_scrape_runs(conn)
+            if est or bld or scr:
                 logging.info(
-                    "stuck-row sweep on startup: %s estimation_runs, %s building_runs",
-                    est, bld,
+                    "stuck-row sweep on startup: %s estimation_runs, "
+                    "%s building_runs, %s scrape_runs",
+                    est, bld, scr,
                 )
         except Exception:
             logging.exception("stuck-row sweep failed on startup")

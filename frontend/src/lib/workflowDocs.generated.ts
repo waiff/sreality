@@ -777,7 +777,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "sreality-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 50,
+    "timeoutMinutes": 90,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape.yml"

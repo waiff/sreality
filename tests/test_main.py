@@ -644,3 +644,31 @@ def test_main_finalizes_run_even_when_scrape_crashes(monkeypatch):
         scraper_main.main(["--no-image-downloads", "--no-condition-scoring"])
     assert calls["start"] == 1
     assert calls["finalize"] == 1   # finalized despite the crash — no stuck row
+
+
+def test_sweep_stuck_scrape_runs_stamps_ended_at():
+    """A GH job SIGKILLed at the timeout can't self-finalize; the API startup
+    sweep stamps ended_at on orphaned scrape_runs so they stop reading 'stuck'.
+    Capture the UPDATE and confirm it only targets un-ended rows past the cutoff."""
+    captured: dict[str, Any] = {}
+
+    class _FakeCursor:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+        def fetchall(self):
+            return [(1,), (2,)]
+
+    class _FakeConn:
+        def cursor(self): return _FakeCursor()
+        def transaction(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    n = scraper_main.db.sweep_stuck_scrape_runs(_FakeConn(), older_than_minutes=90)
+    assert n == 2
+    assert "ended_at IS NULL" in captured["sql"]
+    assert "ended_at = now()" in captured["sql"]
+    assert captured["params"] == (90,)

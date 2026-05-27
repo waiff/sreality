@@ -96,9 +96,13 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     # A complete walk + capped detail refetch + active-image drain at the
-    # bumped concurrency runs ~15-25 min. 50 gives headroom under the hourly
-    # cadence; the self-chain re-dispatch keeps cadence steady if configured.
-    timeout-minutes: 50
+    # bumped concurrency runs ~15-25 min, but a heavy detail backlog can push a
+    # full walk toward ~50 min. 90 gives headroom so a slow walk finishes and
+    # writes ended_at instead of being SIGKILLed mid-walk (which orphans the
+    # scrape_runs row → "stuck" on Health); still well under the hourly cadence
+    # with cancel-in-progress=false. Kept in lockstep with the API's
+    # sweep_stuck_scrape_runs cutoff (90 min) so a live run is never finalized.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 

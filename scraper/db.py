@@ -748,6 +748,33 @@ def clear_fetch_failure(
         )
 
 
+def sweep_stuck_scrape_runs(
+    conn: psycopg.Connection,
+    *,
+    older_than_minutes: int = 90,
+) -> int:
+    """Finalize scrape_runs hard-killed before scrape_run_finalize ran.
+
+    A GitHub-Actions job killed at the job timeout (SIGKILL) can't write
+    ended_at, so the row stays orphaned and the Health 'runs finishing
+    cleanly' check counts it 'stuck'. Stamp ended_at so a hard-kill self-heals
+    on the next API boot. Counters stay as-is (zeros) — the row correctly
+    reflects that it never reported aggregates. The cutoff must stay above the
+    scrape job timeout so a still-running walk is never finalized.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE scrape_runs SET ended_at = now()
+            WHERE ended_at IS NULL
+              AND started_at < now() - make_interval(mins => %s)
+            RETURNING id
+            """,
+            (older_than_minutes,),
+        )
+        return len(cur.fetchall())
+
+
 def scrape_run_start(
     conn: psycopg.Connection,
     run_type: str,
