@@ -5,17 +5,20 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 06:55 UTC_
+_Last refreshed: 2026-05-27 17:03 UTC_
 
 **Branch:** `claude/serene-ptolemy-7nt9s`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 102 files, latest `097_property_matcher_foundation.sql`.
+**Migrations on disk:** 103 files, latest `098_portal_raw_pages.sql`.
 
 **Last 10 commits:**
 
 ```
+18a86a8 bazos parser: robust total-count parsing across nbsp grouping
+690d03e migration 098: portal_raw_pages raw-HTML staging table
+1fb8f0d Add bazos.cz crawler (multi-portal slice 3b)
 fc8bae9 Merge pull request #186 from waiff/claude/eloquent-heisenberg-gXR9k
 af4def2 Merge origin/main into slices 0-3a (live v1 parser + property layer)
 4e6e555 Merge pull request #190 from waiff/claude/zealous-heisenberg-WFmCL
@@ -23,9 +26,6 @@ c54dd1e Merge remote-tracking branch 'origin/main' into claude/zealous-heisenber
 520282a ci: ease the delta scrape cron from */15 to hourly
 d51de6b Merge pull request #189 from waiff/claude/serene-ptolemy-7nt9s
 d51c3ef scraper: normalize condition to diacritic-free underscore form
-00568c6 chore: refresh ROADMAP auto-status block
-45c1e3d scraper: align index price extraction with the parser
-f660f0d Merge remote-tracking branch 'origin/main' into claude/serene-ptolemy-7nt9s
 ```
 
 <!-- END AUTO-STATUS -->
