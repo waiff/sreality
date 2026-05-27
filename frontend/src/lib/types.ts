@@ -209,6 +209,38 @@ export interface ScrapeRun {
   images_stored: number;
   errors: number;
   by_category: ScrapeRunCategory[];
+  // Which portal this run belongs to (migration 100). Defaults to 'sreality'
+  // on rows recorded before the column existed.
+  source: string;
+}
+
+/* Per-portal health (migration 100): the portals registry joined with each
+ * source's activity. `kind` decides which metrics are meaningful — scrapers
+ * report listing + scrape-run stats, on-demand URL parsers report parse
+ * activity. Both metric families are always present (zeroed for the other
+ * kind) so the dashboard renders uniformly. */
+
+export type PortalKind = 'scraper' | 'parser';
+export type PortalStage = 'live' | 'pilot' | 'on_demand' | 'planned';
+
+export interface PortalHealth {
+  source: string;
+  label: string;
+  kind: PortalKind;
+  stage: PortalStage;
+  home_url: string | null;
+  listings_total: number;
+  listings_active: number;
+  listings_active_7d: number;
+  parses_total: number;
+  parses_30d: number;
+  last_scrape_at: string | null;
+  runs_7d: number;
+  scraped_new_7d: number;
+  inactive_7d: number;
+  errors_7d: number;
+  last_parsed_at: string | null;
+  last_activity_at: string | null;
 }
 
 export interface ImageStorageCategory {

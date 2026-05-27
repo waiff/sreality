@@ -14,6 +14,7 @@ import type {
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
+  PortalHealth,
   Ppm2Box,
   ScrapeRun,
   ScraperHealthChecks,
@@ -708,6 +709,12 @@ export const fetchImageStorageOverview = async (): Promise<ImageStorageOverview>
   const { data, error } = await supabase.rpc('image_storage_overview');
   if (error) throw error;
   return data as ImageStorageOverview;
+};
+
+export const fetchPortalHealth = async (): Promise<PortalHealth[]> => {
+  const { data, error } = await supabase.rpc('portal_health_summary');
+  if (error) throw error;
+  return (data ?? []) as PortalHealth[];
 };
 
 export const fetchScraperHealthChecks = async (): Promise<ScraperHealthChecks> => {

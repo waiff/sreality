@@ -782,16 +782,17 @@ def sweep_stuck_scrape_runs(
 def scrape_run_start(
     conn: psycopg.Connection,
     run_type: str,
+    source: str = "sreality",
 ) -> int:
     """Open a new scrape_runs row. Returns the id."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO scrape_runs (run_type)
-            VALUES (%s)
+            INSERT INTO scrape_runs (run_type, source)
+            VALUES (%s, %s)
             RETURNING id
             """,
-            (run_type,),
+            (run_type, source),
         )
         result = cur.fetchone()
         return int(result[0])
