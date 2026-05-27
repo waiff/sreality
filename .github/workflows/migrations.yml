@@ -1,0 +1,65 @@
+name: "CI: migration smoke-test"
+
+# Applies the full migrations/ chain (001 -> latest) to a throwaway Postgres +
+# PostGIS container whenever anything under migrations/ changes, catching a
+# migration that does not apply cleanly before it reaches the production
+# Supabase database (there is no staging DB). It pre-creates the Supabase roles
+# the migrations GRANT to (anon / authenticated / service_role) and the pg_trgm
+# extension migrations 067 / 074 rely on, applies every *.sql in numeric order,
+# then runs a small sanity query. Hermetic: no secrets, never touches production.
+
+on:
+  push:
+    paths:
+      - "migrations/**"
+      - "scripts/ci_db_bootstrap.sql"
+      - ".github/workflows/migrations.yml"
+  pull_request:
+    paths:
+      - "migrations/**"
+      - "scripts/ci_db_bootstrap.sql"
+      - ".github/workflows/migrations.yml"
+  workflow_dispatch:
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgis/postgis:15-3.4
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap roles + extensions
+        run: psql -v ON_ERROR_STOP=1 -f scripts/ci_db_bootstrap.sql
+
+      - name: Apply migrations in numeric order
+        run: |
+          set -euo pipefail
+          for f in $(ls migrations/*.sql | sort); do
+            echo ">>> applying $f"
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Sanity check (key relations exist + queryable)
+        run: |
+          psql -v ON_ERROR_STOP=1 \
+            -c "select 'listings'::regclass, 'listing_snapshots'::regclass, 'properties'::regclass;" \
+            -c "select 'listings_public'::regclass, 'properties_public'::regclass;" \
+            -c "select count(*) as listings_rows from listings;"
