@@ -241,6 +241,13 @@ def test_parse_images_prefixes_scheme():
     assert parse_images(raw) == [{"url": "https://d18-a.sdn.cz/x/y.jpeg", "sequence": 3}]
 
 
+def test_parse_images_keeps_bare_path():
+    """The CDN render-transform is a download-time concern, not identity: the
+    parser stores the bare path so the stored URL stays canonical."""
+    raw = _estate(advert_images=[{"url": "//d18-a.sdn.cz/x/y.jpeg", "order": 1}])
+    assert "fl=" not in parse_images(raw)[0]["url"]
+
+
 def test_description(sample):
     assert parse_listing(sample)["description"].startswith("Prodej samostatné bytové jednotky")
 

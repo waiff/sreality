@@ -409,15 +409,25 @@ def record_images(
 
     values_sql = ", ".join("(%s, %s, %s)" for _ in rows)
     flat: list[Any] = [v for triple in rows for v in triple]
+    # Refresh the URL on conflict so a re-detail-fetch repoints a stale/rotated
+    # CDN path on a not-yet-downloaded image (and clears its stale error state).
+    # The storage_path IS NULL guard is load-bearing: an already-downloaded image
+    # is never disturbed, so we never re-download what we have. xmax = 0 is true
+    # only for genuine inserts, keeping the "newly inserted" count honest.
     sql = f"""
         INSERT INTO images (sreality_id, sreality_url, sequence)
         VALUES {values_sql}
-        ON CONFLICT (sreality_id, sequence) DO NOTHING
-        RETURNING id
+        ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+            sreality_url = EXCLUDED.sreality_url,
+            download_attempts = 0,
+            last_error = NULL,
+            unavailable_reason = NULL
+        WHERE images.storage_path IS NULL
+        RETURNING (xmax = 0) AS inserted
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(sql, flat)
-        return cur.rowcount or 0
+        return sum(1 for (inserted,) in cur.fetchall() if inserted)
 
 
 TOUCH_CHUNK_SIZE = 250
