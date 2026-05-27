@@ -375,6 +375,22 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "",
         "options": null
+      },
+      {
+        "name": "idnes_index_url",
+        "description": "reality.idnes.cz search/index URL for the crawler (leave blank to skip)",
+        "required": false,
+        "type": "string",
+        "default": "https://reality.idnes.cz/s/prodej/byty/",
+        "options": null
+      },
+      {
+        "name": "idnes_detail_url",
+        "description": "reality.idnes.cz single-listing detail URL for the crawler (leave blank to skip)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [],
@@ -856,6 +872,65 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bazos.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bazos.yml"
+  },
+  {
+    "filename": "scrape_idnes.yml",
+    "name": "Scraping: idnes crawler (manual pilot)",
+    "description": "Crawler for reality.idnes.cz (multi-portal). Walks one idnes category's index (?page=N), fetches each listing detail, stages the raw HTML in portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "45 */6 * * *",
+        "human": "Every 6 hours at :45"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "sale_type",
+        "description": "prodej (sale) or pronajem (rent)",
+        "required": false,
+        "type": "choice",
+        "default": "prodej",
+        "options": [
+          "prodej",
+          "pronajem"
+        ]
+      },
+      {
+        "name": "category",
+        "description": "idnes search category segment",
+        "required": false,
+        "type": "choice",
+        "default": "byty",
+        "options": [
+          "byty",
+          "domy",
+          "pozemky",
+          "komercni-objekty",
+          "ostatni"
+        ]
+      },
+      {
+        "name": "max_pages",
+        "description": "cap index pages walked (pilot safety)",
+        "required": false,
+        "type": "string",
+        "default": "2",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "idnes-scrape",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_idnes.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_idnes.yml"
   },
   {
     "filename": "seed_condition_settings.yml",
