@@ -5,17 +5,18 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 09:25 UTC_
+_Last refreshed: 2026-05-27 10:10 UTC_
 
 **Branch:** `claude/serene-thompson-7AlGZ`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 102 files, latest `097_property_matcher_foundation.sql`.
+**Migrations on disk:** 103 files, latest `098_condition_score_batches.sql`.
 
 **Last 10 commits:**
 
 ```
+d9e07a0 scoring: add async Batch API backend for condition scoring (Phase 1.8b)
 1effeaa scraper: consolidate into one hourly pipeline + decouple condition scoring
 9375973 Merge pull request #193 from waiff/claude/serene-thompson-7AlGZ
 6d855b3 chore: refresh ROADMAP auto-status block
@@ -25,7 +26,6 @@ adb8760 chore: refresh ROADMAP auto-status block
 72f180e chore: refresh ROADMAP auto-status block
 c97207d Add self-maintaining GitHub Actions docs to Settings
 9bf13fa Merge pull request #191 from waiff/claude/zealous-heisenberg-WFmCL
-248b044 Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
 ```
 
 <!-- END AUTO-STATUS -->
