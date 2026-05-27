@@ -53,6 +53,37 @@ def test_classify_non_404_is_transient(monkeypatch):
     assert called == []  # no freshness check fired
 
 
+def test_classify_401_is_source_unavailable(monkeypatch):
+    """A 401 is the bare-URL/rotated-path signature — a dead URL, not a block.
+    Classified source_unavailable directly, with no freshness check (we know the
+    URL is the problem), so a pocket of 401s never trips the suspicious-stop."""
+    called = []
+    monkeypatch.setattr(
+        scraper_main, "client_freshness_check",
+        lambda *_a, **_kw: (called.append(1), "should_not_be_called")[1],
+    )
+    gone: set[int] = set()
+    alive: set[int] = set()
+
+    kind = scraper_main._classify_image_failure(
+        conn=None, client=None, sreality_id=42,
+        error=_http_error(401),
+        gone_listings=gone, alive_listings=alive,
+    )
+    assert kind == "source_unavailable"
+    assert called == []  # no freshness check fired
+    assert gone == set() and alive == set()  # not a listing-liveness verdict
+
+
+def test_suspicious_stop_source_unavailable_does_not_count():
+    """A window of all-401 (source_unavailable) outcomes must not fire the
+    breaker — dead URLs are not sreality blocking us."""
+    window: deque[str] = deque(maxlen=scraper_main.SUSPICIOUS_STOP_WINDOW)
+    for _ in range(scraper_main.SUSPICIOUS_STOP_WINDOW):
+        window.append("source_unavailable")
+    assert scraper_main._suspicious_stop(window) is False
+
+
 def test_classify_404_gone_marks_taken_down(monkeypatch):
     monkeypatch.setattr(
         scraper_main, "client_freshness_check",

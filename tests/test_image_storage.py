@@ -38,3 +38,44 @@ def test_from_env_raises_when_missing(monkeypatch):
 
     with pytest.raises(RuntimeError, match="R2_ACCOUNT_ID"):
         R2Client.from_env()
+
+
+def test_download_image_appends_transform(monkeypatch):
+    """Bare CDN URLs 401 without the render-transform; the downloader adds it."""
+    import scraper.image_storage as image_storage
+
+    captured: list[str] = []
+
+    class _Resp:
+        content = b"jpegbytes"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        image_storage.requests, "get",
+        lambda url, timeout=15.0: (captured.append(url), _Resp())[1],
+    )
+    assert image_storage.download_image("https://d18-a.sdn.cz/x/y.jpeg") == b"jpegbytes"
+    assert captured == ["https://d18-a.sdn.cz/x/y.jpeg?fl=res,749,562,3|shr,,20|jpg,90"]
+
+
+def test_download_image_idempotent_on_existing_fl(monkeypatch):
+    """Pre-rebuild stored URLs already carry the param — don't double-append."""
+    import scraper.image_storage as image_storage
+
+    captured: list[str] = []
+
+    class _Resp:
+        content = b""
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        image_storage.requests, "get",
+        lambda url, timeout=15.0: (captured.append(url), _Resp())[1],
+    )
+    existing = "https://d18-a.sdn.cz/x/y.jpeg?fl=res,749,562,3|shr,,20|jpg,90"
+    image_storage.download_image(existing)
+    assert captured == [existing]

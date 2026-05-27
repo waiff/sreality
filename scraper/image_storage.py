@@ -34,8 +34,20 @@ def image_key(sreality_id: int, sequence: int | None) -> str:
     return f"{sreality_id}/{seq:04d}.jpg"
 
 
+# sreality's v1 rebuild serves bare image URLs; the CDN 401s a bare URL and
+# only returns bytes when the render-transform query is present. Pre-rebuild
+# stored URLs already carry it, so appending is gated on its absence.
+IMAGE_TRANSFORM = "fl=res,749,562,3|shr,,20|jpg,90"
+
+
+def _with_transform(url: str) -> str:
+    if "fl=" in url:
+        return url
+    return f"{url}{'&' if '?' in url else '?'}{IMAGE_TRANSFORM}"
+
+
 def download_image(url: str, timeout: float = 15.0) -> bytes:
-    response = requests.get(url, timeout=timeout)
+    response = requests.get(_with_transform(url), timeout=timeout)
     response.raise_for_status()
     return response.content
 
