@@ -258,33 +258,6 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_scores.yml"
   },
   {
-    "filename": "diagnose_block.yml",
-    "name": "Scraping: recon sreality new API (probe)",
-    "description": "Free, zero-secret reconnaissance for the scraper rewrite. We already proved the old /api/cs/v2/estates API is gone (404) and the new Next.js site is reachable from GitHub IPs. This run pins down the two open questions for the new client, from a real GitHub runner IP (this sandbox's own IP is 403'd by sreality):",
-    "manual": true,
-    "schedules": [],
-    "onPush": false,
-    "onPullRequest": false,
-    "paths": null,
-    "inputs": [
-      {
-        "name": "samples",
-        "description": "Number of parallel IP samples (1-10)",
-        "required": false,
-        "type": "string",
-        "default": "3",
-        "options": null
-      }
-    ],
-    "secrets": [],
-    "concurrencyGroup": null,
-    "cancelInProgress": null,
-    "timeoutMinutes": 6,
-    "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/diagnose_block.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/diagnose_block.yml"
-  },
-  {
     "filename": "discover_condition_markers.yml",
     "name": "Discover condition markers (Phase A)",
     "description": "One-off Phase A driver for the building/apartment condition-scoring feature. Runs scripts/discover_condition_markers.py against the real Supabase DB and the Anthropic API to mine Czech condition markers from a stratified sample of listings.",
