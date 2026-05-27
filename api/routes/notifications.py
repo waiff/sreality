@@ -190,12 +190,14 @@ def post_matcher_run(
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    """Synchronously execute one matcher pass.
+    """Synchronously execute one matcher pass (both new-listing and
+    property-change matchers).
 
     Useful for testing a freshly created subscription without waiting
     for the next scheduler tick — the periodic loop continues to run
-    on its own clock. Idempotent against the (subscription, sreality_id)
-    UNIQUE constraint.
+    on its own clock. Idempotent against the (subscription_id,
+    property_id, change_kind) UNIQUE constraint.
     """
     stats = nf.match_once(conn)
-    return {"data": stats}
+    change_stats = nf.match_changes_once(conn)
+    return {"data": stats, "change_data": change_stats}

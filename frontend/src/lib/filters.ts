@@ -141,6 +141,15 @@ export interface ListingFilters {
    * min is set. Set by toolkit.condition_scoring.score_listing_condition. */
   buildingConditionLevelMin: number | null;
   apartmentConditionLevelMin: number | null;
+  /* Multi-portal / price-history signals (migrations 091/093/095). Derived
+   * columns on `properties`, maintained by the recompute job. Property grain:
+   * applied against properties_public. `distinctSiteCountMin` is 1 for every
+   * property today (sreality-only) and lights up with multi-portal ingestion;
+   * the price-history mins read the union of a property's snapshot history. */
+  distinctSiteCountMin: number | null;
+  priceDropCountMin: number | null;
+  priceRiseCountMin: number | null;
+  maxPriceDropPctMin: number | null;
   /* Migration 025 — operator tags. AND-semantics: a listing must carry
    * every selected tag id. Stored as ids (not names) so renames /
    * recolour-by-delete-recreate stay queryable. */
@@ -201,6 +210,10 @@ export const DEFAULT_FILTERS: ListingFilters = {
   gardenAreaMax: null,
   buildingConditionLevelMin: null,
   apartmentConditionLevelMin: null,
+  distinctSiteCountMin: null,
+  priceDropCountMin: null,
+  priceRiseCountMin: null,
+  maxPriceDropPctMin: null,
   tags: [],
   bounds: null,
   locationMode: 'viewport',
@@ -308,6 +321,12 @@ const parseIntOrNull = (s: string | null): number | null => {
   return Number.isFinite(n) ? Math.trunc(n) : null;
 };
 
+const parseFloatOrNull = (s: string | null): number | null => {
+  if (s == null || s === '') return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+};
+
 export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const dispRaw = splitCsv(sp.get('disposition'));
   const dispositions = dispRaw.filter((d): d is Disposition =>
@@ -363,6 +382,10 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     gardenAreaMax: parseIntOrNull(sp.get('garden_max')),
     buildingConditionLevelMin: parseIntOrNull(sp.get('bld_cond_min')),
     apartmentConditionLevelMin: parseIntOrNull(sp.get('apt_cond_min')),
+    distinctSiteCountMin: parseIntOrNull(sp.get('sites_min')),
+    priceDropCountMin: parseIntOrNull(sp.get('drops_min')),
+    priceRiseCountMin: parseIntOrNull(sp.get('rises_min')),
+    maxPriceDropPctMin: parseFloatOrNull(sp.get('drop_pct_min')),
     tags: parseIntList(sp.get('tags')),
     bounds: parseBounds(sp.get('bbox')),
     locationMode: sp.get('locmode') === 'center_radius'
@@ -524,6 +547,10 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.gardenAreaMax != null) sp.set('garden_max', String(f.gardenAreaMax));
   if (f.buildingConditionLevelMin != null) sp.set('bld_cond_min', String(f.buildingConditionLevelMin));
   if (f.apartmentConditionLevelMin != null) sp.set('apt_cond_min', String(f.apartmentConditionLevelMin));
+  if (f.distinctSiteCountMin != null) sp.set('sites_min', String(f.distinctSiteCountMin));
+  if (f.priceDropCountMin != null) sp.set('drops_min', String(f.priceDropCountMin));
+  if (f.priceRiseCountMin != null) sp.set('rises_min', String(f.priceRiseCountMin));
+  if (f.maxPriceDropPctMin != null) sp.set('drop_pct_min', String(f.maxPriceDropPctMin));
   if (f.tags.length) sp.set('tags', f.tags.join(','));
   if (f.bounds) {
     const { west, south, east, north } = f.bounds;
@@ -639,6 +666,10 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.gardenAreaMax == null &&
   f.buildingConditionLevelMin == null &&
   f.apartmentConditionLevelMin == null &&
+  f.distinctSiteCountMin == null &&
+  f.priceDropCountMin == null &&
+  f.priceRiseCountMin == null &&
+  f.maxPriceDropPctMin == null &&
   f.tags.length === 0 &&
   f.bounds == null &&
   f.locationMode === 'viewport' &&
@@ -694,6 +725,10 @@ export const REGISTRY_KEY_MAP = {
   max_garden_area: 'gardenAreaMax',
   building_condition_level_min: 'buildingConditionLevelMin',
   apartment_condition_level_min: 'apartmentConditionLevelMin',
+  distinct_site_count_min: 'distinctSiteCountMin',
+  price_drop_count_min: 'priceDropCountMin',
+  price_rise_count_min: 'priceRiseCountMin',
+  max_price_drop_pct_min: 'maxPriceDropPctMin',
   tags: 'tags',
   tom_days_min: 'tomDaysMin',
   tom_days_max: 'tomDaysMax',

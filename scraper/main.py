@@ -415,7 +415,7 @@ def _run_detail_only(
     counts = {"new": 0, "updated": 0, "unchanged": 0}
     new_imgs = 0
     with db.connect() as conn:
-        result = db.upsert_listing(conn, row, raw, h)
+        result = db.upsert_listing_with_property(conn, row, raw, h)
         counts[result] = 1
         LOG.info("DETAIL id=%d %s", sreality_id, result)
         new_imgs = db.record_images(conn, sreality_id, images)
@@ -980,7 +980,7 @@ def _write_result(conn: Any, fr: FetchResult, dry_run: bool) -> tuple[str, int]:
         return ("unchanged", 0)
 
     try:
-        result = db.upsert_listing(conn, fr.row, fr.raw, fr.content_hash)
+        result = db.upsert_listing_with_property(conn, fr.row, fr.raw, fr.content_hash)
         LOG.info("DETAIL id=%d %s", fr.sid, result)
         new_imgs = db.record_images(conn, fr.sid, fr.images)
         if new_imgs:

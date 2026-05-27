@@ -370,7 +370,7 @@ def test_walk_category_pool_tallies_outcomes_and_decrements_budget(monkeypatch):
 
     writes: dict[str, list] = {"upsert": [], "gone": [], "fail": []}
     monkeypatch.setattr(
-        scraper_main.db, "upsert_listing",
+        scraper_main.db, "upsert_listing_with_property",
         lambda _c, row, raw, h: (writes["upsert"].append(h) or "new"),
     )
     monkeypatch.setattr(scraper_main.db, "record_images", lambda _c, sid, imgs: 0)
