@@ -8,7 +8,7 @@ import {
   applyRegistryUpdates,
 } from '@/lib/filters';
 import type { MapySuggestion } from '@/lib/maps';
-import { ControlGroup, Section } from '@/components/controls';
+import { CollapsibleGroup, ControlGroup, Section } from '@/components/controls';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { FilterForm } from '@/components/FilterForm';
@@ -29,6 +29,50 @@ interface SidebarProps {
    * form, etc.) can mount the sidebar without it. */
   onLocationPick?: (s: MapySuggestion) => void;
 }
+
+/* Which `ListingFilters` keys live in each collapsible band. Used only to
+ * light the copper "active" dot on a collapsed band — the band's content
+ * still reads from the shared registry. `bounds` is deliberately omitted
+ * from Essentials: the viewport bbox changes on every map pan, so counting
+ * it would pin the dot permanently on. */
+const ESSENTIALS_KEYS = [
+  'categoryMain', 'categoryType', 'districts', 'locationMode', 'centerRadius',
+  'dispositions', 'categorySubCb',
+  'priceMin', 'priceMax', 'pricePerM2Min', 'pricePerM2Max',
+] as const satisfies ReadonlyArray<keyof ListingFilters>;
+
+const PROPERTY_KEYS = [
+  'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
+  'usableAreaMin', 'usableAreaMax',
+  'furnished', 'ownership', 'conditionMatch', 'buildingMaterial',
+  'buildingConditionLevelMin', 'apartmentConditionLevelMin',
+  'hasBalcony', 'hasLift', 'hasParking', 'terrace', 'cellar', 'garage',
+  'parkingLotsMin',
+] as const satisfies ReadonlyArray<keyof ListingFilters>;
+
+const SIGNALS_KEYS = [
+  'status', 'firstSeenMinDays', 'firstSeenMaxDays',
+  'lastSeenMinDays', 'lastSeenMaxDays', 'tomDaysMin', 'tomDaysMax',
+  'distinctSiteCountMin', 'priceDropCountMin', 'priceRiseCountMin',
+  'maxPriceDropPctMin',
+] as const satisfies ReadonlyArray<keyof ListingFilters>;
+
+const CURATION_KEYS = [
+  'tags', 'cityIndexRules', 'minCityPopulation', 'maxCityPopulation',
+  'nearCityProximity',
+] as const satisfies ReadonlyArray<keyof ListingFilters>;
+
+const bandActive = (
+  f: ListingFilters,
+  keys: ReadonlyArray<keyof ListingFilters>,
+): boolean =>
+  keys.some((k) => {
+    const value = f[k];
+    const def = DEFAULT_FILTERS[k];
+    if (Array.isArray(def)) return Array.isArray(value) && value.length > 0;
+    if (def === null) return value !== null && value !== undefined;
+    return value !== def;
+  });
 
 export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProps) {
   // <FilterForm> reads snake_case registry ids; Browse keeps the
@@ -73,212 +117,233 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
         )}
       </div>
 
-      <div className="px-5 py-5 space-y-7">
-        {/* Category, disposition, price, size, status & velocity,
-            building, amenities — all driven by <FilterForm>. The
-            registry decides which widget renders per filter; touching
-            `toolkit/filter_registry.py` flows through here without
-            edits. The remaining hand-written sections (district picker,
-            tags picker) wrap rich widgets `<FilterForm>` doesn't yet
-            cover. */}
+      <div className="px-5">
+        {/* Three-tier hierarchy: collapsible bands (top) → ControlGroups
+            (mid, bordered={false} so the band owns separation) → Section
+            labels. Most groups are driven by <FilterForm>: the registry
+            decides which widget renders per filter, so touching
+            `toolkit/filter_registry.py` flows through here without edits.
+            The hand-written sections (district picker, tags picker) wrap
+            rich widgets <FilterForm> doesn't yet cover. */}
 
-        <ControlGroup title="Category">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={['category_main', 'category_type']}
-            labels={{
-              category_main: 'Type',
-              category_type: 'Listing for',
-            }}
-            flat
-          />
-        </ControlGroup>
-
-        <ControlGroup title="Location">
-          <Section label="District">
-            <LocationTypeahead
-              value={filters.districts}
-              onChange={(next) =>
-                onChange({ ...filters, districts: next ?? [] })
-              }
-              onPick={onLocationPick}
+        <CollapsibleGroup
+          title="Essentials"
+          defaultOpen
+          active={bandActive(filters, ESSENTIALS_KEYS)}
+        >
+          <ControlGroup title="Category" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['category_main', 'category_type']}
+              labels={{
+                category_main: 'Type',
+                category_type: 'Listing for',
+              }}
+              flat
             />
-          </Section>
-          <LocationModeSection
-            mode={filters.locationMode}
-            centerRadius={filters.centerRadius}
-            onModeChange={(mode) =>
-              onChange({ ...filters, locationMode: mode })
-            }
-            onCenterRadiusChange={(cr) =>
-              onChange({ ...filters, centerRadius: cr })
-            }
-          />
-        </ControlGroup>
+          </ControlGroup>
 
-        <ControlGroup title="Disposition">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={['dispositions', 'category_sub_cb']}
-            labels={{
-              dispositions: 'Disposition',
-              category_sub_cb: 'Subtype',
-            }}
-            flat
-          />
-        </ControlGroup>
+          <ControlGroup title="Location" bordered={false}>
+            <Section label="District">
+              <LocationTypeahead
+                value={filters.districts}
+                onChange={(next) =>
+                  onChange({ ...filters, districts: next ?? [] })
+                }
+                onPick={onLocationPick}
+              />
+            </Section>
+            <LocationModeSection
+              mode={filters.locationMode}
+              centerRadius={filters.centerRadius}
+              onModeChange={(mode) =>
+                onChange({ ...filters, locationMode: mode })
+              }
+              onCenterRadiusChange={(cr) =>
+                onChange({ ...filters, centerRadius: cr })
+              }
+            />
+          </ControlGroup>
 
-        <ControlGroup title="Price">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={['min_price_czk', 'min_price_per_m2']}
-            labels={{
-              min_price_czk: 'Price',
-              min_price_per_m2: 'Price / m²',
-            }}
-            flat
-          />
-        </ControlGroup>
+          <ControlGroup title="Disposition" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['dispositions', 'category_sub_cb']}
+              labels={{
+                dispositions: 'Disposition',
+                category_sub_cb: 'Subtype',
+              }}
+              flat
+            />
+          </ControlGroup>
 
-        <ControlGroup title="Size">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={['min_area_m2', 'min_estate_area', 'min_usable_area']}
-            labels={{
-              min_area_m2: 'Area',
-              min_estate_area: 'Lot area',
-              min_usable_area: 'Usable area',
-            }}
-            flat
-          />
-        </ControlGroup>
+          <ControlGroup title="Price" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['min_price_czk', 'min_price_per_m2']}
+              labels={{
+                min_price_czk: 'Price',
+                min_price_per_m2: 'Price / m²',
+              }}
+              flat
+            />
+          </ControlGroup>
+        </CollapsibleGroup>
 
-        <ControlGroup title="Status & velocity">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={[
-              'status',
-              'first_seen_min_days',
-              'last_seen_min_days',
-              'tom_days_min',
-            ]}
-            labels={{
-              status: 'Status',
-              first_seen_min_days: 'First seen (days ago)',
-              last_seen_min_days: 'Last seen (days ago)',
-              tom_days_min: 'Turned in (days)',
-            }}
-            flat
-          />
-        </ControlGroup>
+        <CollapsibleGroup
+          title="Property"
+          active={bandActive(filters, PROPERTY_KEYS)}
+        >
+          <ControlGroup title="Size" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['min_area_m2', 'min_estate_area', 'min_usable_area']}
+              labels={{
+                min_area_m2: 'Area',
+                min_estate_area: 'Lot area',
+                min_usable_area: 'Usable area',
+              }}
+              flat
+            />
+          </ControlGroup>
 
-        <ControlGroup title="Price history & sources">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={[
-              'distinct_site_count_min',
-              'price_drop_count_min',
-              'price_rise_count_min',
-              'max_price_drop_pct_min',
-            ]}
-            labels={{
-              distinct_site_count_min: 'Listed on N+ sites',
-              price_drop_count_min: 'Price cut N+ times',
-              price_rise_count_min: 'Price raised N+ times',
-              max_price_drop_pct_min: 'Biggest price drop ≥ %',
-            }}
-            flat
-          />
-        </ControlGroup>
+          <ControlGroup title="Building" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={[
+                'furnished', 'ownership', 'condition_match', 'building_material',
+                'building_condition_level_min', 'apartment_condition_level_min',
+              ]}
+              labels={{
+                furnished: 'Furnished',
+                ownership: 'Ownership',
+                condition_match: 'Condition (Stav objektu)',
+                building_material: 'Building material',
+                building_condition_level_min: 'Min building condition (1–5)',
+                apartment_condition_level_min: 'Min apartment condition (1–5)',
+              }}
+              flat
+            />
+          </ControlGroup>
 
-        <ControlGroup title="Building">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={[
-              'furnished', 'ownership', 'condition_match', 'building_material',
-              'building_condition_level_min', 'apartment_condition_level_min',
-            ]}
-            labels={{
-              furnished: 'Furnished',
-              ownership: 'Ownership',
-              condition_match: 'Condition (Stav objektu)',
-              building_material: 'Building material',
-              building_condition_level_min: 'Min building condition (1–5)',
-              apartment_condition_level_min: 'Min apartment condition (1–5)',
-            }}
-            flat
-          />
-        </ControlGroup>
+          <ControlGroup title="Amenities" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={[
+                'has_balcony', 'has_lift', 'has_parking',
+                'terrace', 'cellar', 'garage',
+                'min_parking_lots',
+              ]}
+              labels={{
+                has_balcony: 'Balcony',
+                has_lift: 'Lift',
+                has_parking: 'Parking',
+                terrace: 'Terrace',
+                cellar: 'Cellar',
+                garage: 'Garage',
+                min_parking_lots: 'Min parking spaces',
+              }}
+              flat
+            />
+          </ControlGroup>
+        </CollapsibleGroup>
 
-        <ControlGroup title="Amenities">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={[
-              'has_balcony', 'has_lift', 'has_parking',
-              'terrace', 'cellar', 'garage',
-              'min_parking_lots',
-            ]}
-            labels={{
-              has_balcony: 'Balcony',
-              has_lift: 'Lift',
-              has_parking: 'Parking',
-              terrace: 'Terrace',
-              cellar: 'Cellar',
-              garage: 'Garage',
-              min_parking_lots: 'Min parking spaces',
-            }}
-            flat
-          />
-        </ControlGroup>
+        <CollapsibleGroup
+          title="Market signals"
+          active={bandActive(filters, SIGNALS_KEYS)}
+        >
+          <ControlGroup title="Status & velocity" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={[
+                'status',
+                'first_seen_min_days',
+                'last_seen_min_days',
+                'tom_days_min',
+              ]}
+              labels={{
+                status: 'Status',
+                first_seen_min_days: 'First seen (days ago)',
+                last_seen_min_days: 'Last seen (days ago)',
+                tom_days_min: 'Turned in (days)',
+              }}
+              flat
+            />
+          </ControlGroup>
 
-        <ControlGroup title="Curation">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={['tags']}
-            labels={{ tags: 'Tags' }}
-            customWidgets={customWidgets}
-            flat
-          />
-        </ControlGroup>
+          <ControlGroup title="Price history & sources" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={[
+                'distinct_site_count_min',
+                'price_drop_count_min',
+                'price_rise_count_min',
+                'max_price_drop_pct_min',
+              ]}
+              labels={{
+                distinct_site_count_min: 'Listed on N+ sites',
+                price_drop_count_min: 'Price cut N+ times',
+                price_rise_count_min: 'Price raised N+ times',
+                max_price_drop_pct_min: 'Biggest price drop ≥ %',
+              }}
+              flat
+            />
+          </ControlGroup>
+        </CollapsibleGroup>
 
-        <ControlGroup title="City quality">
-          <FilterForm
-            scope="browse"
-            state={registryView}
-            onChange={handleRegistryChange}
-            includeOnly={[
-              'city_index_rules',
-              'min_city_population',
-              'max_city_population',
-            ]}
-            labels={{
-              city_index_rules: 'Rules (city must satisfy all)',
-              min_city_population: 'Min population',
-              max_city_population: 'Max population',
-            }}
-            customWidgets={customWidgets}
-            flat
-          />
-          <CityPopulationHint />
-        </ControlGroup>
+        <CollapsibleGroup
+          title="Curation & quality"
+          active={bandActive(filters, CURATION_KEYS)}
+        >
+          <ControlGroup title="Curation" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['tags']}
+              labels={{ tags: 'Tags' }}
+              customWidgets={customWidgets}
+              flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="City quality" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={[
+                'city_index_rules',
+                'min_city_population',
+                'max_city_population',
+              ]}
+              labels={{
+                city_index_rules: 'Rules (city must satisfy all)',
+                min_city_population: 'Min population',
+                max_city_population: 'Max population',
+              }}
+              customWidgets={customWidgets}
+              flat
+            />
+            <CityPopulationHint />
+          </ControlGroup>
+        </CollapsibleGroup>
       </div>
     </aside>
   );
