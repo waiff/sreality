@@ -62,7 +62,7 @@ class IndexPage:
 def _text(node: Node | None) -> str | None:
     if node is None:
         return None
-    txt = node.text(strip=True)
+    txt = re.sub(r"\s+", " ", node.text(separator=" ", strip=False)).strip()
     return txt or None
 
 
