@@ -1,0 +1,72 @@
+name: "Scraping: Bazos crawler (manual pilot)"
+
+# Manual-only crawler for reality.bazos.cz (multi-portal slice 3b). Walks one
+# bazos category's index, fetches each listing detail, stages the raw HTML in
+# portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing
+# (Tier-0 idempotency + Tier-1 property matching).
+#
+# This is NOT a sreality scrape: it writes NO scrape_runs row and does not
+# touch sreality liveness / reconciliation. A one-category crawl is a partial
+# walk, so the orchestrator never runs mark_inactive (architectural rule #3).
+# Cron cadence is deferred until the pilot proves out — keep it
+# workflow_dispatch only for now and use --max-pages to bound a pilot run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sale_type:
+        description: prodam (sale) or pronajmu (rent)
+        type: choice
+        default: prodam
+        options: [prodam, pronajmu]
+      category:
+        description: bazos category segment
+        type: choice
+        default: byt
+        options: [byt, dum, pozemky, nebytove, ostatni]
+      locality:
+        description: locality filter (e.g. Praha); blank = nationwide
+        required: false
+        default: ""
+        type: string
+      radius_km:
+        description: radius around locality in km (blank = none)
+        required: false
+        default: ""
+        type: string
+      max_pages:
+        description: cap index pages walked (pilot safety)
+        required: false
+        default: "2"
+        type: string
+
+concurrency:
+  group: bazos-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run bazos crawl
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          ARGS="--sale-type ${{ inputs.sale_type }} --category ${{ inputs.category }}"
+          if [ -n "${{ inputs.locality }}" ]; then ARGS="$ARGS --locality '${{ inputs.locality }}'"; fi
+          if [ -n "${{ inputs.radius_km }}" ]; then ARGS="$ARGS --radius-km ${{ inputs.radius_km }}"; fi
+          if [ -n "${{ inputs.max_pages }}" ]; then ARGS="$ARGS --max-pages ${{ inputs.max_pages }}"; fi
+          echo "python -m scraper.bazos_main $ARGS"
+          eval "python -m scraper.bazos_main $ARGS"

@@ -5,27 +5,27 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 10:45 UTC_
+_Last refreshed: 2026-05-27 17:16 UTC_
 
-**Branch:** `claude/serene-thompson-7AlGZ`
+**Branch:** `claude/serene-ptolemy-7nt9s`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 103 files, latest `098_condition_score_batches.sql`.
+**Migrations on disk:** 104 files, latest `099_portal_raw_pages.sql`.
 
 **Last 10 commits:**
 
 ```
-6fe3560 chore: refresh ROADMAP auto-status block
-d9e07a0 scoring: add async Batch API backend for condition scoring (Phase 1.8b)
-1effeaa scraper: consolidate into one hourly pipeline + decouple condition scoring
-9375973 Merge pull request #193 from waiff/claude/serene-thompson-7AlGZ
-6d855b3 chore: refresh ROADMAP auto-status block
-ae35da8 chore: refresh ROADMAP auto-status block
-3bd48b4 Merge pull request #192 from waiff/claude/trusting-turing-PFYte
-adb8760 chore: refresh ROADMAP auto-status block
-72f180e chore: refresh ROADMAP auto-status block
-c97207d Add self-maintaining GitHub Actions docs to Settings
+943fa29 chore: refresh ROADMAP auto-status block
+8444bef bazos parser: fix locality extraction smashing into map-link text
+18a86a8 bazos parser: robust total-count parsing across nbsp grouping
+690d03e migration 098: portal_raw_pages raw-HTML staging table
+1fb8f0d Add bazos.cz crawler (multi-portal slice 3b)
+fc8bae9 Merge pull request #186 from waiff/claude/eloquent-heisenberg-gXR9k
+af4def2 Merge origin/main into slices 0-3a (live v1 parser + property layer)
+4e6e555 Merge pull request #190 from waiff/claude/zealous-heisenberg-WFmCL
+c54dd1e Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
+520282a ci: ease the delta scrape cron from */15 to hourly
 ```
 
 <!-- END AUTO-STATUS -->
@@ -1088,11 +1088,18 @@ shape (see D1 below).
 > a new listing to a near-matching property, creates a singleton on no match,
 > or enqueues a `property_identity_candidates` row on ambiguity — plus the
 > `ScrapedListing` contract + a negative synthetic-id sequence for non-sreality
-> rows. It's inert for today's sreality-only data (verified). **Next: Slice 3b**
-> — the first portal scraper (operator chose **bazos**): crawl its index/detail
-> into `ScrapedListing`s through `ingest_scraped_listing`. That's when
-> properties gain multiple children and the dedup/one-dot-per-property plumbing
-> from Slices 1–2 lights up.
+> rows. It's inert for today's sreality-only data (verified). Slice 3b
+> (migration 098) shipped the first portal scraper (operator chose **bazos**):
+> `scraper/bazos_parser.py` (deterministic selectolax HTML→`ScrapedListing`),
+> `scraper/bazos_client.py` (adaptive-throttle fetch reusing `RateLimiter`),
+> `scraper/bazos_main.py` (index→detail→stage-in-`portal_raw_pages`→parse→
+> `ingest_scraped_listing`, no `mark_inactive` on a partial walk), and the
+> manual `scrape_bazos.yml` workflow. `portal_raw_pages` decouples fetch from
+> parse so pages re-parse without re-fetching. **Next: run the capped bazos
+> pilot** (prodej/byty), confirm rows land with `source='bazos'` and that the
+> Tier-1 matcher's cross-source attaches behave as expected (bazos's
+> approximate coords/free-text area mostly form singletons at first), then
+> widen scope + add a cron cadence.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
