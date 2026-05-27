@@ -783,7 +783,19 @@ def _walk_category_split(
     # national total — the latter catches a district missing from DISTRICT_IDS
     # (both union and summed sizes would otherwise drop together).
     complete = all_districts_complete and _walk_complete(len(union), result_size)
-    return union, counts, (summed_drs or result_size), pages, complete
+    LOG.info(
+        "SPLIT summary cm=%s ct=%s districts=%d union=%d national_probe=%s "
+        "summed_districts=%d complete=%s",
+        cm_text, ct_text, len(DISTRICT_IDS), len(union), result_size,
+        summed_drs, complete,
+    )
+    # Report sreality's own national total (the single-filter probe) as the
+    # reconciliation denominator, not the sum of per-district totals: summing
+    # double-counts any area covered by two filters and reads as inflated
+    # drift. The probe is the authoritative count; summed_drs is only a
+    # fallback for when the probe itself failed.
+    reported_size = result_size if result_size is not None else (summed_drs or None)
+    return union, counts, reported_size, pages, complete
 
 
 def _walk_category(

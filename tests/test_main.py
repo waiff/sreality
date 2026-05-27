@@ -468,8 +468,9 @@ def _split_args(conn=None):
 
 def test_walk_category_split_unions_districts(patched_db, monkeypatch):
     """A category over SPLIT_THRESHOLD is walked per district; the union of
-    district seen_ids and the summed result_size feed mark_inactive. Complete
-    when every district is complete and the union covers the national total."""
+    district seen_ids feeds mark_inactive and the reported result_size is the
+    national probe. Complete when every district is complete and the union
+    covers the national total."""
     monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
     monkeypatch.setattr(
         _FakeClient, "district_result_size", {1: 6000, 2: 6000}, raising=False,
@@ -480,7 +481,30 @@ def test_walk_category_split_unions_districts(patched_db, monkeypatch):
         1, 2, **_split_args()
     )
     assert len(seen) == 12000      # 6000 (district 1) + 6000 (district 2)
-    assert rs == 12000             # summed district result_size
+    assert rs == 12000             # national probe total
+    assert complete is True
+
+
+def test_walk_category_split_reports_probe_not_summed_districts(
+    patched_db, monkeypatch
+):
+    """The reported result_size is sreality's national probe total, NOT the sum
+    of per-district totals. Summing double-counts areas covered by two filters
+    (the Praha okres/sub-code overlap that inflated reconciliation drift), so a
+    walk whose districts sum to more than the national total must still report
+    the national total as the denominator."""
+    # National total 12000, but the districts sum to 16000 (simulating an
+    # overlap where the same listings are counted under two district filters).
+    monkeypatch.setattr(_FakeClient, "result_size", 12000, raising=False)
+    monkeypatch.setattr(
+        _FakeClient, "district_result_size", {1: 8000, 2: 8000}, raising=False,
+    )
+    monkeypatch.setattr(_FakeClient, "district_collected", {}, raising=False)
+
+    _seen, _counts, rs, _pages, complete = scraper_main._walk_category_split(
+        1, 2, **_split_args()
+    )
+    assert rs == 12000             # probe total, not summed_drs (16000)
     assert complete is True
 
 

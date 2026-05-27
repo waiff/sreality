@@ -55,11 +55,15 @@ CAP_STATUSES: frozenset[int] = frozenset({422})
 # Sreality's search caps deep pagination per filter, so a single walk of a
 # large category never retrieves the whole set. Categories whose total
 # exceeds SPLIT_THRESHOLD are walked once per DISTRICT (okres) instead — each
-# district is well under the cap, so the union is complete and mark_inactive
-# can run. DISTRICT_IDS is the canonical sreality locality_district_id set:
-# okresy 1..77 (47 = Praha city) plus the Praha sub-district codes 5001..5022.
+# okres is well under the cap (the largest, Praha=okres 47, is ~5k; every
+# other okres is <1k), so the union is complete and mark_inactive can run.
+# DISTRICT_IDS is the 77 okresy. Okres 47 already covers ALL of Praha (it
+# equals locality_region_id=10's total and is a strict superset of the
+# 5001..5022 Praha sub-district codes), so those sub-codes are deliberately
+# NOT included: walking them too would re-fetch Praha a second time and
+# double-count it in the reconciliation totals for no coverage gain.
 SPLIT_THRESHOLD: int = 10000
-DISTRICT_IDS: tuple[int, ...] = (*range(1, 78), *range(5001, 5023))
+DISTRICT_IDS: tuple[int, ...] = tuple(range(1, 78))
 
 # Statuses that mean "this listing no longer exists" rather than a
 # transient or unexpected error. Mirrors scraper.freshness.GONE_STATUSES.
