@@ -258,6 +258,72 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_scores.yml"
   },
   {
+    "filename": "dedup_sweep.yml",
+    "name": "Tier-2 dedup sweep (multi-portal)",
+    "description": "Cross-source dedup sweep (multi-portal dedup PR3). Finds property pairs the cheap insert-time Tier-1 matcher missed -- the same real-world property listed on two portals whose coords/area/price differ enough to slip Tier-1's tight gate -- scores each through a confidence ladder (disposition equivalence -> address similarity -> pHash [PR5] -> vision), then auto-merges the high-confidence few (reversible + audited) and queues the rest for the /dedup review UI. CROSS-SOURCE ONLY: same-portal pairs are legitimately distinct units and never touched.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "45 3 * * *",
+        "human": "Daily at 03:45 UTC"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max candidate pairs generated per run",
+        "required": false,
+        "type": "string",
+        "default": "2000",
+        "options": null
+      },
+      {
+        "name": "max_auto_merges",
+        "description": "Cap auto-merges per run (overflow is queued)",
+        "required": false,
+        "type": "string",
+        "default": "200",
+        "options": null
+      },
+      {
+        "name": "max_vision_calls",
+        "description": "Cap vision corroborations per run (0 = vision off)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report candidate-pair count and exit without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "dedup-sweep",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_sweep.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_sweep.yml"
+  },
+  {
     "filename": "discover_condition_markers.yml",
     "name": "Discover condition markers (Phase A)",
     "description": "One-off Phase A driver for the building/apartment condition-scoring feature. Runs scripts/discover_condition_markers.py against the real Supabase DB and the Anthropic API to mine Czech condition markers from a stratified sample of listings.",
