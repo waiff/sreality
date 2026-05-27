@@ -346,7 +346,7 @@ at a `listings` column). So:
 - **Scraper write path:** `--dry-run` and `--detail-only <id>` against a
   single sreality listing to confirm `property_id` assignment +
   idempotency (re-run = no new property). Tests via
-  `.github/workflows/test.yml` (operator has no local Python).
+  `.github/workflows/test.yml` (or `pytest` locally).
 - **Tier 1 matcher:** seed two listings at the same coords/price/area from
   two sources, confirm they collapse to one property; seed an ambiguous
   multi-hit, confirm a `property_identity_candidates` row instead of a
