@@ -76,7 +76,7 @@ def _page_text(tree: HTMLParser) -> str:
 
 def _parse_total(text: str) -> int | None:
     # "Zobrazeno 1-20 inzerátů z 6 990"
-    m = re.search(r"inzer\w+\s+z\s+([\d  ]+)", text)
+    m = re.search(r"inzer\w+\s+z\s+(\d[\d\s]*\d|\d)", text)
     if not m:
         return None
     digits = re.sub(r"\D", "", m.group(1))
