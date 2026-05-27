@@ -43,8 +43,15 @@ def main(argv: list[str] | None = None) -> int:
     conn = None if args.dry_run else db.connect()
     counts = {"new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0, "images": 0}
 
+    # A one-category crawl is a partial walk (run_type='delta'); it never
+    # marks listings inactive. Recording the run lets the Health dashboard
+    # show bazos activity per-source alongside sreality (migration 100).
+    run_id = None
+    if conn is not None:
+        run_id = db.scrape_run_start(conn, "delta", source=SOURCE)
+
     try:
-        details = _walk_index(client, conn, args)
+        details, pages = _walk_index(client, conn, args)
         LOG.info("PLAN details=%d", len(details))
         _refetch_details(client, conn, args, details, canon_main, canon_type, counts)
         LOG.info(
@@ -53,6 +60,27 @@ def main(argv: list[str] | None = None) -> int:
             len(details), counts["new"], counts["updated"],
             counts["unchanged"], counts["gone"], counts["errors"], counts["images"],
         )
+        if run_id is not None:
+            db.scrape_run_finalize(
+                conn, run_id,
+                index_pages=pages,
+                listings_found_new=counts["new"],
+                listings_scraped_new=counts["new"],
+                listings_updated=counts["updated"],
+                listings_inactive=0,
+                images_discovered=counts["images"],
+                images_stored=counts["images"],
+                errors=counts["errors"],
+                by_category=[{
+                    "category_main": canon_main,
+                    "category_type": canon_type,
+                    "listings_found_new": counts["new"],
+                    "listings_scraped_new": counts["new"],
+                    "listings_inactive": 0,
+                    "images_discovered": counts["images"],
+                    "images_stored": counts["images"],
+                }],
+            )
     finally:
         if conn is not None:
             conn.close()
@@ -61,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _walk_index(
     client: BazosClient, conn: "psycopg.Connection | None", args: argparse.Namespace
-) -> list[tuple[str, str]]:
+) -> tuple[list[tuple[str, str]], int]:
     details: list[tuple[str, str]] = []
     seen: set[str] = set()
     offset = 0
@@ -95,7 +123,7 @@ def _walk_index(
         if not page.items or page.next_offset is None:
             break
         offset = page.next_offset
-    return details
+    return details, pages
 
 
 def _refetch_details(

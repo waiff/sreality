@@ -6,6 +6,18 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: Per-portal Health dashboard
+The Health page now opens with a **Data sources** catalogue — one register
+entry per portal (sreality, bazos, bezrealitky, idnes, remax), each showing
+the metric that fits its kind: active-listing + scrape-run stats for the
+scrapers, on-demand parse activity for the URL parsers. Backed by migration
+100 (`portals` registry + `scrape_runs.source` + a `portal_health_summary()`
+RPC over anon-readable aggregate views `portal_listing_counts` /
+`parsed_url_activity`); adding a portal is one INSERT into `portals`, no code
+change. The bazos crawler now records its own `scrape_runs` row
+(`source='bazos'`, `run_type='delta'`), so the pilot surfaces on the dashboard
+the moment it runs; the Recent-scrapes table gains a per-run Site column.
+
 ### Maintenance 2026-05: sreality v1 API migration
 sreality rebuilt on Next.js and removed the old `/api/cs/v2/estates` API
 (returned 404 from every GitHub IP). A free runner-IP probe confirmed it

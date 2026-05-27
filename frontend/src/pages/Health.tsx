@@ -14,6 +14,7 @@ import {
 import {
   fetchHealthSummary,
   fetchImageStorageOverview,
+  fetchPortalHealth,
   fetchRecentScrapeRuns,
   fetchScraperHealthChecks,
 } from '@/lib/queries';
@@ -27,6 +28,9 @@ import type {
   HealthCheckStatus,
   ImageStorageCategory,
   ImageStorageOverview,
+  PortalHealth,
+  PortalKind,
+  PortalStage,
   ScrapeRun,
   ScrapeRunCategory,
   ScraperHealthCheck,
@@ -67,7 +71,7 @@ export default function Health() {
         <div>
           <h1 className="text-2xl leading-tight">Health</h1>
           <p className="mt-1 text-sm text-[var(--color-ink-2)]">
-            Scraper status by category, snapshot density, fetch failures.{' '}
+            Data sources, scraper status by category, snapshot density, fetch failures.{' '}
             {dataUpdatedAt > 0 && (
               <span className="text-[var(--color-ink-3)]">
                 · refreshed {fmtRelative(new Date(dataUpdatedAt).toISOString())}
@@ -118,7 +122,9 @@ function Body({ data }: { data: HealthSummary }) {
 
   return (
     <div className="mt-5 space-y-5">
-      <Card label="Scraper health checks">
+      <PortalsSection />
+
+      <Card label="Scraper health checks · sreality pipeline">
         <HealthChecksPanel
           checks={healthChecksQuery.data}
           isLoading={healthChecksQuery.isLoading}
@@ -178,6 +184,207 @@ function Body({ data }: { data: HealthSummary }) {
           top10={data.failures_top10}
         />
       </Card>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Data-source catalogue (migration 100 — portal_health_summary RPC)          */
+/*                                                                            */
+/* A roll-call of every portal the platform pulls from. Each portal is a      */
+/* register entry: name in the display serif, a quiet kind/stage tag, and a   */
+/* headline number whose meaning shifts by kind — active listings for         */
+/* scrapers, URLs parsed for on-demand parsers. New portals appear the moment */
+/* a row is added to the `portals` table; never-run ones show at zero rather  */
+/* than vanishing, so a dormant pilot stays visible.                          */
+/* -------------------------------------------------------------------------- */
+
+const PORTAL_KIND_LABEL: Record<PortalKind, string> = {
+  scraper: 'scraper',
+  parser: 'on-demand parser',
+};
+
+const PORTAL_STAGE_LABEL: Record<PortalStage, string> = {
+  live: 'live',
+  pilot: 'pilot',
+  on_demand: 'on demand',
+  planned: 'planned',
+};
+
+/* Short labels for the per-run "Site" tag. Falls back to the raw source. */
+const PORTAL_SHORT_LABEL: Record<string, string> = {
+  sreality: 'Sreality',
+  bazos: 'Bazoš',
+};
+
+function portalShort(source: string): string {
+  return PORTAL_SHORT_LABEL[source] ?? source;
+}
+
+/* Status dot. For scrapers, recency of the last run is meaningful (the cron
+ * should keep it fresh); for on-demand parsers it is not — they only run when
+ * the operator pastes a URL — so a parser that has ever run reads neutral,
+ * never "stale". A never-run portal is muted, not alarming. */
+function portalDotColour(p: PortalHealth): string {
+  if (p.kind === 'scraper') {
+    if (!p.last_scrape_at) return 'var(--color-ink-4)';
+    const ageMin = (Date.now() - new Date(p.last_scrape_at).getTime()) / 60_000;
+    if (ageMin < 90) return 'var(--color-sage)';
+    if (ageMin < 24 * 60) return 'var(--color-ochre)';
+    return 'var(--color-brick)';
+  }
+  return p.last_parsed_at ? 'var(--color-copper)' : 'var(--color-ink-4)';
+}
+
+function PortalsSection() {
+  const { data, isLoading, error } = useQuery<PortalHealth[], Error>({
+    queryKey: ['portal-health'],
+    queryFn: fetchPortalHealth,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
+  const scrapers = (data ?? []).filter((p) => p.kind === 'scraper').length;
+  const parsers = (data ?? []).filter((p) => p.kind === 'parser').length;
+
+  return (
+    <section>
+      <div className="flex items-baseline justify-between gap-4">
+        <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+          Data sources
+        </h2>
+        {data && data.length > 0 && (
+          <span className="text-[0.65rem] text-[var(--color-ink-4)] tabular-nums">
+            {scrapers} scraper{scrapers === 1 ? '' : 's'} · {parsers} on-demand parser
+            {parsers === 1 ? '' : 's'}
+          </span>
+        )}
+      </div>
+
+      <div className="mt-3">
+        {error ? (
+          <p className="text-sm text-[var(--color-brick)]">
+            portal_health_summary failed: {error.message}
+          </p>
+        ) : isLoading && !data ? (
+          <p className="text-sm text-[var(--color-ink-3)]">Loading sources…</p>
+        ) : !data || data.length === 0 ? (
+          <p className="text-sm text-[var(--color-ink-4)]">No portals registered.</p>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {data.map((p) => (
+              <PortalCard key={p.source} portal={p} />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function PortalCard({ portal: p }: { portal: PortalHealth }) {
+  const isScraper = p.kind === 'scraper';
+  const hasHeadline = isScraper ? p.listings_active > 0 : p.parses_total > 0;
+  const headline = isScraper
+    ? fmtCount(p.listings_active)
+    : fmtCount(p.parses_total);
+  const headlineLabel = isScraper
+    ? hasHeadline
+      ? 'active listings'
+      : 'no listings yet'
+    : hasHeadline
+      ? 'URLs parsed'
+      : 'never parsed';
+
+  return (
+    <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 flex flex-col gap-3">
+      <header className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <span
+            className="inline-block h-2 w-2 rounded-full shrink-0"
+            style={{ backgroundColor: portalDotColour(p) }}
+          />
+          {p.home_url ? (
+            <a
+              href={p.home_url}
+              target="_blank"
+              rel="noreferrer"
+              className="font-display text-lg leading-tight text-[var(--color-ink)] hover:text-[var(--color-copper)] truncate"
+            >
+              {p.label}
+            </a>
+          ) : (
+            <span className="font-display text-lg leading-tight text-[var(--color-ink)] truncate">
+              {p.label}
+            </span>
+          )}
+        </div>
+        <span className="shrink-0 text-right text-[0.58rem] tracking-[0.1em] uppercase leading-tight">
+          <span className="text-[var(--color-ink-3)]">{PORTAL_KIND_LABEL[p.kind]}</span>
+          <br />
+          <span className="text-[var(--color-ink-4)]">{PORTAL_STAGE_LABEL[p.stage]}</span>
+        </span>
+      </header>
+
+      <div>
+        <p
+          className="font-mono tabular-nums text-[1.7rem] leading-none tracking-tight"
+          style={{ color: hasHeadline ? 'var(--color-ink)' : 'var(--color-ink-4)' }}
+        >
+          {hasHeadline ? headline : '—'}
+        </p>
+        <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)] tracking-wide">
+          {headlineLabel}
+        </p>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3 pt-2 border-t border-[var(--color-rule-soft)]">
+        {isScraper ? (
+          <>
+            <PortalStat label="new 7&thinsp;d" value={fmtCount(p.scraped_new_7d)} />
+            <PortalStat label="runs 7&thinsp;d" value={fmtCount(p.runs_7d)} />
+            <PortalStat
+              label="last scrape"
+              value={p.last_scrape_at ? fmtRelative(p.last_scrape_at) : '—'}
+              title={p.last_scrape_at ? fmtAbsolute(p.last_scrape_at) : undefined}
+            />
+          </>
+        ) : (
+          <>
+            <PortalStat label="parsed 30&thinsp;d" value={fmtCount(p.parses_30d)} />
+            <PortalStat label="total" value={fmtCount(p.parses_total)} />
+            <PortalStat
+              label="last parse"
+              value={p.last_parsed_at ? fmtRelative(p.last_parsed_at) : '—'}
+              title={p.last_parsed_at ? fmtAbsolute(p.last_parsed_at) : undefined}
+            />
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function PortalStat({
+  label,
+  value,
+  title,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  title?: string;
+}) {
+  return (
+    <div className="min-w-0">
+      <p className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+        {label}
+      </p>
+      <p
+        className="mt-0.5 font-mono tabular-nums text-sm text-[var(--color-ink)] leading-tight truncate"
+        title={title}
+      >
+        {value}
+      </p>
     </div>
   );
 }
@@ -976,6 +1183,7 @@ function RecentScrapesPanel({
           <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
             <tr>
               <th className="text-left  py-1.5 px-1.5 font-medium w-4"></th>
+              <th className="text-left  py-1.5 px-1.5 font-medium">Site</th>
               <th className="text-left  py-1.5 px-1.5 font-medium">Time</th>
               <th className="text-left  py-1.5 px-1.5 font-medium">Type</th>
               <th className="text-right py-1.5 px-1.5 font-medium">Found new</th>
@@ -1015,6 +1223,9 @@ function ScrapeRunRow({ run }: { run: ScrapeRun }) {
           >
             {hasBreakdown ? (open ? '▾' : '▸') : '·'}
           </button>
+        </td>
+        <td className="py-1.5 px-1.5 align-top text-[var(--color-ink-2)] whitespace-nowrap">
+          {portalShort(run.source)}
         </td>
         <td
           className="py-1.5 px-1.5 font-mono tabular-nums text-[var(--color-ink)] align-top"
@@ -1078,7 +1289,7 @@ function ScrapeRunCategoryRow({ cat }: { cat: ScrapeRunCategory }) {
       <td className="py-1 px-1.5"></td>
       <td
         className="py-1 px-1.5 text-[var(--color-ink-2)] text-[0.7rem]"
-        colSpan={2}
+        colSpan={3}
       >
         ↳ {categoryPairLabel(cat.category_main, cat.category_type)}
       </td>
