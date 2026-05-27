@@ -1,6 +1,7 @@
 # sreality · database browser
 
-Read-only web UI over the Supabase database produced by the daily scraper.
+Web UI over the Supabase database produced by the scraper: it reads the
+public views directly and routes any write through the FastAPI service.
 Vite + React + TypeScript + Tailwind v4.  Static SPA — no SSR, no backend.
 
 The estimation flow (`/estimate` → `/estimation/:id` → `/estimations`) is
@@ -10,9 +11,10 @@ table.  The Timeline component dispatches on `step.kind` so it renders
 today's deterministic 4-step traces and the future U4 agent's longer
 traces without rework.
 
-> Audience for this README: a developer setting the project up locally or
-> debugging the deploy.  The operator does not run any of these commands;
-> the live site is built by Railway on push.
+> Audience for this README: anyone setting the project up locally or
+> debugging the deploy.  The operator now works locally (VS Code on WSL2) and
+> can run these commands; the live site is still built by Railway on push to
+> `main`.
 
 ## Stack
 
