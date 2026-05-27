@@ -190,8 +190,9 @@ def test_ingest_first_sight_draws_synthetic_pk(monkeypatch):
         (lambda s: "INSERT INTO properties" in s, [(50,)]),
     ])
 
-    db.ingest_scraped_listing(conn, _listing())
+    pk, result = db.ingest_scraped_listing(conn, _listing())
 
+    assert pk == -1 and result == "new"
     assert _find(conn.executed, "nextval('synthetic_listing_id_seq')") is not None
     src = _find(conn.executed, "UPDATE listings SET source =")
     assert src is not None and src[1] == ("bazos", "https://bazos.cz/x", "218865547", -1)
@@ -205,9 +206,9 @@ def test_ingest_reuses_pk_on_refetch(monkeypatch):
         (lambda s: "SELECT property_id FROM listings" in s, [(3,)]),  # already linked
     ])
 
-    result = db.ingest_scraped_listing(conn, _listing())
+    pk, result = db.ingest_scraped_listing(conn, _listing())
 
-    assert result == "unchanged"
+    assert pk == -5 and result == "unchanged"
     assert _find(conn.executed, "nextval(") is None  # no new PK drawn
     assert _find(conn.executed, "UPDATE properties p SET") is not None  # rollup
 

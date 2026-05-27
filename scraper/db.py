@@ -192,8 +192,12 @@ def upsert_listing_with_property(
 
 def ingest_scraped_listing(
     conn: psycopg.Connection, listing: ScrapedListing,
-) -> UpsertResult:
+) -> tuple[int, UpsertResult]:
     """Write a non-sreality ScrapedListing through the same matcher path.
+
+    Returns `(pk, result)` — the assigned listing PK (synthetic negative for
+    non-sreality rows) so the caller can attribute images / further writes to
+    the right row, plus the upsert result.
 
     Tier 0: (source, source_id_native) is the idempotency key — a re-fetch
     reuses the existing synthetic PK and updates in place; first sight draws a
@@ -226,7 +230,7 @@ def ingest_scraped_listing(
                 (listing.source, listing.source_url, listing.source_id_native, pk),
             )
         _ensure_property(conn, pk, listing.source)
-    return result
+    return pk, result
 
 
 def _ensure_property(conn: psycopg.Connection, listing_pk: int, source: str) -> None:

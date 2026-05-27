@@ -41,16 +41,17 @@ def main(argv: list[str] | None = None) -> int:
 
     client = BazosClient(limiter=RateLimiter(args.rate))
     conn = None if args.dry_run else db.connect()
-    counts = {"new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0}
+    counts = {"new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0, "images": 0}
 
     try:
         details = _walk_index(client, conn, args)
         LOG.info("PLAN details=%d", len(details))
         _refetch_details(client, conn, args, details, canon_main, canon_type, counts)
         LOG.info(
-            "RUN done details=%d new=%d updated=%d unchanged=%d gone=%d errors=%d",
+            "RUN done details=%d new=%d updated=%d unchanged=%d gone=%d "
+            "errors=%d images=%d",
             len(details), counts["new"], counts["updated"],
-            counts["unchanged"], counts["gone"], counts["errors"],
+            counts["unchanged"], counts["gone"], counts["errors"], counts["images"],
         )
     finally:
         if conn is not None:
@@ -132,10 +133,17 @@ def _refetch_details(
                 category_main=canon_main, category_type=canon_type,
             )
             if conn is not None:
-                result = db.ingest_scraped_listing(conn, listing)
+                pk, result = db.ingest_scraped_listing(conn, listing)
+                image_urls = listing.raw.get("image_urls") or []
+                images = [
+                    {"url": url, "sequence": seq}
+                    for seq, url in enumerate(image_urls)
+                ]
+                inserted = db.record_images(conn, pk, images)
                 db.mark_portal_page_parsed(conn, page_id)
                 counts[result] += 1
-                LOG.info("DETAIL id=%s %s", sid, result)
+                counts["images"] += inserted
+                LOG.info("DETAIL id=%s %s images=%d", sid, result, inserted)
             else:
                 LOG.info("DETAIL id=%s parsed (dry-run)", sid)
         except Exception as exc:  # noqa: BLE001
