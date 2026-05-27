@@ -5,9 +5,9 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-26 18:40 UTC_
+_Last refreshed: 2026-05-27 07:14 UTC_
 
-**Branch:** `claude/serene-ptolemy-7nt9s`
+**Branch:** `claude/trusting-turing-PFYte`
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
@@ -16,16 +16,16 @@ _Last refreshed: 2026-05-26 18:40 UTC_
 **Last 10 commits:**
 
 ```
-4cdd4ce properties Slice 3a: insert-time Tier-1 matcher engine
-2f03094 properties Slice 2b: property-grain notifications + change-event matcher
-121f64c properties Slice 2a: property-grain Stats perf + four derived filters
-51868cd properties Slice 1: property-grain read path + recompute job
-4503c8d properties Slice 0: canonical parent table + scraper linkage
-b807918 docs: capture approved multi-portal + dedup design (Shape B)
-baf3ca4 scraper: rewrite parser/client for the live snake_case v1 API
-66c4456 Refresh sreality v1 JSON fixtures (real snake_case API shape)
-8d24939 Merge pull request #187 from waiff/claude/zealous-heisenberg-WFmCL
-e2df70e Merge pull request #185 from waiff/claude/zealous-heisenberg-WFmCL
+72f180e chore: refresh ROADMAP auto-status block
+c97207d Add self-maintaining GitHub Actions docs to Settings
+9bf13fa Merge pull request #191 from waiff/claude/zealous-heisenberg-WFmCL
+248b044 Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
+a0dbba7 chore: refresh ROADMAP auto-status block
+b4b8bf0 scraper: close the drift — new-listing budget reserve, split coverage, image cap
+fc8bae9 Merge pull request #186 from waiff/claude/eloquent-heisenberg-gXR9k
+af4def2 Merge origin/main into slices 0-3a (live v1 parser + property layer)
+4e6e555 Merge pull request #190 from waiff/claude/zealous-heisenberg-WFmCL
+c54dd1e Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
 ```
 
 <!-- END AUTO-STATUS -->

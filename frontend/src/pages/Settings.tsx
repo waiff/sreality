@@ -34,6 +34,7 @@ import {
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton } from '@/components/controls';
+import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
 export default function Settings() {
   return (
@@ -81,10 +82,249 @@ export default function Settings() {
 
       <section className="mt-10">
         <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
+          GitHub Actions
+        </h2>
+        <p className="text-sm text-[var(--color-ink-3)] mb-3">
+          Every workflow in <span className="font-mono">.github/workflows/</span>{' '}
+          — what it does, when it runs, the parameters you can set when running
+          it manually, and links to its run history and source. This list is
+          generated from the workflow files themselves and is kept in sync
+          automatically (the build fails if a workflow changes without
+          regenerating).
+        </p>
+        <WorkflowsSection />
+      </section>
+
+      <section className="mt-10">
+        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
           Appearance
         </h2>
         <ThemeToggle />
       </section>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* GitHub Actions (generated from .github/workflows/*.yml)               */
+/* -------------------------------------------------------------------- */
+
+function triggerLabels(doc: WorkflowDoc): string[] {
+  const labels: string[] = [];
+  for (const s of doc.schedules) labels.push(s.human);
+  if (doc.manual) labels.push('Manual');
+  if (doc.onPush) labels.push('On push');
+  if (doc.onPullRequest) labels.push('On pull request');
+  return labels.length ? labels : ['—'];
+}
+
+function WorkflowsSection() {
+  const sorted = [...WORKFLOW_DOCS].sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <div className="space-y-3">
+      {sorted.map((doc) => (
+        <WorkflowCard key={doc.filename} doc={doc} />
+      ))}
+    </div>
+  );
+}
+
+function WorkflowCard({ doc }: { doc: WorkflowDoc }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
+      <button
+        type="button"
+        className="w-full px-4 py-3 flex items-baseline justify-between gap-4 text-left"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <div className="min-w-0">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="font-medium">{doc.name}</span>
+            <span className="font-mono text-[0.7rem] text-[var(--color-ink-4)]">
+              {doc.filename}
+            </span>
+          </div>
+          <div className="text-xs text-[var(--color-ink-3)] mt-0.5 line-clamp-2">
+            {doc.description}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 whitespace-nowrap">
+          {triggerLabels(doc).slice(0, 2).map((label) => (
+            <TriggerBadge key={label} label={label} />
+          ))}
+          <span className="text-[0.7rem] text-[var(--color-ink-4)]" aria-hidden="true">
+            {open ? '▴' : '▾'}
+          </span>
+        </div>
+      </button>
+      {open && <WorkflowDetail doc={doc} />}
+    </div>
+  );
+}
+
+function TriggerBadge({ label }: { label: string }) {
+  return (
+    <span className="inline-block px-1.5 py-px text-[0.6rem] tracking-[0.08em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] border border-[var(--color-copper)]/30">
+      {label}
+    </span>
+  );
+}
+
+function WorkflowDetail({ doc }: { doc: WorkflowDoc }) {
+  return (
+    <div className="px-4 pt-2 pb-4 border-t border-[var(--color-rule-soft)] space-y-4">
+      <p className="text-sm text-[var(--color-ink-2)] leading-relaxed">
+        {doc.description}
+      </p>
+
+      <Field label="Triggers">
+        <ul className="text-sm text-[var(--color-ink-2)] space-y-0.5">
+          {doc.schedules.map((s) => (
+            <li key={s.cron}>
+              Scheduled · {s.human}{' '}
+              <span className="font-mono text-xs text-[var(--color-ink-4)]">
+                ({s.cron})
+              </span>
+            </li>
+          ))}
+          {doc.manual && <li>Manual · run from the Actions tab with the parameters below</li>}
+          {doc.onPush && (
+            <li>
+              On push{doc.paths ? ' (when matching paths change)' : ''}
+            </li>
+          )}
+          {doc.onPullRequest && (
+            <li>
+              On pull request{doc.paths ? ' (when matching paths change)' : ''}
+            </li>
+          )}
+          {doc.schedules.length === 0 &&
+            !doc.manual &&
+            !doc.onPush &&
+            !doc.onPullRequest && <li className="text-[var(--color-ink-3)]">None declared</li>}
+        </ul>
+        {doc.paths && (
+          <div className="mt-1 text-xs text-[var(--color-ink-3)]">
+            Paths:{' '}
+            {doc.paths.map((p) => (
+              <span
+                key={p}
+                className="font-mono text-[0.7rem] bg-[var(--color-paper-2)] px-1 py-px rounded-[var(--radius-xs)] mr-1"
+              >
+                {p}
+              </span>
+            ))}
+          </div>
+        )}
+      </Field>
+
+      {doc.inputs.length > 0 && (
+        <Field label="Parameters (when run manually)">
+          <div className="border border-[var(--color-rule)] rounded-[var(--radius-xs)] overflow-x-auto">
+            <table className="w-full text-sm border-collapse">
+              <thead>
+                <tr className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)] text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">
+                  <th className="text-left px-3 py-1.5 font-medium">Parameter</th>
+                  <th className="text-left px-3 py-1.5 font-medium">Type</th>
+                  <th className="text-left px-3 py-1.5 font-medium">Default</th>
+                  <th className="text-left px-3 py-1.5 font-medium">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                {doc.inputs.map((input) => (
+                  <tr
+                    key={input.name}
+                    className="border-b border-[var(--color-rule-soft)] last:border-b-0 align-top"
+                  >
+                    <td className="px-3 py-1.5">
+                      <span className="font-mono text-[0.78rem]">{input.name}</span>
+                      {input.required && (
+                        <span className="ml-1 text-[0.6rem] uppercase tracking-wide text-[var(--color-brick)]">
+                          required
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 text-xs text-[var(--color-ink-3)]">
+                      {input.type}
+                      {input.options && (
+                        <div className="mt-0.5 text-[var(--color-ink-4)]">
+                          {input.options.join(' | ')}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 font-mono text-xs text-[var(--color-ink-3)]">
+                      {input.default == null ? '—' : input.default}
+                    </td>
+                    <td className="px-3 py-1.5 text-xs text-[var(--color-ink-2)] max-w-[24rem]">
+                      {input.description || '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Field>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {doc.secrets.length > 0 && (
+          <Field label="Secrets used">
+            <div className="flex flex-wrap gap-1">
+              {doc.secrets.map((s) => (
+                <span
+                  key={s}
+                  className="font-mono text-[0.7rem] bg-[var(--color-paper-2)] px-1.5 py-px rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)]"
+                >
+                  {s}
+                </span>
+              ))}
+            </div>
+          </Field>
+        )}
+        <Field label="Run settings">
+          <ul className="text-xs text-[var(--color-ink-2)] space-y-0.5">
+            {doc.timeoutMinutes != null && (
+              <li>Timeout: {doc.timeoutMinutes} min</li>
+            )}
+            {doc.concurrencyGroup && (
+              <li>
+                Concurrency: <span className="font-mono">{doc.concurrencyGroup}</span>{' '}
+                {doc.cancelInProgress === false
+                  ? '(queues, never cancelled)'
+                  : doc.cancelInProgress === true
+                    ? '(cancels in-progress)'
+                    : ''}
+              </li>
+            )}
+            {doc.permissions && <li>Permissions: {doc.permissions}</li>}
+            {doc.timeoutMinutes == null &&
+              !doc.concurrencyGroup &&
+              !doc.permissions && (
+                <li className="text-[var(--color-ink-3)]">Defaults</li>
+              )}
+          </ul>
+        </Field>
+      </div>
+
+      <div className="flex items-center gap-4 pt-1">
+        <a
+          href={doc.runsUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          View run history ↗
+        </a>
+        <a
+          href={doc.sourceUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          View YAML ↗
+        </a>
+      </div>
     </div>
   );
 }
