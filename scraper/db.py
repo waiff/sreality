@@ -19,6 +19,8 @@ from typing import Any, Literal
 import psycopg
 from psycopg.types.json import Jsonb
 
+from scraper.scraped_listing import ScrapedListing
+
 LOG = logging.getLogger(__name__)
 
 UpsertResult = Literal["new", "updated", "unchanged"]
@@ -164,6 +166,231 @@ def upsert_listing(
     if inserted:
         return "new"
     return "unchanged" if unchanged else "updated"
+
+
+def upsert_listing_with_property(
+    conn: psycopg.Connection,
+    row: dict[str, Any],
+    raw_json: dict[str, Any],
+    content_hash: str,
+) -> UpsertResult:
+    """upsert_listing + maintain the listing's canonical `properties` parent.
+
+    The listing write and its property linkage commit in one transaction so a
+    partial failure can't leave a listing unlinked. New listings run through
+    the Tier-1 spatial matcher (`_match_or_create_property`); for sreality the
+    matcher is inert (every existing property already has a sreality child,
+    which the same-source exclusion skips), so this preserves the historical
+    singleton-per-listing behaviour until a second source lands.
+    """
+    sreality_id = row["sreality_id"]
+    with conn.transaction():
+        result = upsert_listing(conn, row, raw_json, content_hash)
+        _ensure_property(conn, sreality_id, "sreality")
+    return result
+
+
+def ingest_scraped_listing(
+    conn: psycopg.Connection, listing: ScrapedListing,
+) -> UpsertResult:
+    """Write a non-sreality ScrapedListing through the same matcher path.
+
+    Tier 0: (source, source_id_native) is the idempotency key — a re-fetch
+    reuses the existing synthetic PK and updates in place; first sight draws a
+    fresh negative PK from `synthetic_listing_id_seq`. The listing write +
+    source identity + Tier-1 property matching then commit in one transaction.
+    `upsert_listing` doesn't manage the source columns, so they're stamped
+    right after the write, before the matcher reads `source`.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sreality_id FROM listings "
+            "WHERE source = %s AND source_id_native = %s",
+            (listing.source, listing.source_id_native),
+        )
+        found = cur.fetchone()
+    if found is not None:
+        pk = int(found[0])
+    else:
+        with conn.cursor() as cur:
+            cur.execute("SELECT nextval('synthetic_listing_id_seq')")
+            pk = int(cur.fetchone()[0])
+
+    row = listing.to_row(pk)
+    with conn.transaction():
+        result = upsert_listing(conn, row, listing.raw or {}, listing.content_hash())
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE listings SET source = %s, source_url = %s, "
+                "source_id_native = %s WHERE sreality_id = %s",
+                (listing.source, listing.source_url, listing.source_id_native, pk),
+            )
+        _ensure_property(conn, pk, listing.source)
+    return result
+
+
+def _ensure_property(conn: psycopg.Connection, listing_pk: int, source: str) -> None:
+    """Attach the listing to its canonical property, or refresh it if linked.
+
+    Runs inside the caller's transaction (no own transaction block). A new
+    (unlinked) listing goes through the Tier-1 matcher; an already-linked one
+    gets a cheap rollup of its property.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listings SET source_id_native = sreality_id::text
+            WHERE sreality_id = %s AND source_id_native IS NULL
+            """,
+            (listing_pk,),
+        )
+        cur.execute(
+            "SELECT property_id FROM listings WHERE sreality_id = %s",
+            (listing_pk,),
+        )
+        found = cur.fetchone()
+        property_id = found[0] if found else None
+
+    if property_id is None:
+        _match_or_create_property(conn, listing_pk, source)
+    else:
+        _cheap_property_rollup(conn, listing_pk)
+
+
+def _match_or_create_property(
+    conn: psycopg.Connection, listing_pk: int, source: str,
+) -> None:
+    """Tier-1 insert-time matcher (multi-portal dedup design).
+
+    Probe `properties` for a spatial+price+area near-match that doesn't already
+    have a child from this `source`:
+      * exactly one hit  -> attach (this property gains a second source);
+      * zero hits        -> new singleton property (the historical behaviour);
+      * two or more hits  -> new singleton + enqueue each ambiguous pair into
+        `property_identity_candidates` for operator review. Never guess.
+
+    The same-source exclusion is what keeps this inert for sreality-only data:
+    a new sreality listing's neighbours all already carry a sreality child, so
+    nothing matches and it falls through to a fresh singleton.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT price_czk, area_m2 FROM listings WHERE sreality_id = %s",
+            (listing_pk,),
+        )
+        keyrow = cur.fetchone()
+    price = keyrow[0] if keyrow else None
+    area = keyrow[1] if keyrow else None
+
+    hits: list[int] = []
+    if price is not None and area is not None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.id FROM properties p
+                WHERE p.geom IS NOT NULL
+                  AND p.current_price_czk IS NOT NULL
+                  AND p.area_m2 IS NOT NULL
+                  AND ST_DWithin(
+                        p.geom,
+                        (SELECT geom FROM listings WHERE sreality_id = %(pk)s),
+                        20)
+                  AND p.current_price_czk BETWEEN %(price)s * 0.98 AND %(price)s * 1.02
+                  AND p.area_m2 BETWEEN %(area)s - 1 AND %(area)s + 1
+                  AND NOT EXISTS (
+                        SELECT 1 FROM listings c
+                        WHERE c.property_id = p.id AND c.source = %(source)s)
+                LIMIT 2
+                """,
+                {"pk": listing_pk, "price": price, "area": area, "source": source},
+            )
+            hits = [int(r[0]) for r in cur.fetchall()]
+
+    if len(hits) == 1:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
+                (hits[0], listing_pk),
+            )
+        _cheap_property_rollup(conn, listing_pk)
+        return
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO properties (
+                repr_listing_id, category_main, category_type, disposition,
+                area_m2, district, geom, current_price_czk,
+                is_active, first_seen_at, last_seen_at,
+                source_count, distinct_site_count
+            )
+            SELECT
+                sreality_id, category_main, category_type, disposition,
+                area_m2, district, geom, price_czk,
+                is_active, first_seen_at, last_seen_at, 1, 1
+            FROM listings WHERE sreality_id = %s
+            RETURNING id
+            """,
+            (listing_pk,),
+        )
+        new_pid = int(cur.fetchone()[0])
+        cur.execute(
+            "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
+            (new_pid, listing_pk),
+        )
+
+    if len(hits) >= 2:
+        markers = Jsonb({
+            "price_czk": price,
+            "area_m2": float(area) if area is not None else None,
+            "radius_m": 20,
+        })
+        with conn.cursor() as cur:
+            for h in hits:
+                lo, hi = (h, new_pid) if h < new_pid else (new_pid, h)
+                cur.execute(
+                    """
+                    INSERT INTO property_identity_candidates
+                        (left_property_id, right_property_id, tier, markers_matched)
+                    VALUES (%s, %s, 'tier1', %s)
+                    ON CONFLICT (left_property_id, right_property_id) DO NOTHING
+                    """,
+                    (lo, hi, markers),
+                )
+
+
+def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
+    """Insert-time rollup for one property: counts + lifecycle always; the
+    display columns are mirrored from this child only while the property is a
+    singleton. For multi-source properties the representative + price-history +
+    denormalised filter columns are owned by the async recompute job
+    (decision #2), so we leave them untouched here.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE properties p SET
+                source_count        = agg.cnt,
+                distinct_site_count = agg.dcnt,
+                last_seen_at        = agg.last_seen,
+                is_active           = agg.active,
+                current_price_czk   = CASE WHEN agg.cnt = 1 THEN l.price_czk     ELSE p.current_price_czk END,
+                area_m2             = CASE WHEN agg.cnt = 1 THEN l.area_m2        ELSE p.area_m2 END,
+                district            = CASE WHEN agg.cnt = 1 THEN l.district       ELSE p.district END,
+                disposition         = CASE WHEN agg.cnt = 1 THEN l.disposition    ELSE p.disposition END,
+                geom                = CASE WHEN agg.cnt = 1 THEN l.geom           ELSE p.geom END,
+                category_main       = CASE WHEN agg.cnt = 1 THEN l.category_main  ELSE p.category_main END,
+                category_type       = CASE WHEN agg.cnt = 1 THEN l.category_type  ELSE p.category_type END
+            FROM listings l
+            JOIN LATERAL (
+                SELECT count(*) AS cnt, count(DISTINCT source) AS dcnt,
+                       max(last_seen_at) AS last_seen, bool_or(is_active) AS active
+                FROM listings WHERE property_id = l.property_id
+            ) agg ON true
+            WHERE p.id = l.property_id AND l.sreality_id = %s
+            """,
+            (listing_pk,),
+        )
 
 
 def record_images(

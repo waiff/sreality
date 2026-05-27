@@ -66,7 +66,8 @@ def test_enum_constraints_match_enum_values() -> None:
 
 
 def test_pg_columns_subset_of_known_listings_columns() -> None:
-    """Every column-backed filter points at a real `listings` column.
+    """Every column-backed filter points at a real listings or
+    property-grain column.
 
     Hard-coded list mirrored from the migrations under `migrations/`.
     Update when the schema gains a new listings column; the registry
@@ -89,6 +90,11 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         # toolkit / matcher re-render the expression against the raw
         # columns. The PostgREST path treats it as a real column.
         "price_per_m2",
+        # Property-grain derived columns (migrations 091/095), exposed via
+        # properties_public and filtered by the Browse property-grain RPC.
+        # Not on `listings` — they aggregate across a property's children.
+        "distinct_site_count", "price_drop_count", "price_rise_count",
+        "max_price_drop_pct",
     }
     for f in fr.all_filters():
         if f.pg_column is None:
@@ -206,6 +212,11 @@ def test_min_max_pairs_have_companion() -> None:
         "min_parking_lots",
         "building_condition_level_min",
         "apartment_condition_level_min",
+        # Property-grain derived thresholds (migrations 091/095) — min-only.
+        "distinct_site_count_min",
+        "price_drop_count_min",
+        "price_rise_count_min",
+        "max_price_drop_pct_min",
     })
     ids = set(fr.REGISTRY.keys())
     for fid in ids:

@@ -1,0 +1,76 @@
+name: Recompute property stats (Slice 1)
+
+# Async recompute job for the canonical `properties` parent (multi-portal
+# dedup track, Slice 1). Attaches any straggler unlinked listings, then
+# recomputes every property's is_active rollup, source / site counts,
+# first/last-seen span, representative child, current price, and the
+# price-history aggregates (drop / rise counts, max drop %) from the union
+# of its children's snapshots.
+#
+# Decision #3: the property is_active rollup lives here, NOT in the
+# scraper's mid-walk mark_inactive, so a cross-source rollup never races a
+# per-category flip. A property's inactive flag therefore lags by at most
+# one job interval -- acceptable since notifications are at most daily.
+#
+# Idempotent + resumable: autocommit means each property-id batch commits
+# independently, so a timeout or cancel preserves completed batches and the
+# next run simply recomputes from current state.
+#
+# Cadence: hourly, matching the real ~hourly scrape cadence so property
+# is_active / current_price / stats stay fresh for Browse. Tune the cron
+# below or trigger manually from the Actions tab. The */15 scrape's
+# completeness rails (architectural rule #3) are unaffected by this job.
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: Properties recomputed per statement
+        required: true
+        default: "2000"
+        type: string
+      dry_run:
+        description: Report straggler + property counts and exit without writing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: recompute-property-stats
+  cancel-in-progress: false
+
+jobs:
+  recompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Run recompute
+        run: |
+          ARGS="--batch-size ${{ inputs.batch_size || '2000' }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python -m scripts.recompute_property_stats $ARGS

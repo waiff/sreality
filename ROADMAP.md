@@ -11,21 +11,21 @@ _Last refreshed: 2026-05-26 18:40 UTC_
 
 **Database:** unavailable this session (`SUPABASE_DB_URL` not set or unreachable).
 
-**Migrations on disk:** 95 files, latest `090_health_checks_index_walks_only.sql`.
+**Migrations on disk:** 102 files, latest `097_property_matcher_foundation.sql`.
 
 **Last 10 commits:**
 
 ```
-b87ac22 Add bazos index/detail fixtures to the fetch-fixtures pipeline
+4cdd4ce properties Slice 3a: insert-time Tier-1 matcher engine
+2f03094 properties Slice 2b: property-grain notifications + change-event matcher
+121f64c properties Slice 2a: property-grain Stats perf + four derived filters
+51868cd properties Slice 1: property-grain read path + recompute job
+4503c8d properties Slice 0: canonical parent table + scraper linkage
+b807918 docs: capture approved multi-portal + dedup design (Shape B)
 baf3ca4 scraper: rewrite parser/client for the live snake_case v1 API
 66c4456 Refresh sreality v1 JSON fixtures (real snake_case API shape)
 8d24939 Merge pull request #187 from waiff/claude/zealous-heisenberg-WFmCL
-7a52226 ci: add workflow to capture real sreality v1 JSON fixtures
 e2df70e Merge pull request #185 from waiff/claude/zealous-heisenberg-WFmCL
-6d06375 chore: refresh ROADMAP auto-status block
-453e236 chore: refresh ROADMAP auto-status block
-5d857ca ci: dump live search result-item shape in recon probe
-b87a4ff chore: refresh ROADMAP auto-status block
 ```
 
 <!-- END AUTO-STATUS -->
@@ -962,6 +962,14 @@ Small, high leverage; unblocks end-to-end house and commercial
 estimations using data that already exists in the database.
 
 ### Phase 2: Multi-portal ingestion (later, larger)
+> **Design locked (2026-05-25): see
+> [`docs/design/multi-portal-dedup.md`](docs/design/multi-portal-dedup.md).**
+> Multi-portal ingestion is now unified with the Dedup track into one
+> sliced feature. Chosen target portals: **bezrealitky, bazos,
+> reality.idnes**. Ingestion arrives in Slice 3 (after the Shape-B
+> property foundation + property-grain read/notification slices). The
+> scope notes below are background; the doc is the source of truth.
+
 Today's non-sreality flow is *parse on demand* via
 `source_dispatcher` (LLM call per URL, cached 7 days). To make
 bezrealitky / idnes / remax / maxima comparables (and other portals
@@ -1013,7 +1021,45 @@ The migration is significant; this track plans the path but does
 not commit to it without an operator decision on the canonical
 shape (see D1 below).
 
-### Phase D1: Strict cross-source dedup (proposed)
+> **Design locked (2026-05-25): see
+> [`docs/design/multi-portal-dedup.md`](docs/design/multi-portal-dedup.md).**
+> The operator's expanded requirements (cross-portal price-history
+> chart, link history, all-sources-inactive lifecycle, "listed on 3+
+> sites" / "price dropped 10%+" filters, daily property-change
+> notifications) outgrew Shape A. We now adopt **Shape B** (a thin
+> `properties` parent + existing `listings` as per-source children) and
+> treat D1 + D2 + Scraper Phase 2 as **one feature** shipped in six
+> independently-signed-off slices (0 foundation → 5 image tier). The
+> design doc is the source of truth; the Shape-A-as-default text in the
+> D1/D2 subsections below is **superseded** and kept for history. Each
+> slice still needs the per-slice operator sign-off listed in the doc
+> before its migration lands.
+>
+> **Progress:** Slices 0, 1, and 2a are **built and applied**. Slice 0
+> (migrations 091+092 + scraper wrapper) + Slice 1 (migrations 093+094, the
+> recompute job + hourly workflow, Browse Map/Table/Cards on
+> `properties_public`). Slice 2a (migration 095) denormalised the filter
+> columns onto `properties` so `browse_stats_properties` is perf-equivalent to
+> the listing-grain RPC, repointed the Stats tab to it, and added the four
+> derived filters (`distinct_site_count_min`, `price_drop_count_min`,
+> `price_rise_count_min`, `max_price_drop_pct_min`) through the registry into
+> Browse (Map/Table/Cards + Stats). Slice 2b (migration 096) moved
+> notifications to the property grain (dispatch once per real property, not per
+> portal listing), added a second matcher (`match_changes_once`) that fires
+> `price_drop` change-events for properties dropping in the lookback window,
+> and surfaced the four derived filters in Watchdog. Slice 3a (migration 097)
+> built the portal-agnostic insert-time Tier-1 matcher: a geo+price+area probe
+> (`ST_DWithin 20m`, price ±2%, area ±1m², same-source excluded) that attaches
+> a new listing to a near-matching property, creates a singleton on no match,
+> or enqueues a `property_identity_candidates` row on ambiguity — plus the
+> `ScrapedListing` contract + a negative synthetic-id sequence for non-sreality
+> rows. It's inert for today's sreality-only data (verified). **Next: Slice 3b**
+> — the first portal scraper (operator chose **bazos**): crawl its index/detail
+> into `ScrapedListing`s through `ingest_scraped_listing`. That's when
+> properties gain multiple children and the dedup/one-dot-per-property plumbing
+> from Slices 1–2 lights up.
+
+### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
 Catch the obvious duplicates: the same listing observed on two
 portals at once, or the same source-listing re-fetched under a
