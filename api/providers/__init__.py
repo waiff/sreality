@@ -10,6 +10,10 @@ protocol, registered in `api/main.py`.
 """
 
 from api.providers.base import (
+    BatchCapableProvider,
+    BatchResultItem,
+    BatchResultStatus,
+    BatchStatus,
     Block,
     Completion,
     CompletionProvider,
@@ -26,6 +30,10 @@ from api.providers.base import (
 )
 
 __all__ = [
+    "BatchCapableProvider",
+    "BatchResultItem",
+    "BatchResultStatus",
+    "BatchStatus",
     "Block",
     "Completion",
     "CompletionProvider",

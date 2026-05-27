@@ -111,6 +111,71 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
   },
   {
+    "filename": "condition_score_batches.yml",
+    "name": "Scraping: Sreality condition scoring (batch API)",
+    "description": "Phase 1.8b — async condition scoring via the Anthropic Message Batches API (50% cheaper than the synchronous condition_scores.yml job). Two modes, selected by the `mode` input:",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "submit a new batch, or ingest completed ones",
+        "required": true,
+        "type": "choice",
+        "default": "ingest",
+        "options": [
+          "ingest",
+          "submit"
+        ]
+      },
+      {
+        "name": "region_ids",
+        "description": "[submit] Comma-separated locality_region_id list (empty = no filter)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "[submit] Max listings to put in the batch",
+        "required": false,
+        "type": "string",
+        "default": "2000",
+        "options": null
+      },
+      {
+        "name": "n_images",
+        "description": "[submit] Images per listing (0 = text-only, matches production)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      },
+      {
+        "name": "max_age_days",
+        "description": "[submit] Only listings seen within this many days (0 = no filter)",
+        "required": false,
+        "type": "string",
+        "default": "30",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "condition-score-batches",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/condition_score_batches.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_score_batches.yml"
+  },
+  {
     "filename": "condition_scores.yml",
     "name": "Scraping: Sreality condition scoring (hourly + manual backfill)",
     "description": "Decoupled condition-scoring job. Scores building/apartment condition (1..5) for active listings whose latest snapshot doesn't yet have a row in `listing_condition_scores`, writing both the cache row AND the two listings.*_condition_level columns in one transaction per listing (autocommit — every successful score commits independently, so a timeout or cancel preserves the rows already done). Resumable: scored listings drop out of the next selection.",

@@ -732,6 +732,22 @@ kraje, limit 500, cap $10). Wraps `scripts/backfill_condition_scores.py`.
 The selection is portal-agnostic, so a future scraper landing rows in
 `listings`/`listing_snapshots` is scored by the same job.
 
+**Optional batch backend (Phase 1.8b).** `condition_score_batches.yml`
+runs the same scoring through the Anthropic **Message Batches API** (50%
+cheaper, async) in two modes: `submit` builds one batch from the pending
+selection (`scripts/submit_condition_batch.py`), `ingest` polls in-flight
+batches and writes completed results through the **shared**
+`toolkit.condition_scoring.persist_scoring_result` (identical cache row +
+guarded `listings.*` UPDATE as the synchronous scorer) plus one
+`llm_calls` row at the discounted cost (`scripts/ingest_condition_batch.py`).
+Tracking lives in `condition_score_batches` / `condition_score_batch_requests`
+(migration 098); re-ingest is idempotent. The workflow is **dispatch-only**
+until migration 098 is applied and a manual submit→ingest round-trip is
+confirmed; the synchronous `condition_scores.yml` remains the default
+steady-state path. The two scorers share one request builder
+(`build_scoring_request`) so the cached system+tools prefix is identical
+across both.
+
 The image backfill (`images.yml`, `--images-only`) is NOT a scrape run and
 does **not** write a `scrape_runs` row — only index walks do — so "last
 scrape", the liveness check, and reconciliation track real walks.

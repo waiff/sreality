@@ -191,6 +191,37 @@ class LLMClient:
             completion=completion,
         )
 
+    def record_external_call(
+        self,
+        *,
+        called_for: CalledFor,
+        provider: str,
+        model: str,
+        usage: Usage,
+        cost_usd: float,
+        duration_ms: int = 0,
+        estimation_run_id: int | None = None,
+    ) -> int:
+        """Record an `llm_calls` row for a call this client didn't dispatch.
+
+        Used by the async batch ingester: the Message Batches API runs the
+        request server-side, so there's no synchronous `complete()` here —
+        the ingester computes the (batch-discounted) cost from the returned
+        usage and logs it through this method to keep the audit trail and
+        daily-spend warning intact.
+        """
+        call_id = self._record_call(
+            called_for=called_for,
+            provider=provider,
+            model=model,
+            usage=usage,
+            cost_usd=cost_usd,
+            duration_ms=duration_ms,
+            estimation_run_id=estimation_run_id,
+        )
+        self._check_daily_cost(just_recorded=cost_usd)
+        return call_id
+
     def resolve_model(self, key: str = "llm_parse_model") -> str:
         with self._conn.cursor() as cur:
             cur.execute(

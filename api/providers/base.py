@@ -10,6 +10,7 @@ touching `api/agent.py`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
@@ -92,6 +93,33 @@ class Completion:
     raw: Any = field(repr=False, default=None)
 
 
+# --- Batch (async) result types -------------------------------------------
+
+BatchResultStatus = Literal["succeeded", "errored", "canceled", "expired"]
+
+
+@dataclass(frozen=True)
+class BatchStatus:
+    """Snapshot of an in-flight provider batch."""
+    provider_batch_id: str
+    ended: bool
+    raw_status: str
+    counts: dict[str, int]
+
+
+@dataclass(frozen=True)
+class BatchResultItem:
+    """One request's outcome within a completed batch.
+
+    `completion` is populated only when `status == "succeeded"`;
+    `error` carries a message for every non-success status.
+    """
+    custom_id: str
+    status: BatchResultStatus
+    completion: Completion | None = None
+    error: str | None = None
+
+
 # --- Pricing --------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -155,3 +183,30 @@ class CompletionProvider(Protocol):
     ) -> Completion: ...
 
     def price_for(self, model: str) -> ModelPrice | None: ...
+
+
+class BatchCapableProvider(CompletionProvider, Protocol):
+    """A provider that also supports the async Message Batches API.
+
+    Only Anthropic implements this today. Callers that need batch
+    submission type against this protocol; the synchronous agent loop
+    only needs `CompletionProvider`.
+    """
+
+    def build_batch_request_params(
+        self,
+        *,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str,
+        max_tokens: int = 4096,
+    ) -> dict[str, Any]: ...
+
+    def submit_batch(self, items: list[tuple[str, dict[str, Any]]]) -> str: ...
+
+    def poll_batch(self, provider_batch_id: str) -> BatchStatus: ...
+
+    def iter_batch_results(
+        self, provider_batch_id: str
+    ) -> "Iterator[BatchResultItem]": ...

@@ -5,7 +5,7 @@
      Do not hand-edit; changes will be lost. The narrative phase entries
      below the block are the manual sequencing source of truth. -->
 
-_Last refreshed: 2026-05-27 08:43 UTC_
+_Last refreshed: 2026-05-27 09:25 UTC_
 
 **Branch:** `claude/serene-thompson-7AlGZ`
 
@@ -16,6 +16,8 @@ _Last refreshed: 2026-05-27 08:43 UTC_
 **Last 10 commits:**
 
 ```
+1effeaa scraper: consolidate into one hourly pipeline + decouple condition scoring
+9375973 Merge pull request #193 from waiff/claude/serene-thompson-7AlGZ
 6d855b3 chore: refresh ROADMAP auto-status block
 ae35da8 chore: refresh ROADMAP auto-status block
 3bd48b4 Merge pull request #192 from waiff/claude/trusting-turing-PFYte
@@ -24,8 +26,6 @@ adb8760 chore: refresh ROADMAP auto-status block
 c97207d Add self-maintaining GitHub Actions docs to Settings
 9bf13fa Merge pull request #191 from waiff/claude/zealous-heisenberg-WFmCL
 248b044 Merge remote-tracking branch 'origin/main' into claude/zealous-heisenberg-WFmCL
-a0dbba7 chore: refresh ROADMAP auto-status block
-b4b8bf0 scraper: close the drift — new-listing budget reserve, split coverage, image cap
 ```
 
 <!-- END AUTO-STATUS -->
@@ -959,11 +959,25 @@ phase can never slow the walk; its selection is portal-agnostic, ready to
 score future scrapers. `images.yml` repurposed as the deep backlog drain
 that also reaches inactive/historical images (the hourly run covers
 active). Liveness (migration 090) keys off any `index_pages>0` walk, not
-`run_type`, so no schema change was needed. **Next (Phase 1.8b, deferred):**
-swap the scoring job's per-listing synchronous LLM calls for the Anthropic
-Message Batches API (~50% cheaper, async) — refactor
-`score_listing_condition` into build/persist halves, add a submitter +
-`condition_score_batches` tracking migration + a poller/ingester job.
+`run_type`, so no schema change was needed.
+
+### Phase 1.8b: Async condition scoring via the Batch API (code shipped; migration pending)
+Optional second scoring backend on the Anthropic **Message Batches API**
+(50% cheaper, async). `score_listing_condition` was split into a shared
+`build_scoring_request` (one request builder, so the cached system+tools
+prefix is identical across sync and batch) and `persist_scoring_result`
+(the cache row + guarded `listings.*` UPDATE). `AnthropicProvider` gained
+`submit_batch` / `poll_batch` / `iter_batch_results` (+ neutral
+`BatchStatus` / `BatchResultItem` types). Two scripts —
+`submit_condition_batch.py` (build + submit a batch, dedup against
+in-flight requests) and `ingest_condition_batch.py` (poll, persist
+results idempotently, record `llm_calls` at the discounted cost) — drive
+the new `condition_score_batches.yml` workflow (dispatch-only:
+`submit` / `ingest` modes). Tracking tables are migration **098**
+(`condition_score_batches`, `condition_score_batch_requests`). **Pending:**
+apply migration 098 + confirm a manual submit→ingest round-trip before
+enabling a scheduled `ingest`; the synchronous `condition_scores.yml`
+stays the default steady-state path.
 
 ### Phase 1.5b: Multi-category UI defaults (next, follow-up)
 The data is now broad, but the analytical and estimation surfaces
