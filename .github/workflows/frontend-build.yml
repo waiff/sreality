@@ -1,5 +1,10 @@
 name: Frontend build
 
+# Builds the frontend/ Vite SPA on every push or pull request that touches
+# frontend code, to catch build/type errors before deploy. Type-checks,
+# builds the production bundle, and reports gzipped chunk sizes (warning if
+# the initial JS chunk exceeds the 500 kB budget). Does not deploy.
+
 on:
   push:
     paths:
