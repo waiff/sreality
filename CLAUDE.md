@@ -52,10 +52,12 @@ row contract; `scraper/hashing.py` strips the volatile fields (`params.stats` vi
 counter, `note`/`rus`/`rusReply`).
 
 **Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
-`bazos_parser.py`, `bazos_main.py`, workflow `scrape_bazos.yml` — a manual pilot, not yet
-scheduled) lands bazos listings into the same `listings`/`listing_snapshots` contract,
+`bazos_parser.py`, `bazos_main.py`, workflow `scrape_bazos.yml` — a scheduled pilot, every
+6h) lands bazos listings into the same `listings`/`listing_snapshots` contract,
 tagged `source='bazos'`. Raw HTML is staged in `portal_raw_pages` (migration 099) before
-parsing.
+parsing. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
+(page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
+sreality.
 
 ## Territories
 
@@ -387,6 +389,15 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     insert-time Tier-1 matcher (geo + price + area proximity) seeds candidate groupings.
     Today sreality + bazos ingest; further portals follow the design in
     `docs/design/multi-portal-dedup.md`. Frontend Browse reads `properties_public`.
+    The dedup feature is **complete**: beyond Tier-1, a daily Tier-2 fuzzy sweep
+    (`scripts/dedup_sweep.py`) generates cross-source candidate pairs (150m + disposition +
+    price/area bands) and **auto-merges only the high-confidence few** (≤30m + an independent
+    corroborator — near-exact address, low-Hamming `images.phash`, or vision); the rest queue
+    on the operator's `/dedup` review page. Merges are **reversible**: `toolkit/property_identity.py`
+    re-points `listings.property_id` onto the survivor + soft-retires the loser
+    (`properties.status='merged_away'`) and logs `property_merge_events` so `unmerge_group` is a
+    deterministic replay. Cross-source matching is **geo-based**, so a portal's listings need
+    coordinates to participate. Region stats also read the property grain (migration 103).
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
     in `notification_subscriptions` (migration 056); the background matcher in
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
@@ -693,9 +704,12 @@ hand-edit the file.
 ## How to manually trigger the scrapers
 
 The sreality scrape (`scrape.yml`, "Scraping: Sreality hourly run") and the bazos crawl
-(`scrape_bazos.yml`, "Scraping: Bazos crawler (manual pilot)" — dispatch-only, not yet
-scheduled) can both be run from the terminal or the browser. You (or Claude) can run them
-directly:
+(`scrape_bazos.yml`, "Scraping: Bazos crawler (pilot)" — every 6h + dispatch) can both be
+run from the terminal or the browser. The cross-source dedup track adds three more
+scheduled/dispatch workflows: `recompute_property_stats.yml` (hourly property rollups),
+`dedup_sweep.yml` (daily Tier-2 cross-source sweep + auto-merge), and
+`compute_image_phash.yml` (6-hourly perceptual-hash backfill). You (or Claude) can run any of
+them directly:
 - CLI: `gh workflow run scrape.yml --ref <branch>` (add `-f` for optional flags). Watch with
   `gh run list --workflow=scrape.yml` then `gh run watch`.
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional

@@ -1125,11 +1125,23 @@ shape (see D1 below).
 > `scraper/bazos_main.py` (index→detail→stage-in-`portal_raw_pages`→parse→
 > `ingest_scraped_listing`, no `mark_inactive` on a partial walk), and the
 > manual `scrape_bazos.yml` workflow. `portal_raw_pages` decouples fetch from
-> parse so pages re-parse without re-fetching. **Next: run the capped bazos
-> pilot** (prodej/byty), confirm rows land with `source='bazos'` and that the
-> Tier-1 matcher's cross-source attaches behave as expected (bazos's
-> approximate coords/free-text area mostly form singletons at first), then
-> widen scope + add a cron cadence.
+> parse so pages re-parse without re-fetching.
+>
+> **Complete (2026-05-28).** The remaining slices shipped: the merge/unmerge core
+> + review API (migration 100, `toolkit/property_identity.py`, `/dedup/*`), the
+> Tier-2 fuzzy sweep + auto-merge classifier (`scripts/dedup_sweep.py`,
+> `dedup_sweep.yml`), the `/dedup` operator review UI, the Listing Detail
+> cross-source price chart + "listed on N sites" panel, the image pHash tier
+> (migration 102, `scraper/image_phash.py`, `compute_image_phash.yml`), and region
+> stats on the property grain (migration 103). Auto-merge is conservative —
+> only ≤30m + an independent corroborator (near-exact address, low-Hamming pHash,
+> or vision); everything else queues. Every merge is reversible via `unmerge_group`.
+> The bazos pilot is now **scheduled (every 6h)** and lands data after three pilot
+> fixes (return-the-PK for image attribution; cast geom params so null-coord rows
+> insert; extract coords from the page-wide maps link). Cross-source matching is
+> geo-based, so it lights up as bazos coordinates accumulate; the sweep already
+> produces real bazos↔sreality candidate pairs. Next portals (bezrealitky / idnes)
+> reuse the same `ScrapedListing` → `ingest_scraped_listing` framework.
 
 ### Phase D1: Strict cross-source dedup (proposed — superseded by the design doc above)
 
