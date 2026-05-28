@@ -39,7 +39,8 @@ from typing import Any
 
 import requests
 
-from scraper import db, hashing, image_storage, parser
+from scraper import db, hashing, image_storage, parser, portal_runner
+from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import (
     DISTRICT_IDS,
@@ -55,13 +56,6 @@ DEFAULT_IMAGE_WORKERS = 32
 # the (single-egress-IP) API. Tunable per workflow / dialable down on blocks.
 DEFAULT_DETAIL_WORKERS = 4
 DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
-
-# Phase 2 detail-drain: how many claimed listings the batched writer flushes per
-# transaction, and how many queue rows a single claim grabs. The flush size
-# bounds the per-batch jsonb payload + lock span; the claim chunk just paces the
-# fetch pool.
-DETAIL_BATCH_SIZE = 100
-DRAIN_CLAIM_CHUNK = 500
 
 # A full index walk that collected at least this fraction of the total the
 # API reported (result_size) is treated as complete enough to drive
@@ -714,148 +708,86 @@ def _run_full(
     return (0, scrape_agg)
 
 
-def _run_index_walk(dry_run: bool) -> tuple[int, dict[str, Any]]:
-    """Phase 2 index-walk: walk every category, touch + mark_inactive, and
-    enqueue new/price-changed ids into listing_detail_queue. No detail fetch —
-    the detail-drain (`_run_detail_drain`) consumes the queue asynchronously.
-
-    Mirrors `_run_full`'s per-category loop + completeness-guarded mark_inactive
-    + reconciliation, but the slow DETAIL phase is replaced by an enqueue. Uses
-    the transaction pooler (bulk set-based statements, no per-listing hot loop).
-    Records run_type='index' with index_pages>0 so Health liveness keys off it.
+class SrealityPortal:
+    """The sreality portal as a Portal (Phase 4): the seams the generic
+    portal_runner needs, wrapping this module's existing helpers so sreality's
+    behavior is unchanged. The district-split (the one sanctioned per-portal
+    customization, forced by the deep-pagination cap) stays inside walk_category.
     """
-    total_pages = 0
-    total_index = 0
-    total_enqueued = 0
-    category_aggregates: list[dict[str, Any]] = []
-    limiter = RateLimiter(DEFAULT_DETAIL_RATE)
-    conn = None if dry_run else db.connect()
-    categories = _rotated_categories(CATEGORIES, datetime.now(timezone.utc).hour)
 
-    try:
-        for category_main, category_type in categories:
-            cm_text = parser.CATEGORY_MAIN[category_main]
-            ct_text = parser.CATEGORY_TYPE[category_type]
-            LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
-            try:
-                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
-                    _walk_category_split(
-                        category_main,
-                        category_type,
-                        limiter=limiter,
-                        conn=conn,
-                        cat_limit=None,
-                        dry_run=dry_run,
-                        refetch_budget=[None],
-                        cat_refetch_cap=None,
-                        detail_workers=1,
-                        enqueue_only=True,
-                    )
-                )
-            except Exception as exc:
-                LOG.exception(
-                    "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
-                    cm_text, ct_text, exc,
-                )
-                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
-                    set(), {}, None, 0, False,
-                )
-            total_pages += cat_pages
-            total_index += len(seen_ids)
-            total_enqueued += cat_counts.get("enqueued", 0)
+    source = "sreality"
+    supports_complete_walk = True
+    index_rate = DEFAULT_DETAIL_RATE
 
-            inactive = 0
-            if conn is not None:
-                if complete:
-                    inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
-                    LOG.info(
-                        "INACTIVE cm=%s ct=%s marked=%d collected=%d result_size=%s",
-                        cm_text, ct_text, inactive, len(seen_ids), cat_result_size,
-                    )
-                else:
-                    LOG.warning(
-                        "INACTIVE skipped cm=%s ct=%s: walk looks incomplete "
-                        "(collected=%d result_size=%s); not flipping to avoid "
-                        "false delisting",
-                        cm_text, ct_text, len(seen_ids), cat_result_size,
-                    )
+    def categories(self) -> list[tuple[int, int]]:
+        return list(_rotated_categories(CATEGORIES, datetime.now(timezone.utc).hour))
 
-            active_db: int | None = None
-            if conn is not None:
-                try:
-                    active_db = db.active_count(conn, cm_text, ct_text)
-                except Exception as exc:
-                    LOG.warning(
-                        "active_count failed cm=%s ct=%s: %s", cm_text, ct_text, exc
-                    )
-            LOG.info(
-                "RECONCILE cm=%s ct=%s sreality=%s collected=%d active=%s",
-                cm_text, ct_text, cat_result_size, len(seen_ids), active_db,
+    def category_labels(self, category: tuple[int, int]) -> tuple[str, str]:
+        cm, ct = category
+        return parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct]
+
+    def connect_index(self) -> Any:
+        return db.connect()
+
+    def connect_drain(self) -> Any:
+        # Session-mode pooler for the batched prepared writes (Phase 1 win).
+        return db.connect_session()
+
+    def walk_category(
+        self, category: tuple[int, int], conn: Any, dry_run: bool, limiter: RateLimiter,
+    ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
+        cm, ct = category
+        return _walk_category_split(
+            cm, ct, limiter=limiter, conn=conn, cat_limit=None, dry_run=dry_run,
+            refetch_budget=[None], cat_refetch_cap=None, detail_workers=1,
+            enqueue_only=True,
+        )
+
+    def mark_inactive(self, conn: Any, category: tuple[int, int], seen: set[int]) -> int:
+        cm, ct = category
+        return db.mark_inactive(
+            conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct], seen
+        )
+
+    def active_count(self, conn: Any, category: tuple[int, int]) -> int | None:
+        cm, ct = category
+        return db.active_count(conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct])
+
+    def make_client(self, limiter: RateLimiter) -> SrealityClient:
+        return _build_client(CATEGORIES[0][0], CATEGORIES[0][1], limiter=limiter)
+
+    def fetch_detail(
+        self, client: SrealityClient, native_id: str, detail_ref: str | None,
+    ) -> DrainItem:
+        # sreality's native_id IS the sreality_id as text; fetch by the int id.
+        fr = _fetch_detail(client, int(native_id))
+        error = f"{fr.source}: {fr.error}" if fr.kind == "error" else None
+        return DrainItem(native_id=str(native_id), kind=fr.kind, payload=fr, error=error)
+
+    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        return db.write_detail_batch(conn, [it.payload for it in items])
+
+    def mark_gone(self, conn: Any, native_id: str) -> None:
+        sid = int(native_id)
+        db.mark_listing_inactive(conn, sid)
+        db.clear_fetch_failure(conn, sid)
+
+    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
+        db.record_fetch_failure(conn, int(native_id), message)
+
+    def claimable_count(self, conn: Any) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM listing_detail_queue "
+                "WHERE source = 'sreality' AND claimed_at IS NULL AND given_up = false"
             )
-
-            category_aggregates.append({
-                "category_main": cm_text,
-                "category_type": ct_text,
-                "listings_found_new":   cat_counts.get("found_new", 0),
-                "listings_scraped_new": 0,
-                "listings_inactive":    inactive,
-                "listings_enqueued":    cat_counts.get("enqueued", 0),
-                "images_discovered":    0,
-                "images_stored":        0,
-                "sreality_result_size": cat_result_size,
-                "collected":            len(seen_ids),
-                "active_db":            active_db,
-            })
-
-        LOG.info("INDEX total=%d pages=%d enqueued=%d", total_index, total_pages, total_enqueued)
-    finally:
-        if conn is not None:
-            conn.close()
-
-    LOG.info(
-        "RUN done pages=%d enqueued=%d inactive=%d",
-        total_pages, total_enqueued,
-        sum(c["listings_inactive"] for c in category_aggregates),
-    )
-    scrape_agg: dict[str, Any] = {
-        "index_pages":          total_pages,
-        "listings_found_new":   sum(c["listings_found_new"] for c in category_aggregates),
-        "listings_scraped_new": 0,
-        "listings_updated":     0,
-        "listings_inactive":    sum(c["listings_inactive"] for c in category_aggregates),
-        "images_discovered":    0,
-        "errors":               0,
-        "by_category":          category_aggregates,
-    }
-    return (0, scrape_agg)
+            return int(cur.fetchone()[0])
 
 
-def _flush_drain_batch(
-    conn: Any,
-    buffer: list[FetchResult],
-    counts: dict[str, int],
-    dry_run: bool,
-) -> None:
-    """Write a buffered batch of ok FetchResults and dequeue them. In dry-run,
-    log and leave the queue untouched (no claim is taken in dry-run anyway)."""
-    if not buffer:
-        return
-    if dry_run:
-        for fr in buffer:
-            LOG.info(
-                "DRY-RUN id=%d hash=%s images=%d",
-                fr.sid, (fr.content_hash or "")[:8], len(fr.images or []),
-            )
-        return
-    res = db.write_detail_batch(conn, buffer)
-    for k in ("new", "updated", "unchanged", "images_discovered"):
-        counts[k] = counts.get(k, 0) + res[k]
-    db.complete_detail(conn, "sreality", [str(fr.sid) for fr in buffer])
-    LOG.info(
-        "DRAIN flush size=%d new=%d updated=%d unchanged=%d images=%d",
-        len(buffer), res["new"], res["updated"], res["unchanged"],
-        res["images_discovered"],
-    )
+def _run_index_walk(dry_run: bool) -> tuple[int, dict[str, Any]]:
+    """Sreality index-walk via the generic portal_runner (Phase 4). Records
+    run_type='index' with index_pages>0 so Health liveness keys off it."""
+    return portal_runner.run_index_walk(SrealityPortal(), dry_run)
 
 
 def _run_detail_drain(
@@ -864,103 +796,12 @@ def _run_detail_drain(
     detail_workers: int = DEFAULT_DETAIL_WORKERS,
     detail_rate: float = DEFAULT_DETAIL_RATE,
 ) -> tuple[int, dict[str, Any]]:
-    """Phase 2 detail-drain: claim ids from listing_detail_queue, fetch their
-    details on a worker pool, and write them in batches via write_detail_batch.
-
-    Bounded by `max_claims` (claims per run) so it finalizes inside the workflow
-    timeout; the queue persists across runs so progress is never lost. Uses the
-    Session-mode pooler for the batched prepared writes. Records run_type='detail'
-    with index_pages=0 (it never walks the index).
-    """
-    counts: dict[str, int] = {
-        "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
-        "images_discovered": 0,
-    }
-    limiter = RateLimiter(detail_rate)
-    client = _build_client(CATEGORIES[0][0], CATEGORIES[0][1], limiter=limiter)
-
-    if dry_run:
-        with db.connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT count(*) FROM listing_detail_queue "
-                "WHERE claimed_at IS NULL AND given_up = false"
-            )
-            claimable = int(cur.fetchone()[0])
-        LOG.info("DRAIN dry-run claimable=%d max_claims=%s; exit", claimable, max_claims)
-        return (0, {})
-
-    conn = db.connect_session()
-    total_claimed = 0
-    buffer: list[FetchResult] = []
-    try:
-        reclaimed = db.reclaim_stale_claims(conn, "sreality")
-        if reclaimed:
-            LOG.info("DRAIN reclaimed stale claims=%d", reclaimed)
-        LOG.info(
-            "DRAIN starting max_claims=%s workers=%d batch=%d",
-            max_claims, detail_workers, DETAIL_BATCH_SIZE,
-        )
-        while max_claims is None or total_claimed < max_claims:
-            chunk = DRAIN_CLAIM_CHUNK
-            if max_claims is not None:
-                chunk = min(chunk, max_claims - total_claimed)
-            claimed = db.claim_detail_batch(conn, "sreality", chunk)
-            if not claimed:
-                break
-            total_claimed += len(claimed)
-            with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
-                # sreality's native_id IS the sreality_id as text.
-                futures = {
-                    pool.submit(_fetch_detail, client, int(native_id)): native_id
-                    for native_id, _ref, _price in claimed
-                }
-                for future in as_completed(futures):
-                    fr = future.result()  # never raises
-                    if fr.kind == "ok":
-                        buffer.append(fr)
-                        if len(buffer) >= DETAIL_BATCH_SIZE:
-                            _flush_drain_batch(conn, buffer, counts, dry_run)
-                            buffer = []
-                    elif fr.kind == "gone":
-                        LOG.info("DETAIL id=%d gone (is_active=false)", fr.sid)
-                        try:
-                            db.mark_listing_inactive(conn, fr.sid)
-                        except Exception as exc:
-                            LOG.warning("could not mark id=%d inactive: %s", fr.sid, exc)
-                        db.clear_fetch_failure(conn, fr.sid)
-                        db.complete_detail(conn, "sreality", [str(fr.sid)])
-                        counts["gone"] += 1
-                    else:  # error: keep the queue row, bump attempts, log failure
-                        LOG.error("DETAIL id=%d %s error: %s", fr.sid, fr.source, fr.error)
-                        db.record_fetch_failure(conn, fr.sid, f"{fr.source}: {fr.error}")
-                        db.fail_detail(conn, "sreality", [str(fr.sid)], f"{fr.source}: {fr.error}")
-                        counts["errors"] += 1
-            LOG.info(
-                "DRAIN progress claimed=%d new=%d updated=%d unchanged=%d "
-                "gone=%d errors=%d buffered=%d",
-                total_claimed, counts["new"], counts["updated"],
-                counts["unchanged"], counts["gone"], counts["errors"], len(buffer),
-            )
-        _flush_drain_batch(conn, buffer, counts, dry_run)
-    finally:
-        conn.close()
-
-    LOG.info(
-        "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d errors=%d claimed=%d",
-        counts["new"], counts["updated"], counts["unchanged"],
-        counts["gone"], counts["errors"], total_claimed,
+    """Sreality detail-drain via the generic portal_runner (Phase 4): claim from
+    listing_detail_queue, fetch on a worker pool, write batched via
+    write_detail_batch. Records run_type='detail' with index_pages=0."""
+    return portal_runner.run_detail_drain(
+        SrealityPortal(), max_claims, dry_run, detail_workers, detail_rate,
     )
-    scrape_agg: dict[str, Any] = {
-        "index_pages":          0,
-        "listings_found_new":   counts["new"],
-        "listings_scraped_new": counts["new"],
-        "listings_updated":     counts["updated"],
-        "listings_inactive":    counts["gone"],
-        "images_discovered":    counts["images_discovered"],
-        "errors":               counts["errors"],
-        "by_category":          [],
-    }
-    return (0, scrape_agg)
 
 
 def _walk_complete(collected: int, result_size: int | None) -> bool:
