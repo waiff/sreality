@@ -1,5 +1,13 @@
-name: "Scraping: Sreality hourly run"
+name: "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)"
 
+# DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live
+# pipeline is now the cadence split — index_walk.yml (fast, frequent, marks
+# delistings + enqueues) feeds detail_drain.yml (async, batched writes). This
+# combined index+detail walk (_run_full) is kept intact as the instant revert:
+# if the split misbehaves, re-add `schedule: - cron: "0 * * * *"` here and
+# disable the two new crons — no code change, the proven pipeline is back. It
+# also remains the way to run an ad-hoc full walk by hand.
+#
 # The single scrape pipeline. Each run walks the COMPLETE index of all six
 # category pairs (byt + dum + komercni × pronajem + prodej), so:
 #   - newly-listed properties surface, and
@@ -28,23 +36,18 @@ name: "Scraping: Sreality hourly run"
 # what pushed runs past the timeout once the CDN fix made downloads succeed.
 # Condition scoring is likewise decoupled (condition_scores.yml).
 #
-# CADENCE: hourly (0 * * * *). Each run is a complete walk; hourly keeps a
-# steady, polite request volume against sreality. GitHub throttles scheduled
-# workflows (worse overnight), so effective cadence may be slightly slower;
-# the Health liveness check is tuned to this (warn >90 min, fail >180 min).
-# For tighter cadence configure the optional SCRAPE_CHAIN_TOKEN PAT (see the
-# "Chain next run" step). Recorded as run_type='full' (auto, since no --limit).
+# CADENCE: none — dispatch-only (the Phase-2 split carries the schedule). When
+# used as the revert fallback, re-add `schedule: - cron: "0 * * * *"` below.
+# Each run is a complete walk; mark_inactive runs every tick (no --limit).
+# Recorded as run_type='full' (auto, since no --limit).
 #
 # Concurrency: cancel-in-progress=false so a long tick is never killed
-# mid-walk; the next cron tick queues behind it instead of overlapping.
+# mid-walk; the next dispatch queues behind it instead of overlapping.
 #
-# Cron triggers cannot pass inputs — they always fall back to the defaults
-# below. workflow_dispatch lets the operator override any cap, bump
-# concurrency, or skip the image phase for ad-hoc runs.
+# workflow_dispatch lets the operator override any cap, bump concurrency, or
+# skip the image phase for ad-hoc runs.
 
 on:
-  schedule:
-    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       limit:

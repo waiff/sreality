@@ -56,6 +56,13 @@ DEFAULT_IMAGE_WORKERS = 32
 DEFAULT_DETAIL_WORKERS = 4
 DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
 
+# Phase 2 detail-drain: how many claimed listings the batched writer flushes per
+# transaction, and how many queue rows a single claim grabs. The flush size
+# bounds the per-batch jsonb payload + lock span; the claim chunk just paces the
+# fetch pool.
+DETAIL_BATCH_SIZE = 100
+DRAIN_CLAIM_CHUNK = 500
+
 # A full index walk that collected at least this fraction of the total the
 # API reported (result_size) is treated as complete enough to drive
 # mark_inactive. Below it, the walk likely truncated and flipping unseen
@@ -120,16 +127,37 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
+    if args.index_only or args.drain_only:
+        if args.index_only and args.drain_only:
+            LOG.error("--index-only and --drain-only are mutually exclusive")
+            return 2
+        if (
+            args.images_only
+            or args.detail_only is not None
+            or args.limit is not None
+        ):
+            LOG.error(
+                "--index-only/--drain-only are incompatible with "
+                "--images-only, --detail-only, and --limit"
+            )
+            return 2
+
     # Open a scrape_runs row for any non-dry-run invocation that actually
     # scrapes the index. The image-only backfill (images.yml) is NOT a
     # scrape run — recording it here polluted "last scrape" / the liveness
     # check / reconciliation with index_pages=0 rows, so it's excluded.
     run_id: int | None = None
     if not args.dry_run and not args.images_only:
-        run_type = args.run_type or ("delta" if (
-            args.limit is not None
-            or args.detail_only is not None
-        ) else "full")
+        if args.run_type:
+            run_type = args.run_type
+        elif args.index_only:
+            run_type = "index"
+        elif args.drain_only:
+            run_type = "detail"
+        elif args.limit is not None or args.detail_only is not None:
+            run_type = "delta"
+        else:
+            run_type = "full"
         try:
             with db.connect() as conn:
                 run_id = db.scrape_run_start(conn, run_type)
@@ -146,6 +174,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.images_only:
             rc = 0
+        elif args.index_only:
+            rc, scrape_agg = _run_index_walk(dry_run=args.dry_run)
+        elif args.drain_only:
+            rc, scrape_agg = _run_detail_drain(
+                max_claims=args.max_detail_refetches,
+                dry_run=args.dry_run,
+                detail_workers=args.detail_workers,
+                detail_rate=args.detail_rate,
+            )
         elif args.detail_only is not None:
             rc, scrape_agg = _run_detail_only(
                 _build_client(CATEGORIES[0][0], CATEGORIES[0][1]),
@@ -166,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
             rc == 0
             and not args.dry_run
             and not args.no_image_downloads
+            and not args.index_only
+            and not args.drain_only
         ):
             image_agg = _run_image_downloads(
                 max_downloads=args.max_image_downloads,
@@ -184,6 +223,8 @@ def main(argv: list[str] | None = None) -> int:
             and not args.dry_run
             and not args.no_condition_scoring
             and not args.images_only
+            and not args.index_only
+            and not args.drain_only
         ):
             _run_condition_scoring(max_scores=args.max_condition_scores)
     finally:
@@ -371,13 +412,30 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--run-type",
-        choices=("full", "delta"),
+        choices=("full", "delta", "index", "detail"),
         default=None,
         help=(
             "explicit scrape_runs.run_type label. Overrides the "
-            "limit-based heuristic — the unified 15-min job does a full "
-            "index walk (no --limit) but should still record as 'delta' "
-            "so the Health page separates it from the nightly 'full' run."
+            "limit-based heuristic. The Phase-2 split records 'index' for "
+            "the index-walk and 'detail' for the detail-drain."
+        ),
+    )
+    p.add_argument(
+        "--index-only",
+        action="store_true",
+        help=(
+            "Phase 2: walk the index, touch + mark_inactive, and enqueue "
+            "new/price-changed ids into listing_detail_queue. No detail "
+            "fetch — the detail-drain (--drain-only) consumes the queue."
+        ),
+    )
+    p.add_argument(
+        "--drain-only",
+        action="store_true",
+        help=(
+            "Phase 2: claim ids from listing_detail_queue, fetch their "
+            "details, and write them in batches. Bounded by "
+            "--max-detail-refetches (claims per run). Skips the index walk."
         ),
     )
     p.add_argument("-v", "--verbose", action="store_true")
@@ -656,6 +714,254 @@ def _run_full(
     return (0, scrape_agg)
 
 
+def _run_index_walk(dry_run: bool) -> tuple[int, dict[str, Any]]:
+    """Phase 2 index-walk: walk every category, touch + mark_inactive, and
+    enqueue new/price-changed ids into listing_detail_queue. No detail fetch —
+    the detail-drain (`_run_detail_drain`) consumes the queue asynchronously.
+
+    Mirrors `_run_full`'s per-category loop + completeness-guarded mark_inactive
+    + reconciliation, but the slow DETAIL phase is replaced by an enqueue. Uses
+    the transaction pooler (bulk set-based statements, no per-listing hot loop).
+    Records run_type='index' with index_pages>0 so Health liveness keys off it.
+    """
+    total_pages = 0
+    total_index = 0
+    total_enqueued = 0
+    category_aggregates: list[dict[str, Any]] = []
+    limiter = RateLimiter(DEFAULT_DETAIL_RATE)
+    conn = None if dry_run else db.connect()
+    categories = _rotated_categories(CATEGORIES, datetime.now(timezone.utc).hour)
+
+    try:
+        for category_main, category_type in categories:
+            cm_text = parser.CATEGORY_MAIN[category_main]
+            ct_text = parser.CATEGORY_TYPE[category_type]
+            LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
+            try:
+                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
+                    _walk_category_split(
+                        category_main,
+                        category_type,
+                        limiter=limiter,
+                        conn=conn,
+                        cat_limit=None,
+                        dry_run=dry_run,
+                        refetch_budget=[None],
+                        cat_refetch_cap=None,
+                        detail_workers=1,
+                        enqueue_only=True,
+                    )
+                )
+            except Exception as exc:
+                LOG.exception(
+                    "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
+                    cm_text, ct_text, exc,
+                )
+                seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
+                    set(), {}, None, 0, False,
+                )
+            total_pages += cat_pages
+            total_index += len(seen_ids)
+            total_enqueued += cat_counts.get("enqueued", 0)
+
+            inactive = 0
+            if conn is not None:
+                if complete:
+                    inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
+                    LOG.info(
+                        "INACTIVE cm=%s ct=%s marked=%d collected=%d result_size=%s",
+                        cm_text, ct_text, inactive, len(seen_ids), cat_result_size,
+                    )
+                else:
+                    LOG.warning(
+                        "INACTIVE skipped cm=%s ct=%s: walk looks incomplete "
+                        "(collected=%d result_size=%s); not flipping to avoid "
+                        "false delisting",
+                        cm_text, ct_text, len(seen_ids), cat_result_size,
+                    )
+
+            active_db: int | None = None
+            if conn is not None:
+                try:
+                    active_db = db.active_count(conn, cm_text, ct_text)
+                except Exception as exc:
+                    LOG.warning(
+                        "active_count failed cm=%s ct=%s: %s", cm_text, ct_text, exc
+                    )
+            LOG.info(
+                "RECONCILE cm=%s ct=%s sreality=%s collected=%d active=%s",
+                cm_text, ct_text, cat_result_size, len(seen_ids), active_db,
+            )
+
+            category_aggregates.append({
+                "category_main": cm_text,
+                "category_type": ct_text,
+                "listings_found_new":   cat_counts.get("found_new", 0),
+                "listings_scraped_new": 0,
+                "listings_inactive":    inactive,
+                "listings_enqueued":    cat_counts.get("enqueued", 0),
+                "images_discovered":    0,
+                "images_stored":        0,
+                "sreality_result_size": cat_result_size,
+                "collected":            len(seen_ids),
+                "active_db":            active_db,
+            })
+
+        LOG.info("INDEX total=%d pages=%d enqueued=%d", total_index, total_pages, total_enqueued)
+    finally:
+        if conn is not None:
+            conn.close()
+
+    LOG.info(
+        "RUN done pages=%d enqueued=%d inactive=%d",
+        total_pages, total_enqueued,
+        sum(c["listings_inactive"] for c in category_aggregates),
+    )
+    scrape_agg: dict[str, Any] = {
+        "index_pages":          total_pages,
+        "listings_found_new":   sum(c["listings_found_new"] for c in category_aggregates),
+        "listings_scraped_new": 0,
+        "listings_updated":     0,
+        "listings_inactive":    sum(c["listings_inactive"] for c in category_aggregates),
+        "images_discovered":    0,
+        "errors":               0,
+        "by_category":          category_aggregates,
+    }
+    return (0, scrape_agg)
+
+
+def _flush_drain_batch(
+    conn: Any,
+    buffer: list[FetchResult],
+    counts: dict[str, int],
+    dry_run: bool,
+) -> None:
+    """Write a buffered batch of ok FetchResults and dequeue them. In dry-run,
+    log and leave the queue untouched (no claim is taken in dry-run anyway)."""
+    if not buffer:
+        return
+    if dry_run:
+        for fr in buffer:
+            LOG.info(
+                "DRY-RUN id=%d hash=%s images=%d",
+                fr.sid, (fr.content_hash or "")[:8], len(fr.images or []),
+            )
+        return
+    res = db.write_detail_batch(conn, buffer)
+    for k in ("new", "updated", "unchanged", "images_discovered"):
+        counts[k] = counts.get(k, 0) + res[k]
+    db.complete_detail(conn, [fr.sid for fr in buffer])
+    LOG.info(
+        "DRAIN flush size=%d new=%d updated=%d unchanged=%d images=%d",
+        len(buffer), res["new"], res["updated"], res["unchanged"],
+        res["images_discovered"],
+    )
+
+
+def _run_detail_drain(
+    max_claims: int | None,
+    dry_run: bool,
+    detail_workers: int = DEFAULT_DETAIL_WORKERS,
+    detail_rate: float = DEFAULT_DETAIL_RATE,
+) -> tuple[int, dict[str, Any]]:
+    """Phase 2 detail-drain: claim ids from listing_detail_queue, fetch their
+    details on a worker pool, and write them in batches via write_detail_batch.
+
+    Bounded by `max_claims` (claims per run) so it finalizes inside the workflow
+    timeout; the queue persists across runs so progress is never lost. Uses the
+    Session-mode pooler for the batched prepared writes. Records run_type='detail'
+    with index_pages=0 (it never walks the index).
+    """
+    counts: dict[str, int] = {
+        "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
+        "images_discovered": 0,
+    }
+    limiter = RateLimiter(detail_rate)
+    client = _build_client(CATEGORIES[0][0], CATEGORIES[0][1], limiter=limiter)
+
+    if dry_run:
+        with db.connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM listing_detail_queue "
+                "WHERE claimed_at IS NULL AND given_up = false"
+            )
+            claimable = int(cur.fetchone()[0])
+        LOG.info("DRAIN dry-run claimable=%d max_claims=%s; exit", claimable, max_claims)
+        return (0, {})
+
+    conn = db.connect_session()
+    total_claimed = 0
+    buffer: list[FetchResult] = []
+    try:
+        reclaimed = db.reclaim_stale_claims(conn)
+        if reclaimed:
+            LOG.info("DRAIN reclaimed stale claims=%d", reclaimed)
+        LOG.info(
+            "DRAIN starting max_claims=%s workers=%d batch=%d",
+            max_claims, detail_workers, DETAIL_BATCH_SIZE,
+        )
+        while max_claims is None or total_claimed < max_claims:
+            chunk = DRAIN_CLAIM_CHUNK
+            if max_claims is not None:
+                chunk = min(chunk, max_claims - total_claimed)
+            claimed = db.claim_detail_batch(conn, chunk)
+            if not claimed:
+                break
+            total_claimed += len(claimed)
+            with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
+                futures = {
+                    pool.submit(_fetch_detail, client, sid): sid
+                    for sid, _price in claimed
+                }
+                for future in as_completed(futures):
+                    fr = future.result()  # never raises
+                    if fr.kind == "ok":
+                        buffer.append(fr)
+                        if len(buffer) >= DETAIL_BATCH_SIZE:
+                            _flush_drain_batch(conn, buffer, counts, dry_run)
+                            buffer = []
+                    elif fr.kind == "gone":
+                        LOG.info("DETAIL id=%d gone (is_active=false)", fr.sid)
+                        try:
+                            db.mark_listing_inactive(conn, fr.sid)
+                        except Exception as exc:
+                            LOG.warning("could not mark id=%d inactive: %s", fr.sid, exc)
+                        db.clear_fetch_failure(conn, fr.sid)
+                        db.complete_detail(conn, [fr.sid])
+                        counts["gone"] += 1
+                    else:  # error: keep the queue row, bump attempts, log failure
+                        LOG.error("DETAIL id=%d %s error: %s", fr.sid, fr.source, fr.error)
+                        db.record_fetch_failure(conn, fr.sid, f"{fr.source}: {fr.error}")
+                        db.fail_detail(conn, [fr.sid], f"{fr.source}: {fr.error}")
+                        counts["errors"] += 1
+            LOG.info(
+                "DRAIN progress claimed=%d new=%d updated=%d unchanged=%d "
+                "gone=%d errors=%d buffered=%d",
+                total_claimed, counts["new"], counts["updated"],
+                counts["unchanged"], counts["gone"], counts["errors"], len(buffer),
+            )
+        _flush_drain_batch(conn, buffer, counts, dry_run)
+    finally:
+        conn.close()
+
+    LOG.info(
+        "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d errors=%d claimed=%d",
+        counts["new"], counts["updated"], counts["unchanged"],
+        counts["gone"], counts["errors"], total_claimed,
+    )
+    scrape_agg: dict[str, Any] = {
+        "index_pages":          0,
+        "listings_found_new":   counts["new"],
+        "listings_scraped_new": counts["new"],
+        "listings_updated":     counts["updated"],
+        "listings_inactive":    counts["gone"],
+        "images_discovered":    counts["images_discovered"],
+        "errors":               counts["errors"],
+        "by_category":          [],
+    }
+    return (0, scrape_agg)
+
+
 def _walk_complete(collected: int, result_size: int | None) -> bool:
     """Whether an index walk covered enough of the API-reported total to
     safely drive mark_inactive.
@@ -688,6 +994,7 @@ def _walk_category_split(
     refetch_budget: list[int | None],
     cat_refetch_cap: int | None,
     detail_workers: int,
+    enqueue_only: bool = False,
 ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
     """Walk one category, splitting large ones by district (okres).
 
@@ -722,7 +1029,7 @@ def _walk_category_split(
         client = _build_client(category_main, category_type, limiter=limiter)
         seen, counts = _walk_category(
             client, conn, cat_limit, dry_run, refetch_budget,
-            cat_refetch_cap, detail_workers,
+            cat_refetch_cap, detail_workers, enqueue_only=enqueue_only,
         )
         rs = client.result_size if client.result_size is not None else result_size
         complete = cat_limit is None and _walk_complete(len(seen), rs)
@@ -750,7 +1057,7 @@ def _walk_category_split(
         try:
             dseen, dcounts = _walk_category(
                 dclient, conn, None, dry_run, refetch_budget,
-                district_cap, detail_workers,
+                district_cap, detail_workers, enqueue_only=enqueue_only,
             )
         except Exception as exc:
             all_districts_complete = False
@@ -802,7 +1109,7 @@ def _walk_category_split(
         try:
             nseen, ncounts = _walk_category(
                 nclient, conn, None, dry_run, refetch_budget,
-                national_cap, detail_workers,
+                national_cap, detail_workers, enqueue_only=enqueue_only,
             )
             added = len(nseen - union)
             union |= nseen
@@ -844,16 +1151,21 @@ def _walk_category(
     refetch_budget: list[int | None],
     cat_refetch_cap: int | None = None,
     detail_workers: int = DEFAULT_DETAIL_WORKERS,
+    enqueue_only: bool = False,
 ) -> tuple[set[int], dict[str, int]]:
-    """Walk one category's index + refetch loop.
+    """Walk one category's index, then either fetch+write details (the legacy
+    coupled path) or, when `enqueue_only`, enqueue new/price-changed ids into
+    listing_detail_queue for the async detail-drain (Phase 2 index-walk).
 
     `refetch_budget` is a single-element mutable list so the global
     cap decrements as each category consumes refetches. `cat_refetch_cap`
-    is the per-category ceiling (None = no per-category limit).
+    is the per-category ceiling (None = no per-category limit). Both are
+    ignored when `enqueue_only` — the queue absorbs unbounded enqueues; the
+    drain is what's bounded.
     """
     counts = {
         "new": 0, "updated": 0, "unchanged": 0, "errors": 0, "gone": 0,
-        "found_new": 0, "images_discovered": 0,
+        "found_new": 0, "images_discovered": 0, "enqueued": 0,
     }
     index_entries: list[tuple[int, int | None]] = []
     for estate in client.iter_index():
@@ -903,6 +1215,23 @@ def _walk_category(
     changed = [s for s in known_ids if s not in failed_ids]
     if priority:
         LOG.info("PLAN priority_retry=%d", len(priority))
+
+    # Phase 2 index-walk: enqueue the whole refetch set (no per-run cap — the
+    # drain is bounded) and return without fetching any detail.
+    if enqueue_only:
+        price_map = dict(index_entries)
+        entries = (
+            [(s, price_map.get(s), db.QUEUE_PRIORITY_FAILURE) for s in priority]
+            + [(s, price_map.get(s), db.QUEUE_PRIORITY_CHANGED) for s in changed]
+            + [(s, price_map.get(s), db.QUEUE_PRIORITY_NEW) for s in new_ids]
+        )
+        if conn is not None and entries:
+            counts["enqueued"] = db.enqueue_detail(conn, entries)
+        LOG.info(
+            "ENQUEUE enqueued=%d new=%d changed=%d priority=%d",
+            counts["enqueued"], len(new_ids), len(changed), len(priority),
+        )
+        return seen_ids, counts
 
     caps = [c for c in (refetch_budget[0], cat_refetch_cap) if c is not None]
     if caps and len(to_refetch) > min(caps):

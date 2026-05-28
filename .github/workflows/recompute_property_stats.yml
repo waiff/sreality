@@ -16,17 +16,21 @@ name: "Jobs: recompute property stats"
 # independently, so a timeout or cancel preserves completed batches and the
 # next run simply recomputes from current state.
 #
-# Cadence: hourly, matching the real ~hourly scrape cadence so property
-# is_active / current_price / stats stay fresh for Browse. Tune the cron
-# below or trigger manually from the Actions tab. The */15 scrape's
-# completeness rails (architectural rule #3) are unaffected by this job.
+# Cadence: every 30 min. Phase 2 deferred the inline Tier-1 property matcher
+# off the scraper's hot write path into this job's straggler-attach phase, so
+# a brand-new listing written by the detail-drain has no `properties` parent
+# (property_id NULL) until the next recompute. Running every 30 min bounds that
+# Browse read-lag; the straggler-attach phase only touches NULL-property rows
+# so it stays cheap. Tune the cron below or trigger manually from the Actions
+# tab. The index-walk's completeness rails (architectural rule #3) are
+# unaffected by this job.
 #
 # Required GitHub secret:
 #   SUPABASE_DB_URL  -- same one used by every other workflow.
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       batch_size:

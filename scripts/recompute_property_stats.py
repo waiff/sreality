@@ -2,10 +2,16 @@
 
 Two phases, both idempotent:
 
-1. Attach stragglers. Any `listings` row with `property_id IS NULL` (an
-   old-code insert on `main` that ran before the property-linking wrapper
-   went live) gets its own singleton property, mirroring migration 092.
-   Self-heals the transient gap the foundation migration documented.
+1. Attach stragglers. Any `listings` row with `property_id IS NULL` — an
+   old-code insert, or (Phase 2) a row written by the batched detail-drain,
+   which deliberately defers Tier-1 matching off the hot write path — is
+   resolved here. First the same Tier-1 spatial probe the inline matcher runs
+   (`scraper.db._match_or_create_property`): a straggler with exactly one
+   same-source-excluded near-match (geom 20 m / price ±2% / area ±1 m²) links
+   to that property (the cross-portal dedup link). Whatever remains unlinked
+   (zero hits, or ambiguous ≥2 hits) gets its own singleton, mirroring
+   migration 092. Ambiguous candidate pairs are NOT recorded here — the daily
+   Tier-2 fuzzy sweep (`scripts.dedup_sweep`) is the backstop for those.
 
 2. Recompute every property from its children. Per property:
      is_active           = bool_or(children.is_active)   (decision #3 rollup)
@@ -74,6 +80,43 @@ _ATTACH_LINK_SQL = """
     FROM properties p
     WHERE p.repr_listing_id = l.sreality_id
       AND l.property_id IS NULL
+"""
+
+# Tier-1 spatial match, set-based — the deferred-matcher half of Phase 2.
+# Reproduces _match_or_create_property's single-hit branch over all unlinked
+# stragglers at once: a straggler with exactly one same-source-excluded
+# near-match (20 m / ±2% price / ±1 m² area) links to that property. The
+# same-source exclusion keeps it inert for sreality-only neighbourhoods (every
+# nearby property already has a sreality child) and fires only on genuine
+# cross-portal matches. Stragglers with 0 or ≥2 hits stay NULL and fall through
+# to the singleton insert below; ambiguous pairs are left for the Tier-2 sweep.
+_ATTACH_SPATIAL_LINK_SQL = """
+    WITH straggler AS (
+        SELECT sreality_id, geom, price_czk, area_m2, source
+        FROM listings
+        WHERE property_id IS NULL
+          AND geom IS NOT NULL
+          AND price_czk IS NOT NULL
+          AND area_m2 IS NOT NULL
+    ),
+    m AS (
+        SELECT s.sreality_id, min(p.id) AS pid, count(*) AS hits
+        FROM straggler s
+        JOIN properties p
+          ON p.geom IS NOT NULL
+         AND p.current_price_czk IS NOT NULL
+         AND p.area_m2 IS NOT NULL
+         AND ST_DWithin(p.geom, s.geom, 20)
+         AND p.current_price_czk BETWEEN s.price_czk * 0.98 AND s.price_czk * 1.02
+         AND p.area_m2 BETWEEN s.area_m2 - 1 AND s.area_m2 + 1
+         AND NOT EXISTS (
+               SELECT 1 FROM listings c
+               WHERE c.property_id = p.id AND c.source = s.source)
+        GROUP BY s.sreality_id
+    )
+    UPDATE listings l SET property_id = m.pid
+    FROM m
+    WHERE m.hits = 1 AND l.sreality_id = m.sreality_id
 """
 
 _RECOMPUTE_BATCH_SQL = """
@@ -221,10 +264,14 @@ def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
 def _attach_stragglers(conn: Any) -> int:
     with conn.cursor() as cur:
         cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
+        cur.execute(_ATTACH_SPATIAL_LINK_SQL)
+        linked = cur.rowcount or 0
         cur.execute(_ATTACH_INSERT_SQL)
         inserted = cur.rowcount or 0
         cur.execute(_ATTACH_LINK_SQL)
-    return inserted
+    if linked:
+        LOG.info("RECOMPUTE attach spatial_linked=%d", linked)
+    return inserted + linked
 
 
 def _max_property_id(conn: Any) -> int:

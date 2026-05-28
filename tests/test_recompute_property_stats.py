@@ -6,7 +6,9 @@ are verified out-of-band via the Supabase MCP after the migrations apply.
 
 from __future__ import annotations
 
-from scripts.recompute_property_stats import _batch_ranges
+from typing import Any
+
+from scripts.recompute_property_stats import _attach_stragglers, _batch_ranges
 
 
 def test_empty_when_no_properties():
@@ -32,3 +34,45 @@ def test_every_id_lands_in_exactly_one_range():
         # half-open [lo, hi); count the ids in [lo, min(hi-1, max_id)]
         seen += min(hi - 1, max_id) - lo + 1
     assert seen == max_id
+
+
+class _Cur:
+    def __init__(self, conn: "_FakeConn") -> None:
+        self._conn = conn
+        self.rowcount = 0
+
+    def __enter__(self) -> "_Cur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._conn.executed.append(" ".join(sql.split()))
+        self.rowcount = 0
+
+
+class _FakeConn:
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+
+    def cursor(self) -> _Cur:
+        return _Cur(self)
+
+
+def test_attach_stragglers_spatial_link_before_singleton_insert():
+    """The deferred Tier-1 match must run BEFORE the singleton insert, so a
+    straggler with a single cross-source hit links instead of becoming a
+    duplicate singleton."""
+    conn = _FakeConn()
+    _attach_stragglers(conn)
+    order = conn.executed
+    spatial = next(i for i, s in enumerate(order) if "ST_DWithin(p.geom, s.geom, 20)" in s)
+    insert = next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
+    link = next(i for i, s in enumerate(order) if "p.repr_listing_id = l.sreality_id" in s)
+    assert spatial < insert < link
+    # The deferred matcher keeps the inline matcher's exact gates.
+    spatial_sql = order[spatial]
+    assert "BETWEEN s.price_czk * 0.98 AND s.price_czk * 1.02" in spatial_sql
+    assert "c.source = s.source" in spatial_sql
+    assert "m.hits = 1" in spatial_sql

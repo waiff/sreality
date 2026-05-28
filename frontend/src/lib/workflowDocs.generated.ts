@@ -373,6 +373,65 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_sweep.yml"
   },
   {
+    "filename": "detail_drain.yml",
+    "name": "Scraping: Sreality detail drain (Phase 2)",
+    "description": "The slow half of the Phase-2 cadence split. Claims a bounded slice of listing_detail_queue (enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool, and writes them in batches via the set-based write_detail_batch (one transaction per ~100 listings) — targeting ~0.1-0.2 s/listing versus the ~1.5 s of the legacy per-listing write. New listings land with property_id NULL; the Tier-1 matcher is deferred to the recompute_property_stats straggler-attach phase.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/15 * * * *",
+        "human": "Every 15 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_detail_refetches",
+        "description": "Cap listings claimed + fetched this run (blank = 6000)",
+        "required": false,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "detail_workers",
+        "description": "Concurrent detail-fetch workers (blank = 8)",
+        "required": false,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "detail_rate",
+        "description": "Global detail-fetch rate cap, req/s (blank = 6.0)",
+        "required": false,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the claimable queue depth and exit without claiming",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_SESSION_URL",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "sreality-detail-drain",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/detail_drain.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/detail_drain.yml"
+  },
+  {
     "filename": "discover_condition_markers.yml",
     "name": "Dev: discover condition markers (one-off Phase A bootstrap)",
     "description": "One-off Phase A driver for the building/apartment condition-scoring feature. Runs scripts/discover_condition_markers.py against the real Supabase DB and the Anthropic API to mine Czech condition markers from a stratified sample of listings.",
@@ -619,6 +678,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/images.yml"
   },
   {
+    "filename": "index_walk.yml",
+    "name": "Scraping: Sreality index walk (Phase 2)",
+    "description": "The fast half of the Phase-2 cadence split. Walks the COMPLETE index of all six category pairs, bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the completeness guard), and enqueues new + price-changed ids into listing_detail_queue for the asynchronous detail-drain. It does NO detail fetching, so it finishes in minutes and delistings surface fast — decoupled from the slow per-listing write that used to drag it.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/15 * * * *",
+        "human": "Every 15 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "Walk the index and log enqueue intent, but write nothing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "sreality-index-walk",
+    "cancelInProgress": false,
+    "timeoutMinutes": 25,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/index_walk.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/index_walk.yml"
+  },
+  {
     "filename": "ingest_boundaries.yml",
     "name": "Data: ingest admin boundaries",
     "description": "Loads ČÚZK RÚIAN administrative-unit polygons (kraj / okres / obec / KÚ) into the admin_boundaries table. Manual-only; boundaries change rarely (a few municipal mergers / cadastral re-alignments per year), so there is no cron. Re-run when ČÚZK publishes a notable update or when the operator wants to bring in newly-created units.",
@@ -708,8 +801,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "manual": true,
     "schedules": [
       {
-        "cron": "0 * * * *",
-        "human": "Every hour (on the hour)"
+        "cron": "*/30 * * * *",
+        "human": "Every 30 minutes"
       }
     ],
     "onPush": false,
@@ -786,15 +879,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "scrape.yml",
-    "name": "Scraping: Sreality hourly run",
-    "description": "The single scrape pipeline. Each run walks the COMPLETE index of all six category pairs (byt + dum + komercni × pronajem + prodej), so: - newly-listed properties surface, and - delisted properties flip to is_active=false — a complete walk is what makes that inference valid (architectural rule #3).",
+    "name": "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)",
+    "description": "DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live pipeline is now the cadence split — index_walk.yml (fast, frequent, marks delistings + enqueues) feeds detail_drain.yml (async, batched writes). This combined index+detail walk (_run_full) is kept intact as the instant revert: if the split misbehaves, re-add `schedule: - cron: \"0 * * * *\"` here and disable the two new crons — no code change, the proven pipeline is back. It also remains the way to run an ad-hoc full walk by hand.",
     "manual": true,
-    "schedules": [
-      {
-        "cron": "0 * * * *",
-        "human": "Every hour (on the hour)"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
