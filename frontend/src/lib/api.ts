@@ -298,6 +298,52 @@ export const fetchListingSummaries = (
     json: { items },
   });
 
+/* ----- freshness (Phase U2.5) -------------------------------------------- *
+ *
+ * POST /tools/verify_listing_freshness — on-demand re-fetch of one listing.
+ * The endpoint logs to listing_freshness_checks and may write a new
+ * listing_snapshots row and/or flip listings.is_active (the explicit
+ * write-allowed exception per CLAUDE.md). max_age_hours defaults to 0 here
+ * so an operator clicking the button always triggers a real check rather
+ * than the throttle's `cached` short-circuit.
+ */
+
+export type FreshnessOutcome =
+  | 'unchanged'
+  | 'updated'
+  | 'gone'
+  | 'fetch_error'
+  | 'cached';
+
+export interface VerifyFreshnessResult {
+  data: {
+    sreality_id: number;
+    outcome: FreshnessOutcome;
+    verified: boolean;
+    cached: boolean;
+    age_hours: number | null;
+    what_changed: string[];
+    snapshot_id: number | null;
+    current: Record<string, unknown> | null;
+  };
+  metadata: {
+    tool: string;
+    filters_used: Record<string, unknown>;
+    result_count: number;
+    queried_at: string;
+    data_freshness: string | null;
+  };
+}
+
+export const verifyListingFreshness = (
+  sreality_id: number,
+  options: { max_age_hours?: number } = {},
+): Promise<VerifyFreshnessResult> =>
+  request<VerifyFreshnessResult>('/tools/verify_listing_freshness', {
+    method: 'POST',
+    json: { sreality_id, max_age_hours: options.max_age_hours ?? 0 },
+  });
+
 /* ----- buildings (Phase B1) ---------------------------------------------- */
 
 export const createBuildingFromUrl = (
