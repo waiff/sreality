@@ -645,6 +645,10 @@ def _walk_complete(collected: int, result_size: int | None) -> bool:
 
 
 _REFETCH_OUTCOMES = ("new", "updated", "unchanged", "gone", "errors")
+# The subset that actually consumed a detail FETCH (and the global
+# refetch_budget). Excludes "unchanged" — those are bulk-touched, not fetched —
+# so it's the correct counter for the per-category refetch cap.
+_DETAIL_FETCH_OUTCOMES = ("new", "updated", "gone", "errors")
 
 
 def _walk_category_split(
@@ -736,7 +740,15 @@ def _walk_category_split(
         if drs is not None:
             summed_drs += drs
         pages += dclient.pages_fetched
-        cat_refetched += sum(dcounts.get(o, 0) for o in _REFETCH_OUTCOMES)
+        # Count only ACTUAL detail fetches toward the per-category cap. "new",
+        # "updated", "gone", "errors" each consumed a fetch (and the global
+        # refetch_budget, decremented per fetch). "unchanged" listings are
+        # bulk-touched (touch_listings), NOT fetched — counting them here let
+        # ~cat_cap unchanged touches in the first 1-2 districts exhaust the cap,
+        # deferring every genuinely-new listing for the rest of the category.
+        # That silently starved the detail backlog of the big split categories
+        # (komercni/pronajem, dum/prodej) so it never drained.
+        cat_refetched += sum(dcounts.get(o, 0) for o in _DETAIL_FETCH_OUTCOMES)
         # Empty district (drs 0) is trivially complete; a populated district
         # whose own walk fell short is a truncation.
         if drs is None or len(dseen) < drs * INDEX_MIN_COMPLETENESS:

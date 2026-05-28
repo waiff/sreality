@@ -567,6 +567,40 @@ def test_walk_category_split_national_fallback_closes_gap(patched_db, monkeypatc
     assert complete is True        # union now >= 90% of national result_size
 
 
+def test_split_cap_counts_only_fetches_not_unchanged(monkeypatch):
+    """The per-category refetch cap must count only ACTUAL fetches, never the
+    bulk-touched 'unchanged' listings. Otherwise unchanged touches in the first
+    districts exhaust the per-category cap and every genuinely-new listing in
+    later districts is deferred forever — which silently starved the detail
+    backlog of the big split categories."""
+    caps_seen: list[int | None] = []
+
+    class _FC:
+        result_size = 500
+        pages_fetched = 1
+        def probe_result_size(self):
+            return 50000  # over SPLIT_THRESHOLD → force the per-district split
+
+    monkeypatch.setattr(scraper_main, "_build_client", lambda *a, **k: _FC())
+
+    def fake_walk_category(client, conn, cat_limit, dry_run, budget, district_cap, workers):
+        caps_seen.append(district_cap)
+        # Each district: 300 unchanged (touched, NOT fetched) + 10 real fetches.
+        return (set(), {"unchanged": 300, "new": 10, "found_new": 10})
+
+    monkeypatch.setattr(scraper_main, "_walk_category", fake_walk_category)
+
+    scraper_main._walk_category_split(
+        1, 2, limiter=None, conn=object(), cat_limit=None, dry_run=False,
+        refetch_budget=[100000], cat_refetch_cap=700, detail_workers=1,
+    )
+    # Only the 10 fetches/district count: after 10 districts cat_refetched=100,
+    # so the 11th district still gets 700-100=600. With the bug (counting the
+    # 310 unchanged+fetches), the cap would hit 0 after ~3 districts.
+    assert caps_seen[0] == 700
+    assert caps_seen[10] == 600
+
+
 def test_walk_category_no_split_under_threshold(patched_db, monkeypatch):
     """Below the threshold there's a single unfiltered walk; district config
     is never consulted."""

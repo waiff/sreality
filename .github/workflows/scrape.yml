@@ -154,11 +154,16 @@ jobs:
           # one-time new-listing backlog drains over several finalizing runs.
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
           if [ -z "$MAX_REFETCH" ]; then
-            MAX_REFETCH="1500"
+            MAX_REFETCH="1200"
           fi
+          # Per-category below global so two backlogged split categories
+          # (komercni/pronajem + dum/prodej) both get a fetch share each run and
+          # drain in parallel, rather than the first one consuming the whole
+          # global budget. new_reserve (half the budget) protects genuinely-new
+          # listings from the failure-retry queue.
           MAX_REFETCH_PER_CAT="${{ inputs.max_detail_refetches_per_category }}"
           if [ -z "$MAX_REFETCH_PER_CAT" ]; then
-            MAX_REFETCH_PER_CAT="1000"
+            MAX_REFETCH_PER_CAT="700"
           fi
           DETAIL_WORKERS="${{ inputs.detail_workers }}"
           if [ -z "$DETAIL_WORKERS" ]; then
