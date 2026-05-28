@@ -996,22 +996,35 @@ budget — consumed in category order — no longer permanently starves the same
 trailing categories. Next in the scaling roadmap: **Phase 2 — split the
 fast index walk from the slow batched detail-drain.**
 
-### Phase 1.5b: Multi-category UI defaults (next, follow-up)
-The data is now broad, but the analytical and estimation surfaces
-still hardcode `category_main='byt'` / `category_type='pronajem'` as
-defaults. Work to do:
-- `toolkit/comparables.py` — promote `category_main` /
-  `category_type` from defaulted parameters to required-with-clear-
-  error or first-class request fields (lines 57-58 today).
-- `api/schemas.py` — same on `FindComparablesIn`,
-  `DescribeNeighborhoodIn`, `ComputeMarketVelocityIn`,
-  `CreateEstimationIn`, `EstimateYieldIn`.
-- `frontend/src/components/EstimateForm.tsx` — replace "Apartment"
-  hard-coded labelling with a category/type selector.
-- `frontend/src/components/UrlScrapeStep.tsx` — placeholder URL +
-  copy reflect the chosen category.
-Small, high leverage; unblocks end-to-end house and commercial
-estimations using data that already exists in the database.
+### Phase 1.5b: Multi-category UI defaults (done)
+The data was always broad (all six byt/dum/komercni ×
+pronajem/prodej pairs), but the analytical and estimation surfaces
+silently defaulted `category_main='byt'` / `category_type='pronajem'`,
+so house and commercial estimations couldn't be driven cleanly. Done:
+- `toolkit/comparables.py` — `ComparableFilters.category_main` /
+  `category_type` now default to `None` ("search every category"), not
+  `byt`/`pronajem`. The silent apartment-rental default is gone; the
+  `None` semantic (no category clause) was already supported and tested.
+- `toolkit/velocity.py` — `compute_listing_velocity` was the one
+  internal caller relying on the old default; it now reads the
+  subject's own `category_main`/`category_type` and ranks it against
+  same-category peers (a house no longer ranks against apartments).
+- `toolkit/neighborhoods.py` — `describe_neighborhood`'s function
+  default aligned to `None` for consistency.
+- `api/schemas.py` — `category_main`/`category_type` are now **required**
+  (Pydantic 422 on omission, pass `null` for "all categories") on
+  `FindComparablesIn`, `DescribeNeighborhoodIn`, `ComputeMarketVelocityIn`.
+  `EstimateYieldIn` requires `category_main` and keeps `category_type`
+  following `estimate_kind` — the same smart pattern `CreateEstimationIn`
+  already used (left unchanged).
+- `frontend/src/components/NewEstimationModal.tsx` (the current estimation
+  entry point; the old `EstimateForm.tsx`/`UrlScrapeStep.tsx` are gone) —
+  a "Property type" selector (Apartment / House / Commercial) sits beside
+  the Rent/Sale toggle; both plumb `category_main` + `category_type`
+  explicitly into the estimation request, and the placeholder URL + help
+  copy follow the chosen category.
+Unblocks end-to-end house and commercial estimations over data that
+already existed in the database.
 
 ### Phase 2: Multi-portal ingestion (later, larger)
 > **Design locked (2026-05-25): see

@@ -180,14 +180,15 @@ def client(monkeypatch):
     api_main.app.dependency_overrides.clear()
 
 
-_FIND_BODY = {"target": {"lat": 50.0, "lng": 14.0}}
+_CAT = {"category_main": "byt", "category_type": "pronajem"}
+_FIND_BODY = {"target": {"lat": 50.0, "lng": 14.0}, **_CAT}
 _DIST_BODY = {"listings": [], "field": "price_per_m2"}
 _VERIFY_BODY = {"sreality_id": 1, "max_age_hours": 24}
 _COMPARE_BODY = {"sreality_id": 1}
-_ESTIMATE_BODY = {"target": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}}
-_NEIGHBORHOOD_BODY = {"lat": 50.0, "lng": 14.0}
+_ESTIMATE_BODY = {"target": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}, **_CAT}
+_NEIGHBORHOOD_BODY = {"lat": 50.0, "lng": 14.0, **_CAT}
 _OUTLIERS_BODY = {"listings": []}
-_MARKET_VEL_BODY = {"target": {"lat": 50.0, "lng": 14.0}}
+_MARKET_VEL_BODY = {"target": {"lat": 50.0, "lng": 14.0}, **_CAT}
 _LISTING_VEL_BODY = {"sreality_id": 1}
 _ANCHORS_BODY = {"lat": 50.0, "lng": 14.0}
 _CREATE_ESTIMATION_BODY = {"spec": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}}

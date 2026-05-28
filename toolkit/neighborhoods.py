@@ -160,8 +160,8 @@ def describe_neighborhood(
     lng: float,
     radius_m: int = 1000,
     max_age_days: int | None = None,
-    category_main: str | None = "byt",
-    category_type: str | None = "pronajem",
+    category_main: str | None = None,
+    category_type: str | None = None,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 

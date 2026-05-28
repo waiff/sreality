@@ -206,6 +206,7 @@ def test_envelope_shape_with_typical_response():
     conn = _FakeConn(cur)
     res = describe_neighborhood(
         conn, lat=50.087, lng=14.42, radius_m=1000,  # type: ignore[arg-type]
+        category_main="byt", category_type="pronajem",
     )
 
     d = res["data"]
@@ -324,6 +325,7 @@ def test_executes_against_cursor_with_expected_params():
     describe_neighborhood(
         conn, lat=50.087, lng=14.42, radius_m=1500,  # type: ignore[arg-type]
         max_age_days=14,
+        category_main="byt", category_type="pronajem",
     )
     assert cur.executed is not None
     sql, params = cur.executed

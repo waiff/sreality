@@ -328,6 +328,7 @@ def test_route_wired_via_app(monkeypatch):
         trace_recorder=None,
     ):
         captured["target"] = target
+        captured["filters"] = filters
         captured["price"] = purchase_price_czk
         captured["kind"] = estimate_kind
         captured["expected_rent"] = expected_monthly_rent_czk
@@ -342,6 +343,7 @@ def test_route_wired_via_app(monkeypatch):
                        "disposition": "2+kk"},
             "purchase_price_czk": 5_000_000,
             "radius_m": 1500,
+            "category_main": "byt",
         },
     )
     api_main.app.dependency_overrides.clear()
@@ -349,6 +351,9 @@ def test_route_wired_via_app(monkeypatch):
     assert captured["target"].lat == 50.087
     assert captured["price"] == 5_000_000
     assert captured["kind"] == "rent"
+    # category_type follows estimate_kind (rent -> pronajem) when omitted.
+    assert captured["filters"].category_main == "byt"
+    assert captured["filters"].category_type == "pronajem"
 
 
 def test_sale_kind_emits_sale_keys_and_reverse_yield(monkeypatch):

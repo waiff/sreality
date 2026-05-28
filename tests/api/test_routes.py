@@ -47,6 +47,8 @@ def test_find_comparables_passes_target_and_filters(client, monkeypatch):
             "radius_m": 1500,
             "max_age_days": 14,
             "has_lift": True,
+            "category_main": "byt",
+            "category_type": "pronajem",
         },
     )
     assert res.status_code == 200
@@ -55,6 +57,45 @@ def test_find_comparables_passes_target_and_filters(client, monkeypatch):
     assert captured["filters"].radius_m == 1500
     assert captured["filters"].max_age_days == 14
     assert captured["filters"].has_lift is True
+    assert captured["filters"].category_main == "byt"
+    assert captured["filters"].category_type == "pronajem"
+
+
+def test_find_comparables_requires_category(client):
+    """Category is required now — omitting it must 422, not silently
+    default to apartments-for-rent."""
+    res = client.post(
+        "/tools/find_comparables",
+        json={"target": {"lat": 50.0, "lng": 14.0}},
+    )
+    assert res.status_code == 422
+    missing = {
+        tuple(e["loc"]) for e in res.json()["detail"] if e["type"] == "missing"
+    }
+    assert ("body", "category_main") in missing
+    assert ("body", "category_type") in missing
+
+
+def test_find_comparables_non_byt_category_flows_through(client, monkeypatch):
+    """A house-for-sale request must carry dum/prodej into the filters,
+    not get overwritten by an apartment default."""
+    captured = {}
+    def fake(conn, target, filters):
+        captured["filters"] = filters
+        return {"data": {"listings": []}, "metadata": {"tool": "find_comparables"}}
+    monkeypatch.setattr(api_main, "find_comparables", fake)
+
+    res = client.post(
+        "/tools/find_comparables",
+        json={
+            "target": {"lat": 49.2, "lng": 16.6},
+            "category_main": "dum",
+            "category_type": "prodej",
+        },
+    )
+    assert res.status_code == 200
+    assert captured["filters"].category_main == "dum"
+    assert captured["filters"].category_type == "prodej"
 
 
 def test_analyze_distribution_passes_listings(client, monkeypatch):
@@ -173,7 +214,10 @@ def test_describe_neighborhood_uses_defaults(client, monkeypatch):
 
     res = client.post(
         "/tools/describe_neighborhood",
-        json={"lat": 50.087, "lng": 14.42},
+        json={
+            "lat": 50.087, "lng": 14.42,
+            "category_main": "byt", "category_type": "pronajem",
+        },
     )
     assert res.status_code == 200
     assert captured["radius_m"] == 1000
@@ -252,6 +296,8 @@ def test_compute_market_velocity_passes_target_and_filters(client, monkeypatch):
             "radius_m": 1500,
             "population": "active",
             "trend_split_days": 14,
+            "category_main": "komercni",
+            "category_type": "prodej",
         },
     )
     assert res.status_code == 200
@@ -260,6 +306,8 @@ def test_compute_market_velocity_passes_target_and_filters(client, monkeypatch):
     assert captured["filters"].radius_m == 1500
     # Endpoint always passes active_only=False; population controls instead.
     assert captured["filters"].active_only is False
+    assert captured["filters"].category_main == "komercni"
+    assert captured["filters"].category_type == "prodej"
     assert captured["population"] == "active"
     assert captured["trend_split_days"] == 14
 
@@ -275,7 +323,10 @@ def test_compute_market_velocity_uses_defaults(client, monkeypatch):
 
     res = client.post(
         "/tools/compute_market_velocity",
-        json={"target": {"lat": 50.0, "lng": 14.0}},
+        json={
+            "target": {"lat": 50.0, "lng": 14.0},
+            "category_main": "byt", "category_type": "pronajem",
+        },
     )
     assert res.status_code == 200
     assert captured["population"] == "all"
