@@ -39,6 +39,8 @@ import type {
   WatchdogFilterSpec,
   WatchdogSeenFilter,
   WatchdogSubscription,
+  DedupCandidatesResponse,
+  MergesResponse,
 } from './types';
 
 /* Sources the backend allowlists for high-confidence parsing.
@@ -334,6 +336,52 @@ export const fetchRegionDispositionAnnotations = (
     '/tools/summarize_region_dispositions',
     { method: 'POST', json: input, signal },
   );
+
+/* ----- freshness (Phase U2.5) -------------------------------------------- *
+ *
+ * POST /tools/verify_listing_freshness — on-demand re-fetch of one listing.
+ * The endpoint logs to listing_freshness_checks and may write a new
+ * listing_snapshots row and/or flip listings.is_active (the explicit
+ * write-allowed exception per CLAUDE.md). max_age_hours defaults to 0 here
+ * so an operator clicking the button always triggers a real check rather
+ * than the throttle's `cached` short-circuit.
+ */
+
+export type FreshnessOutcome =
+  | 'unchanged'
+  | 'updated'
+  | 'gone'
+  | 'fetch_error'
+  | 'cached';
+
+export interface VerifyFreshnessResult {
+  data: {
+    sreality_id: number;
+    outcome: FreshnessOutcome;
+    verified: boolean;
+    cached: boolean;
+    age_hours: number | null;
+    what_changed: string[];
+    snapshot_id: number | null;
+    current: Record<string, unknown> | null;
+  };
+  metadata: {
+    tool: string;
+    filters_used: Record<string, unknown>;
+    result_count: number;
+    queried_at: string;
+    data_freshness: string | null;
+  };
+}
+
+export const verifyListingFreshness = (
+  sreality_id: number,
+  options: { max_age_hours?: number } = {},
+): Promise<VerifyFreshnessResult> =>
+  request<VerifyFreshnessResult>('/tools/verify_listing_freshness', {
+    method: 'POST',
+    json: { sreality_id, max_age_hours: options.max_age_hours ?? 0 },
+  });
 
 /* ----- buildings (Phase B1) ---------------------------------------------- */
 
@@ -837,3 +885,67 @@ export const runWatchdogMatcher = (): Promise<{
       listings_in_window: number;
     };
   }>('/notifications/matcher/run', { method: 'POST' });
+
+/* ----- Cross-source dedup review (multi-portal PR3b) --------------------- */
+
+export interface ListDedupCandidatesParams {
+  status?: string;
+  tier?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface MergeResult {
+  data: {
+    merge_group_id: string;
+    survivor_id: number;
+    retired_id: number;
+    listings_moved: number;
+  };
+}
+
+export interface UnmergeResult {
+  data: {
+    merge_group_id: string;
+    survivor_id: number;
+    retired_ids: number[];
+    listings_moved_back: number;
+    conflicts: number[];
+  };
+}
+
+export const listDedupCandidates = (
+  params: ListDedupCandidatesParams = {},
+): Promise<DedupCandidatesResponse> =>
+  request<DedupCandidatesResponse>('/dedup/candidates', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const mergeDedupCandidate = (candidateId: number): Promise<MergeResult> =>
+  request<MergeResult>(
+    `/dedup/candidates/${candidateId}/merge`,
+    { method: 'POST' },
+  );
+
+export const dismissDedupCandidate = (
+  candidateId: number,
+): Promise<{ id: number; status: string }> =>
+  request<{ id: number; status: string }>(
+    `/dedup/candidates/${candidateId}/dismiss`,
+    { method: 'POST' },
+  );
+
+export const listDedupMerges = (
+  params: { limit?: number; offset?: number } = {},
+): Promise<MergesResponse> =>
+  request<MergesResponse>('/dedup/merges', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const unmergeMergeGroup = (
+  mergeGroupId: string,
+): Promise<UnmergeResult> =>
+  request<UnmergeResult>(
+    `/dedup/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
+    { method: 'POST' },
+  );

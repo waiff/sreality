@@ -464,7 +464,7 @@ it (`api/`). They do not apply to the scraper.
      (`building_condition_level`, `apartment_condition_level`) in one transaction, guarded by
      a latest-wins subquery.
    - `summarize_region_dispositions`, which writes the per-disposition box-plot annotations
-     for a Browse > Stats cohort to `region_disposition_annotations` (migration 102, keyed on
+     for a Browse > Stats cohort to `region_disposition_annotations` (migration 104, keyed on
      `(region_hash, day)`) on cache miss. Unlike the snapshot-keyed caches above this one
      invalidates by **calendar day**: a region's annotations are generated once per day so
      repeat browser sessions don't re-bill. `region_hash` is the sha256 of the caller's
@@ -630,7 +630,7 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
 - `score_listing_condition` (`toolkit/condition_scoring.py`, migration 072, cache
   `listing_condition_scores`) — two-axis building/apartment condition levels (1..5) from the
   curated rubric + marker dictionary. See architectural rule #14.
-- `summarize_region_dispositions` (`toolkit/region_annotations.py`, migration 102, cache
+- `summarize_region_dispositions` (`toolkit/region_annotations.py`, migration 104, cache
   `region_disposition_annotations`) — a one-to-two-sentence factual annotation per
   per-disposition Kč/m² box plot in Browse > Stats, from the same `ppm2_box` payload that
   drives the chart. Cached per `(region_hash, day)` — invalidates by calendar day, not by

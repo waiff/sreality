@@ -775,11 +775,26 @@ End-to-end browser flow over the U1b backend.
   price-range + n + share labels; Card heading and caption updated
   accordingly.
 
-### Phase U2.5: Freshness write-path (next)
-"Verify freshness" button on Listing Detail that calls the
-bearer-token-gated FastAPI service to refresh a listing on demand.
-The audit log table (`listing_freshness_checks`) already exists from
-Phase 2.5; the remaining work is the UI button + API call.
+### Phase U2.5: Freshness write-path (done)
+- "Ověřit aktuálnost" (Verify freshness) button on Listing Detail's
+  freshness-checks section. Calls the bearer-token-gated
+  `POST /tools/verify_listing_freshness` on demand via the existing
+  `request()` auth path (no new auth mechanism) — `max_age_hours: 0`
+  so an operator click always forces a real re-fetch rather than the
+  throttle's `cached` short-circuit.
+- `verifyListingFreshness` wrapper + `VerifyFreshnessResult` /
+  `FreshnessOutcome` types in `frontend/src/lib/api.ts`.
+- Pending state ("Ověřuji…" / "Re-fetching the listing from the
+  source…") and a result line that maps the outcome
+  (`unchanged` / `updated` / `gone` / `fetch_error` / `cached`) to a
+  human message + the existing `OutcomeChip`. On success it
+  invalidates the `listing`, `snapshots`, and `freshness` queries so
+  the timeline strip and the check log refetch immediately.
+- The audit log table (`listing_freshness_checks`) and the wrapped
+  `scraper.freshness.freshness_check` already existed from Phase 2.5;
+  this phase added only the frontend affordance. Backed by a
+  `FreshnessBlock` component test (the full live e2e needs production
+  secrets).
 
 ### Phase U-Nav: Unified browse → detail navigation (next)
 
@@ -2360,7 +2375,7 @@ the browser never holds an Anthropic key.
   context. Annotations are facts about the distribution — never a price
   recommendation (toolkit rule #1).
 - Cached per `(region, calendar day)` in `region_disposition_annotations`
-  (migration 102) so repeat browser sessions don't re-bill: the first
+  (migration 104) so repeat browser sessions don't re-bill: the first
   viewer of a region today pays for the Claude call, everyone else hits
   the cache; the next day's first view regenerates. `region_key` is the
   SPA's deterministic serialization of the active filter set.

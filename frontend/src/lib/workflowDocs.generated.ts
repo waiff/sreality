@@ -111,6 +111,55 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
   },
   {
+    "filename": "compute_image_phash.yml",
+    "name": "Compute image pHash (multi-portal dedup)",
+    "description": "Backfills images.phash (a 64-bit perceptual dHash per stored image) for the Tier-2 dedup sweep's cheap image corroborator. Downloads stored bytes from R2, hashes them, writes images.phash. Idempotent + resumable; a no-op if R2 env vars are missing.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 */6 * * *",
+        "human": "Every 6 hours at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max images hashed per run",
+        "required": false,
+        "type": "string",
+        "default": "5000",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the pending count and exit without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "compute-image-phash",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/compute_image_phash.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/compute_image_phash.yml"
+  },
+  {
     "filename": "condition_score_batches.yml",
     "name": "Scraping: Sreality condition scoring (batch API)",
     "description": "Phase 1.8b — async condition scoring via the Anthropic Message Batches API (50% cheaper than the synchronous condition_scores.yml job). Two modes, selected by the `mode` input:",

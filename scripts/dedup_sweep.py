@@ -53,6 +53,7 @@ AUTO_PHASH_HAMMING_MAX = 6
 AUTO_VISION_SIM_MIN = 0.85
 
 VisionFn = Callable[[int, int], float | None]
+PhashFn = Callable[[int, int], int | None]
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,7 @@ def run_sweep(
     max_auto_merges: int = 200,
     compare_fn: VisionFn | None = None,
     max_vision_calls: int = 0,
+    phash_fn: "PhashFn | None" = None,
 ) -> dict[str, int]:
     pairs = generate_candidate_pairs(
         conn, radius=radius, price_drift=price_drift,
@@ -230,6 +232,15 @@ def run_sweep(
                 f"{p['b_locality'] or ''} {p['b_district'] or ''}",
             ),
         )
+
+        # pHash rung (cheap, SQL): min image Hamming between the two
+        # representatives. A close match is a strong auto-merge corroborator,
+        # so it can settle a pair without paying for the vision call.
+        if phash_fn is not None:
+            ph = phash_fn(int(p["a_repr"]), int(p["b_repr"]))
+            if ph is not None:
+                signals = replace(signals, phash_hamming=ph)
+
         decision = classify_pair(signals)
 
         # Vision escalation: only for the tight-but-uncorroborated few, bounded.
@@ -301,6 +312,25 @@ def _build_vision_fn(conn: Any) -> VisionFn:
     return _score
 
 
+def _build_phash_fn(conn: Any) -> PhashFn:
+    """The pHash corroborator: the min image Hamming between two listings'
+    perceptual hashes, computed in SQL via bit_count(a # b). Cheap, so it runs
+    for every candidate pair. None when neither side has a hashed image yet."""
+    def _hamming(a_repr: int, b_repr: int) -> int | None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT min(bit_count((ia.phash # ib.phash)::bit(64))) "
+                "FROM images ia JOIN images ib ON true "
+                "WHERE ia.sreality_id = %s AND ib.sreality_id = %s "
+                "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL",
+                (a_repr, b_repr),
+            )
+            row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
+    return _hamming
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=2000,
@@ -340,6 +370,7 @@ def main() -> int:
         stats = run_sweep(
             conn, limit=args.limit, max_auto_merges=args.max_auto_merges,
             compare_fn=compare_fn, max_vision_calls=args.max_vision_calls,
+            phash_fn=_build_phash_fn(conn),
         )
 
     LOG.info(
