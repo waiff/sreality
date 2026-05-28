@@ -37,6 +37,7 @@ import type {
   ScraperHealthChecks,
 } from '@/lib/types';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
+import { WORKFLOW_DOCS } from '@/lib/workflowDocs.generated';
 
 const STALE_HOURS_WARN = 36;
 
@@ -132,21 +133,13 @@ function Body({ data }: { data: HealthSummary }) {
         />
       </Card>
 
-      <Card label="Count reconciliation · sreality vs us">
-        <ReconciliationPanel
-          rows={scrapeRunsQuery.data}
-          liveByCategory={data.by_category}
-          isLoading={scrapeRunsQuery.isLoading}
-          error={scrapeRunsQuery.error}
-        />
-      </Card>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <LastScrapeTile lastScrapeAt={data.last_scrape_at} />
-        {data.by_category.map((c) => (
-          <CategoryTile key={`${c.category_main}-${c.category_type}`} block={c} />
-        ))}
       </div>
+
+      <Card label="Listings by category · reconciliation">
+        <CategoryTable liveByCategory={data.by_category} rows={scrapeRunsQuery.data} />
+      </Card>
 
       <Card label="Recent scrapes · last 14 d">
         <RecentScrapesPanel
@@ -433,100 +426,157 @@ function LastScrapeTile({ lastScrapeAt }: { lastScrapeAt: string | null }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Per-category tile                                                          */
+/* Per-category table + reconciliation (one row per category)                 */
+/*                                                                            */
+/* Folds the old 6-tile grid and the separate Count-Reconciliation table into */
+/* one place — each category appears once with both its activity (active /     */
+/* new / flipped / failed) and its reconciliation against sreality. After the  */
+/* index/detail split the honest reconciliation is two distinct things:        */
+/*   · Index  — did the walk SEE every listing (collected vs sreality total).  */
+/*   · Queue  — seen but not yet FETCHED by the detail-drain (the real lag      */
+/*     behind any apparent "drift"; a new listing is active only once drained).*/
 /* -------------------------------------------------------------------------- */
 
-function CategoryTile({ block }: { block: HealthCategoryBlock }) {
+function CategoryTable({
+  liveByCategory,
+  rows,
+}: {
+  liveByCategory: HealthCategoryBlock[];
+  rows: ScrapeRun[] | undefined;
+}) {
+  // The latest index run carrying per-category result_size (rows are
+  // most-recent-first). Supplies sreality's total + what we collected.
+  const run = (rows ?? []).find((r) =>
+    r.by_category?.some((c) => c.sreality_result_size != null),
+  );
+  const reconByCat = new Map<string, ScrapeRunCategory>();
+  run?.by_category.forEach((c) =>
+    reconByCat.set(`${c.category_main}-${c.category_type}`, c),
+  );
+
+  const cats = [...liveByCategory].sort((a, b) => b.active_now - a.active_now);
+
+  return (
+    <div>
+      <p className="mb-2 text-xs text-[var(--color-ink-3)] leading-snug">
+        <span className="text-[var(--color-ink-2)]">sreality</span> = the portal&rsquo;s
+        reported total{run ? <> (probed {fmtRelative(run.started_at)})</> : null};{' '}
+        <span className="text-[var(--color-ink-2)]">Index</span> = share of those listings
+        the walk collected; <span className="text-[var(--color-ink-2)]">Queue</span> = seen
+        but not yet fetched by the detail-drain (the real lag behind any apparent drift).
+      </p>
+      <div className="overflow-x-auto -mx-1">
+        <table className="w-full text-xs">
+          <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
+            <tr>
+              <th className="text-left  py-1.5 px-1.5 font-medium">Category</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">Active</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">sreality</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">Collected</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">Index</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">Queue</th>
+              <th className="text-left  py-1.5 px-1.5 font-medium">new 14&thinsp;d</th>
+              <th className="text-left  py-1.5 px-1.5 font-medium">flipped 7&thinsp;d</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">failed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {cats.map((b) => (
+              <CategoryTableRow
+                key={`${b.category_main}-${b.category_type}`}
+                block={b}
+                recon={reconByCat.get(`${b.category_main}-${b.category_type}`)}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CategoryTableRow({
+  block,
+  recon,
+}: {
+  block: HealthCategoryBlock;
+  recon: ScrapeRunCategory | undefined;
+}) {
   const newTotal = block.new_per_day_14d.reduce((s, r) => s + r.n, 0);
   const failuresActive = block.failures_total - block.failures_given_up;
+  const srealityTotal = recon?.sreality_result_size ?? null;
+  const collected = recon?.collected ?? null;
+  const indexPct =
+    srealityTotal && srealityTotal > 0 && collected != null
+      ? (collected / srealityTotal) * 100
+      : null;
+  const indexColour =
+    indexPct == null
+      ? 'var(--color-ink-4)'
+      : indexPct >= 99
+        ? 'var(--color-sage)'
+        : indexPct >= 95
+          ? 'var(--color-ochre)'
+          : 'var(--color-brick)';
+  // Detail-drain backlog proxy: seen (collected, or sreality's total) minus
+  // what is currently active. Per-category exact queue depth isn't available
+  // (un-drained ids aren't listings rows yet), so this is the honest estimate.
+  const seen = collected ?? srealityTotal;
+  const queue = seen != null ? Math.max(0, seen - block.active_now) : null;
   return (
-    <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 flex flex-col gap-3">
-      <header>
-        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-          {categoryLabel(block)}
-        </p>
-        <p className="mt-2 font-mono tabular-nums text-[2rem] leading-none tracking-tight text-[var(--color-ink)]">
-          {fmtCount(block.active_now)}
-        </p>
-        <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)] tracking-wide">active listings</p>
-      </header>
-
-      <div className="grid grid-cols-3 gap-3 pt-2 border-t border-[var(--color-rule-soft)]">
-        <MiniStat
-          label="new 14&thinsp;d"
-          value={fmtCount(newTotal)}
-          spark={block.new_per_day_14d}
-          colour="copper"
-        />
-        <MiniStat
-          label="flipped 7&thinsp;d"
-          value={fmtCount(block.flipped_inactive_7d)}
-          spark={block.flipped_per_day_7d}
-          colour="brick"
-        />
-        <FailuresMini
-          active={failuresActive}
-          given_up={block.failures_given_up}
-        />
-      </div>
-    </section>
-  );
-}
-
-function MiniStat({
-  label,
-  value,
-  spark,
-  colour,
-}: {
-  label: ReactNode;
-  value: ReactNode;
-  spark: HealthDayCount[];
-  colour: 'copper' | 'brick';
-}) {
-  return (
-    <div className="min-w-0">
-      <p className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-        {label}
-      </p>
-      <p className="mt-0.5 font-mono tabular-nums text-base text-[var(--color-ink)] leading-tight">
-        {value}
-      </p>
-      <div className="mt-1">
-        <Sparkline rows={spark} width={90} height={20} colour={colour} />
-      </div>
-    </div>
-  );
-}
-
-function FailuresMini({
-  active,
-  given_up,
-}: {
-  active: number;
-  given_up: number;
-}) {
-  return (
-    <div className="min-w-0">
-      <p className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-        failed
-      </p>
-      <p
-        className="mt-0.5 font-mono tabular-nums text-base leading-tight"
-        style={{ color: active > 0 ? 'var(--color-ochre)' : 'var(--color-ink)' }}
+    <tr className="border-t border-[var(--color-rule-soft)] hover:bg-[var(--color-paper-3)]/40">
+      <td className="py-1.5 px-1.5 text-[var(--color-ink)] whitespace-nowrap">
+        {categoryLabel(block)}
+      </td>
+      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink)]">
+        {fmtCount(block.active_now)}
+      </td>
+      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {srealityTotal != null ? fmtCount(srealityTotal) : '—'}
+      </td>
+      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {collected != null ? fmtCount(collected) : '—'}
+      </td>
+      <td
+        className="py-1.5 px-1.5 text-right font-mono tabular-nums"
+        style={{ color: indexColour }}
       >
-        {fmtCount(active)}
-      </p>
-      <p className="mt-1 text-[0.6rem] text-[var(--color-ink-4)] tabular-nums leading-none">
-        {given_up > 0 ? (
-          <span style={{ color: 'var(--color-brick)' }}>
-            {fmtCount(given_up)}&thinsp;given&nbsp;up
+        {indexPct != null ? `${indexPct.toFixed(0)}%` : '—'}
+      </td>
+      <td
+        className="py-1.5 px-1.5 text-right font-mono tabular-nums"
+        style={{ color: queue && queue > 1000 ? 'var(--color-ochre)' : 'var(--color-ink-3)' }}
+        title="seen in the index but not yet fetched by the detail-drain"
+      >
+        {queue != null ? fmtCount(queue) : '—'}
+      </td>
+      <td className="py-1.5 px-1.5">
+        <div className="flex items-center gap-2">
+          <span className="font-mono tabular-nums text-[var(--color-ink)] w-10 text-right">
+            {fmtCount(newTotal)}
           </span>
-        ) : (
-          <span>0 given up</span>
+          <Sparkline rows={block.new_per_day_14d} width={64} height={18} colour="copper" />
+        </div>
+      </td>
+      <td className="py-1.5 px-1.5">
+        <div className="flex items-center gap-2">
+          <span className="font-mono tabular-nums text-[var(--color-ink)] w-8 text-right">
+            {fmtCount(block.flipped_inactive_7d)}
+          </span>
+          <Sparkline rows={block.flipped_per_day_7d} width={64} height={18} colour="brick" />
+        </div>
+      </td>
+      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums leading-tight">
+        <span style={{ color: failuresActive > 0 ? 'var(--color-ochre)' : 'var(--color-ink)' }}>
+          {fmtCount(failuresActive)}
+        </span>
+        {block.failures_given_up > 0 && (
+          <span className="block text-[0.6rem] text-[var(--color-brick)]">
+            {fmtCount(block.failures_given_up)}&thinsp;given&nbsp;up
+          </span>
         )}
-      </p>
-    </div>
+      </td>
+    </tr>
   );
 }
 
@@ -654,120 +704,6 @@ function HealthCheckCard({ check }: { check: ScraperHealthCheck }) {
       <p className="mt-1.5 text-[0.7rem] leading-snug text-[var(--color-ink-3)]">
         {check.detail}
       </p>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Count reconciliation (sreality result_size vs our active count)             */
-/* -------------------------------------------------------------------------- */
-
-function categoryDriftPct(srealityResultSize: number, activeNow: number): number {
-  return srealityResultSize > 0
-    ? (100 * (activeNow - srealityResultSize)) / srealityResultSize
-    : 0;
-}
-
-function ReconciliationPanel({
-  rows,
-  liveByCategory,
-  isLoading,
-  error,
-}: {
-  rows: ScrapeRun[] | undefined;
-  liveByCategory: HealthCategoryBlock[];
-  isLoading: boolean;
-  error: Error | null;
-}) {
-  if (error) {
-    return (
-      <p className="text-sm text-[var(--color-brick)]">
-        recent_scrape_runs failed: {error.message}
-      </p>
-    );
-  }
-  if (isLoading && !rows) {
-    return <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>;
-  }
-  // "we have" is the SAME live active_now the per-category tiles show, keyed by
-  // category, so the two panels can never disagree. The scrape run supplies
-  // only sreality_result_size (the per-category total it probed during the walk).
-  const activeByCategory = new Map(
-    liveByCategory.map((b) => [`${b.category_main}-${b.category_type}`, b.active_now]),
-  );
-  const run = (rows ?? []).find((r) =>
-    r.by_category?.some((c) => c.sreality_result_size != null),
-  );
-  if (!run) {
-    return (
-      <p className="text-sm text-[var(--color-ink-3)]">
-        Awaiting data — populates after the next scrape on the region-split scraper.
-      </p>
-    );
-  }
-  const cats = run.by_category
-    .filter((c) => c.sreality_result_size != null)
-    .map((c) => ({
-      cat: c,
-      activeNow: activeByCategory.get(`${c.category_main}-${c.category_type}`) ?? 0,
-    }))
-    .sort(
-      (a, b) =>
-        Math.abs(categoryDriftPct(b.cat.sreality_result_size ?? 0, b.activeNow)) -
-        Math.abs(categoryDriftPct(a.cat.sreality_result_size ?? 0, a.activeNow)),
-    );
-
-  return (
-    <div>
-      <p className="mb-2 text-xs text-[var(--color-ink-3)]">
-        sreality&rsquo;s reported total (probed {fmtRelative(run.started_at)}) vs our
-        current active count, per category. Drift &gt;5% is flagged.
-      </p>
-      <table className="w-full text-sm border-collapse">
-        <thead>
-          <tr className="text-left text-[0.7rem] uppercase tracking-wide text-[var(--color-ink-3)]">
-            <th className="py-1 px-1.5">Category</th>
-            <th className="py-1 px-1.5 text-right">sreality</th>
-            <th className="py-1 px-1.5 text-right">we have</th>
-            <th className="py-1 px-1.5 text-right">drift</th>
-          </tr>
-        </thead>
-        <tbody>
-          {cats.map(({ cat: c, activeNow }) => {
-            const drift = categoryDriftPct(c.sreality_result_size ?? 0, activeNow);
-            const adrift = Math.abs(drift);
-            const color =
-              adrift < 2
-                ? 'var(--color-sage)'
-                : adrift < 5
-                  ? 'var(--color-ochre)'
-                  : 'var(--color-brick)';
-            return (
-              <tr
-                key={`${c.category_main}-${c.category_type}`}
-                className="border-t border-[var(--color-rule-soft)]"
-              >
-                <td className="py-1 px-1.5 text-[var(--color-ink-2)]">
-                  {categoryPairLabel(c.category_main, c.category_type)}
-                </td>
-                <td className="py-1 px-1.5 text-right font-mono tabular-nums">
-                  {fmtCount(c.sreality_result_size ?? 0)}
-                </td>
-                <td className="py-1 px-1.5 text-right font-mono tabular-nums">
-                  {fmtCount(activeNow)}
-                </td>
-                <td
-                  className="py-1 px-1.5 text-right font-mono tabular-nums"
-                  style={{ color }}
-                >
-                  {drift > 0 ? '+' : ''}
-                  {drift.toFixed(1)}%
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
     </div>
   );
 }
@@ -1090,6 +1026,17 @@ function categoryPairLabel(
   return `${main} · ${type}`;
 }
 
+const RECENT_RUNS_VISIBLE = 15;
+
+/* index = the cheap completeness walk; detail = the slow per-listing drain;
+ * full/delta = the legacy monolithic scraper. */
+const RUN_TYPE_PILL: Record<ScrapeRun['run_type'], string> = {
+  index: 'bg-[var(--color-copper-soft)] text-[var(--color-copper)]',
+  detail: 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]',
+  full: 'bg-[var(--color-copper-soft)] text-[var(--color-copper)]',
+  delta: 'bg-[var(--color-rule-soft)] text-[var(--color-ink-2)]',
+};
+
 function RecentScrapesPanel({
   rows,
   isLoading,
@@ -1099,6 +1046,7 @@ function RecentScrapesPanel({
   isLoading: boolean;
   error: Error | null;
 }) {
+  const [showAll, setShowAll] = useState(false);
   if (error) {
     return (
       <p className="text-sm text-[var(--color-brick)]">
@@ -1210,12 +1158,24 @@ function RecentScrapesPanel({
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => (
+            {(showAll ? rows : rows.slice(0, RECENT_RUNS_VISIBLE)).map((r) => (
               <ScrapeRunRow key={r.id} run={r} />
             ))}
           </tbody>
         </table>
       </div>
+
+      {rows.length > RECENT_RUNS_VISIBLE && (
+        <button
+          type="button"
+          onClick={() => setShowAll((v) => !v)}
+          className="mt-3 text-xs text-[var(--color-copper)] hover:underline"
+        >
+          {showAll
+            ? `Show fewer (latest ${RECENT_RUNS_VISIBLE})`
+            : `Show all ${fmtCount(rows.length)} runs`}
+        </button>
+      )}
     </div>
   );
 }
@@ -1257,9 +1217,7 @@ function ScrapeRunRow({ run }: { run: ScrapeRun }) {
           <span
             className={
               'inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium ' +
-              (run.run_type === 'full'
-                ? 'bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-                : 'bg-[var(--color-rule-soft)] text-[var(--color-ink-2)]')
+              RUN_TYPE_PILL[run.run_type]
             }
           >
             {run.run_type}
@@ -1356,30 +1314,30 @@ function ImageMirrorPanel({
     overview.total_images > 0
       ? (overview.stored_images / overview.total_images) * 100
       : 0;
+  const activePct =
+    overview.total_active_images > 0
+      ? (overview.stored_active_images / overview.total_active_images) * 100
+      : 0;
+  // Focus the active subset — those CDN photos are still fetchable, so the gap
+  // is closeable; inactive listings' photos are mostly expired.
   const rows = [...overview.by_category].sort(
-    (a, b) => b.total - a.total,
+    (a, b) => b.total_active - a.total_active,
   );
   return (
     <div>
-      <div className="flex items-baseline justify-between gap-4">
-        <p className="text-[0.62rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
-          stored / total
-        </p>
-        <p className="font-mono tabular-nums text-sm text-[var(--color-ink)]">
-          {fmtCount(overview.stored_images)}
-          <span className="text-[var(--color-ink-4)]">
-            {' / '}
-            {fmtCount(overview.total_images)}
-          </span>
-          <span className="ml-2 text-[var(--color-ink-3)] text-[0.65rem]">
-            {pct.toFixed(1)}%
-          </span>
-        </p>
-      </div>
-      <div className="mt-1.5 h-1.5 bg-[var(--color-rule-soft)] rounded-full overflow-hidden">
-        <div
-          className="h-full bg-[var(--color-copper)] rounded-full"
-          style={{ width: `${pct}%` }}
+      <ImageBar
+        label="active listings · closeable gap"
+        stored={overview.stored_active_images}
+        total={overview.total_active_images}
+        pct={activePct}
+        emphasis
+      />
+      <div className="mt-3">
+        <ImageBar
+          label="all listings (incl. inactive — mostly expired)"
+          stored={overview.stored_images}
+          total={overview.total_images}
+          pct={pct}
         />
       </div>
 
@@ -1387,9 +1345,11 @@ function ImageMirrorPanel({
         <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
           <tr>
             <th className="text-left  py-1.5 px-1.5 font-medium">Category</th>
-            <th className="text-right py-1.5 px-1.5 font-medium">Total</th>
-            <th className="text-right py-1.5 px-1.5 font-medium">Stored</th>
-            <th className="text-right py-1.5 px-1.5 font-medium w-12">%</th>
+            <th className="text-right py-1.5 px-1.5 font-medium">Active stored</th>
+            <th className="text-right py-1.5 px-1.5 font-medium">Active total</th>
+            <th className="text-right py-1.5 px-1.5 font-medium w-12">Active&thinsp;%</th>
+            <th className="text-right py-1.5 px-1.5 font-medium text-[var(--color-ink-4)]">All stored</th>
+            <th className="text-right py-1.5 px-1.5 font-medium text-[var(--color-ink-4)]">All total</th>
           </tr>
         </thead>
         <tbody>
@@ -1402,46 +1362,138 @@ function ImageMirrorPanel({
   );
 }
 
+function ImageBar({
+  label,
+  stored,
+  total,
+  pct,
+  emphasis = false,
+}: {
+  label: string;
+  stored: number;
+  total: number;
+  pct: number;
+  emphasis?: boolean;
+}) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-4">
+        <p className="text-[0.62rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
+          {label}
+        </p>
+        <p className="font-mono tabular-nums text-sm text-[var(--color-ink)]">
+          {fmtCount(stored)}
+          <span className="text-[var(--color-ink-4)]">
+            {' / '}
+            {fmtCount(total)}
+          </span>
+          <span className="ml-2 text-[var(--color-ink-3)] text-[0.65rem]">
+            {pct.toFixed(1)}%
+          </span>
+        </p>
+      </div>
+      <div className="mt-1.5 h-1.5 bg-[var(--color-rule-soft)] rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full"
+          style={{
+            width: `${pct}%`,
+            background: emphasis ? 'var(--color-copper)' : 'var(--color-ink-3)',
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function ImageStorageRow({ row }: { row: ImageStorageCategory }) {
-  const pct = row.total > 0 ? (row.stored / row.total) * 100 : 0;
+  const activePct = row.total_active > 0 ? (row.stored_active / row.total_active) * 100 : 0;
+  const activeColour =
+    row.total_active === 0
+      ? 'var(--color-ink-4)'
+      : activePct >= 80
+        ? 'var(--color-sage)'
+        : activePct >= 40
+          ? 'var(--color-ochre)'
+          : 'var(--color-brick)';
   return (
     <tr className="border-t border-[var(--color-rule-soft)]">
       <td className="py-1.5 px-1.5 text-[var(--color-ink)]">
         {categoryPairLabel(row.category_main, row.category_type)}
       </td>
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink)]">
-        {fmtCount(row.total)}
+        {fmtCount(row.stored_active)}
       </td>
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink)]">
+        {fmtCount(row.total_active)}
+      </td>
+      <td
+        className="py-1.5 px-1.5 text-right font-mono tabular-nums"
+        style={{ color: activeColour }}
+      >
+        {row.total_active > 0 ? `${activePct.toFixed(0)}%` : '—'}
+      </td>
+      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-4)]">
         {fmtCount(row.stored)}
       </td>
-      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-3)]">
-        {row.total > 0 ? `${pct.toFixed(0)}%` : '—'}
+      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-4)]">
+        {fmtCount(row.total)}
       </td>
     </tr>
   );
 }
 
 /* -------------------------------------------------------------------------- */
-/* Scrape schedule (static config — mirrors the GitHub Actions cron lines)     */
+/* Scrape schedule (data-driven from workflowDocs.generated.ts — the codegen   */
+/* of the .github/workflows/*.yml cron lines, so it can never go stale)        */
 /* -------------------------------------------------------------------------- */
 
+/* Which scheduled workflows are scrapes vs background maintenance jobs. */
+const SCRAPE_WORKFLOW_FILES = new Set([
+  'index_walk.yml',
+  'detail_drain.yml',
+  'scrape.yml',
+  'scrape_bazos.yml',
+]);
+
 function SchedulePanel() {
+  const scheduled = WORKFLOW_DOCS.filter((w) => w.schedules.length > 0).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+  const scrapes = scheduled.filter((w) => SCRAPE_WORKFLOW_FILES.has(w.filename));
+  const jobs = scheduled.filter((w) => !SCRAPE_WORKFLOW_FILES.has(w.filename));
   return (
-    <dl className="space-y-2 text-sm">
-      <ScheduleRow
-        label="Full scrape"
-        cron="0 22 * * *"
-        human="Daily at 22:00 UTC"
-        note="Walks all six category pairs end-to-end; the only path that marks listings inactive. Runs the image-download phase and condition scoring after the scrape."
-      />
-      <ScheduleRow
-        label="Delta scrape"
-        cron="*/15 * * * *"
-        human="Every 15 minutes"
-        note="--limit 200 per category — picks up new listings within minutes. Skips image downloads and condition scoring; never marks listings inactive."
-      />
-    </dl>
+    <div className="space-y-4">
+      <ScheduleGroup title="Scrapes" items={scrapes} />
+      <ScheduleGroup title="Maintenance jobs" items={jobs} />
+    </div>
+  );
+}
+
+function ScheduleGroup({
+  title,
+  items,
+}: {
+  title: string;
+  items: typeof WORKFLOW_DOCS;
+}) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)] mb-1">
+        {title}
+      </p>
+      <dl className="space-y-2 text-sm">
+        {items.map((w) => (
+          <ScheduleRow
+            key={w.filename}
+            label={w.name}
+            cron={w.schedules.map((s) => s.cron).join(', ')}
+            human={w.schedules.map((s) => s.human).join(' · ')}
+            note={w.description}
+          />
+        ))}
+      </dl>
+    </div>
   );
 }
 
@@ -1459,17 +1511,17 @@ function ScheduleRow({
   return (
     <div className="border-t first:border-t-0 first:pt-0 pt-2 border-[var(--color-rule-soft)]">
       <div className="flex items-baseline justify-between gap-3">
-        <dt className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+        <dt className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)] font-medium">
           {label}
         </dt>
-        <dd className="font-mono text-[0.65rem] text-[var(--color-ink-4)] tabular-nums">
+        <dd className="font-mono text-[0.65rem] text-[var(--color-ink-4)] tabular-nums shrink-0">
           {cron}
         </dd>
       </div>
       <p className="mt-0.5 font-mono tabular-nums text-[var(--color-ink)]">
         {human}
       </p>
-      <p className="mt-1 text-xs text-[var(--color-ink-3)] leading-snug">
+      <p className="mt-1 text-xs text-[var(--color-ink-3)] leading-snug line-clamp-3">
         {note}
       </p>
     </div>

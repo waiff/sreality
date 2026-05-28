@@ -199,7 +199,9 @@ export interface ScrapeRun {
   id: number;
   started_at: string;
   ended_at: string | null;
-  run_type: 'full' | 'delta';
+  // 'full'/'delta' are the legacy monolithic scraper; 'index'/'detail' are the
+  // Phase-2 cadence split (migration 105).
+  run_type: 'full' | 'delta' | 'index' | 'detail';
   index_pages: number;
   listings_found_new: number;
   listings_scraped_new: number;
@@ -248,11 +250,17 @@ export interface ImageStorageCategory {
   category_type: string | null;
   total: number;
   stored: number;
+  // Active-listing subset (migration 109): the *closeable* gap — inactive
+  // listings' CDN photos are mostly expired and unrecoverable.
+  total_active: number;
+  stored_active: number;
 }
 
 export interface ImageStorageOverview {
   total_images: number;
   stored_images: number;
+  total_active_images: number;
+  stored_active_images: number;
   by_category: ImageStorageCategory[];
 }
 

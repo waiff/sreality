@@ -302,6 +302,31 @@ def test_mark_inactive_no_dirty_when_no_flips():
     assert _find(conn.executed, "INSERT INTO dirty_properties") is None
 
 
+def test_mark_inactive_is_source_scoped():
+    # Rule #15: a sreality index walk must only flip sreality rows. Bazos rows
+    # carry the same canon categories but are never in sreality's seen_ids, so
+    # without the source clause every sreality walk would sweep them inactive.
+    conn = _FakeConn([
+        (lambda s: "UPDATE listings SET is_active = false WHERE is_active = true" in s, []),
+    ])
+    db.mark_inactive(conn, "byt", "prodej", {1, 2}, source="sreality")
+    sql, params = conn.executed[0]
+    assert "AND source = %s" in sql
+    assert params[0] == "sreality"          # source bound first
+    assert params[1:3] == ("byt", "prodej")
+    assert sorted(params[3]) == [1, 2]
+
+
+def test_active_count_is_source_scoped():
+    conn = _FakeConn([
+        (lambda s: "SELECT count(*) FROM listings" in s, [(42,)]),
+    ])
+    assert db.active_count(conn, "byt", "prodej", source="sreality") == 42
+    sql, params = conn.executed[0]
+    assert "AND source = %s" in sql
+    assert params == ("sreality", "byt", "prodej")
+
+
 def test_mark_listing_inactive_enqueues_its_property():
     conn = _FakeConn([
         (lambda s: "WHERE sreality_id = %s RETURNING property_id" in s, [(42,)]),

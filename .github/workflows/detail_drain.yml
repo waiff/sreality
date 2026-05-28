@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       max_detail_refetches:
-        description: "Cap listings claimed + fetched this run (blank = 6000)"
+        description: "Cap listings claimed + fetched this run (blank = 12000)"
         required: false
         type: string
       detail_workers:
@@ -56,9 +56,12 @@ concurrency:
 jobs:
   detail-drain:
     runs-on: ubuntu-latest
-    # The fetch rate (default 6 req/s) is the bottleneck, not the batched write,
-    # so the default 6000-claim cap drains in ~17 min. 50 min leaves headroom;
-    # kept under the API's sweep_stuck_scrape_runs cutoff (90 min).
+    # The fetch rate (6 req/s) is the bottleneck, not the batched write, so the
+    # cap — not the rate — sets how much one run drains. At 6 req/s a 50-min
+    # window covers ~18k fetches; the 12000-claim default (~33 min) uses most of
+    # it so the run clears a deep backlog instead of stopping early, while the
+    # rate (politeness) is unchanged. Kept under the API's
+    # sweep_stuck_scrape_runs cutoff (90 min).
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
@@ -78,7 +81,7 @@ jobs:
           SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
         run: |
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
-          if [ -z "$MAX_REFETCH" ]; then MAX_REFETCH="6000"; fi
+          if [ -z "$MAX_REFETCH" ]; then MAX_REFETCH="12000"; fi
           DETAIL_WORKERS="${{ inputs.detail_workers }}"
           if [ -z "$DETAIL_WORKERS" ]; then DETAIL_WORKERS="8"; fi
           DETAIL_RATE="${{ inputs.detail_rate }}"

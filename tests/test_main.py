@@ -152,12 +152,13 @@ def patched_db(monkeypatch):
     )
     monkeypatch.setattr(
         scraper_main.db, "mark_inactive",
-        lambda _conn, cm, ct, ids: (
+        lambda _conn, cm, ct, ids, *, source="sreality": (
             calls["mark_inactive"].append((cm, ct, set(ids))) or 0
         ),
     )
     monkeypatch.setattr(
-        scraper_main.db, "active_count", lambda _conn, _cm, _ct: 0,
+        scraper_main.db, "active_count",
+        lambda _conn, _cm, _ct, *, source="sreality": 0,
     )
     # The pooled walk calls _fetch_detail (worker) then _write_result
     # (main thread); stub both so _run_full exercises planning + the pool
@@ -676,7 +677,9 @@ def test_run_full_isolates_a_crashing_category(patched_db, monkeypatch):
 
 def test_run_full_records_reconciliation_fields(patched_db, monkeypatch):
     monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
-    monkeypatch.setattr(scraper_main.db, "active_count", lambda _c, _cm, _ct: 42)
+    monkeypatch.setattr(
+        scraper_main.db, "active_count", lambda _c, _cm, _ct, *, source="sreality": 42
+    )
 
     rc, agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
