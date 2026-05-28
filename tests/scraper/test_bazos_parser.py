@@ -112,6 +112,41 @@ def test_parse_detail_full():
     assert len(listing.raw["image_urls"]) == 2
 
 
+def test_parse_detail_coords_from_map_link_outside_lokalita_cell():
+    """Live bazos renders the "show on map" link OUTSIDE the Lokalita table cell
+    (the fixture above happens to have it inside). Coords must still be extracted
+    from the page-wide Google-Maps / Mapy.cz link — the bug that left every real
+    bazos listing with NULL geom and starved cross-source dedup."""
+    html = """
+    <!DOCTYPE html><html><body>
+    <h1 class="nadpisdetail">Prodám byt 3+kk Brno</h1>
+    <table class="listadvalues">
+      <tr><td>Cena:</td><td>3 500 000 Kč</td></tr>
+      <tr><td>Lokalita:</td><td>Brno 602 00</td></tr>
+    </table>
+    <div class="popisdetail">Byt 3+kk o výměře 70 m².</div>
+    <div class="mapadetail">
+      <a href="https://www.google.com/maps/place/49.180806,16.675186/@49.18,16.67,12z">Zobrazit na mapě</a>
+    </div>
+    </body></html>
+    """
+    listing = parse_detail(
+        html, source_url="https://reality.bazos.cz/inzerat/999/x.php",
+        category_main="byt", category_type="prodej",
+    )
+    assert listing.lat == 49.180806
+    assert listing.lon == 16.675186
+    assert listing.locality == "Brno"
+
+
+def test_parse_coords_rejects_out_of_cz_bounds():
+    from scraper.bazos_parser import _parse_coords
+    # A stray non-Czech decimal pair must never become geom.
+    assert _parse_coords("https://x/maps/place/1.234567,2.345678/") == (None, None)
+    # A real Czech pair passes through.
+    assert _parse_coords("https://x/maps/place/50.087,14.421/") == (50.087, 14.421)
+
+
 def test_parse_detail_content_hash_stable():
     url = "https://reality.bazos.cz/inzerat/219122924/x.php"
     a = parse_detail(DETAIL_HTML, source_url=url, category_main="byt", category_type="prodej")
