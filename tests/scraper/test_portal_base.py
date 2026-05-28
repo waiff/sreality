@@ -36,6 +36,10 @@ class _Session:
         self.calls.append((url, params))
         return self._responses.pop(0)
 
+    def post(self, url, json=None, timeout=None):
+        self.calls.append((url, json))
+        return self._responses.pop(0)
+
 
 def _client(responses: list[_Resp], **kw) -> BasePortalClient:
     c = BasePortalClient(**kw)
@@ -125,6 +129,21 @@ def test_no_limiter_falls_back_to_sleep(monkeypatch):
     c._last_at = 99.5  # 0.5s since last fetch -> should sleep ~1.5s
     c._request("http://x/")
     assert slept and abs(slept[0] - 1.5) < 1e-9
+
+
+def test_post_request_sends_json_body():
+    c = _client([_Resp(200, "{}")])
+    resp = c._request("http://x/graphql", json_body={"query": "{a}"})
+    assert resp.status_code == 200
+    assert c._session.calls == [("http://x/graphql", {"query": "{a}"})]
+
+
+def test_post_request_retries_like_get(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
+    c = _client([_Resp(503), _Resp(200, "{}")], max_retries=2)
+    resp = c._request("http://x/graphql", json_body={"query": "{a}"})
+    assert resp.status_code == 200
+    assert len(c._session.calls) == 2  # retried the 503, then succeeded
 
 
 def test_accept_header_per_subclass():

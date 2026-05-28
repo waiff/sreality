@@ -61,6 +61,20 @@ _DEFAULTS: dict[str, PortalConfig] = {
         categories=[{"sale_type": "prodam", "category": "byt"}],
         split_threshold=None,
     ),
+    "bezrealitky": PortalConfig(
+        source="bezrealitky",
+        # GraphQL listAdverts gives a totalCount and has no deep-pagination cap,
+        # so a per-category walk is provable-complete (mark_inactive runs under
+        # the completeness guard, source-scoped). No split needed.
+        supports_complete_walk=True,
+        categories=[
+            {"offer_type": "PRODEJ", "estate_type": "BYT"},
+            {"offer_type": "PRONAJEM", "estate_type": "BYT"},
+            {"offer_type": "PRODEJ", "estate_type": "DUM"},
+            {"offer_type": "PRONAJEM", "estate_type": "DUM"},
+        ],
+        split_threshold=None,
+    ),
 }
 
 
