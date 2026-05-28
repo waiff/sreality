@@ -64,6 +64,7 @@ from toolkit.image_similarity import compare_listing_images  # noqa: E402
 from toolkit.manual_estimates import get_manual_rental_estimates  # noqa: E402
 from toolkit.neighborhoods import describe_neighborhood  # noqa: E402
 from toolkit.outliers import find_distribution_outliers  # noqa: E402
+from toolkit.region_annotations import summarize_region_dispositions  # noqa: E402
 from toolkit.snapshots import compare_snapshots  # noqa: E402
 from toolkit.summaries import summarize_listing  # noqa: E402
 from toolkit.transit_axis import find_comparables_along_axis  # noqa: E402
@@ -101,5 +102,6 @@ __all__ = [
     "read_floor_plan",
     "score_listing_condition",
     "summarize_listing",
+    "summarize_region_dispositions",
     "verify_listing_freshness",
 ]

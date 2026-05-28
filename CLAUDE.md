@@ -433,7 +433,7 @@ it (`api/`). They do not apply to the scraper.
 4. **"Active" filter is `is_active = true AND last_seen_at > now() - interval 'X days'`
    (default 7).** Don't trust `is_active` alone — a listing not seen for 30 days is
    functionally inactive.
-5. **No writes from the toolkit, with nine explicit exceptions.** Read-only by default. The
+5. **No writes from the toolkit, with ten explicit exceptions.** Read-only by default. The
    exceptions are:
    - `verify_listing_freshness` (and `scraper.freshness.freshness_check` that it wraps), so
      an agent can confirm a comparable is still valid before relying on it. Every call logs
@@ -463,11 +463,18 @@ it (`api/`). They do not apply to the scraper.
      on `(sreality_id, snapshot_id)`) AND updates the two derived columns on `listings`
      (`building_condition_level`, `apartment_condition_level`) in one transaction, guarded by
      a latest-wins subquery.
+   - `summarize_region_dispositions`, which writes the per-disposition box-plot annotations
+     for a Browse > Stats cohort to `region_disposition_annotations` (migration 102, keyed on
+     `(region_hash, day)`) on cache miss. Unlike the snapshot-keyed caches above this one
+     invalidates by **calendar day**: a region's annotations are generated once per day so
+     repeat browser sessions don't re-bill. `region_hash` is the sha256 of the caller's
+     deterministic serialization of the active filter set.
    Every write-allowed exception caches an expensive external/LLM fact locally and
-   auto-invalidates (a new snapshot, or a model bump, yields a fresh key); the LLM/OSM source
-   is the truth, the table is a mirror. No other toolkit function may write. The API service
-   should still connect with a read-only role if Postgres permits; these nine paths then need
-   a separately-elevated route. For now we ship with one role and discipline.
+   auto-invalidates (a new snapshot, a model bump, or the calendar day rolling over yields a
+   fresh key); the LLM/OSM source is the truth, the table is a mirror. No other toolkit
+   function may write. The API service should still connect with a read-only role if Postgres
+   permits; these ten paths then need a separately-elevated route. For now we ship with one
+   role and discipline.
 6. **Spatial queries use `geography(point, 4326)`.** Always `ST_DWithin(geom, target_geom,
    radius_m)`. Never compute distance in Python.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
@@ -623,6 +630,12 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
 - `score_listing_condition` (`toolkit/condition_scoring.py`, migration 072, cache
   `listing_condition_scores`) — two-axis building/apartment condition levels (1..5) from the
   curated rubric + marker dictionary. See architectural rule #14.
+- `summarize_region_dispositions` (`toolkit/region_annotations.py`, migration 102, cache
+  `region_disposition_annotations`) — a one-to-two-sentence factual annotation per
+  per-disposition Kč/m² box plot in Browse > Stats, from the same `ppm2_box` payload that
+  drives the chart. Cached per `(region_hash, day)` — invalidates by calendar day, not by
+  snapshot. Powers the `summarize-1` annotated-charts feature; FACTS not opinions (toolkit
+  rule #1) — it describes the distribution, never recommends a price.
 
 ## Coding conventions
 
