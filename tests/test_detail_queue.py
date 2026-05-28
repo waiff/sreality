@@ -224,3 +224,104 @@ def test_reclaim_stale_claims_releases_old_claims():
     assert "SET claimed_at = NULL" in sql
     assert "claimed_at < now() - make_interval(mins => %s)" in sql
     assert params == (30,)
+
+
+# --- Phase 3: dirty-property enqueue ----------------------------------------
+
+
+def test_write_detail_batch_enqueues_dirty_for_changed_listings():
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO listings (" in s, [(True,), (False,)]),
+        # both listings changed -> RETURNING sreality_id gives both ids
+        (lambda s: "INSERT INTO listing_snapshots" in s, [(1,), (2,)]),
+        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
+        (lambda s: "INSERT INTO dirty_properties" in s, []),
+    ])
+    db.write_detail_batch(conn, [
+        _result(1, price=100, content_hash="h1"),
+        _result(2, price=200, content_hash="h2"),
+    ])
+    dirty = _find(conn.executed, "INSERT INTO dirty_properties")
+    assert dirty is not None
+    sql, params = dirty
+    assert "FROM listings" in sql and "property_id IS NOT NULL" in sql
+    assert "ON CONFLICT (property_id) DO NOTHING" in sql
+    assert params == ([1, 2],)
+
+
+def test_write_detail_batch_no_dirty_when_nothing_changed():
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO listings (" in s, [(False,)]),
+        (lambda s: "INSERT INTO listing_snapshots" in s, []),  # no content change
+        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
+    ])
+    db.write_detail_batch(conn, [_result(1, price=100, content_hash="h1")])
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+
+
+def test_mark_properties_dirty_drops_null_and_uses_unnest():
+    conn = _FakeConn([(lambda s: "INSERT INTO dirty_properties" in s, [(10,)])])
+    db.mark_properties_dirty(conn, [10, None, 10])
+    sql, params = conn.executed[0]
+    assert "unnest(%s::bigint[])" in sql
+    assert "ON CONFLICT (property_id) DO NOTHING" in sql
+    assert params == ([10, 10],)  # NULL dropped; SQL DISTINCT collapses dups
+
+
+def test_mark_properties_dirty_empty_noop():
+    conn = _FakeConn([])
+    assert db.mark_properties_dirty(conn, [None]) == 0
+    assert conn.executed == []
+
+
+def test_mark_inactive_enqueues_flipped_properties_and_returns_count():
+    conn = _FakeConn([
+        (lambda s: "UPDATE listings SET is_active = false WHERE is_active = true" in s,
+         [(5,), (5,), (None,)]),
+        (lambda s: "INSERT INTO dirty_properties" in s, []),
+    ])
+    n = db.mark_inactive(conn, "byt", "prodej", {1, 2})
+    assert n == 3  # three listings flipped
+    dirty = _find(conn.executed, "INSERT INTO dirty_properties")
+    assert dirty is not None
+    assert dirty[1] == ([5],)  # NULL-property listing excluded; deduped
+
+
+def test_mark_inactive_no_dirty_when_no_flips():
+    conn = _FakeConn([
+        (lambda s: "UPDATE listings SET is_active = false WHERE is_active = true" in s, []),
+    ])
+    assert db.mark_inactive(conn, "byt", "prodej", {1}) == 0
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+
+
+def test_mark_listing_inactive_enqueues_its_property():
+    conn = _FakeConn([
+        (lambda s: "WHERE sreality_id = %s RETURNING property_id" in s, [(42,)]),
+        (lambda s: "INSERT INTO dirty_properties" in s, []),
+    ])
+    db.mark_listing_inactive(conn, 999)
+    dirty = _find(conn.executed, "INSERT INTO dirty_properties")
+    assert dirty is not None
+    assert dirty[1] == (42,)
+
+
+def test_mark_listing_inactive_no_property_no_dirty():
+    conn = _FakeConn([
+        (lambda s: "WHERE sreality_id = %s RETURNING property_id" in s, [(None,)]),
+    ])
+    db.mark_listing_inactive(conn, 999)
+    assert _find(conn.executed, "INSERT INTO dirty_properties") is None
+
+
+def test_touch_listings_enqueues_reactivated_properties():
+    conn = _FakeConn([
+        (lambda s: "WITH react AS" in s, []),
+        (lambda s: "SET last_seen_at = now(), is_active = true" in s, [(1,), (2,)]),
+    ])
+    db.touch_listings(conn, [1, 2])
+    react = _find(conn.executed, "WITH react AS")
+    assert react is not None
+    # only listings currently inactive are captured for re-activation dirtying
+    assert "listings.is_active = false" in react[0]
+    assert "INSERT INTO dirty_properties" in react[0]
