@@ -34,6 +34,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -86,6 +87,23 @@ CATEGORIES: tuple[tuple[int, int], ...] = (
     (4, 2),  # komercni / pronajem
     (4, 1),  # komercni / prodej
 )
+
+
+def _rotated_categories(
+    categories: tuple[tuple[int, int], ...],
+    offset: int,
+) -> tuple[tuple[int, int], ...]:
+    """Rotate the category order left by `offset` positions.
+
+    The per-run detail-refetch budget is consumed in category order, so a
+    fixed order always starves the same trailing categories. Rotating each
+    run (offset = run hour) gives every category a turn at the front.
+    """
+    if not categories:
+        return categories
+    k = offset % len(categories)
+    return categories[k:] + categories[:k]
+
 
 LOG = logging.getLogger("scraper")
 
@@ -479,11 +497,19 @@ def _run_full(
     # request-rate cap is global. Adapts down on 429/403.
     limiter = RateLimiter(detail_rate)
 
-    conn = None if dry_run else db.connect()
+    # The long-lived detail-write connection uses the Session-mode pooler so
+    # the repeated upsert + spatial SQL gets prepared once and reused across
+    # every listing in the run. Falls back to the Transaction-mode pooler when
+    # SUPABASE_DB_SESSION_URL is unset.
+    conn = None if dry_run else db.connect_session()
+
+    # Rotate the category order each run so the per-run refetch budget (consumed
+    # in order) doesn't always starve the same trailing categories.
+    categories = _rotated_categories(CATEGORIES, datetime.now(timezone.utc).hour)
 
     try:
         global_collected = 0
-        for category_main, category_type in CATEGORIES:
+        for category_main, category_type in categories:
             cm_text = parser.CATEGORY_MAIN[category_main]
             ct_text = parser.CATEGORY_TYPE[category_type]
             LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)

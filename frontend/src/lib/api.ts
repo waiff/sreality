@@ -38,6 +38,8 @@ import type {
   WatchdogFilterSpec,
   WatchdogSeenFilter,
   WatchdogSubscription,
+  DedupCandidatesResponse,
+  MergesResponse,
 } from './types';
 
 /* Sources the backend allowlists for high-confidence parsing.
@@ -798,3 +800,67 @@ export const runWatchdogMatcher = (): Promise<{
       listings_in_window: number;
     };
   }>('/notifications/matcher/run', { method: 'POST' });
+
+/* ----- Cross-source dedup review (multi-portal PR3b) --------------------- */
+
+export interface ListDedupCandidatesParams {
+  status?: string;
+  tier?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface MergeResult {
+  data: {
+    merge_group_id: string;
+    survivor_id: number;
+    retired_id: number;
+    listings_moved: number;
+  };
+}
+
+export interface UnmergeResult {
+  data: {
+    merge_group_id: string;
+    survivor_id: number;
+    retired_ids: number[];
+    listings_moved_back: number;
+    conflicts: number[];
+  };
+}
+
+export const listDedupCandidates = (
+  params: ListDedupCandidatesParams = {},
+): Promise<DedupCandidatesResponse> =>
+  request<DedupCandidatesResponse>('/dedup/candidates', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const mergeDedupCandidate = (candidateId: number): Promise<MergeResult> =>
+  request<MergeResult>(
+    `/dedup/candidates/${candidateId}/merge`,
+    { method: 'POST' },
+  );
+
+export const dismissDedupCandidate = (
+  candidateId: number,
+): Promise<{ id: number; status: string }> =>
+  request<{ id: number; status: string }>(
+    `/dedup/candidates/${candidateId}/dismiss`,
+    { method: 'POST' },
+  );
+
+export const listDedupMerges = (
+  params: { limit?: number; offset?: number } = {},
+): Promise<MergesResponse> =>
+  request<MergesResponse>('/dedup/merges', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const unmergeMergeGroup = (
+  mergeGroupId: string,
+): Promise<UnmergeResult> =>
+  request<UnmergeResult>(
+    `/dedup/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
+    { method: 'POST' },
+  );

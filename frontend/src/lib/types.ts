@@ -1115,6 +1115,60 @@ export interface ScraperHealthChecks {
   checks: ScraperHealthCheck[];
 }
 
+/* ----- Cross-source dedup review (multi-portal PR3b) --------------------- */
+
+export interface DedupPropertySide {
+  property_id: number;
+  status: string;
+  sreality_id: number | null;
+  price_czk: number | null;
+  area_m2: number | null;
+  disposition: string | null;
+  district: string | null;
+  category_main: string | null;
+  category_type: string | null;
+  source_count: number | null;
+  distinct_site_count: number | null;
+  first_seen_at: string | null;
+  lat: number | null;
+  lng: number | null;
+}
+
+export interface DedupCandidate {
+  id: number;
+  tier: string;
+  status: string;
+  confidence: number | null;
+  markers_matched: Record<string, unknown> | null;
+  auto_merged: boolean;
+  merge_group_id: string | null;
+  created_at: string;
+  reviewed_at: string | null;
+  left_property: DedupPropertySide;
+  right_property: DedupPropertySide;
+}
+
+export interface DedupCandidatesResponse {
+  data: DedupCandidate[];
+  total: number;
+}
+
+export interface MergeGroup {
+  merge_group_id: string;
+  merged_at: string;
+  survivor_property_id: number;
+  retired_count: number;
+  listings_moved: number;
+  source: 'auto' | 'operator';
+  reason: string;
+  fully_undone: boolean;
+}
+
+export interface MergesResponse {
+  data: MergeGroup[];
+  total: number;
+}
+
 /* One row of property_sources_public — a property's per-portal observations
  * (multi-portal dedup). Drives the Listing Detail "listed on N sites" panel. */
 export interface PropertySource {
