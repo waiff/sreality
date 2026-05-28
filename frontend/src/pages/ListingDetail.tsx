@@ -3,7 +3,8 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchListingById,
-  fetchSnapshotsByListing,
+  fetchPropertySources,
+  fetchSnapshotsForListings,
   fetchFreshnessChecksByListing,
   fetchImagesByListing,
 } from '@/lib/queries';
@@ -19,6 +20,7 @@ import {
   fmtPricePerM2,
   fmtRelative,
   fmtAbsolute,
+  fmtShortDate,
   fmtFurnished,
   fmtOwnership,
   fmtParkingLots,
@@ -29,6 +31,7 @@ import type {
   ListingPublic,
   ListingSnapshotPublic,
   ListingFreshnessCheckPublic,
+  PropertySource,
 } from '@/lib/types';
 import SnapshotTimeline from '@/components/SnapshotTimeline';
 
@@ -54,10 +57,29 @@ export default function ListingDetail() {
     staleTime: 60_000,
   });
 
-  const snapshotsQ = useQuery<ListingSnapshotPublic[], Error>({
-    queryKey: ['snapshots', sid],
-    queryFn: () => fetchSnapshotsByListing(sid as number),
+  const sourcesQ = useQuery<{ property_id: number | null; sources: PropertySource[] }, Error>({
+    queryKey: ['property-sources', sid],
+    queryFn: () => fetchPropertySources(sid as number),
     enabled: sid != null && !!listingQ.data,
+    staleTime: 60_000,
+  });
+
+  // Cross-source price history: snapshots across every child of the property,
+  // falling back to just this listing until sources load / for singletons.
+  const childIds = (sourcesQ.data?.sources ?? [])
+    .map((s) => s.sreality_id)
+    .filter((x): x is number => x != null);
+  const snapshotIds =
+    childIds.length > 0
+      ? [...childIds].sort((a, b) => a - b)
+      : sid != null
+        ? [sid]
+        : [];
+
+  const snapshotsQ = useQuery<ListingSnapshotPublic[], Error>({
+    queryKey: ['snapshots', snapshotIds],
+    queryFn: () => fetchSnapshotsForListings(snapshotIds),
+    enabled: snapshotIds.length > 0 && !!listingQ.data,
     staleTime: 60_000,
   });
 
@@ -107,6 +129,8 @@ export default function ListingDetail() {
   const snapshots = snapshotsQ.data ?? [];
   const checks = checksQ.data ?? [];
   const images = imagesQ.data ?? [];
+  const sources = sourcesQ.data?.sources ?? [];
+  const currentSource = sources.find((s) => s.sreality_id === listing.sreality_id);
 
   return (
     <Page>
@@ -133,8 +157,14 @@ export default function ListingDetail() {
       <HistoryBlock listing={listing} snapshots={snapshots} checks={checks} />
       <Hairline />
       <FreshnessBlock sreality_id={listing.sreality_id} checks={checks} />
+      {sources.length > 1 ? (
+        <>
+          <Hairline />
+          <SourcesBlock sources={sources} currentId={listing.sreality_id} />
+        </>
+      ) : null}
       <Hairline />
-      <OutboundBlock sreality_id={listing.sreality_id} />
+      <OutboundBlock sreality_id={listing.sreality_id} source={currentSource} />
     </Page>
   );
 }
@@ -861,18 +891,94 @@ function OutcomeChip({ outcome }: { outcome: string }) {
 /* Outbound link                                                              */
 /* -------------------------------------------------------------------------- */
 
-function OutboundBlock({ sreality_id }: { sreality_id: number }) {
-  const href = `https://www.sreality.cz/detail/pronajem/byt/x/x/${sreality_id}`;
+function OutboundBlock({
+  sreality_id,
+  source,
+}: {
+  sreality_id: number;
+  source?: PropertySource;
+}) {
+  // Prefer the listing's real source URL (any portal); fall back to sreality
+  // for legacy rows where property_sources hasn't been populated.
+  const href =
+    source?.source_url
+    ?? `https://www.sreality.cz/detail/pronajem/byt/x/x/${sreality_id}`;
+  const label = source ? `Open on ${source.source}` : 'Open on sreality.cz';
   return (
     <a
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex items-center gap-1.5 text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors"
+      className="inline-flex items-center gap-1.5 text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors capitalize"
     >
-      Open on sreality.cz
+      {label}
       <OutArrow />
     </a>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Listed-on-N-sites — multi-portal link history                              */
+/* -------------------------------------------------------------------------- */
+
+function SourcesBlock({
+  sources,
+  currentId,
+}: {
+  sources: PropertySource[];
+  currentId: number;
+}) {
+  return (
+    <div>
+      <SectionLabel>Listed on {sources.length} sites</SectionLabel>
+      <ul className="mt-3 space-y-2">
+        {sources.map((s) => (
+          <li
+            key={s.sreality_id}
+            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-sm text-[var(--color-ink)] capitalize">{s.source}</span>
+              {s.sreality_id === currentId ? (
+                <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+                  this listing
+                </span>
+              ) : null}
+              <SourceStatusPill active={s.is_active} />
+            </div>
+            <div className="flex items-center gap-3 text-[0.8rem] text-[var(--color-ink-3)] tabular-nums">
+              <span className="font-mono text-[var(--color-ink-2)]">{fmtCzk(s.price_czk)}</span>
+              <span title={`${s.first_seen_at} – ${s.last_seen_at}`}>
+                {fmtShortDate(s.first_seen_at)} – {s.is_active ? 'now' : fmtShortDate(s.last_seen_at)}
+              </span>
+              {s.source_url ? (
+                <a
+                  href={s.source_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)]"
+                >
+                  open ↗
+                </a>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SourceStatusPill({ active }: { active: boolean }) {
+  return (
+    <span
+      className={[
+        'inline-block px-1.5 py-0.5 text-[0.6rem] tracking-wide uppercase rounded-[var(--radius-xs)] border border-[var(--color-rule)]',
+        active ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-ink-4)]',
+      ].join(' ')}
+    >
+      {active ? 'active' : 'inactive'}
+    </span>
   );
 }
 
