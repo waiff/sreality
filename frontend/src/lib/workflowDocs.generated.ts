@@ -795,14 +795,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/migrations.yml"
   },
   {
-    "filename": "recompute_property_stats.yml",
-    "name": "Jobs: recompute property stats",
-    "description": "Async recompute job for the canonical `properties` parent (multi-portal dedup track, Slice 1). Attaches any straggler unlinked listings, then recomputes every property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots.",
+    "filename": "property_maintenance.yml",
+    "name": "Jobs: property maintenance (incremental)",
+    "description": "Phase 3 of the scaling roadmap: real-time properties. This is the FAST, FREQUENT half of property maintenance — the dirty-set incremental pass. It runs scripts/recompute_property_stats --incremental, which:",
     "manual": true,
     "schedules": [
       {
-        "cron": "*/30 * * * *",
-        "human": "Every 30 minutes"
+        "cron": "*/5 * * * *",
+        "human": "Every 5 minutes"
       }
     ],
     "onPush": false,
@@ -819,7 +819,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "dry_run",
-        "description": "Report straggler + property counts and exit without writing",
+        "description": "Report straggler + dirty + property counts and exit without writing",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -832,7 +832,52 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "recompute-property-stats",
+    "concurrencyGroup": "sreality-property-maintenance",
+    "cancelInProgress": false,
+    "timeoutMinutes": 10,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/property_maintenance.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/property_maintenance.yml"
+  },
+  {
+    "filename": "recompute_property_stats.yml",
+    "name": "Jobs: recompute property stats (daily full reconcile)",
+    "description": "DAILY FULL SWEEP for the canonical `properties` parent. Attaches any straggler unlinked listings (incl. the one-time native-id backfill), then recomputes EVERY property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots. Finally it clears the dirty_properties queue (everything was just recomputed).",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "15 4 * * *",
+        "human": "Daily at 04:15 UTC"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "batch_size",
+        "description": "Properties recomputed per statement",
+        "required": true,
+        "type": "string",
+        "default": "2000",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report straggler + dirty + property counts and exit without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "sreality-property-maintenance",
     "cancelInProgress": false,
     "timeoutMinutes": 30,
     "permissions": "contents: read",
