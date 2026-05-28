@@ -116,7 +116,12 @@ def _parse_coords(href: str | None) -> tuple[float | None, float | None]:
     m = _COORD_RE.search(href)
     if not m:
         return None, None
-    return float(m.group(1)), float(m.group(2))
+    lat, lon = float(m.group(1)), float(m.group(2))
+    # Sanity-guard to the Czech bbox so a stray decimal pair (or a swapped
+    # lat/lon) can never become a bogus geom.
+    if not (48.0 <= lat <= 51.5 and 12.0 <= lon <= 19.0):
+        return None, None
+    return lat, lon
 
 
 def _id_from_href(href: str | None) -> str | None:
@@ -214,7 +219,11 @@ def parse_detail(
     price_czk, price_unit = _parse_price(_text(price_cell), category_type)
 
     lok_cell = table.get("lokalita")
-    maps_link = lok_cell.css_first('a[href*="map"]') if lok_cell else None
+    # Coords come from an embedded maps link. Prefer the lokalita cell, but live
+    # bazos renders the "show on map" link elsewhere on the detail page, so fall
+    # back to any Google-Maps / Mapy.cz link anywhere on the page.
+    maps_link = (lok_cell.css_first('a[href*="map"]') if lok_cell else None) or \
+        tree.css_first('a[href*="google.com/maps"], a[href*="mapy.cz"]')
     lat, lon = _parse_coords(maps_link.attributes.get("href") if maps_link else None)
     locality, psc = _locality(_text(lok_cell))
 
