@@ -39,7 +39,8 @@ from typing import Any
 
 import requests
 
-from scraper import db, hashing, image_storage, parser
+from scraper import db, hashing, image_storage, parser, portal_runner
+from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import (
     DISTRICT_IDS,
@@ -120,16 +121,37 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
+    if args.index_only or args.drain_only:
+        if args.index_only and args.drain_only:
+            LOG.error("--index-only and --drain-only are mutually exclusive")
+            return 2
+        if (
+            args.images_only
+            or args.detail_only is not None
+            or args.limit is not None
+        ):
+            LOG.error(
+                "--index-only/--drain-only are incompatible with "
+                "--images-only, --detail-only, and --limit"
+            )
+            return 2
+
     # Open a scrape_runs row for any non-dry-run invocation that actually
     # scrapes the index. The image-only backfill (images.yml) is NOT a
     # scrape run — recording it here polluted "last scrape" / the liveness
     # check / reconciliation with index_pages=0 rows, so it's excluded.
     run_id: int | None = None
     if not args.dry_run and not args.images_only:
-        run_type = args.run_type or ("delta" if (
-            args.limit is not None
-            or args.detail_only is not None
-        ) else "full")
+        if args.run_type:
+            run_type = args.run_type
+        elif args.index_only:
+            run_type = "index"
+        elif args.drain_only:
+            run_type = "detail"
+        elif args.limit is not None or args.detail_only is not None:
+            run_type = "delta"
+        else:
+            run_type = "full"
         try:
             with db.connect() as conn:
                 run_id = db.scrape_run_start(conn, run_type)
@@ -146,6 +168,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.images_only:
             rc = 0
+        elif args.index_only:
+            rc, scrape_agg = _run_index_walk(dry_run=args.dry_run)
+        elif args.drain_only:
+            rc, scrape_agg = _run_detail_drain(
+                max_claims=args.max_detail_refetches,
+                dry_run=args.dry_run,
+                detail_workers=args.detail_workers,
+                detail_rate=args.detail_rate,
+            )
         elif args.detail_only is not None:
             rc, scrape_agg = _run_detail_only(
                 _build_client(CATEGORIES[0][0], CATEGORIES[0][1]),
@@ -166,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
             rc == 0
             and not args.dry_run
             and not args.no_image_downloads
+            and not args.index_only
+            and not args.drain_only
         ):
             image_agg = _run_image_downloads(
                 max_downloads=args.max_image_downloads,
@@ -184,6 +217,8 @@ def main(argv: list[str] | None = None) -> int:
             and not args.dry_run
             and not args.no_condition_scoring
             and not args.images_only
+            and not args.index_only
+            and not args.drain_only
         ):
             _run_condition_scoring(max_scores=args.max_condition_scores)
     finally:
@@ -371,13 +406,30 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--run-type",
-        choices=("full", "delta"),
+        choices=("full", "delta", "index", "detail"),
         default=None,
         help=(
             "explicit scrape_runs.run_type label. Overrides the "
-            "limit-based heuristic — the unified 15-min job does a full "
-            "index walk (no --limit) but should still record as 'delta' "
-            "so the Health page separates it from the nightly 'full' run."
+            "limit-based heuristic. The Phase-2 split records 'index' for "
+            "the index-walk and 'detail' for the detail-drain."
+        ),
+    )
+    p.add_argument(
+        "--index-only",
+        action="store_true",
+        help=(
+            "Phase 2: walk the index, touch + mark_inactive, and enqueue "
+            "new/price-changed ids into listing_detail_queue. No detail "
+            "fetch — the detail-drain (--drain-only) consumes the queue."
+        ),
+    )
+    p.add_argument(
+        "--drain-only",
+        action="store_true",
+        help=(
+            "Phase 2: claim ids from listing_detail_queue, fetch their "
+            "details, and write them in batches. Bounded by "
+            "--max-detail-refetches (claims per run). Skips the index walk."
         ),
     )
     p.add_argument("-v", "--verbose", action="store_true")
@@ -656,6 +708,102 @@ def _run_full(
     return (0, scrape_agg)
 
 
+class SrealityPortal:
+    """The sreality portal as a Portal (Phase 4): the seams the generic
+    portal_runner needs, wrapping this module's existing helpers so sreality's
+    behavior is unchanged. The district-split (the one sanctioned per-portal
+    customization, forced by the deep-pagination cap) stays inside walk_category.
+    """
+
+    source = "sreality"
+    supports_complete_walk = True
+    index_rate = DEFAULT_DETAIL_RATE
+
+    def categories(self) -> list[tuple[int, int]]:
+        return list(_rotated_categories(CATEGORIES, datetime.now(timezone.utc).hour))
+
+    def category_labels(self, category: tuple[int, int]) -> tuple[str, str]:
+        cm, ct = category
+        return parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct]
+
+    def connect_index(self) -> Any:
+        return db.connect()
+
+    def connect_drain(self) -> Any:
+        # Session-mode pooler for the batched prepared writes (Phase 1 win).
+        return db.connect_session()
+
+    def walk_category(
+        self, category: tuple[int, int], conn: Any, dry_run: bool, limiter: RateLimiter,
+    ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
+        cm, ct = category
+        return _walk_category_split(
+            cm, ct, limiter=limiter, conn=conn, cat_limit=None, dry_run=dry_run,
+            refetch_budget=[None], cat_refetch_cap=None, detail_workers=1,
+            enqueue_only=True,
+        )
+
+    def mark_inactive(self, conn: Any, category: tuple[int, int], seen: set[int]) -> int:
+        cm, ct = category
+        return db.mark_inactive(
+            conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct], seen
+        )
+
+    def active_count(self, conn: Any, category: tuple[int, int]) -> int | None:
+        cm, ct = category
+        return db.active_count(conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct])
+
+    def make_client(self, limiter: RateLimiter) -> SrealityClient:
+        return _build_client(CATEGORIES[0][0], CATEGORIES[0][1], limiter=limiter)
+
+    def fetch_detail(
+        self, client: SrealityClient, native_id: str, detail_ref: str | None,
+    ) -> DrainItem:
+        # sreality's native_id IS the sreality_id as text; fetch by the int id.
+        fr = _fetch_detail(client, int(native_id))
+        error = f"{fr.source}: {fr.error}" if fr.kind == "error" else None
+        return DrainItem(native_id=str(native_id), kind=fr.kind, payload=fr, error=error)
+
+    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        return db.write_detail_batch(conn, [it.payload for it in items])
+
+    def mark_gone(self, conn: Any, native_id: str) -> None:
+        sid = int(native_id)
+        db.mark_listing_inactive(conn, sid)
+        db.clear_fetch_failure(conn, sid)
+
+    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
+        db.record_fetch_failure(conn, int(native_id), message)
+
+    def claimable_count(self, conn: Any) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM listing_detail_queue "
+                "WHERE source = 'sreality' AND claimed_at IS NULL AND given_up = false"
+            )
+            return int(cur.fetchone()[0])
+
+
+def _run_index_walk(dry_run: bool) -> tuple[int, dict[str, Any]]:
+    """Sreality index-walk via the generic portal_runner (Phase 4). Records
+    run_type='index' with index_pages>0 so Health liveness keys off it."""
+    return portal_runner.run_index_walk(SrealityPortal(), dry_run)
+
+
+def _run_detail_drain(
+    max_claims: int | None,
+    dry_run: bool,
+    detail_workers: int = DEFAULT_DETAIL_WORKERS,
+    detail_rate: float = DEFAULT_DETAIL_RATE,
+) -> tuple[int, dict[str, Any]]:
+    """Sreality detail-drain via the generic portal_runner (Phase 4): claim from
+    listing_detail_queue, fetch on a worker pool, write batched via
+    write_detail_batch. Records run_type='detail' with index_pages=0."""
+    return portal_runner.run_detail_drain(
+        SrealityPortal(), max_claims, dry_run, detail_workers, detail_rate,
+    )
+
+
 def _walk_complete(collected: int, result_size: int | None) -> bool:
     """Whether an index walk covered enough of the API-reported total to
     safely drive mark_inactive.
@@ -688,6 +836,7 @@ def _walk_category_split(
     refetch_budget: list[int | None],
     cat_refetch_cap: int | None,
     detail_workers: int,
+    enqueue_only: bool = False,
 ) -> tuple[set[int], dict[str, int], int | None, int, bool]:
     """Walk one category, splitting large ones by district (okres).
 
@@ -722,7 +871,7 @@ def _walk_category_split(
         client = _build_client(category_main, category_type, limiter=limiter)
         seen, counts = _walk_category(
             client, conn, cat_limit, dry_run, refetch_budget,
-            cat_refetch_cap, detail_workers,
+            cat_refetch_cap, detail_workers, enqueue_only=enqueue_only,
         )
         rs = client.result_size if client.result_size is not None else result_size
         complete = cat_limit is None and _walk_complete(len(seen), rs)
@@ -750,7 +899,7 @@ def _walk_category_split(
         try:
             dseen, dcounts = _walk_category(
                 dclient, conn, None, dry_run, refetch_budget,
-                district_cap, detail_workers,
+                district_cap, detail_workers, enqueue_only=enqueue_only,
             )
         except Exception as exc:
             all_districts_complete = False
@@ -802,7 +951,7 @@ def _walk_category_split(
         try:
             nseen, ncounts = _walk_category(
                 nclient, conn, None, dry_run, refetch_budget,
-                national_cap, detail_workers,
+                national_cap, detail_workers, enqueue_only=enqueue_only,
             )
             added = len(nseen - union)
             union |= nseen
@@ -844,16 +993,21 @@ def _walk_category(
     refetch_budget: list[int | None],
     cat_refetch_cap: int | None = None,
     detail_workers: int = DEFAULT_DETAIL_WORKERS,
+    enqueue_only: bool = False,
 ) -> tuple[set[int], dict[str, int]]:
-    """Walk one category's index + refetch loop.
+    """Walk one category's index, then either fetch+write details (the legacy
+    coupled path) or, when `enqueue_only`, enqueue new/price-changed ids into
+    listing_detail_queue for the async detail-drain (Phase 2 index-walk).
 
     `refetch_budget` is a single-element mutable list so the global
     cap decrements as each category consumes refetches. `cat_refetch_cap`
-    is the per-category ceiling (None = no per-category limit).
+    is the per-category ceiling (None = no per-category limit). Both are
+    ignored when `enqueue_only` — the queue absorbs unbounded enqueues; the
+    drain is what's bounded.
     """
     counts = {
         "new": 0, "updated": 0, "unchanged": 0, "errors": 0, "gone": 0,
-        "found_new": 0, "images_discovered": 0,
+        "found_new": 0, "images_discovered": 0, "enqueued": 0,
     }
     index_entries: list[tuple[int, int | None]] = []
     for estate in client.iter_index():
@@ -903,6 +1057,25 @@ def _walk_category(
     changed = [s for s in known_ids if s not in failed_ids]
     if priority:
         LOG.info("PLAN priority_retry=%d", len(priority))
+
+    # Phase 2 index-walk: enqueue the whole refetch set (no per-run cap — the
+    # drain is bounded) and return without fetching any detail.
+    if enqueue_only:
+        price_map = dict(index_entries)
+        # sreality native_id is the sreality_id as text; detail_ref is None (the
+        # drain derives the URL from the id). source-generic queue (Phase 4).
+        entries = (
+            [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_FAILURE) for s in priority]
+            + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_CHANGED) for s in changed]
+            + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_NEW) for s in new_ids]
+        )
+        if conn is not None and entries:
+            counts["enqueued"] = db.enqueue_detail(conn, "sreality", entries)
+        LOG.info(
+            "ENQUEUE enqueued=%d new=%d changed=%d priority=%d",
+            counts["enqueued"], len(new_ids), len(changed), len(priority),
+        )
+        return seen_ids, counts
 
     caps = [c for c in (refetch_budget[0], cat_refetch_cap) if c is not None]
     if caps and len(to_refetch) > min(caps):

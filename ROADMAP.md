@@ -996,6 +996,88 @@ budget — consumed in category order — no longer permanently starves the same
 trailing categories. Next in the scaling roadmap: **Phase 2 — split the
 fast index walk from the slow batched detail-drain.**
 
+### Phase 3.0: Real-time properties — dirty-set incremental recompute (done)
+The third scaling-roadmap unlock: the `properties` rollup goes near-real-time
+and **O(changes)** instead of a full-table recompute. Previously
+`recompute_property_stats` recomputed *every* property every 30 min, so a
+new/edited/delisted listing lagged up to that interval and the job wouldn't
+scale to 5–10 portals.
+- **`dirty_properties` queue (migration 106).** The writers that change a
+  property's children enqueue its `property_id` with a cheap set-based
+  `INSERT ... ON CONFLICT DO UPDATE SET marked_at`: `write_detail_batch` (a
+  content change → new snapshot, via the snapshot insert's `RETURNING`),
+  `mark_inactive` / `mark_listing_inactive` (delisting), and `touch_listings`
+  (a re-sighting that reactivates a listing — no snapshot, so captured via a
+  CTE). New listings (`property_id` NULL) are left to straggler-attach.
+- **`property_maintenance.yml`** (`recompute_property_stats --incremental`,
+  cron `*/5`): attaches new stragglers (the batched **Tier-1 matcher**,
+  skipping the one-time native-id backfill) + recomputes **only** the queued
+  properties — the full recompute SQL scoped to `id = ANY(...)`. So properties
+  reflect changes within ~5 min and the job is O(changes).
+- **Race-free + terminating drain:** claims rows dirtied at/before a run
+  cutoff, recomputes, deletes only those untouched since (a mid-run re-dirty
+  bumps `marked_at` past the cutoff → preserved for the next pass).
+- **Daily full sweep** (`recompute_property_stats.yml`, no `--incremental`,
+  04:15 UTC) recomputes everything + clears the queue — the self-healing
+  backstop, so a missed enqueue reconciles within 24h. Tier-2 fuzzy dedup
+  (`dedup_sweep.py`) unchanged. Both maintenance jobs share the
+  `sreality-property-maintenance` concurrency group.
+- Accepted lag: a byte-identical reactivation (no snapshot) waits for the
+  daily sweep — rare, documented. Architectural rule #20.
+
+### Phase 4.0: Portal framework — one pipeline for every portal (done)
+The fourth scaling-roadmap unlock: collapse sreality + bazos onto ONE shared
+framework so a new portal is a fetcher + parser + config row, with no per-portal
+branches in shared code. The lean/modular guardrail before onboarding portals 3+.
+- **`BasePortalClient`** (`scraper/portal_base.py`): the HTTP machinery every
+  portal shares — session/headers, `RateLimiter` pacing + 429/403 penalize,
+  retry/backoff, `ListingGoneError` on 404/410. `SrealityClient` / `BazosClient`
+  subclass it and keep only the `Accept` header, URL building, and body markers.
+- **`PortalConfig`** (`scraper/portal.py`) backed by the `portals` registry's new
+  operational columns (`supports_complete_walk`, `categories`, `split_threshold`,
+  migration 107), with a baked-in default fallback.
+- **Source-generic queue** (migration 108): `listing_detail_queue` re-keyed from
+  `sreality_id` to `(source, native_id)` + `detail_ref`, so every portal enqueues
+  into the one queue and the one drain claims from it. Backward-compatible
+  re-key (sreality_id stays a unique index).
+- **`portal_runner`** (`scraper/portal_runner.py`): one `run_index_walk` + one
+  `run_detail_drain`, parameterized by a `Portal`. `SrealityPortal` /
+  `BazosPortal` implement the seams; the entrypoints are thin delegators.
+  sreality stays byte-identical (the district-split is the one sanctioned hook);
+  bazos joins the queue/drain model (partial walks → never marks inactive).
+- Architectural rules #19 (shared split) + #21 (the framework + modularity).
+  Pilot scope: bazos is single-category (the queue doesn't carry the category
+  parse_detail needs); multi-category bazos would encode it — deferred.
+After Phase 4 the limiter is each portal's polite fetch rate, not the DB or
+pipeline divergence — the healthy place to be.
+
+### Phase 2.0: Cadence split — index-walk / batched detail-drain (done)
+The structural unlock from the scaling roadmap
+(`~/.claude/plans/the-health-page-is-functional-moore.md`). The single
+combined scrape is split into two cadence-matched jobs joined by a queue:
+- **`index_walk.yml`** (`scraper.main --index-only`, cron `*/15`,
+  `run_type='index'`) walks the full index, `touch_listings` +
+  `mark_inactive` under the completeness guard, and **enqueues** new /
+  price-changed ids into `listing_detail_queue` (migration 105) with a
+  priority (failure-retry > price-changed > new). No detail fetch — delistings
+  surface within minutes. Transaction pooler.
+- **`detail_drain.yml`** (`--drain-only`, cron `*/15`, `run_type='detail'`)
+  claims a bounded slice (`FOR UPDATE SKIP LOCKED`), fetches on a rate-limited
+  pool, and writes **batched** via `db.write_detail_batch` — set-based
+  `jsonb_to_recordset` (fixed-shape SQL so the session pooler still prepares
+  it), one transaction per ~100 listings, snapshot-on-change preserved by an
+  `IS DISTINCT FROM` anti-join. Target ~0.1–0.2 s/listing. Session pooler.
+- **Tier-1 matcher deferred** off the hot path: the drain inserts with
+  `property_id` NULL; the straggler-attach runs the same spatial match
+  set-based. (Phase 3 moved that attach to a `*/5` incremental pass, cutting
+  the brand-new-listing Browse read-lag from ≤30 min to ~5 min.)
+- `scrape.yml`'s combined `_run_full` retained as the **dispatch-only revert
+  fallback** (re-add its cron to roll back; no code change).
+- Migration 105 also widens `scrape_runs.run_type` to admit `index`/`detail`
+  and redefines `scraper_health_checks()` so liveness/reconciliation stay
+  scoped to the index walk while the 24h counters also see the drain's
+  `index_pages=0` rows. Architectural rule #19.
+
 ### Phase 1.5b: Multi-category UI defaults (done)
 The data was always broad (all six byt/dum/komercni ×
 pronajem/prodej pairs), but the analytical and estimation surfaces

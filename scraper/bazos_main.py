@@ -1,13 +1,19 @@
-"""Orchestrator for the bazos.cz crawler (multi-portal slice 3b).
+"""Orchestrator for the bazos.cz crawler — on the shared portal framework (Phase 4).
 
-Runnable as `python -m scraper.bazos_main`. Walks one bazos category's index
-(offset paging), fetches each listing detail, stages the raw HTML in
-`portal_raw_pages`, parses it to a `ScrapedListing`, and feeds it through
-`db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 property matching).
+Runnable as `python -m scraper.bazos_main`. Bazos is now a `Portal` (BazosPortal)
+driven by the one generic `scraper.portal_runner`: an index-walk that stages raw
+pages and enqueues listings into the shared `listing_detail_queue` (source='bazos',
+migration 108), then a detail-drain that fetches + parses + ingests via
+`db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 matching). No bespoke
+pipeline — only the per-portal fetcher (BazosClient) + parser (bazos_parser) +
+config differ from sreality.
 
-Kept separate from `scraper.main` (the sreality JSON scraper) on purpose.
-A one-category crawl is a partial walk, so this NEVER runs mark_inactive
-(architectural rule #3) — it only upserts.
+A one-category crawl is a partial walk, so `supports_complete_walk=False` and the
+runner NEVER runs mark_inactive (architectural rule #3) — it only upserts.
+
+Pilot scope: a single category at a time (the queue does not carry the category,
+which `parse_detail` needs, so the drain assumes this portal's one category).
+Multi-category bazos would encode the category in the queue — deferred.
 """
 
 from __future__ import annotations
@@ -15,10 +21,9 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from typing import Any
 
-import psycopg
-
-from scraper import db, geocoding
+from scraper import db, geocoding, portal_runner
 from scraper.bazos_client import BazosClient, detail_url, index_url
 from scraper.bazos_parser import (
     CATEGORY_MAIN,
@@ -28,8 +33,9 @@ from scraper.bazos_parser import (
     parse_index,
 )
 from scraper.geocoding import GeocodeResult, GeocodingError
+from scraper.portal_base import ListingGoneError
+from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
-from scraper.sreality_client import ListingGoneError
 
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
@@ -37,8 +43,12 @@ SOURCE = "bazos"
 
 class _CachingGeocoder:
     """Per-run memoised geocoder: collapses repeat street/locality queries to
-    one Mapy.cz call each (the crawl's listings cluster by town). Caches misses
-    too so a failing query isn't retried for every listing in that locality."""
+    one Mapy.cz call each (a crawl's listings cluster by town). Caches misses
+    too so a failing query isn't retried for every listing in that locality.
+
+    Shared across the detail-drain worker pool. Dict get/set are atomic under
+    the GIL and `geocoding.geocode` builds its own request session per call, so
+    the worst concurrent case is a harmless duplicate lookup, never corruption."""
 
     def __init__(self, fn: Geocoder) -> None:
         self._fn = fn
@@ -69,6 +79,209 @@ def _build_geocoder() -> Geocoder | None:
     return _CachingGeocoder(geocoding.geocode)
 
 
+class BazosPortal:
+    """Bazos as a Portal: the seams the generic runner needs, wrapping the
+    bazos client + parser. Single-category pilot (see module docstring)."""
+
+    source = SOURCE
+    supports_complete_walk = False
+    index_rate = 0.5
+
+    def __init__(
+        self,
+        *,
+        sale_type: str,
+        category: str,
+        canon_main: str,
+        canon_type: str,
+        locality: str | None = None,
+        radius_km: int | None = None,
+        max_pages: int | None = None,
+        geocoder: Geocoder | None = None,
+    ) -> None:
+        self._sale_type = sale_type
+        self._category = category
+        self._canon_main = canon_main
+        self._canon_type = canon_type
+        self._geocoder = geocoder
+        self._locality = locality
+        self._radius_km = radius_km
+        self._max_pages = max_pages
+
+    # --- index-walk seams ---
+    def categories(self) -> list[dict[str, str]]:
+        return [{"sale_type": self._sale_type, "category": self._category}]
+
+    def category_labels(self, category: dict[str, str]) -> tuple[str, str]:
+        return (self._canon_main, self._canon_type)
+
+    def connect_index(self) -> Any:
+        return db.connect()
+
+    def connect_drain(self) -> Any:
+        # Bazos ingests single rows (not batched-prepared), so the transaction
+        # pooler is fine — no session pooler needed.
+        return db.connect()
+
+    def walk_category(
+        self, category: dict[str, str], conn: Any, dry_run: bool, limiter: RateLimiter,
+    ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
+        sale_type, cat = category["sale_type"], category["category"]
+        client = BazosClient(limiter=limiter)
+        seen: set[str] = set()
+        entries: list[tuple[str, str | None, int | None, int]] = []
+        pages = 0
+        offset = 0
+        while True:
+            html, status = client.fetch_index(
+                sale_type, cat, offset,
+                locality=self._locality, radius_km=self._radius_km,
+            )
+            page = parse_index(html)
+            pages += 1
+            LOG.info(
+                "INDEX offset=%d items=%d total=%s", offset, len(page.items), page.total
+            )
+            if conn is not None:
+                db.upsert_portal_raw_page(
+                    conn, source=SOURCE,
+                    source_id_native=f"{sale_type}/{cat}/{offset}",
+                    source_url=index_url(
+                        sale_type, cat, offset,
+                        locality=self._locality, radius_km=self._radius_km,
+                    ),
+                    page_kind="index", html=html, http_status=status,
+                )
+            for item in page.items:
+                if item.source_id_native not in seen:
+                    seen.add(item.source_id_native)
+                    entries.append(
+                        (item.source_id_native, item.detail_path, None,
+                         db.QUEUE_PRIORITY_NEW)
+                    )
+            if self._max_pages and pages >= self._max_pages:
+                break
+            if not page.items or page.next_offset is None:
+                break
+            offset = page.next_offset
+        enqueued = 0
+        if conn is not None and entries:
+            enqueued = db.enqueue_detail(conn, SOURCE, entries)
+        LOG.info("ENQUEUE source=bazos enqueued=%d seen=%d", enqueued, len(seen))
+        # Partial walk: result_size unknown, complete=False (never mark_inactive).
+        return seen, {"found_new": len(seen), "enqueued": enqueued}, None, pages, False
+
+    def mark_inactive(self, conn: Any, category: dict[str, str], seen: set[str]) -> int:
+        return 0  # never called (supports_complete_walk=False)
+
+    def active_count(self, conn: Any, category: dict[str, str]) -> int | None:
+        return None
+
+    # --- detail-drain seams ---
+    def make_client(self, limiter: RateLimiter) -> BazosClient:
+        return BazosClient(limiter=limiter)
+
+    def fetch_detail(
+        self, client: BazosClient, native_id: str, detail_ref: str | None,
+    ) -> DrainItem:
+        url = detail_url(detail_ref or native_id)
+        try:
+            html, status = client.fetch_detail(detail_ref or native_id)
+        except ListingGoneError:
+            return DrainItem(native_id=native_id, kind="gone")
+        except Exception as exc:
+            return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        try:
+            listing = parse_detail(
+                html, source_url=url,
+                category_main=self._canon_main, category_type=self._canon_type,
+                geocoder=self._geocoder,
+            )
+        except Exception as exc:
+            return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        return DrainItem(
+            native_id=native_id, kind="ok",
+            payload={"listing": listing, "html": html, "status": status, "url": url},
+        )
+
+    def write_details(self, conn: Any, items: list[DrainItem]) -> dict[str, int]:
+        counts = {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
+        for it in items:
+            p = it.payload
+            page_id = db.upsert_portal_raw_page(
+                conn, source=SOURCE, source_id_native=it.native_id,
+                source_url=p["url"], page_kind="detail",
+                html=p["html"], http_status=p["status"],
+            )
+            pk, result = db.ingest_scraped_listing(conn, p["listing"])
+            image_urls = p["listing"].raw.get("image_urls") or []
+            images = [{"url": u, "sequence": seq} for seq, u in enumerate(image_urls)]
+            inserted = db.record_images(conn, pk, images)
+            db.mark_portal_page_parsed(conn, page_id)
+            if result in counts:
+                counts[result] += 1
+            counts["images_discovered"] += inserted
+        return counts
+
+    def mark_gone(self, conn: Any, native_id: str) -> None:
+        # Partial-walk pilot: a gone detail is dequeued but NOT flipped inactive
+        # (rule #3 — no delisting inference for a portal that can't prove a
+        # complete walk). Documented limitation.
+        pass
+
+    def record_failure(self, conn: Any, native_id: str, message: str) -> None:
+        # The queue (fail_detail) tracks attempts/give-up; bazos has no
+        # sreality_id-keyed listing_fetch_failures row.
+        pass
+
+    def claimable_count(self, conn: Any) -> int:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM listing_detail_queue "
+                "WHERE source = 'bazos' AND claimed_at IS NULL AND given_up = false"
+            )
+            return int(cur.fetchone()[0])
+
+
+def _finalize(run_id: int | None, agg: dict[str, Any]) -> None:
+    if run_id is None or not agg:
+        return
+    try:
+        with db.connect() as conn:
+            db.scrape_run_finalize(
+                conn, run_id,
+                index_pages=agg.get("index_pages", 0),
+                listings_found_new=agg.get("listings_found_new", 0),
+                listings_scraped_new=agg.get("listings_scraped_new", 0),
+                listings_updated=agg.get("listings_updated", 0),
+                listings_inactive=agg.get("listings_inactive", 0),
+                images_discovered=agg.get("images_discovered", 0),
+                images_stored=agg.get("images_discovered", 0),
+                errors=agg.get("errors", 0),
+                by_category=agg.get("by_category", []),
+            )
+    except Exception as exc:
+        LOG.warning("scrape_run_finalize failed: %s", exc)
+
+
+def _run_phase(portal: BazosPortal, run_type: str, runner, dry_run: bool, **kw: Any) -> int:
+    run_id: int | None = None
+    if not dry_run:
+        try:
+            with db.connect() as conn:
+                run_id = db.scrape_run_start(conn, run_type, source=SOURCE)
+        except Exception as exc:
+            LOG.warning("scrape_run_start failed: %s", exc)
+    agg: dict[str, Any] = {}
+    rc = 0
+    try:
+        rc, agg = runner(portal, dry_run=dry_run, **kw)
+    finally:
+        if not dry_run:
+            _finalize(run_id, agg)
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_logging(args.verbose)
@@ -81,158 +294,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    client = BazosClient(limiter=RateLimiter(args.rate))
-    geocoder = _build_geocoder()
-    conn = None if args.dry_run else db.connect()
-    counts = {"new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0, "images": 0}
+    portal = BazosPortal(
+        sale_type=args.sale_type, category=args.category,
+        canon_main=canon_main, canon_type=canon_type,
+        locality=args.locality, radius_km=args.radius_km, max_pages=args.max_pages,
+        geocoder=_build_geocoder(),
+    )
 
-    # A one-category crawl is a partial walk (run_type='delta'); it never
-    # marks listings inactive. Recording the run lets the Health dashboard
-    # show bazos activity per-source alongside sreality (migration 100).
-    run_id = None
-    if conn is not None:
-        run_id = db.scrape_run_start(conn, "delta", source=SOURCE)
-
-    try:
-        details, pages = _walk_index(client, conn, args)
-        LOG.info("PLAN details=%d", len(details))
-        _refetch_details(
-            client, conn, args, details, canon_main, canon_type, counts, geocoder,
+    # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
+    # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
+    rc = _run_phase(
+        portal, "index", portal_runner.run_index_walk, args.dry_run,
+    )
+    if rc == 0:
+        rc = _run_phase(
+            portal, "detail", portal_runner.run_detail_drain, args.dry_run,
+            max_claims=args.max_detail, detail_workers=args.workers,
+            detail_rate=args.rate,
         )
-        LOG.info(
-            "RUN done details=%d new=%d updated=%d unchanged=%d gone=%d "
-            "errors=%d images=%d",
-            len(details), counts["new"], counts["updated"],
-            counts["unchanged"], counts["gone"], counts["errors"], counts["images"],
-        )
-        if run_id is not None:
-            db.scrape_run_finalize(
-                conn, run_id,
-                index_pages=pages,
-                listings_found_new=counts["new"],
-                listings_scraped_new=counts["new"],
-                listings_updated=counts["updated"],
-                listings_inactive=0,
-                images_discovered=counts["images"],
-                images_stored=counts["images"],
-                errors=counts["errors"],
-                by_category=[{
-                    "category_main": canon_main,
-                    "category_type": canon_type,
-                    "listings_found_new": counts["new"],
-                    "listings_scraped_new": counts["new"],
-                    "listings_inactive": 0,
-                    "images_discovered": counts["images"],
-                    "images_stored": counts["images"],
-                }],
-            )
-    finally:
-        if conn is not None:
-            conn.close()
-    return 0
-
-
-def _walk_index(
-    client: BazosClient, conn: "psycopg.Connection | None", args: argparse.Namespace
-) -> tuple[list[tuple[str, str]], int]:
-    details: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    offset = 0
-    pages = 0
-    while True:
-        html, status = client.fetch_index(
-            args.sale_type, args.category, offset,
-            locality=args.locality, radius_km=args.radius_km,
-        )
-        page = parse_index(html)
-        pages += 1
-        LOG.info(
-            "INDEX offset=%d items=%d total=%s", offset, len(page.items), page.total
-        )
-        if conn is not None:
-            db.upsert_portal_raw_page(
-                conn, source=SOURCE,
-                source_id_native=f"{args.sale_type}/{args.category}/{offset}",
-                source_url=index_url(
-                    args.sale_type, args.category, offset,
-                    locality=args.locality, radius_km=args.radius_km,
-                ),
-                page_kind="index", html=html, http_status=status,
-            )
-        for item in page.items:
-            if item.source_id_native not in seen:
-                seen.add(item.source_id_native)
-                details.append((item.source_id_native, item.detail_path))
-        if args.max_pages and pages >= args.max_pages:
-            break
-        if not page.items or page.next_offset is None:
-            break
-        offset = page.next_offset
-    return details, pages
-
-
-def _refetch_details(
-    client: BazosClient,
-    conn: "db.psycopg.Connection | None",
-    args: argparse.Namespace,
-    details: list[tuple[str, str]],
-    canon_main: str,
-    canon_type: str,
-    counts: dict[str, int],
-    geocoder: Geocoder | None,
-) -> None:
-    total = len(details)
-    for i, (sid, path) in enumerate(details, 1):
-        url = detail_url(path)
-        try:
-            html, status = client.fetch_detail(path)
-        except ListingGoneError:
-            counts["gone"] += 1
-            LOG.info("DETAIL id=%s gone", sid)
-            continue
-        except Exception as exc:  # noqa: BLE001 - one listing must not kill the run
-            counts["errors"] += 1
-            LOG.warning("DETAIL id=%s fetch error: %s", sid, exc)
-            continue
-
-        page_id = None
-        if conn is not None:
-            page_id = db.upsert_portal_raw_page(
-                conn, source=SOURCE, source_id_native=sid, source_url=url,
-                page_kind="detail", html=html, http_status=status,
-            )
-        try:
-            listing = parse_detail(
-                html, source_url=url,
-                category_main=canon_main, category_type=canon_type,
-                geocoder=geocoder,
-            )
-            if conn is not None:
-                pk, result = db.ingest_scraped_listing(conn, listing)
-                image_urls = listing.raw.get("image_urls") or []
-                images = [
-                    {"url": url, "sequence": seq}
-                    for seq, url in enumerate(image_urls)
-                ]
-                inserted = db.record_images(conn, pk, images)
-                db.mark_portal_page_parsed(conn, page_id)
-                counts[result] += 1
-                counts["images"] += inserted
-                LOG.info("DETAIL id=%s %s images=%d", sid, result, inserted)
-            else:
-                LOG.info("DETAIL id=%s parsed (dry-run)", sid)
-        except Exception as exc:  # noqa: BLE001
-            counts["errors"] += 1
-            LOG.warning("DETAIL id=%s parse/ingest error: %s", sid, exc)
-            if conn is not None and page_id is not None:
-                db.mark_portal_page_parsed(conn, page_id, parse_error=str(exc))
-
-        if i % 50 == 0:
-            LOG.info("DETAIL progress=%d/%d", i, total)
+    return rc
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="bazos.cz crawler (multi-portal 3b)")
+    p = argparse.ArgumentParser(description="bazos.cz crawler (portal framework)")
     p.add_argument("--sale-type", default="prodam", choices=sorted(SALE_TYPE))
     p.add_argument("--category", default="byt", choices=sorted(CATEGORY_MAIN))
     p.add_argument("--locality", default=None)
@@ -241,6 +325,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--max-pages", type=int, default=None,
         help="cap index pages walked (pilot safety); omit for a full walk",
     )
+    p.add_argument(
+        "--max-detail", type=int, default=None,
+        help="cap detail-drain claims per run (omit = drain the queue)",
+    )
+    p.add_argument("--workers", type=int, default=1, help="detail-fetch workers")
     p.add_argument(
         "--rate", type=float, default=0.5,
         help="requests/second ceiling (default 0.5 = one request per 2s)",

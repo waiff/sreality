@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable
-from typing import Any, Literal
+from collections.abc import Iterable, Sequence
+from typing import Any, Literal, Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -58,6 +58,48 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "parking_lots",
     "ownership",
     "description",
+)
+
+# Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
+# column spec for the batched detail-drain write (write_detail_batch). Kept in
+# lockstep with LISTING_COLUMNS by the assertion below so a new scraper column
+# can't silently break the batch path.
+_LISTING_COLUMN_PGTYPE: dict[str, str] = {
+    "category_main": "text",
+    "category_type": "text",
+    "price_czk": "integer",
+    "price_unit": "text",
+    "area_m2": "numeric",
+    "disposition": "text",
+    "locality": "text",
+    "district": "text",
+    "locality_district_id": "integer",
+    "locality_region_id": "integer",
+    "locality_municipality_id": "integer",
+    "locality_quarter_id": "integer",
+    "locality_ward_id": "integer",
+    "floor": "integer",
+    "total_floors": "integer",
+    "has_balcony": "boolean",
+    "has_parking": "boolean",
+    "has_lift": "boolean",
+    "building_type": "text",
+    "condition": "text",
+    "energy_rating": "text",
+    "estate_area": "numeric",
+    "usable_area": "numeric",
+    "garden_area": "numeric",
+    "category_sub_cb": "integer",
+    "furnished": "text",
+    "terrace": "boolean",
+    "cellar": "boolean",
+    "garage": "boolean",
+    "parking_lots": "integer",
+    "ownership": "text",
+    "description": "text",
+}
+assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
+    "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
 )
 
 
@@ -425,6 +467,31 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
         )
 
 
+def mark_properties_dirty(
+    conn: psycopg.Connection,
+    property_ids: Iterable[int],
+) -> int:
+    """Enqueue property ids for the incremental maintenance job (Phase 3).
+
+    Idempotent set-based insert; nests in the caller's transaction so the dirty
+    mark is atomic with the child-listing change that caused it. NULL ids are
+    dropped. Returns rows newly enqueued.
+    """
+    ids = [int(p) for p in property_ids if p is not None]
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO dirty_properties (property_id)
+            SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
+            ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+            """,
+            (ids,),
+        )
+        return cur.rowcount or 0
+
+
 def record_images(
     conn: psycopg.Connection,
     sreality_id: int,
@@ -502,6 +569,27 @@ def touch_listings(
     with conn.cursor() as cur:
         for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
             chunk = ids[start : start + TOUCH_CHUNK_SIZE]
+            # Phase 3: a re-sighting that flips a listing back to active changes
+            # its property's lifecycle rollup with NO snapshot, so it would not
+            # be caught by the snapshot-driven dirty mark. Capture exactly the
+            # reactivated subset (was inactive) and enqueue their properties.
+            # The bulk last_seen bump below covers the active majority.
+            cur.execute(
+                """
+                WITH react AS (
+                    UPDATE listings
+                    SET is_active = true, last_seen_at = now()
+                    FROM unnest(%s::bigint[]) AS u(sreality_id)
+                    WHERE listings.sreality_id = u.sreality_id
+                      AND listings.is_active = false
+                    RETURNING listings.property_id
+                )
+                INSERT INTO dirty_properties (property_id)
+                SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+                """,
+                (chunk,),
+            )
             cur.execute(
                 """
                 UPDATE listings
@@ -539,10 +627,22 @@ def mark_inactive(
               AND category_main = %s
               AND category_type = %s
               AND sreality_id <> ALL(%s)
+            RETURNING property_id
             """,
             (category_main, category_type, list(seen_ids)),
         )
-        return cur.rowcount or 0
+        rows = cur.fetchall()
+        pids = {int(r[0]) for r in rows if r[0] is not None}
+        if pids:
+            cur.execute(
+                """
+                INSERT INTO dirty_properties (property_id)
+                SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+                """,
+                (list(pids),),
+            )
+        return len(rows)
 
 
 def mark_listing_inactive(
@@ -557,9 +657,17 @@ def mark_listing_inactive(
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "UPDATE listings SET is_active = false WHERE sreality_id = %s",
+            "UPDATE listings SET is_active = false WHERE sreality_id = %s "
+            "RETURNING property_id",
             (sreality_id,),
         )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            cur.execute(
+                "INSERT INTO dirty_properties (property_id) VALUES (%s) "
+                "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
+                (int(row[0]),),
+            )
 
 
 def index_summary(
@@ -908,6 +1016,360 @@ def active_failure_ids(
             (ids,),
         )
         return {row[0] for row in cur.fetchall()}
+
+
+# --- Phase 2: needs-detail queue + batched detail-drain writes --------------
+#
+# The index-walk enqueues new / price-changed ids into listing_detail_queue;
+# the detail-drain claims a bounded slice, fetches, and writes them in batches
+# via write_detail_batch. The queue is the "what to fetch" signal;
+# listing_fetch_failures stays the Health-visible give-up ledger.
+
+# Priorities (higher drains first): failure-retry > price-changed > new.
+QUEUE_PRIORITY_NEW = 0
+QUEUE_PRIORITY_CHANGED = 1
+QUEUE_PRIORITY_FAILURE = 2
+
+_QUEUE_ENQUEUE_CHUNK = 1000
+
+
+class DetailResult(Protocol):
+    """The subset of scraper.main.FetchResult that write_detail_batch reads.
+
+    Duck-typed so db.py needn't import main (which imports db). Only 'ok'
+    results are passed to write_detail_batch.
+    """
+
+    row: dict[str, Any] | None
+    raw: dict[str, Any] | None
+    images: list[dict[str, Any]] | None
+    content_hash: str | None
+
+
+# jsonb_to_recordset keeps the SQL text fixed-shape (the column-type spec is a
+# literal; only the single jsonb param varies), so psycopg3 can prepare the plan
+# once on the session pooler — the same prepared-statement win as Phase 1, now
+# for the whole batch in one round-trip.
+_BATCH_RECORD_SPEC = ", ".join(
+    f"{c} {_LISTING_COLUMN_PGTYPE[c]}" for c in LISTING_COLUMNS
+)
+_BATCH_SELECT_COLS = ", ".join(f"j.{c}" for c in LISTING_COLUMNS)
+_BATCH_UPDATE_SET = ",\n          ".join(
+    f"{c} = EXCLUDED.{c}" for c in LISTING_COLUMNS
+)
+
+_BATCH_UPSERT_SQL = f"""
+    INSERT INTO listings (
+        sreality_id, last_seen_at, is_active,
+        {", ".join(LISTING_COLUMNS)},
+        geom, raw_json
+    )
+    SELECT
+        j.sreality_id, now(), true,
+        {_BATCH_SELECT_COLS},
+        CASE
+          WHEN j.lon IS NOT NULL AND j.lat IS NOT NULL
+          THEN ST_SetSRID(ST_MakePoint(j.lon, j.lat), 4326)::geography
+          ELSE NULL
+        END,
+        j.raw_json
+    FROM jsonb_to_recordset(%s::jsonb) AS j(
+        sreality_id bigint, {_BATCH_RECORD_SPEC},
+        lon double precision, lat double precision, raw_json jsonb
+    )
+    ON CONFLICT (sreality_id) DO UPDATE SET
+      last_seen_at = now(),
+      is_active = true,
+      {_BATCH_UPDATE_SET},
+      geom = EXCLUDED.geom,
+      raw_json = EXCLUDED.raw_json
+    RETURNING (xmax = 0) AS inserted
+"""
+
+# Snapshot-on-change, set-based: insert a snapshot for exactly the listings
+# whose content_hash differs from their latest (or that have none yet). raw_json
+# is read back from the listings row just upserted in the same txn, so the large
+# raw payload isn't sent twice. IS DISTINCT FROM handles the no-prior-snapshot
+# case (latest NULL → distinct → one snapshot for a brand-new listing).
+_BATCH_SNAPSHOT_SQL = """
+    INSERT INTO listing_snapshots (sreality_id, price_czk, content_hash, raw_json)
+    SELECT j.sreality_id, j.price_czk, j.content_hash, l.raw_json
+    FROM jsonb_to_recordset(%s::jsonb)
+        AS j(sreality_id bigint, price_czk integer, content_hash text)
+    JOIN listings l ON l.sreality_id = j.sreality_id
+    LEFT JOIN LATERAL (
+        SELECT content_hash FROM listing_snapshots s
+        WHERE s.sreality_id = j.sreality_id
+        ORDER BY s.scraped_at DESC, s.id DESC
+        LIMIT 1
+    ) latest ON true
+    WHERE latest.content_hash IS DISTINCT FROM j.content_hash
+    RETURNING sreality_id
+"""
+
+# Phase 3: enqueue the changed listings' properties as dirty so the incremental
+# maintenance job recomputes only them. New listings (property_id NULL) are
+# skipped here -- the job's straggler-attach phase resolves them instead.
+_BATCH_DIRTY_FROM_SIDS_SQL = """
+    INSERT INTO dirty_properties (property_id)
+    SELECT DISTINCT property_id FROM listings
+    WHERE sreality_id = ANY(%s) AND property_id IS NOT NULL
+    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+"""
+
+_BATCH_IMAGES_SQL = """
+    INSERT INTO images (sreality_id, sreality_url, sequence)
+    SELECT j.sreality_id, j.sreality_url, j.sequence
+    FROM jsonb_to_recordset(%s::jsonb)
+        AS j(sreality_id bigint, sreality_url text, sequence integer)
+    ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+        sreality_url = EXCLUDED.sreality_url,
+        download_attempts = 0,
+        last_error = NULL,
+        unavailable_reason = NULL
+    WHERE images.storage_path IS NULL
+    RETURNING (xmax = 0) AS inserted
+"""
+
+
+def write_detail_batch(
+    conn: psycopg.Connection,
+    results: Sequence[DetailResult],
+) -> dict[str, int]:
+    """Write a batch of successful detail fetches in ONE transaction.
+
+    Set-based: one multi-row listings upsert, one snapshot-on-change insert
+    (changed -> exactly one snapshot, unchanged -> none), one images upsert,
+    one failure-clear. Collapses the per-listing round-trips into ~4 per batch.
+
+    Does NOT run the Tier-1 property matcher — new listings land with
+    property_id NULL and are matched asynchronously by recompute_property_stats
+    (Phase 2 deferral). Returns counts {new, updated, unchanged, images_discovered}.
+    """
+    n = len(results)
+    if n == 0:
+        return {"new": 0, "updated": 0, "unchanged": 0, "images_discovered": 0}
+
+    listing_objs: list[dict[str, Any]] = []
+    snapshot_objs: list[dict[str, Any]] = []
+    image_objs: list[dict[str, Any]] = []
+    ok_ids: list[int] = []
+    seen_img: set[tuple[int, int]] = set()
+
+    for r in results:
+        row = r.row or {}
+        sid = int(row["sreality_id"])
+        ok_ids.append(sid)
+        obj: dict[str, Any] = {c: row.get(c) for c in LISTING_COLUMNS}
+        obj["sreality_id"] = sid
+        obj["lon"] = row.get("lon")
+        obj["lat"] = row.get("lat")
+        obj["raw_json"] = r.raw or {}
+        listing_objs.append(obj)
+        snapshot_objs.append({
+            "sreality_id": sid,
+            "price_czk": row.get("price_czk"),
+            "content_hash": r.content_hash,
+        })
+        for img in r.images or []:
+            url = img.get("url")
+            if not url:
+                continue
+            seq = img.get("sequence")
+            if seq is not None:
+                key = (sid, seq)
+                if key in seen_img:
+                    continue
+                seen_img.add(key)
+            image_objs.append(
+                {"sreality_id": sid, "sreality_url": url, "sequence": seq}
+            )
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(_BATCH_UPSERT_SQL, (Jsonb(listing_objs),))
+        new = sum(1 for (inserted,) in cur.fetchall() if inserted)
+
+        cur.execute(_BATCH_SNAPSHOT_SQL, (Jsonb(snapshot_objs),))
+        changed_sids = [int(r[0]) for r in cur.fetchall()]
+        snapshots = len(changed_sids)
+
+        images_discovered = 0
+        if image_objs:
+            cur.execute(_BATCH_IMAGES_SQL, (Jsonb(image_objs),))
+            images_discovered = sum(1 for (ins,) in cur.fetchall() if ins)
+
+        cur.execute(
+            "DELETE FROM listing_fetch_failures WHERE sreality_id = ANY(%s)",
+            (ok_ids,),
+        )
+
+        if changed_sids:
+            cur.execute(_BATCH_DIRTY_FROM_SIDS_SQL, (changed_sids,))
+
+    # snapshots == new + updated (a brand-new listing always gets one snapshot);
+    # the rest were content-identical touches.
+    updated = max(0, snapshots - new)
+    unchanged = n - new - updated
+    return {
+        "new": new,
+        "updated": updated,
+        "unchanged": unchanged,
+        "images_discovered": images_discovered,
+    }
+
+
+def enqueue_detail(
+    conn: psycopg.Connection,
+    source: str,
+    entries: Sequence[tuple[str, str | None, int | None, int]],
+) -> int:
+    """Enqueue (native_id, detail_ref, index_price_czk, priority) tuples for
+    detail fetch under `source` (Phase 4 source-generic queue).
+
+    native_id is the portal-native id (sreality: sreality_id as text; bazos:
+    source_id_native); detail_ref is what the drain needs to FETCH the detail
+    (None for sreality — the URL is derived from the id; the detail path/URL for
+    crawler portals). For sreality the bigint sreality_id column is set too (from
+    the numeric native_id) so the write path + the legacy unique still work.
+
+    Idempotent on (source, native_id): re-seeing an id refreshes its observed
+    price + detail_ref and raises its priority (GREATEST), but never disturbs a
+    row a drain has already claimed. Chunked to stay under the pooler timeout.
+    """
+    rows = list(entries)
+    if not rows:
+        return 0
+    total = 0
+    with conn.cursor() as cur:
+        for start in range(0, len(rows), _QUEUE_ENQUEUE_CHUNK):
+            chunk = rows[start : start + _QUEUE_ENQUEUE_CHUNK]
+            native_ids = [str(nid) for nid, _, _, _ in chunk]
+            refs = [r for _, r, _, _ in chunk]
+            prices = [p for _, _, p, _ in chunk]
+            prios = [int(pr) for _, _, _, pr in chunk]
+            cur.execute(
+                """
+                INSERT INTO listing_detail_queue
+                    (source, native_id, detail_ref, index_price_czk, priority,
+                     sreality_id)
+                SELECT %(source)s, u.nid, u.ref, u.price, u.prio,
+                       CASE WHEN %(source)s = 'sreality'
+                            THEN u.nid::bigint ELSE NULL END
+                FROM unnest(
+                    %(nids)s::text[], %(refs)s::text[],
+                    %(prices)s::int[], %(prios)s::smallint[]
+                ) AS u(nid, ref, price, prio)
+                ON CONFLICT (source, native_id) DO UPDATE SET
+                    detail_ref      = EXCLUDED.detail_ref,
+                    index_price_czk = EXCLUDED.index_price_czk,
+                    priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority),
+                    enqueued_at     = now()
+                WHERE listing_detail_queue.claimed_at IS NULL
+                """,
+                {"source": source, "nids": native_ids, "refs": refs,
+                 "prices": prices, "prios": prios},
+            )
+            total += cur.rowcount or 0
+    return total
+
+
+def claim_detail_batch(
+    conn: psycopg.Connection,
+    source: str,
+    limit: int,
+) -> list[tuple[str, str | None, int | None]]:
+    """Atomically claim up to `limit` available rows for `source`, highest
+    priority + oldest first. Returns (native_id, detail_ref, index_price_czk).
+
+    FOR UPDATE SKIP LOCKED makes concurrent drains safe. The claim is committed
+    immediately (claimed_at set) so a crashed drain's rows are recovered by
+    reclaim_stale_claims rather than lost.
+    """
+    if limit <= 0:
+        return []
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH c AS (
+                SELECT source, native_id FROM listing_detail_queue
+                WHERE source = %s AND claimed_at IS NULL AND given_up = false
+                ORDER BY priority DESC, enqueued_at
+                LIMIT %s
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE listing_detail_queue q SET claimed_at = now()
+            FROM c WHERE q.source = c.source AND q.native_id = c.native_id
+            RETURNING q.native_id, q.detail_ref, q.index_price_czk
+            """,
+            (source, limit),
+        )
+        return [(nid, ref, price) for nid, ref, price in cur.fetchall()]
+
+
+def complete_detail(
+    conn: psycopg.Connection,
+    source: str,
+    native_ids: Iterable[str],
+) -> int:
+    """Remove drained rows from the queue (success or confirmed-gone)."""
+    ids = [str(n) for n in native_ids]
+    if not ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM listing_detail_queue "
+            "WHERE source = %s AND native_id = ANY(%s)",
+            (source, ids),
+        )
+        return cur.rowcount or 0
+
+
+def fail_detail(
+    conn: psycopg.Connection,
+    source: str,
+    native_ids: Iterable[str],
+    error_message: str,
+    max_attempts: int = FAILURE_GIVE_UP_THRESHOLD,
+) -> None:
+    """Release a failed claim back to the queue, bumping attempts; give up at
+    max_attempts so a permanently-broken listing stops re-claiming."""
+    ids = [str(n) for n in native_ids]
+    if not ids:
+        return
+    truncated = (error_message or "")[:500]
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listing_detail_queue SET
+                attempts   = attempts + 1,
+                given_up   = (attempts + 1) >= %s,
+                claimed_at = NULL,
+                last_error = %s
+            WHERE source = %s AND native_id = ANY(%s)
+            """,
+            (max_attempts, truncated, source, ids),
+        )
+
+
+def reclaim_stale_claims(
+    conn: psycopg.Connection,
+    source: str,
+    older_than_minutes: int = 30,
+) -> int:
+    """Release `source` claims older than the cutoff (a drain SIGKILLed
+    mid-flight), so its rows become claimable again. Mirrors
+    sweep_stuck_scrape_runs."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listing_detail_queue SET claimed_at = NULL
+            WHERE source = %s AND claimed_at IS NOT NULL AND given_up = false
+              AND claimed_at < now() - make_interval(mins => %s)
+            RETURNING native_id
+            """,
+            (source, older_than_minutes),
+        )
+        return len(cur.fetchall())
 
 
 def upsert_portal_raw_page(

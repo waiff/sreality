@@ -1,0 +1,86 @@
+name: "Jobs: property maintenance (incremental)"
+
+# Phase 3 of the scaling roadmap: real-time properties. This is the FAST,
+# FREQUENT half of property maintenance — the dirty-set incremental pass. It
+# runs scripts/recompute_property_stats --incremental, which:
+#
+#   1. Attaches new straggler listings (property_id NULL — every row the
+#      detail-drain wrote, since Phase 2 defers Tier-1 matching off the hot
+#      path): the set-based Tier-1 spatial matcher links genuine cross-portal
+#      matches, the rest become singletons. The legacy one-time native-id
+#      backfill is SKIPPED here (it scans the whole listings table) — the daily
+#      full sweep owns that.
+#   2. Recomputes ONLY the properties the writers queued in dirty_properties
+#      (a child listing was inserted / price-changed / inactivated / reactivated
+#      since the last pass). O(changes), not O(all properties).
+#
+# So a new / edited / delisted listing is reflected in `properties` (and Browse)
+# within one interval (~5 min) instead of waiting up to a full hourly recompute.
+#
+# The DAILY FULL sweep (recompute_property_stats.yml, no --incremental) stays the
+# reconcile backstop: it recomputes every property and clears the queue, so a
+# missed enqueue self-heals within 24h. Tier-2 fuzzy dedup (dedup_sweep) is
+# unchanged.
+#
+# Cadence: every 5 min. GitHub throttles scheduled workflows, so the effective
+# cadence can be slightly slower — fine for a property-aggregation surface. The
+# incremental pass is cheap (NULL-property attach + a bounded dirty drain), so it
+# finishes in seconds.
+#
+# Concurrency: shares the `sreality-property-maintenance` group with the daily
+# full sweep so the two never mutate `properties` / `dirty_properties`
+# concurrently; cancel-in-progress=false so a pass is never killed mid-recompute.
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: Properties recomputed per statement
+        required: true
+        default: "2000"
+        type: string
+      dry_run:
+        description: Report straggler + dirty + property counts and exit without writing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: sreality-property-maintenance
+  cancel-in-progress: false
+
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Run incremental property maintenance
+        run: |
+          ARGS="--incremental --batch-size ${{ inputs.batch_size || '2000' }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python -m scripts.recompute_property_stats $ARGS

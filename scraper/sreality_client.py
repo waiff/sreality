@@ -18,8 +18,26 @@ from typing import TYPE_CHECKING, Any
 
 import requests
 
+from scraper.portal_base import (
+    GONE_STATUSES,
+    RETRYABLE_STATUS,
+    BasePortalClient,
+    ListingGoneError,
+)
+
 if TYPE_CHECKING:
     from scraper.rate_limit import RateLimiter
+
+# Re-exported for backwards-compatible imports (`from scraper.sreality_client
+# import ListingGoneError` is used across the codebase).
+__all__ = [
+    "SrealityClient",
+    "ListingGoneError",
+    "GONE_STATUSES",
+    "RETRYABLE_STATUS",
+    "SPLIT_THRESHOLD",
+    "DISTRICT_IDS",
+]
 
 LOG = logging.getLogger(__name__)
 
@@ -28,23 +46,6 @@ DETAIL_URL = "https://www.sreality.cz/api/v1/estates/{id}"
 
 # Czech Republic in the new API's locality scheme (the old API used 10001).
 CZ_COUNTRY_ID = 112
-
-DEFAULT_HEADERS: dict[str, str] = {
-    "Accept": "application/json",
-    "Accept-Language": "cs,en;q=0.9",
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/148.0.0.0 Safari/537.36"
-    ),
-}
-
-RETRYABLE_STATUS: frozenset[int] = frozenset(
-    # 403/429 are how sreality throttles a too-fast egress IP; treat them as
-    # retryable (penalize + back off + retry) rather than a fatal error, so a
-    # transient block can't crash a whole run.
-    {403, 408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
-)
 
 # The search endpoint refuses offsets past its deep-pagination window with
 # HTTP 422. We stop the walk cleanly when we hit it (the completeness guard
@@ -65,10 +66,6 @@ CAP_STATUSES: frozenset[int] = frozenset({422})
 SPLIT_THRESHOLD: int = 10000
 DISTRICT_IDS: tuple[int, ...] = tuple(range(1, 78))
 
-# Statuses that mean "this listing no longer exists" rather than a
-# transient or unexpected error. Mirrors scraper.freshness.GONE_STATUSES.
-GONE_STATUSES: frozenset[int] = frozenset({404, 410})
-
 # Substrings of sreality's HTML "this page does not exist" page. Sreality
 # sometimes serves this (HTTP 200, text/html) for a delisted detail URL
 # instead of a 404/410 JSON error, in which case response.json() would
@@ -78,14 +75,6 @@ _NOT_FOUND_MARKERS: tuple[str, ...] = (
     "tato stránka neexistuje",
     "stránka nebyla nalezena",
 )
-
-
-class ListingGoneError(Exception):
-    """A listing's detail endpoint signals it no longer exists."""
-
-    def __init__(self, url: str, status: int | None) -> None:
-        self.status = status
-        super().__init__(f"listing gone (status={status}) at {url}")
 
 
 def _is_not_found_body(response: requests.Response) -> bool:
@@ -112,7 +101,9 @@ def _unwrap_estate(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-class SrealityClient:
+class SrealityClient(BasePortalClient):
+    ACCEPT = "application/json"
+
     def __init__(
         self,
         category_main: int = 1,
@@ -126,6 +117,15 @@ class SrealityClient:
         locality_region_id: int | None = None,
         locality_district_id: int | None = None,
     ) -> None:
+        # A shared RateLimiter (when set) paces fetches across worker threads;
+        # serial callers (freshness, --detail-only) pass none and keep the
+        # per-instance detail_delay_s self-throttle in get_detail.
+        super().__init__(
+            limiter=limiter,
+            request_delay_s=detail_delay_s,
+            timeout_s=timeout_s,
+            max_retries=max_retries,
+        )
         self.category_main = category_main
         self.category_type = category_type
         self.country_id = country_id
@@ -136,15 +136,6 @@ class SrealityClient:
         self.locality_district_id = locality_district_id
         self.per_page = per_page
         self.detail_delay_s = detail_delay_s
-        self.timeout_s = timeout_s
-        self.max_retries = max_retries
-        # When set, a shared RateLimiter paces detail fetches (allowing
-        # concurrency across threads) instead of the per-instance
-        # detail_delay_s spacing. Serial callers (freshness, --detail-only)
-        # pass no limiter and keep the 1.5s self-throttle.
-        self._limiter = limiter
-        self._session = requests.Session()
-        self._session.headers.update(DEFAULT_HEADERS)
         self._last_detail_at = 0.0
         self.pages_fetched = 0
         # Total matching estates as the API reports it (pagination.total).
@@ -251,6 +242,8 @@ class SrealityClient:
         except ListingGoneError:
             raise
         except requests.HTTPError as exc:
+            # _request already maps a 404/410 to ListingGoneError; this stays as
+            # a defensive net for any HTTPError that still carries a gone status.
             status = (
                 exc.response.status_code
                 if getattr(exc, "response", None) is not None
@@ -267,40 +260,12 @@ class SrealityClient:
         url: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            if attempt > 0:
-                time.sleep(2.0 ** (attempt - 1))
-            try:
-                response = self._session.get(
-                    url, params=params, timeout=self.timeout_s
-                )
-                if response.status_code in (429, 403) and self._limiter is not None:
-                    LOG.warning(
-                        "RATE penalize status=%d url=%s", response.status_code, url
-                    )
-                    self._limiter.penalize()
-                if (
-                    response.status_code >= 400
-                    and response.status_code not in RETRYABLE_STATUS
-                ):
-                    response.raise_for_status()
-                if response.status_code in RETRYABLE_STATUS:
-                    raise requests.HTTPError(
-                        f"{response.status_code} from {url}",
-                        response=response,
-                    )
-                if _is_not_found_body(response):
-                    raise ListingGoneError(url, response.status_code)
-                return response.json()
-            except (requests.RequestException, ValueError) as exc:
-                error = exc
-                LOG.warning(
-                    "GET %s attempt %d/%d failed: %s",
-                    url,
-                    attempt + 1,
-                    self.max_retries + 1,
-                    exc,
-                )
-        assert error is not None
-        raise error
+        # The callers (iter_index / probe / get_detail) already paced via the
+        # shared limiter or the detail self-throttle, so skip the base's pace.
+        # _request raises ListingGoneError on 404/410 and HTTPError on the 422
+        # deep-pagination cap (caught by iter_index); a 200 body that is really
+        # sreality's HTML "page does not exist" is caught here.
+        response = self._request(url, params=params, pace=False)
+        if _is_not_found_body(response):
+            raise ListingGoneError(url, response.status_code)
+        return response.json()

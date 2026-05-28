@@ -383,10 +383,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     and an FK `property_id` to a `properties` row that groups observations of the same
     real-world property across portals. `properties` holds a representative display row plus
     derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
-    `first/last_seen_at`), maintained by an **async recompute job** (`recompute_property_stats.yml`),
-    never inline in the scrape. `is_active` / `last_seen_at` are **per-source** on the
-    `listings` row; the property-level rollup is derived, not authoritative per source. An
-    insert-time Tier-1 matcher (geo + price + area proximity) seeds candidate groupings.
+    `first/last_seen_at`), maintained by an **async property-maintenance job**, never inline in
+    the scrape (see rule #20 for the dirty-set incremental cadence). `is_active` /
+    `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
+    derived, not authoritative per source. The Tier-1 matcher (geo + price + area proximity)
+    seeds candidate groupings; as of Phase 2 it runs **batched in the maintenance job**, not
+    inline (rule #19/#20).
     Today sreality + bazos ingest; further portals follow the design in
     `docs/design/multi-portal-dedup.md`. Frontend Browse reads `properties_public`.
     The dedup feature is **complete**: beyond Tier-1, a daily Tier-2 fuzzy sweep
@@ -418,6 +420,65 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `collection_listings(collection_id, sreality_id)`, migration 022). Writes flow through
     the FastAPI service; the browser never writes directly. Same no-hard-delete spirit as the
     rest of the data model.
+19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
+    batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
+    (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +
+    `mark_inactive` (under the completeness guard, rule #3), and **enqueues** new/price-changed
+    ids with a priority. `detail_drain.yml` (`--drain-only`, `run_type='detail'`) claims a
+    bounded slice (`FOR UPDATE SKIP LOCKED`), fetches, and writes **batched** via
+    `db.write_detail_batch` (set-based `jsonb_to_recordset`; one transaction per ~100 listings;
+    snapshot-on-change preserved via an `IS DISTINCT FROM` anti-join). The index-walk uses the
+    transaction pooler; the drain uses the session pooler (`connect_session()`) for prepared
+    statements. The **Tier-1 property matcher is deferred off the hot write path** — the drain
+    inserts with `property_id` NULL and `recompute_property_stats`'s straggler-attach runs the
+    same spatial match set-based (rule #15 still governs the grouping). `scrape.yml`'s combined
+    `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
+    back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
+    the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
+    `portal_runner`** (rule #21) and the queue is **source-generic** (`(source, native_id)`,
+    migration 108), so this same split is how every portal scrapes — sreality is just one
+    `Portal`.
+20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
+    The writers that change a property's children — `write_detail_batch` (a content change →
+    new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
+    (re-sighting reactivation) — enqueue the affected `property_id` into `dirty_properties`
+    (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
+    `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
+    new stragglers (the batched **Tier-1 matcher**, skipping the one-time native-id backfill)
+    and recomputes **only the queued properties** (the full recompute SQL scoped to
+    `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` + Browse within ~5
+    min and the job is **O(changes)**, not O(all properties). The drain is race-free +
+    terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
+    since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
+    New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
+    **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
+    reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
+    self-heals within 24h. Tier-2 fuzzy dedup (`dedup_sweep.py`, daily) is unchanged. Both
+    maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
+    mutate `properties` concurrently. Inline merge/unmerge still call `recompute_one` directly
+    (they keep the survivor current without waiting for the cron). One accepted lag: a
+    byte-identical reactivation (a delisted listing reappears with no content change) produces
+    no snapshot, so it waits for the daily sweep — rare, documented.
+21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher +
+    a parser + a config row — no per-portal branches in shared code.** The pieces:
+    `scraper/portal_base.py` (`BasePortalClient` — the shared HTTP session/headers, `RateLimiter`
+    pacing + 429/403 penalize, retry/backoff, `ListingGoneError` on 404/410); `scraper/portal.py`
+    (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`
+    registry — `supports_complete_walk`, `categories`, `split_threshold` — migration 107); and
+    `scraper/portal_runner.py` (the one `run_index_walk` + `run_detail_drain`, parameterized by a
+    `Portal` object). sreality (`SrealityPortal` in `scraper/main.py`) and bazos (`BazosPortal` in
+    `scraper/bazos_main.py`) both implement the `Portal` protocol; `_run_index_walk` /
+    `_run_detail_drain` and `bazos_main.main` are thin delegators to the runner. The **only**
+    per-portal code is the fetcher (a `BasePortalClient` subclass), the parser strategy, and the
+    config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
+    completeness-gated `mark_inactive`, `scrape_runs`) is shared. A genuine per-portal need is an
+    explicit method on the `Portal` protocol, justified in review — **sreality's district-split
+    (the deep-pagination-cap workaround) inside its `walk_category` is the one sanctioned hook**.
+    The needs-detail queue is **source-generic** (`listing_detail_queue` keyed on
+    `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
+    the one drain. A portal that cannot prove a near-complete walk sets
+    `supports_complete_walk=false` and the runner never marks its listings inactive (rule #3) —
+    bazos (partial single-category walks) is such a portal.
 
 ## Toolkit and API rules
 
@@ -541,10 +602,12 @@ Database:
   Transaction pooler, port 6543; password embedded). **The one the scraper / API / scripts
   actually use.** Required.
 - `SUPABASE_DB_SESSION_URL` — Session-mode pooler connection string (Supabase → Database →
-  Connect → Session pooler, port 5432). **Optional**; used only by the scraper's hot
-  detail-write loop (`connect_session()`) so its repeated SQL gets prepared statements.
-  Unset → falls back to `SUPABASE_DB_URL`. Set it as an Actions secret on the scrape
-  workflow (and the Railway env var only if the API ever calls `connect_session()`).
+  Connection string → Session pooler, port 5432; same host/user as `SUPABASE_DB_URL`, just
+  port 5432 not 6543). **Optional**; used only by the scraper's hot detail-write loop
+  (`connect_session()`, i.e. the Phase-2 detail-drain's batched writes) so its repeated SQL
+  gets prepared statements. Unset → falls back to `SUPABASE_DB_URL`. Set it as an Actions
+  secret on `detail_drain.yml` (and the Railway env var only if the API ever calls
+  `connect_session()`).
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — set as Actions secrets for forward
   compatibility; the v1 scraper connects to Postgres directly and does not need them.
   (`SUPABASE_SERVICE_ROLE_KEY` is the 2025 `sb_secret_...` token, **not** a JWT.)
@@ -703,62 +766,67 @@ hand-edit the file.
 
 ## How to manually trigger the scrapers
 
-The sreality scrape (`scrape.yml`, "Scraping: Sreality hourly run") and the bazos crawl
-(`scrape_bazos.yml`, "Scraping: Bazos crawler (pilot)" — every 6h + dispatch) can both be
-run from the terminal or the browser. The cross-source dedup track adds three more
-scheduled/dispatch workflows: `recompute_property_stats.yml` (hourly property rollups),
-`dedup_sweep.yml` (daily Tier-2 cross-source sweep + auto-merge), and
-`compute_image_phash.yml` (6-hourly perceptual-hash backfill). You (or Claude) can run any of
-them directly:
-- CLI: `gh workflow run scrape.yml --ref <branch>` (add `-f` for optional flags). Watch with
-  `gh run list --workflow=scrape.yml` then `gh run watch`.
+The sreality pipeline is **split by cadence (Phase 2)**: `index_walk.yml` ("Scraping: Sreality
+index walk", cron `*/15`) feeds `detail_drain.yml` ("Scraping: Sreality detail drain", cron
+`*/15`). `scrape.yml` ("Scraping: Sreality combined walk") is the **dispatch-only fallback** —
+the proven combined index+detail `_run_full`, kept for instant revert (re-add its `schedule:`
+cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrape_bazos.yml`
+("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The dedup/properties track adds
+`property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers via
+the batched Tier-1 matcher + recomputes only changed properties; rule #20),
+`recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
+property + clears the dirty queue), `dedup_sweep.yml` (daily Tier-2 sweep + auto-merge), and
+`compute_image_phash.yml` (6-hourly pHash backfill). Run any directly:
+- CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
+  Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
-  flags → **Run workflow**. (All sreality scraping workflows are prefixed `Scraping:` so they
-  group together.)
+  flags → **Run workflow**. (All sreality scraping workflows are prefixed `Scraping:`.)
 
-There is **one sreality scrape pipeline**, not a two-tier split. `scrape.yml` (cron `0 * * * *`,
-hourly) walks the **entire** index of every category pair (no `--limit`) every run, so
-newly-listed properties surface AND delistings flip to `is_active=false`. Because the walk is
-complete it runs `mark_inactive` every run. It records `run_type='full'` (auto-derived, since
-there's no `--limit`).
+**The split (architectural rule #19).** The cheap "which ads still exist" check is decoupled
+from the slow "download each ad" write:
+- **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no
+  `--limit`), `touch_listings` bumps `last_seen_at` on still-listed ids, `mark_inactive` flips
+  delisted ones (under the completeness guard), and new + price-changed ids are **enqueued** into
+  `listing_detail_queue` with a priority (failure-retry > price-changed > new). No detail fetch,
+  so delistings surface within minutes. Records `run_type='index'`, `index_pages>0` (what Health
+  liveness keys off). Uses the **transaction pooler** (`connect()`) — bulk set-based statements,
+  no per-listing loop.
+- **`detail_drain.yml` (slow, async, bounded).** Claims a bounded slice of the queue
+  (`--max-detail-refetches`, default 6000), fetches details on a rate-limited pool, and writes
+  them **batched** via `db.write_detail_batch` (set-based `jsonb_to_recordset`, one transaction
+  per ~100 listings, ~0.1–0.2 s/listing). Uses the **session pooler** (`connect_session()`) for
+  prepared statements. New listings land with `property_id` NULL — the **Tier-1 matcher is
+  deferred** to `recompute_property_stats`'s straggler-attach (so the hot write path carries no
+  spatial probe). A gone fetch flips that listing inactive + dequeues it; a transient error bumps
+  the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
+  `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a
+  SIGKILLed claim is recovered by the next run's `reclaim_stale_claims`.
 
-- **Detail refetches** are capped per run (`--max-detail-refetches 4000`,
-  `--max-detail-refetches-per-category 1200`) — generous caps comfortably above hourly churn so
-  details don't perpetually lag, while still bounding worst-case run time. Deferred work drains
-  on the next run (failure-priority retry). Fetches run on a thread pool paced by a shared rate
-  limiter (`--detail-workers 8` / `--detail-rate 6.0`; the 429/403 auto-backoff is the safety
-  net).
-- **Images:** the run drains ACTIVE-listing images newest-first to empty
-  (`--images-active-only`, no cap). The 2-hourly `images.yml` backfill is the deeper drain that
-  also reaches the INACTIVE/historical backlog.
-- **Condition scoring is NOT part of the scrape.** It lives in its own decoupled workflow
-  `condition_scores.yml` (cron `30 * * * *`) so the LLM phase can never slow the walk; the hourly
-  scrape always passes `--no-condition-scoring`. The same workflow's `workflow_dispatch` is the
-  manual backfill. An optional cheaper async backend runs scoring through the Anthropic Message
-  Batches API (`condition_score_batches.yml`, dispatch-only).
+`mark_inactive` runs every index walk. Two safety rails make the flip safe (architectural rule
+#3): (1) each per-category flip is gated on **walk completeness** — `_walk_complete` compares the
+collected count against the API's `result_size` and skips the flip (logging `INACTIVE skipped`)
+when the walk looks truncated; (2) a gone detail fetch (HTTP 404/410 or sreality's "tato stránka
+neexistuje" body, `ListingGoneError`) flips that single listing immediately. The drain's
+failure-priority replaces the old per-walk priority retry: a failed fetch keeps its queue row at
+elevated priority.
 
-**Cadence:** hourly, deliberately — each run is a complete walk, and hourly keeps a steady,
-polite request volume (a too-aggressive schedule is a plausible abuse-flag trigger). GitHub also
-throttles scheduled workflows, so effective cadence can be slightly slower; the Health liveness
-check is tuned to this (warn >90 min, fail >180 min). Setting `SCRAPE_CHAIN_TOKEN` enables the
-workflow's "Chain next run" step (re-dispatches itself on success, since `GITHUB_TOKEN` can't);
-the hourly cron remains the safety net.
+**Condition scoring** stays decoupled (`condition_scores.yml`, cron `30 * * * *`); both new
+workflows pass `--no-condition-scoring`. **Images** stay decoupled (`images.yml`, `--images-only`,
+2-hourly); both new workflows pass `--no-image-downloads`. Neither `images.yml` nor the drain's
+write phase downloads bytes — the drain only writes image-URL rows.
 
-`mark_inactive` runs every walk. Two safety rails make the every-run flip safe (architectural
-rule #3): (1) each per-category flip is gated on **walk completeness** — `_walk_complete`
-compares the collected count against the API's `result_size` and skips the flip (logging
-`INACTIVE skipped`) when the walk looks truncated; (2) a gone detail fetch (HTTP 404/410 or
-sreality's "tato stránka neexistuje" body, surfaced as `ListingGoneError`) flips that single
-listing immediately and clears any `listing_fetch_failures` row. The `--limit` guard
-short-circuits `mark_inactive` for ad-hoc partial runs (a `--limit` run records
-`run_type='delta'`).
+**Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
+while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled
+workflows, so effective cadence is slower; Health liveness is tuned to this (warn >90 min, fail
+>180 min). Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long
+run is never killed mid-batch; the next tick queues behind it. Per-category mark_inactive commits
+immediately after each category's walk, so even a timed-out index walk leaves a consistent
+partial result.
 
-The image backfill (`images.yml`, `--images-only`) is NOT a scrape run and does **not** write a
-`scrape_runs` row — only index walks do — so "last scrape", the liveness check, and
-reconciliation track real walks. Scrape concurrency is `cancel-in-progress: false` — a long tick
-is never killed mid-walk; the next cron tick queues behind it. Per-category marking commits
-immediately after each category's walk, so even a timed-out tick leaves a consistent partial
-result.
+The image backfill (`images.yml`) and the detail-drain both write `scrape_runs` rows, but only
+the **index walk** sets `index_pages>0` — so "last scrape", the liveness check, and
+reconciliation track the index walk specifically, while the 24h new/updated/error counters sum
+across the drain's `index_pages=0` rows too (see `scraper_health_checks()`, migration 105).
 
 ## Reading the logs
 
