@@ -1,36 +1,36 @@
-name: "Jobs: recompute property stats"
+name: "Jobs: recompute property stats (daily full reconcile)"
 
-# Async recompute job for the canonical `properties` parent (multi-portal
-# dedup track, Slice 1). Attaches any straggler unlinked listings, then
-# recomputes every property's is_active rollup, source / site counts,
-# first/last-seen span, representative child, current price, and the
-# price-history aggregates (drop / rise counts, max drop %) from the union
-# of its children's snapshots.
+# DAILY FULL SWEEP for the canonical `properties` parent. Attaches any straggler
+# unlinked listings (incl. the one-time native-id backfill), then recomputes
+# EVERY property's is_active rollup, source / site counts, first/last-seen span,
+# representative child, current price, and the price-history aggregates (drop /
+# rise counts, max drop %) from the union of its children's snapshots. Finally it
+# clears the dirty_properties queue (everything was just recomputed).
 #
-# Decision #3: the property is_active rollup lives here, NOT in the
-# scraper's mid-walk mark_inactive, so a cross-source rollup never races a
-# per-category flip. A property's inactive flag therefore lags by at most
-# one job interval -- acceptable since notifications are at most daily.
+# As of Phase 3 this is the RECONCILE BACKSTOP, not the live path: the fast,
+# frequent dirty-set incremental pass (property_maintenance.yml, cron */5) keeps
+# `properties` near-real-time by recomputing only the properties the writers
+# queued. This full sweep runs once a day to recompute everything from scratch,
+# so any enqueue the writers missed self-heals within 24h. O(all properties), so
+# it must NOT run frequently at scale.
+#
+# Decision #3: the property is_active rollup lives here / in the incremental
+# pass, NOT in the scraper's mid-walk mark_inactive, so a cross-source rollup
+# never races a per-category flip.
 #
 # Idempotent + resumable: autocommit means each property-id batch commits
 # independently, so a timeout or cancel preserves completed batches and the
 # next run simply recomputes from current state.
 #
-# Cadence: every 30 min. Phase 2 deferred the inline Tier-1 property matcher
-# off the scraper's hot write path into this job's straggler-attach phase, so
-# a brand-new listing written by the detail-drain has no `properties` parent
-# (property_id NULL) until the next recompute. Running every 30 min bounds that
-# Browse read-lag; the straggler-attach phase only touches NULL-property rows
-# so it stays cheap. Tune the cron below or trigger manually from the Actions
-# tab. The index-walk's completeness rails (architectural rule #3) are
-# unaffected by this job.
+# Cadence: daily (04:15 UTC), after the Tier-2 fuzzy dedup sweep (dedup_sweep at
+# 03:45). Tune the cron below or trigger manually from the Actions tab.
 #
 # Required GitHub secret:
 #   SUPABASE_DB_URL  -- same one used by every other workflow.
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "15 4 * * *"
   workflow_dispatch:
     inputs:
       batch_size:
@@ -39,7 +39,7 @@ on:
         default: "2000"
         type: string
       dry_run:
-        description: Report straggler + property counts and exit without writing
+        description: Report straggler + dirty + property counts and exit without writing
         required: false
         default: "false"
         type: choice
@@ -48,7 +48,7 @@ on:
           - "true"
 
 concurrency:
-  group: recompute-property-stats
+  group: sreality-property-maintenance
   cancel-in-progress: false
 
 jobs:

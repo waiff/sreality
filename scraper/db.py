@@ -467,6 +467,31 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
         )
 
 
+def mark_properties_dirty(
+    conn: psycopg.Connection,
+    property_ids: Iterable[int],
+) -> int:
+    """Enqueue property ids for the incremental maintenance job (Phase 3).
+
+    Idempotent set-based insert; nests in the caller's transaction so the dirty
+    mark is atomic with the child-listing change that caused it. NULL ids are
+    dropped. Returns rows newly enqueued.
+    """
+    ids = [int(p) for p in property_ids if p is not None]
+    if not ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO dirty_properties (property_id)
+            SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
+            ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+            """,
+            (ids,),
+        )
+        return cur.rowcount or 0
+
+
 def record_images(
     conn: psycopg.Connection,
     sreality_id: int,
@@ -544,6 +569,27 @@ def touch_listings(
     with conn.cursor() as cur:
         for start in range(0, len(ids), TOUCH_CHUNK_SIZE):
             chunk = ids[start : start + TOUCH_CHUNK_SIZE]
+            # Phase 3: a re-sighting that flips a listing back to active changes
+            # its property's lifecycle rollup with NO snapshot, so it would not
+            # be caught by the snapshot-driven dirty mark. Capture exactly the
+            # reactivated subset (was inactive) and enqueue their properties.
+            # The bulk last_seen bump below covers the active majority.
+            cur.execute(
+                """
+                WITH react AS (
+                    UPDATE listings
+                    SET is_active = true, last_seen_at = now()
+                    FROM unnest(%s::bigint[]) AS u(sreality_id)
+                    WHERE listings.sreality_id = u.sreality_id
+                      AND listings.is_active = false
+                    RETURNING listings.property_id
+                )
+                INSERT INTO dirty_properties (property_id)
+                SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+                """,
+                (chunk,),
+            )
             cur.execute(
                 """
                 UPDATE listings
@@ -581,10 +627,22 @@ def mark_inactive(
               AND category_main = %s
               AND category_type = %s
               AND sreality_id <> ALL(%s)
+            RETURNING property_id
             """,
             (category_main, category_type, list(seen_ids)),
         )
-        return cur.rowcount or 0
+        rows = cur.fetchall()
+        pids = {int(r[0]) for r in rows if r[0] is not None}
+        if pids:
+            cur.execute(
+                """
+                INSERT INTO dirty_properties (property_id)
+                SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+                """,
+                (list(pids),),
+            )
+        return len(rows)
 
 
 def mark_listing_inactive(
@@ -599,9 +657,17 @@ def mark_listing_inactive(
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "UPDATE listings SET is_active = false WHERE sreality_id = %s",
+            "UPDATE listings SET is_active = false WHERE sreality_id = %s "
+            "RETURNING property_id",
             (sreality_id,),
         )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            cur.execute(
+                "INSERT INTO dirty_properties (property_id) VALUES (%s) "
+                "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
+                (int(row[0]),),
+            )
 
 
 def index_summary(
@@ -1038,6 +1104,17 @@ _BATCH_SNAPSHOT_SQL = """
         LIMIT 1
     ) latest ON true
     WHERE latest.content_hash IS DISTINCT FROM j.content_hash
+    RETURNING sreality_id
+"""
+
+# Phase 3: enqueue the changed listings' properties as dirty so the incremental
+# maintenance job recomputes only them. New listings (property_id NULL) are
+# skipped here -- the job's straggler-attach phase resolves them instead.
+_BATCH_DIRTY_FROM_SIDS_SQL = """
+    INSERT INTO dirty_properties (property_id)
+    SELECT DISTINCT property_id FROM listings
+    WHERE sreality_id = ANY(%s) AND property_id IS NOT NULL
+    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
 _BATCH_IMAGES_SQL = """
@@ -1113,7 +1190,8 @@ def write_detail_batch(
         new = sum(1 for (inserted,) in cur.fetchall() if inserted)
 
         cur.execute(_BATCH_SNAPSHOT_SQL, (Jsonb(snapshot_objs),))
-        snapshots = cur.rowcount or 0
+        changed_sids = [int(r[0]) for r in cur.fetchall()]
+        snapshots = len(changed_sids)
 
         images_discovered = 0
         if image_objs:
@@ -1124,6 +1202,9 @@ def write_detail_batch(
             "DELETE FROM listing_fetch_failures WHERE sreality_id = ANY(%s)",
             (ok_ids,),
         )
+
+        if changed_sids:
+            cur.execute(_BATCH_DIRTY_FROM_SIDS_SQL, (changed_sids,))
 
     # snapshots == new + updated (a brand-new listing always gets one snapshot);
     # the rest were content-identical touches.

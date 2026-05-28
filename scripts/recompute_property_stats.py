@@ -34,9 +34,19 @@ Batched by property-id range so each statement stays well under the
 transaction-pooler statement timeout. autocommit=True means each batch
 commits independently -- a workflow timeout preserves completed batches.
 
-Usage (typically via .github/workflows/recompute_property_stats.yml):
+Two run modes (Phase 3 -- real-time properties):
 
-    python -m scripts.recompute_property_stats --batch-size 2000
+  * --incremental (cron */5, property_maintenance.yml): attach new stragglers
+    (skipping the one-time native-id backfill) + recompute ONLY the properties
+    queued in `dirty_properties` by the writers. O(changes), near-real-time.
+  * full (default, daily reconcile, recompute_property_stats.yml): attach +
+    recompute EVERY property + reconcile childless + clear the queue. The
+    self-healing backstop for anything the incremental pass missed.
+
+Usage (typically via the workflows above):
+
+    python -m scripts.recompute_property_stats --batch-size 2000       # full
+    python -m scripts.recompute_property_stats --incremental            # dirty-set
 
 Required env var: SUPABASE_DB_URL.
 """
@@ -117,6 +127,7 @@ _ATTACH_SPATIAL_LINK_SQL = """
     UPDATE listings l SET property_id = m.pid
     FROM m
     WHERE m.hits = 1 AND l.sreality_id = m.sreality_id
+    RETURNING l.property_id
 """
 
 _RECOMPUTE_BATCH_SQL = """
@@ -224,6 +235,43 @@ _RECOMPUTE_ONE_SQL = _RECOMPUTE_BATCH_SQL.replace(
     "SELECT id FROM properties WHERE id = %(pid)s",
 )
 
+# Dirty-set recompute (Phase 3), derived the same way: the batch CTE is scoped to
+# an explicit id array instead of an id range, so the incremental job recomputes
+# exactly the queued properties with the identical body (never drifts from full).
+_RECOMPUTE_SCOPED_SQL = _RECOMPUTE_BATCH_SQL.replace(
+    "SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s",
+    "SELECT id FROM properties WHERE id = ANY(%(ids)s)",
+)
+
+# Claim a marked_at-ordered slice of the dirty queue, but only rows dirtied at or
+# before a run-start cutoff. A property re-dirtied DURING the run gets a fresh
+# marked_at (> cutoff, via the writers' ON CONFLICT DO UPDATE), so it is neither
+# claimed here nor deleted below -- it survives for the next pass. That makes the
+# working set finite + strictly shrinking, so the drain loop always terminates.
+_CLAIM_DIRTY_SQL = """
+    SELECT property_id, marked_at FROM dirty_properties
+    WHERE marked_at <= %(cutoff)s
+    ORDER BY marked_at
+    LIMIT %(limit)s
+"""
+
+# Delete only the claimed ids that have NOT been re-dirtied since the cutoff.
+_DELETE_DIRTY_SQL = """
+    DELETE FROM dirty_properties
+    WHERE property_id = ANY(%(ids)s) AND marked_at <= %(cutoff)s
+"""
+
+# Enqueue the spatially-linked stragglers so the recompute below picks them up.
+_ENQUEUE_DIRTY_SQL = """
+    INSERT INTO dirty_properties (property_id)
+    SELECT DISTINCT u FROM unnest(%(ids)s::bigint[]) AS u
+    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+"""
+
+# Full sweep clears the queue (it recomputed everything), but only rows that
+# existed at its start -- anything dirtied mid-sweep is left for the next pass.
+_CLEAR_DIRTY_SQL = "DELETE FROM dirty_properties WHERE marked_at <= %(cutoff)s"
+
 # A merge re-points a retired property's children onto the survivor, leaving the
 # loser childless. _RECOMPUTE_BATCH_SQL inner-joins listings, so a childless
 # property drops out of the UPDATE and keeps stale columns -- merge_properties
@@ -261,17 +309,54 @@ def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
         yield lo, lo + batch_size
 
 
-def _attach_stragglers(conn: Any) -> int:
+def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
+    """Resolve property_id-NULL listings: Tier-1 spatial link, then singletons.
+
+    The native-id backfill is a one-time legacy fix that scans the whole listings
+    table, so the */5 incremental pass skips it (daily full mode runs it). The
+    spatially-linked stragglers join an EXISTING property, so that property gains
+    a child and must be recomputed -- enqueue them dirty. Fresh singletons are
+    inserted already-correct (one child, no price history), so they need no
+    recompute and are not enqueued.
+    """
     with conn.cursor() as cur:
-        cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
+        if not skip_native_backfill:
+            cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
         cur.execute(_ATTACH_SPATIAL_LINK_SQL)
-        linked = cur.rowcount or 0
+        linked_pids = [int(r[0]) for r in cur.fetchall()]
+        linked = len(linked_pids)
         cur.execute(_ATTACH_INSERT_SQL)
         inserted = cur.rowcount or 0
         cur.execute(_ATTACH_LINK_SQL)
+        if linked_pids:
+            cur.execute(_ENQUEUE_DIRTY_SQL, {"ids": linked_pids})
     if linked:
         LOG.info("RECOMPUTE attach spatial_linked=%d", linked)
     return inserted + linked
+
+
+def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:
+    """Recompute every property queued at/before `cutoff`, scoped + batched.
+
+    Crash-safe under autocommit: recompute then delete per batch, so an
+    interrupted run simply re-recomputes (idempotent) on the next pass. Always
+    terminates -- only rows with marked_at <= cutoff are claimable, the delete
+    removes the claimed ones, and a row re-dirtied mid-run moves past the cutoff.
+    """
+    total = 0
+    while True:
+        with conn.cursor() as cur:
+            cur.execute(_CLAIM_DIRTY_SQL, {"cutoff": cutoff, "limit": batch_size})
+            claimed = cur.fetchall()
+        if not claimed:
+            break
+        ids = [int(r[0]) for r in claimed]
+        with conn.cursor() as cur:
+            cur.execute(_RECOMPUTE_SCOPED_SQL, {"ids": ids})
+        with conn.cursor() as cur:
+            cur.execute(_DELETE_DIRTY_SQL, {"ids": ids, "cutoff": cutoff})
+        total += len(ids)
+    return total
 
 
 def _max_property_id(conn: Any) -> int:
@@ -287,8 +372,14 @@ def main() -> int:
         help="Properties recomputed per statement (default 2000).",
     )
     parser.add_argument(
+        "--incremental", action="store_true",
+        help="Dirty-set mode: attach new stragglers (skip the legacy native-id "
+             "backfill) + recompute only queued properties. Default is the full "
+             "sweep over every property (the daily reconcile backstop).",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
-        help="Report straggler + property counts and exit without writing.",
+        help="Report straggler + dirty + property counts and exit without writing.",
     )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -309,22 +400,41 @@ def main() -> int:
 
     import psycopg
 
+    mode = "incremental" if args.incremental else "full"
     LOG.info(
-        "RECOMPUTE config batch_size=%d dry_run=%s",
-        args.batch_size, args.dry_run,
+        "RECOMPUTE config mode=%s batch_size=%d dry_run=%s",
+        mode, args.batch_size, args.dry_run,
     )
 
     started_at = time.monotonic()
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT now()")
+            cutoff = cur.fetchone()[0]
+
         if args.dry_run:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*) FROM listings WHERE property_id IS NULL")
                 stragglers = int(cur.fetchone()[0])
+                cur.execute("SELECT count(*) FROM dirty_properties")
+                dirty = int(cur.fetchone()[0])
                 cur.execute("SELECT count(*) FROM properties")
                 properties = int(cur.fetchone()[0])
             LOG.info(
-                "RECOMPUTE dry-run stragglers=%d properties=%d; exit",
-                stragglers, properties,
+                "RECOMPUTE dry-run mode=%s stragglers=%d dirty=%d properties=%d; exit",
+                mode, stragglers, dirty, properties,
+            )
+            return 0
+
+        # Incremental: attach new stragglers, then recompute only the queued
+        # (dirty) properties. The full-table sweep is the daily reconcile.
+        if args.incremental:
+            attached = _attach_stragglers(conn, skip_native_backfill=True)
+            recomputed = _drain_dirty(conn, args.batch_size, cutoff)
+            elapsed = time.monotonic() - started_at
+            LOG.info(
+                "RECOMPUTE incremental done attached=%d recomputed=%d elapsed=%.1fs",
+                attached, recomputed, elapsed,
             )
             return 0
 
@@ -344,6 +454,12 @@ def main() -> int:
             LOG.info(
                 "RECOMPUTE reconciled childless=%d (set is_active=false)", reconciled,
             )
+
+        # The full sweep recomputed every property, so clear the dirt that
+        # existed at its start; anything dirtied mid-sweep survives for the next
+        # incremental pass.
+        with conn.cursor() as cur:
+            cur.execute(_CLEAR_DIRTY_SQL, {"cutoff": cutoff})
 
     elapsed = time.monotonic() - started_at
     LOG.info(
