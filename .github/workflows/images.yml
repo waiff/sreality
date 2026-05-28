@@ -1,23 +1,21 @@
 name: "Scraping: Sreality image backlog drain"
 
-# Deep image-backlog drain that runs only the image-download phase every
-# 2 hours. The hourly scrape.yml drains ACTIVE-listing images newest-first
-# to empty each run (the user-visible coverage gap); this workflow is the
-# deeper safety net that also reaches the INACTIVE/historical backlog the
-# hourly active-only drain never touches.
+# THE image-download workflow. Images are fully decoupled from the scrape
+# (scrape.yml is index + detail only), so this is the single owner of all
+# image downloading — both newest active listings and the deep INACTIVE/
+# historical backlog. Runs the image-download phase only, every 2 hours.
 #
 # Configured for the operator's spec:
 #   * Drains ALL pending images by default (active + inactive); tick
-#     images_active_only to restrict to active listings only.
-#   * --max-image-downloads 0 → no cap; the loop drains until either
-#     the queue is empty or the suspicious-stop heuristic in
-#     scraper.main._run_image_downloads fires (transient-failure rate
-#     > 30% over the last 100 outcomes). On suspicious stop the next
-#     2-hourly cron tick picks up.
-#   * --image-workers 32 — moderate bump from the historical 16. The
-#     suspicious-stop heuristic gives us early warning if the higher
-#     concurrency makes sreality's CDN throttle harder; dial back via
-#     workflow_dispatch if it does.
+#     images_active_only to restrict to active listings only. The selection
+#     orders active listings first, so fresh listings get pictures soonest.
+#   * --max-image-downloads defaults to a BOUNDED per-run cap (see the run
+#     step) so each run exits cleanly inside the timeout instead of draining
+#     a huge backlog to a SIGKILL. Per-image commits mean progress is never
+#     lost; the next tick continues. Override to 0 to drain-to-empty on demand.
+#     The suspicious-stop heuristic (transient-failure rate > 30% over the last
+#     100 outcomes) still bails early if sreality's CDN starts blocking.
+#   * --image-workers 32 — dial via workflow_dispatch if the CDN throttles.
 #   * Concurrency group `images-backfill` with cancel-in-progress
 #     false. If a still-draining run is in flight when the next 2h
 #     cron tick arrives, the new run queues and succeeds the old one.
@@ -77,7 +75,13 @@ jobs:
         run: |
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
-            MAX_IMG="0"
+            # Bounded so the run EXITS CLEANLY within the 110-min timeout instead
+            # of draining-to-empty against a huge backlog and being SIGKILLed
+            # ("cancelled"). Per-image commits mean progress is never lost either
+            # way; a clean exit just keeps the run-history honest and frees the
+            # runner. Sized below measured throughput; the next 2-hourly tick
+            # continues the drain. Override to 0 to drain-to-empty on demand.
+            MAX_IMG="40000"
           fi
           WORKERS="${{ inputs.image_workers }}"
           if [ -z "$WORKERS" ]; then

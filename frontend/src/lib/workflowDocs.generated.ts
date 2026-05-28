@@ -252,7 +252,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "condition-scoring",
     "cancelInProgress": false,
-    "timeoutMinutes": 350,
+    "timeoutMinutes": 55,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/condition_scores.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_scores.yml"
@@ -518,7 +518,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "images.yml",
     "name": "Scraping: Sreality image backlog drain",
-    "description": "Deep image-backlog drain that runs only the image-download phase every 2 hours. The hourly scrape.yml drains ACTIVE-listing images newest-first to empty each run (the user-visible coverage gap); this workflow is the deeper safety net that also reaches the INACTIVE/historical backlog the hourly active-only drain never touches.",
+    "description": "THE image-download workflow. Images are fully decoupled from the scrape (scrape.yml is index + detail only), so this is the single owner of all image downloading — both newest active listings and the deep INACTIVE/ historical backlog. Runs the image-download phase only, every 2 hours.",
     "manual": true,
     "schedules": [
       {
