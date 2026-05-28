@@ -39,9 +39,15 @@ def image_key(sreality_id: int, sequence: int | None) -> str:
 # stored URLs already carry it, so appending is gated on its absence.
 IMAGE_TRANSFORM = "fl=res,749,562,3|shr,,20|jpg,90"
 
+# The render-transform is a sreality CDN (*.sdn.cz / Seznam) feature. Other
+# portals (bazos and onward) serve plain image URLs and would 404/ignore the
+# query, so the transform is gated on the sreality host — keeping download_image
+# portal-agnostic now that non-sreality images flow through it (multi-portal).
+_SREALITY_IMAGE_HOST = "sdn.cz"
+
 
 def _with_transform(url: str) -> str:
-    if "fl=" in url:
+    if "fl=" in url or _SREALITY_IMAGE_HOST not in url:
         return url
     return f"{url}{'&' if '?' in url else '?'}{IMAGE_TRANSFORM}"
 

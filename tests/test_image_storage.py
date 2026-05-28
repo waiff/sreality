@@ -79,3 +79,25 @@ def test_download_image_idempotent_on_existing_fl(monkeypatch):
     existing = "https://d18-a.sdn.cz/x/y.jpeg?fl=res,749,562,3|shr,,20|jpg,90"
     image_storage.download_image(existing)
     assert captured == [existing]
+
+
+def test_download_image_leaves_non_sreality_url_untouched(monkeypatch):
+    """The render-transform is sreality-CDN-only; bazos (and other portals')
+    image URLs must download verbatim (they 404 on the sreality query)."""
+    import scraper.image_storage as image_storage
+
+    captured: list[str] = []
+
+    class _Resp:
+        content = b"bazosbytes"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        image_storage.requests, "get",
+        lambda url, timeout=15.0: (captured.append(url), _Resp())[1],
+    )
+    bazos = "https://www.bazos.cz/img/1/123/456.jpg"
+    assert image_storage.download_image(bazos) == b"bazosbytes"
+    assert captured == [bazos]  # no transform appended
