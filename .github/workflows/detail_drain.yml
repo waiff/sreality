@@ -1,0 +1,93 @@
+name: "Scraping: Sreality detail drain (Phase 2)"
+
+# The slow half of the Phase-2 cadence split. Claims a bounded slice of
+# listing_detail_queue (enqueued by index_walk.yml), fetches each listing's
+# detail on a rate-limited worker pool, and writes them in batches via the
+# set-based write_detail_batch (one transaction per ~100 listings) — targeting
+# ~0.1-0.2 s/listing versus the ~1.5 s of the legacy per-listing write. New
+# listings land with property_id NULL; the Tier-1 matcher is deferred to the
+# recompute_property_stats straggler-attach phase.
+#
+# Bounded per run (--max-detail-refetches = claims/run) so it always finalizes
+# inside the timeout; the queue persists across runs so progress is never lost
+# and failure-priority retries drain first. A gone detail fetch (404/410) flips
+# that listing inactive immediately and dequeues it; a transient error bumps the
+# queue row's attempts (given up after 5). Records run_type='detail' with
+# index_pages=0 (it never walks the index).
+#
+# CADENCE: every 15 min. Uses the Session-mode pooler so the batched upsert +
+# snapshot SQL is prepared once and reused (the Phase-1 prepared-statement win,
+# now per-batch). Concurrency group isolated from the index walk and the
+# fallback scrape; cancel-in-progress=false so a drain is never killed mid-batch
+# (a SIGKILLed claim is reclaimed by the next run's reclaim_stale_claims).
+#
+# Required GitHub secrets:
+#   SUPABASE_DB_SESSION_URL — Session-mode pooler (port 5432) for the batched
+#     prepared writes. Falls back to SUPABASE_DB_URL when unset.
+#   SUPABASE_DB_URL — transaction pooler (used by the fallback + dry-run count).
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_detail_refetches:
+        description: "Cap listings claimed + fetched this run (blank = 6000)"
+        required: false
+        type: string
+      detail_workers:
+        description: "Concurrent detail-fetch workers (blank = 8)"
+        required: false
+        type: string
+      detail_rate:
+        description: "Global detail-fetch rate cap, req/s (blank = 6.0)"
+        required: false
+        type: string
+      dry_run:
+        description: "Report the claimable queue depth and exit without claiming"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: sreality-detail-drain
+  cancel-in-progress: false
+
+jobs:
+  detail-drain:
+    runs-on: ubuntu-latest
+    # The fetch rate (default 6 req/s) is the bottleneck, not the batched write,
+    # so the default 6000-claim cap drains in ~17 min. 50 min leaves headroom;
+    # kept under the API's sweep_stuck_scrape_runs cutoff (90 min).
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run detail drain
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_DB_SESSION_URL: ${{ secrets.SUPABASE_DB_SESSION_URL }}
+        run: |
+          MAX_REFETCH="${{ inputs.max_detail_refetches }}"
+          if [ -z "$MAX_REFETCH" ]; then MAX_REFETCH="6000"; fi
+          DETAIL_WORKERS="${{ inputs.detail_workers }}"
+          if [ -z "$DETAIL_WORKERS" ]; then DETAIL_WORKERS="8"; fi
+          DETAIL_RATE="${{ inputs.detail_rate }}"
+          if [ -z "$DETAIL_RATE" ]; then DETAIL_RATE="6.0"; fi
+          ARGS="--drain-only --no-image-downloads --no-condition-scoring --run-type detail"
+          ARGS="$ARGS --max-detail-refetches $MAX_REFETCH"
+          ARGS="$ARGS --detail-workers $DETAIL_WORKERS --detail-rate $DETAIL_RATE"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          echo "Running with: $ARGS"
+          python -m scraper.main $ARGS

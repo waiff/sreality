@@ -996,6 +996,35 @@ budget — consumed in category order — no longer permanently starves the same
 trailing categories. Next in the scaling roadmap: **Phase 2 — split the
 fast index walk from the slow batched detail-drain.**
 
+### Phase 2.0: Cadence split — index-walk / batched detail-drain (done)
+The structural unlock from the scaling roadmap
+(`~/.claude/plans/the-health-page-is-functional-moore.md`). The single
+combined scrape is split into two cadence-matched jobs joined by a queue:
+- **`index_walk.yml`** (`scraper.main --index-only`, cron `*/15`,
+  `run_type='index'`) walks the full index, `touch_listings` +
+  `mark_inactive` under the completeness guard, and **enqueues** new /
+  price-changed ids into `listing_detail_queue` (migration 105) with a
+  priority (failure-retry > price-changed > new). No detail fetch — delistings
+  surface within minutes. Transaction pooler.
+- **`detail_drain.yml`** (`--drain-only`, cron `*/15`, `run_type='detail'`)
+  claims a bounded slice (`FOR UPDATE SKIP LOCKED`), fetches on a rate-limited
+  pool, and writes **batched** via `db.write_detail_batch` — set-based
+  `jsonb_to_recordset` (fixed-shape SQL so the session pooler still prepares
+  it), one transaction per ~100 listings, snapshot-on-change preserved by an
+  `IS DISTINCT FROM` anti-join. Target ~0.1–0.2 s/listing. Session pooler.
+- **Tier-1 matcher deferred** off the hot path: the drain inserts with
+  `property_id` NULL; `recompute_property_stats`'s straggler-attach (now
+  every 30 min) runs the same spatial match set-based. Browse read-lag for
+  brand-new listings ≤30 min (accepted; Phase 3 makes it real-time).
+- `scrape.yml`'s combined `_run_full` retained as the **dispatch-only revert
+  fallback** (re-add its cron to roll back; no code change).
+- Migration 105 also widens `scrape_runs.run_type` to admit `index`/`detail`
+  and redefines `scraper_health_checks()` so liveness/reconciliation stay
+  scoped to the index walk while the 24h counters also see the drain's
+  `index_pages=0` rows. Architectural rule #19.
+Next: **Phase 3 — real-time properties** (dirty-set incremental recompute +
+the batched Tier-1 matcher moves there).
+
 ### Phase 1.5b: Multi-category UI defaults (done)
 The data was always broad (all six byt/dum/komercni ×
 pronajem/prodej pairs), but the analytical and estimation surfaces

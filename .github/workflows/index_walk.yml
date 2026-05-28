@@ -1,0 +1,73 @@
+name: "Scraping: Sreality index walk (Phase 2)"
+
+# The fast half of the Phase-2 cadence split. Walks the COMPLETE index of all
+# six category pairs, bumps last_seen on still-listed ids (touch), flips
+# delisted ones to is_active=false (mark_inactive, under the completeness
+# guard), and enqueues new + price-changed ids into listing_detail_queue for
+# the asynchronous detail-drain. It does NO detail fetching, so it finishes in
+# minutes and delistings surface fast — decoupled from the slow per-listing
+# write that used to drag it.
+#
+# This replaces the index+detail+mark_inactive of the legacy scrape.yml (now a
+# dispatch-only fallback). The companion detail_drain.yml consumes the queue.
+# Records run_type='index' with index_pages>0, which is what the Health
+# liveness check keys off (freshness/delisting depend on the index walk, not
+# the drain).
+#
+# CADENCE: every 15 min. Each run is a complete walk; mark_inactive runs every
+# tick under the same per-category walk-completeness rail (architectural rule
+# #3) so a truncated page never mass-flips live listings. GitHub throttles
+# scheduled workflows, so effective cadence is slower; Health liveness is tuned
+# to this (warn >90 min, fail >180 min).
+#
+# Concurrency: cancel-in-progress=false so a long walk is never killed mid-walk;
+# the next tick queues behind it. Its own group keeps it isolated from the
+# detail-drain and the fallback scrape.
+#
+# Required GitHub secret: SUPABASE_DB_URL (transaction pooler — the walk does
+# bulk set-based touch/mark_inactive/enqueue, no per-listing prepared loop).
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Walk the index and log enqueue intent, but write nothing"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: sreality-index-walk
+  cancel-in-progress: false
+
+jobs:
+  index-walk:
+    runs-on: ubuntu-latest
+    # A complete index walk + touch + mark_inactive + enqueue is cheap (no
+    # detail fetches). 25 min is generous headroom; kept under the API's
+    # sweep_stuck_scrape_runs cutoff (90 min) so a live run is never finalized.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run index walk
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          ARGS="--index-only --no-image-downloads --no-condition-scoring --run-type index"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          echo "Running with: $ARGS"
+          python -m scraper.main $ARGS
