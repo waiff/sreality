@@ -245,7 +245,7 @@ def test_write_detail_batch_enqueues_dirty_for_changed_listings():
     assert dirty is not None
     sql, params = dirty
     assert "FROM listings" in sql and "property_id IS NOT NULL" in sql
-    assert "ON CONFLICT (property_id) DO NOTHING" in sql
+    assert "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()" in sql
     assert params == ([1, 2],)
 
 
@@ -264,7 +264,7 @@ def test_mark_properties_dirty_drops_null_and_uses_unnest():
     db.mark_properties_dirty(conn, [10, None, 10])
     sql, params = conn.executed[0]
     assert "unnest(%s::bigint[])" in sql
-    assert "ON CONFLICT (property_id) DO NOTHING" in sql
+    assert "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()" in sql
     assert params == ([10, 10],)  # NULL dropped; SQL DISTINCT collapses dups
 
 

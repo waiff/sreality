@@ -485,7 +485,7 @@ def mark_properties_dirty(
             """
             INSERT INTO dirty_properties (property_id)
             SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
-            ON CONFLICT (property_id) DO NOTHING
+            ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
             """,
             (ids,),
         )
@@ -586,7 +586,7 @@ def touch_listings(
                 )
                 INSERT INTO dirty_properties (property_id)
                 SELECT DISTINCT property_id FROM react WHERE property_id IS NOT NULL
-                ON CONFLICT (property_id) DO NOTHING
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
                 """,
                 (chunk,),
             )
@@ -638,7 +638,7 @@ def mark_inactive(
                 """
                 INSERT INTO dirty_properties (property_id)
                 SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
-                ON CONFLICT (property_id) DO NOTHING
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
                 """,
                 (list(pids),),
             )
@@ -665,7 +665,7 @@ def mark_listing_inactive(
         if row and row[0] is not None:
             cur.execute(
                 "INSERT INTO dirty_properties (property_id) VALUES (%s) "
-                "ON CONFLICT (property_id) DO NOTHING",
+                "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
                 (int(row[0]),),
             )
 
@@ -1114,7 +1114,7 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
     INSERT INTO dirty_properties (property_id)
     SELECT DISTINCT property_id FROM listings
     WHERE sreality_id = ANY(%s) AND property_id IS NOT NULL
-    ON CONFLICT (property_id) DO NOTHING
+    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
 _BATCH_IMAGES_SQL = """
