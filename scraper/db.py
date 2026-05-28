@@ -131,8 +131,17 @@ def upsert_listing(
             %(sreality_id)s, now(), true,
             {placeholders},
             CASE
-              WHEN %(lon)s IS NOT NULL AND %(lat)s IS NOT NULL
-              THEN ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography
+              -- Cast to double precision so a NULL lon/lat (common for bazos and
+              -- other portals; rare for sreality) carries a concrete type. Without
+              -- the cast psycopg sends untyped NULL and Postgres can't resolve the
+              -- parameter type inside IS NOT NULL / ST_MakePoint, failing the whole
+              -- insert ("could not determine data type of parameter").
+              WHEN %(lon)s::double precision IS NOT NULL
+               AND %(lat)s::double precision IS NOT NULL
+              THEN ST_SetSRID(
+                     ST_MakePoint(%(lon)s::double precision, %(lat)s::double precision),
+                     4326
+                   )::geography
               ELSE NULL
             END,
             %(raw_json)s
