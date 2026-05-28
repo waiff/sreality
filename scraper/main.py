@@ -850,7 +850,7 @@ def _flush_drain_batch(
     res = db.write_detail_batch(conn, buffer)
     for k in ("new", "updated", "unchanged", "images_discovered"):
         counts[k] = counts.get(k, 0) + res[k]
-    db.complete_detail(conn, [fr.sid for fr in buffer])
+    db.complete_detail(conn, "sreality", [str(fr.sid) for fr in buffer])
     LOG.info(
         "DRAIN flush size=%d new=%d updated=%d unchanged=%d images=%d",
         len(buffer), res["new"], res["updated"], res["unchanged"],
@@ -893,7 +893,7 @@ def _run_detail_drain(
     total_claimed = 0
     buffer: list[FetchResult] = []
     try:
-        reclaimed = db.reclaim_stale_claims(conn)
+        reclaimed = db.reclaim_stale_claims(conn, "sreality")
         if reclaimed:
             LOG.info("DRAIN reclaimed stale claims=%d", reclaimed)
         LOG.info(
@@ -904,14 +904,15 @@ def _run_detail_drain(
             chunk = DRAIN_CLAIM_CHUNK
             if max_claims is not None:
                 chunk = min(chunk, max_claims - total_claimed)
-            claimed = db.claim_detail_batch(conn, chunk)
+            claimed = db.claim_detail_batch(conn, "sreality", chunk)
             if not claimed:
                 break
             total_claimed += len(claimed)
             with ThreadPoolExecutor(max_workers=max(1, detail_workers)) as pool:
+                # sreality's native_id IS the sreality_id as text.
                 futures = {
-                    pool.submit(_fetch_detail, client, sid): sid
-                    for sid, _price in claimed
+                    pool.submit(_fetch_detail, client, int(native_id)): native_id
+                    for native_id, _ref, _price in claimed
                 }
                 for future in as_completed(futures):
                     fr = future.result()  # never raises
@@ -927,12 +928,12 @@ def _run_detail_drain(
                         except Exception as exc:
                             LOG.warning("could not mark id=%d inactive: %s", fr.sid, exc)
                         db.clear_fetch_failure(conn, fr.sid)
-                        db.complete_detail(conn, [fr.sid])
+                        db.complete_detail(conn, "sreality", [str(fr.sid)])
                         counts["gone"] += 1
                     else:  # error: keep the queue row, bump attempts, log failure
                         LOG.error("DETAIL id=%d %s error: %s", fr.sid, fr.source, fr.error)
                         db.record_fetch_failure(conn, fr.sid, f"{fr.source}: {fr.error}")
-                        db.fail_detail(conn, [fr.sid], f"{fr.source}: {fr.error}")
+                        db.fail_detail(conn, "sreality", [str(fr.sid)], f"{fr.source}: {fr.error}")
                         counts["errors"] += 1
             LOG.info(
                 "DRAIN progress claimed=%d new=%d updated=%d unchanged=%d "
@@ -1220,13 +1221,15 @@ def _walk_category(
     # drain is bounded) and return without fetching any detail.
     if enqueue_only:
         price_map = dict(index_entries)
+        # sreality native_id is the sreality_id as text; detail_ref is None (the
+        # drain derives the URL from the id). source-generic queue (Phase 4).
         entries = (
-            [(s, price_map.get(s), db.QUEUE_PRIORITY_FAILURE) for s in priority]
-            + [(s, price_map.get(s), db.QUEUE_PRIORITY_CHANGED) for s in changed]
-            + [(s, price_map.get(s), db.QUEUE_PRIORITY_NEW) for s in new_ids]
+            [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_FAILURE) for s in priority]
+            + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_CHANGED) for s in changed]
+            + [(str(s), None, price_map.get(s), db.QUEUE_PRIORITY_NEW) for s in new_ids]
         )
         if conn is not None and entries:
-            counts["enqueued"] = db.enqueue_detail(conn, entries)
+            counts["enqueued"] = db.enqueue_detail(conn, "sreality", entries)
         LOG.info(
             "ENQUEUE enqueued=%d new=%d changed=%d priority=%d",
             counts["enqueued"], len(new_ids), len(changed), len(priority),

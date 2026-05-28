@@ -133,7 +133,7 @@ def patched_db(monkeypatch):
     monkeypatch.setattr(scraper_main.db, "connect", _FakeConn)
     monkeypatch.setattr(scraper_main.db, "connect_session", _FakeConn)
 
-    def _fake_enqueue(_conn, entries, source="sreality"):
+    def _fake_enqueue(_conn, source, entries):
         e = list(entries)
         calls["enqueue"].append(e)
         return len(e)
@@ -791,7 +791,10 @@ def test_index_walk_enqueues_and_marks_inactive(patched_db, monkeypatch):
     # index_summary returns {} (fixture) -> every id is new (priority 0).
     all_entries = [e for batch in patched_db["enqueue"] for e in batch]
     assert all_entries
-    assert all(prio == scraper_main.db.QUEUE_PRIORITY_NEW for _sid, _p, prio in all_entries)
+    assert all(
+        prio == scraper_main.db.QUEUE_PRIORITY_NEW
+        for _nid, _ref, _p, prio in all_entries
+    )
     # No detail writes happen in the index-walk.
     assert agg["listings_scraped_new"] == 0
     assert agg["listings_updated"] == 0
@@ -832,7 +835,7 @@ def test_walk_category_enqueue_assigns_priorities(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         scraper_main.db, "enqueue_detail",
-        lambda _c, entries, source="sreality": (
+        lambda _c, source, entries: (
             captured.__setitem__("e", list(entries)) or len(captured["e"])
         ),
     )
@@ -840,7 +843,7 @@ def test_walk_category_enqueue_assigns_priorities(monkeypatch):
     seen, counts = scraper_main._walk_category(
         client, object(), None, False, [None], None, 1, enqueue_only=True,
     )
-    by_prio = {sid: prio for sid, _p, prio in captured["e"]}
+    by_prio = {int(nid): prio for nid, _ref, _p, prio in captured["e"]}
     assert by_prio[12001] == scraper_main.db.QUEUE_PRIORITY_FAILURE  # changed AND failed -> failure
     assert by_prio[12002] == scraper_main.db.QUEUE_PRIORITY_NEW
     assert 12000 not in by_prio   # unchanged -> not enqueued
@@ -867,10 +870,10 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
             pass
 
     monkeypatch.setattr(scraper_main.db, "connect_session", lambda: _Conn())
-    monkeypatch.setattr(scraper_main.db, "reclaim_stale_claims", lambda _c, **k: 0)
+    monkeypatch.setattr(scraper_main.db, "reclaim_stale_claims", lambda _c, _src, **k: 0)
     it = iter(list(claim_batches) + [[]])
 
-    def _claim(_c, n):
+    def _claim(_c, _source, n):
         captured["claim_n"].append(n)
         return next(it, [])
 
@@ -888,11 +891,11 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
     monkeypatch.setattr(scraper_main.db, "write_detail_batch", _write)
     monkeypatch.setattr(
         scraper_main.db, "complete_detail",
-        lambda _c, ids: captured["complete"].append(sorted(ids)),
+        lambda _c, _src, ids: captured["complete"].append(sorted(ids)),
     )
     monkeypatch.setattr(
         scraper_main.db, "fail_detail",
-        lambda _c, ids, msg, **k: captured["fail"].append(sorted(ids)),
+        lambda _c, _src, ids, msg, **k: captured["fail"].append(sorted(ids)),
     )
     monkeypatch.setattr(
         scraper_main.db, "record_fetch_failure",
@@ -907,30 +910,38 @@ def _drain_patches(monkeypatch, claim_batches, fetch_kind):
 
 
 def test_detail_drain_batches_and_completes(monkeypatch):
-    cap = _drain_patches(monkeypatch, [[(1, None), (2, None), (3, None)]], lambda s: "ok")
+    cap = _drain_patches(
+        monkeypatch,
+        [[("1", None, None), ("2", None, None), ("3", None, None)]],
+        lambda s: "ok",
+    )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
     assert rc == 0
-    assert cap["write"] == [[1, 2, 3]]      # one partial flush at end
-    assert cap["complete"] == [[1, 2, 3]]   # dequeued after the write
+    assert cap["write"] == [[1, 2, 3]]              # one partial flush at end
+    assert cap["complete"] == [["1", "2", "3"]]     # dequeued by native_id
     assert agg["listings_scraped_new"] == 3
 
 
 def test_detail_drain_routes_gone_and_error(monkeypatch):
     kinds = {10: "ok", 11: "gone", 12: "error"}
-    cap = _drain_patches(monkeypatch, [[(10, None), (11, None), (12, None)]], lambda s: kinds[s])
+    cap = _drain_patches(
+        monkeypatch,
+        [[("10", None, None), ("11", None, None), ("12", None, None)]],
+        lambda s: kinds[s],
+    )
     rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
     assert rc == 0
     assert cap["gone"] == [11]              # gone -> mark_listing_inactive
     assert cap["failure"] == [12]           # error -> record_fetch_failure
-    assert cap["fail"] == [[12]]            # error -> queue attempts++
+    assert cap["fail"] == [["12"]]          # error -> queue attempts++ (by native_id)
     assert sorted(x for b in cap["write"] for x in b) == [10]
     # 11 (gone) and 10 (ok flush) both dequeued; 12 (error) stays queued.
-    assert sorted(x for b in cap["complete"] for x in b) == [10, 11]
+    assert sorted(x for b in cap["complete"] for x in b) == ["10", "11"]
     assert agg["errors"] == 1 and agg["listings_inactive"] == 1
 
 
 def test_detail_drain_respects_max_claims_cap(monkeypatch):
-    cap = _drain_patches(monkeypatch, [[(1, None), (2, None)]], lambda s: "ok")
+    cap = _drain_patches(monkeypatch, [[("1", None, None), ("2", None, None)]], lambda s: "ok")
     scraper_main._run_detail_drain(max_claims=2, dry_run=False, detail_workers=1)
     # First claim is sized to the cap and, once met, the loop stops (one claim).
     assert cap["claim_n"] == [2]
