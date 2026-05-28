@@ -130,6 +130,7 @@ def patched_db(monkeypatch):
             pass
 
     monkeypatch.setattr(scraper_main.db, "connect", _FakeConn)
+    monkeypatch.setattr(scraper_main.db, "connect_session", _FakeConn)
     monkeypatch.setattr(
         scraper_main.db, "index_summary",
         lambda _conn, _ids: (calls["index_summary"].append(set(_ids)) or {}),
@@ -276,6 +277,39 @@ def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
     rc, _agg = scraper_main._run_full(limit=None, dry_run=False)
     assert rc == 0
     assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+
+
+# --- category-order rotation (detail-budget fairness) -----------------------
+
+
+def test_rotated_categories_is_a_pure_rotation():
+    cats = (("a",), ("b",), ("c",), ("d",))
+    assert scraper_main._rotated_categories(cats, 0) == cats
+    assert scraper_main._rotated_categories(cats, 1) == (("b",), ("c",), ("d",), ("a",))
+    # offset wraps modulo length, so a full lap returns the original order.
+    assert scraper_main._rotated_categories(cats, len(cats)) == cats
+    assert scraper_main._rotated_categories(cats, len(cats) + 1) == (
+        ("b",), ("c",), ("d",), ("a",),
+    )
+
+
+def test_rotated_categories_preserves_membership_and_handles_empty():
+    # Every rotation is a permutation — same set, same length, no dupes/drops.
+    for off in range(len(scraper_main.CATEGORIES) * 2):
+        rotated = scraper_main._rotated_categories(scraper_main.CATEGORIES, off)
+        assert set(rotated) == set(scraper_main.CATEGORIES)
+        assert len(rotated) == len(scraper_main.CATEGORIES)
+    assert scraper_main._rotated_categories((), 3) == ()
+
+
+def test_rotation_gives_each_category_the_front_across_a_full_cycle():
+    """Over len(CATEGORIES) consecutive offsets every category leads once, so
+    the per-run detail budget isn't permanently biased toward a fixed prefix."""
+    leaders = {
+        scraper_main._rotated_categories(scraper_main.CATEGORIES, off)[0]
+        for off in range(len(scraper_main.CATEGORIES))
+    }
+    assert leaders == set(scraper_main.CATEGORIES)
 
 
 # --- gone detection in _process_one ----------------------------------------

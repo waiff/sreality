@@ -211,7 +211,21 @@ client), for two reasons:
   atomically.
 
 Do not introduce `supabase-py` without an explicit reason and a discussion.
-`prepare_threshold=None` for the pgbouncer-mode pooler.
+
+**Two connection modes.** `scraper/db.py` exposes two factories:
+- `connect()` — the **default for everything** (scrape_run bookkeeping, bazos, images,
+  recompute, API, scripts). Points at `SUPABASE_DB_URL` (the **Transaction-mode pooler**,
+  port 6543) with `prepare_threshold=None`. Disabling auto-prepare is **required** there:
+  PgBouncer rebinds connections between queries, so a cached prepared statement would trip
+  `DuplicatePreparedStatement`.
+- `connect_session()` — **only** for the scraper's hot detail-write loop (the long-lived
+  connection in `scraper/main.py:_run_full`). Points at `SUPABASE_DB_SESSION_URL` (the
+  **Session-mode pooler**, port 5432) and leaves `prepare_threshold` at psycopg3's default,
+  so the repeated upsert + spatial SQL gets server-side **prepared once and reused** across
+  every listing in the run (the plan isn't re-derived per call). The session pooler gives
+  each client a dedicated backend, so prepared statements are safe there. If
+  `SUPABASE_DB_SESSION_URL` is unset, `connect_session()` **falls back to `connect()`**, so
+  nothing breaks where the secret isn't configured.
 
 **Supabase MCP.** Claude Code has direct read/write access to the production Supabase
 project via the MCP integration. Use it for: inspecting the live schema, running SELECT
@@ -508,6 +522,11 @@ Database:
 - `SUPABASE_DB_URL` — Postgres connection string (Supabase → Database → Connection string →
   Transaction pooler, port 6543; password embedded). **The one the scraper / API / scripts
   actually use.** Required.
+- `SUPABASE_DB_SESSION_URL` — Session-mode pooler connection string (Supabase → Database →
+  Connect → Session pooler, port 5432). **Optional**; used only by the scraper's hot
+  detail-write loop (`connect_session()`) so its repeated SQL gets prepared statements.
+  Unset → falls back to `SUPABASE_DB_URL`. Set it as an Actions secret on the scrape
+  workflow (and the Railway env var only if the API ever calls `connect_session()`).
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — set as Actions secrets for forward
   compatibility; the v1 scraper connects to Postgres directly and does not need them.
   (`SUPABASE_SERVICE_ROLE_KEY` is the 2025 `sb_secret_...` token, **not** a JWT.)

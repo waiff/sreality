@@ -83,6 +83,25 @@ def connect(url: str | None = None) -> psycopg.Connection:
     )
 
 
+def connect_session(url: str | None = None) -> psycopg.Connection:
+    """Open a connection that lets psycopg3 auto-prepare statements.
+
+    For the scraper's hot detail-write loop only. Points at SUPABASE_DB_SESSION_URL
+    (Supabase's Session-mode pooler, port 5432), where each client gets a dedicated
+    backend, so leaving prepare_threshold at psycopg3's default is safe: the repeated
+    upsert + spatial SQL gets server-side prepared (plan cached once, not re-derived
+    on every listing) without risking DuplicatePreparedStatement the way the rebinding
+    Transaction-mode pooler would.
+
+    Falls back to connect() when SUPABASE_DB_SESSION_URL is unset, so environments
+    without the secret keep working on the Transaction-mode pooler.
+    """
+    session_url = url or os.environ.get("SUPABASE_DB_SESSION_URL")
+    if not session_url:
+        return connect()
+    return psycopg.connect(session_url, autocommit=True)
+
+
 def upsert_listing(
     conn: psycopg.Connection,
     row: dict[str, Any],
