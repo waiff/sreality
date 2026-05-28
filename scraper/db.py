@@ -609,12 +609,16 @@ def mark_inactive(
     category_main: str,
     category_type: str,
     seen_ids: set[int],
+    *,
+    source: str = "sreality",
 ) -> int:
     """Mark listings of this category not in seen_ids as is_active=false.
 
-    Scoped to (category_main, category_type) so a per-category index walk
-    only flips its own slice. Without scoping, scraping rentals would
-    clobber sales `is_active`, and vice versa.
+    Scoped to (source, category_main, category_type) so a per-category index
+    walk only flips its own slice. Without the category scope, scraping rentals
+    would clobber sales `is_active`; without the source scope, a sreality walk
+    would sweep other portals' rows (which carry the same canon categories but
+    are never in sreality's seen_ids) — see architectural rule #15.
     """
     if not seen_ids:
         return 0
@@ -624,12 +628,13 @@ def mark_inactive(
             UPDATE listings
             SET is_active = false
             WHERE is_active = true
+              AND source = %s
               AND category_main = %s
               AND category_type = %s
               AND sreality_id <> ALL(%s)
             RETURNING property_id
             """,
-            (category_main, category_type, list(seen_ids)),
+            (source, category_main, category_type, list(seen_ids)),
         )
         rows = cur.fetchall()
         pids = {int(r[0]) for r in rows if r[0] is not None}
@@ -702,17 +707,20 @@ def active_count(
     conn: psycopg.Connection,
     category_main: str,
     category_type: str,
+    *,
+    source: str = "sreality",
 ) -> int:
-    """Current active-listing count for one (category_main, category_type)."""
+    """Current active-listing count for one (source, category_main, category_type)."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT count(*) FROM listings
             WHERE is_active = true
+              AND source = %s
               AND category_main = %s
               AND category_type = %s
             """,
-            (category_main, category_type),
+            (source, category_main, category_type),
         )
         row = cur.fetchone()
         return int(row[0]) if row else 0

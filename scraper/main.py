@@ -615,7 +615,9 @@ def _run_full(
             inactive = 0
             if conn is not None and limit is None:
                 if complete:
-                    inactive = db.mark_inactive(conn, cm_text, ct_text, seen_ids)
+                    inactive = db.mark_inactive(
+                        conn, cm_text, ct_text, seen_ids, source="sreality"
+                    )
                     LOG.info(
                         "INACTIVE cm=%s ct=%s marked=%d collected=%d result_size=%s",
                         cm_text, ct_text, inactive, len(seen_ids), cat_result_size,
@@ -634,7 +636,9 @@ def _run_full(
             active_db: int | None = None
             if conn is not None:
                 try:
-                    active_db = db.active_count(conn, cm_text, ct_text)
+                    active_db = db.active_count(
+                        conn, cm_text, ct_text, source="sreality"
+                    )
                 except Exception as exc:
                     LOG.warning(
                         "active_count failed cm=%s ct=%s: %s", cm_text, ct_text, exc
@@ -746,12 +750,16 @@ class SrealityPortal:
     def mark_inactive(self, conn: Any, category: tuple[int, int], seen: set[int]) -> int:
         cm, ct = category
         return db.mark_inactive(
-            conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct], seen
+            conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct], seen,
+            source=self.source,
         )
 
     def active_count(self, conn: Any, category: tuple[int, int]) -> int | None:
         cm, ct = category
-        return db.active_count(conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct])
+        return db.active_count(
+            conn, parser.CATEGORY_MAIN[cm], parser.CATEGORY_TYPE[ct],
+            source=self.source,
+        )
 
     def make_client(self, limiter: RateLimiter) -> SrealityClient:
         return _build_client(CATEGORIES[0][0], CATEGORIES[0][1], limiter=limiter)

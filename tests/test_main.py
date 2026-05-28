@@ -152,12 +152,13 @@ def patched_db(monkeypatch):
     )
     monkeypatch.setattr(
         scraper_main.db, "mark_inactive",
-        lambda _conn, cm, ct, ids: (
+        lambda _conn, cm, ct, ids, *, source="sreality": (
             calls["mark_inactive"].append((cm, ct, set(ids))) or 0
         ),
     )
     monkeypatch.setattr(
-        scraper_main.db, "active_count", lambda _conn, _cm, _ct: 0,
+        scraper_main.db, "active_count",
+        lambda _conn, _cm, _ct, *, source="sreality": 0,
     )
     # The pooled walk calls _fetch_detail (worker) then _write_result
     # (main thread); stub both so _run_full exercises planning + the pool

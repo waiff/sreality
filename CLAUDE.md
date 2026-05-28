@@ -386,9 +386,13 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `first/last_seen_at`), maintained by an **async property-maintenance job**, never inline in
     the scrape (see rule #20 for the dirty-set incremental cadence). `is_active` /
     `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
-    derived, not authoritative per source. The Tier-1 matcher (geo + price + area proximity)
-    seeds candidate groupings; as of Phase 2 it runs **batched in the maintenance job**, not
-    inline (rule #19/#20).
+    derived, not authoritative per source. `db.mark_inactive` / `db.active_count` are
+    **source-scoped** to enforce this — a portal's index walk only flips its own rows.
+    (Originally `mark_inactive` scoped by `(category_main, category_type)` alone, so every
+    sreality walk swept bazos rows — same canon categories, never in sreality's `seen_ids` —
+    to `is_active=false`; migration 109 era fixed it.) The Tier-1 matcher (geo + price + area
+    proximity) seeds candidate groupings; as of Phase 2 it runs **batched in the maintenance
+    job**, not inline (rule #19/#20).
     Today sreality + bazos ingest; further portals follow the design in
     `docs/design/multi-portal-dedup.md`. Frontend Browse reads `properties_public`.
     The dedup feature is **complete**: beyond Tier-1, a daily Tier-2 fuzzy sweep
