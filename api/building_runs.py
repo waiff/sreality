@@ -363,6 +363,282 @@ def _execute_building_extraction(
     )
 
 
+# --- B2 orchestrator: per-unit fan-out + rollup ----------------------------
+#
+# On unit confirmation a building lands in status='estimating'. The
+# orchestrator fans out one rent + one sale child estimation_runs row per
+# confirmed unit, reusing the standard /estimations plumbing
+# (create_estimation_run, agent + deterministic modes alike), then sums the
+# per-unit results into building-level totals. It is a fan-out + watcher, not
+# a new LLM loop: each child runs synchronously through create_estimation_run,
+# so when the loop returns every child has reached a terminal status and the
+# rollup is exact. Per CLAUDE.md architectural rule #13 and ROADMAP.md B2.
+
+# Rent children run under the operator's apartment estimator skill so a unit
+# inside a building is estimated exactly like a standalone apartment (any
+# improvement to that skill rolls into the building flow for free). Sale
+# children fall back to deterministic mode until a sale-specific skill exists
+# (ROADMAP.md B2 "out of scope"); reading a not-yet-seeded app_settings key
+# just returns the fallback, so no migration is needed to wire it later.
+_DEFAULT_ESTIMATOR_SKILL = "rental_estimator_v1"
+
+
+def _orchestrate_building_estimations_background(*, building_id: int) -> None:
+    """Background-task entry: open a fresh connection + clients and run the
+    per-unit fan-out + rollup. Any uncaught exception flips the row to
+    'failed' so it can't get stuck in 'estimating'.
+    """
+    from api import dependencies as deps
+
+    try:
+        with deps.open_background_conn() as conn:
+            from api.llm_client import LLMClient
+            sreality_client = deps.get_sreality_client()
+            llm_client = LLMClient(conn, providers=deps.get_providers())
+            _run_building_estimations(
+                conn, sreality_client, llm_client, building_id=building_id,
+            )
+    except Exception as exc:
+        LOG.exception(
+            "background building orchestration %s crashed", building_id,
+        )
+        try:
+            with deps.open_background_conn() as conn:
+                _update_building_fields(
+                    conn, building_id,
+                    status="failed",
+                    error_message=(
+                        f"orchestration crash: {type(exc).__name__}: {exc}"
+                    )[:1000],
+                )
+        except Exception:
+            LOG.exception(
+                "failed to mark building %s failed after orchestration crash",
+                building_id,
+            )
+
+
+def _run_building_estimations(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient | None",
+    llm_client: "LLMClient | None",
+    *,
+    building_id: int,
+) -> None:
+    """Fan out per-unit child estimations for a confirmed building, then roll
+    the totals up. Safe to re-enter: if children already exist it just
+    re-runs the finalisation step instead of double-fanning-out.
+    """
+    from api.estimation_runs import _load_app_setting
+
+    row = _fetch_building(conn, building_id)
+    if row is None or row.get("status") != "estimating":
+        return
+
+    units = row.get("units") or []
+    if not units:
+        _update_building_fields(
+            conn, building_id,
+            status="failed",
+            error_message="no confirmed units to estimate",
+        )
+        return
+
+    if _fetch_children(conn, building_id):
+        _finalise_building(conn, building_id)
+        return
+
+    lat, lng = _building_latlng(row)
+    if lat is None or lng is None:
+        _update_building_fields(
+            conn, building_id,
+            status="failed",
+            error_message=(
+                "building parse has no lat/lng; cannot fan out per-unit "
+                "estimations"
+            ),
+        )
+        return
+
+    source = row.get("source") or "ui"
+    rent_skill = str(
+        _load_app_setting(
+            conn, "building_default_estimator_skill", _DEFAULT_ESTIMATOR_SKILL,
+        )
+    )
+    sale_skill = _load_app_setting(conn, "building_sale_estimator_skill", None)
+
+    for unit in units:
+        _create_child_estimation(
+            conn, sreality_client, llm_client,
+            building_id=building_id, unit=unit, estimate_kind="rent",
+            lat=lat, lng=lng, source=source, skill=rent_skill,
+        )
+        _create_child_estimation(
+            conn, sreality_client, llm_client,
+            building_id=building_id, unit=unit, estimate_kind="sale",
+            lat=lat, lng=lng, source=source,
+            skill=str(sale_skill) if sale_skill else None,
+        )
+
+    _finalise_building(conn, building_id)
+
+
+def _building_latlng(
+    row: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    """Pull the subject coordinates from the parse output. Prefer the
+    compact subject_summary.fields (what the UI shows); fall back to the
+    full input_spec.
+    """
+    def _coord(d: dict[str, Any] | None, key: str) -> float | None:
+        if not isinstance(d, dict):
+            return None
+        v = d.get(key)
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    fields = (row.get("subject_summary") or {}).get("fields") \
+        if isinstance(row.get("subject_summary"), dict) else None
+    spec = row.get("input_spec")
+    lat = _coord(fields, "lat")
+    lng = _coord(fields, "lng")
+    if lat is None:
+        lat = _coord(spec, "lat")
+    if lng is None:
+        lng = _coord(spec, "lng")
+    return lat, lng
+
+
+def _create_child_estimation(
+    conn: "psycopg.Connection",
+    sreality_client: "SrealityClient | None",
+    llm_client: "LLMClient | None",
+    *,
+    building_id: int,
+    unit: dict[str, Any],
+    estimate_kind: str,
+    lat: float,
+    lng: float,
+    source: str,
+    skill: str | None,
+) -> dict[str, Any]:
+    """INSERT + run one child estimation for a unit, then link it back to
+    the parent building. `skill` None means deterministic mode (today's
+    sale path); a skill name means agent mode under that skill.
+    """
+    from api.estimation_runs import create_estimation_run
+
+    use_agent = bool(skill)
+    body = s.CreateEstimationIn(
+        source=source if source in ("ui", "api", "clickup") else "ui",
+        mode="agent" if use_agent else "deterministic",
+        skill=skill or "rental_estimator_full_v1",
+        estimate_kind="rent" if estimate_kind == "rent" else "sale",
+        spec=s.TargetIn(
+            lat=lat,
+            lng=lng,
+            area_m2=unit.get("area_m2"),
+            disposition=unit.get("disposition"),
+        ),
+        category_main="byt",
+        category_type="pronajem" if estimate_kind == "rent" else "prodej",
+    )
+    child = create_estimation_run(
+        conn, sreality_client, llm_client, body, background_tasks=None,
+    )
+    child_id = child.get("id")
+    if child_id is not None:
+        _link_child_to_building(
+            conn, int(child_id),
+            building_id=building_id, unit_id=unit.get("unit_id"),
+        )
+    return child
+
+
+def _link_child_to_building(
+    conn: "psycopg.Connection",
+    child_id: int,
+    *,
+    building_id: int,
+    unit_id: str | None,
+) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE estimation_runs "
+            "SET building_run_id = %s, building_unit_id = %s WHERE id = %s",
+            (building_id, unit_id, child_id),
+        )
+
+
+def _finalise_building(
+    conn: "psycopg.Connection", building_id: int,
+) -> None:
+    """Roll per-unit child estimates up to building-level totals once every
+    child has reached a terminal status. No-op while any child is still
+    running (the orchestrator runs children synchronously, so this is only
+    a guard against re-entry on a partially-done set).
+    """
+    children = _fetch_children(conn, building_id)
+    terminal = {"success", "failed"}
+    if not children or any(c.get("status") not in terminal for c in children):
+        return
+
+    totals = _rollup_totals(children)
+    any_success = any(c.get("status") == "success" for c in children)
+    fields: dict[str, Any] = {
+        "status": "success" if any_success else "failed",
+        **totals,
+    }
+    if not any_success:
+        fields["error_message"] = "all per-unit estimations failed"
+    _update_building_fields(conn, building_id, **fields)
+
+
+def _rollup_totals(
+    children: list[dict[str, Any]],
+) -> dict[str, int | None]:
+    """Sum successful per-unit estimates into building-level totals.
+
+    P50 is the straight sum of per-unit point estimates; P25 / P75 sum the
+    per-unit IQR endpoints (matches how the operator reads the spreadsheet).
+    Only successful children contribute; a percentile with no contributing
+    unit stays NULL rather than reading as a misleading zero.
+    """
+    def _sum(kind: str, p50_key: str, p25_key: str, p75_key: str) -> tuple[
+        int | None, int | None, int | None,
+    ]:
+        rows = [
+            c for c in children
+            if c.get("estimate_kind") == kind and c.get("status") == "success"
+        ]
+        p25 = [c[p25_key] for c in rows if c.get(p25_key) is not None]
+        p50 = [c[p50_key] for c in rows if c.get(p50_key) is not None]
+        p75 = [c[p75_key] for c in rows if c.get(p75_key) is not None]
+        return (
+            int(sum(p25)) if p25 else None,
+            int(sum(p50)) if p50 else None,
+            int(sum(p75)) if p75 else None,
+        )
+
+    r25, r50, r75 = _sum(
+        "rent", "estimated_monthly_rent_czk", "rent_p25_czk", "rent_p75_czk",
+    )
+    s25, s50, s75 = _sum(
+        "sale", "estimated_sale_price_czk", "sale_p25_czk", "sale_p75_czk",
+    )
+    return {
+        "total_rent_p25_czk": r25,
+        "total_rent_p50_czk": r50,
+        "total_rent_p75_czk": r75,
+        "total_sale_p25_czk": s25,
+        "total_sale_p50_czk": s50,
+        "total_sale_p75_czk": s75,
+    }
+
+
 def sweep_stuck_buildings(
     conn: "psycopg.Connection",
     *,
@@ -371,9 +647,11 @@ def sweep_stuck_buildings(
     """Mark any building_runs in a non-terminal-non-awaiting status older
     than the cutoff as 'failed'. Returns the number of rows updated.
 
-    Recovers from server restart mid-background-extraction. We exclude
-    'awaiting_input' (the human-in-the-loop pause is intentional) and
-    'estimating' is left for now — it's handled by B2's orchestrator.
+    Recovers from a server restart mid-background-task. We exclude
+    'awaiting_input' (the human-in-the-loop pause is intentional). 'pending'
+    and 'extracting' cover an interrupted B1 extraction; 'estimating' covers
+    an interrupted B2 fan-out — an orphaned orchestration would otherwise
+    sit in 'estimating' forever.
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -381,7 +659,7 @@ def sweep_stuck_buildings(
             "SET status = 'failed', "
             "    error_message = coalesce(error_message, "
             "        'interrupted by server restart') "
-            "WHERE status IN ('pending', 'extracting') "
+            "WHERE status IN ('pending', 'extracting', 'estimating') "
             "  AND created_at < now() - make_interval(mins => %s) "
             "RETURNING id",
             (older_than_minutes,),
@@ -393,11 +671,22 @@ def confirm_units(
     conn: "psycopg.Connection",
     building_id: int,
     body: s.ConfirmBuildingUnitsIn,
+    sreality_client: "SrealityClient | None" = None,
+    llm_client: "LLMClient | None" = None,
+    background_tasks: Any | None = None,
 ) -> dict[str, Any]:
-    """Operator confirmation gate: awaiting_input -> estimating.
+    """Operator confirmation gate: awaiting_input -> estimating, then fan out.
 
-    Rejects 409 if the row is not in awaiting_input — B2's
-    orchestrator owns the row from there on.
+    Rejects 409 if the row is not in awaiting_input. On success it writes
+    the confirmed unit list, flips the row to 'estimating', and hands off
+    to the B2 orchestrator which fans out one rent + one sale child
+    estimation per unit and rolls the totals back up.
+
+    When `background_tasks` is provided the orchestration runs as a
+    BackgroundTask (the handler returns the 'estimating' row immediately;
+    the detail page polls until success/failed). When it is None the
+    orchestration runs inline — used by tests and any caller that wants
+    the rolled-up row before reading it back.
     """
     row = _fetch_building(conn, building_id)
     if row is None:
@@ -416,6 +705,17 @@ def confirm_units(
         conn, building_id,
         status="estimating",
         units=units,
+    )
+
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _orchestrate_building_estimations_background,
+            building_id=building_id,
+        )
+        return _fetch_building(conn, building_id) or {}
+
+    _run_building_estimations(
+        conn, sreality_client, llm_client, building_id=building_id,
     )
     return _fetch_building(conn, building_id) or {}
 

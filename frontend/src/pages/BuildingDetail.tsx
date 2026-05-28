@@ -22,10 +22,12 @@ import {
   updateBuildingInputs,
   uploadBuildingAttachment,
 } from '@/lib/api';
-import { fmtAbsolute, fmtArea } from '@/lib/format';
+import { fmtAbsolute, fmtArea, fmtCzk } from '@/lib/format';
 import BuildingUnitEditor from '@/components/BuildingUnitEditor';
+import RangeStrip from '@/components/region/RangeStrip';
 import type {
   BuildingAttachment,
+  BuildingChildRun,
   BuildingRun,
   BuildingStatus,
   BuildingUnit,
@@ -99,6 +101,7 @@ export default function BuildingDetail() {
       {isInFlight && <InFlightNotice building={b} />}
       <SubjectBlock building={b} />
       <Warnings building={b} />
+      <RollupSection building={b} />
       <OperatorInputsSection building={b} onUpdated={onConfirmed} />
       <AttachmentsSection building={b} onChanged={onConfirmed} />
 
@@ -117,6 +120,8 @@ export default function BuildingDetail() {
 
       {b.status === 'awaiting_input' ? (
         <BuildingUnitEditor building={b} onConfirmed={onConfirmed} />
+      ) : b.children && b.children.length > 0 ? (
+        <UnitsWithEstimates building={b} />
       ) : (
         <ReadOnlyUnits building={b} />
       )}
@@ -287,6 +292,196 @@ function Warnings({ building }: { building: BuildingRun }) {
   );
 }
 
+/* ---------- B2: rollup totals + per-unit estimates ---------- */
+
+function RollupSection({ building }: { building: BuildingRun }) {
+  const hasRent = building.total_rent_p50_czk != null;
+  const hasSale = building.total_sale_p50_czk != null;
+  const relevant =
+    building.status === 'estimating' ||
+    building.status === 'success' ||
+    building.status === 'failed';
+  if (!relevant || (!hasRent && !hasSale)) return null;
+
+  return (
+    <section className="mt-5 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-5 py-4">
+      <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        Building totals
+      </h2>
+      <p className="mt-1 text-[0.78rem] text-[var(--color-ink-3)]">
+        Summed across all successfully-estimated units. P50 is a straight
+        sum; P25 / P75 sum the per-unit ranges.
+      </p>
+      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-6">
+        {hasRent && (
+          <RangeStrip
+            label="Total monthly rent (Kč)"
+            triple={{
+              p25: building.total_rent_p25_czk ?? building.total_rent_p50_czk!,
+              p50: building.total_rent_p50_czk!,
+              p75: building.total_rent_p75_czk ?? building.total_rent_p50_czk!,
+            }}
+            format={(n) => fmtCzk(n)}
+          />
+        )}
+        {hasSale && (
+          <RangeStrip
+            label="Total sale price (Kč)"
+            triple={{
+              p25: building.total_sale_p25_czk ?? building.total_sale_p50_czk!,
+              p50: building.total_sale_p50_czk!,
+              p75: building.total_sale_p75_czk ?? building.total_sale_p50_czk!,
+            }}
+            format={(n) => fmtCzk(n)}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function UnitsWithEstimates({ building }: { building: BuildingRun }) {
+  const units: BuildingUnit[] =
+    building.units && building.units.length > 0
+      ? building.units
+      : building.units_proposal?.units ?? [];
+  const children = building.children ?? [];
+
+  const byUnit = useMemo(() => {
+    const map = new Map<string, { rent?: BuildingChildRun; sale?: BuildingChildRun }>();
+    for (const c of children) {
+      if (c.building_unit_id == null) continue;
+      const entry = map.get(c.building_unit_id) ?? {};
+      if (c.estimate_kind === 'sale') entry.sale = c;
+      else entry.rent = c;
+      map.set(c.building_unit_id, entry);
+    }
+    return map;
+  }, [children]);
+
+  if (units.length === 0) return null;
+
+  return (
+    <section className="mt-6">
+      <header className="mb-3">
+        <h2 className="text-[1rem]" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+          Units
+        </h2>
+        <p className="text-[0.78rem] text-[var(--color-ink-3)] mt-1">
+          {building.status === 'estimating'
+            ? 'Estimating each unit — this updates as estimates land.'
+            : 'One rent + one sale estimate per confirmed unit.'}
+        </p>
+      </header>
+      <div className="space-y-4">
+        {units.map((u) => (
+          <UnitEstimateCard
+            key={u.unit_id}
+            unit={u}
+            rent={byUnit.get(u.unit_id)?.rent}
+            sale={byUnit.get(u.unit_id)?.sale}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function UnitEstimateCard({
+  unit, rent, sale,
+}: {
+  unit: BuildingUnit;
+  rent?: BuildingChildRun;
+  sale?: BuildingChildRun;
+}) {
+  const facts = [
+    unit.floor != null ? `Floor ${unit.floor}` : null,
+    unit.area_m2 != null ? fmtArea(unit.area_m2) : null,
+    unit.disposition,
+    unit.condition,
+  ].filter((x): x is string => x != null && x !== '');
+
+  return (
+    <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)]">
+      <header className="px-5 py-3 border-b border-[var(--color-rule)] flex items-baseline justify-between gap-3">
+        <div className="flex items-baseline gap-2 min-w-0">
+          <span className="font-mono text-[0.78rem] text-[var(--color-ink-3)]">{unit.unit_id}</span>
+          <span className="text-[0.92rem] text-[var(--color-ink)] truncate">
+            {unit.label ?? unit.disposition ?? 'Unit'}
+          </span>
+          {unit.is_potential && (
+            <span className="text-[0.65rem] tracking-[0.12em] uppercase text-[var(--color-ochre)]">
+              potential
+            </span>
+          )}
+        </div>
+        {facts.length > 0 && (
+          <p className="shrink-0 text-[0.75rem] text-[var(--color-ink-3)]">
+            {facts.join(' · ')}
+          </p>
+        )}
+      </header>
+      <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-6">
+        <UnitEstimateBlock kind="rent" child={rent} />
+        <UnitEstimateBlock kind="sale" child={sale} />
+      </div>
+    </div>
+  );
+}
+
+function UnitEstimateBlock({
+  kind, child,
+}: {
+  kind: 'rent' | 'sale';
+  child?: BuildingChildRun;
+}) {
+  const isSale = kind === 'sale';
+  const heading = isSale ? 'Sale price' : 'Monthly rent';
+
+  if (!child) {
+    return (
+      <div>
+        <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">{heading}</p>
+        <p className="mt-2 text-[0.83rem] text-[var(--color-ink-3)]">Queued…</p>
+      </div>
+    );
+  }
+
+  const median = isSale ? child.estimated_sale_price_czk : child.estimated_monthly_rent_czk;
+  const p25 = isSale ? child.sale_p25_czk : child.rent_p25_czk;
+  const p75 = isSale ? child.sale_p75_czk : child.rent_p75_czk;
+  const terminal = child.status === 'success' || child.status === 'failed';
+
+  return (
+    <div>
+      {median != null && p25 != null && p75 != null ? (
+        <RangeStrip
+          label={`${heading} (Kč)`}
+          triple={{ p25, p50: median, p75 }}
+          format={(n) => fmtCzk(n)}
+        />
+      ) : (
+        <div>
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">{heading}</p>
+          <p className="mt-2 text-[0.83rem] text-[var(--color-ink-3)]">
+            {child.status === 'failed'
+              ? (child.error_message ?? 'Estimate failed.')
+              : terminal
+                ? 'No range available.'
+                : 'Estimating…'}
+          </p>
+        </div>
+      )}
+      <Link
+        to={`/estimation/${child.id}`}
+        className="mt-2 inline-block text-[0.75rem] text-[var(--color-copper)] hover:text-[var(--color-copper-2)]"
+      >
+        View estimate →
+      </Link>
+    </div>
+  );
+}
+
 function ReadOnlyUnits({ building }: { building: BuildingRun }) {
   const units: BuildingUnit[] =
     building.units && building.units.length > 0
@@ -301,7 +496,7 @@ function ReadOnlyUnits({ building }: { building: BuildingRun }) {
         </h2>
         <p className="text-[0.78rem] text-[var(--color-ink-3)] mt-1">
           {building.units
-            ? 'Operator-confirmed list. Per-unit estimates land here when B2 ships.'
+            ? 'Operator-confirmed list. Per-unit estimates appear once they finish.'
             : 'Extractor proposal — not yet confirmed.'}
         </p>
       </header>
