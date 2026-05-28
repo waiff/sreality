@@ -81,7 +81,11 @@ concurrency:
 jobs:
   score:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    # Bounded under the hourly cadence so a run can't grind for hours and pile
+    # up behind cancel-in-progress=false. The scheduled LIMIT + max_cost_usd cap
+    # the work; this is the hard backstop. Manual backfills can still chew a
+    # large slice by dispatching repeatedly.
+    timeout-minutes: 55
     permissions:
       contents: read
     env:
@@ -114,7 +118,7 @@ jobs:
           # cap. Manual dispatch carries the form's own defaults/overrides.
           REGION='${{ inputs.region_ids }}'
           LIMIT='${{ inputs.limit }}'
-          if [ -z "$LIMIT" ]; then LIMIT="2000"; fi
+          if [ -z "$LIMIT" ]; then LIMIT="500"; fi
           NIMG='${{ inputs.n_images }}'
           if [ -z "$NIMG" ]; then NIMG="0"; fi
           COST='${{ inputs.max_cost_usd }}'

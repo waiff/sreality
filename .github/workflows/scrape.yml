@@ -20,11 +20,13 @@ name: "Scraping: Sreality hourly run"
 # "page does not exist" body) flips that single listing immediately instead
 # of accumulating fetch failures.
 #
-# Detail refetches are capped per run (generous caps comfortably above hourly
-# churn, so details don't perpetually lag, while still bounding worst-case
-# run time). The image phase drains ACTIVE listings newest-first to empty
-# (--images-active-only, no cap) — the user-visible coverage gap. The deep
-# image-backlog drain (including inactive listings) stays in images.yml.
+# This workflow is index + detail ONLY. Detail refetches are capped per run
+# (generous caps comfortably above hourly churn, so details don't perpetually
+# lag and the new-listing backlog drains, while still bounding worst-case run
+# time). Images are FULLY decoupled — ALL image downloading lives in images.yml
+# (active newest-first + the deep backlog). Coupling an image drain in here is
+# what pushed runs past the timeout once the CDN fix made downloads succeed.
+# Condition scoring is likewise decoupled (condition_scores.yml).
 #
 # CADENCE: hourly (0 * * * *). Each run is a complete walk; hourly keeps a
 # steady, polite request volume against sreality. GitHub throttles scheduled
@@ -135,25 +137,25 @@ jobs:
           if [ -n "${{ inputs.detail_only }}" ]; then
             ARGS="$ARGS --detail-only ${{ inputs.detail_only }}"
           fi
-          if [ "${{ inputs.no_image_downloads }}" = "true" ]; then
-            ARGS="$ARGS --no-image-downloads"
-          fi
+          # Images are FULLY decoupled: images.yml owns all image downloading
+          # (active newest-first + the deep backlog). The scrape never runs the
+          # image phase, so index+detail always finishes inside the timeout —
+          # coupling an unbounded image drain in here is what pushed runs past
+          # it once the CDN fix made downloads actually succeed.
+          ARGS="$ARGS --no-image-downloads"
 
+          # Detail caps raised now that the whole window is index+detail only:
+          # high enough to drain the new-listing backlog the old shared 4000
+          # budget starved (komercni/pronajem, dum/prodej, which sit last in
+          # category order), while the per-category commit + 90-min timeout
+          # still bound worst-case run time.
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
           if [ -z "$MAX_REFETCH" ]; then
-            MAX_REFETCH="4000"
+            MAX_REFETCH="12000"
           fi
           MAX_REFETCH_PER_CAT="${{ inputs.max_detail_refetches_per_category }}"
           if [ -z "$MAX_REFETCH_PER_CAT" ]; then
-            MAX_REFETCH_PER_CAT="1200"
-          fi
-          MAX_IMG="${{ inputs.max_image_downloads }}"
-          if [ -z "$MAX_IMG" ]; then
-            MAX_IMG="0"
-          fi
-          WORKERS="${{ inputs.image_workers }}"
-          if [ -z "$WORKERS" ]; then
-            WORKERS="16"
+            MAX_REFETCH_PER_CAT="4000"
           fi
           DETAIL_WORKERS="${{ inputs.detail_workers }}"
           if [ -z "$DETAIL_WORKERS" ]; then
@@ -167,17 +169,10 @@ jobs:
           ARGS="$ARGS --max-detail-refetches-per-category $MAX_REFETCH_PER_CAT"
           ARGS="$ARGS --detail-workers $DETAIL_WORKERS"
           ARGS="$ARGS --detail-rate $DETAIL_RATE"
-          ARGS="$ARGS --max-image-downloads $MAX_IMG"
-          ARGS="$ARGS --image-workers $WORKERS"
 
-          # Condition scoring is a separate decoupled workflow now
+          # Condition scoring is a separate decoupled workflow
           # (condition_scores.yml); never run it inline with the scrape.
           ARGS="$ARGS --no-condition-scoring"
-          # Drain active-listing images newest-first; images.yml handles the
-          # deep inactive/historical backlog. Skip when isolating a test run.
-          if [ "${{ inputs.no_image_downloads }}" != "true" ]; then
-            ARGS="$ARGS --images-active-only"
-          fi
 
           echo "Running with: $ARGS"
           python -m scraper.main $ARGS
