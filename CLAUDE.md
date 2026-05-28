@@ -434,7 +434,10 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     same spatial match set-based (rule #15 still governs the grouping). `scrape.yml`'s combined
     `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
     back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
-    the Health-visible give-up ledger.
+    the Health-visible give-up ledger. As of Phase 4 both phases run through the **shared
+    `portal_runner`** (rule #21) and the queue is **source-generic** (`(source, native_id)`,
+    migration 108), so this same split is how every portal scrapes — sreality is just one
+    `Portal`.
 20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
     The writers that change a property's children — `write_detail_batch` (a content change →
     new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
@@ -456,6 +459,26 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (they keep the survivor current without waiting for the cron). One accepted lag: a
     byte-identical reactivation (a delisted listing reappears with no content change) produces
     no snapshot, so it waits for the daily sweep — rare, documented.
+21. **Every portal runs through ONE shared framework (Phase 4); per-portal code is a fetcher +
+    a parser + a config row — no per-portal branches in shared code.** The pieces:
+    `scraper/portal_base.py` (`BasePortalClient` — the shared HTTP session/headers, `RateLimiter`
+    pacing + 429/403 penalize, retry/backoff, `ListingGoneError` on 404/410); `scraper/portal.py`
+    (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`
+    registry — `supports_complete_walk`, `categories`, `split_threshold` — migration 107); and
+    `scraper/portal_runner.py` (the one `run_index_walk` + `run_detail_drain`, parameterized by a
+    `Portal` object). sreality (`SrealityPortal` in `scraper/main.py`) and bazos (`BazosPortal` in
+    `scraper/bazos_main.py`) both implement the `Portal` protocol; `_run_index_walk` /
+    `_run_detail_drain` and `bazos_main.main` are thin delegators to the runner. The **only**
+    per-portal code is the fetcher (a `BasePortalClient` subclass), the parser strategy, and the
+    config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
+    completeness-gated `mark_inactive`, `scrape_runs`) is shared. A genuine per-portal need is an
+    explicit method on the `Portal` protocol, justified in review — **sreality's district-split
+    (the deep-pagination-cap workaround) inside its `walk_category` is the one sanctioned hook**.
+    The needs-detail queue is **source-generic** (`listing_detail_queue` keyed on
+    `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
+    the one drain. A portal that cannot prove a near-complete walk sets
+    `supports_complete_walk=false` and the runner never marks its listings inactive (rule #3) —
+    bazos (partial single-category walks) is such a portal.
 
 ## Toolkit and API rules
 

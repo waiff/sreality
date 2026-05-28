@@ -1024,8 +1024,32 @@ scale to 5–10 portals.
   `sreality-property-maintenance` concurrency group.
 - Accepted lag: a byte-identical reactivation (no snapshot) waits for the
   daily sweep — rare, documented. Architectural rule #20.
-Next: **Phase 4 — portal framework** (`BasePortalClient` + a `Portal` contract
-+ a generic `portal_runner`; refactor sreality + bazos onto it).
+
+### Phase 4.0: Portal framework — one pipeline for every portal (done)
+The fourth scaling-roadmap unlock: collapse sreality + bazos onto ONE shared
+framework so a new portal is a fetcher + parser + config row, with no per-portal
+branches in shared code. The lean/modular guardrail before onboarding portals 3+.
+- **`BasePortalClient`** (`scraper/portal_base.py`): the HTTP machinery every
+  portal shares — session/headers, `RateLimiter` pacing + 429/403 penalize,
+  retry/backoff, `ListingGoneError` on 404/410. `SrealityClient` / `BazosClient`
+  subclass it and keep only the `Accept` header, URL building, and body markers.
+- **`PortalConfig`** (`scraper/portal.py`) backed by the `portals` registry's new
+  operational columns (`supports_complete_walk`, `categories`, `split_threshold`,
+  migration 107), with a baked-in default fallback.
+- **Source-generic queue** (migration 108): `listing_detail_queue` re-keyed from
+  `sreality_id` to `(source, native_id)` + `detail_ref`, so every portal enqueues
+  into the one queue and the one drain claims from it. Backward-compatible
+  re-key (sreality_id stays a unique index).
+- **`portal_runner`** (`scraper/portal_runner.py`): one `run_index_walk` + one
+  `run_detail_drain`, parameterized by a `Portal`. `SrealityPortal` /
+  `BazosPortal` implement the seams; the entrypoints are thin delegators.
+  sreality stays byte-identical (the district-split is the one sanctioned hook);
+  bazos joins the queue/drain model (partial walks → never marks inactive).
+- Architectural rules #19 (shared split) + #21 (the framework + modularity).
+  Pilot scope: bazos is single-category (the queue doesn't carry the category
+  parse_detail needs); multi-category bazos would encode it — deferred.
+After Phase 4 the limiter is each portal's polite fetch rate, not the DB or
+pipeline divergence — the healthy place to be.
 
 ### Phase 2.0: Cadence split — index-walk / batched detail-drain (done)
 The structural unlock from the scaling roadmap

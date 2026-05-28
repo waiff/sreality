@@ -1220,15 +1220,21 @@ def write_detail_batch(
 
 def enqueue_detail(
     conn: psycopg.Connection,
-    entries: Sequence[tuple[int, int | None, int]],
-    source: str = "sreality",
+    source: str,
+    entries: Sequence[tuple[str, str | None, int | None, int]],
 ) -> int:
-    """Enqueue (sreality_id, index_price_czk, priority) tuples for detail fetch.
+    """Enqueue (native_id, detail_ref, index_price_czk, priority) tuples for
+    detail fetch under `source` (Phase 4 source-generic queue).
 
-    Idempotent: re-seeing an id refreshes its observed price and raises its
-    priority (GREATEST), but never disturbs a row a drain has already claimed.
-    Chunked like touch_listings to stay under the pooler statement timeout.
-    Returns the number of rows inserted or updated.
+    native_id is the portal-native id (sreality: sreality_id as text; bazos:
+    source_id_native); detail_ref is what the drain needs to FETCH the detail
+    (None for sreality — the URL is derived from the id; the detail path/URL for
+    crawler portals). For sreality the bigint sreality_id column is set too (from
+    the numeric native_id) so the write path + the legacy unique still work.
+
+    Idempotent on (source, native_id): re-seeing an id refreshes its observed
+    price + detail_ref and raises its priority (GREATEST), but never disturbs a
+    row a drain has already claimed. Chunked to stay under the pooler timeout.
     """
     rows = list(entries)
     if not rows:
@@ -1237,23 +1243,31 @@ def enqueue_detail(
     with conn.cursor() as cur:
         for start in range(0, len(rows), _QUEUE_ENQUEUE_CHUNK):
             chunk = rows[start : start + _QUEUE_ENQUEUE_CHUNK]
-            sids = [int(sid) for sid, _, _ in chunk]
-            prices = [p for _, p, _ in chunk]
-            prios = [int(pr) for _, _, pr in chunk]
+            native_ids = [str(nid) for nid, _, _, _ in chunk]
+            refs = [r for _, r, _, _ in chunk]
+            prices = [p for _, _, p, _ in chunk]
+            prios = [int(pr) for _, _, _, pr in chunk]
             cur.execute(
                 """
                 INSERT INTO listing_detail_queue
-                    (sreality_id, source, index_price_czk, priority)
-                SELECT u.sid, %s, u.price, u.prio
-                FROM unnest(%s::bigint[], %s::int[], %s::smallint[])
-                    AS u(sid, price, prio)
-                ON CONFLICT (sreality_id) DO UPDATE SET
+                    (source, native_id, detail_ref, index_price_czk, priority,
+                     sreality_id)
+                SELECT %(source)s, u.nid, u.ref, u.price, u.prio,
+                       CASE WHEN %(source)s = 'sreality'
+                            THEN u.nid::bigint ELSE NULL END
+                FROM unnest(
+                    %(nids)s::text[], %(refs)s::text[],
+                    %(prices)s::int[], %(prios)s::smallint[]
+                ) AS u(nid, ref, price, prio)
+                ON CONFLICT (source, native_id) DO UPDATE SET
+                    detail_ref      = EXCLUDED.detail_ref,
                     index_price_czk = EXCLUDED.index_price_czk,
                     priority = GREATEST(listing_detail_queue.priority, EXCLUDED.priority),
-                    enqueued_at = now()
+                    enqueued_at     = now()
                 WHERE listing_detail_queue.claimed_at IS NULL
                 """,
-                (source, sids, prices, prios),
+                {"source": source, "nids": native_ids, "refs": refs,
+                 "prices": prices, "prios": prios},
             )
             total += cur.rowcount or 0
     return total
@@ -1261,10 +1275,11 @@ def enqueue_detail(
 
 def claim_detail_batch(
     conn: psycopg.Connection,
+    source: str,
     limit: int,
-) -> list[tuple[int, int | None]]:
-    """Atomically claim up to `limit` available queue rows, highest priority +
-    oldest first. Returns (sreality_id, index_price_czk) pairs.
+) -> list[tuple[str, str | None, int | None]]:
+    """Atomically claim up to `limit` available rows for `source`, highest
+    priority + oldest first. Returns (native_id, detail_ref, index_price_czk).
 
     FOR UPDATE SKIP LOCKED makes concurrent drains safe. The claim is committed
     immediately (claimed_at set) so a crashed drain's rows are recovered by
@@ -1276,46 +1291,49 @@ def claim_detail_batch(
         cur.execute(
             """
             WITH c AS (
-                SELECT sreality_id FROM listing_detail_queue
-                WHERE claimed_at IS NULL AND given_up = false
+                SELECT source, native_id FROM listing_detail_queue
+                WHERE source = %s AND claimed_at IS NULL AND given_up = false
                 ORDER BY priority DESC, enqueued_at
                 LIMIT %s
                 FOR UPDATE SKIP LOCKED
             )
             UPDATE listing_detail_queue q SET claimed_at = now()
-            FROM c WHERE q.sreality_id = c.sreality_id
-            RETURNING q.sreality_id, q.index_price_czk
+            FROM c WHERE q.source = c.source AND q.native_id = c.native_id
+            RETURNING q.native_id, q.detail_ref, q.index_price_czk
             """,
-            (limit,),
+            (source, limit),
         )
-        return [(int(sid), price) for sid, price in cur.fetchall()]
+        return [(nid, ref, price) for nid, ref, price in cur.fetchall()]
 
 
 def complete_detail(
     conn: psycopg.Connection,
-    sreality_ids: Iterable[int],
+    source: str,
+    native_ids: Iterable[str],
 ) -> int:
-    """Remove drained ids from the queue (success or confirmed-gone)."""
-    ids = [int(s) for s in sreality_ids]
+    """Remove drained rows from the queue (success or confirmed-gone)."""
+    ids = [str(n) for n in native_ids]
     if not ids:
         return 0
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "DELETE FROM listing_detail_queue WHERE sreality_id = ANY(%s)",
-            (ids,),
+            "DELETE FROM listing_detail_queue "
+            "WHERE source = %s AND native_id = ANY(%s)",
+            (source, ids),
         )
         return cur.rowcount or 0
 
 
 def fail_detail(
     conn: psycopg.Connection,
-    sreality_ids: Iterable[int],
+    source: str,
+    native_ids: Iterable[str],
     error_message: str,
     max_attempts: int = FAILURE_GIVE_UP_THRESHOLD,
 ) -> None:
     """Release a failed claim back to the queue, bumping attempts; give up at
     max_attempts so a permanently-broken listing stops re-claiming."""
-    ids = [int(s) for s in sreality_ids]
+    ids = [str(n) for n in native_ids]
     if not ids:
         return
     truncated = (error_message or "")[:500]
@@ -1327,27 +1345,29 @@ def fail_detail(
                 given_up   = (attempts + 1) >= %s,
                 claimed_at = NULL,
                 last_error = %s
-            WHERE sreality_id = ANY(%s)
+            WHERE source = %s AND native_id = ANY(%s)
             """,
-            (max_attempts, truncated, ids),
+            (max_attempts, truncated, source, ids),
         )
 
 
 def reclaim_stale_claims(
     conn: psycopg.Connection,
+    source: str,
     older_than_minutes: int = 30,
 ) -> int:
-    """Release claims older than the cutoff (a drain SIGKILLed mid-flight), so
-    its rows become claimable again. Mirrors sweep_stuck_scrape_runs."""
+    """Release `source` claims older than the cutoff (a drain SIGKILLed
+    mid-flight), so its rows become claimable again. Mirrors
+    sweep_stuck_scrape_runs."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
             """
             UPDATE listing_detail_queue SET claimed_at = NULL
-            WHERE claimed_at IS NOT NULL AND given_up = false
+            WHERE source = %s AND claimed_at IS NOT NULL AND given_up = false
               AND claimed_at < now() - make_interval(mins => %s)
-            RETURNING sreality_id
+            RETURNING native_id
             """,
-            (older_than_minutes,),
+            (source, older_than_minutes),
         )
         return len(cur.fetchall())
 

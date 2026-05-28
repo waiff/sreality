@@ -161,69 +161,76 @@ def test_write_detail_batch_skips_image_insert_when_no_images():
 
 def test_enqueue_detail_idempotent_greatest_priority():
     conn = _FakeConn([(lambda s: "INSERT INTO listing_detail_queue" in s, [(1,)])])
-    db.enqueue_detail(conn, [(1, 100, db.QUEUE_PRIORITY_NEW), (2, None, db.QUEUE_PRIORITY_FAILURE)])
+    db.enqueue_detail(conn, "sreality", [
+        ("1", None, 100, db.QUEUE_PRIORITY_NEW),
+        ("2", None, None, db.QUEUE_PRIORITY_FAILURE),
+    ])
     sql, params = _find(conn.executed, "INSERT INTO listing_detail_queue")
-    assert "ON CONFLICT (sreality_id) DO UPDATE" in sql
+    assert "ON CONFLICT (source, native_id) DO UPDATE" in sql
     assert "GREATEST(listing_detail_queue.priority, EXCLUDED.priority)" in sql
     assert "WHERE listing_detail_queue.claimed_at IS NULL" in sql
-    # (source, sids, prices, priorities)
-    assert params[0] == "sreality"
-    assert params[1] == [1, 2]
-    assert params[3] == [0, 2]
+    # sreality sets the bigint sreality_id from the numeric native_id.
+    assert "THEN u.nid::bigint ELSE NULL END" in sql
+    assert params["source"] == "sreality"
+    assert params["nids"] == ["1", "2"]
+    assert params["prios"] == [0, 2]
 
 
 def test_enqueue_detail_empty_noop():
     conn = _FakeConn([])
-    assert db.enqueue_detail(conn, []) == 0
+    assert db.enqueue_detail(conn, "sreality", []) == 0
     assert conn.executed == []
 
 
 def test_claim_detail_batch_skip_locked_priority_order():
     conn = _FakeConn([
-        (lambda s: "FOR UPDATE SKIP LOCKED" in s, [(5, 100), (6, None)]),
+        (lambda s: "FOR UPDATE SKIP LOCKED" in s, [("5", None, 100), ("6", "/p", None)]),
     ])
-    claimed = db.claim_detail_batch(conn, 50)
-    assert claimed == [(5, 100), (6, None)]
+    claimed = db.claim_detail_batch(conn, "sreality", 50)
+    assert claimed == [("5", None, 100), ("6", "/p", None)]
     sql, params = conn.executed[0]
     assert "ORDER BY priority DESC, enqueued_at" in sql
-    assert "claimed_at IS NULL AND given_up = false" in sql
+    assert "source = %s AND claimed_at IS NULL AND given_up = false" in sql
     assert "SET claimed_at = now()" in sql
-    assert params == (50,)
+    assert "RETURNING q.native_id, q.detail_ref, q.index_price_czk" in sql
+    assert params == ("sreality", 50)
 
 
 def test_claim_detail_batch_zero_limit_noop():
     conn = _FakeConn([])
-    assert db.claim_detail_batch(conn, 0) == []
+    assert db.claim_detail_batch(conn, "sreality", 0) == []
     assert conn.executed == []
 
 
 def test_fail_detail_gives_up_at_threshold():
     conn = _FakeConn([(lambda s: "UPDATE listing_detail_queue" in s, [])])
-    db.fail_detail(conn, [7, 8], "boom")
+    db.fail_detail(conn, "sreality", ["7", "8"], "boom")
     sql, params = conn.executed[0]
     assert "attempts = attempts + 1" in sql
     assert "given_up = (attempts + 1) >= %s" in sql
     assert "claimed_at = NULL" in sql
+    assert "source = %s AND native_id = ANY(%s)" in sql
     assert params[0] == db.FAILURE_GIVE_UP_THRESHOLD
-    assert params[2] == [7, 8]
+    assert params[2] == "sreality"
+    assert params[3] == ["7", "8"]
 
 
-def test_complete_detail_deletes_by_id():
+def test_complete_detail_deletes_by_native_id():
     conn = _FakeConn([(lambda s: "DELETE FROM listing_detail_queue" in s, [])])
-    db.complete_detail(conn, [1, 2, 3])
+    db.complete_detail(conn, "sreality", ["1", "2", "3"])
     sql, params = conn.executed[0]
-    assert "DELETE FROM listing_detail_queue WHERE sreality_id = ANY(%s)" in sql
-    assert params == ([1, 2, 3],)
+    assert "DELETE FROM listing_detail_queue WHERE source = %s AND native_id = ANY(%s)" in sql
+    assert params == ("sreality", ["1", "2", "3"])
 
 
 def test_reclaim_stale_claims_releases_old_claims():
-    conn = _FakeConn([(lambda s: "UPDATE listing_detail_queue" in s, [(1,), (2,)])])
-    n = db.reclaim_stale_claims(conn, older_than_minutes=30)
+    conn = _FakeConn([(lambda s: "UPDATE listing_detail_queue" in s, [("1",), ("2",)])])
+    n = db.reclaim_stale_claims(conn, "sreality", older_than_minutes=30)
     assert n == 2
     sql, params = conn.executed[0]
     assert "SET claimed_at = NULL" in sql
     assert "claimed_at < now() - make_interval(mins => %s)" in sql
-    assert params == (30,)
+    assert params == ("sreality", 30)
 
 
 # --- Phase 3: dirty-property enqueue ----------------------------------------
