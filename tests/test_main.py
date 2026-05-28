@@ -123,6 +123,7 @@ def patched_db(monkeypatch):
         "mark_inactive": [],
         "touch_listings": [],
         "index_summary": [],
+        "enqueue": [],
     }
 
     class _FakeConn:
@@ -131,6 +132,13 @@ def patched_db(monkeypatch):
 
     monkeypatch.setattr(scraper_main.db, "connect", _FakeConn)
     monkeypatch.setattr(scraper_main.db, "connect_session", _FakeConn)
+
+    def _fake_enqueue(_conn, entries, source="sreality"):
+        e = list(entries)
+        calls["enqueue"].append(e)
+        return len(e)
+
+    monkeypatch.setattr(scraper_main.db, "enqueue_detail", _fake_enqueue)
     monkeypatch.setattr(
         scraper_main.db, "index_summary",
         lambda _conn, _ids: (calls["index_summary"].append(set(_ids)) or {}),
@@ -764,3 +772,230 @@ def test_sweep_stuck_scrape_runs_stamps_ended_at():
     assert "ended_at IS NULL" in captured["sql"]
     assert "ended_at = now()" in captured["sql"]
     assert captured["params"] == (90,)
+
+
+# --- Phase 2: index-walk / detail-drain split ------------------------------
+
+
+def test_index_walk_enqueues_and_marks_inactive(patched_db, monkeypatch):
+    """The index-walk enqueues every category's new ids and runs mark_inactive
+    once per category under the completeness guard (result_size=5 == collected)."""
+    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
+    rc, agg = scraper_main._run_index_walk(dry_run=False)
+    assert rc == 0
+    assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
+    assert len(patched_db["enqueue"]) == len(scraper_main.CATEGORIES)
+    # index_summary returns {} (fixture) -> every id is new (priority 0).
+    all_entries = [e for batch in patched_db["enqueue"] for e in batch]
+    assert all_entries
+    assert all(prio == scraper_main.db.QUEUE_PRIORITY_NEW for _sid, _p, prio in all_entries)
+    # No detail writes happen in the index-walk.
+    assert agg["listings_scraped_new"] == 0
+    assert agg["listings_updated"] == 0
+    assert agg["index_pages"] >= 1
+
+
+def test_index_walk_dry_run_writes_nothing(patched_db):
+    """dry_run -> conn is None -> no enqueue, no mark_inactive."""
+    rc, _agg = scraper_main._run_index_walk(dry_run=True)
+    assert rc == 0
+    assert patched_db["enqueue"] == []
+    assert patched_db["mark_inactive"] == []
+
+
+def test_index_walk_skips_inactive_when_incomplete(patched_db, monkeypatch):
+    """A truncated walk (collected << result_size) still enqueues but must NOT
+    mark_inactive — same completeness guard as the legacy full run."""
+    monkeypatch.setattr(_FakeClient, "result_size", 1000, raising=False)
+    rc, _agg = scraper_main._run_index_walk(dry_run=False)
+    assert rc == 0
+    assert patched_db["mark_inactive"] == []
+    assert patched_db["enqueue"]  # enqueue is independent of completeness
+
+
+def test_walk_category_enqueue_assigns_priorities(monkeypatch):
+    """failure-retry (2) > price-changed (1) > new (0); unchanged ids skipped."""
+    monkeypatch.setattr(_FakeClient, "result_size", 5, raising=False)
+    # (1,2): ids 12000..12004, idx price 10000..10004.
+    monkeypatch.setattr(
+        scraper_main.db, "index_summary",
+        lambda _c, ids: {
+            12000: {"price_czk": 10000, "last_seen_at": None},  # same price -> unchanged
+            12001: {"price_czk": 999, "last_seen_at": None},    # diff price -> changed
+        },
+    )
+    monkeypatch.setattr(scraper_main.db, "touch_listings", lambda _c, ids: 0)
+    monkeypatch.setattr(scraper_main.db, "active_failure_ids", lambda _c, ids: {12001})
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        scraper_main.db, "enqueue_detail",
+        lambda _c, entries, source="sreality": (
+            captured.__setitem__("e", list(entries)) or len(captured["e"])
+        ),
+    )
+    client = _FakeClient(category_main=1, category_type=2)
+    seen, counts = scraper_main._walk_category(
+        client, object(), None, False, [None], None, 1, enqueue_only=True,
+    )
+    by_prio = {sid: prio for sid, _p, prio in captured["e"]}
+    assert by_prio[12001] == scraper_main.db.QUEUE_PRIORITY_FAILURE  # changed AND failed -> failure
+    assert by_prio[12002] == scraper_main.db.QUEUE_PRIORITY_NEW
+    assert 12000 not in by_prio   # unchanged -> not enqueued
+    assert counts["enqueued"] == 4
+    assert counts["new"] == 0 and counts["updated"] == 0   # no detail outcomes
+
+
+def _make_fr(sid: int, kind: str):
+    if kind == "ok":
+        return scraper_main.FetchResult(
+            sid, "ok", row={"sreality_id": sid}, raw={}, images=[], content_hash="h",
+        )
+    return scraper_main.FetchResult(sid, kind, source="fetch")
+
+
+def _drain_patches(monkeypatch, claim_batches, fetch_kind):
+    captured: dict[str, list] = {
+        "write": [], "complete": [], "fail": [], "failure": [],
+        "gone": [], "claim_n": [],
+    }
+
+    class _Conn:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(scraper_main.db, "connect_session", lambda: _Conn())
+    monkeypatch.setattr(scraper_main.db, "reclaim_stale_claims", lambda _c, **k: 0)
+    it = iter(list(claim_batches) + [[]])
+
+    def _claim(_c, n):
+        captured["claim_n"].append(n)
+        return next(it, [])
+
+    monkeypatch.setattr(scraper_main.db, "claim_detail_batch", _claim)
+    monkeypatch.setattr(scraper_main, "_build_client", lambda *a, **k: object())
+    monkeypatch.setattr(
+        scraper_main, "_fetch_detail",
+        lambda _client, sid: _make_fr(sid, fetch_kind(sid)),
+    )
+
+    def _write(_c, buf):
+        captured["write"].append(sorted(fr.sid for fr in buf))
+        return {"new": len(buf), "updated": 0, "unchanged": 0, "images_discovered": 0}
+
+    monkeypatch.setattr(scraper_main.db, "write_detail_batch", _write)
+    monkeypatch.setattr(
+        scraper_main.db, "complete_detail",
+        lambda _c, ids: captured["complete"].append(sorted(ids)),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "fail_detail",
+        lambda _c, ids, msg, **k: captured["fail"].append(sorted(ids)),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "record_fetch_failure",
+        lambda _c, sid, msg: captured["failure"].append(sid),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "mark_listing_inactive",
+        lambda _c, sid: captured["gone"].append(sid),
+    )
+    monkeypatch.setattr(scraper_main.db, "clear_fetch_failure", lambda _c, sid: None)
+    return captured
+
+
+def test_detail_drain_batches_and_completes(monkeypatch):
+    cap = _drain_patches(monkeypatch, [[(1, None), (2, None), (3, None)]], lambda s: "ok")
+    rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
+    assert rc == 0
+    assert cap["write"] == [[1, 2, 3]]      # one partial flush at end
+    assert cap["complete"] == [[1, 2, 3]]   # dequeued after the write
+    assert agg["listings_scraped_new"] == 3
+
+
+def test_detail_drain_routes_gone_and_error(monkeypatch):
+    kinds = {10: "ok", 11: "gone", 12: "error"}
+    cap = _drain_patches(monkeypatch, [[(10, None), (11, None), (12, None)]], lambda s: kinds[s])
+    rc, agg = scraper_main._run_detail_drain(max_claims=None, dry_run=False, detail_workers=1)
+    assert rc == 0
+    assert cap["gone"] == [11]              # gone -> mark_listing_inactive
+    assert cap["failure"] == [12]           # error -> record_fetch_failure
+    assert cap["fail"] == [[12]]            # error -> queue attempts++
+    assert sorted(x for b in cap["write"] for x in b) == [10]
+    # 11 (gone) and 10 (ok flush) both dequeued; 12 (error) stays queued.
+    assert sorted(x for b in cap["complete"] for x in b) == [10, 11]
+    assert agg["errors"] == 1 and agg["listings_inactive"] == 1
+
+
+def test_detail_drain_respects_max_claims_cap(monkeypatch):
+    cap = _drain_patches(monkeypatch, [[(1, None), (2, None)]], lambda s: "ok")
+    scraper_main._run_detail_drain(max_claims=2, dry_run=False, detail_workers=1)
+    # First claim is sized to the cap and, once met, the loop stops (one claim).
+    assert cap["claim_n"] == [2]
+
+
+def test_detail_drain_dry_run_does_not_claim(monkeypatch):
+    class _CountCur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): pass
+        def fetchone(self): return (7,)
+
+    class _CountConn:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def cursor(self): return _CountCur()
+
+    monkeypatch.setattr(scraper_main.db, "connect", lambda: _CountConn())
+    claimed = {"n": 0}
+    monkeypatch.setattr(
+        scraper_main.db, "claim_detail_batch",
+        lambda *a: claimed.__setitem__("n", claimed["n"] + 1) or [],
+    )
+    rc, agg = scraper_main._run_detail_drain(max_claims=50, dry_run=True)
+    assert rc == 0 and agg == {}
+    assert claimed["n"] == 0
+
+
+def _dispatch_patches(monkeypatch) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(scraper_main.db, "connect", lambda: _NoopConn())
+    monkeypatch.setattr(
+        scraper_main.db, "scrape_run_start",
+        lambda _c, rt, **k: (captured.__setitem__("run_type", rt) or 1),
+    )
+    monkeypatch.setattr(scraper_main.db, "scrape_run_finalize", lambda *a, **k: None)
+    monkeypatch.setattr(
+        scraper_main, "_run_index_walk",
+        lambda dry_run: (captured.__setitem__("called", "index") or (0, {})),
+    )
+    monkeypatch.setattr(
+        scraper_main, "_run_detail_drain",
+        lambda **k: (captured.__setitem__("called", "drain") or (0, {})),
+    )
+    return captured
+
+
+def test_index_only_dispatches_index_walk_with_index_run_type(monkeypatch):
+    captured = _dispatch_patches(monkeypatch)
+    rc = scraper_main.main(["--index-only"])
+    assert rc == 0
+    assert captured["called"] == "index"
+    assert captured["run_type"] == "index"
+
+
+def test_drain_only_dispatches_detail_drain_with_detail_run_type(monkeypatch):
+    captured = _dispatch_patches(monkeypatch)
+    rc = scraper_main.main(["--drain-only"])
+    assert rc == 0
+    assert captured["called"] == "drain"
+    assert captured["run_type"] == "detail"
+
+
+def test_index_and_drain_only_mutually_exclusive(monkeypatch):
+    _dispatch_patches(monkeypatch)
+    assert scraper_main.main(["--index-only", "--drain-only"]) == 2
+
+
+def test_index_only_rejects_limit(monkeypatch):
+    _dispatch_patches(monkeypatch)
+    assert scraper_main.main(["--index-only", "--limit", "5"]) == 2
