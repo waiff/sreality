@@ -15,6 +15,7 @@ import type {
   ListingPublic,
   ListingSnapshotPublic,
   PortalHealth,
+  PropertySource,
   Ppm2Box,
   ScrapeRun,
   ScraperHealthChecks,
@@ -609,6 +610,47 @@ export const fetchSnapshotsByListing = async (
     .from('listing_snapshots_public')
     .select('id,sreality_id,scraped_at,price_czk,description')
     .eq('sreality_id', sreality_id)
+    .order('scraped_at', { ascending: true });
+  if (error) throw error;
+  return (data ?? []) as unknown as ListingSnapshotPublic[];
+};
+
+/* Multi-portal: resolve the property a listing belongs to (works from ANY
+ * child sreality_id via property_sources_public, not just the representative),
+ * then return all of that property's per-portal observations. */
+export const fetchPropertySources = async (
+  sreality_id: number,
+): Promise<{ property_id: number | null; sources: PropertySource[] }> => {
+  const { data: row, error: e1 } = await supabase
+    .from('property_sources_public')
+    .select('property_id')
+    .eq('sreality_id', sreality_id)
+    .maybeSingle();
+  if (e1) throw e1;
+  const property_id = (row as { property_id: number } | null)?.property_id ?? null;
+  if (property_id == null) return { property_id: null, sources: [] };
+  const { data, error } = await supabase
+    .from('property_sources_public')
+    .select(
+      'property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
+    )
+    .eq('property_id', property_id)
+    .order('first_seen_at', { ascending: true });
+  if (error) throw error;
+  return { property_id, sources: (data ?? []) as unknown as PropertySource[] };
+};
+
+/* Snapshots across several listings (a property's children) — the union that
+ * makes the Listing Detail price chart cross-source. For a singleton property
+ * this is identical to fetchSnapshotsByListing. */
+export const fetchSnapshotsForListings = async (
+  ids: number[],
+): Promise<ListingSnapshotPublic[]> => {
+  if (ids.length === 0) return [];
+  const { data, error } = await supabase
+    .from('listing_snapshots_public')
+    .select('id,sreality_id,scraped_at,price_czk,description')
+    .in('sreality_id', ids)
     .order('scraped_at', { ascending: true });
   if (error) throw error;
   return (data ?? []) as unknown as ListingSnapshotPublic[];
