@@ -597,6 +597,33 @@ const CATEGORY_TYPE_LABEL: Record<CategoryType, string> = {
 export const categoryHeading = (f: ListingFilters): string =>
   `${CATEGORY_MAIN_PLURAL[f.categoryMain]} ${CATEGORY_TYPE_LABEL[f.categoryType]}`;
 
+/* Stable, order-independent serialization of the cohort-defining filters.
+ * Reuses the canonical URL serializer (toSearchParams) and sorts the
+ * entries so two equal filter sets always produce the same string —
+ * used as the per-region cache key for box-plot annotations. */
+export const regionKeyFromFilters = (f: ListingFilters): string => {
+  const entries = [...toSearchParams(f).entries()].sort((a, b) =>
+    a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0,
+  );
+  return new URLSearchParams(entries).toString();
+};
+
+/* Short human-readable label for the cohort — passed to the annotator
+ * as context so it can say "in Praha" rather than "(filtered cohort)". */
+export const regionLabelFromFilters = (f: ListingFilters): string => {
+  const base = categoryHeading(f);
+  if (f.districts.length) {
+    const shown = f.districts.slice(0, 3).map((d) => d.name).join(', ');
+    const extra = f.districts.length > 3 ? ` +${f.districts.length - 3}` : '';
+    return `${base} in ${shown}${extra}`;
+  }
+  if (f.locationMode === 'center_radius' && f.centerRadius) {
+    return `${base} within ${f.centerRadius.radius_m} m of a point`;
+  }
+  if (f.bounds) return `${base} in the current map area`;
+  return base;
+};
+
 const fmtDaysRange = (lo: number | null, hi: number | null): string => {
   if (lo == null && hi == null) return '';
   if (lo != null && hi != null) return `${lo}–${hi} d`;

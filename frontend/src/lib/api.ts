@@ -24,6 +24,7 @@ import type {
   EstimationListResponse,
   EstimationRun,
   ListingSummaryBatchRow,
+  Ppm2Box,
   ManualRentalEstimate,
   CreateManualEstimateIn,
   UpdateManualEstimateIn,
@@ -297,6 +298,44 @@ export const fetchListingSummaries = (
     method: 'POST',
     json: { items },
   });
+
+/* POST /tools/summarize_region_dispositions — one-to-two-sentence
+ * natural-language annotation per per-disposition Kč/m² box plot in
+ * Browse > Stats. Generated server-side from the same ppm2_box payload
+ * that drives the chart. Cached server-side per (region, calendar day):
+ * the first viewer of a region today pays for the LLM call, everyone
+ * else hits the cache. `region_key` is the caller's deterministic
+ * serialization of the active filter set (see regionKeyFromFilters). */
+export interface RegionDispositionAnnotationsInput {
+  region_key: string;
+  dispositions: ReadonlyArray<{
+    disposition: string;
+    n: number;
+    ppm2_box: Ppm2Box | null;
+  }>;
+  ppm2_overall?: { p25: number; p50: number; p75: number } | null;
+  region_label?: string | null;
+}
+
+export interface RegionDispositionAnnotationsResult {
+  data: {
+    region_key: string;
+    annotations: Record<string, string>;
+    model: string;
+    cost_usd: number | null;
+    cache_hit: boolean;
+  };
+  metadata: Record<string, unknown>;
+}
+
+export const fetchRegionDispositionAnnotations = (
+  input: RegionDispositionAnnotationsInput,
+  signal?: AbortSignal,
+): Promise<RegionDispositionAnnotationsResult> =>
+  request<RegionDispositionAnnotationsResult>(
+    '/tools/summarize_region_dispositions',
+    { method: 'POST', json: input, signal },
+  );
 
 /* ----- freshness (Phase U2.5) -------------------------------------------- *
  *

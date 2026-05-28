@@ -8,9 +8,19 @@ interface Props {
   stats: BrowseStats | null;
   isLoading: boolean;
   isEmpty: boolean;
+  /* Per-disposition box-plot annotations (summarize-1), keyed by
+   * disposition. Optional — the view renders fully without them. */
+  annotations?: Record<string, string>;
+  annotationsLoading?: boolean;
 }
 
-export default function BrowseStatsView({ stats, isLoading, isEmpty }: Props) {
+export default function BrowseStatsView({
+  stats,
+  isLoading,
+  isEmpty,
+  annotations,
+  annotationsLoading,
+}: Props) {
   if (isLoading && !stats) return <Skeleton />;
   if (!stats) return null;
   if (isEmpty) return <Empty />;
@@ -62,6 +72,8 @@ export default function BrowseStatsView({ stats, isLoading, isEmpty }: Props) {
             median_area: null,
             ppm2_box: r.ppm2_box,
           }))}
+          annotations={annotations}
+          annotationsLoading={annotationsLoading}
         />
       </Card>
 

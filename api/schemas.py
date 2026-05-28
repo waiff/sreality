@@ -223,6 +223,36 @@ class CompareListingImagesIn(BaseModel):
     force_refresh: bool = False
 
 
+class Ppm2BoxIn(BaseModel):
+    n: int
+    min: float
+    p25: float
+    median: float
+    p75: float
+    max: float
+
+
+class RegionDispositionIn(BaseModel):
+    disposition: str
+    n: int
+    ppm2_box: Ppm2BoxIn | None = None
+
+
+class SummarizeRegionDispositionsIn(BaseModel):
+    """Annotate the per-disposition Kč/m² box plots in Browse > Stats.
+
+    `region_key` is the caller's deterministic serialization of the active
+    filter set; the server hashes it and caches the annotations per
+    (region, calendar day) so repeat browser sessions don't re-bill.
+    `dispositions` is the same `ppm2_box` payload that drives the chart.
+    """
+    region_key: str = Field(min_length=1, max_length=8192)
+    dispositions: list[RegionDispositionIn] = Field(default_factory=list, max_length=40)
+    ppm2_overall: dict[str, Any] | None = None
+    region_label: str | None = Field(default=None, max_length=256)
+    force_refresh: bool = False
+
+
 class PreviewEstimationIn(BaseModel):
     """POST /estimations/preview body.
 

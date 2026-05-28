@@ -16,6 +16,11 @@ import type { Ppm2Box, RegionDispositionRow } from '@/lib/types';
 
 interface Props {
   rows: RegionDispositionRow[];
+  /* Per-disposition natural-language annotations of the Kč/m²
+   * distribution, generated server-side (summarize-1). Keyed by
+   * disposition label. Optional: the chart renders fully without them. */
+  annotations?: Record<string, string>;
+  annotationsLoading?: boolean;
 }
 
 const MIN_BOX_N = 5;
@@ -78,7 +83,11 @@ interface RenderRow {
   box: Ppm2Box | null;
 }
 
-export default function DispositionBoxPlots({ rows }: Props) {
+export default function DispositionBoxPlots({
+  rows,
+  annotations,
+  annotationsLoading = false,
+}: Props) {
   const data = useMemo<RenderRow[]>(
     () => rows.map((r) => ({ disposition: r.disposition, n: r.n, box: r.ppm2_box })),
     [rows],
@@ -210,7 +219,62 @@ export default function DispositionBoxPlots({ rows }: Props) {
       </div>
 
       <NumericTable rows={renderable} />
+
+      <Annotations
+        rows={renderable}
+        annotations={annotations}
+        loading={annotationsLoading}
+      />
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Natural-language annotations — one short read per box plot (summarize-1)   */
+/* -------------------------------------------------------------------------- */
+
+function Annotations({
+  rows,
+  annotations,
+  loading,
+}: {
+  rows: Array<RenderRow & { box: Ppm2Box }>;
+  annotations?: Record<string, string>;
+  loading: boolean;
+}) {
+  const hasAny =
+    annotations != null &&
+    rows.some((r) => (annotations[r.disposition] ?? '').trim().length > 0);
+
+  if (loading && !hasAny) {
+    return (
+      <p className="text-[0.75rem] text-[var(--color-ink-4)] italic" aria-live="polite">
+        Reading the distributions…
+      </p>
+    );
+  }
+  if (!hasAny) return null;
+
+  return (
+    <dl className="space-y-2.5 border-t border-[var(--color-rule-soft)] pt-3">
+      {rows.map((r) => {
+        const text = (annotations?.[r.disposition] ?? '').trim();
+        if (!text) return null;
+        return (
+          <div
+            key={r.disposition}
+            className="grid grid-cols-[4.5rem_1fr] gap-3 items-baseline"
+          >
+            <dt className="font-mono tabular-nums text-[0.8rem] text-[var(--color-ink-2)]">
+              {r.disposition}
+            </dt>
+            <dd className="text-[0.8rem] leading-relaxed text-[var(--color-ink)]">
+              {text}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
   );
 }
 

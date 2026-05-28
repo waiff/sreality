@@ -13,10 +13,13 @@ import {
   toSearchParams,
   summarise,
   isDefault,
+  regionKeyFromFilters,
+  regionLabelFromFilters,
   DEFAULT_FILTERS,
   type ListingFilters,
   type MapBounds,
 } from '@/lib/filters';
+import { fetchRegionDispositionAnnotations, isApiConfigured } from '@/lib/api';
 import {
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
@@ -252,6 +255,39 @@ export default function Browse() {
     enabled: tabFromUrl === 'stats',
   });
 
+  /* summarize-1: natural-language annotations for the per-disposition
+   * box plots. Keyed on the cohort's stable region key; the FastAPI
+   * service caches them per (region, calendar day) so repeat sessions
+   * don't re-bill. Only fires once the stats payload has at least one
+   * box the chart will actually draw (n >= 5), and only when the API
+   * is configured. */
+  const regionKey = useMemo(() => regionKeyFromFilters(filters), [filters]);
+  const boxDispositions = useMemo(
+    () =>
+      (statsQuery.data?.dispositions ?? []).filter(
+        (d) => d.ppm2_box != null && d.ppm2_box.n >= 5,
+      ),
+    [statsQuery.data],
+  );
+  const annotationsQuery = useQuery({
+    queryKey: ['region-annotations', regionKey],
+    queryFn: () =>
+      fetchRegionDispositionAnnotations({
+        region_key: regionKey,
+        region_label: regionLabelFromFilters(filters),
+        ppm2_overall: statsQuery.data?.ppm2 ?? null,
+        dispositions: boxDispositions.map((d) => ({
+          disposition: d.disposition,
+          n: d.n,
+          ppm2_box: d.ppm2_box,
+        })),
+      }),
+    enabled:
+      tabFromUrl === 'stats' && isApiConfigured() && boxDispositions.length > 0,
+    staleTime: 60 * 60 * 1000,
+    retry: false,
+  });
+
   /* Build the city overlay payload. Filter the 206 curated cities
    * client-side based on the active city-quality rules + population
    * bounds — same predicate the `listings_with_city_quality` RPC
@@ -445,6 +481,8 @@ export default function Browse() {
                 stats={statsQuery.data ?? null}
                 isLoading={statsQuery.isLoading}
                 isEmpty={!statsQuery.isLoading && (statsQuery.data?.total ?? 0) === 0}
+                annotations={annotationsQuery.data?.data.annotations}
+                annotationsLoading={annotationsQuery.isFetching}
               />
             )}
           </div>
