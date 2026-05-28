@@ -939,6 +939,14 @@ export const watchdogKeys = {
     ['watchdog', 'dispatches', params] as const,
 };
 
+export const dedupKeys = {
+  all: ['dedup'] as const,
+  candidates: (params: Record<string, unknown>) =>
+    ['dedup', 'candidates', params] as const,
+  merges: (params: Record<string, unknown>) =>
+    ['dedup', 'merges', params] as const,
+};
+
 export const curationKeys = {
   collections: ['curation', 'collections'] as const,
   collection: (id: number) => ['curation', 'collection', id] as const,

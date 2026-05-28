@@ -11,6 +11,7 @@ const navLinks: ReadonlyArray<{ to: string; label: string }> = [
   { to: '/estimations', label: 'Estimations' },
   { to: '/collections', label: 'Collections' },
   { to: '/watchdog',    label: 'Watchdog' },
+  { to: '/dedup',       label: 'Dedup' },
   { to: '/health',      label: 'Health' },
 ];
 
