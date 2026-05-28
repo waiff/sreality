@@ -6,6 +6,29 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: Health dashboard accuracy (post-split truth)
+Made the Health page tell the truth about the index/detail-split pipeline and
+fixed a cross-portal data bug it surfaced. (1) **Bazos no-progress bug:**
+`db.mark_inactive` scoped only by category, so every sreality index walk swept
+bazos rows (same canon categories, never in sreality's `seen_ids`) to
+`is_active=false` — bazos showed 0 active. Now **source-scoped** (`db.mark_inactive`
+/ `db.active_count`), enforcing rule #15; the mis-flipped rows are reactivated by a
+one-off backfill after the fix deploys. (2) **Apparent "huge drift"** was the
+un-drained detail-queue backlog, not data loss — the index walk collects ~100% of
+sreality's listings. Migration 109 splits the old `count_reconciliation` check into
+**`index_completeness`** (collected vs sreality total — did we SEE every listing) and
+**`detail_queue_backlog`** (seen-but-not-fetched, via a new `listing_detail_queue_public`
+view), and `detail_drain.yml`'s per-run cap rose 6000→12000 so a run uses its full
+50-min window to clear deep backlogs (rate/politeness unchanged). (3) The Count-
+Reconciliation panel and the 6 per-category tiles merged into **one unified per-category
+table** (Active / sreality / Collected / Index% / Queue / new14d / flipped7d / failed).
+(4) Recent-scrapes table caps at 15 rows with a show-all toggle. (5) **Image mirror**
+gains active-listing columns + a closeable-gap bar (`image_storage_overview()` adds
+`total_active`/`stored_active`) — the active gap is recoverable; inactive photos are
+mostly CDN-expired. (6) The **Schedule** tile is now data-driven from
+`workflowDocs.generated.ts` (all scheduled scrapes + maintenance jobs), replacing two
+hardcoded, stale entries.
+
 ### 2026-05: Per-portal Health dashboard
 The Health page now opens with a **Data sources** catalogue — one register
 entry per portal (sreality, bazos, bezrealitky, idnes, remax), each showing

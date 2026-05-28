@@ -389,7 +389,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "max_detail_refetches",
-        "description": "Cap listings claimed + fetched this run (blank = 6000)",
+        "description": "Cap listings claimed + fetched this run (blank = 12000)",
         "required": false,
         "type": "string",
         "default": null,
