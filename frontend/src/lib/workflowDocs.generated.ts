@@ -837,6 +837,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "R2_BUCKET_NAME",
       "R2_SECRET_ACCESS_KEY",
       "SCRAPE_CHAIN_TOKEN",
+      "SUPABASE_DB_SESSION_URL",
       "SUPABASE_DB_URL",
       "SUPABASE_SERVICE_ROLE_KEY",
       "SUPABASE_URL"

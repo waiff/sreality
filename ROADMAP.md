@@ -961,6 +961,26 @@ apply migration 098 + confirm a manual submit→ingest round-trip before
 enabling a scheduled `ingest`; the synchronous `condition_scores.yml`
 stays the default steady-state path.
 
+### Phase 1.9: Prepared statements for the hot write loop (done)
+First phase of the scaling roadmap
+(`~/.claude/plans/the-health-page-is-functional-moore.md`, the low-risk
+write-throughput quick win). `scraper/db.py` gained `connect_session()`,
+which points the scraper's long-lived detail-write connection
+(`_run_full`) at a new `SUPABASE_DB_SESSION_URL` (Supabase Session-mode
+pooler, port 5432) **without** `prepare_threshold=None`, so the repeated
+upsert + spatial SQL gets server-side prepared once and reused across the
+run instead of re-planned per listing. The session pooler gives each
+client a dedicated backend, so prepared statements are safe there (no
+`DuplicatePreparedStatement`). Everything else — scrape_run bookkeeping,
+bazos, images, recompute, API, scripts — stays on `connect()` (Transaction
+pooler, 6543). When `SUPABASE_DB_SESSION_URL` is unset, `connect_session()`
+falls back to `connect()`, so nothing breaks where the secret isn't set.
+Plus a small fairness tweak: `_rotated_categories` rotates the category
+processing order each run (offset = run hour) so the per-run detail-refetch
+budget — consumed in category order — no longer permanently starves the same
+trailing categories. Next in the scaling roadmap: **Phase 2 — split the
+fast index walk from the slow batched detail-drain.**
+
 ### Phase 1.5b: Multi-category UI defaults (next, follow-up)
 The data is now broad, but the analytical and estimation surfaces
 still hardcode `category_main='byt'` / `category_type='pronajem'` as
