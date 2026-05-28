@@ -11,6 +11,10 @@ dependencies = [
   # Single lexbor wheel, CSS selectors; stdlib html.parser is too low-level for
   # bazos's class-based markup. Not needed by the sreality JSON path.
   "selectolax>=0.3",
+  # Perceptual image hashing (dHash) for the Tier-2 dedup sweep's image
+  # corroborator (scraper/image_phash.py). Pillow-only — no numpy/scipy.
+  # Pre-approved in docs/design/multi-portal-dedup.md.
+  "Pillow>=10",
 ]
 
 [project.optional-dependencies]
