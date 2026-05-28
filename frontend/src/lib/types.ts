@@ -1114,3 +1114,17 @@ export interface ScraperHealthChecks {
   generated_at: string;
   checks: ScraperHealthCheck[];
 }
+
+/* One row of property_sources_public — a property's per-portal observations
+ * (multi-portal dedup). Drives the Listing Detail "listed on N sites" panel. */
+export interface PropertySource {
+  property_id: number;
+  sreality_id: number;
+  source: string;
+  source_url: string | null;
+  source_id_native: string | null;
+  is_active: boolean;
+  price_czk: number | null;
+  first_seen_at: string;
+  last_seen_at: string;
+}
