@@ -20,17 +20,63 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from typing import Any
 
-from scraper import db, portal_runner
+from scraper import db, geocoding, portal_runner
 from scraper.bazos_client import BazosClient, detail_url, index_url
-from scraper.bazos_parser import CATEGORY_MAIN, SALE_TYPE, parse_detail, parse_index
+from scraper.bazos_parser import (
+    CATEGORY_MAIN,
+    SALE_TYPE,
+    Geocoder,
+    parse_detail,
+    parse_index,
+)
+from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
+
+
+class _CachingGeocoder:
+    """Per-run memoised geocoder: collapses repeat street/locality queries to
+    one Mapy.cz call each (a crawl's listings cluster by town). Caches misses
+    too so a failing query isn't retried for every listing in that locality.
+
+    Shared across the detail-drain worker pool. Dict get/set are atomic under
+    the GIL and `geocoding.geocode` builds its own request session per call, so
+    the worst concurrent case is a harmless duplicate lookup, never corruption."""
+
+    def __init__(self, fn: Geocoder) -> None:
+        self._fn = fn
+        self._cache: dict[str, GeocodeResult | GeocodingError] = {}
+
+    def __call__(self, query: str) -> GeocodeResult:
+        key = " ".join(query.lower().split())
+        cached = self._cache.get(key)
+        if cached is not None:
+            if isinstance(cached, GeocodingError):
+                raise cached
+            return cached
+        try:
+            result = self._fn(query)
+        except GeocodingError as exc:
+            self._cache[key] = exc
+            raise
+        self._cache[key] = result
+        return result
+
+
+def _build_geocoder() -> Geocoder | None:
+    """A cached Mapy.cz geocoder, or None when MAPY_CZ_API_KEY is unset so the
+    crawl still runs (coordinates then come from the CZ-guarded maps link)."""
+    if not os.environ.get("MAPY_CZ_API_KEY"):
+        LOG.info("GEOCODE skipped: MAPY_CZ_API_KEY unset; coords from maps link only")
+        return None
+    return _CachingGeocoder(geocoding.geocode)
 
 
 class BazosPortal:
@@ -51,11 +97,13 @@ class BazosPortal:
         locality: str | None = None,
         radius_km: int | None = None,
         max_pages: int | None = None,
+        geocoder: Geocoder | None = None,
     ) -> None:
         self._sale_type = sale_type
         self._category = category
         self._canon_main = canon_main
         self._canon_type = canon_type
+        self._geocoder = geocoder
         self._locality = locality
         self._radius_km = radius_km
         self._max_pages = max_pages
@@ -147,6 +195,7 @@ class BazosPortal:
             listing = parse_detail(
                 html, source_url=url,
                 category_main=self._canon_main, category_type=self._canon_type,
+                geocoder=self._geocoder,
             )
         except Exception as exc:
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
@@ -249,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         sale_type=args.sale_type, category=args.category,
         canon_main=canon_main, canon_type=canon_type,
         locality=args.locality, radius_km=args.radius_km, max_pages=args.max_pages,
+        geocoder=_build_geocoder(),
     )
 
     # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one

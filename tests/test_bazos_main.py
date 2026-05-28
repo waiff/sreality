@@ -8,8 +8,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from scraper import bazos_main
 from scraper.bazos_main import BazosPortal
+from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 
@@ -188,3 +191,58 @@ def test_write_details_ingests_and_counts(monkeypatch):
     counts = _portal().write_details(object(), items)
     assert counts["new"] == 1
     assert counts["images_discovered"] == 2
+
+
+# --- geocoder wiring (text-first coordinate resolution) ---------------------
+
+
+def test_build_geocoder_none_without_key(monkeypatch):
+    monkeypatch.delenv("MAPY_CZ_API_KEY", raising=False)
+    assert bazos_main._build_geocoder() is None
+
+
+def test_build_geocoder_cached_with_key(monkeypatch):
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "test-key")
+    geocoder = bazos_main._build_geocoder()
+    assert isinstance(geocoder, bazos_main._CachingGeocoder)
+
+
+def test_caching_geocoder_memoises_hits_and_misses():
+    calls = {"n": 0}
+
+    def fn(query: str) -> GeocodeResult:
+        calls["n"] += 1
+        if "bad" in query:
+            raise GeocodingError("no result")
+        return GeocodeResult(
+            lat=50.0, lng=14.0, confidence="high", matched_address="a",
+            matched_type="regional.address", bbox=None, raw={},
+        )
+
+    geocoder = bazos_main._CachingGeocoder(fn)
+    assert geocoder("Praha").lat == 50.0
+    assert geocoder("  praha ").lat == 50.0     # normalized key -> cache hit
+    assert calls["n"] == 1
+    with pytest.raises(GeocodingError):
+        geocoder("bad street")
+    with pytest.raises(GeocodingError):
+        geocoder("bad street")                  # cached miss, not re-queried
+    assert calls["n"] == 2
+
+
+def test_fetch_detail_passes_geocoder_to_parser(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_parse(html, *, source_url, category_main, category_type, geocoder=None):
+        captured["geocoder"] = geocoder
+        return SimpleNamespace(raw={})
+
+    monkeypatch.setattr(bazos_main, "parse_detail", fake_parse)
+    sentinel = object()
+    portal = BazosPortal(
+        sale_type="prodam", category="byt",
+        canon_main="byt", canon_type="prodej", geocoder=sentinel,
+    )
+    item = portal.fetch_detail(_DetailClient("ok"), "a", "/a")
+    assert item.kind == "ok"
+    assert captured["geocoder"] is sentinel
