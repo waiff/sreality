@@ -784,10 +784,18 @@ def post_buildings_from_url(
 def post_buildings_confirm_units(
     building_id: int,
     body: s.ConfirmBuildingUnitsIn,
+    background_tasks: BackgroundTasks,
     conn: Any = Depends(deps.get_db_conn),
+    sreality_client: Any = Depends(deps.get_sreality_client),
+    llm_client: Any = Depends(deps.get_llm_client),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return confirm_units(conn, building_id, body)
+    return confirm_units(
+        conn, building_id, body,
+        sreality_client=sreality_client,
+        llm_client=llm_client,
+        background_tasks=background_tasks,
+    )
 
 
 @app.post("/buildings/{building_id}/re_extract")
