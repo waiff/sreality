@@ -62,8 +62,14 @@ class ComparableFilters:
     # falls out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
-    category_main: str | None = "byt"
-    category_type: str | None = "pronajem"
+    # Default None means "no category filter" — search every category.
+    # There is deliberately no implicit apartment-rental default: callers
+    # that want one category pass it explicitly (the request schemas in
+    # api/schemas.py require it; the estimation path threads it from
+    # CreateEstimationIn). A silent "byt"/"pronajem" default used to make
+    # house and commercial cohorts impossible to drive cleanly.
+    category_main: str | None = None
+    category_type: str | None = None
     category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None

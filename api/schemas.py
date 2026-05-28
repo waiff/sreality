@@ -40,8 +40,12 @@ class FindComparablesIn(BaseModel):
     has_parking: bool | None = None
     min_price_czk: int | None = None
     max_price_czk: int | None = None
-    category_main: str | None = "byt"
-    category_type: str | None = "pronajem"
+    # Required, no silent default. A missing category used to mean
+    # "apartments for rent", which made house/commercial cohorts
+    # impossible to drive cleanly. Pass `null` explicitly to search every
+    # category. See ComparableFilters in toolkit/comparables.py.
+    category_main: str | None = Field(...)
+    category_type: str | None = Field(...)
     category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
@@ -109,8 +113,10 @@ class DescribeNeighborhoodIn(BaseModel):
     radius_m: int = 1000
     # No implicit freshness gate; pass explicitly when needed.
     max_age_days: int | None = None
-    category_main: str | None = "byt"
-    category_type: str | None = "pronajem"
+    # Required, no silent apartment-rental default. Pass `null` to span
+    # every category.
+    category_main: str | None = Field(...)
+    category_type: str | None = Field(...)
 
 
 class FindDistributionOutliersIn(BaseModel):
@@ -134,8 +140,10 @@ class ComputeMarketVelocityIn(BaseModel):
     has_parking: bool | None = None
     min_price_czk: int | None = None
     max_price_czk: int | None = None
-    category_main: str | None = "byt"
-    category_type: str | None = "pronajem"
+    # Required, no silent apartment-rental default. Pass `null` to span
+    # every category.
+    category_main: str | None = Field(...)
+    category_type: str | None = Field(...)
     category_sub_cb: int | None = None
     locality_district_id: int | None = None
     locality_region_id: int | None = None
@@ -384,7 +392,11 @@ class EstimateYieldIn(BaseModel):
     has_parking: bool | None = None
     min_price_czk: int | None = None
     max_price_czk: int | None = None
-    category_main: str | None = "byt"
+    # category_main is required (no silent apartment default). category_type
+    # follows estimate_kind when omitted — same smart pattern as
+    # CreateEstimationIn (rent -> pronajem, sale -> prodej). Pass it
+    # explicitly to override.
+    category_main: str | None = Field(...)
     category_type: str | None = None
     category_sub_cb: int | None = None
     locality_district_id: int | None = None

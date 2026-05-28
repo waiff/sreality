@@ -73,15 +73,28 @@ def test_include_unreliable_flag_drops_failures_clause():
     assert "listing_fetch_failures" not in sql
 
 
-def test_default_filters_apartments_for_rent():
+def test_default_applies_no_category_filter():
+    """No silent apartment-rental default: an unspecified category means
+    'search every category', not 'byt/pronajem'."""
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),
         ComparableFilters(),
     )
+    assert "l.category_main" not in sql
+    assert "l.category_type" not in sql
+    assert "category_main" not in params
+    assert "category_type" not in params
+
+
+def test_explicit_category_filters_applied():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(category_main="dum", category_type="prodej"),
+    )
     assert "l.category_main = %(category_main)s" in sql
     assert "l.category_type = %(category_type)s" in sql
-    assert params["category_main"] == "byt"
-    assert params["category_type"] == "pronajem"
+    assert params["category_main"] == "dum"
+    assert params["category_type"] == "prodej"
 
 
 def test_disposition_exact_filter():

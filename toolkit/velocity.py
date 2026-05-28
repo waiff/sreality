@@ -209,6 +209,12 @@ def compute_listing_velocity(
         radius_m=radius_m,
         disposition_match=disposition_match,
         active_only=False,  # let `population` dictate
+        # Peers must be the same category as the subject; otherwise a
+        # house would be ranked against apartments. ComparableFilters no
+        # longer defaults to byt/pronajem, so carry the subject's own
+        # category explicitly.
+        category_main=listing["category_main"],
+        category_type=listing["category_type"],
     )
     sql, params = build_market_velocity_query(target, filters, population)
     with conn.cursor() as cur:
@@ -258,7 +264,8 @@ def _fetch_listing_for_velocity(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT first_seen_at, last_seen_at, is_active, disposition,\n"
-            "  ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng\n"
+            "  ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng,\n"
+            "  category_main, category_type\n"
             "FROM listings WHERE sreality_id = %s",
             (sreality_id,),
         )
@@ -272,6 +279,8 @@ def _fetch_listing_for_velocity(
         "disposition": row[3],
         "lat": float(row[4]) if row[4] is not None else None,
         "lng": float(row[5]) if row[5] is not None else None,
+        "category_main": row[6],
+        "category_type": row[7],
     }
 
 

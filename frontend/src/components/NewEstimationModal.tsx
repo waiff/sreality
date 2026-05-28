@@ -100,10 +100,25 @@ export function NewEstimationProvider({ children }: { children: ReactNode }) {
 
 type Kind = 'apartment' | 'building';
 type EstimateKind = 'rent' | 'sale';
+type CategoryMain = 'byt' | 'dum' | 'komercni';
+
+const CATEGORY_LABELS: Record<CategoryMain, string> = {
+  byt: 'Apartment',
+  dum: 'House',
+  komercni: 'Commercial',
+};
+
+/* Czech words the platform stores in listings.category_type, derived from
+ * the rent/sale toggle. Sent explicitly so the estimation request never
+ * silently defaults to apartments-for-rent. */
+function categoryTypeFor(kind: EstimateKind): string {
+  return kind === 'rent' ? 'pronajem' : 'prodej';
+}
 
 function NewEstimationModal({ onClose }: { onClose: () => void }) {
   const [kind, setKind] = useState<Kind>('apartment');
   const [estimateKind, setEstimateKind] = useState<EstimateKind>('rent');
+  const [categoryMain, setCategoryMain] = useState<CategoryMain>('byt');
   const [url, setUrl] = useState('');
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [contextualText, setContextualText] = useState('');
@@ -121,7 +136,8 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
     mutationFn: (preview) =>
       submitEstimation(
         buildEstimationPayload(
-          preview, estimateKind, specialInstructions, contextualText,
+          preview, estimateKind, categoryMain,
+          specialInstructions, contextualText,
         ),
       ),
     onSuccess: (run) => {
@@ -226,14 +242,17 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
 
   const title =
     kind === 'building' ? 'Which building?' : 'Where is the listing?';
+  const dealSeg = categoryTypeFor(estimateKind);
   const placeholder =
     kind === 'building'
       ? 'https://www.sreality.cz/detail/prodej/dum/…'
-      : 'https://www.sreality.cz/detail/…';
+      : `https://www.sreality.cz/detail/${dealSeg}/${categoryMain}/…`;
+  const categoryWord = CATEGORY_LABELS[categoryMain].toLowerCase();
+  const dealWord = estimateKind === 'rent' ? 'rent' : 'sale';
   const helpCopy =
     kind === 'building'
       ? 'We read the listing and start extracting units. Once the run opens you can navigate away — extraction continues in the background.'
-      : 'We scrape the listing and kick off the estimate. Once the run opens you can navigate away — it finishes in the background.';
+      : `We scrape the ${categoryWord} listing and kick off the ${dealWord} estimate. Once the run opens you can navigate away — it finishes in the background.`;
   const submitLabel = pending
     ? previewMut.isPending
       ? 'Scraping…'
@@ -287,11 +306,18 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
           <KindToggle kind={kind} setKind={setKind} disabled={pending} />
 
           {kind === 'apartment' && (
-            <EstimateKindToggle
-              estimateKind={estimateKind}
-              setEstimateKind={setEstimateKind}
-              disabled={pending}
-            />
+            <div className="flex flex-wrap items-start gap-x-8 gap-y-2">
+              <CategoryMainToggle
+                categoryMain={categoryMain}
+                setCategoryMain={setCategoryMain}
+                disabled={pending}
+              />
+              <EstimateKindToggle
+                estimateKind={estimateKind}
+                setEstimateKind={setEstimateKind}
+                disabled={pending}
+              />
+            </div>
           )}
 
           <label
@@ -532,6 +558,37 @@ function KindToggle({
   );
 }
 
+function CategoryMainToggle({
+  categoryMain, setCategoryMain, disabled,
+}: {
+  categoryMain: CategoryMain;
+  setCategoryMain: (c: CategoryMain) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="mt-3">
+      <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        Property type
+      </span>
+      <div
+        role="radiogroup"
+        aria-label="Property category"
+        className="mt-2 inline-flex items-stretch gap-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)] overflow-hidden bg-[var(--color-inset)]"
+      >
+        {(['byt', 'dum', 'komercni'] as const).map((c) => (
+          <EstimateKindButton
+            key={c}
+            active={categoryMain === c}
+            onClick={() => setCategoryMain(c)}
+            disabled={disabled}
+            label={CATEGORY_LABELS[c]}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function EstimateKindToggle({
   estimateKind, setEstimateKind, disabled,
 }: {
@@ -657,6 +714,7 @@ async function waitForStatus(
 function buildEstimationPayload(
   preview: ParseResult,
   estimateKind: EstimateKind,
+  categoryMain: CategoryMain,
   specialInstructions: string,
   contextualText: string,
 ): CreateEstimationIn {
@@ -667,6 +725,10 @@ function buildEstimationPayload(
     provider: 'anthropic',
     population: 'active',
     estimate_kind: estimateKind,
+    // Sent explicitly so house / commercial estimations drive the right
+    // cohort instead of silently falling back to byt / pronajem.
+    category_main: categoryMain,
+    category_type: categoryTypeFor(estimateKind),
     url: preview.source_url,
     special_instructions: specialInstructions.trim() || null,
     contextual_text: contextualText.trim() || null,
