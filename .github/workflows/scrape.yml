@@ -144,18 +144,21 @@ jobs:
           # it once the CDN fix made downloads actually succeed.
           ARGS="$ARGS --no-image-downloads"
 
-          # Detail caps raised now that the whole window is index+detail only:
-          # high enough to drain the new-listing backlog the old shared 4000
-          # budget starved (komercni/pronajem, dum/prodej, which sit last in
-          # category order), while the per-category commit + 90-min timeout
-          # still bound worst-case run time.
+          # Detail caps tuned for RELIABLE FINALIZATION, not max drain. Detail
+          # writes are serial on the main thread (upsert + snapshot + images
+          # over the Frankfurt pooler) at ~2-3 s/listing, so ~90 min only fits
+          # ~1500 detail writes ON TOP of the all-category index+touch walk
+          # (~20 min). A higher cap just overflows the timeout → SIGKILL before
+          # scrape_run_finalize → orphaned run, stale drift. So cap LOW: each
+          # run finalizes (drift + mark_inactive update every run) and the
+          # one-time new-listing backlog drains over several finalizing runs.
           MAX_REFETCH="${{ inputs.max_detail_refetches }}"
           if [ -z "$MAX_REFETCH" ]; then
-            MAX_REFETCH="12000"
+            MAX_REFETCH="1500"
           fi
           MAX_REFETCH_PER_CAT="${{ inputs.max_detail_refetches_per_category }}"
           if [ -z "$MAX_REFETCH_PER_CAT" ]; then
-            MAX_REFETCH_PER_CAT="4000"
+            MAX_REFETCH_PER_CAT="1000"
           fi
           DETAIL_WORKERS="${{ inputs.detail_workers }}"
           if [ -z "$DETAIL_WORKERS" ]; then

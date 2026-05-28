@@ -403,11 +403,24 @@ def record_images(
     images: Iterable[dict[str, Any]],
 ) -> int:
     """Insert any image rows that don't already exist. Returns newly inserted count."""
-    rows = [
-        (sreality_id, img["url"], img.get("sequence"))
-        for img in images
-        if img.get("url")
-    ]
+    # De-dupe non-null sequences within this batch: sreality occasionally
+    # returns two images sharing one `order`, and ON CONFLICT DO UPDATE raises
+    # CardinalityViolation ("cannot affect row a second time") if a single
+    # statement proposes the same conflict key twice. (DO NOTHING tolerated it;
+    # the URL-refresh DO UPDATE does not.) NULL sequences are kept as-is — they
+    # don't conflict (NULLs are distinct in the unique index).
+    rows: list[tuple[int, str, Any]] = []
+    seen_seqs: set[int] = set()
+    for img in images:
+        url = img.get("url")
+        if not url:
+            continue
+        seq = img.get("sequence")
+        if seq is not None:
+            if seq in seen_seqs:
+                continue
+            seen_seqs.add(seq)
+        rows.append((sreality_id, url, seq))
     if not rows:
         return 0
 

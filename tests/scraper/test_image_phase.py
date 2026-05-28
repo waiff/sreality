@@ -297,3 +297,40 @@ def test_run_image_downloads_no_op_when_r2_unset(monkeypatch, caplog):
         out = scraper_main._run_image_downloads(max_downloads=1000, workers=8)
     assert out == {"images_stored": 0, "by_category": {}, "stopped_suspicious": False}
     assert any("IMAGES skipped" in m for m in caplog.messages)
+
+
+def test_record_images_dedupes_duplicate_sequence():
+    """sreality occasionally returns two images sharing one `order`. With
+    ON CONFLICT DO UPDATE, a single INSERT proposing the same (sreality_id,
+    sequence) twice raises CardinalityViolation. record_images must de-dupe
+    non-null sequences in the batch first, while keeping NULL sequences (which
+    don't conflict — NULLs are distinct in the unique index)."""
+    captured: dict[str, Any] = {}
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql: str, params: Any) -> None:
+            captured["params"] = params
+        def fetchall(self): return [(True,)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+        def transaction(self):
+            from contextlib import nullcontext
+            return nullcontext()
+
+    imgs = [
+        {"url": "//a/1.jpg", "sequence": 1},
+        {"url": "//a/1b.jpg", "sequence": 1},   # duplicate non-null sequence
+        {"url": "//a/2.jpg", "sequence": 2},
+        {"url": "//a/n.jpg", "sequence": None},
+        {"url": "//a/n2.jpg", "sequence": None},  # two nulls: both kept
+    ]
+    scraper_db.record_images(_Conn(), 999, imgs)
+    seqs = captured["params"][2::3]  # every 3rd flat value is the sequence
+    assert seqs.count(1) == 1   # deduped
+    assert seqs.count(2) == 1
+    assert seqs.count(None) == 2  # nulls preserved
+    assert "//a/1.jpg" in captured["params"]       # first of the dup kept
+    assert "//a/1b.jpg" not in captured["params"]  # second dropped
