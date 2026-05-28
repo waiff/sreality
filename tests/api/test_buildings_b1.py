@@ -345,6 +345,14 @@ def test_confirm_units_happy_path(client, monkeypatch):
                             "model": "x", "cost_usd": 0.01, "snapshot_id": 1},
     }
     state.next_id = 2
+    # B2: confirm_units now schedules the per-unit fan-out as a BackgroundTask.
+    # Capture the schedule instead of running it — the fan-out itself is
+    # exercised in tests/api/test_buildings_b2.py.
+    scheduled: list[int] = []
+    monkeypatch.setattr(
+        br, "_orchestrate_building_estimations_background",
+        lambda **kw: scheduled.append(kw["building_id"]),
+    )
 
     units = [
         {
@@ -362,6 +370,7 @@ def test_confirm_units_happy_path(client, monkeypatch):
     assert body["status"] == "estimating"
     assert body["units"] == units
     assert state.rows[1]["status"] == "estimating"
+    assert scheduled == [1]
 
 
 def test_confirm_units_rejects_wrong_status(client, monkeypatch):
