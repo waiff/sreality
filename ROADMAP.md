@@ -1602,7 +1602,7 @@ Shipped in PR #59.
 - Tests: hermetic CRUD tests in `tests/api/test_buildings.py`
   modeled on the `_State`-style fakes from `test_estimations.py`.
 
-### Phase B1: URL ingest + unit extractor + confirmation UI (next — active)
+### Phase B1: URL ingest + unit extractor + confirmation UI (done)
 
 Builds on B0's persistence. The output of B1 is a `building_runs`
 row sitting in `status='awaiting_input'` (extractor ran,
@@ -1818,52 +1818,56 @@ lands in B2; B1 stops at the human-in-the-loop gate.
   flow exercises; defer until a real bezrealitky `dum` URL surfaces
   in operator testing.
 
-### Phase B2: Per-unit fan-out + building rollup view
+### Phase B2: Per-unit fan-out + building rollup view (done)
 
-- **Orchestrator** in `api/building_runs.py` (or a new
-  `building_agent.py`): on `units` confirmation, INSERT one rent
-  + one sale `estimation_runs` row per unit, each linked back via
-  `building_run_id` + `building_unit_id`. Reuse the existing
-  agent-mode plumbing — the orchestrator is just a fan-out +
-  watcher, no new LLM loop.
-  - **Reuse the existing apartment estimator skill.** Each child
-    `estimation_runs` row submitted by the B2 orchestrator runs
-    under the operator's configured apartment estimator skill —
-    today `rental_estimator_v1` (slice 1) or
-    `rental_estimator_full_v1` (slice 1.5), sourced from
+Takes the flow from B1's confirmation gate through to per-unit
+estimates + a building-level rollup. No new migration: migration
+035 already carried all six `total_rent/sale_p25/p50/p75_czk`
+columns.
+
+- **Orchestrator** in `api/building_runs.py`: `confirm_units`
+  flips the row to `estimating` and hands off to
+  `_run_building_estimations`, which fans out one rent + one sale
+  `estimation_runs` child per confirmed unit, each linked back via
+  `building_run_id` + `building_unit_id`. It is a fan-out +
+  synchronous watcher, **not** a new LLM loop — each child runs
+  through the existing `create_estimation_run` plumbing
+  (`background_tasks=None`), so when the loop returns every child
+  is terminal and the rollup is exact. Runs as a BackgroundTask
+  from the endpoint (handler returns the `estimating` row; the
+  detail page polls); runs inline when called without
+  `background_tasks` (tests).
+  - **Reuse of the apartment estimator skill.** Rent children run
+    in **agent mode** under
     `app_settings.building_default_estimator_skill` (seeded by
     migration 036 to `rental_estimator_v1`, operator-tunable via
-    `/settings`). The child rows pass `category_main='byt'`,
-    `category_type='pronajem'` for rent (and `'prodej'` for sale),
-    `area_m2` and `disposition` from the confirmed `units` entry,
-    and `lat`/`lng` from the parent building's parse output. This
-    is a deliberate design choice: an apartment unit inside a
-    building must be estimated exactly the same way as a
-    standalone apartment, so the two surfaces stay consistent and
-    any improvement to the apartment skill (better prompts,
-    additional tools, model upgrades) rolls into the building
-    flow automatically with zero per-flow work. Adding a separate
-    "building-apartment estimator" skill would duplicate prompt
-    engineering, drift over time, and silently produce different
-    numbers for the same unit depending on the surface — exactly
-    what we want to avoid. (Sale-side estimation reuses the same
-    discipline once a sale-specific skill exists; until then sale
-    children fall back to deterministic mode — see "out of scope"
-    below.)
-- **Rollup**: when all child runs reach a terminal status, write
-  summed `total_rent_p25/p50/p75_czk` +
-  `total_sale_p25/p50/p75_czk` to `building_runs`. P50 is straight
-  sum across units; P25 / P75 use the per-unit IQR endpoints
-  summed (matches how the operator reads the spreadsheet).
-- **Frontend**: extend `/building/:id` from B1's read-only view —
-  building subject summary at the top, units list with per-unit
-  estimate strips (reusing the `EstimationStrip` component from
-  `/estimation/:id`), rollup totals, link out to each child
-  estimation for detail.
-- **Out of scope for B2**: sale-side skill (rent reuse is the
-  minimum bar). The sale child rows in B2 run in deterministic
-  mode against the existing sale-estimation path until a
-  `sale_estimator_v1` skill ships in a later phase.
+    `/settings`), so a unit inside a building is estimated exactly
+    like a standalone apartment and any skill improvement rolls in
+    for free. Children pass `category_main='byt'`,
+    `category_type='pronajem'`/`'prodej'`, plus `area_m2` +
+    `disposition` from the confirmed unit and `lat`/`lng` from the
+    parent parse. **Sale children run in deterministic mode** until
+    a sale-specific skill ships; the orchestrator already reads an
+    optional `building_sale_estimator_skill` setting (absent today
+    → deterministic), so wiring a sale skill later needs no code or
+    migration change.
+- **Rollup**: `_finalise_building` runs once every child is
+  terminal and `_rollup_totals` sums the **successful** children
+  into `total_rent/sale_p25/p50/p75_czk`. P50 is a straight sum;
+  P25 / P75 sum the per-unit IQR endpoints. A percentile with no
+  contributing unit stays NULL rather than reading as a misleading
+  zero. The building lands `success` if any child succeeded, else
+  `failed`. `sweep_stuck_buildings` now also recovers an orphaned
+  `estimating` row (server restart mid-fan-out) to `failed`.
+- **Frontend**: `/building/:id` grows a "Building totals" section
+  (rent + sale `RangeStrip`s) and a per-unit card list — each unit
+  shows its rent + sale estimate strip (reusing `RangeStrip`, the
+  same strip `/estimation/:id` uses) and a "View estimate →" link
+  to the child estimation. The read-only proposal table stays as
+  the pre-fan-out / no-children fallback.
+- **Out of scope (carried forward)**: sale-side estimator skill
+  (sale children stay deterministic until `sale_estimator_v1`
+  ships); the Excel-style business case overlay (B3).
 
 ### Phase B3: Business case tab
 
