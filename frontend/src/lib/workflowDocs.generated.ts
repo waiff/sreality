@@ -964,6 +964,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "bazos-scrape",

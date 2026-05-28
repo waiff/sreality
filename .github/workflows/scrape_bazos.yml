@@ -10,6 +10,10 @@ name: "Scraping: Bazos crawler (pilot)"
 # touch sreality liveness / reconciliation. A one-category crawl is a partial
 # walk, so the orchestrator never runs mark_inactive (architectural rule #3).
 #
+# Required secrets: SUPABASE_DB_URL. Optional: MAPY_CZ_API_KEY enables
+# text-first, cross-checked coordinate resolution (street geocode beats the
+# coarse maps-link pin); without it the crawl falls back to the CZ-guarded link.
+#
 # Cadence: a conservative every-6h schedule (offset off the hourly recompute's
 # :00 so a crawl's Tier-1 attaches are picked up by the next recompute within
 # the hour). A scheduled run has no workflow inputs, so the run step falls back
@@ -72,6 +76,7 @@ jobs:
       - name: Run bazos crawl
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
           # inputs.* are empty on a scheduled run, so fall back to the pilot scope.
           SALE_TYPE: ${{ inputs.sale_type || 'prodam' }}
           CATEGORY: ${{ inputs.category || 'byt' }}

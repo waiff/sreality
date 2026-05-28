@@ -14,17 +14,59 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 
 import psycopg
 
-from scraper import db
+from scraper import db, geocoding
 from scraper.bazos_client import BazosClient, detail_url, index_url
-from scraper.bazos_parser import CATEGORY_MAIN, SALE_TYPE, parse_detail, parse_index
+from scraper.bazos_parser import (
+    CATEGORY_MAIN,
+    SALE_TYPE,
+    Geocoder,
+    parse_detail,
+    parse_index,
+)
+from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import ListingGoneError
 
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
+
+
+class _CachingGeocoder:
+    """Per-run memoised geocoder: collapses repeat street/locality queries to
+    one Mapy.cz call each (the crawl's listings cluster by town). Caches misses
+    too so a failing query isn't retried for every listing in that locality."""
+
+    def __init__(self, fn: Geocoder) -> None:
+        self._fn = fn
+        self._cache: dict[str, GeocodeResult | GeocodingError] = {}
+
+    def __call__(self, query: str) -> GeocodeResult:
+        key = " ".join(query.lower().split())
+        cached = self._cache.get(key)
+        if cached is not None:
+            if isinstance(cached, GeocodingError):
+                raise cached
+            return cached
+        try:
+            result = self._fn(query)
+        except GeocodingError as exc:
+            self._cache[key] = exc
+            raise
+        self._cache[key] = result
+        return result
+
+
+def _build_geocoder() -> Geocoder | None:
+    """A cached Mapy.cz geocoder, or None when MAPY_CZ_API_KEY is unset so the
+    crawl still runs (coordinates then come from the CZ-guarded maps link)."""
+    if not os.environ.get("MAPY_CZ_API_KEY"):
+        LOG.info("GEOCODE skipped: MAPY_CZ_API_KEY unset; coords from maps link only")
+        return None
+    return _CachingGeocoder(geocoding.geocode)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     client = BazosClient(limiter=RateLimiter(args.rate))
+    geocoder = _build_geocoder()
     conn = None if args.dry_run else db.connect()
     counts = {"new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0, "images": 0}
 
@@ -53,7 +96,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         details, pages = _walk_index(client, conn, args)
         LOG.info("PLAN details=%d", len(details))
-        _refetch_details(client, conn, args, details, canon_main, canon_type, counts)
+        _refetch_details(
+            client, conn, args, details, canon_main, canon_type, counts, geocoder,
+        )
         LOG.info(
             "RUN done details=%d new=%d updated=%d unchanged=%d gone=%d "
             "errors=%d images=%d",
@@ -134,6 +179,7 @@ def _refetch_details(
     canon_main: str,
     canon_type: str,
     counts: dict[str, int],
+    geocoder: Geocoder | None,
 ) -> None:
     total = len(details)
     for i, (sid, path) in enumerate(details, 1):
@@ -159,6 +205,7 @@ def _refetch_details(
             listing = parse_detail(
                 html, source_url=url,
                 category_main=canon_main, category_type=canon_type,
+                geocoder=geocoder,
             )
             if conn is not None:
                 pk, result = db.ingest_scraped_listing(conn, listing)
