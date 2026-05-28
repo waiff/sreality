@@ -22,7 +22,7 @@ def _stub_walk_and_refetch(monkeypatch, *, pages: int) -> None:
         bazos_main, "_walk_index", lambda *_a, **_k: ([("1", "/p/1")], pages)
     )
 
-    def _fake_refetch(_client, _conn, _args, _details, _cm, _ct, counts):
+    def _fake_refetch(_client, _conn, _args, _details, _cm, _ct, counts, _geocoder):
         counts["new"] += 2
         counts["updated"] += 1
         counts["images"] += 4

@@ -382,7 +382,8 @@ def test_parse_detail_street_geocode_overrides_coarse_link():
     )
     assert (listing.lat, listing.lon) == (49.560, 16.565)
     assert listing.raw["coords"]["source"] == "street"
-    assert listing.raw["coords"]["street"] == "ulice Tyršova 12"
+    # locative "v ulici" is what real descriptions write; geocoding tolerates it.
+    assert listing.raw["coords"]["street"] == "ulici Tyršova 12"
 
 
 def test_parse_detail_records_coord_provenance():
