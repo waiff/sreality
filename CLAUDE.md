@@ -523,7 +523,8 @@ Database:
   Transaction pooler, port 6543; password embedded). **The one the scraper / API / scripts
   actually use.** Required.
 - `SUPABASE_DB_SESSION_URL` — Session-mode pooler connection string (Supabase → Database →
-  Connect → Session pooler, port 5432). **Optional**; used only by the scraper's hot
+  Connection string → Session pooler, port 5432; same host/user as `SUPABASE_DB_URL`, just
+  port 5432 not 6543). **Optional**; used only by the scraper's hot
   detail-write loop (`connect_session()`) so its repeated SQL gets prepared statements.
   Unset → falls back to `SUPABASE_DB_URL`. Set it as an Actions secret on the scrape
   workflow (and the Railway env var only if the API ever calls `connect_session()`).
