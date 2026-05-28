@@ -625,7 +625,10 @@ def test_split_cap_counts_only_fetches_not_unchanged(monkeypatch):
 
     monkeypatch.setattr(scraper_main, "_build_client", lambda *a, **k: _FC())
 
-    def fake_walk_category(client, conn, cat_limit, dry_run, budget, district_cap, workers):
+    def fake_walk_category(
+        client, conn, cat_limit, dry_run, budget, district_cap, workers,
+        enqueue_only=False,
+    ):
         caps_seen.append(district_cap)
         # Each district: 300 unchanged (touched, NOT fetched) + 10 real fetches.
         return (set(), {"unchanged": 300, "new": 10, "found_new": 10})
