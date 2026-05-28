@@ -996,6 +996,37 @@ budget — consumed in category order — no longer permanently starves the same
 trailing categories. Next in the scaling roadmap: **Phase 2 — split the
 fast index walk from the slow batched detail-drain.**
 
+### Phase 3.0: Real-time properties — dirty-set incremental recompute (done)
+The third scaling-roadmap unlock: the `properties` rollup goes near-real-time
+and **O(changes)** instead of a full-table recompute. Previously
+`recompute_property_stats` recomputed *every* property every 30 min, so a
+new/edited/delisted listing lagged up to that interval and the job wouldn't
+scale to 5–10 portals.
+- **`dirty_properties` queue (migration 106).** The writers that change a
+  property's children enqueue its `property_id` with a cheap set-based
+  `INSERT ... ON CONFLICT DO UPDATE SET marked_at`: `write_detail_batch` (a
+  content change → new snapshot, via the snapshot insert's `RETURNING`),
+  `mark_inactive` / `mark_listing_inactive` (delisting), and `touch_listings`
+  (a re-sighting that reactivates a listing — no snapshot, so captured via a
+  CTE). New listings (`property_id` NULL) are left to straggler-attach.
+- **`property_maintenance.yml`** (`recompute_property_stats --incremental`,
+  cron `*/5`): attaches new stragglers (the batched **Tier-1 matcher**,
+  skipping the one-time native-id backfill) + recomputes **only** the queued
+  properties — the full recompute SQL scoped to `id = ANY(...)`. So properties
+  reflect changes within ~5 min and the job is O(changes).
+- **Race-free + terminating drain:** claims rows dirtied at/before a run
+  cutoff, recomputes, deletes only those untouched since (a mid-run re-dirty
+  bumps `marked_at` past the cutoff → preserved for the next pass).
+- **Daily full sweep** (`recompute_property_stats.yml`, no `--incremental`,
+  04:15 UTC) recomputes everything + clears the queue — the self-healing
+  backstop, so a missed enqueue reconciles within 24h. Tier-2 fuzzy dedup
+  (`dedup_sweep.py`) unchanged. Both maintenance jobs share the
+  `sreality-property-maintenance` concurrency group.
+- Accepted lag: a byte-identical reactivation (no snapshot) waits for the
+  daily sweep — rare, documented. Architectural rule #20.
+Next: **Phase 4 — portal framework** (`BasePortalClient` + a `Portal` contract
++ a generic `portal_runner`; refactor sreality + bazos onto it).
+
 ### Phase 2.0: Cadence split — index-walk / batched detail-drain (done)
 The structural unlock from the scaling roadmap
 (`~/.claude/plans/the-health-page-is-functional-moore.md`). The single
@@ -1013,17 +1044,15 @@ combined scrape is split into two cadence-matched jobs joined by a queue:
   it), one transaction per ~100 listings, snapshot-on-change preserved by an
   `IS DISTINCT FROM` anti-join. Target ~0.1–0.2 s/listing. Session pooler.
 - **Tier-1 matcher deferred** off the hot path: the drain inserts with
-  `property_id` NULL; `recompute_property_stats`'s straggler-attach (now
-  every 30 min) runs the same spatial match set-based. Browse read-lag for
-  brand-new listings ≤30 min (accepted; Phase 3 makes it real-time).
+  `property_id` NULL; the straggler-attach runs the same spatial match
+  set-based. (Phase 3 moved that attach to a `*/5` incremental pass, cutting
+  the brand-new-listing Browse read-lag from ≤30 min to ~5 min.)
 - `scrape.yml`'s combined `_run_full` retained as the **dispatch-only revert
   fallback** (re-add its cron to roll back; no code change).
 - Migration 105 also widens `scrape_runs.run_type` to admit `index`/`detail`
   and redefines `scraper_health_checks()` so liveness/reconciliation stay
   scoped to the index walk while the 24h counters also see the drain's
   `index_pages=0` rows. Architectural rule #19.
-Next: **Phase 3 — real-time properties** (dirty-set incremental recompute +
-the batched Tier-1 matcher moves there).
 
 ### Phase 1.5b: Multi-category UI defaults (done)
 The data was always broad (all six byt/dum/komercni ×

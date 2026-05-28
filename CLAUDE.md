@@ -383,10 +383,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     and an FK `property_id` to a `properties` row that groups observations of the same
     real-world property across portals. `properties` holds a representative display row plus
     derived rollups (`source_count`, price-change aggregates, lifecycle `is_active` /
-    `first/last_seen_at`), maintained by an **async recompute job** (`recompute_property_stats.yml`),
-    never inline in the scrape. `is_active` / `last_seen_at` are **per-source** on the
-    `listings` row; the property-level rollup is derived, not authoritative per source. An
-    insert-time Tier-1 matcher (geo + price + area proximity) seeds candidate groupings.
+    `first/last_seen_at`), maintained by an **async property-maintenance job**, never inline in
+    the scrape (see rule #20 for the dirty-set incremental cadence). `is_active` /
+    `last_seen_at` are **per-source** on the `listings` row; the property-level rollup is
+    derived, not authoritative per source. The Tier-1 matcher (geo + price + area proximity)
+    seeds candidate groupings; as of Phase 2 it runs **batched in the maintenance job**, not
+    inline (rule #19/#20).
     Today sreality + bazos ingest; further portals follow the design in
     `docs/design/multi-portal-dedup.md`. Frontend Browse reads `properties_public`.
     The dedup feature is **complete**: beyond Tier-1, a daily Tier-2 fuzzy sweep
@@ -433,6 +435,27 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `_run_full` is retained as the **dispatch-only revert fallback** (re-add its cron to roll
     back, no code change). The queue is the needs-detail signal; `listing_fetch_failures` stays
     the Health-visible give-up ledger.
+20. **Property maintenance is dirty-set incremental (Phase 3), not a full-table recompute.**
+    The writers that change a property's children — `write_detail_batch` (a content change →
+    new snapshot), `mark_inactive` / `mark_listing_inactive` (delisting), `touch_listings`
+    (re-sighting reactivation) — enqueue the affected `property_id` into `dirty_properties`
+    (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
+    `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
+    new stragglers (the batched **Tier-1 matcher**, skipping the one-time native-id backfill)
+    and recomputes **only the queued properties** (the full recompute SQL scoped to
+    `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` + Browse within ~5
+    min and the job is **O(changes)**, not O(all properties). The drain is race-free +
+    terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
+    since (a mid-run re-dirty bumps `marked_at` past the cutoff → survives to the next pass).
+    New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
+    **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
+    reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
+    self-heals within 24h. Tier-2 fuzzy dedup (`dedup_sweep.py`, daily) is unchanged. Both
+    maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
+    mutate `properties` concurrently. Inline merge/unmerge still call `recompute_one` directly
+    (they keep the survivor current without waiting for the cron). One accepted lag: a
+    byte-identical reactivation (a delisted listing reappears with no content change) produces
+    no snapshot, so it waits for the daily sweep — rare, documented.
 
 ## Toolkit and API rules
 
@@ -726,9 +749,11 @@ index walk", cron `*/15`) feeds `detail_drain.yml` ("Scraping: Sreality detail d
 the proven combined index+detail `_run_full`, kept for instant revert (re-add its `schedule:`
 cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrape_bazos.yml`
 ("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The dedup/properties track adds
-`recompute_property_stats.yml` (now **every 30 min** — it also runs the deferred Tier-1 matcher),
-`dedup_sweep.yml` (daily Tier-2 sweep + auto-merge), and `compute_image_phash.yml` (6-hourly
-pHash backfill). Run any directly:
+`property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers via
+the batched Tier-1 matcher + recomputes only changed properties; rule #20),
+`recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
+property + clears the dirty queue), `dedup_sweep.yml` (daily Tier-2 sweep + auto-merge), and
+`compute_image_phash.yml` (6-hourly pHash backfill). Run any directly:
 - CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
   Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
