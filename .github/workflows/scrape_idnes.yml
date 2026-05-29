@@ -1,34 +1,22 @@
-name: "Scraping: iDNES Reality scraper (pilot)"
+name: "Scraping: iDNES Reality combined walk (fallback)"
 
-# Scheduled (every 6h) + manual scraper for reality.idnes.cz on the shared portal
-# framework. One job runs both phases: an index walk pages the HTML search
-# results and enqueues new/price-changed ids into listing_detail_queue, then a
-# detail drain fetches each listing page, parses to a ScrapedListing, and ingests
-# through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
+# DISPATCH-ONLY combined index+detail fallback for reality.idnes.cz, mirroring
+# sreality's scrape.yml. The scheduled pipeline is the cadence SPLIT — the fast
+# idnes_index_walk.yml (full walk + mark_inactive + enqueue) feeds the bounded
+# idnes_detail_drain.yml — because iDNES is large (~2400 index pages, ~60k
+# listings) and a single combined run can't do both inside one job (the full
+# index eats the window, starving the drain).
 #
-# Categories live in the `portals` registry row (migrations 110/111), not here, so
-# coverage is tuned with a SQL update, no workflow edit. A scheduled run takes no
-# inputs and does a FULL per-category walk (no --max-pages), which is provable-
-# complete (search pages carry a result total + no deep-pagination cap), so the
-# runner marks delisted listings inactive under the completeness guard —
-# source-scoped to idnes rows only (architectural rules #3/#15).
+# This combined entry point stays for ad-hoc full runs and small validation
+# passes (e.g. -f max_pages=2, which suppresses mark_inactive). One job runs the
+# index walk then a bounded detail drain via idnes_main. No schedule — re-add a
+# `schedule:` cron here to revert to a combined cadence if ever needed.
 #
-# Writes 'index' + 'detail' scrape_runs rows under source='idnes' (its own
-# Health-page lane; does not touch sreality liveness / reconciliation). Images:
-# the drain records image-URL rows; the shared images.yml job downloads the bytes
-# to R2 (source-agnostic). Coordinates come from the page's embedded map config,
-# so no MAPY_CZ_API_KEY is needed.
-#
-# Required secret: SUPABASE_DB_URL.
-#
-# Cadence: every 6h, offset off the other scrapers. iDNES is large (tens of
-# thousands of listings/category), so the index walk takes ~10-15 min and the
-# detail drain is bounded per run (--max-detail); the queue persists across runs,
-# so the first ~1-2 days drain the initial backlog, then it is steady-state.
+# Writes 'index' + 'detail' scrape_runs rows under source='idnes'. Coordinates
+# come from the page, so no MAPY_CZ_API_KEY is needed. Required secret:
+# SUPABASE_DB_URL.
 
 on:
-  schedule:
-    - cron: "15 */6 * * *"
   workflow_dispatch:
     inputs:
       max_pages:

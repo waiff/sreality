@@ -42,10 +42,15 @@ source-scoped (rules #3/#15). The detail URL carries the category
 own URL — one `portals`-row config walks **many categories** (byty + domy × prodej +
 pronájem). Registered as a scraper portal (migration 110, `source='idnes'`, sort 25)
 parallel to bazos; the pre-existing `idnes_reality` on-demand parser row stays (the
-Health card shows both badges). `scrape_idnes.yml` runs a full walk + bounded detail
-drain every 6h; the queue persists, so the first ~1-2 days drain the ~60k backlog,
-then steady-state. Images: the drain records URL rows; the shared `images.yml`
-downloads bytes to R2. Next: scale categories / tune cadence as the pilot proves out.
+Health card shows both badges). Because iDNES is large (~2400 index pages, ~60k
+listings), the pipeline is **cadence-split like sreality** (rule #19): a full index
+walk (`idnes_index_walk.yml`, `--index-only`, every 6h — completes + marks inactive +
+enqueues) feeds a bounded detail drain (`idnes_detail_drain.yml`, `--drain-only`, every
+2h); a combined run can't do both in one job (the full index eats the window).
+`scrape_idnes.yml` is the dispatch-only combined fallback. The queue persists, so the
+first ~1-2 days drain the ~60k backlog, then steady-state. Images: the drain records
+URL rows; the shared `images.yml` downloads bytes to R2. Validated live: ingest +
+100% property-linking + coords + categories work; the price-overflow crash is fixed.
 
 ### 2026-05: Bezrealitky scraper (portal 3 on the shared framework)
 The first portal onboarded purely as a fetcher + parser + config row — proving

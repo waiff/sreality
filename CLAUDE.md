@@ -822,9 +822,13 @@ cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrap
 ("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The idnes scrape is
-`scrape_idnes.yml` ("Scraping: iDNES Reality scraper (pilot)", every 6h + dispatch; runs both
-index walk + detail drain in one job via `idnes_main` — complete-walk, marks inactive). The
-dedup/properties track adds
+**cadence-split** like sreality (iDNES is large — ~2400 index pages, ~60k listings — so a
+combined run's full index starves the drain): `idnes_index_walk.yml` ("Scraping: iDNES Reality
+index walk", `idnes_main --index-only`, cron `15 */6`, full complete-walk + mark_inactive +
+enqueue) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain", `--drain-only`,
+cron `30 */2`, bounded `--max-detail`). `scrape_idnes.yml` ("Scraping: iDNES Reality combined
+walk (fallback)") is the **dispatch-only** combined entry point (ad-hoc full runs + small
+`-f max_pages=N` validation passes). The dedup/properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers via
 the batched Tier-1 matcher + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
