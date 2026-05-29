@@ -874,8 +874,12 @@ write phase downloads bytes — the drain only writes image-URL rows.
 
 **Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
 while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled
-workflows, so effective cadence is slower; Health liveness is tuned to this (warn >90 min, fail
->180 min). Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long
+workflows, so effective cadence is slower; Health liveness/freshness thresholds are **per-portal
+cadence-aware** (`portals.scrape_cadence_minutes`, migration 114): `scraper_health_checks` scales
+liveness warn at 1.5× / fail at 3× the portal's cadence, and freshness warn at 1× / fail at 3×.
+sreality's cadence (60 min, ~hourly real cadence) reproduces the original 90/180 + 60/180; the 6h
+pilots (bazos/bezrealitky/idnes, cadence 360) get proportional thresholds so they aren't falsely
+red between runs. Concurrency: each workflow has its own group with `cancel-in-progress: false` — a long
 run is never killed mid-batch; the next tick queues behind it. Per-category mark_inactive commits
 immediately after each category's walk, so even a timed-out index walk leaves a consistent
 partial result.
