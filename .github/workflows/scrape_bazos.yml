@@ -13,16 +13,18 @@ name: "Scraping: Bazos crawler (pilot)"
 # coarse maps-link pin); without it the crawl falls back to the CZ-guarded link.
 #
 # Cadence: hourly. The full index walk is cheap (it re-fetches no detail — only
-# new/price-changed ads enqueue), so it surfaces new ads + freshness every hour.
-# The riskier index-absence delisting sweep is throttled inside BazosPortal to
-# once per 12h (portals.inactive_sweep_min_interval_hours, migration 113), so a
-# single rate-limited walk can never mass-delist. The detail drain is bounded
-# per run (--max-detail) and the queue persists, so the initial backfill spreads
-# over a few hourly runs without losing work.
+# new/price-changed ads enqueue) and bazos has NO deep-pagination cap (unlike
+# sreality), so one nationwide walk reaches every page (~355 pages / ~7k ads at
+# ~2s/page ≈ 12 min) — no per-region split needed. It surfaces new ads +
+# freshness every hour. The riskier index-absence delisting sweep is throttled
+# inside BazosPortal to once per 12h (portals.inactive_sweep_min_interval_hours,
+# migration 113), so a single rate-limited walk can never mass-delist. The detail
+# drain is bounded per run (--max-detail) and the queue persists, so the ~7k
+# initial backfill spreads over ~a day of hourly runs without losing work.
 #
-# Scope (scheduled default): prodam/byt within ~10km of Praha — the first
-# complete-walk scope. workflow_dispatch overrides every knob (blank locality =
-# nationwide; blank max_pages = full walk).
+# Scope (scheduled default): prodam/byt nationwide. workflow_dispatch overrides
+# every knob (set locality+radius_km to scope to a region; blank max_pages = full
+# walk).
 
 on:
   schedule:
@@ -67,7 +69,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
@@ -84,17 +86,18 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
-          # inputs.* are empty on a scheduled run, so fall back to the Praha scope.
+          # inputs.* are empty on a scheduled run, so fall back to nationwide scope.
           SALE_TYPE: ${{ inputs.sale_type || 'prodam' }}
           CATEGORY: ${{ inputs.category || 'byt' }}
-          LOCALITY: ${{ inputs.locality || 'Praha' }}
-          RADIUS_KM: ${{ inputs.radius_km || '10' }}
+          LOCALITY: ${{ inputs.locality }}
+          RADIUS_KM: ${{ inputs.radius_km }}
           MAX_PAGES: ${{ inputs.max_pages }}
-          # Bound the drain so the initial backfill spreads across hourly runs
-          # and stays inside the timeout; the queue persists between runs. A
-          # detail fetch costs ~3.4s (rate limit + per-listing geocoding), so
-          # ~350/run keeps the drain near ~20m, well under the 30m timeout.
-          MAX_DETAIL: ${{ inputs.max_detail || '350' }}
+          # Bound the drain so the ~7k initial backfill spreads across hourly runs
+          # and stays inside the timeout; the queue persists between runs. A detail
+          # fetch costs ~3.4s (rate limit + per-listing geocoding), so ~400/run is
+          # ~23m of drain; with the ~12m nationwide index walk that's ~35m, under
+          # the 50m timeout.
+          MAX_DETAIL: ${{ inputs.max_detail || '400' }}
         run: |
           ARGS="--sale-type $SALE_TYPE --category $CATEGORY --workers 2 --rate 0.6"
           if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi
