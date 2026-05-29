@@ -6,6 +6,21 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: Health dashboard — per-portal ledger
+Restructured the Health page from a flat data-source grid + sreality-only global
+panels into a **registry ledger**: one expandable record-card per portal, each with a
+roll-up status dot (worst of its checks) and three nested disclosures — listings-by-
+category reconciliation, per-pipeline scrape health checks, and pipeline schedule.
+Portals **group by canonical host**, so iDNES's scraper-pilot + on-demand-parser facets
+fold into one card (fixing the duplicate "iDNES Reality" tiles). Backend:
+`scraper_health_checks(p_source)` is now parameterized per source (migration 111;
+listings-based checks gained a source filter, so `listings_public` exposes `source`),
+with a fetch-failures count fix (migration 112). Also fixed a statement-timeout
+regression in `image_storage_overview()` from migration 109 — the active-listing counts
+did a second 1.3M-row join; now derived from the per-category sums in one join
+(migration 110). Pilots (bazos, bezrealitky) get a compact reconciliation from their
+latest run; never-started scraper pilots read "idle", not false-red.
+
 ### 2026-05: iDNES Reality crawler (portal 4, pilot)
 Another portal onto the shared Phase-4 framework (after bezrealitky) — proof that
 a new portal is "a fetcher + a parser + a config row," no pipeline divergence.

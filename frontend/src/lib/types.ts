@@ -1120,6 +1120,7 @@ export interface ScraperHealthCheck {
 
 export interface ScraperHealthChecks {
   generated_at: string;
+  source?: string;
   checks: ScraperHealthCheck[];
 }
 
