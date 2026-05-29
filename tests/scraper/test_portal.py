@@ -52,6 +52,14 @@ def test_default_config_bazos():
     assert cfg.categories == [{"sale_type": "prodam", "category": "byt"}]
 
 
+def test_default_config_idnes():
+    cfg = default_config("idnes")
+    assert cfg.supports_complete_walk is False
+    assert cfg.split_threshold is None
+    assert cfg.splits is False
+    assert cfg.categories == [{"sale_type": "prodej", "category": "byty"}]
+
+
 def test_default_config_unknown_raises():
     with pytest.raises(ValueError):
         default_config("nope")

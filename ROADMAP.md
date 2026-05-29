@@ -6,6 +6,27 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: iDNES Reality crawler (portal 4, pilot)
+Another portal onto the shared Phase-4 framework (after bezrealitky) — proof that
+a new portal is "a fetcher + a parser + a config row," no pipeline divergence.
+iDNES is an **HTML crawler** (like bazos, unlike the JSON-API bezrealitky). `IdnesClient`
+(`scraper/idnes_client.py`) subclasses `BasePortalClient`, adding only the HTML
+`Accept` header, idnes URL builders, and removed-listing signals (404, a redirect
+off `/detail/`, body markers). `idnes_parser.py` parses the structured portal —
+the `<dl>` spec table, a clean price element, and precise per-listing coordinates
+straight from the page map config (`"center":[lon,lat]`), so geocoding is only a
+fallback; typed fields are normalised to the canonical sreality labels
+(`panelová→panel`, `velmi dobrý stav→velmi_dobry`, `osobní→osobni`) for
+cross-portal filter agreement. `IdnesPortal` (`scraper/idnes_main.py`) implements
+the runner seams and drives index-walk → detail-drain via the one
+`portal_runner`; partial walk ⇒ `supports_complete_walk=false` (never marks
+inactive, rule #3). Registered as a scraper portal (migration 110, `source='idnes'`,
+sort 25) parallel to bazos; the pre-existing `idnes_reality` on-demand parser row
+stays. `scrape_idnes.yml` runs both phases (every 6h, pilot `--max-pages 2`).
+Pilot scope: single category (`prodej/byty`) — the queue doesn't carry the
+category `parse_detail` needs; multi-category is the same deferred encoding as
+bazos.
+
 ### 2026-05: Bezrealitky scraper (portal 3 on the shared framework)
 The first portal onboarded purely as a fetcher + parser + config row — proving
 the Phase 4.0 framework holds with no per-portal branches in shared code.
