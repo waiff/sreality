@@ -1145,6 +1145,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "2.0",
         "options": null
+      },
+      {
+        "name": "workers",
+        "description": "detail-fetch workers (concurrency; raise for a one-time backfill)",
+        "required": false,
+        "type": "string",
+        "default": "8",
+        "options": null
       }
     ],
     "secrets": [
