@@ -321,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
             max_claims=args.max_detail, detail_workers=args.workers,
-            detail_rate=args.rate,
+            detail_rate=args.rate, max_seconds=args.max_seconds,
         )
     return rc
 
@@ -341,6 +341,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--rate", type=float, default=3.0,
         help="detail-fetch requests/second ceiling (default 3.0)",
+    )
+    p.add_argument(
+        "--max-seconds", type=float, default=None,
+        help="wall-clock budget for the detail drain; it stops claiming + "
+             "finalizes cleanly before the job timeout (no 'stuck' run)",
     )
     p.add_argument(
         "--index-only", action="store_true",
