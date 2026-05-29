@@ -308,10 +308,16 @@ def main(argv: list[str] | None = None) -> int:
     config = _load_config(args.dry_run)
     portal = IdnesPortal(config, max_pages=args.max_pages)
 
-    # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
-    # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
-    rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
-    if rc == 0:
+    # Cadence split, like sreality (rule #19): --index-only walks + enqueues
+    # (and marks inactive under the completeness guard); --drain-only fetches +
+    # ingests a bounded slice of the queue. idnes is large (~2400 index pages,
+    # tens of thousands of details), so a combined run can't do both inside one
+    # job — the full index eats the window. Omitting both flags runs both phases
+    # (the dispatch-only combined fallback).
+    rc = 0
+    if not args.drain_only:
+        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+    if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
             max_claims=args.max_detail, detail_workers=args.workers,
@@ -335,6 +341,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--rate", type=float, default=3.0,
         help="detail-fetch requests/second ceiling (default 3.0)",
+    )
+    p.add_argument(
+        "--index-only", action="store_true",
+        help="walk the index + enqueue + mark_inactive only (no detail drain)",
+    )
+    p.add_argument(
+        "--drain-only", action="store_true",
+        help="drain the detail queue only (no index walk)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

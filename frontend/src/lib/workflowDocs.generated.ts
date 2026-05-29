@@ -624,6 +624,90 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/frontend-build.yml"
   },
   {
+    "filename": "idnes_detail_drain.yml",
+    "name": "Scraping: iDNES Reality detail drain",
+    "description": "The slow half of the iDNES cadence split (architectural rule #19, like sreality). Claims a bounded slice of listing_detail_queue (source='idnes', enqueued by idnes_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "30 */2 * * *",
+        "human": "Every 2 hours at :30"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_detail",
+        "description": "cap listings claimed + fetched this run (blank = 6000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "concurrent detail-fetch workers (blank = 8)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "global detail-fetch rate cap, req/s (blank = 4.0)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "idnes-detail-drain",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/idnes_detail_drain.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/idnes_detail_drain.yml"
+  },
+  {
+    "filename": "idnes_index_walk.yml",
+    "name": "Scraping: iDNES Reality index walk",
+    "description": "The fast half of the iDNES cadence split (architectural rule #19, like sreality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='idnes'). No detail fetch — the drain (idnes_detail_drain.yml) consumes the queue. Records run_type='index'.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "15 */6 * * *",
+        "human": "Every 6 hours at :15"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "idnes-index-walk",
+    "cancelInProgress": false,
+    "timeoutMinutes": 75,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/idnes_index_walk.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/idnes_index_walk.yml"
+  },
+  {
     "filename": "images.yml",
     "name": "Scraping: Sreality image backlog drain",
     "description": "THE image-download workflow. Images are fully decoupled from the scrape (scrape.yml is index + detail only), so this is the single owner of all image downloading — both newest active listings and the deep INACTIVE/ historical backlog. Runs the image-download phase only, every 2 hours.",
@@ -1175,15 +1259,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "scrape_idnes.yml",
-    "name": "Scraping: iDNES Reality scraper (pilot)",
-    "description": "Scheduled (every 6h) + manual scraper for reality.idnes.cz on the shared portal framework. One job runs both phases: an index walk pages the HTML search results and enqueues new/price-changed ids into listing_detail_queue, then a detail drain fetches each listing page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "name": "Scraping: iDNES Reality combined walk (fallback)",
+    "description": "DISPATCH-ONLY combined index+detail fallback for reality.idnes.cz, mirroring sreality's scrape.yml. The scheduled pipeline is the cadence SPLIT — the fast idnes_index_walk.yml (full walk + mark_inactive + enqueue) feeds the bounded idnes_detail_drain.yml — because iDNES is large (~2400 index pages, ~60k listings) and a single combined run can't do both inside one job (the full index eats the window, starving the drain).",
     "manual": true,
-    "schedules": [
-      {
-        "cron": "15 */6 * * *",
-        "human": "Every 6 hours at :15"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,

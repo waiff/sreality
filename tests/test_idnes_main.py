@@ -80,6 +80,34 @@ def test_main_records_index_and_detail_runs(monkeypatch):
     assert finals[1][1]["listings_scraped_new"] == 2
 
 
+def _stub_phases(monkeypatch, calls):
+    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
+    monkeypatch.setattr(idnes_main.db, "connect", lambda: _Conn())
+    monkeypatch.setattr(
+        idnes_main.db, "scrape_run_start",
+        lambda _c, run_type, source: (calls.append(run_type) or len(calls)),
+    )
+    monkeypatch.setattr(idnes_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        idnes_main.portal_runner, "run_index_walk", lambda portal, dry_run: (0, {}))
+    monkeypatch.setattr(
+        idnes_main.portal_runner, "run_detail_drain", lambda portal, dry_run, **kw: (0, {}))
+
+
+def test_index_only_skips_drain(monkeypatch):
+    calls: list[str] = []
+    _stub_phases(monkeypatch, calls)
+    assert idnes_main.main(["--index-only"]) == 0
+    assert calls == ["index"]            # no detail phase
+
+
+def test_drain_only_skips_index(monkeypatch):
+    calls: list[str] = []
+    _stub_phases(monkeypatch, calls)
+    assert idnes_main.main(["--drain-only", "--max-detail", "100"]) == 0
+    assert calls == ["detail"]           # no index phase
+
+
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
     monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())

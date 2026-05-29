@@ -1,0 +1,61 @@
+name: "Scraping: iDNES Reality index walk"
+
+# The fast half of the iDNES cadence split (architectural rule #19, like sreality).
+# Walks the ENTIRE index of every configured category (no --max-pages),
+# touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted
+# ones under the completeness guard (source-scoped), and new/price-changed ids are
+# enqueued into listing_detail_queue (source='idnes'). No detail fetch — the drain
+# (idnes_detail_drain.yml) consumes the queue. Records run_type='index'.
+#
+# WHY split: iDNES is large (~2400 index pages across byty+domy × prodej+pronájem,
+# ~60k listings), so a full index walk takes most of a job's window — a combined
+# index+detail run starves the drain. Splitting lets the index complete every cycle
+# (so active counts stay accurate) while the drain chips the backlog on its own
+# cadence.
+#
+# Categories live in the `portals` registry row (migrations 110/111); coverage is
+# tuned with a SQL update, no workflow edit. Coordinates come from the page, so no
+# MAPY_CZ_API_KEY is needed. Required secret: SUPABASE_DB_URL.
+
+on:
+  schedule:
+    - cron: "15 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: idnes-index-walk
+  cancel-in-progress: false
+
+jobs:
+  index-walk:
+    runs-on: ubuntu-latest
+    # A full 4-category walk is ~2400 pages at the portal's index rate (~50 min
+    # observed); the headroom keeps it under the 90-min stuck-run cutoff.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run idnes index walk
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+        run: |
+          ARGS="--index-only"
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          echo "python -m scraper.idnes_main $ARGS"
+          eval "python -m scraper.idnes_main $ARGS"
