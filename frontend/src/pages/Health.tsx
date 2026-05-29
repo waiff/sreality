@@ -209,6 +209,7 @@ const PORTAL_STAGE_LABEL: Record<PortalStage, string> = {
 const PORTAL_SHORT_LABEL: Record<string, string> = {
   sreality: 'Sreality',
   bazos: 'Bazoš',
+  idnes: 'iDNES',
 };
 
 function portalShort(source: string): string {

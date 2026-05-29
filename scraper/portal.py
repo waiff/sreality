@@ -61,6 +61,12 @@ _DEFAULTS: dict[str, PortalConfig] = {
         categories=[{"sale_type": "prodam", "category": "byt"}],
         split_threshold=None,
     ),
+    "idnes": PortalConfig(
+        source="idnes",
+        supports_complete_walk=False,
+        categories=[{"sale_type": "prodej", "category": "byty"}],
+        split_threshold=None,
+    ),
 }
 
 
