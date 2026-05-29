@@ -8,12 +8,15 @@ migration 108), then a detail-drain that fetches + parses + ingests via
 pipeline — only the per-portal fetcher (BazosClient) + parser (bazos_parser) +
 config differ from sreality.
 
-A one-category crawl is a partial walk, so `supports_complete_walk=False` and the
-runner NEVER runs mark_inactive (architectural rule #3) — it only upserts.
+The index reports a total ("z N inzerátů"), so a full walk of the configured
+scope is provable-complete: `supports_complete_walk=True` and the runner marks
+delisted ads inactive under the completeness guard (rule #3), throttled to once
+per window (migration 113) so a frequent walk surfaces new ads + freshness every
+run while delisting inference stays conservative.
 
-Pilot scope: a single category at a time (the queue does not carry the category,
-which `parse_detail` needs, so the drain assumes this portal's one category).
-Multi-category bazos would encode the category in the queue — deferred.
+Scope: a single category + one locality per run (the queue does not carry the
+category, which `parse_detail` needs, so the drain assumes this portal's one
+category). Multi-category bazos would encode the category in the queue — deferred.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from scraper.bazos_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
     Geocoder,
+    _parse_price,
     parse_detail,
     parse_index,
 )
@@ -39,6 +43,11 @@ from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
+
+# Fraction of the portal-reported total a walk must collect before its
+# index-absence sweep is trusted to mark_inactive (architectural rule #3).
+# Below it the walk likely truncated and the sweep is skipped.
+INDEX_MIN_COMPLETENESS = 0.95
 
 
 class _CachingGeocoder:
@@ -81,10 +90,17 @@ def _build_geocoder() -> Geocoder | None:
 
 class BazosPortal:
     """Bazos as a Portal: the seams the generic runner needs, wrapping the
-    bazos client + parser. Single-category pilot (see module docstring)."""
+    bazos client + parser. Single-category, one locality scope per run.
+
+    Complete-walk capable: the index reports a total ("z N inzerátů"), so a
+    full walk of the configured scope is provable-complete and drives
+    mark_inactive under the completeness guard (rule #3). The delisting sweep
+    is additionally throttled to once per `inactive_sweep_min_interval_hours`
+    (migration 113) so a frequent index walk surfaces new ads + freshness every
+    run while delisting inference stays conservative."""
 
     source = SOURCE
-    supports_complete_walk = False
+    supports_complete_walk = True
     index_rate = 0.5
 
     def __init__(
@@ -129,7 +145,8 @@ class BazosPortal:
         sale_type, cat = category["sale_type"], category["category"]
         client = BazosClient(limiter=limiter)
         seen: set[str] = set()
-        entries: list[tuple[str, str | None, int | None, int]] = []
+        items: list[tuple[str, str, int | None]] = []  # (native, detail_path, idx_price)
+        total: int | None = None
         pages = 0
         offset = 0
         while True:
@@ -139,6 +156,8 @@ class BazosPortal:
             )
             page = parse_index(html)
             pages += 1
+            if page.total is not None:
+                total = page.total
             LOG.info(
                 "INDEX offset=%d items=%d total=%s", offset, len(page.items), page.total
             )
@@ -155,27 +174,82 @@ class BazosPortal:
             for item in page.items:
                 if item.source_id_native not in seen:
                     seen.add(item.source_id_native)
-                    entries.append(
-                        (item.source_id_native, item.detail_path, None,
-                         db.QUEUE_PRIORITY_NEW)
-                    )
+                    idx_price, _ = _parse_price(item.price_text, self._canon_type)
+                    items.append((item.source_id_native, item.detail_path, idx_price))
             if self._max_pages and pages >= self._max_pages:
                 break
             if not page.items or page.next_offset is None:
                 break
             offset = page.next_offset
+
+        # Resolve which natives already have a row (PK + stored price), so we can
+        # bump last_seen cheaply (no detail fetch) and enqueue only genuinely-new
+        # + price-changed ads — the discipline sreality's index walk uses.
+        existing = (
+            db.index_summary_native(conn, SOURCE, seen) if conn is not None else {}
+        )
+        if conn is not None and existing:
+            db.touch_listings(conn, [v["sreality_id"] for v in existing.values()])
+
+        new_entries: list[tuple[str, str, int | None, int]] = []
+        changed_entries: list[tuple[str, str, int | None, int]] = []
+        unchanged = 0
+        for native, path, idx_price in items:
+            prev = existing.get(native)
+            if prev is None:
+                new_entries.append((native, path, idx_price, db.QUEUE_PRIORITY_NEW))
+            elif idx_price is not None and prev["price_czk"] != idx_price:
+                changed_entries.append(
+                    (native, path, idx_price, db.QUEUE_PRIORITY_CHANGED)
+                )
+            else:
+                unchanged += 1
+
         enqueued = 0
+        entries = changed_entries + new_entries
         if conn is not None and entries:
             enqueued = db.enqueue_detail(conn, SOURCE, entries)
-        LOG.info("ENQUEUE source=bazos enqueued=%d seen=%d", enqueued, len(seen))
-        # Partial walk: result_size unknown, complete=False (never mark_inactive).
-        return seen, {"found_new": len(seen), "enqueued": enqueued}, None, pages, False
+
+        # Complete only when the walk collected ~all of the portal-reported total
+        # (and wasn't page-capped). A failed total parse (None) reads as
+        # incomplete — for an HTML crawl we never infer delistings without that
+        # positive signal.
+        complete = (
+            not self._max_pages
+            and total is not None
+            and total > 0
+            and len(seen) >= total * INDEX_MIN_COMPLETENESS
+        )
+        LOG.info(
+            "ENQUEUE source=bazos enqueued=%d new=%d changed=%d unchanged=%d "
+            "seen=%d total=%s complete=%s",
+            enqueued, len(new_entries), len(changed_entries), unchanged,
+            len(seen), total, complete,
+        )
+        return (
+            seen,
+            {"found_new": len(new_entries), "enqueued": enqueued},
+            total, pages, complete,
+        )
 
     def mark_inactive(self, conn: Any, category: dict[str, str], seen: set[str]) -> int:
-        return 0  # never called (supports_complete_walk=False)
+        # Throttled delisting sweep: the index walk runs frequently, but the
+        # index-absence inference runs at most once per configured window so a
+        # single rate-limited/truncated walk can't mass-delist (migration 113).
+        # The runner already gated this on walk completeness (rule #3).
+        if not db.portal_inactive_sweep_due(conn, SOURCE):
+            LOG.info("INACTIVE throttled source=bazos (within sweep interval)")
+            return 0
+        n = db.mark_inactive_native(
+            conn, SOURCE, self._canon_main, self._canon_type, seen
+        )
+        db.record_portal_inactive_sweep(conn, SOURCE)
+        return n
 
     def active_count(self, conn: Any, category: dict[str, str]) -> int | None:
-        return None
+        return db.active_count(
+            conn, self._canon_main, self._canon_type, source=SOURCE
+        )
 
     # --- detail-drain seams ---
     def make_client(self, limiter: RateLimiter) -> BazosClient:
@@ -224,10 +298,10 @@ class BazosPortal:
         return counts
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
-        # Partial-walk pilot: a gone detail is dequeued but NOT flipped inactive
-        # (rule #3 — no delisting inference for a portal that can't prove a
-        # complete walk). Documented limitation.
-        pass
+        # A gone detail (404/410 / gone-marker body) is definitive per-listing
+        # evidence — flip it inactive immediately, independent of the throttled
+        # index-absence sweep.
+        db.mark_listing_inactive_native(conn, SOURCE, native_id)
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:
         # The queue (fail_detail) tracks attempts/give-up; bazos has no

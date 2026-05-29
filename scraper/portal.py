@@ -57,7 +57,10 @@ _DEFAULTS: dict[str, PortalConfig] = {
     ),
     "bazos": PortalConfig(
         source="bazos",
-        supports_complete_walk=False,
+        # The index reports a total, so a full walk of the configured scope is
+        # provable-complete; the per-walk completeness guard + the 12h sweep
+        # throttle (migration 113) keep delisting inference safe.
+        supports_complete_walk=True,
         categories=[{"sale_type": "prodam", "category": "byt"}],
         split_threshold=None,
     ),

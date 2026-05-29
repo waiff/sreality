@@ -1,30 +1,32 @@
 name: "Scraping: Bazos crawler (pilot)"
 
-# Scheduled (every 6h) + manual crawler for reality.bazos.cz (multi-portal
-# slice 3b). Walks one
-# bazos category's index, fetches each listing detail, stages the raw HTML in
-# portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing
-# (Tier-0 idempotency + Tier-1 property matching).
-#
-# This is NOT a sreality scrape: it writes NO scrape_runs row and does not
-# touch sreality liveness / reconciliation. A one-category crawl is a partial
-# walk, so the orchestrator never runs mark_inactive (architectural rule #3).
+# Scheduled (hourly) + manual crawler for reality.bazos.cz. Runs the shared
+# portal framework (Phase 4): an index walk that stages raw pages, bumps
+# last_seen on still-listed ads (touch_listings), enqueues new + price-changed
+# ads into the shared listing_detail_queue, and — under the completeness guard
+# (architectural rule #3) — marks delisted ads inactive. A detail drain then
+# fetches a bounded slice of the queue, parses it, and ingests through
+# db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
 #
 # Required secrets: SUPABASE_DB_URL. Optional: MAPY_CZ_API_KEY enables
 # text-first, cross-checked coordinate resolution (street geocode beats the
 # coarse maps-link pin); without it the crawl falls back to the CZ-guarded link.
 #
-# Cadence: a conservative every-6h schedule (offset off the hourly recompute's
-# :00 so a crawl's Tier-1 attaches are picked up by the next recompute within
-# the hour). A scheduled run has no workflow inputs, so the run step falls back
-# to prodam/byt (the roadmap's pilot scope) bounded by --max-pages 2 — small
-# enough to stay well inside the 20-min timeout. Widen / shard once the pilot
-# proves the full-category run time; workflow_dispatch stays the manual escape
-# hatch with its own inputs.
+# Cadence: hourly. The full index walk is cheap (it re-fetches no detail — only
+# new/price-changed ads enqueue), so it surfaces new ads + freshness every hour.
+# The riskier index-absence delisting sweep is throttled inside BazosPortal to
+# once per 12h (portals.inactive_sweep_min_interval_hours, migration 113), so a
+# single rate-limited walk can never mass-delist. The detail drain is bounded
+# per run (--max-detail) and the queue persists, so the initial backfill spreads
+# over a few hourly runs without losing work.
+#
+# Scope (scheduled default): prodam/byt within ~10km of Praha — the first
+# complete-walk scope. workflow_dispatch overrides every knob (blank locality =
+# nationwide; blank max_pages = full walk).
 
 on:
   schedule:
-    - cron: "30 */6 * * *"
+    - cron: "0 * * * *"
   workflow_dispatch:
     inputs:
       sale_type:
@@ -48,9 +50,14 @@ on:
         default: ""
         type: string
       max_pages:
-        description: cap index pages walked (pilot safety)
+        description: cap index pages walked (blank = full walk)
         required: false
-        default: "2"
+        default: ""
+        type: string
+      max_detail:
+        description: cap detail-drain claims this run (blank = drain the queue)
+        required: false
+        default: ""
         type: string
 
 concurrency:
@@ -60,7 +67,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -77,16 +84,20 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
-          # inputs.* are empty on a scheduled run, so fall back to the pilot scope.
+          # inputs.* are empty on a scheduled run, so fall back to the Praha scope.
           SALE_TYPE: ${{ inputs.sale_type || 'prodam' }}
           CATEGORY: ${{ inputs.category || 'byt' }}
-          LOCALITY: ${{ inputs.locality }}
-          RADIUS_KM: ${{ inputs.radius_km }}
-          MAX_PAGES: ${{ inputs.max_pages || '2' }}
+          LOCALITY: ${{ inputs.locality || 'Praha' }}
+          RADIUS_KM: ${{ inputs.radius_km || '10' }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          # Bound the drain so the initial backfill spreads across hourly runs
+          # and stays inside the timeout; the queue persists between runs.
+          MAX_DETAIL: ${{ inputs.max_detail || '800' }}
         run: |
-          ARGS="--sale-type $SALE_TYPE --category $CATEGORY"
+          ARGS="--sale-type $SALE_TYPE --category $CATEGORY --workers 2 --rate 0.6"
           if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi
           if [ -n "$RADIUS_KM" ]; then ARGS="$ARGS --radius-km $RADIUS_KM"; fi
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
           echo "python -m scraper.bazos_main $ARGS"
           eval "python -m scraper.bazos_main $ARGS"

@@ -46,7 +46,7 @@ def test_default_config_sreality():
 
 def test_default_config_bazos():
     cfg = default_config("bazos")
-    assert cfg.supports_complete_walk is False
+    assert cfg.supports_complete_walk is True
     assert cfg.split_threshold is None
     assert cfg.splits is False
     assert cfg.categories == [{"sale_type": "prodam", "category": "byt"}]
