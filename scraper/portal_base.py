@@ -98,10 +98,16 @@ class BasePortalClient:
         url: str,
         *,
         params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | None = None,
+        method: str = "GET",
         pace: bool = True,
     ) -> requests.Response:
-        """GET with retry/backoff + adaptive throttle. Returns a `< 400`
-        response.
+        """GET (or POST) with retry/backoff + adaptive throttle. Returns a
+        `< 400` response.
+
+        A `json_body` (or `method="POST"`) sends a POST with that JSON body —
+        for JSON-API portals whose index/detail is a GraphQL/RPC call rather
+        than a URL GET (bezrealitky). Everything else is identical to a GET.
 
         Raises `ListingGoneError` immediately on a 404/410 (no retry — a gone
         listing won't come back), retries the `RETRYABLE_STATUS` set with
@@ -119,7 +125,11 @@ class BasePortalClient:
             if pace:
                 self._pace()
             try:
-                if params is None:
+                if json_body is not None or method == "POST":
+                    response = self._session.post(
+                        url, json=json_body, timeout=self.timeout_s
+                    )
+                elif params is None:
                     response = self._session.get(url, timeout=self.timeout_s)
                 else:
                     response = self._session.get(

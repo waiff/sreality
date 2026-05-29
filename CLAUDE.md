@@ -14,8 +14,9 @@ history.
 
 It works with several kinds of data, layered together:
 - **Scraped listings** from a growing set of portals. sreality.cz (public JSON v1 API)
-  is the steady hourly ingest; bazos.cz (HTML crawler) is a manual pilot, with more
-  portals rolling out per `docs/design/multi-portal-dedup.md`.
+  is the steady hourly ingest; bazos.cz (HTML crawler) and bezrealitky.cz (public GraphQL
+  API) are scheduled 6-hourly pilots, with more portals rolling out per
+  `docs/design/multi-portal-dedup.md`.
 - **Geo data** — coordinates, districts, ČÚZK/RÚIAN admin boundaries, transit-route
   geometry, OSM amenities.
 - **Operator-supplied data** — curated city-quality indexes, collections, building
@@ -58,6 +59,26 @@ tagged `source='bazos'`. Raw HTML is staged in `portal_raw_pages` (migration 099
 parsing. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
 (page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
 sreality.
+
+**Data source (bezrealitky.cz).** A scheduled scraper (`scraper/bezrealitky_client.py`,
+`bezrealitky_parser.py`, `bezrealitky_main.py`, workflow `scrape_bezrealitky.yml` — pilot,
+every 6h) tagged `source='bezrealitky'`. Bezrealitky is a JSON-API portal like sreality
+(not an HTML crawler): it reads the public GraphQL API at `api.bezrealitky.cz/graphql/`
+(`listAdverts` for the index — offset/limit paging, `totalCount` for completeness,
+`includeImports:false` to scope to bezrealitky's OWN private-seller inventory — and
+`advert(id)` for detail). The API requires browser-like `Origin`/`Referer` headers; no
+cookies. `bezrealitky_parser.parse_advert` maps the advert object onto the shared
+`ScrapedListing` contract, translating bezrealitky's enums into the SAME canonical label
+strings sreality stores (`po_rekonstrukci`, `cihla`, `celkem`/`měsíc`, `2+kk`, …) so
+cross-source filtering/dedup/condition-scoring see one vocabulary. Coordinates come from
+the API's `gps` field (precise, per-listing — no geocoding step). Because the detail JSON
+carries `offerType`/`estateType`, the drain derives each listing's category from the
+response, so one config walks many categories (no per-category queue encoding).
+`listAdverts` has a `totalCount` and no deep-pagination cap, so a per-category walk is
+provable-complete: unlike bazos, bezrealitky is complete-walk capable and the runner marks
+delisted listings inactive under the completeness guard (source-scoped). NOTE: bezrealitky
+also has an on-demand URL parser (`scraper/source_parsers/bezrealitky.py`, LLM) used by the
+estimation preview — a separate entry point that is unchanged by the scheduled scraper.
 
 ## Territories
 
@@ -470,10 +491,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (`PortalConfig` + `load_portal_config`, backed by the operational columns on the `portals`
     registry — `supports_complete_walk`, `categories`, `split_threshold` — migration 107); and
     `scraper/portal_runner.py` (the one `run_index_walk` + `run_detail_drain`, parameterized by a
-    `Portal` object). sreality (`SrealityPortal` in `scraper/main.py`) and bazos (`BazosPortal` in
-    `scraper/bazos_main.py`) both implement the `Portal` protocol; `_run_index_walk` /
-    `_run_detail_drain` and `bazos_main.main` are thin delegators to the runner. The **only**
-    per-portal code is the fetcher (a `BasePortalClient` subclass), the parser strategy, and the
+    `Portal` object). sreality (`SrealityPortal` in `scraper/main.py`), bazos (`BazosPortal` in
+    `scraper/bazos_main.py`), and bezrealitky (`BezrealitkyPortal` in `scraper/bezrealitky_main.py`)
+    all implement the `Portal` protocol; `_run_index_walk` / `_run_detail_drain`, `bazos_main.main`,
+    and `bezrealitky_main.main` are thin delegators to the runner. The **only**
+    per-portal code is the fetcher (a `BasePortalClient` subclass — its `_request` does GET for
+    sreality/bazos and POST for bezrealitky's GraphQL), the parser strategy, and the
     config — everything else (queue claim/complete/fail, the fetch pool, batched writes,
     completeness-gated `mark_inactive`, `scrape_runs`) is shared. A genuine per-portal need is an
     explicit method on the `Portal` protocol, justified in review — **sreality's district-split
@@ -482,7 +505,9 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `(source, native_id)` + `detail_ref`, migration 108) so every portal shares the one queue and
     the one drain. A portal that cannot prove a near-complete walk sets
     `supports_complete_walk=false` and the runner never marks its listings inactive (rule #3) —
-    bazos (partial single-category walks) is such a portal.
+    bazos (partial single-category walks) is such a portal; bezrealitky is NOT (its GraphQL
+    `totalCount` + uncapped paging make a per-category walk provable-complete, so it sets
+    `supports_complete_walk=true` and marks delistings inactive, source-scoped).
 
 ## Toolkit and API rules
 
@@ -775,7 +800,10 @@ index walk", cron `*/15`) feeds `detail_drain.yml` ("Scraping: Sreality detail d
 `*/15`). `scrape.yml` ("Scraping: Sreality combined walk") is the **dispatch-only fallback** —
 the proven combined index+detail `_run_full`, kept for instant revert (re-add its `schedule:`
 cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrape_bazos.yml`
-("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The dedup/properties track adds
+("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The bezrealitky scrape is
+`scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
+both index walk + detail drain in one job via `bezrealitky_main`). The dedup/properties track
+adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers via
 the batched Tier-1 matcher + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every

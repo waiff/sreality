@@ -1,0 +1,78 @@
+name: "Scraping: Bezrealitky scraper (pilot)"
+
+# Scheduled (every 6h) + manual scraper for bezrealitky.cz on the shared portal
+# framework. Bezrealitky is a JSON-API portal (public GraphQL at
+# api.bezrealitky.cz) like sreality: the index walk pages listAdverts and
+# enqueues new/price-changed ids into listing_detail_queue, then the detail
+# drain fetches advert(id), parses to a ScrapedListing, and ingests through
+# db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
+#
+# Categories live in the `portals` registry row (migration 110), not here, so
+# coverage is tuned with a SQL update, no workflow edit. A scheduled run takes
+# no inputs and does a FULL per-category walk (no --max-pages), which is
+# provable-complete (totalCount, no deep-pagination cap), so the runner marks
+# delisted listings inactive under the completeness guard — source-scoped to
+# bezrealitky rows only.
+#
+# Writes 'index' + 'detail' scrape_runs rows under source='bezrealitky' (its own
+# Health-page lane; does not touch sreality liveness / reconciliation).
+#
+# Required secret: SUPABASE_DB_URL. (Coordinates come from the API's gps field,
+# so no MAPY_CZ_API_KEY is needed.)
+#
+# Cadence: every 6h, offset off the other scrapers. The detail drain is bounded
+# per run (--max-detail) and the queue persists across runs, so a bounded run
+# never loses work; the first few runs drain the initial backlog.
+
+on:
+  schedule:
+    - cron: "45 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
+        required: false
+        default: ""
+        type: string
+      max_detail:
+        description: cap detail-drain claims this run
+        required: false
+        default: "2000"
+        type: string
+      rate:
+        description: detail-fetch requests/second ceiling
+        required: false
+        default: "2.0"
+        type: string
+
+concurrency:
+  group: bezrealitky-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run bezrealitky scrape
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_DETAIL: ${{ inputs.max_detail || '2000' }}
+          RATE: ${{ inputs.rate || '2.0' }}
+        run: |
+          ARGS="--max-detail $MAX_DETAIL --rate $RATE"
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          echo "python -m scraper.bezrealitky_main $ARGS"
+          eval "python -m scraper.bezrealitky_main $ARGS"
