@@ -115,12 +115,22 @@ insert into app_settings (key, value, description, updated_by) values
   on conflict (key) do nothing;
 
 -- Expose the new column on the anon-readable view (registry surface, like 107).
--- CREATE OR REPLACE must keep the existing columns in order and only append, so
--- operational_limits goes after scrape_cadence_minutes (added since migration
--- 107) — portal_health_summary()'s dependency on the view is never broken.
-create or replace view portals_public as
-  select source, label, kind, stage, home_url, sort_order, is_enabled,
-         supports_complete_walk, categories, split_threshold,
-         scrape_cadence_minutes, operational_limits
-  from portals;
+-- CREATE OR REPLACE must keep the existing columns in order and only append.
+-- The column set has grown since 107 and differs across environments (prod
+-- carries an extra scrape_cadence_minutes not in the committed sequence), so we
+-- rebuild dynamically: preserve whatever portals_public currently selects and
+-- append operational_limits. Robust to that drift + idempotent, and
+-- portal_health_summary()'s dependency on the view is never broken.
+do $$
+declare existing_cols text;
+begin
+  select string_agg(quote_ident(column_name), ', ' order by ordinal_position)
+    into existing_cols
+  from information_schema.columns
+  where table_name = 'portals_public' and column_name <> 'operational_limits';
+  execute format(
+    'create or replace view portals_public as select %s, operational_limits from portals',
+    existing_cols
+  );
+end $$;
 grant select on portals_public to anon;
