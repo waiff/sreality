@@ -188,3 +188,18 @@ def test_detail_drain_dry_run_does_not_claim(monkeypatch):
     rc, agg = portal_runner.run_detail_drain(p, 50, True, detail_workers=1, detail_rate=1.0)
     assert rc == 0 and agg == {}
     assert cap["claim_n"] == []   # dry-run never claims
+
+
+def test_detail_drain_time_budget_finalizes_cleanly(monkeypatch):
+    # A wall-clock budget makes the drain stop + finalize rather than overrun the
+    # job timeout (which would leave a 'stuck' scrape_run). monotonic() jumps far
+    # past the tiny budget on the first loop check, so it stops before claiming.
+    cap = _patch_queue(monkeypatch, [[("1", None, None)]])
+    seq = iter(range(0, 1_000_000, 1000))
+    monkeypatch.setattr(portal_runner.time, "monotonic", lambda: float(next(seq)))
+    p = _FakePortal()
+    rc, agg = portal_runner.run_detail_drain(
+        p, None, False, detail_workers=1, detail_rate=1.0, max_seconds=1.0)
+    assert rc == 0
+    assert cap["claim_n"] == []      # budget exceeded → stopped before claiming
+    assert p.conn.closed             # but finalized cleanly (no stuck run)

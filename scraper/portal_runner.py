@@ -18,6 +18,7 @@ district-split lives inside its `walk_category`, not here — justified in revie
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -204,8 +205,16 @@ def run_detail_drain(
     dry_run: bool,
     detail_workers: int,
     detail_rate: float,
+    max_seconds: float | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Claim queue rows for this source, fetch on a worker pool, write batched."""
+    """Claim queue rows for this source, fetch on a worker pool, write batched.
+
+    `max_seconds` is an optional wall-clock budget: the drain stops claiming new
+    chunks once it is exceeded and finalizes cleanly (records ended_at), so a
+    write-bound portal can never overrun its GitHub-Actions timeout and leave a
+    'stuck' scrape_run. When set, claims use a smaller chunk so the budget is
+    checked often enough; the queue persists, so deferred work drains next run.
+    """
     counts: dict[str, int] = {
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
         "images_discovered": 0,
@@ -219,6 +228,8 @@ def run_detail_drain(
         LOG.info("DRAIN dry-run claimable=%d max_claims=%s; exit", claimable, max_claims)
         return (0, {})
 
+    deadline = (time.monotonic() + max_seconds) if max_seconds else None
+    claim_chunk = min(DRAIN_CLAIM_CHUNK, 100) if max_seconds else DRAIN_CLAIM_CHUNK
     conn = portal.connect_drain()
     total_claimed = 0
     buffer: list[DrainItem] = []
@@ -227,11 +238,17 @@ def run_detail_drain(
         if reclaimed:
             LOG.info("DRAIN reclaimed stale claims=%d", reclaimed)
         LOG.info(
-            "DRAIN starting source=%s max_claims=%s workers=%d batch=%d",
-            portal.source, max_claims, detail_workers, DETAIL_BATCH_SIZE,
+            "DRAIN starting source=%s max_claims=%s workers=%d batch=%d budget=%ss",
+            portal.source, max_claims, detail_workers, DETAIL_BATCH_SIZE, max_seconds,
         )
         while max_claims is None or total_claimed < max_claims:
-            chunk = DRAIN_CLAIM_CHUNK
+            if deadline is not None and time.monotonic() >= deadline:
+                LOG.info(
+                    "DRAIN time budget %ss reached at claimed=%d; finalizing cleanly",
+                    max_seconds, total_claimed,
+                )
+                break
+            chunk = claim_chunk
             if max_claims is not None:
                 chunk = min(chunk, max_claims - total_claimed)
             claimed = db.claim_detail_batch(conn, portal.source, chunk)
