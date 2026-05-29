@@ -85,6 +85,11 @@ _INT_RE = re.compile(r"(\d+)")
 _ENERGY_RE = re.compile(r"\b([A-G])\b")
 _PAGE_RE = re.compile(r"[?&]page=(\d+)")
 _DETAIL_PATH_RE = re.compile(r"/detail/([^/?#]+)/([^/?#]+)/")
+# A price token: a leading digit then more digits split by ordinary / no-break /
+# zero-width spaces (the Czech "9 790 000" thousands format idnes renders with
+# &nbsp;/&zwj; between groups). Stops at the first non-space, non-digit char.
+_PRICE_RUN_RE = re.compile(r"\d[\d\s\u00a0\u200b\u200c\u200d\u2060]*")
+_PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # Map config: "center":[lon, lat]. CZ lat/lon ranges don't overlap, so a swap is
 # caught by the bbox guard rather than producing a bogus point.
 _CENTER_RE = re.compile(r'"center"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\]')
@@ -170,8 +175,18 @@ def _parse_price(text: str | None, category_type: str | None) -> tuple[int | Non
     low = _strip_diacritics(text).lower()
     if any(k in low for k in ("dohodou", "vyzadani", "poptavce", "info o cene", "neuvedena")):
         return None, unit
-    digits = re.sub(r"\D", "", text)
-    return (int(digits) if digits else None), unit
+    # Take only the FIRST price run (digits split by thin/no-break/zero-width
+    # spaces, the Czech thousands format). Stripping the whole string would
+    # CONCATENATE a struck original price + the current one (or a price note)
+    # into a giant number that overflows the price_czk integer column.
+    m = _PRICE_RUN_RE.search(text)
+    if not m:
+        return None, unit
+    digits = re.sub(r"\D", "", m.group(0))
+    if not digits:
+        return None, unit
+    value = int(digits)
+    return (value if value <= _PRICE_MAX else None), unit
 
 
 def _parse_disposition(text: str | None) -> str | None:
@@ -378,7 +393,10 @@ def parse_detail(
     description = _text(tree.css_first("div.b-desc")) or _text(tree.css_first(".b-detail__text"))
     params = _detail_params(tree)
 
-    price_text = _text(tree.css_first(".b-detail__price")) or _text(params.get("cena"))
+    # The <strong> holds just the amount; the surrounding .b-detail__price also
+    # carries the "Chci spočítat hypotéku" CTA / price note (extra digits).
+    price_node = tree.css_first(".b-detail__price strong") or tree.css_first(".b-detail__price")
+    price_text = _text(price_node) or _text(params.get("cena"))
     price_czk, price_unit = _parse_price(price_text, category_type)
 
     locality = _text(tree.css_first(".b-detail__info"))

@@ -184,6 +184,14 @@ def test_index_price_parsing():
     assert index_price(None) is None
 
 
+def test_price_takes_first_run_and_clamps_to_int():
+    # Two numbers in the price text must NOT concatenate — that overflowed the
+    # price_czk integer column on a real detail page. Take the first run only.
+    assert index_price("12 000 000 Kč 9 790 000 Kč") == 12_000_000
+    # A value past the integer column max is dropped, not stored wrong.
+    assert index_price("9 999 999 999 Kč") is None
+
+
 def test_parse_detail_price_on_request_is_none_for_rent():
     listing = parse_detail(
         RENT_DOHODOU_HTML, source_url="https://reality.idnes.cz/detail/pronajem/byt/brno/6a18deadbeefdeadbeef0002/",
