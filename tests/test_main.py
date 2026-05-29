@@ -983,7 +983,7 @@ def _dispatch_patches(monkeypatch) -> dict[str, Any]:
     monkeypatch.setattr(scraper_main.db, "scrape_run_finalize", lambda *a, **k: None)
     monkeypatch.setattr(
         scraper_main, "_run_index_walk",
-        lambda dry_run: (captured.__setitem__("called", "index") or (0, {})),
+        lambda **k: (captured.__setitem__("called", "index") or (0, {})),
     )
     monkeypatch.setattr(
         scraper_main, "_run_detail_drain",
