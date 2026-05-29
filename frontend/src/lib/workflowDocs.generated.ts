@@ -1159,13 +1159,13 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "scrape_idnes.yml",
-    "name": "Scraping: iDNES Reality crawler (pilot)",
-    "description": "Scheduled (every 6h) + manual crawler for reality.idnes.cz, on the shared portal framework (Phase 4). One process runs both phases: an index-walk that stages raw pages and enqueues listings into the shared listing_detail_queue (source='idnes'), then a detail-drain that fetches + parses + ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "name": "Scraping: iDNES Reality scraper (pilot)",
+    "description": "Scheduled (every 6h) + manual scraper for reality.idnes.cz on the shared portal framework. One job runs both phases: an index walk pages the HTML search results and enqueues new/price-changed ids into listing_detail_queue, then a detail drain fetches each listing page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
     "manual": true,
     "schedules": [
       {
-        "cron": "45 */6 * * *",
-        "human": "Every 6 hours at :45"
+        "cron": "15 */6 * * *",
+        "human": "Every 6 hours at :15"
       }
     ],
     "onPush": false,
@@ -1173,54 +1173,36 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "paths": null,
     "inputs": [
       {
-        "name": "sale_type",
-        "description": "prodej (sale) or pronajem (rent)",
-        "required": false,
-        "type": "choice",
-        "default": "prodej",
-        "options": [
-          "prodej",
-          "pronajem"
-        ]
-      },
-      {
-        "name": "category",
-        "description": "idnes category segment",
-        "required": false,
-        "type": "choice",
-        "default": "byty",
-        "options": [
-          "byty",
-          "domy",
-          "pozemky",
-          "komercni",
-          "ostatni"
-        ]
-      },
-      {
-        "name": "locality",
-        "description": "idnes region path segment (e.g. praha); blank = nationwide",
+        "name": "max_pages",
+        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
         "required": false,
         "type": "string",
         "default": "",
         "options": null
       },
       {
-        "name": "max_pages",
-        "description": "cap index pages walked (pilot safety)",
+        "name": "max_detail",
+        "description": "cap detail-drain claims this run",
         "required": false,
         "type": "string",
-        "default": "2",
+        "default": "6000",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "detail-fetch requests/second ceiling",
+        "required": false,
+        "type": "string",
+        "default": "3.0",
         "options": null
       }
     ],
     "secrets": [
-      "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "idnes-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 20,
+    "timeoutMinutes": 55,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_idnes.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_idnes.yml"

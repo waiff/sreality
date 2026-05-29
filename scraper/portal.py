@@ -63,8 +63,16 @@ _DEFAULTS: dict[str, PortalConfig] = {
     ),
     "idnes": PortalConfig(
         source="idnes",
-        supports_complete_walk=False,
-        categories=[{"sale_type": "prodej", "category": "byty"}],
+        # Search pages carry a result total and have no deep-pagination cap, so a
+        # per-category walk is provable-complete → mark_inactive runs under the
+        # completeness guard (source-scoped). No split needed.
+        supports_complete_walk=True,
+        categories=[
+            {"sale_type": "prodej", "category": "byty"},
+            {"sale_type": "pronajem", "category": "byty"},
+            {"sale_type": "prodej", "category": "domy"},
+            {"sale_type": "pronajem", "category": "domy"},
+        ],
         split_threshold=None,
     ),
     "bezrealitky": PortalConfig(

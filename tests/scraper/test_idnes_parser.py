@@ -6,7 +6,12 @@ detail <dl> spec table, the fancybox gallery, and the embedded map config
 
 from __future__ import annotations
 
-from scraper.idnes_parser import parse_detail, parse_index
+from scraper.idnes_parser import (
+    category_from_url,
+    index_price,
+    parse_detail,
+    parse_index,
+)
 
 _DETAIL_URL = (
     "https://reality.idnes.cz/detail/prodej/byt/praha-8-cerneho/"
@@ -160,6 +165,23 @@ def test_parse_detail_content_hash_stable_and_bridges_to_ingest():
     assert row["area_m2"] == 69.0
     assert row["lat"] == 50.130427866
     assert row["lon"] == 14.484176216
+
+
+def test_category_from_detail_url():
+    # The drain recovers the category from the detail URL (the queue omits it).
+    assert category_from_url(
+        "https://reality.idnes.cz/detail/prodej/byt/praha/6a18deadbeefdeadbeef0001/"
+    ) == ("byt", "prodej")
+    assert category_from_url(
+        "https://reality.idnes.cz/detail/pronajem/dum/brno/6a18deadbeefdeadbeef0002/"
+    ) == ("dum", "pronajem")
+    assert category_from_url("https://reality.idnes.cz/s/prodej/byty/") == (None, None)
+
+
+def test_index_price_parsing():
+    assert index_price("9 790 000 Kč") == 9_790_000
+    assert index_price("Info o ceně") is None
+    assert index_price(None) is None
 
 
 def test_parse_detail_price_on_request_is_none_for_rent():

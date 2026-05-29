@@ -80,6 +80,25 @@ delisted listings inactive under the completeness guard (source-scoped). NOTE: b
 also has an on-demand URL parser (`scraper/source_parsers/bezrealitky.py`, LLM) used by the
 estimation preview — a separate entry point that is unchanged by the scheduled scraper.
 
+**Data source (reality.idnes.cz).** A scheduled scraper (`scraper/idnes_client.py`,
+`idnes_parser.py`, `idnes_main.py`, workflow `scrape_idnes.yml` — pilot, every 6h) tagged
+`source='idnes'`. iDNES is an HTML portal (like bazos, not a JSON API) but a STRUCTURED one:
+`idnes_parser` reads the `<dl>` spec table, a clean price element, and **precise per-listing
+coordinates from the page's embedded map config** (`"center":[lon,lat]`), so there is no
+geocoding step. Typed fields are normalised to the SAME canonical labels sreality stores
+(`panelová→panel`, `velmi dobrý stav→velmi_dobry`, `osobní→osobni`) for one cross-source
+vocabulary. Search pages carry a result total and have **no deep-pagination cap**, so a
+per-category walk is provable-complete: unlike bazos, idnes is **complete-walk capable**
+(`supports_complete_walk=true`) and the runner marks delisted listings inactive under the
+completeness guard, source-scoped (rules #3/#15). The detail URL carries the category
+(`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its own URL —
+one config (the `portals` row, migrations 110/111) walks many categories (byty + domy ×
+prodej + pronájem today). Image-URL rows are recorded by the drain; the shared `images.yml`
+job downloads the bytes to R2 (source-agnostic). NOTE: iDNES also has an on-demand URL parser
+(`scraper/source_parsers/idnes_reality.py`, LLM, `source_kind='idnes_reality'`) used by the
+estimation preview — a separate entry point unchanged by the scheduled scraper, which is why
+the Health dashboard's iDNES card shows BOTH a scraper and an on-demand-parser badge.
+
 ## Territories
 
 The repo is split into **three** top-level territories with deliberately different
@@ -802,8 +821,10 @@ the proven combined index+detail `_run_full`, kept for instant revert (re-add it
 cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrape_bazos.yml`
 ("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
-both index walk + detail drain in one job via `bezrealitky_main`). The dedup/properties track
-adds
+both index walk + detail drain in one job via `bezrealitky_main`). The idnes scrape is
+`scrape_idnes.yml` ("Scraping: iDNES Reality scraper (pilot)", every 6h + dispatch; runs both
+index walk + detail drain in one job via `idnes_main` — complete-walk, marks inactive). The
+dedup/properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers via
 the batched Tier-1 matcher + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
