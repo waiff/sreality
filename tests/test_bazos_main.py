@@ -230,6 +230,65 @@ def test_walk_category_page_capped_is_incomplete(monkeypatch):
     assert complete is False     # max_pages cap → never claims completeness
 
 
+class _SeqIdxClient:
+    """fetch_index returns 200 for the first `ok_pages` calls, then raises
+    ListingGoneError — bazos 404s an offset past the last result page."""
+
+    def __init__(self, ok_pages: int):
+        self._ok = ok_pages
+        self.calls = 0
+
+    def fetch_index(self, *a, **k):
+        self.calls += 1
+        if self.calls > self._ok:
+            raise ListingGoneError("/past-end", 404)
+        return ("<html>", 200)
+
+
+def test_walk_category_stops_when_total_reached(monkeypatch):
+    # The pager advertises a next page, but we've already collected `total`, so
+    # the walk must stop (and never request the offset bazos would 404 on).
+    page = SimpleNamespace(
+        items=[SimpleNamespace(source_id_native="a", detail_path="/a", price_text=None),
+               SimpleNamespace(source_id_native="b", detail_path="/b", price_text=None)],
+        total=2, next_offset=20,
+    )
+    client = _SeqIdxClient(ok_pages=10)
+    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
+    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
+    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 2)
+    seen, _c, result_size, _pages, complete = _portal().walk_category(
+        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+    )
+    assert seen == {"a", "b"} and result_size == 2 and complete is True
+    assert client.calls == 1     # stopped after page 1; never requested offset 20
+
+
+def test_walk_category_tolerates_gone_index_page(monkeypatch):
+    # If a page past the end 404s before the total is reached, keep what we
+    # collected and report incomplete (so the sweep is skipped, not a crash).
+    page = SimpleNamespace(
+        items=[SimpleNamespace(source_id_native=str(i), detail_path=f"/{i}", price_text=None)
+               for i in range(20)],
+        total=400, next_offset=20,
+    )
+    client = _SeqIdxClient(ok_pages=1)   # page 1 ok, page 2 → gone
+    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
+    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
+    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 20)
+    seen, _c, result_size, _pages, complete = _portal().walk_category(
+        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+    )
+    assert len(seen) == 20            # page-1 items kept despite the 404 on page 2
+    assert result_size == 400 and complete is False   # partial → no false delisting
+
+
 class _Limiter:
     def acquire(self) -> None:
         pass

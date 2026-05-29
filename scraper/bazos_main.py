@@ -150,10 +150,18 @@ class BazosPortal:
         pages = 0
         offset = 0
         while True:
-            html, status = client.fetch_index(
-                sale_type, cat, offset,
-                locality=self._locality, radius_km=self._radius_km,
-            )
+            try:
+                html, status = client.fetch_index(
+                    sale_type, cat, offset,
+                    locality=self._locality, radius_km=self._radius_km,
+                )
+            except ListingGoneError:
+                # bazos 404s an offset past the last result page, and its pager's
+                # "Další" link points one page beyond the end — so treat a gone
+                # index page as end-of-results and keep what we collected, rather
+                # than letting it abort (and discard) the whole walk.
+                LOG.info("INDEX end-of-results at offset=%d (gone)", offset)
+                break
             page = parse_index(html)
             pages += 1
             if page.total is not None:
@@ -179,6 +187,10 @@ class BazosPortal:
             if self._max_pages and pages >= self._max_pages:
                 break
             if not page.items or page.next_offset is None:
+                break
+            # Stop once we've collected the portal-reported total; the pager
+            # often advertises one offset past the end (which 404s).
+            if total is not None and len(seen) >= total:
                 break
             offset = page.next_offset
 
