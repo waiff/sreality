@@ -1202,7 +1202,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "bazos-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 50,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bazos.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bazos.yml"
