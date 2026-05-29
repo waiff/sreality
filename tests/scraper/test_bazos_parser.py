@@ -119,6 +119,22 @@ def test_parse_index_total_and_items():
     assert "Letovice" in (first.locality_text or "")
 
 
+def test_next_offset_handles_locality_query_string():
+    # A locality-filtered search appends ?hlokalita=…&humkreis=… AFTER the
+    # offset path segment; the pager parse must still find the offset, else the
+    # walk stops after page 1 and never proves completeness.
+    html = """
+<!DOCTYPE html><html><body>
+<div class="strankovani">
+  <a href="/prodam/byt/?hlokalita=Praha&humkreis=10">1</a>
+  <a href="/prodam/byt/20/?hlokalita=Praha&humkreis=10">2</a>
+  <a href="/prodam/byt/20/?hlokalita=Praha&humkreis=10">Další</a>
+</div>
+</body></html>
+"""
+    assert parse_index(html).next_offset == 20
+
+
 def test_parse_index_ignores_non_listing_divs():
     # The strankovani / header divs must not produce phantom items.
     page = parse_index(INDEX_HTML)

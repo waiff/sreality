@@ -94,14 +94,60 @@ def test_main_rejects_unmapped_scope(monkeypatch):
 # --- BazosPortal seams ------------------------------------------------------
 
 
-def test_portal_single_category_and_partial_walk():
+def test_portal_single_category_complete_walk():
     p = _portal()
     assert p.source == "bazos"
-    assert p.supports_complete_walk is False
+    assert p.supports_complete_walk is True
     assert p.categories() == [{"sale_type": "prodam", "category": "byt"}]
     assert p.category_labels({}) == ("byt", "prodej")
-    assert p.mark_inactive(None, {}, {"x"}) == 0
-    assert p.active_count(None, {}) is None
+
+
+def test_mark_inactive_runs_native_sweep_when_due(monkeypatch):
+    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: True)
+    swept: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bazos_main.db, "mark_inactive_native",
+        lambda _c, src, cm, ct, seen: swept.update(
+            src=src, cm=cm, ct=ct, seen=seen) or 3,
+    )
+    recorded = {"n": 0}
+    monkeypatch.setattr(
+        bazos_main.db, "record_portal_inactive_sweep",
+        lambda _c, _s: recorded.__setitem__("n", recorded["n"] + 1),
+    )
+    n = _portal().mark_inactive(object(), {}, {"a", "b"})
+    assert n == 3
+    assert swept == {"src": "bazos", "cm": "byt", "ct": "prodej", "seen": {"a", "b"}}
+    assert recorded["n"] == 1
+
+
+def test_mark_inactive_throttled_when_not_due(monkeypatch):
+    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: False)
+    monkeypatch.setattr(
+        bazos_main.db, "mark_inactive_native",
+        lambda *a, **k: pytest.fail("sweep must be skipped when throttled"),
+    )
+    assert _portal().mark_inactive(object(), {}, {"a"}) == 0
+
+
+def test_active_count_source_scoped(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bazos_main.db, "active_count",
+        lambda _c, cm, ct, source: captured.update(cm=cm, ct=ct, source=source) or 42,
+    )
+    assert _portal().active_count(object(), {}) == 42
+    assert captured == {"cm": "byt", "ct": "prodej", "source": "bazos"}
+
+
+def test_mark_gone_flips_native_inactive(monkeypatch):
+    gone: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bazos_main.db, "mark_listing_inactive_native",
+        lambda _c, src, nid: gone.update(src=src, nid=nid),
+    )
+    _portal().mark_gone(object(), "216945145")
+    assert gone == {"src": "bazos", "nid": "216945145"}
 
 
 class _IdxClient:
@@ -114,15 +160,32 @@ class _IdxClient:
         return ("<html>", 200)
 
 
-def test_walk_category_enqueues_seen(monkeypatch):
+def test_walk_category_complete_walk_enqueues_new_and_changed(monkeypatch):
     page1 = SimpleNamespace(
-        items=[SimpleNamespace(source_id_native="a", detail_path="/a"),
-               SimpleNamespace(source_id_native="b", detail_path="/b")],
-        total=2, next_offset=None,
+        items=[
+            SimpleNamespace(source_id_native="a", detail_path="/a", price_text="3 000 000 Kč"),
+            SimpleNamespace(source_id_native="b", detail_path="/b", price_text="4 000 000 Kč"),
+            SimpleNamespace(source_id_native="c", detail_path="/c", price_text="5 000 000 Kč"),
+        ],
+        total=3, next_offset=None,
     )
     monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page1)
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page1]))
     monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    # "b" already exists at the same price (unchanged → touch only); "c" exists
+    # at a different price (price-changed → enqueue); "a" is brand new.
+    monkeypatch.setattr(
+        bazos_main.db, "index_summary_native",
+        lambda _c, _src, _natives: {
+            "b": {"sreality_id": -2, "price_czk": 4_000_000, "last_seen_at": None},
+            "c": {"sreality_id": -3, "price_czk": 9_999_999, "last_seen_at": None},
+        },
+    )
+    touched: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bazos_main.db, "touch_listings",
+        lambda _c, ids: touched.update(ids=sorted(ids)),
+    )
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         bazos_main.db, "enqueue_detail",
@@ -133,11 +196,97 @@ def test_walk_category_enqueues_seen(monkeypatch):
     seen, counts, result_size, pages, complete = p.walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
     )
-    assert seen == {"a", "b"}
-    assert result_size is None and complete is False     # partial walk
+    assert seen == {"a", "b", "c"}
+    assert result_size == 3 and complete is True          # full walk, collected == total
+    assert touched["ids"] == [-3, -2]                     # both existing rows touched
+    assert counts["found_new"] == 1                       # only "a" is genuinely new
     assert captured["source"] == "bazos"
-    # entries: (native_id, detail_ref, price, priority)
-    assert ("a", "/a", None, bazos_main.db.QUEUE_PRIORITY_NEW) in captured["entries"]
+    natives = {e[0] for e in captured["entries"]}
+    assert natives == {"a", "c"}                          # new + price-changed; "b" skipped
+    by_native = {e[0]: e for e in captured["entries"]}
+    assert by_native["a"][3] == bazos_main.db.QUEUE_PRIORITY_NEW
+    assert by_native["c"][3] == bazos_main.db.QUEUE_PRIORITY_CHANGED
+
+
+def test_walk_category_page_capped_is_incomplete(monkeypatch):
+    page1 = SimpleNamespace(
+        items=[SimpleNamespace(source_id_native="a", detail_path="/a", price_text=None)],
+        total=500, next_offset=20,
+    )
+    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page1)
+    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page1]))
+    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
+    p = BazosPortal(
+        sale_type="prodam", category="byt",
+        canon_main="byt", canon_type="prodej", max_pages=1,
+    )
+    _seen, _counts, result_size, _pages, complete = p.walk_category(
+        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+    )
+    assert result_size == 500
+    assert complete is False     # max_pages cap → never claims completeness
+
+
+class _SeqIdxClient:
+    """fetch_index returns 200 for the first `ok_pages` calls, then raises
+    ListingGoneError — bazos 404s an offset past the last result page."""
+
+    def __init__(self, ok_pages: int):
+        self._ok = ok_pages
+        self.calls = 0
+
+    def fetch_index(self, *a, **k):
+        self.calls += 1
+        if self.calls > self._ok:
+            raise ListingGoneError("/past-end", 404)
+        return ("<html>", 200)
+
+
+def test_walk_category_stops_when_total_reached(monkeypatch):
+    # The pager advertises a next page, but we've already collected `total`, so
+    # the walk must stop (and never request the offset bazos would 404 on).
+    page = SimpleNamespace(
+        items=[SimpleNamespace(source_id_native="a", detail_path="/a", price_text=None),
+               SimpleNamespace(source_id_native="b", detail_path="/b", price_text=None)],
+        total=2, next_offset=20,
+    )
+    client = _SeqIdxClient(ok_pages=10)
+    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
+    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
+    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 2)
+    seen, _c, result_size, _pages, complete = _portal().walk_category(
+        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+    )
+    assert seen == {"a", "b"} and result_size == 2 and complete is True
+    assert client.calls == 1     # stopped after page 1; never requested offset 20
+
+
+def test_walk_category_tolerates_gone_index_page(monkeypatch):
+    # If a page past the end 404s before the total is reached, keep what we
+    # collected and report incomplete (so the sweep is skipped, not a crash).
+    page = SimpleNamespace(
+        items=[SimpleNamespace(source_id_native=str(i), detail_path=f"/{i}", price_text=None)
+               for i in range(20)],
+        total=400, next_offset=20,
+    )
+    client = _SeqIdxClient(ok_pages=1)   # page 1 ok, page 2 → gone
+    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
+    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: client)
+    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 20)
+    seen, _c, result_size, _pages, complete = _portal().walk_category(
+        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+    )
+    assert len(seen) == 20            # page-1 items kept despite the 404 on page 2
+    assert result_size == 400 and complete is False   # partial → no false delisting
 
 
 class _Limiter:

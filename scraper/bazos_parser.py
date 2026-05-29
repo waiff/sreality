@@ -384,7 +384,11 @@ def _next_offset(tree: HTMLParser) -> int | None:
         return None
     for link in pager.css("a"):
         if (link.text(strip=True) or "").startswith("Další"):
-            m = re.search(r"/(\d+)/?$", link.attributes.get("href") or "")
+            # The offset is a path segment; a locality-filtered URL appends a
+            # query (?hlokalita=…&humkreis=…), so allow a trailing ?/# after it
+            # — anchoring on $ alone misses every page past the first when a
+            # filter is active.
+            m = re.search(r"/(\d+)/?(?:[?#]|$)", link.attributes.get("href") or "")
             if m:
                 return int(m.group(1))
     return None

@@ -1034,12 +1034,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "scrape_bazos.yml",
     "name": "Scraping: Bazos crawler (pilot)",
-    "description": "Scheduled (every 6h) + manual crawler for reality.bazos.cz (multi-portal slice 3b). Walks one bazos category's index, fetches each listing detail, stages the raw HTML in portal_raw_pages, parses it, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "description": "Scheduled (hourly) + manual crawler for reality.bazos.cz. Runs the shared portal framework (Phase 4): an index walk that stages raw pages, bumps last_seen on still-listed ads (touch_listings), enqueues new + price-changed ads into the shared listing_detail_queue, and — under the completeness guard (architectural rule #3) — marks delisted ads inactive. A detail drain then fetches a bounded slice of the queue, parses it, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
     "manual": true,
     "schedules": [
       {
-        "cron": "30 */6 * * *",
-        "human": "Every 6 hours at :30"
+        "cron": "0 * * * *",
+        "human": "Every hour (on the hour)"
       }
     ],
     "onPush": false,
@@ -1089,10 +1089,18 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_pages",
-        "description": "cap index pages walked (pilot safety)",
+        "description": "cap index pages walked (blank = full walk)",
         "required": false,
         "type": "string",
-        "default": "2",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "cap detail-drain claims this run (blank = drain the queue)",
+        "required": false,
+        "type": "string",
+        "default": "",
         "options": null
       }
     ],
@@ -1102,7 +1110,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "bazos-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 20,
+    "timeoutMinutes": 30,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bazos.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bazos.yml"

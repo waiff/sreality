@@ -675,6 +675,108 @@ def mark_listing_inactive(
             )
 
 
+def mark_inactive_native(
+    conn: psycopg.Connection,
+    source: str,
+    category_main: str,
+    category_type: str,
+    seen_natives: set[str],
+) -> int:
+    """Native-id analogue of `mark_inactive` for portals whose index knows only
+    a portal-native string id (bazos), not the bigint PK.
+
+    Flips active listings of this (source, category_main, category_type) whose
+    `source_id_native` is absent from the walk to is_active=false. Scoped the
+    same way as `mark_inactive` (rule #15). A brand-new listing seen in the index
+    but not yet drained has no row, so it cannot be wrongly swept.
+    """
+    if not seen_natives:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE listings
+            SET is_active = false
+            WHERE is_active = true
+              AND source = %s
+              AND category_main = %s
+              AND category_type = %s
+              AND source_id_native <> ALL(%s)
+            RETURNING property_id
+            """,
+            (source, category_main, category_type, list(seen_natives)),
+        )
+        rows = cur.fetchall()
+        pids = {int(r[0]) for r in rows if r[0] is not None}
+        if pids:
+            cur.execute(
+                """
+                INSERT INTO dirty_properties (property_id)
+                SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+                """,
+                (list(pids),),
+            )
+        return len(rows)
+
+
+def mark_listing_inactive_native(
+    conn: psycopg.Connection,
+    source: str,
+    native_id: str,
+) -> None:
+    """Flip a single (source, source_id_native) listing inactive — used when a
+    portal detail fetch reports the ad gone (404/410 / gone-marker body). A
+    definitive per-listing signal, independent of the index-absence sweep."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE listings SET is_active = false "
+            "WHERE source = %s AND source_id_native = %s RETURNING property_id",
+            (source, native_id),
+        )
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            cur.execute(
+                "INSERT INTO dirty_properties (property_id) VALUES (%s) "
+                "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()",
+                (int(row[0]),),
+            )
+
+
+def portal_inactive_sweep_due(
+    conn: psycopg.Connection,
+    source: str,
+    default_interval_hours: int = 12,
+) -> bool:
+    """Whether a portal's index-absence delisting sweep is allowed to run now.
+
+    Throttled via `portals.inactive_sweep_min_interval_hours` (NULL → the code
+    default): the frequent index walk touches last_seen + enqueues new ads every
+    run, but the riskier delisting sweep runs at most once per window so a single
+    flaky/rate-limited walk can never mass-delist. Unknown source → allowed."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT last_inactive_sweep_at IS NULL
+                   OR now() - last_inactive_sweep_at
+                      >= make_interval(hours => coalesce(inactive_sweep_min_interval_hours, %s))
+            FROM portals WHERE source = %s
+            """,
+            (default_interval_hours, source),
+        )
+        row = cur.fetchone()
+    return True if row is None else bool(row[0])
+
+
+def record_portal_inactive_sweep(conn: psycopg.Connection, source: str) -> None:
+    """Stamp the moment a portal's delisting sweep actually ran (throttle clock)."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE portals SET last_inactive_sweep_at = now() WHERE source = %s",
+            (source,),
+        )
+
+
 def index_summary(
     conn: psycopg.Connection,
     sreality_ids: Iterable[int],
