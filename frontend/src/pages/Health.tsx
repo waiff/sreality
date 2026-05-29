@@ -196,6 +196,7 @@ const PORTAL_STAGE_LABEL: Record<PortalStage, string> = {
 const PORTAL_SHORT_LABEL: Record<string, string> = {
   sreality: 'Sreality',
   bazos: 'Bazoš',
+  idnes: 'iDNES',
 };
 
 function portalShort(source: string): string {
@@ -212,6 +213,8 @@ const PORTAL_WORKFLOWS: Record<string, string[]> = {
     'property_maintenance.yml', 'recompute_property_stats.yml', 'dedup_sweep.yml',
   ],
   bazos: ['scrape_bazos.yml'],
+  bezrealitky: ['scrape_bezrealitky.yml'],
+  idnes: ['scrape_idnes.yml'],
 };
 
 type RollupStatus = HealthCheckStatus | 'idle' | 'loading';

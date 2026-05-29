@@ -21,6 +21,50 @@ did a second 1.3M-row join; now derived from the per-category sums in one join
 (migration 110). Pilots (bazos, bezrealitky) get a compact reconciliation from their
 latest run; never-started scraper pilots read "idle", not false-red.
 
+### 2026-05: iDNES Reality crawler (portal 4, pilot)
+Another portal onto the shared Phase-4 framework (after bezrealitky) — proof that
+a new portal is "a fetcher + a parser + a config row," no pipeline divergence.
+iDNES is an **HTML crawler** (like bazos, unlike the JSON-API bezrealitky). `IdnesClient`
+(`scraper/idnes_client.py`) subclasses `BasePortalClient`, adding only the HTML
+`Accept` header, idnes URL builders, and removed-listing signals (404, a redirect
+off `/detail/`, body markers). `idnes_parser.py` parses the structured portal —
+the `<dl>` spec table, a clean price element, and precise per-listing coordinates
+straight from the page map config (`"center":[lon,lat]`), so geocoding is only a
+fallback; typed fields are normalised to the canonical sreality labels
+(`panelová→panel`, `velmi dobrý stav→velmi_dobry`, `osobní→osobni`) for
+cross-portal filter agreement. `IdnesPortal` (`scraper/idnes_main.py`) implements
+the runner seams and drives index-walk → detail-drain via the one
+`portal_runner`; partial walk ⇒ `supports_complete_walk=false` (never marks
+inactive, rule #3). Registered as a scraper portal (migration 110, `source='idnes'`,
+sort 25) parallel to bazos; the pre-existing `idnes_reality` on-demand parser row
+stays. `scrape_idnes.yml` runs both phases (every 6h, pilot `--max-pages 2`).
+Pilot scope: single category (`prodej/byty`) — the queue doesn't carry the
+category `parse_detail` needs; multi-category is the same deferred encoding as
+bazos.
+
+### 2026-05: Bezrealitky scraper (portal 3 on the shared framework)
+The first portal onboarded purely as a fetcher + parser + config row — proving
+the Phase 4.0 framework holds with no per-portal branches in shared code.
+Bezrealitky is a **JSON-API portal** (public GraphQL at `api.bezrealitky.cz`),
+so it mirrors sreality, not the bazos HTML crawler: `bezrealitky_client.py` pages
+`listAdverts` (index) + reads `advert(id)` (detail) over GraphQL (the shared
+`BasePortalClient._request` gained POST support — backwards-compatible); the API
+needs browser-like `Origin`/`Referer` headers. `bezrealitky_parser.parse_advert`
+maps the advert object onto the shared `ScrapedListing`, translating bezrealitky's
+enums into the **same canonical labels sreality stores** (verified against the live
+table) so cross-source filtering/dedup/condition-scoring see one vocabulary; coords
+come from the API's `gps` (precise, no geocoding). `BezrealitkyPortal` is
+complete-walk capable (GraphQL `totalCount` + no deep-pagination cap), so unlike
+bazos it marks delistings inactive under the completeness guard, **source-scoped**.
+Because the detail JSON carries offerType/estateType, the drain derives category
+from the response — one config walks many categories (byt/dum × prodej/pronájem to
+start; `includeImports:false` = bezrealitky's own private-seller inventory). New:
+`db.index_summary_native` (price-change refetch + PK resolution by
+`(source, source_id_native)`), migration 110 (promote the `portals` row to
+`kind='scraper'` + operational config), `scrape_bezrealitky.yml` (6-hourly + dispatch).
+The on-demand LLM URL parser (`source_parsers/bezrealitky.py`, estimation preview)
+is a separate entry point, unchanged.
+
 ### 2026-05: Health dashboard accuracy (post-split truth)
 Made the Health page tell the truth about the index/detail-split pipeline and
 fixed a cross-portal data bug it surfaced. (1) **Bazos no-progress bug:**
@@ -1087,7 +1131,11 @@ branches in shared code. The lean/modular guardrail before onboarding portals 3+
   Pilot scope: bazos is single-category (the queue doesn't carry the category
   parse_detail needs); multi-category bazos would encode it — deferred.
 After Phase 4 the limiter is each portal's polite fetch rate, not the DB or
-pipeline divergence — the healthy place to be.
+pipeline divergence — the healthy place to be. **Validated by onboarding
+bezrealitky (portal 3)** as a pure fetcher + parser + config row — a JSON-API
+portal that, because its detail JSON carries the category, walks many categories
+through the unchanged queue/drain (the multi-category limitation is per-portal,
+not a framework one). See the dated entry at the top of ## Done.
 
 ### Phase 2.0: Cadence split — index-walk / batched detail-drain (done)
 The structural unlock from the scaling roadmap
