@@ -300,7 +300,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--max-detail", type=int, default=None,
         help="cap detail-drain claims per run (omit = drain the queue)",
     )
-    p.add_argument("--workers", type=int, default=2, help="detail-fetch workers")
+    p.add_argument(
+        "--workers", type=int, default=8,
+        help="detail-fetch workers. advert(id) is ~2-3s latency-bound, so "
+             "concurrency (not the rate cap) sets throughput — 8 lets the rate "
+             "ceiling actually be reached. Raise for a one-time backfill.",
+    )
     p.add_argument(
         "--rate", type=float, default=1.0,
         help="detail-fetch requests/second ceiling (default 1.0)",

@@ -44,6 +44,11 @@ on:
         required: false
         default: "2.0"
         type: string
+      workers:
+        description: detail-fetch workers (concurrency; raise for a one-time backfill)
+        required: false
+        default: "8"
+        type: string
 
 concurrency:
   group: bezrealitky-scrape
@@ -71,8 +76,9 @@ jobs:
           MAX_PAGES: ${{ inputs.max_pages }}
           MAX_DETAIL: ${{ inputs.max_detail || '2000' }}
           RATE: ${{ inputs.rate || '2.0' }}
+          WORKERS: ${{ inputs.workers || '8' }}
         run: |
-          ARGS="--max-detail $MAX_DETAIL --rate $RATE"
+          ARGS="--max-detail $MAX_DETAIL --rate $RATE --workers $WORKERS"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
           echo "python -m scraper.bezrealitky_main $ARGS"
           eval "python -m scraper.bezrealitky_main $ARGS"
