@@ -1,6 +1,6 @@
-"""idnes_main on the portal framework: IdnesPortal seams + the main() that drives
-index-walk then detail-drain through the shared runner, recording an 'index' + a
-'detail' scrape_runs row tagged source='idnes'.
+"""idnes_main on the portal framework: IdnesPortal (complete-walk) seams + the
+main() that drives index-walk then detail-drain through the shared runner,
+recording an 'index' + a 'detail' scrape_runs row tagged source='idnes'.
 """
 
 from __future__ import annotations
@@ -8,11 +8,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from scraper import idnes_main
-from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.idnes_main import IdnesPortal
+from scraper.portal import PortalConfig
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 
@@ -28,11 +26,25 @@ class _Conn:
         pass
 
 
-def _portal() -> IdnesPortal:
-    return IdnesPortal(
-        sale_type="prodej", category="byty",
-        canon_main="byt", canon_type="prodej",
+def _config(complete: bool = True) -> PortalConfig:
+    return PortalConfig(
+        source="idnes",
+        supports_complete_walk=complete,
+        categories=[{"sale_type": "prodej", "category": "byty"}],
+        split_threshold=None,
     )
+
+
+def _portal(**kw: Any) -> IdnesPortal:
+    return IdnesPortal(_config(), **kw)
+
+
+class _Limiter:
+    def acquire(self) -> None:
+        pass
+
+    def penalize(self) -> None:
+        pass
 
 
 # --- main(): two-phase run recording ---------------------------------------
@@ -41,6 +53,7 @@ def _portal() -> IdnesPortal:
 def test_main_records_index_and_detail_runs(monkeypatch):
     starts: list[tuple] = []
     finals: list[tuple] = []
+    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
     monkeypatch.setattr(idnes_main.db, "connect", lambda: _Conn())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
@@ -60,16 +73,16 @@ def test_main_records_index_and_detail_runs(monkeypatch):
         lambda portal, dry_run, **kw: (0, {"listings_scraped_new": 2, "listings_updated": 1}),
     )
 
-    rc = idnes_main.main([])
+    rc = idnes_main.main(["--max-detail", "10"])
     assert rc == 0
     assert starts == [("index", "idnes"), ("detail", "idnes")]
     assert [kw["index_pages"] for _id, kw in finals] == [3, 0]
-    assert finals[0][1]["by_category"][0]["category_main"] == "byt"
     assert finals[1][1]["listings_scraped_new"] == 2
 
 
 def test_dry_run_records_no_scrape_run(monkeypatch):
     starts = {"n": 0}
+    monkeypatch.setattr(idnes_main, "_load_config", lambda dry_run: _config())
     monkeypatch.setattr(
         idnes_main.db, "scrape_run_start",
         lambda *_a, **_k: starts.__setitem__("n", starts["n"] + 1) or 1,
@@ -89,14 +102,12 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 # --- IdnesPortal seams ------------------------------------------------------
 
 
-def test_portal_single_category_and_partial_walk():
+def test_portal_config_and_complete_walk():
     p = _portal()
     assert p.source == "idnes"
-    assert p.supports_complete_walk is False
+    assert p.supports_complete_walk is True
     assert p.categories() == [{"sale_type": "prodej", "category": "byty"}]
-    assert p.category_labels({}) == ("byt", "prodej")
-    assert p.mark_inactive(None, {}, {"x"}) == 0
-    assert p.active_count(None, {}) is None
+    assert p.category_labels({"sale_type": "prodej", "category": "byty"}) == ("byt", "prodej")
 
 
 class _IdxClient:
@@ -108,40 +119,95 @@ class _IdxClient:
         return ("<html>", 200)
 
 
-def test_walk_category_enqueues_seen(monkeypatch):
-    a_url = "https://reality.idnes.cz/detail/prodej/byt/x/6a18deadbeefdeadbeef0001/"
-    b_url = "https://reality.idnes.cz/detail/prodej/byt/y/6a18deadbeefdeadbeef0002/"
+def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
+    a = "6a18deadbeefdeadbeef0001"  # new
+    b = "6a18deadbeefdeadbeef0002"  # price changed
+    c = "6a18deadbeefdeadbeef0003"  # unchanged
+    base = "https://reality.idnes.cz/detail/prodej/byt/x/"
     page = SimpleNamespace(
-        items=[SimpleNamespace(source_id_native="6a18deadbeefdeadbeef0001", detail_path=a_url),
-               SimpleNamespace(source_id_native="6a18deadbeefdeadbeef0002", detail_path=b_url)],
-        total=2, next_offset=None,
+        total=3, next_offset=None,
+        items=[
+            SimpleNamespace(source_id_native=a, detail_path=f"{base}{a}/", price_text="5 000 000 Kč"),
+            SimpleNamespace(source_id_native=b, detail_path=f"{base}{b}/", price_text="6 000 000 Kč"),
+            SimpleNamespace(source_id_native=c, detail_path=f"{base}{c}/", price_text="7 000 000 Kč"),
+        ],
     )
     monkeypatch.setattr(idnes_main, "parse_index", lambda _h: page)
     monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
     monkeypatch.setattr(idnes_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(
+        idnes_main.db, "index_summary_native",
+        lambda _c, _s, ids: {
+            b: {"sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},  # differs -> changed
+            c: {"sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},  # same -> unchanged
+        },
+    )
+    touched: dict[str, Any] = {}
+    monkeypatch.setattr(idnes_main.db, "touch_listings", lambda _c, pks: touched.update(pks=list(pks)))
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         idnes_main.db, "enqueue_detail",
         lambda _c, source, entries: (captured.update(source=source, entries=list(entries))
                                       or len(captured["entries"])),
     )
-    p = _portal()
-    seen, counts, result_size, pages, complete = p.walk_category(
+    seen, counts, total, pages, complete = _portal().walk_category(
         {"sale_type": "prodej", "category": "byty"}, object(), False, _Limiter(),
     )
-    assert seen == {"6a18deadbeefdeadbeef0001", "6a18deadbeefdeadbeef0002"}
-    assert result_size is None and complete is False     # partial walk
+    assert seen == {a, b, c}
+    assert total == 3 and complete is True       # full walk (no max_pages) >= 90%
+    assert touched["pks"] == [-3]                # unchanged listing touched
+    refs = {e[0]: e for e in captured["entries"]}
+    assert refs[a][3] == idnes_main.db.QUEUE_PRIORITY_NEW      # new
+    assert refs[b][3] == idnes_main.db.QUEUE_PRIORITY_CHANGED  # changed
+    assert refs[a][1] == f"{base}{a}/"           # detail_ref is the absolute URL
+    assert c not in refs                          # unchanged is not enqueued
+
+
+def test_walk_category_max_pages_suppresses_complete(monkeypatch):
+    page = SimpleNamespace(
+        total=1000, next_offset=2,
+        items=[SimpleNamespace(
+            source_id_native="6a18deadbeefdeadbeef0001",
+            detail_path="https://reality.idnes.cz/detail/prodej/byt/x/6a18deadbeefdeadbeef0001/",
+            price_text="5 000 000 Kč")],
+    )
+    monkeypatch.setattr(idnes_main, "parse_index", lambda _h: page)
+    monkeypatch.setattr(idnes_main, "IdnesClient", _IdxClient)
+    monkeypatch.setattr(idnes_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(idnes_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(idnes_main.db, "enqueue_detail", lambda *a, **k: 1)
+    _, _, total, pages, complete = _portal(max_pages=1).walk_category(
+        {"sale_type": "prodej", "category": "byty"}, object(), False, _Limiter(),
+    )
+    assert pages == 1
+    assert complete is False     # max_pages => partial => never mark_inactive
+
+
+def test_mark_inactive_source_scoped(monkeypatch):
+    monkeypatch.setattr(
+        idnes_main.db, "index_summary_native",
+        lambda _c, _s, ids: {n: {"sreality_id": -i, "price_czk": 1, "last_seen_at": None}
+                             for i, n in enumerate(ids, 1)},
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        idnes_main.db, "mark_inactive",
+        lambda _c, cm, ct, pks, source: (captured.update(cm=cm, ct=ct, pks=set(pks), source=source) or 7),
+    )
+    n = _portal().mark_inactive(object(), {"sale_type": "prodej", "category": "byty"}, {"x", "y"})
+    assert n == 7
+    assert captured["cm"] == "byt" and captured["ct"] == "prodej"
     assert captured["source"] == "idnes"
-    # entries: (native_id, detail_ref(absolute url), price, priority)
-    assert ("6a18deadbeefdeadbeef0001", a_url, None, idnes_main.db.QUEUE_PRIORITY_NEW) in captured["entries"]
 
 
-class _Limiter:
-    def acquire(self) -> None:
-        pass
-
-    def penalize(self) -> None:
-        pass
+def test_active_count_source_scoped(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        idnes_main.db, "active_count",
+        lambda _c, cm, ct, source: (captured.update(cm=cm, ct=ct, source=source) or 42),
+    )
+    assert _portal().active_count(object(), {"sale_type": "prodej", "category": "byty"}) == 42
+    assert captured == {"cm": "byt", "ct": "prodej", "source": "idnes"}
 
 
 class _DetailClient:
@@ -156,12 +222,18 @@ class _DetailClient:
         return ("<html>detail</html>", 200)
 
 
-def test_fetch_detail_ok(monkeypatch):
-    monkeypatch.setattr(idnes_main, "parse_detail", lambda *a, **k: SimpleNamespace(raw={}))
-    p = _portal()
-    item = p.fetch_detail(_DetailClient("ok"), "6a18deadbeefdeadbeef0001", "/d/a")
-    assert item.kind == "ok" and item.native_id == "6a18deadbeefdeadbeef0001"
-    assert item.payload["status"] == 200
+def test_fetch_detail_ok_derives_category_from_url(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_parse(html, *, source_url, category_main, category_type):
+        captured["cm"], captured["ct"] = category_main, category_type
+        return SimpleNamespace(raw={})
+
+    monkeypatch.setattr(idnes_main, "parse_detail", fake_parse)
+    ref = "https://reality.idnes.cz/detail/pronajem/dum/brno/6a18deadbeefdeadbeef0009/"
+    item = _portal().fetch_detail(_DetailClient("ok"), "6a18deadbeefdeadbeef0009", ref)
+    assert item.kind == "ok"
+    assert (captured["cm"], captured["ct"]) == ("dum", "pronajem")  # derived from URL
 
 
 def test_fetch_detail_gone():
@@ -187,55 +259,15 @@ def test_write_details_ingests_and_counts(monkeypatch):
     assert counts["images_discovered"] == 2
 
 
-# --- geocoder wiring (fallback when the page omits coordinates) --------------
-
-
-def test_build_geocoder_none_without_key(monkeypatch):
-    monkeypatch.delenv("MAPY_CZ_API_KEY", raising=False)
-    assert idnes_main._build_geocoder() is None
-
-
-def test_build_geocoder_cached_with_key(monkeypatch):
-    monkeypatch.setenv("MAPY_CZ_API_KEY", "test-key")
-    assert isinstance(idnes_main._build_geocoder(), idnes_main._CachingGeocoder)
-
-
-def test_caching_geocoder_memoises_hits_and_misses():
-    calls = {"n": 0}
-
-    def fn(query: str) -> GeocodeResult:
-        calls["n"] += 1
-        if "bad" in query:
-            raise GeocodingError("no result")
-        return GeocodeResult(
-            lat=50.0, lng=14.0, confidence="high", matched_address="a",
-            matched_type="regional.address", bbox=None, raw={},
-        )
-
-    geocoder = idnes_main._CachingGeocoder(fn)
-    assert geocoder("Praha").lat == 50.0
-    assert geocoder("  praha ").lat == 50.0     # normalized key -> cache hit
-    assert calls["n"] == 1
-    with pytest.raises(GeocodingError):
-        geocoder("bad street")
-    with pytest.raises(GeocodingError):
-        geocoder("bad street")                  # cached miss, not re-queried
-    assert calls["n"] == 2
-
-
-def test_fetch_detail_passes_geocoder_to_parser(monkeypatch):
-    captured: dict[str, Any] = {}
-
-    def fake_parse(html, *, source_url, category_main, category_type, geocoder=None):
-        captured["geocoder"] = geocoder
-        return SimpleNamespace(raw={})
-
-    monkeypatch.setattr(idnes_main, "parse_detail", fake_parse)
-    sentinel = object()
-    portal = IdnesPortal(
-        sale_type="prodej", category="byty",
-        canon_main="byt", canon_type="prodej", geocoder=sentinel,
+def test_mark_gone_flips_listing_inactive(monkeypatch):
+    monkeypatch.setattr(
+        idnes_main.db, "index_summary_native",
+        lambda _c, _s, ids: {"a": {"sreality_id": -5, "price_czk": 1, "last_seen_at": None}},
     )
-    item = portal.fetch_detail(_DetailClient("ok"), "a", "/d/a")
-    assert item.kind == "ok"
-    assert captured["geocoder"] is sentinel
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        idnes_main.db, "mark_listing_inactive",
+        lambda _c, pk: captured.update(pk=pk),
+    )
+    _portal().mark_gone(object(), "a")
+    assert captured["pk"] == -5

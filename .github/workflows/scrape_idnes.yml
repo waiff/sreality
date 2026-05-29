@@ -1,51 +1,50 @@
-name: "Scraping: iDNES Reality crawler (pilot)"
+name: "Scraping: iDNES Reality scraper (pilot)"
 
-# Scheduled (every 6h) + manual crawler for reality.idnes.cz, on the shared
-# portal framework (Phase 4). One process runs both phases: an index-walk that
-# stages raw pages and enqueues listings into the shared listing_detail_queue
-# (source='idnes'), then a detail-drain that fetches + parses + ingests through
-# db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
+# Scheduled (every 6h) + manual scraper for reality.idnes.cz on the shared portal
+# framework. One job runs both phases: an index walk pages the HTML search
+# results and enqueues new/price-changed ids into listing_detail_queue, then a
+# detail drain fetches each listing page, parses to a ScrapedListing, and ingests
+# through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
 #
-# Records its own scrape_runs rows tagged source='idnes' (an 'index' + a
-# 'detail' row) so the Health dashboard shows iDNES activity per-source. A
-# one-category crawl is a partial walk, so the runner never runs mark_inactive
-# (architectural rule #3) — it only upserts.
+# Categories live in the `portals` registry row (migrations 110/111), not here, so
+# coverage is tuned with a SQL update, no workflow edit. A scheduled run takes no
+# inputs and does a FULL per-category walk (no --max-pages), which is provable-
+# complete (search pages carry a result total + no deep-pagination cap), so the
+# runner marks delisted listings inactive under the completeness guard —
+# source-scoped to idnes rows only (architectural rules #3/#15).
 #
-# Required secrets: SUPABASE_DB_URL. Optional: MAPY_CZ_API_KEY — idnes embeds
-# precise per-listing coordinates in the page, so the geocoder is only a fallback
-# for the rare coordless listing; the crawl runs fine without it.
+# Writes 'index' + 'detail' scrape_runs rows under source='idnes' (its own
+# Health-page lane; does not touch sreality liveness / reconciliation). Images:
+# the drain records image-URL rows; the shared images.yml job downloads the bytes
+# to R2 (source-agnostic). Coordinates come from the page's embedded map config,
+# so no MAPY_CZ_API_KEY is needed.
 #
-# Cadence: every 6h, offset off bazos's :30 and the hourly recompute's :00 so a
-# crawl's Tier-1 attaches are picked up by the next recompute within the hour. A
-# scheduled run has no inputs, so the run falls back to prodej/byty (the pilot
-# scope) bounded by --max-pages 2 — small enough to stay inside the 20-min
-# timeout. Widen / shard once the pilot proves the full-category run time;
-# workflow_dispatch stays the manual escape hatch with its own inputs.
+# Required secret: SUPABASE_DB_URL.
+#
+# Cadence: every 6h, offset off the other scrapers. iDNES is large (tens of
+# thousands of listings/category), so the index walk takes ~10-15 min and the
+# detail drain is bounded per run (--max-detail); the queue persists across runs,
+# so the first ~1-2 days drain the initial backlog, then it is steady-state.
 
 on:
   schedule:
-    - cron: "45 */6 * * *"
+    - cron: "15 */6 * * *"
   workflow_dispatch:
     inputs:
-      sale_type:
-        description: prodej (sale) or pronajem (rent)
-        type: choice
-        default: prodej
-        options: [prodej, pronajem]
-      category:
-        description: idnes category segment
-        type: choice
-        default: byty
-        options: [byty, domy, pozemky, komercni, ostatni]
-      locality:
-        description: idnes region path segment (e.g. praha); blank = nationwide
+      max_pages:
+        description: cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
         required: false
         default: ""
         type: string
-      max_pages:
-        description: cap index pages walked (pilot safety)
+      max_detail:
+        description: cap detail-drain claims this run
         required: false
-        default: "2"
+        default: "6000"
+        type: string
+      rate:
+        description: detail-fetch requests/second ceiling
+        required: false
+        default: "3.0"
         type: string
 
 concurrency:
@@ -55,7 +54,7 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
 
@@ -68,18 +67,14 @@ jobs:
       - name: Install
         run: pip install -e .
 
-      - name: Run idnes crawl
+      - name: Run idnes scrape
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
-          # inputs.* are empty on a scheduled run, so fall back to the pilot scope.
-          SALE_TYPE: ${{ inputs.sale_type || 'prodej' }}
-          CATEGORY: ${{ inputs.category || 'byty' }}
-          LOCALITY: ${{ inputs.locality }}
-          MAX_PAGES: ${{ inputs.max_pages || '2' }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_DETAIL: ${{ inputs.max_detail || '6000' }}
+          RATE: ${{ inputs.rate || '3.0' }}
         run: |
-          ARGS="--sale-type $SALE_TYPE --category $CATEGORY"
-          if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi
+          ARGS="--max-detail $MAX_DETAIL --rate $RATE"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
           echo "python -m scraper.idnes_main $ARGS"
           eval "python -m scraper.idnes_main $ARGS"

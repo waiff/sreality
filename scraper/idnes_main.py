@@ -1,37 +1,42 @@
-"""Orchestrator for the reality.idnes.cz crawler — on the shared portal framework.
+"""Orchestrator for the reality.idnes.cz scraper — on the shared portal framework.
 
 Runnable as `python -m scraper.idnes_main`. iDNES is a `Portal` (IdnesPortal)
-driven by the one generic `scraper.portal_runner`: an index-walk that stages raw
-pages and enqueues listings into the shared `listing_detail_queue` (source='idnes',
-migration 108), then a detail-drain that fetches + parses + ingests via
+driven by the one generic `scraper.portal_runner`: an index-walk that pages the
+HTML search results and enqueues new/price-changed ids into the shared
+`listing_detail_queue` (source='idnes', migration 108), then a detail-drain that
+fetches each listing page, parses it to a `ScrapedListing`, and ingests via
 `db.ingest_scraped_listing` (Tier-0 idempotency + Tier-1 matching). No bespoke
 pipeline — only the per-portal fetcher (IdnesClient) + parser (idnes_parser) +
-config differ from sreality/bazos (the modularity rule in CLAUDE.md).
+config differ from sreality/bezrealitky (the modularity rule in CLAUDE.md).
 
-A one-category crawl is a partial walk, so `supports_complete_walk=False` and the
-runner NEVER runs mark_inactive (architectural rule #3) — it only upserts.
-
-Pilot scope: a single category at a time (the queue does not carry the category,
-which `parse_detail` needs, so the drain assumes this portal's one category).
+Unlike bazos (a partial-walk classifieds crawler), idnes's search pages carry a
+result total and have no deep-pagination cap, so a per-category walk is
+provable-complete: `supports_complete_walk` (config-driven) lets the runner mark
+delisted listings inactive under the completeness guard (architectural rule #3),
+source-scoped so it only ever touches idnes rows (rule #15). The detail URL
+carries the category (`/detail/{sale}/{cat}/…`), so the drain derives each
+listing's category from its own URL — one config walks many categories without
+the queue-encodes-category limitation that constrains bazos. Coordinates come
+straight from the page's embedded map config, so there is no geocoding step.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 from typing import Any
 
-from scraper import db, geocoding, portal_runner
-from scraper.geocoding import GeocodeResult, GeocodingError
+from scraper import db, portal_runner
 from scraper.idnes_client import IdnesClient, detail_url, index_url
 from scraper.idnes_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
-    Geocoder,
+    category_from_url,
+    index_price,
     parse_detail,
     parse_index,
 )
+from scraper.portal import PortalConfig, default_config, load_portal_config
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -39,133 +44,143 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "idnes"
 
-
-class _CachingGeocoder:
-    """Per-run memoised geocoder. idnes embeds precise per-listing coordinates, so
-    geocoding is only a fallback for the rare coordless page; memoising still
-    collapses repeat locality queries (and caches misses) across the worker pool."""
-
-    def __init__(self, fn: Geocoder) -> None:
-        self._fn = fn
-        self._cache: dict[str, GeocodeResult | GeocodingError] = {}
-
-    def __call__(self, query: str) -> GeocodeResult:
-        key = " ".join(query.lower().split())
-        cached = self._cache.get(key)
-        if cached is not None:
-            if isinstance(cached, GeocodingError):
-                raise cached
-            return cached
-        try:
-            result = self._fn(query)
-        except GeocodingError as exc:
-            self._cache[key] = exc
-            raise
-        self._cache[key] = result
-        return result
+# An index walk that collected at least this fraction of the page-reported total
+# is treated as complete enough to drive mark_inactive; below it the walk likely
+# truncated and flipping unseen listings inactive would falsely delist live ones.
+# Mirrors scraper.main / bezrealitky_main.
+INDEX_MIN_COMPLETENESS = 0.9
 
 
-def _build_geocoder() -> Geocoder | None:
-    if not os.environ.get("MAPY_CZ_API_KEY"):
-        LOG.info("GEOCODE skipped: MAPY_CZ_API_KEY unset; coords from page pin only")
-        return None
-    return _CachingGeocoder(geocoding.geocode)
+def _walk_complete(collected: int, total: int | None) -> bool:
+    if not total or total <= 0:
+        return True
+    return collected >= total * INDEX_MIN_COMPLETENESS
 
 
 class IdnesPortal:
     """iDNES Reality as a Portal: the seams the generic runner needs, wrapping the
-    idnes client + parser. Single-category pilot (see module docstring)."""
+    idnes client + parser. Operational scope (categories, complete-walk
+    capability) comes from the `portals` registry config."""
 
     source = SOURCE
-    supports_complete_walk = False
-    index_rate = 0.5
+    # idnes is a large portal walked page-by-page (≈26 listings/page, tens of
+    # thousands per category), so the index needs a faster ceiling than the
+    # classifieds pilots. The detail-fetch rate is the (slower) drain CLI arg.
+    index_rate = 3.0
 
-    def __init__(
-        self,
-        *,
-        sale_type: str,
-        category: str,
-        canon_main: str,
-        canon_type: str,
-        locality: str | None = None,
-        max_pages: int | None = None,
-        geocoder: Geocoder | None = None,
-    ) -> None:
-        self._sale_type = sale_type
-        self._category = category
-        self._canon_main = canon_main
-        self._canon_type = canon_type
-        self._locality = locality
+    def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
+        self.supports_complete_walk = config.supports_complete_walk
+        self._categories = config.categories
         self._max_pages = max_pages
-        self._geocoder = geocoder
 
     # --- index-walk seams ---
-    def categories(self) -> list[dict[str, str]]:
-        return [{"sale_type": self._sale_type, "category": self._category}]
+    def categories(self) -> list[dict[str, Any]]:
+        return list(self._categories)
 
-    def category_labels(self, category: dict[str, str]) -> tuple[str, str]:
-        return (self._canon_main, self._canon_type)
+    def category_labels(self, category: dict[str, Any]) -> tuple[str | None, str | None]:
+        return (
+            CATEGORY_MAIN.get(category.get("category")),
+            SALE_TYPE.get(category.get("sale_type")),
+        )
 
     def connect_index(self) -> Any:
         return db.connect()
 
     def connect_drain(self) -> Any:
+        # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
+        # so the transaction pooler is fine — no session pooler needed.
         return db.connect()
 
     def walk_category(
-        self, category: dict[str, str], conn: Any, dry_run: bool, limiter: RateLimiter,
+        self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = IdnesClient(limiter=limiter)
-        seen: set[str] = set()
-        entries: list[tuple[str, str | None, int | None, int]] = []
+
+        native_ids: list[str] = []
+        price_map: dict[str, int | None] = {}
+        ref_map: dict[str, str] = {}
+        total: int | None = None
         pages = 0
         page: int | None = None       # None = the bare first page (idnes offset paging)
         while True:
-            html, status = client.fetch_index(
-                sale_type, cat, page, locality=self._locality
-            )
+            html, status = client.fetch_index(sale_type, cat, page, locality=None)
             parsed = parse_index(html)
             pages += 1
-            LOG.info(
-                "INDEX page=%s items=%d total=%s", page, len(parsed.items), parsed.total
-            )
+            total = parsed.total if parsed.total is not None else total
+            LOG.info("INDEX page=%s items=%d total=%s", page, len(parsed.items), total)
             if conn is not None:
                 db.upsert_portal_raw_page(
                     conn, source=SOURCE,
                     source_id_native=f"{sale_type}/{cat}/{page if page is not None else 0}",
-                    source_url=index_url(sale_type, cat, page, locality=self._locality),
+                    source_url=index_url(sale_type, cat, page),
                     page_kind="index", html=html, http_status=status,
                 )
             new_on_page = 0
             for item in parsed.items:
-                if item.source_id_native not in seen:
-                    seen.add(item.source_id_native)
+                nid = item.source_id_native
+                if nid not in ref_map:
+                    native_ids.append(nid)
                     new_on_page += 1
-                    entries.append(
-                        (item.source_id_native, detail_url(item.detail_path), None,
-                         db.QUEUE_PRIORITY_NEW)
-                    )
+                ref_map[nid] = detail_url(item.detail_path)
+                price_map[nid] = index_price(item.price_text)
             if self._max_pages and pages >= self._max_pages:
                 break
             # Stop on an empty page, no "next" link, or a page that added nothing
-            # new (idnes clamps an out-of-range ?page to the last page rather than
-            # 404ing, which would otherwise loop).
+            # new (idnes clamps an out-of-range ?page to the last page, which
+            # would otherwise loop forever).
             if not parsed.items or parsed.next_offset is None or new_on_page == 0:
                 break
             page = parsed.next_offset
-        enqueued = 0
-        if conn is not None and entries:
-            enqueued = db.enqueue_detail(conn, SOURCE, entries)
-        LOG.info("ENQUEUE source=idnes enqueued=%d seen=%d", enqueued, len(seen))
-        # Partial walk: result_size unknown, complete=False (never mark_inactive).
-        return seen, {"found_new": len(seen), "enqueued": enqueued}, None, pages, False
 
-    def mark_inactive(self, conn: Any, category: dict[str, str], seen: set[str]) -> int:
-        return 0  # never called (supports_complete_walk=False)
+        seen = set(native_ids)
+        existing = (
+            db.index_summary_native(conn, SOURCE, native_ids)
+            if conn is not None else {}
+        )
+        new_ids = [n for n in native_ids if n not in existing]
+        changed: list[str] = []
+        unchanged_pks: list[int] = []
+        for nid in native_ids:
+            prev = existing.get(nid)
+            if prev is None:
+                continue
+            if price_map.get(nid) is not None and prev["price_czk"] == price_map[nid]:
+                unchanged_pks.append(prev["sreality_id"])
+            else:
+                changed.append(nid)
 
-    def active_count(self, conn: Any, category: dict[str, str]) -> int | None:
-        return None
+        if conn is not None and unchanged_pks:
+            db.touch_listings(conn, unchanged_pks)
+
+        entries = (
+            [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
+            + [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
+        )
+        enqueued = (
+            db.enqueue_detail(conn, SOURCE, entries)
+            if conn is not None and entries else 0
+        )
+        LOG.info(
+            "ENQUEUE source=idnes new=%d changed=%d unchanged=%d enqueued=%d",
+            len(new_ids), len(changed), len(unchanged_pks), enqueued,
+        )
+        complete = (not self._max_pages) and _walk_complete(len(seen), total)
+        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
+
+    def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return 0
+        existing = db.index_summary_native(conn, SOURCE, list(seen))
+        pks = {v["sreality_id"] for v in existing.values()}
+        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
+
+    def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return None
+        return db.active_count(conn, cm, ct, source=SOURCE)
 
     # --- detail-drain seams ---
     def make_client(self, limiter: RateLimiter) -> IdnesClient:
@@ -181,11 +196,10 @@ class IdnesPortal:
             return DrainItem(native_id=native_id, kind="gone")
         except Exception as exc:  # noqa: BLE001 - one listing must not kill the run
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        cm, ct = category_from_url(url)
         try:
             listing = parse_detail(
-                html, source_url=url,
-                category_main=self._canon_main, category_type=self._canon_type,
-                geocoder=self._geocoder,
+                html, source_url=url, category_main=cm, category_type=ct,
             )
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
@@ -214,14 +228,16 @@ class IdnesPortal:
         return counts
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
-        # Partial-walk pilot: a gone detail is dequeued but NOT flipped inactive
-        # (rule #3 — no delisting inference for a portal that can't prove a
-        # complete walk). Documented limitation.
-        pass
+        # Complete-walk portal: a gone detail flips that one listing inactive
+        # immediately (mirrors sreality), then the runner dequeues it.
+        existing = db.index_summary_native(conn, SOURCE, [native_id])
+        row = existing.get(native_id)
+        if row is not None:
+            db.mark_listing_inactive(conn, row["sreality_id"])
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:
-        # The queue (fail_detail) tracks attempts/give-up; idnes has no
-        # sreality_id-keyed listing_fetch_failures row.
+        # The queue (fail_detail) tracks attempts/give-up; non-sreality sources
+        # have no sreality_id-keyed listing_fetch_failures row.
         pass
 
     def claimable_count(self, conn: Any) -> int:
@@ -231,6 +247,17 @@ class IdnesPortal:
                 "WHERE source = 'idnes' AND claimed_at IS NULL AND given_up = false"
             )
             return int(cur.fetchone()[0])
+
+
+def _load_config(dry_run: bool) -> PortalConfig:
+    if dry_run:
+        return default_config(SOURCE)
+    try:
+        with db.connect() as conn:
+            return load_portal_config(conn, SOURCE)
+    except Exception as exc:
+        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
+        return default_config(SOURCE)
 
 
 def _finalize(run_id: int | None, agg: dict[str, Any]) -> None:
@@ -254,7 +281,9 @@ def _finalize(run_id: int | None, agg: dict[str, Any]) -> None:
         LOG.warning("scrape_run_finalize failed: %s", exc)
 
 
-def _run_phase(portal: IdnesPortal, run_type: str, runner, dry_run: bool, **kw: Any) -> int:
+def _run_phase(
+    portal: IdnesPortal, run_type: str, runner: Any, dry_run: bool, **kw: Any,
+) -> int:
     run_id: int | None = None
     if not dry_run:
         try:
@@ -276,26 +305,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_logging(args.verbose)
 
-    canon_type = SALE_TYPE.get(args.sale_type)
-    canon_main = CATEGORY_MAIN.get(args.category)
-    if canon_type is None or canon_main is None:
-        LOG.error(
-            "unmapped scope sale_type=%s category=%s", args.sale_type, args.category
-        )
-        return 2
-
-    portal = IdnesPortal(
-        sale_type=args.sale_type, category=args.category,
-        canon_main=canon_main, canon_type=canon_type,
-        locality=args.locality, max_pages=args.max_pages,
-        geocoder=_build_geocoder(),
-    )
+    config = _load_config(args.dry_run)
+    portal = IdnesPortal(config, max_pages=args.max_pages)
 
     # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
     # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
-    rc = _run_phase(
-        portal, "index", portal_runner.run_index_walk, args.dry_run,
-    )
+    rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
     if rc == 0:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
@@ -306,22 +321,20 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="reality.idnes.cz crawler (portal framework)")
-    p.add_argument("--sale-type", default="prodej", choices=sorted(SALE_TYPE))
-    p.add_argument("--category", default="byty", choices=sorted(CATEGORY_MAIN))
-    p.add_argument("--locality", default=None, help="idnes region path segment, e.g. praha")
+    p = argparse.ArgumentParser(description="reality.idnes.cz scraper (portal framework)")
     p.add_argument(
         "--max-pages", type=int, default=None,
-        help="cap index pages walked (pilot safety); omit for a full walk",
+        help="cap index pages per category (ad-hoc partial run; suppresses "
+             "mark_inactive). Omit for a full, complete walk.",
     )
     p.add_argument(
         "--max-detail", type=int, default=None,
         help="cap detail-drain claims per run (omit = drain the queue)",
     )
-    p.add_argument("--workers", type=int, default=1, help="detail-fetch workers")
+    p.add_argument("--workers", type=int, default=4, help="detail-fetch workers")
     p.add_argument(
-        "--rate", type=float, default=0.5,
-        help="requests/second ceiling (default 0.5 = one request per 2s)",
+        "--rate", type=float, default=3.0,
+        help="detail-fetch requests/second ceiling (default 3.0)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

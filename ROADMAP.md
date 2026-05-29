@@ -29,18 +29,23 @@ iDNES is an **HTML crawler** (like bazos, unlike the JSON-API bezrealitky). `Idn
 `Accept` header, idnes URL builders, and removed-listing signals (404, a redirect
 off `/detail/`, body markers). `idnes_parser.py` parses the structured portal —
 the `<dl>` spec table, a clean price element, and precise per-listing coordinates
-straight from the page map config (`"center":[lon,lat]`), so geocoding is only a
-fallback; typed fields are normalised to the canonical sreality labels
+straight from the page map config (`"center":[lon,lat]`), so there is no geocoding
+step; typed fields are normalised to the canonical sreality labels
 (`panelová→panel`, `velmi dobrý stav→velmi_dobry`, `osobní→osobni`) for
 cross-portal filter agreement. `IdnesPortal` (`scraper/idnes_main.py`) implements
-the runner seams and drives index-walk → detail-drain via the one
-`portal_runner`; partial walk ⇒ `supports_complete_walk=false` (never marks
-inactive, rule #3). Registered as a scraper portal (migration 110, `source='idnes'`,
-sort 25) parallel to bazos; the pre-existing `idnes_reality` on-demand parser row
-stays. `scrape_idnes.yml` runs both phases (every 6h, pilot `--max-pages 2`).
-Pilot scope: single category (`prodej/byty`) — the queue doesn't carry the
-category `parse_detail` needs; multi-category is the same deferred encoding as
-bazos.
+the runner seams and drives index-walk → detail-drain via the one `portal_runner`.
+**Complete-walk** (migration 111): search pages carry a result total and have no
+deep-pagination cap, so — like bezrealitky, unlike bazos — `supports_complete_walk=
+true` and the runner marks delisted listings inactive under the completeness guard,
+source-scoped (rules #3/#15). The detail URL carries the category
+(`/detail/{sale}/{cat}/…`), so the drain derives each listing's category from its
+own URL — one `portals`-row config walks **many categories** (byty + domy × prodej +
+pronájem). Registered as a scraper portal (migration 110, `source='idnes'`, sort 25)
+parallel to bazos; the pre-existing `idnes_reality` on-demand parser row stays (the
+Health card shows both badges). `scrape_idnes.yml` runs a full walk + bounded detail
+drain every 6h; the queue persists, so the first ~1-2 days drain the ~60k backlog,
+then steady-state. Images: the drain records URL rows; the shared `images.yml`
+downloads bytes to R2. Next: scale categories / tune cadence as the pilot proves out.
 
 ### 2026-05: Bezrealitky scraper (portal 3 on the shared framework)
 The first portal onboarded purely as a fetcher + parser + config row — proving

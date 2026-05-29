@@ -41,6 +41,18 @@ CATEGORY_MAIN: dict[str, str] = {
     "ostatni": "ostatni",
 }
 
+# Detail URLs use the SINGULAR category segment (/detail/prodej/byt/...), unlike
+# the plural search segment (/s/prodej/byty/). The drain derives each listing's
+# category from its own detail URL (the queue is category-agnostic), so one
+# config can walk many categories.
+DETAIL_CATEGORY: dict[str, str] = {
+    "byt": "byt",
+    "dum": "dum",
+    "pozemek": "pozemek",
+    "komercni": "komercni",
+    "ostatni": "ostatni",
+}
+
 # idnes building-construction labels -> the canonical codes parser._BUILDING_TYPE_TEXT
 # emits, so a cross-portal "panel" filter matches sreality and idnes alike.
 BUILDING_TYPE: dict[str, str] = {
@@ -72,6 +84,7 @@ _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
 _INT_RE = re.compile(r"(\d+)")
 _ENERGY_RE = re.compile(r"\b([A-G])\b")
 _PAGE_RE = re.compile(r"[?&]page=(\d+)")
+_DETAIL_PATH_RE = re.compile(r"/detail/([^/?#]+)/([^/?#]+)/")
 # Map config: "center":[lon, lat]. CZ lat/lon ranges don't overlap, so a swap is
 # caught by the bbox guard rather than producing a bogus point.
 _CENTER_RE = re.compile(r'"center"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\]')
@@ -124,6 +137,22 @@ def _id_from_href(href: str | None) -> str | None:
         return None
     m = _ID_RE.search(href)
     return m.group(1) if m else None
+
+
+def category_from_url(url: str) -> tuple[str | None, str | None]:
+    """Derive (category_main, category_type) from a detail URL's path,
+    /detail/{sale}/{cat}/... — the detail-drain recovers a listing's category
+    from its own URL since the shared queue doesn't carry it."""
+    m = _DETAIL_PATH_RE.search(url or "")
+    if not m:
+        return None, None
+    return DETAIL_CATEGORY.get(m.group(2)), SALE_TYPE.get(m.group(1))
+
+
+def index_price(text: str | None) -> int | None:
+    """The Kč amount from an index card's price text, or None ("Info o ceně" /
+    "Dohodou"). Drives price-change detection for the detail-refetch queue."""
+    return _parse_price(text, None)[0]
 
 
 def _parse_total(text: str) -> int | None:

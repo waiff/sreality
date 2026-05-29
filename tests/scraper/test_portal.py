@@ -54,10 +54,11 @@ def test_default_config_bazos():
 
 def test_default_config_idnes():
     cfg = default_config("idnes")
-    assert cfg.supports_complete_walk is False
+    assert cfg.supports_complete_walk is True   # complete-walk (total + no page cap)
     assert cfg.split_threshold is None
     assert cfg.splits is False
-    assert cfg.categories == [{"sale_type": "prodej", "category": "byty"}]
+    assert {"sale_type": "prodej", "category": "byty"} in cfg.categories
+    assert len(cfg.categories) == 4              # byty + domy × prodej + pronajem
 
 
 def test_default_config_unknown_raises():
