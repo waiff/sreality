@@ -48,7 +48,8 @@ const DAY_MS = 86_400_000;
 
 export default function ListingDetail() {
   const { sreality_id: idParam } = useParams();
-  const sid = idParam && /^\d+$/.test(idParam) ? Number(idParam) : null;
+  // sreality_id is negative for non-sreality portals (synthetic id seq, migration 097)
+  const sid = idParam && /^-?\d+$/.test(idParam) ? Number(idParam) : null;
 
   const listingQ = useQuery<ListingPublic | null, Error>({
     queryKey: ['listing', sid],
