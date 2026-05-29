@@ -759,8 +759,10 @@ export const fetchPortalHealth = async (): Promise<PortalHealth[]> => {
   return (data ?? []) as PortalHealth[];
 };
 
-export const fetchScraperHealthChecks = async (): Promise<ScraperHealthChecks> => {
-  const { data, error } = await supabase.rpc('scraper_health_checks');
+export const fetchScraperHealthChecks = async (
+  source: string = 'sreality',
+): Promise<ScraperHealthChecks> => {
+  const { data, error } = await supabase.rpc('scraper_health_checks', { p_source: source });
   if (error) throw error;
   return data as ScraperHealthChecks;
 };

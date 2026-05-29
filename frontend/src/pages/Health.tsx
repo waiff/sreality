@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueries } from '@tanstack/react-query';
 import {
   CartesianGrid,
   Legend,
@@ -102,12 +102,6 @@ export default function Health() {
 /* -------------------------------------------------------------------------- */
 
 function Body({ data }: { data: HealthSummary }) {
-  const healthChecksQuery = useQuery<ScraperHealthChecks, Error>({
-    queryKey: ['scraper-health-checks'],
-    queryFn: fetchScraperHealthChecks,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
-  });
   const scrapeRunsQuery = useQuery<ScrapeRun[], Error>({
     queryKey: ['scrape-runs', 14],
     queryFn: () => fetchRecentScrapeRuns(14),
@@ -122,63 +116,56 @@ function Body({ data }: { data: HealthSummary }) {
   });
 
   return (
-    <div className="mt-5 space-y-5">
-      <PortalsSection />
+    <div className="mt-5 space-y-6">
+      <PortalLedger healthSummary={data} scrapeRuns={scrapeRunsQuery.data} />
 
-      <Card label="Scraper health checks · sreality pipeline">
-        <HealthChecksPanel
-          checks={healthChecksQuery.data}
-          isLoading={healthChecksQuery.isLoading}
-          error={healthChecksQuery.error}
-        />
-      </Card>
+      <section>
+        <SectionHeading>Activity &amp; data quality</SectionHeading>
+        <div className="mt-3 space-y-4">
+          <Card label="Recent scrapes · last 14 d · all portals">
+            <RecentScrapesPanel
+              rows={scrapeRunsQuery.data}
+              isLoading={scrapeRunsQuery.isLoading}
+              error={scrapeRunsQuery.error}
+            />
+          </Card>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <LastScrapeTile lastScrapeAt={data.last_scrape_at} />
-      </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card label="Image mirror">
+              <ImageMirrorPanel
+                overview={imageOverviewQuery.data}
+                isLoading={imageOverviewQuery.isLoading}
+                error={imageOverviewQuery.error}
+              />
+            </Card>
+            <Card label="Snapshot density">
+              <SnapshotBars rows={data.snapshot_density} totalListings={data.active_now} />
+            </Card>
+          </div>
 
-      <Card label="Listings by category · reconciliation">
-        <CategoryTable liveByCategory={data.by_category} rows={scrapeRunsQuery.data} />
-      </Card>
-
-      <Card label="Recent scrapes · last 14 d">
-        <RecentScrapesPanel
-          rows={scrapeRunsQuery.data}
-          isLoading={scrapeRunsQuery.isLoading}
-          error={scrapeRunsQuery.error}
-        />
-      </Card>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card label="Image mirror">
-          <ImageMirrorPanel
-            overview={imageOverviewQuery.data}
-            isLoading={imageOverviewQuery.isLoading}
-            error={imageOverviewQuery.error}
-          />
-        </Card>
-        <Card label="Schedule">
-          <SchedulePanel />
-        </Card>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card label="Snapshot density">
-          <SnapshotBars rows={data.snapshot_density} totalListings={data.active_now} />
-        </Card>
-        <Card label="Freshness checks · last 24 h">
-          <FreshnessRows rows={data.freshness_24h} />
-        </Card>
-      </div>
-
-      <Card label="Fetch failures · top 10 by attempts">
-        <FailuresPanel
-          given_up={data.failures_given_up}
-          total={data.failures_total}
-          top10={data.failures_top10}
-        />
-      </Card>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card label="Freshness checks · last 24 h">
+              <FreshnessRows rows={data.freshness_24h} />
+            </Card>
+            <Card label="Fetch failures · top 10 by attempts">
+              <FailuresPanel
+                given_up={data.failures_given_up}
+                total={data.failures_total}
+                top10={data.failures_top10}
+              />
+            </Card>
+          </div>
+        </div>
+      </section>
     </div>
+  );
+}
+
+function SectionHeading({ children }: { children: ReactNode }) {
+  return (
+    <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+      {children}
+    </h2>
   );
 }
 
@@ -215,149 +202,440 @@ function portalShort(source: string): string {
   return PORTAL_SHORT_LABEL[source] ?? source;
 }
 
-/* Status dot. For scrapers, recency of the last run is meaningful (the cron
- * should keep it fresh); for on-demand parsers it is not — they only run when
- * the operator pastes a URL — so a parser that has ever run reads neutral,
- * never "stale". A never-run portal is muted, not alarming. */
-function portalDotColour(p: PortalHealth): string {
-  if (p.kind === 'scraper') {
-    if (!p.last_scrape_at) return 'var(--color-ink-4)';
-    const ageMin = (Date.now() - new Date(p.last_scrape_at).getTime()) / 60_000;
-    if (ageMin < 90) return 'var(--color-sage)';
-    if (ageMin < 24 * 60) return 'var(--color-ochre)';
-    return 'var(--color-brick)';
-  }
-  return p.last_parsed_at ? 'var(--color-copper)' : 'var(--color-ink-4)';
+/* Workflows belonging to each scraper source's pipeline (drives the per-portal
+ * schedule). Sreality owns the split scrape + its derived maintenance jobs;
+ * bazos its crawl. Pilots with no scheduled workflow read "manual only". */
+const PORTAL_WORKFLOWS: Record<string, string[]> = {
+  sreality: [
+    'index_walk.yml', 'detail_drain.yml', 'images.yml', 'compute_image_phash.yml',
+    'condition_scores.yml', 'condition_score_batches.yml',
+    'property_maintenance.yml', 'recompute_property_stats.yml', 'dedup_sweep.yml',
+  ],
+  bazos: ['scrape_bazos.yml'],
+};
+
+type RollupStatus = HealthCheckStatus | 'idle' | 'loading';
+
+function worstStatus(checks: ScraperHealthCheck[]): HealthCheckStatus {
+  if (checks.some((c) => c.status === 'fail')) return 'fail';
+  if (checks.some((c) => c.status === 'warn')) return 'warn';
+  return 'pass';
 }
 
-function PortalsSection() {
-  const { data, isLoading, error } = useQuery<PortalHealth[], Error>({
+const ROLLUP_DOT: Record<RollupStatus, string> = {
+  pass: 'var(--color-sage)',
+  warn: 'var(--color-ochre)',
+  fail: 'var(--color-brick)',
+  idle: 'var(--color-ink-4)',
+  loading: 'var(--color-ink-4)',
+};
+
+const ROLLUP_LABEL: Record<RollupStatus, string> = {
+  pass: 'Healthy', warn: 'Watch', fail: 'Problem', idle: 'Not started', loading: 'Checking…',
+};
+
+interface PortalGroup {
+  key: string;
+  label: string;
+  scraper?: PortalHealth;
+  parser?: PortalHealth;
+}
+
+/* A scraper facet is "active" (worth fetching checks for) once it has any
+ * listings or runs; a planned pilot with neither reads idle, not false-red. */
+function scraperHasActivity(p: PortalHealth): boolean {
+  return p.listings_total > 0 || p.runs_7d > 0;
+}
+
+function portalHost(url: string | null): string | null {
+  if (!url) return null;
+  try { return new URL(url).host.replace(/^www\./, ''); } catch { return url; }
+}
+
+/* Group registry rows by canonical portal identity (home host), so a portal's
+ * scraper + on-demand-parser facets fold into one card — which dedupes the two
+ * "iDNES Reality" rows (scraper pilot + parser) the flat grid showed twice. */
+function groupPortals(portals: PortalHealth[]): PortalGroup[] {
+  const groups = new Map<string, PortalGroup>();
+  for (const p of portals) {
+    const key = portalHost(p.home_url) ?? p.source;
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, label: p.label };
+      groups.set(key, g);
+    }
+    if (p.kind === 'scraper') { g.scraper = p; g.label = p.label; }
+    else g.parser = p;
+  }
+  const rank = (g: PortalGroup): number =>
+    g.scraper?.stage === 'live' ? 0 : g.scraper ? 1 : 2;
+  return [...groups.values()].sort(
+    (a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label),
+  );
+}
+
+type ChecksState =
+  | { data?: ScraperHealthChecks; isLoading: boolean; error: Error | null }
+  | undefined;
+
+function PortalLedger({
+  healthSummary,
+  scrapeRuns,
+}: {
+  healthSummary: HealthSummary;
+  scrapeRuns: ScrapeRun[] | undefined;
+}) {
+  const portalsQuery = useQuery<PortalHealth[], Error>({
     queryKey: ['portal-health'],
     queryFn: fetchPortalHealth,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
+  const portals = portalsQuery.data ?? [];
+  const groups = groupPortals(portals);
 
-  const scrapers = (data ?? []).filter((p) => p.kind === 'scraper').length;
-  const parsers = (data ?? []).filter((p) => p.kind === 'parser').length;
+  // One checks query per active scraper source — drives the roll-up dot even
+  // while collapsed, so a problem is visible without expanding.
+  const activeSources = portals
+    .filter((p) => p.kind === 'scraper' && scraperHasActivity(p))
+    .map((p) => p.source);
+  const checkResults = useQueries({
+    queries: activeSources.map((src) => ({
+      queryKey: ['scraper-health-checks', src],
+      queryFn: () => fetchScraperHealthChecks(src),
+      refetchInterval: 60_000,
+      staleTime: 30_000,
+    })),
+  });
+  const checksBySource = new Map<string, ChecksState>();
+  activeSources.forEach((src, i) => {
+    const r = checkResults[i];
+    checksBySource.set(src, { data: r.data, isLoading: r.isLoading, error: (r.error as Error) ?? null });
+  });
+
+  const scrapers = portals.filter((p) => p.kind === 'scraper').length;
+  const parsers = portals.filter((p) => p.kind === 'parser').length;
 
   return (
     <section>
       <div className="flex items-baseline justify-between gap-4">
-        <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-          Data sources
-        </h2>
-        {data && data.length > 0 && (
+        <SectionHeading>Data sources</SectionHeading>
+        {portals.length > 0 && (
           <span className="text-[0.65rem] text-[var(--color-ink-4)] tabular-nums">
             {scrapers} scraper{scrapers === 1 ? '' : 's'} · {parsers} on-demand parser
             {parsers === 1 ? '' : 's'}
           </span>
         )}
       </div>
-
-      <div className="mt-3">
-        {error ? (
+      <div className="mt-3 space-y-3">
+        {portalsQuery.error ? (
           <p className="text-sm text-[var(--color-brick)]">
-            portal_health_summary failed: {error.message}
+            portal_health_summary failed: {portalsQuery.error.message}
           </p>
-        ) : isLoading && !data ? (
+        ) : portalsQuery.isLoading && portals.length === 0 ? (
           <p className="text-sm text-[var(--color-ink-3)]">Loading sources…</p>
-        ) : !data || data.length === 0 ? (
+        ) : groups.length === 0 ? (
           <p className="text-sm text-[var(--color-ink-4)]">No portals registered.</p>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {data.map((p) => (
-              <PortalCard key={p.source} portal={p} />
-            ))}
-          </div>
+          groups.map((g) => (
+            <PortalGroupCard
+              key={g.key}
+              group={g}
+              checks={g.scraper ? checksBySource.get(g.scraper.source) : undefined}
+              healthSummary={healthSummary}
+              scrapeRuns={scrapeRuns}
+            />
+          ))
         )}
       </div>
     </section>
   );
 }
 
-function PortalCard({ portal: p }: { portal: PortalHealth }) {
-  const isScraper = p.kind === 'scraper';
-  const hasHeadline = isScraper ? p.listings_active > 0 : p.parses_total > 0;
-  const headline = isScraper
-    ? fmtCount(p.listings_active)
-    : fmtCount(p.parses_total);
-  const headlineLabel = isScraper
-    ? hasHeadline
-      ? 'active listings'
-      : 'no listings yet'
-    : hasHeadline
-      ? 'URLs parsed'
-      : 'never parsed';
+function PortalGroupCard({
+  group,
+  checks,
+  healthSummary,
+  scrapeRuns,
+}: {
+  group: PortalGroup;
+  checks: ChecksState;
+  healthSummary: HealthSummary;
+  scrapeRuns: ScrapeRun[] | undefined;
+}) {
+  const [open, setOpen] = useState(false);
+  const { scraper, parser } = group;
+  const isSreality = scraper?.source === 'sreality';
+
+  let status: RollupStatus;
+  if (scraper && scraperHasActivity(scraper)) {
+    status = checks?.data ? worstStatus(checks.data.checks) : checks?.isLoading ? 'loading' : 'idle';
+  } else if (scraper) {
+    status = 'idle';
+  } else {
+    status = parser?.last_parsed_at ? 'pass' : 'idle';
+  }
+
+  const counts = checks?.data
+    ? checks.data.checks.reduce(
+        (a, c) => ({ ...a, [c.status]: a[c.status] + 1 }),
+        { pass: 0, warn: 0, fail: 0 } as Record<HealthCheckStatus, number>,
+      )
+    : null;
+
+  // Lead with the scraper's active count; but if the scraper facet is idle
+  // and the parser has activity (e.g. iDNES: pilot scraper + live parser),
+  // lead with the parser metric so the card doesn't read as dead.
+  const headline =
+    scraper && scraperHasActivity(scraper)
+      ? { value: scraper.listings_active, label: 'active listings', has: scraper.listings_active > 0 }
+      : parser && parser.parses_total > 0
+        ? { value: parser.parses_total, label: 'URLs parsed', has: true }
+        : scraper
+          ? { value: scraper.listings_active, label: 'active listings', has: false }
+          : { value: parser?.parses_total ?? 0, label: 'URLs parsed', has: (parser?.parses_total ?? 0) > 0 };
+
+  const portalWorkflows = scraper ? (PORTAL_WORKFLOWS[scraper.source] ?? []) : [];
 
   return (
-    <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4 flex flex-col gap-3">
-      <header className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <span
-            className="inline-block h-2 w-2 rounded-full shrink-0"
-            style={{ backgroundColor: portalDotColour(p) }}
-          />
-          {p.home_url ? (
-            <a
-              href={p.home_url}
-              target="_blank"
-              rel="noreferrer"
-              className="font-display text-lg leading-tight text-[var(--color-ink)] hover:text-[var(--color-copper)] truncate"
-            >
-              {p.label}
-            </a>
-          ) : (
+    <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left px-4 py-3.5 flex items-center gap-4 hover:bg-[var(--color-paper-3)]/40 transition-colors"
+        aria-expanded={open}
+      >
+        <span
+          className="shrink-0 h-2.5 w-2.5 rounded-full"
+          style={{ backgroundColor: ROLLUP_DOT[status] }}
+          title={ROLLUP_LABEL[status]}
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="font-display text-lg leading-tight text-[var(--color-ink)] truncate">
-              {p.label}
+              {group.label}
+            </span>
+            {scraper && <FacetChip kind="scraper" stage={scraper.stage} />}
+            {parser && <FacetChip kind="parser" stage={parser.stage} />}
+          </div>
+          <div className="mt-1 flex items-center gap-x-5 gap-y-1 flex-wrap">
+            {scraper ? (
+              <>
+                <Inline label="new 7d" value={fmtCount(scraper.scraped_new_7d)} />
+                <Inline label="runs 7d" value={fmtCount(scraper.runs_7d)} />
+                <Inline label="last scrape" value={scraper.last_scrape_at ? fmtRelative(scraper.last_scrape_at) : '—'} />
+                {parser && <Inline label="parsed 30d" value={fmtCount(parser.parses_30d)} />}
+              </>
+            ) : parser ? (
+              <>
+                <Inline label="parsed 30d" value={fmtCount(parser.parses_30d)} />
+                <Inline label="total" value={fmtCount(parser.parses_total)} />
+                <Inline label="last parse" value={parser.last_parsed_at ? fmtRelative(parser.last_parsed_at) : '—'} />
+              </>
+            ) : null}
+          </div>
+        </div>
+        <div className="shrink-0 text-right">
+          <p
+            className="font-mono tabular-nums text-[1.6rem] leading-none tracking-tight"
+            style={{ color: headline.has ? 'var(--color-ink)' : 'var(--color-ink-4)' }}
+          >
+            {headline.has ? fmtCount(headline.value) : '—'}
+          </p>
+          <p className="mt-0.5 text-[0.6rem] text-[var(--color-ink-4)] tracking-wide">{headline.label}</p>
+        </div>
+        <div className="shrink-0 flex items-center gap-3">
+          {counts && (
+            <span className="text-[0.62rem] tabular-nums hidden sm:inline">
+              {counts.fail > 0 && <span style={{ color: 'var(--color-brick)' }}>{counts.fail} problem </span>}
+              {counts.warn > 0 && <span style={{ color: 'var(--color-ochre)' }}>{counts.warn} watch </span>}
+              <span style={{ color: 'var(--color-sage)' }}>{counts.pass} ok</span>
             </span>
           )}
+          <span className="text-[var(--color-ink-3)] font-mono text-xs w-3">{open ? '▾' : '▸'}</span>
         </div>
-        <span className="shrink-0 text-right text-[0.58rem] tracking-[0.1em] uppercase leading-tight">
-          <span className="text-[var(--color-ink-3)]">{PORTAL_KIND_LABEL[p.kind]}</span>
-          <br />
-          <span className="text-[var(--color-ink-4)]">{PORTAL_STAGE_LABEL[p.stage]}</span>
-        </span>
-      </header>
+      </button>
 
-      <div>
-        <p
-          className="font-mono tabular-nums text-[1.7rem] leading-none tracking-tight"
-          style={{ color: hasHeadline ? 'var(--color-ink)' : 'var(--color-ink-4)' }}
-        >
-          {hasHeadline ? headline : '—'}
-        </p>
-        <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)] tracking-wide">
-          {headlineLabel}
-        </p>
-      </div>
+      {open && (
+        <div className="border-t border-[var(--color-rule-soft)] px-4 py-3 space-y-2">
+          {scraper && scraperHasActivity(scraper) ? (
+            <>
+              <Disclosure label="Listings by category · reconciliation">
+                {isSreality ? (
+                  <CategoryTable
+                    liveByCategory={healthSummary.by_category}
+                    rows={(scrapeRuns ?? []).filter((r) => r.source === 'sreality')}
+                  />
+                ) : (
+                  <CompactReconTable rows={(scrapeRuns ?? []).filter((r) => r.source === scraper.source)} />
+                )}
+              </Disclosure>
+              <Disclosure
+                label="Scrape health checks"
+                status={status === 'pass' || status === 'warn' || status === 'fail' ? status : undefined}
+              >
+                <HealthChecksPanel
+                  checks={checks?.data}
+                  isLoading={checks?.isLoading ?? false}
+                  error={checks?.error ?? null}
+                />
+              </Disclosure>
+            </>
+          ) : scraper ? (
+            <p className="text-sm text-[var(--color-ink-4)] px-1 py-2">
+              Pipeline not started yet — no listings or runs recorded for this portal.
+            </p>
+          ) : null}
 
-      <div className="grid grid-cols-3 gap-3 pt-2 border-t border-[var(--color-rule-soft)]">
-        {isScraper ? (
-          <>
-            <PortalStat label="new 7&thinsp;d" value={fmtCount(p.scraped_new_7d)} />
-            <PortalStat label="runs 7&thinsp;d" value={fmtCount(p.runs_7d)} />
-            <PortalStat
-              label="last scrape"
-              value={p.last_scrape_at ? fmtRelative(p.last_scrape_at) : '—'}
-              title={p.last_scrape_at ? fmtAbsolute(p.last_scrape_at) : undefined}
-            />
-          </>
-        ) : (
-          <>
-            <PortalStat label="parsed 30&thinsp;d" value={fmtCount(p.parses_30d)} />
-            <PortalStat label="total" value={fmtCount(p.parses_total)} />
-            <PortalStat
-              label="last parse"
-              value={p.last_parsed_at ? fmtRelative(p.last_parsed_at) : '—'}
-              title={p.last_parsed_at ? fmtAbsolute(p.last_parsed_at) : undefined}
-            />
-          </>
-        )}
-      </div>
+          {parser && (
+            <Disclosure label="On-demand parser">
+              <ParserFacetDetail parser={parser} />
+            </Disclosure>
+          )}
+
+          <Disclosure label="Pipeline schedule">
+            <PortalSchedule files={portalWorkflows} />
+          </Disclosure>
+        </div>
+      )}
     </section>
   );
 }
+
+function FacetChip({ kind, stage }: { kind: PortalKind; stage: PortalStage }) {
+  return (
+    <span className="inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] bg-[var(--color-rule-soft)] text-[0.55rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] whitespace-nowrap">
+      {PORTAL_KIND_LABEL[kind]} · {PORTAL_STAGE_LABEL[stage]}
+    </span>
+  );
+}
+
+function Inline({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <span className="inline-flex items-baseline gap-1.5">
+      <span className="text-[0.55rem] tracking-[0.1em] uppercase text-[var(--color-ink-4)]">{label}</span>
+      <span className="font-mono tabular-nums text-[0.72rem] text-[var(--color-ink-2)]">{value}</span>
+    </span>
+  );
+}
+
+function Disclosure({
+  label,
+  status,
+  children,
+}: {
+  label: string;
+  status?: HealthCheckStatus;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border border-[var(--color-rule-soft)] rounded-[var(--radius-sm)] bg-[var(--color-paper)]">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left px-3 py-2 flex items-center gap-2 hover:bg-[var(--color-paper-2)]"
+        aria-expanded={open}
+      >
+        <span className="text-[var(--color-ink-4)] font-mono text-[0.7rem] w-3">{open ? '▾' : '▸'}</span>
+        <span className="text-[0.68rem] tracking-[0.12em] uppercase text-[var(--color-ink-3)] font-medium flex-1">
+          {label}
+        </span>
+        {status && (
+          <span className="h-1.5 w-1.5 rounded-full" style={{ backgroundColor: ROLLUP_DOT[status] }} />
+        )}
+      </button>
+      {open && <div className="px-3 pb-3 pt-1">{children}</div>}
+    </div>
+  );
+}
+
+/* Pilot reconciliation: pilots walk a partial index (no result_size / active
+ * roll-up), so show what their latest run recorded rather than the rich
+ * sreality table. */
+function CompactReconTable({ rows }: { rows: ScrapeRun[] }) {
+  const run =
+    rows.find((r) => r.index_pages > 0 && r.by_category.length > 0) ??
+    rows.find((r) => r.by_category.length > 0);
+  if (!run || run.by_category.length === 0) {
+    return <p className="text-sm text-[var(--color-ink-4)]">No per-category data recorded yet for this portal.</p>;
+  }
+  return (
+    <div className="overflow-x-auto -mx-1">
+      <table className="w-full text-xs">
+        <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
+          <tr>
+            <th className="text-left  py-1.5 px-1.5 font-medium">Category</th>
+            <th className="text-right py-1.5 px-1.5 font-medium">Found new</th>
+            <th className="text-right py-1.5 px-1.5 font-medium">Scraped new</th>
+            <th className="text-right py-1.5 px-1.5 font-medium">Inactive</th>
+            <th className="text-right py-1.5 px-1.5 font-medium">Collected</th>
+          </tr>
+        </thead>
+        <tbody>
+          {run.by_category.map((c) => (
+            <tr key={`${c.category_main}-${c.category_type}`} className="border-t border-[var(--color-rule-soft)]">
+              <td className="py-1.5 px-1.5 text-[var(--color-ink)] whitespace-nowrap">
+                {categoryPairLabel(c.category_main, c.category_type)}
+              </td>
+              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums">{fmtCount(c.listings_found_new)}</td>
+              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums">{fmtCount(c.listings_scraped_new)}</td>
+              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums">{fmtCount(c.listings_inactive)}</td>
+              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+                {c.collected != null ? fmtCount(c.collected) : '—'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="mt-2 text-[0.65rem] text-[var(--color-ink-4)]">
+        Latest run · {fmtRelative(run.started_at)}. Pilot portals walk a partial index, so they never infer delistings.
+      </p>
+    </div>
+  );
+}
+
+function ParserFacetDetail({ parser }: { parser: PortalHealth }) {
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      <PortalStat label="URLs parsed" value={fmtCount(parser.parses_total)} />
+      <PortalStat label="parsed 30&thinsp;d" value={fmtCount(parser.parses_30d)} />
+      <PortalStat
+        label="last parse"
+        value={parser.last_parsed_at ? fmtRelative(parser.last_parsed_at) : '—'}
+        title={parser.last_parsed_at ? fmtAbsolute(parser.last_parsed_at) : undefined}
+      />
+    </div>
+  );
+}
+
+function PortalSchedule({ files }: { files: string[] }) {
+  const docs = WORKFLOW_DOCS
+    .filter((w) => files.includes(w.filename) && w.schedules.length > 0)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (docs.length === 0) {
+    return (
+      <p className="text-sm text-[var(--color-ink-4)]">
+        No scheduled jobs — manual dispatch only, or this pilot isn&rsquo;t wired to a cron yet.
+      </p>
+    );
+  }
+  return (
+    <dl className="space-y-2 text-sm">
+      {docs.map((w) => (
+        <ScheduleRow
+          key={w.filename}
+          label={w.name}
+          cron={w.schedules.map((s) => s.cron).join(', ')}
+          human={w.schedules.map((s) => s.human).join(' · ')}
+          note={w.description}
+        />
+      ))}
+    </dl>
+  );
+}
+
+/* (PortalsSection / PortalCard replaced by PortalLedger / PortalGroupCard above.) */
 
 function PortalStat({
   label,
@@ -398,29 +676,6 @@ function StaleScrapeBanner({ lastScrapeAt }: { lastScrapeAt: string | null }) {
         No scrape activity in <span className="font-mono tabular-nums">{Math.round(ageH)}&thinsp;h</span>.
         The daily cron may have failed — check the latest run in GitHub Actions.
       </span>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Last-scrape global tile (keeps a single global anchor in the grid)         */
-/* -------------------------------------------------------------------------- */
-
-function LastScrapeTile({ lastScrapeAt }: { lastScrapeAt: string | null }) {
-  return (
-    <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-5 py-4">
-      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        Last scrape run
-      </p>
-      <p
-        className="mt-2 font-display text-[2rem] leading-none tracking-tight text-[var(--color-ink)]"
-        title={lastScrapeAt ? fmtAbsolute(lastScrapeAt) : undefined}
-      >
-        {lastScrapeAt ? fmtRelative(lastScrapeAt) : '—'}
-      </p>
-      {lastScrapeAt && (
-        <p className="mt-1 text-[0.65rem] text-[var(--color-ink-4)]">{fmtAbsolute(lastScrapeAt)}</p>
-      )}
     </div>
   );
 }
@@ -1443,59 +1698,9 @@ function ImageStorageRow({ row }: { row: ImageStorageCategory }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Scrape schedule (data-driven from workflowDocs.generated.ts — the codegen   */
-/* of the .github/workflows/*.yml cron lines, so it can never go stale)        */
+/* Schedule rows (rendered per-portal by PortalSchedule, data-driven from       */
+/* workflowDocs.generated.ts so the cron lines can never go stale)             */
 /* -------------------------------------------------------------------------- */
-
-/* Which scheduled workflows are scrapes vs background maintenance jobs. */
-const SCRAPE_WORKFLOW_FILES = new Set([
-  'index_walk.yml',
-  'detail_drain.yml',
-  'scrape.yml',
-  'scrape_bazos.yml',
-]);
-
-function SchedulePanel() {
-  const scheduled = WORKFLOW_DOCS.filter((w) => w.schedules.length > 0).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
-  const scrapes = scheduled.filter((w) => SCRAPE_WORKFLOW_FILES.has(w.filename));
-  const jobs = scheduled.filter((w) => !SCRAPE_WORKFLOW_FILES.has(w.filename));
-  return (
-    <div className="space-y-4">
-      <ScheduleGroup title="Scrapes" items={scrapes} />
-      <ScheduleGroup title="Maintenance jobs" items={jobs} />
-    </div>
-  );
-}
-
-function ScheduleGroup({
-  title,
-  items,
-}: {
-  title: string;
-  items: typeof WORKFLOW_DOCS;
-}) {
-  if (items.length === 0) return null;
-  return (
-    <div>
-      <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)] mb-1">
-        {title}
-      </p>
-      <dl className="space-y-2 text-sm">
-        {items.map((w) => (
-          <ScheduleRow
-            key={w.filename}
-            label={w.name}
-            cron={w.schedules.map((s) => s.cron).join(', ')}
-            human={w.schedules.map((s) => s.human).join(' · ')}
-            note={w.description}
-          />
-        ))}
-      </dl>
-    </div>
-  );
-}
 
 function ScheduleRow({
   label,
