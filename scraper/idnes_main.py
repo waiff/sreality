@@ -66,12 +66,14 @@ class IdnesPortal:
     # idnes is a large portal walked page-by-page (≈26 listings/page, tens of
     # thousands per category), so the index needs a faster ceiling than the
     # classifieds pilots. The detail-fetch rate is the (slower) drain CLI arg.
+    # The class value is the baked floor; the instance reads it from config.
     index_rate = 3.0
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
         self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
+        self.index_rate = config.limits.index_rate
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -308,6 +310,14 @@ def main(argv: list[str] | None = None) -> int:
     config = _load_config(args.dry_run)
     portal = IdnesPortal(config, max_pages=args.max_pages)
 
+    # Resolve operational limits: CLI override > per-portal DB config > default.
+    workers = args.workers if args.workers is not None else config.limits.detail_workers
+    rate = args.rate if args.rate is not None else config.limits.detail_rate
+    max_detail = (
+        args.max_detail if args.max_detail is not None
+        else config.limits.max_detail_per_run
+    )
+
     # Cadence split, like sreality (rule #19): --index-only walks + enqueues
     # (and marks inactive under the completeness guard); --drain-only fetches +
     # ingests a bounded slice of the queue. idnes is large (~2400 index pages,
@@ -320,8 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
-            max_claims=args.max_detail, detail_workers=args.workers,
-            detail_rate=args.rate,
+            max_claims=max_detail, detail_workers=workers, detail_rate=rate,
         )
     return rc
 
@@ -337,10 +346,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--max-detail", type=int, default=None,
         help="cap detail-drain claims per run (omit = drain the queue)",
     )
-    p.add_argument("--workers", type=int, default=4, help="detail-fetch workers")
     p.add_argument(
-        "--rate", type=float, default=3.0,
-        help="detail-fetch requests/second ceiling (default 3.0)",
+        "--workers", type=int, default=None,
+        help="detail-fetch workers (default: per-portal config)",
+    )
+    p.add_argument(
+        "--rate", type=float, default=None,
+        help="detail-fetch requests/second ceiling (default: per-portal config)",
     )
     p.add_argument(
         "--index-only", action="store_true",

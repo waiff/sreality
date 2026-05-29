@@ -6,6 +6,24 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: Per-portal operational limits in config (PR A of the Scrapers-admin track)
+Made the per-portal operational limits (index/detail rate, workers, per-run caps,
+image limits, completeness) operator-tunable from the DB — the foundation for a
+Scrapers admin dashboard (PR B next). Migration 107 had deliberately kept these
+knobs out of the registry ("per-run CLI tuning, not portal identity"); this reverses
+that for the limit knobs, by operator request, since they vary a lot per portal (6
+req/s JSON API vs 0.6 req/s HTML crawl) and the operator wants to tune them without a
+deploy. Migration 114 adds `portals.operational_limits jsonb` (+ a `portal_limits_history`
+trigger mirroring `app_settings`) and a global default layer in
+`app_settings.scraper_limits_global`. `scraper/portal.py` grows a `PortalLimits`
+dataclass + a deep-merge in `load_portal_config` (baked default < global < per-portal);
+all four scraper mains (`main`, `idnes_main`, `bazos_main`, `bezrealitky_main`) resolve
+each limit as **CLI override > per-portal DB > global DB > code default**. Seeded with
+today's production values + baked code defaults matching today's argparse defaults, so
+it is **zero behavior change** (production workflows still pass their CLI flags → CLI
+wins). Next (PR B): admin GET/PUT endpoints + a Scrapers dashboard page to edit limits
+for every portal + the global layer.
+
 ### 2026-05: Health dashboard — per-portal ledger
 Restructured the Health page from a flat data-source grid + sreality-only global
 panels into a **registry ledger**: one expandable record-card per portal, each with a

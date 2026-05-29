@@ -3,21 +3,96 @@
 A portal is "operational config + a fetcher + a parser", with no per-portal
 branches in the shared `portal_runner`. This module holds the config half:
 `PortalConfig` mirrors the operational columns on the `portals` registry
-(migration 107) and `load_portal_config` reads a row, falling back to a baked-in
-default so a registry hiccup never breaks a scrape. The behavioral half — the
-`Portal` protocol the runner consumes and the concrete sreality / bazos portals —
-builds on this in `scraper.portal_runner`.
+(migration 107) and now carries `PortalLimits` — the per-portal tuning knobs
+(rate / workers / per-run caps / image limits / completeness) made
+operator-editable in migration 114. `load_portal_config` reads a row, merges the
+global default layer (`app_settings.scraper_limits_global`) under the per-portal
+overrides, and falls back to baked-in defaults so a registry hiccup never breaks
+a scrape. The behavioral half — the `Portal` protocol the runner consumes and
+the concrete portals — builds on this in the per-portal `*_main` modules.
+
+Resolution precedence (highest wins): CLI override (in each *_main) >
+per-portal `portals.operational_limits` > global `scraper_limits_global` >
+baked-in code default.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
 from typing import Any
+
+LOG = logging.getLogger(__name__)
+
+
+def _as_opt_int(v: Any) -> int | None:
+    return None if v is None else int(v)
+
+
+# Operational-limit field name -> coercer. The coercer is applied to any value
+# coming from JSONB (operator-edited), so a bad-typed leaf is caught per-field.
+_LIMIT_COERCERS: dict[str, Any] = {
+    "index_rate": float,
+    "detail_workers": int,
+    "detail_rate": float,
+    "max_detail_per_run": _as_opt_int,
+    "max_detail_per_category": _as_opt_int,
+    "min_completeness": float,
+    "image_workers": int,
+    "max_image_downloads": _as_opt_int,
+    "suspicious_stop_window": int,
+    "suspicious_stop_threshold": float,
+}
+
+
+@dataclass(frozen=True)
+class PortalLimits:
+    """Per-portal operational tuning (migration 114). Every field has a baked
+    default; the DB layers (global, then per-portal) override by key. A key
+    absent from a JSONB layer is inherited; a key present (incl. null) is
+    applied (null = "unlimited" for the optional caps)."""
+
+    index_rate: float = 2.0
+    detail_workers: int = 4
+    detail_rate: float = 2.0
+    max_detail_per_run: int | None = None
+    max_detail_per_category: int | None = None
+    min_completeness: float = 0.9
+    image_workers: int = 32
+    max_image_downloads: int | None = 1000
+    suspicious_stop_window: int = 100
+    suspicious_stop_threshold: float = 0.30
+
+    def merged(self, overrides: Any) -> "PortalLimits":
+        """Return a copy with each present key from `overrides` (a dict, or None)
+        applied. Bad-typed leaves are skipped with a warning so an operator's
+        malformed dashboard edit can never crash a scrape."""
+        if not overrides or not isinstance(overrides, dict):
+            return self
+        changes: dict[str, Any] = {}
+        for key, coerce in _LIMIT_COERCERS.items():
+            if key not in overrides:
+                continue
+            try:
+                changes[key] = coerce(overrides[key])
+            except (TypeError, ValueError):
+                LOG.warning(
+                    "ignoring bad scraper-limit %s=%r; keeping %r",
+                    key, overrides[key], getattr(self, key),
+                )
+        return replace(self, **changes) if changes else self
+
+
+# The generic baseline (a portal with no specific tuning). Per-portal baked
+# defaults below override only what differs, mirroring today's code defaults so
+# a DB-down fallback reproduces current behavior exactly.
+_GENERIC_LIMITS = PortalLimits()
 
 
 @dataclass(frozen=True)
 class PortalConfig:
-    """The portal-defining operational knobs (migration 107).
+    """The portal-defining operational knobs (migration 107) + per-portal limits
+    (migration 114).
 
     - supports_complete_walk: can the portal prove a near-complete index walk?
       Gates mark_inactive (architectural rule #3). Partial-walk crawlers stay
@@ -26,12 +101,14 @@ class PortalConfig:
       Shape is portal-specific (the Portal object interprets it).
     - split_threshold: deep-pagination cap above which a category is walked
       per-district and unioned (None = no cap, never split).
+    - limits: per-portal operational tuning (rate / workers / caps / images).
     """
 
     source: str
     supports_complete_walk: bool
     categories: list[dict[str, Any]]
     split_threshold: int | None = None
+    limits: PortalLimits = _GENERIC_LIMITS
 
     @property
     def splits(self) -> bool:
@@ -40,7 +117,10 @@ class PortalConfig:
 
 # Baked-in defaults — the source of truth the runner falls back to when the DB
 # row or a column is missing, so a registry glitch can never break a scrape. The
-# `portals` row (migration 107) is the operator-tunable override + Health surface.
+# `portals` row (migrations 107 + 114) is the operator-tunable override + Health
+# surface. Each portal's `limits` mirror its *current code defaults* (argparse
+# defaults + the portal's index_rate), NOT the production workflow values, so a
+# DB-down run behaves exactly as it does today.
 _DEFAULTS: dict[str, PortalConfig] = {
     "sreality": PortalConfig(
         source="sreality",
@@ -54,6 +134,10 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"category_main_cb": 4, "category_type_cb": 1},  # komercni / prodej
         ],
         split_threshold=10000,
+        limits=PortalLimits(
+            index_rate=2.0, detail_workers=4, detail_rate=2.0,
+            min_completeness=0.9, image_workers=32, max_image_downloads=1000,
+        ),
     ),
     "bazos": PortalConfig(
         source="bazos",
@@ -63,6 +147,10 @@ _DEFAULTS: dict[str, PortalConfig] = {
         supports_complete_walk=True,
         categories=[{"sale_type": "prodam", "category": "byt"}],
         split_threshold=None,
+        limits=PortalLimits(
+            index_rate=0.5, detail_workers=1, detail_rate=0.5,
+            min_completeness=0.95,
+        ),
     ),
     "idnes": PortalConfig(
         source="idnes",
@@ -77,6 +165,10 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"sale_type": "pronajem", "category": "domy"},
         ],
         split_threshold=None,
+        limits=PortalLimits(
+            index_rate=3.0, detail_workers=4, detail_rate=3.0,
+            min_completeness=0.9,
+        ),
     ),
     "bezrealitky": PortalConfig(
         source="bezrealitky",
@@ -91,6 +183,10 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"offer_type": "PRONAJEM", "estate_type": "DUM"},
         ],
         split_threshold=None,
+        limits=PortalLimits(
+            index_rate=1.0, detail_workers=8, detail_rate=1.0,
+            min_completeness=0.9,
+        ),
     ),
 }
 
@@ -103,29 +199,58 @@ def default_config(source: str) -> PortalConfig:
         raise ValueError(f"no portal config for source={source!r}") from None
 
 
-def load_portal_config(conn: Any, source: str) -> PortalConfig:
-    """Read operational config from the `portals` registry, falling back to the
-    baked-in default for any missing row or NULL column.
+def _read_global_limits(conn: Any) -> dict[str, Any] | None:
+    """The global default-limits layer (app_settings.scraper_limits_global), or
+    None if absent/malformed — a missing global layer is not an error."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value FROM app_settings WHERE key = 'scraper_limits_global'"
+            )
+            row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 - global layer is best-effort
+        LOG.warning("read scraper_limits_global failed: %s; skipping global layer", exc)
+        return None
+    if row is None or not isinstance(row[0], dict):
+        return None
+    return row[0]
 
-    The DB is the operator-tunable surface (edit coverage with a SQL update, no
-    deploy); the code default is the robustness floor.
+
+def load_portal_config(conn: Any, source: str) -> PortalConfig:
+    """Read operational config from the `portals` registry, merging the global
+    default-limits layer under the per-portal limit overrides, and falling back
+    to the baked-in default for any missing row or NULL column.
+
+    The DB is the operator-tunable surface (edit limits in the dashboard / a SQL
+    update, no deploy); the code default is the robustness floor. Resolution:
+    baked default < global (scraper_limits_global) < per-portal
+    (portals.operational_limits).
     """
     default = _DEFAULTS.get(source)
+    base_limits = default.limits if default is not None else _GENERIC_LIMITS
+    global_limits = _read_global_limits(conn)
+
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT supports_complete_walk, categories, split_threshold "
-            "FROM portals WHERE source = %s",
+            "SELECT supports_complete_walk, categories, split_threshold, "
+            "operational_limits FROM portals WHERE source = %s",
             (source,),
         )
         row = cur.fetchone()
+
     if row is None:
-        return default_config(source)
-    scw, categories, split_threshold = row
+        if default is None:
+            raise ValueError(f"no portal config for source={source!r}")
+        return replace(default, limits=base_limits.merged(global_limits))
+
+    scw, categories, split_threshold, op_limits = row
     if categories is None:
         categories = default.categories if default is not None else []
+    merged_limits = base_limits.merged(global_limits).merged(op_limits)
     return PortalConfig(
         source=source,
         supports_complete_walk=bool(scw),
         categories=list(categories),
         split_threshold=split_threshold,
+        limits=merged_limits,
     )

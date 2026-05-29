@@ -37,6 +37,7 @@ from scraper.bazos_parser import (
     parse_index,
 )
 from scraper.geocoding import GeocodeResult, GeocodingError
+from scraper.portal import PortalLimits, default_config, load_portal_config
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -368,6 +369,17 @@ def _run_phase(portal: BazosPortal, run_type: str, runner, dry_run: bool, **kw: 
     return rc
 
 
+def _load_limits(dry_run: bool) -> PortalLimits:
+    if dry_run:
+        return default_config(SOURCE).limits
+    try:
+        with db.connect() as conn:
+            return load_portal_config(conn, SOURCE).limits
+    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a scrape
+        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
+        return default_config(SOURCE).limits
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_logging(args.verbose)
@@ -380,11 +392,20 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    limits = _load_limits(args.dry_run)
     portal = BazosPortal(
         sale_type=args.sale_type, category=args.category,
         canon_main=canon_main, canon_type=canon_type,
         locality=args.locality, radius_km=args.radius_km, max_pages=args.max_pages,
         geocoder=_build_geocoder(),
+    )
+    portal.index_rate = limits.index_rate
+
+    # Resolve operational limits: CLI override > per-portal DB config > default.
+    workers = args.workers if args.workers is not None else limits.detail_workers
+    rate = args.rate if args.rate is not None else limits.detail_rate
+    max_detail = (
+        args.max_detail if args.max_detail is not None else limits.max_detail_per_run
     )
 
     # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
@@ -395,8 +416,7 @@ def main(argv: list[str] | None = None) -> int:
     if rc == 0:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
-            max_claims=args.max_detail, detail_workers=args.workers,
-            detail_rate=args.rate,
+            max_claims=max_detail, detail_workers=workers, detail_rate=rate,
         )
     return rc
 
@@ -415,10 +435,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--max-detail", type=int, default=None,
         help="cap detail-drain claims per run (omit = drain the queue)",
     )
-    p.add_argument("--workers", type=int, default=1, help="detail-fetch workers")
     p.add_argument(
-        "--rate", type=float, default=0.5,
-        help="requests/second ceiling (default 0.5 = one request per 2s)",
+        "--workers", type=int, default=None,
+        help="detail-fetch workers (default: per-portal config)",
+    )
+    p.add_argument(
+        "--rate", type=float, default=None,
+        help="requests/second ceiling (default: per-portal config)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
