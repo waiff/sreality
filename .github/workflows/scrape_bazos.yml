@@ -91,8 +91,10 @@ jobs:
           RADIUS_KM: ${{ inputs.radius_km || '10' }}
           MAX_PAGES: ${{ inputs.max_pages }}
           # Bound the drain so the initial backfill spreads across hourly runs
-          # and stays inside the timeout; the queue persists between runs.
-          MAX_DETAIL: ${{ inputs.max_detail || '800' }}
+          # and stays inside the timeout; the queue persists between runs. A
+          # detail fetch costs ~3.4s (rate limit + per-listing geocoding), so
+          # ~350/run keeps the drain near ~20m, well under the 30m timeout.
+          MAX_DETAIL: ${{ inputs.max_detail || '350' }}
         run: |
           ARGS="--sale-type $SALE_TYPE --category $CATEGORY --workers 2 --rate 0.6"
           if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi
