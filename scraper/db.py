@@ -703,6 +703,38 @@ def index_summary(
         }
 
 
+def index_summary_native(
+    conn: psycopg.Connection,
+    source: str,
+    native_ids: Iterable[str],
+) -> dict[str, dict[str, Any]]:
+    """Fetch (sreality_id PK, price_czk, last_seen_at) keyed by source_id_native
+    for one portal.
+
+    The native-id analogue of `index_summary` (which keys on the bigint PK that
+    sreality's index already carries). A non-sreality portal's index walk only
+    knows the portal-native string id, so it looks rows up by
+    (source, source_id_native) to decide price-change refetch — and to resolve
+    the PK set for a source-scoped `mark_inactive`.
+    """
+    ids = [str(n) for n in native_ids]
+    if not ids:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT source_id_native, sreality_id, price_czk, last_seen_at
+            FROM listings
+            WHERE source = %s AND source_id_native = ANY(%s)
+            """,
+            (source, ids),
+        )
+        return {
+            native: {"sreality_id": pk, "price_czk": price, "last_seen_at": ls}
+            for native, pk, price, ls in cur.fetchall()
+        }
+
+
 def active_count(
     conn: psycopg.Connection,
     category_main: str,
