@@ -79,6 +79,14 @@ def test_default_config_idnes():
     assert len(cfg.categories) == 4              # byty + domy × prodej + pronajem
 
 
+def test_default_config_mmreality():
+    cfg = default_config("mmreality")
+    assert cfg.supports_complete_walk is False  # mixed single index → partial walk
+    assert cfg.split_threshold is None
+    assert cfg.splits is False
+    assert cfg.categories == [{"index": "nemovitosti"}]
+
+
 def test_default_config_unknown_raises():
     with pytest.raises(ValueError):
         default_config("nope")

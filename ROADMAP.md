@@ -6,6 +6,31 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: M&M Reality scraper (portal 5, pilot)
+The fifth portal onto the shared Phase-4 framework — again "a fetcher + a parser +
+a config row," no pipeline divergence. M&M Reality is server-rendered HTML, but
+**every detail page embeds a complete structured estate object** as a Vue
+`:property` prop (HTML-entity-encoded JSON), so `mmreality_parser.parse_detail`
+**decodes that JSON** rather than scraping markup: precise per-listing coordinates,
+typed condition/construction/ownership/energy, area, floors, and images all come
+from one object (no `<dl>` table, no geocoding). Typed fields are normalised to the
+canonical sreality labels (`smíšená→smisena`, `velmi dobrý→velmi_dobry`,
+`Družstevní→druzstevni`, `2+1`) for cross-portal filter/dedup agreement.
+`MmRealityClient` (`scraper/mmreality_client.py`) subclasses `BasePortalClient`
+(HTML `Accept`, `/nemovitosti/{id}/` URL builders, removed-listing redirect
+signal); `MmRealityPortal` (`scraper/mmreality_main.py`) implements the runner
+seams. The index is a **single mixed-category feed** (`/nemovitosti/?page=N`, no
+per-category slice) and each listing's category is read from its own detail JSON,
+so one config descriptor walks everything. Because a single mixed walk can't be
+gated per-(category_main, category_type) the way the source-scoped `mark_inactive`
+requires, it is **`supports_complete_walk=false`** (the bazos posture): the runner
+never flips its listings inactive from index absence (rule #3) — delistings surface
+via a gone detail fetch (immediate per-listing flip) + the "active = seen within 7
+days" rule. Registered as a scraper portal (migration 116, `source='mmreality'`,
+sort 35, pilot, 6h cadence). Scheduled + manual via `scrape_mmreality.yml` (combined
+index-walk → detail-drain in one job, bounded by `--max-pages` / `--max-detail`; the
+`--index-only`/`--drain-only` split flags exist for a cadence-split backfill).
+
 ### 2026-05: Per-portal operational limits in config (PR A of the Scrapers-admin track)
 Made the per-portal operational limits (index/detail rate, workers, per-run caps,
 image limits, completeness) operator-tunable from the DB — the foundation for a

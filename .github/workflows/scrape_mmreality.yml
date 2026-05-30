@@ -1,0 +1,86 @@
+name: "Scraping: M&M Reality scraper (pilot)"
+
+# Scheduled (every 6h) + manual scraper for mmreality.cz on the shared portal
+# framework. M&M Reality is a server-rendered HTML portal whose detail pages
+# embed a complete structured estate object (a Vue `:property` prop): the index
+# walk pages the mixed-category /nemovitosti/ results and enqueues new/price-
+# changed ids into listing_detail_queue, then the detail drain fetches each
+# listing page, decodes its :property JSON to a ScrapedListing, and ingests
+# through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property
+# matching).
+#
+# The index is a single MIXED-category feed, so it can't be gated per-category
+# the way source-scoped mark_inactive needs: the portal is supports_complete_walk
+# =false (registry row, migration 116), so the runner never flips its listings
+# inactive from index absence (architectural rule #3) — delistings still surface
+# via a gone detail fetch + the "active = seen within 7 days" rule. Coordinates
+# come straight from the estate JSON, so no MAPY_CZ_API_KEY is needed.
+#
+# Writes 'index' + 'detail' scrape_runs rows under source='mmreality' (its own
+# Health-page lane; does not touch sreality liveness / reconciliation).
+#
+# Required secret: SUPABASE_DB_URL.
+#
+# Cadence: every 6h, offset off the other scrapers. The index is large, so a
+# scheduled run is bounded by --max-pages; the detail drain is bounded by
+# --max-detail and the queue persists across runs, so a bounded run never loses
+# work — the first few runs drain the initial backlog.
+
+on:
+  schedule:
+    - cron: "50 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: cap index pages walked (pilot safety). Blank = full walk.
+        required: false
+        default: "20"
+        type: string
+      max_detail:
+        description: cap detail-drain claims this run
+        required: false
+        default: "2000"
+        type: string
+      rate:
+        description: detail-fetch requests/second ceiling
+        required: false
+        default: "2.0"
+        type: string
+      workers:
+        description: detail-fetch workers (concurrency; raise for a one-time backfill)
+        required: false
+        default: "4"
+        type: string
+
+concurrency:
+  group: mmreality-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run mmreality scrape
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_PAGES: ${{ inputs.max_pages || '20' }}
+          MAX_DETAIL: ${{ inputs.max_detail || '2000' }}
+          RATE: ${{ inputs.rate || '2.0' }}
+          WORKERS: ${{ inputs.workers || '4' }}
+        run: |
+          ARGS="--max-detail $MAX_DETAIL --rate $RATE --workers $WORKERS"
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          echo "python -m scraper.mmreality_main $ARGS"
+          eval "python -m scraper.mmreality_main $ARGS"

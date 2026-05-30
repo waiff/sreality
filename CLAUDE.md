@@ -99,6 +99,25 @@ job downloads the bytes to R2 (source-agnostic). NOTE: iDNES also has an on-dema
 estimation preview — a separate entry point unchanged by the scheduled scraper, which is why
 the Health dashboard's iDNES card shows BOTH a scraper and an on-demand-parser badge.
 
+**Data source (mmreality.cz).** A scheduled scraper (`scraper/mmreality_client.py`,
+`mmreality_parser.py`, `mmreality_main.py`, workflow `scrape_mmreality.yml` — pilot,
+every 6h + dispatch) tagged `source='mmreality'`. M&M Reality is server-rendered HTML
+but **every detail page embeds a COMPLETE structured estate object** as a Vue
+`:property` prop (HTML-entity-encoded JSON), so `mmreality_parser.parse_detail` decodes
+that JSON rather than scraping markup: precise per-listing coordinates (`point`), typed
+condition/construction/ownership/energy, area, floors, and images all from one object —
+no `<dl>` table, no geocoding step. Typed fields are normalised to the SAME canonical
+labels sreality/idnes emit (`smíšená→smisena`, `velmi dobrý→velmi_dobry`,
+`Družstevní→druzstevni`, `2+1`). The index is a SINGLE MIXED-category feed
+(`/nemovitosti/?page=N`, no per-category slice); each listing's category is read from
+its own detail JSON, so one config descriptor walks everything. Because a single mixed
+walk can't be gated per-(category_main, category_type) the way the source-scoped
+`mark_inactive` requires, mmreality is `supports_complete_walk=false` (the bazos posture,
+rule #21): the runner never flips its listings inactive from index absence (rule #3) —
+delistings surface via a gone detail fetch (immediate per-listing flip via
+`mark_listing_inactive_native`) + the toolkit's "active = seen within 7 days" rule.
+Registered as a scraper portal (migration 116, sort 35).
+
 ## Territories
 
 The repo is split into **three** top-level territories with deliberately different
@@ -821,7 +840,9 @@ the proven combined index+detail `_run_full`, kept for instant revert (re-add it
 cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrape_bazos.yml`
 ("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
-both index walk + detail drain in one job via `bezrealitky_main`). The idnes scrape is
+both index walk + detail drain in one job via `bezrealitky_main`). The mmreality scrape is
+`scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", every 6h + dispatch; runs
+both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The idnes scrape is
 **cadence-split** like sreality (iDNES is large — ~2400 index pages, ~60k listings — so a
 combined run's full index starves the drain): `idnes_index_walk.yml` ("Scraping: iDNES Reality
 index walk", `idnes_main --index-only`, cron `15 */6`, full complete-walk + mark_inactive +
