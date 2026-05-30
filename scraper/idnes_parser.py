@@ -90,6 +90,12 @@ _DETAIL_PATH_RE = re.compile(r"/detail/([^/?#]+)/([^/?#]+)/")
 # &nbsp;/&zwj; between groups). Stops at the first non-space, non-digit char.
 _PRICE_RUN_RE = re.compile(r"\d[\d\s\u00a0\u200b\u200c\u200d\u2060]*")
 _PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
+# Column maxes for the numeric area fields. A parsed area larger than its column
+# can hold (a million-m\u00b2 title-number garble, a developer-project "1234567 m\u00b2"
+# rendered without thousand separators) gets dropped to NULL rather than
+# crashing the drain. Matches the schema in `listings`.
+_AREA_M2_MAX = 999_999.9            # listings.area_m2 is numeric(7,1)
+_AREA_LARGE_MAX = 99_999_999.9      # usable_area / estate_area / garden_area are numeric(9,1)
 # Map config: "center":[lon, lat]. CZ lat/lon ranges don't overlap, so a swap is
 # caught by the bbox guard rather than producing a bogus point.
 _CENTER_RE = re.compile(r'"center"\s*:\s*\[\s*(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)\s*\]')
@@ -205,6 +211,13 @@ def _parse_area(text: str | None) -> float | None:
     if not m:
         return None
     return float(m.group(1).replace(",", "."))
+
+
+def _clamp(value: float | None, ceiling: float) -> float | None:
+    """Drop an area that would overflow its numeric column rather than crash the
+    drain. A real apartment/house area can never exceed millions of m²; a value
+    that does is either a parse artifact or genuinely unstorable in the schema."""
+    return None if value is None or value > ceiling else value
 
 
 def _parse_int(text: str | None) -> int | None:
@@ -407,7 +420,7 @@ def parse_detail(
         or _text(params.get("podlahová plocha"))
         or _text(params.get("plocha"))
     )
-    area_m2 = _parse_area(area_text) or _parse_area(title)
+    area_m2 = _clamp(_parse_area(area_text) or _parse_area(title), _AREA_M2_MAX)
 
     image_urls: list[str] = []
     seen_img: set[str] = set()
@@ -442,7 +455,7 @@ def parse_detail(
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
-        usable_area=_parse_area(area_text),
+        usable_area=_clamp(_parse_area(area_text), _AREA_LARGE_MAX),
         disposition=_parse_disposition(title) or _parse_disposition(_text(params.get("dispozice"))),
         locality=locality,
         district=None,
@@ -465,8 +478,8 @@ def parse_detail(
         terrace=_has_check(params.get("terasa")),
         garage=_has_check(params.get("garáž")),
         has_parking=_truthy_field(params.get("parkování")),
-        estate_area=_parse_area(_text(params.get("plocha pozemku"))),
-        garden_area=_parse_area(_text(params.get("plocha zahrady"))),
+        estate_area=_clamp(_parse_area(_text(params.get("plocha pozemku"))), _AREA_LARGE_MAX),
+        garden_area=_clamp(_parse_area(_text(params.get("plocha zahrady"))), _AREA_LARGE_MAX),
         description=description,
         raw=raw,
     )

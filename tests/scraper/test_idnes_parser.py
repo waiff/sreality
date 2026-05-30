@@ -192,6 +192,28 @@ def test_price_takes_first_run_and_clamps_to_int():
     assert index_price("9 999 999 999 Kč") is None
 
 
+def test_parse_detail_clamps_area_to_column_max():
+    # A listing whose area parses to > 999,999.9 m² (an unusual page where the
+    # m² value is rendered without thousand separators, or a developer-project
+    # template glitch) overflowed listings.area_m2 (numeric(7,1)) and crashed
+    # the drain. The parser drops the unstorable value to NULL.
+    huge_area_detail_html = """
+<!DOCTYPE html><html><body>
+<h1>Prodej domu</h1>
+<p class="b-detail__price"><strong>5 000 000 Kč</strong></p>
+<p class="b-detail__info">Praha</p>
+<dl><dt>Užitná plocha</dt><dd>1234567 m<sup>2</sup></dd></dl>
+</body></html>
+"""
+    listing = parse_detail(
+        huge_area_detail_html,
+        source_url="https://reality.idnes.cz/detail/prodej/dum/x/6a18deadbeefdeadbeef0099/",
+        category_main="dum", category_type="prodej",
+    )
+    assert listing.area_m2 is None        # would have been 1_234_567 → numeric(7,1) overflow
+    assert listing.price_czk == 5_000_000
+
+
 def test_parse_detail_price_on_request_is_none_for_rent():
     listing = parse_detail(
         RENT_DOHODOU_HTML, source_url="https://reality.idnes.cz/detail/pronajem/byt/brno/6a18deadbeefdeadbeef0002/",
