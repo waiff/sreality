@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from scraper.maxima_parser import (
     category_from_id,
+    category_of,
     index_price,
     parse_detail,
     parse_index,
@@ -142,6 +143,17 @@ def test_category_from_id():
     assert category_from_id("o10000001") == "ostatni"
     assert category_from_id("z99999999") is None
     assert category_from_id(None) is None
+
+
+def test_category_of_title_first_with_garage_catchall():
+    # Title is authoritative across both agendas; a rent 'a'/'c'-prefix id the sale
+    # taxonomy doesn't cover is categorised by its title verb.
+    assert category_of("a10067262", "Pronájem bytu 1 + kk") == "byt"
+    assert category_of("c30000001", "Pronájem rodinného domu") == "dum"
+    # A specific category still wins over the garage/ostatni catch-all.
+    assert category_of("b50000001", "Prodej bytu 3+kk s garáží") == "byt"
+    # A garage / "ostatní" title maps to ostatni (no prefix match either).
+    assert category_of("j90000004", "Pronájem ostatní garáže, 13 m2") == "ostatni"
 
 
 def test_parse_detail_full():
