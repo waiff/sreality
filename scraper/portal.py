@@ -206,10 +206,21 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # the completeness guard, source-scoped). No split needed.
         supports_complete_walk=True,
         categories=[
-            {"offer_type": "PRODEJ", "estate_type": "BYT"},
+            {"offer_type": "PRODEJ",   "estate_type": "BYT"},
             {"offer_type": "PRONAJEM", "estate_type": "BYT"},
-            {"offer_type": "PRODEJ", "estate_type": "DUM"},
+            {"offer_type": "PRODEJ",   "estate_type": "DUM"},
             {"offer_type": "PRONAJEM", "estate_type": "DUM"},
+            {"offer_type": "PRODEJ",   "estate_type": "POZEMEK"},
+            {"offer_type": "PRONAJEM", "estate_type": "POZEMEK"},
+            # KANCELAR + NEBYTOVY_PROSTOR both canonicalise to 'komercni' —
+            # grouped into one walk so the source-scoped mark_inactive (which
+            # keys on canonical cm/ct) sees the union, not two disjoint subsets
+            # that would mutually delist each other.
+            {"offer_type": "PRODEJ",   "estate_type": ["KANCELAR", "NEBYTOVY_PROSTOR"], "category_main": "komercni"},
+            {"offer_type": "PRONAJEM", "estate_type": ["KANCELAR", "NEBYTOVY_PROSTOR"], "category_main": "komercni"},
+            # GARAZ + REKREACNI_OBJEKT both canonicalise to 'ostatni' — same.
+            {"offer_type": "PRODEJ",   "estate_type": ["GARAZ", "REKREACNI_OBJEKT"], "category_main": "ostatni"},
+            {"offer_type": "PRONAJEM", "estate_type": ["GARAZ", "REKREACNI_OBJEKT"], "category_main": "ostatni"},
         ],
         split_threshold=None,
         limits=PortalLimits(
