@@ -175,6 +175,18 @@ def test_category_from_detail_url():
     assert category_from_url(
         "https://reality.idnes.cz/detail/pronajem/dum/brno/6a18deadbeefdeadbeef0002/"
     ) == ("dum", "pronajem")
+    # The new categories use multi-word singular slugs (komercni-nemovitost,
+    # maly-objekt-nebo-garaz) — those must canonicalise too, else the drain
+    # records the wrong category_main and breaks source-scoped mark_inactive.
+    assert category_from_url(
+        "https://reality.idnes.cz/detail/prodej/pozemek/x/6a18deadbeefdeadbeef0003/"
+    ) == ("pozemek", "prodej")
+    assert category_from_url(
+        "https://reality.idnes.cz/detail/prodej/komercni-nemovitost/x/6a18deadbeefdeadbeef0004/"
+    ) == ("komercni", "prodej")
+    assert category_from_url(
+        "https://reality.idnes.cz/detail/pronajem/maly-objekt-nebo-garaz/x/6a18deadbeefdeadbeef0005/"
+    ) == ("ostatni", "pronajem")
     assert category_from_url("https://reality.idnes.cz/s/prodej/byty/") == (None, None)
 
 

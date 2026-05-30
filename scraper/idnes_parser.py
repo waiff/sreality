@@ -37,8 +37,8 @@ CATEGORY_MAIN: dict[str, str] = {
     "byty": "byt",
     "domy": "dum",
     "pozemky": "pozemek",
-    "komercni": "komercni",
-    "ostatni": "ostatni",
+    "komercni-nemovitosti": "komercni",
+    "male-objekty-garaze": "ostatni",
 }
 
 # Detail URLs use the SINGULAR category segment (/detail/prodej/byt/...), unlike
@@ -49,8 +49,8 @@ DETAIL_CATEGORY: dict[str, str] = {
     "byt": "byt",
     "dum": "dum",
     "pozemek": "pozemek",
-    "komercni": "komercni",
-    "ostatni": "ostatni",
+    "komercni-nemovitost": "komercni",
+    "maly-objekt-nebo-garaz": "ostatni",
 }
 
 # idnes building-construction labels -> the canonical codes parser._BUILDING_TYPE_TEXT

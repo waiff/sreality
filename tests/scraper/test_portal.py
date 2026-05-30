@@ -76,7 +76,9 @@ def test_default_config_idnes():
     assert cfg.split_threshold is None
     assert cfg.splits is False
     assert {"sale_type": "prodej", "category": "byty"} in cfg.categories
-    assert len(cfg.categories) == 4              # byty + domy × prodej + pronajem
+    assert {"sale_type": "prodej", "category": "komercni-nemovitosti"} in cfg.categories
+    assert {"sale_type": "prodej", "category": "male-objekty-garaze"} in cfg.categories
+    assert len(cfg.categories) == 10             # 5 slugs × prodej + pronajem
 
 
 def test_default_config_mmreality():
