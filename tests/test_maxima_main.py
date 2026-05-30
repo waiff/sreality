@@ -145,7 +145,7 @@ def test_active_count_and_mark_inactive_source_scoped(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         maxima_main.db, "active_count",
-        lambda _c, cm, ct, source: captured.setdefault("active", (cm, ct, source)) or 12,
+        lambda _c, cm, ct, source: captured.update(active=(cm, ct, source)) or 12,
     )
     assert _portal().active_count(object(), _CATEGORIES[0]) == 12
     assert captured["active"] == ("byt", "prodej", "maxima")
