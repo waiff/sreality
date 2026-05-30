@@ -8,11 +8,13 @@ name: "Scraping: iDNES Reality detail drain"
 # its detail URL. Records run_type='detail' (index_pages=0). The drain records
 # image-URL rows; the shared images.yml job downloads the bytes to R2.
 #
-# Bounded per run (--max-detail) so it always finalizes inside the timeout; the
-# queue persists across runs (a SIGKILLed claim is reclaimed by the next run), so a
-# bounded run never loses work and the first ~day drains the initial ~60k backlog,
-# then it idles when the queue is empty. A gone detail (404 / redirect off /detail/)
-# flips that listing inactive + dequeues it.
+# Bounded by a wall-clock budget (--max-seconds, default 2400 = 40 min, safely
+# under the 50-min job timeout) so the run always FINALIZES cleanly — it stops
+# claiming and records ended_at rather than being SIGKILLed mid-flight (which would
+# leave a "stuck" scrape_run on the Health dashboard). The queue persists across
+# runs, so the first ~days drain the initial ~60k backlog, then it idles when the
+# queue is empty. A gone detail (404 / redirect off /detail/) flips that listing
+# inactive + dequeues it.
 #
 # Required secret: SUPABASE_DB_URL (single-row ingest uses the transaction pooler).
 
@@ -21,8 +23,13 @@ on:
     - cron: "30 */2 * * *"
   workflow_dispatch:
     inputs:
+      max_seconds:
+        description: wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)
+        required: false
+        default: ""
+        type: string
       max_detail:
-        description: cap listings claimed + fetched this run (blank = 6000)
+        description: hard cap on listings claimed this run (blank = none; the time budget governs)
         required: false
         default: ""
         type: string
@@ -60,10 +67,12 @@ jobs:
       - name: Run idnes detail drain
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          MAX_DETAIL: ${{ inputs.max_detail || '6000' }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
+          MAX_DETAIL: ${{ inputs.max_detail }}
           WORKERS: ${{ inputs.workers || '8' }}
           RATE: ${{ inputs.rate || '4.0' }}
         run: |
-          ARGS="--drain-only --max-detail $MAX_DETAIL --workers $WORKERS --rate $RATE"
+          ARGS="--drain-only --max-seconds $MAX_SECONDS --workers $WORKERS --rate $RATE"
+          if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
           echo "python -m scraper.idnes_main $ARGS"
           eval "python -m scraper.idnes_main $ARGS"

@@ -639,8 +639,16 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "paths": null,
     "inputs": [
       {
+        "name": "max_seconds",
+        "description": "wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
         "name": "max_detail",
-        "description": "cap listings claimed + fetched this run (blank = 6000)",
+        "description": "hard cap on listings claimed this run (blank = none; the time budget governs)",
         "required": false,
         "type": "string",
         "default": "",
@@ -1194,7 +1202,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "bazos-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 50,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bazos.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bazos.yml"

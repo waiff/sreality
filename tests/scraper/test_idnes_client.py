@@ -103,6 +103,18 @@ def test_fetch_detail_gone_body_marker():
         c.fetch_detail(_DETAIL)
 
 
+def test_fetch_detail_gone_real_delisted_stub():
+    # idnes keeps the title but replaces the body with this exact stub (HTTP 200).
+    stub = (
+        '<h1>Pronájem bytu 1+kk v Klatovech.</h1>'
+        '<p class="b-intro__title">Nabídka již není aktivní</p>'
+        '<p>Ode dne 29.05.2026 evidujeme nabídku jako neaktivní.</p>'
+    )
+    c = _client([FakeResponse(200, stub, url=_DETAIL)])
+    with pytest.raises(ListingGoneError):
+        c.fetch_detail(_DETAIL)
+
+
 def test_retry_then_success_penalizes_on_429(monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda *a, **k: None)
     limiter = RateLimiter(1000.0)
