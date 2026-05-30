@@ -96,3 +96,14 @@ jobs:
 
           echo "Running with: $ARGS"
           python -m scraper.main $ARGS
+
+      # Keep the Health "Image mirror" tile current. Its RPC reads a
+      # precomputed matview (migration 115) instead of scanning the full
+      # images table on every load; this refreshes it off the request path.
+      # if: always() so the stats stay fresh even if the drain bailed early
+      # (e.g. the suspicious-stop heuristic) — the counts still moved.
+      - name: Refresh image-storage stats matview
+        if: always()
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python -m scripts.refresh_image_stats
