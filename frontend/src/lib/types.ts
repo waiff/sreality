@@ -179,6 +179,23 @@ export interface HealthSummary {
   by_category: HealthCategoryBlock[];
 }
 
+/* Per-category trend series (migration 118): category_trends RPC. One point per
+   index run — "portal" = sreality reported total, "db" = our active count. */
+
+export interface CategoryTrendPoint {
+  t: string;
+  portal: number | null;
+  db: number | null;
+}
+
+export interface CategoryTrend {
+  category_main: string;
+  category_type: string;
+  total_in_db: number;
+  hourly: CategoryTrendPoint[];
+  daily: CategoryTrendPoint[];
+}
+
 /* Per-scrape stats (migration 086): scrape_runs table + recent_scrape_runs RPC. */
 
 export interface ScrapeRunCategory {
