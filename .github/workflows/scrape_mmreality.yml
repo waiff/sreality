@@ -11,7 +11,7 @@ name: "Scraping: M&M Reality scraper (pilot)"
 #
 # The index is a single MIXED-category feed, so it can't be gated per-category
 # the way source-scoped mark_inactive needs: the portal is supports_complete_walk
-# =false (registry row, migration 116), so the runner never flips its listings
+# =false (registry row, migration 117), so the runner never flips its listings
 # inactive from index absence (architectural rule #3) — delistings still surface
 # via a gone detail fetch + the "active = seen within 7 days" rule. Coordinates
 # come straight from the estate JSON, so no MAPY_CZ_API_KEY is needed.

@@ -183,6 +183,22 @@ _DEFAULTS: dict[str, PortalConfig] = {
             index_rate=1.0, detail_workers=4, detail_rate=2.0,
         ),
     ),
+    "maxima": PortalConfig(
+        source="maxima",
+        # A single-agency catalogue (~220 listings) on one mixed index. Pilot:
+        # ships supports_complete_walk=false (never marks listings inactive from
+        # index-absence) until proven — the whole-catalogue walk IS complete, so
+        # promotion is a later migration (as bazos got in 113). One "category"
+        # descriptor: maxima has no per-category URL, so the parser derives each
+        # listing's category from its native-id prefix + title verb.
+        supports_complete_walk=False,
+        categories=[{"label": "all"}],
+        split_threshold=None,
+        limits=PortalLimits(
+            index_rate=1.0, detail_workers=2, detail_rate=1.0,
+            min_completeness=0.9,
+        ),
+    ),
     "bezrealitky": PortalConfig(
         source="bezrealitky",
         # GraphQL listAdverts gives a totalCount and has no deep-pagination cap,

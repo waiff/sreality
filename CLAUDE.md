@@ -116,7 +116,7 @@ walk can't be gated per-(category_main, category_type) the way the source-scoped
 rule #21): the runner never flips its listings inactive from index absence (rule #3) —
 delistings surface via a gone detail fetch (immediate per-listing flip via
 `mark_listing_inactive_native`) + the toolkit's "active = seen within 7 days" rule.
-Registered as a scraper portal (migration 116, sort 35).
+Registered as a scraper portal (migration 117, sort 35).
 
 ## Territories
 
