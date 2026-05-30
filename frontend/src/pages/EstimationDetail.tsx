@@ -39,6 +39,7 @@ import {
   type RerunInput,
   type RerunOverrides,
 } from '@/lib/rerun';
+import { imageSrc } from '@/lib/imageUrl';
 import type {
   ComparableExcluded,
   ComparableUsed,
@@ -88,15 +89,6 @@ function useSubjectImages(run: EstimationRun | null, enabled: boolean) {
   });
 }
 
-const R2_PUBLIC_BASE =
-  (import.meta.env.VITE_R2_PUBLIC_BASE as string | undefined) ?? undefined;
-
-function pickImageUrl(img: ImagePublic): string {
-  if (R2_PUBLIC_BASE && img.storage_path) {
-    return `${R2_PUBLIC_BASE.replace(/\/$/, '')}/${img.storage_path}`;
-  }
-  return img.sreality_url;
-}
 
 export default function EstimationDetail() {
   const { id: idParam } = useParams();
@@ -413,7 +405,7 @@ function SubjectImageStrip({
   inputUrl: string | null;
 }) {
   const [index, setIndex] = useState(0);
-  const urls = useMemo(() => images.map(pickImageUrl), [images]);
+  const urls = useMemo(() => images.map(imageSrc), [images]);
   const safeIndex = urls.length === 0 ? 0 : Math.min(index, urls.length - 1);
   const hasMany = urls.length > 1;
 

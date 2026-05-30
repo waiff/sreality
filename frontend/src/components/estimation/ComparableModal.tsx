@@ -8,8 +8,7 @@ import {
   fmtAbsolute,
 } from '@/lib/format';
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
-
-const R2_BASE = import.meta.env.VITE_R2_PUBLIC_BASE as string | undefined;
+import { imageSrc } from '@/lib/imageUrl';
 
 interface Props {
   listing: ListingPublic;
@@ -203,7 +202,7 @@ function CarouselImage({ img, dim }: { img: ImagePublic; dim: string }) {
   return (
     <img
       key={img.id}
-      src={imageUrl(img)}
+      src={imageSrc(img)}
       alt=""
       onError={() => setErrored(true)}
       className={['w-full h-full object-cover', dim].join(' ')}
@@ -216,7 +215,7 @@ function ThumbImage({ img, dim }: { img: ImagePublic; dim: string }) {
   if (errored) return <BrokenPlaceholder small />;
   return (
     <img
-      src={imageUrl(img)}
+      src={imageSrc(img)}
       alt=""
       loading="lazy"
       onError={() => setErrored(true)}
@@ -366,13 +365,6 @@ function Footer({ sreality_id }: { sreality_id: number }) {
 function yesNo(v: boolean | null): string | null {
   if (v == null) return null;
   return v ? 'Yes' : 'No';
-}
-
-function imageUrl(img: ImagePublic): string {
-  if (R2_BASE && img.storage_path) {
-    return `${R2_BASE.replace(/\/$/, '')}/${img.storage_path}`;
-  }
-  return img.sreality_url;
 }
 
 function CloseGlyph() {

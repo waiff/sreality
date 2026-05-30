@@ -249,8 +249,14 @@ function Card({
         )}
         <div className="mt-1 flex items-baseline justify-between gap-1">
           <p className={`text-[0.78rem] font-medium tabular-nums ${priceColor}`}>
-            {fmtCzk(r.price_czk)}
-            <span className="text-[var(--color-ink-3)] text-[0.65rem]">{priceSuffix}</span>
+            {r.price_czk != null ? (
+              <>
+                {fmtCzk(r.price_czk)}
+                <span className="text-[var(--color-ink-3)] text-[0.65rem]">{priceSuffix}</span>
+              </>
+            ) : (
+              <span className="text-[var(--color-ink-3)] text-[0.7rem]">Cena na vyžádání</span>
+            )}
           </p>
           <p className="text-[0.62rem] text-[var(--color-ink-4)] tabular-nums whitespace-nowrap">
             {fmtPricePerM2(r.price_czk, r.area_m2)}
