@@ -21,8 +21,12 @@ all four scraper mains (`main`, `idnes_main`, `bazos_main`, `bezrealitky_main`) 
 each limit as **CLI override > per-portal DB > global DB > code default**. Seeded with
 today's production values + baked code defaults matching today's argparse defaults, so
 it is **zero behavior change** (production workflows still pass their CLI flags → CLI
-wins). Next (PR B): admin GET/PUT endpoints + a Scrapers dashboard page to edit limits
-for every portal + the global layer.
+wins). PR B adds the operator surface: `GET/PUT /admin/portals/{source}/limits` (+
+`GET /admin/portals`) mirroring the `app_settings` admin pattern (writes flow through the
+history trigger; server-side range validation → 400 on bad shape), and a **Scrapers**
+dashboard page (`frontend/src/pages/Scrapers.tsx` + nav) with one editable card per
+registry portal plus a Global-defaults card — blank field inherits the global, edits
+apply on the next scrape with no redeploy. Cadence (cron) stays in code for now.
 
 ### 2026-05: Health dashboard — per-portal ledger
 Restructured the Health page from a flat data-source grid + sreality-only global

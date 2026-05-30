@@ -605,6 +605,50 @@ export const updateAppSetting = (
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
 
+/* ----- per-portal operational limits (Scrapers dashboard, migration 114) ---
+ * Each portal's limits resolve as CLI override > per-portal DB > global
+ * (app_settings.scraper_limits_global, edited via updateAppSetting) > code
+ * default. `overrides` is the raw per-portal jsonb; `effective` is the resolved
+ * value the scraper would use today; `baked_default` is the code floor. */
+
+export interface PortalLimitValues {
+  index_rate?: number | null;
+  detail_workers?: number | null;
+  detail_rate?: number | null;
+  max_detail_per_run?: number | null;
+  max_detail_per_category?: number | null;
+  min_completeness?: number | null;
+  image_workers?: number | null;
+  max_image_downloads?: number | null;
+  suspicious_stop_window?: number | null;
+  suspicious_stop_threshold?: number | null;
+}
+
+export interface PortalAdminRow {
+  source: string;
+  label: string;
+  kind: 'scraper' | 'parser';
+  stage: string;
+  sort_order: number;
+  is_enabled: boolean;
+  supports_complete_walk: boolean;
+  overrides: PortalLimitValues | null;
+  effective: PortalLimitValues | null;
+  baked_default: PortalLimitValues | null;
+}
+
+export const listPortals = (): Promise<{ data: PortalAdminRow[] }> =>
+  request<{ data: PortalAdminRow[] }>('/admin/portals');
+
+export const updatePortalLimits = (
+  source: string,
+  patch: PortalLimitValues,
+): Promise<{ source: string; overrides: PortalLimitValues; effective: PortalLimitValues }> =>
+  request(`/admin/portals/${encodeURIComponent(source)}/limits`, {
+    method: 'PUT',
+    json: patch,
+  });
+
 /* ----- filter registry + visibility (PR 1 / migration 059) ----------------
  * The canonical filter list lives in toolkit/filter_registry.py. `getFilterSchema`
  * returns the live registry plus the agenda × filter visibility matrix.

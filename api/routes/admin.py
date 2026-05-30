@@ -28,6 +28,7 @@ from api.skills import (
     load_skill,
     update_skill,
 )
+from scraper.portal import default_config, load_portal_config
 from toolkit import filter_registry
 
 if TYPE_CHECKING:
@@ -52,6 +53,23 @@ class UpdateAppSettingIn(BaseModel):
 
 class UpdateFilterVisibilityIn(BaseModel):
     enabled: bool
+
+
+class UpdatePortalLimitsIn(BaseModel):
+    """Partial update of one portal's operational_limits. Only fields the client
+    sends are applied (merged into the existing value); an explicit null on a cap
+    field means "unlimited". Use model_dump(exclude_unset=True) to honor that."""
+
+    index_rate: float | None = None
+    detail_workers: int | None = None
+    detail_rate: float | None = None
+    max_detail_per_run: int | None = None
+    max_detail_per_category: int | None = None
+    min_completeness: float | None = None
+    image_workers: int | None = None
+    max_image_downloads: int | None = None
+    suspicious_stop_window: int | None = None
+    suspicious_stop_threshold: float | None = None
 
 
 # --- skills ---------------------------------------------------------------
@@ -269,7 +287,119 @@ def put_filter_visibility(
     }
 
 
+# --- portals: per-portal operational limits (migration 114) ----------------
+
+@router.get("/portals")
+def get_portals(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
+    """Every registry portal with its raw limit overrides + the resolved
+    (effective) limits + the baked code default, so the Scrapers dashboard can
+    render an editable card per portal and show "(from global)" where a value is
+    inherited rather than explicitly overridden."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source, label, kind, stage, sort_order, is_enabled, "
+            "supports_complete_walk, operational_limits "
+            "FROM portals ORDER BY sort_order, source"
+        )
+        rows = cur.fetchall()
+    data: list[dict[str, Any]] = []
+    for r in rows:
+        source = r[0]
+        try:
+            effective = _limits_to_dict(load_portal_config(conn, source).limits)
+        except Exception:  # noqa: BLE001 - never let one portal break the list
+            effective = None
+        try:
+            baked = _limits_to_dict(default_config(source).limits)
+        except ValueError:
+            baked = None  # parser-only portal: no baked scraper default
+        data.append({
+            "source": source,
+            "label": r[1],
+            "kind": r[2],
+            "stage": r[3],
+            "sort_order": r[4],
+            "is_enabled": r[5],
+            "supports_complete_walk": r[6],
+            "overrides": r[7],          # raw per-portal jsonb (or null)
+            "effective": effective,     # resolved: baked < global < per-portal
+            "baked_default": baked,
+        })
+    return {"data": data}
+
+
+@router.put("/portals/{source}/limits")
+def put_portal_limits(
+    source: str,
+    body: UpdatePortalLimitsIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Merge the sent limit fields into the portal's operational_limits. The
+    before-update trigger records the prior value in portal_limits_history."""
+    import json
+    patch = body.model_dump(exclude_unset=True)
+    if not patch:
+        raise HTTPException(status_code=400, detail="no limit fields provided")
+    try:
+        _validate_portal_limits(patch)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT operational_limits FROM portals WHERE source = %s FOR UPDATE",
+            (source,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"portal {source!r} not found")
+        merged = {**(row[0] or {}), **patch}
+        cur.execute(
+            "UPDATE portals SET operational_limits = %s::jsonb, "
+            "operational_limits_updated_by = %s WHERE source = %s",
+            (json.dumps(merged), "scrapers_ui", source),
+        )
+    effective = _limits_to_dict(load_portal_config(conn, source).limits)
+    return {"source": source, "overrides": merged, "effective": effective}
+
+
 # --- helpers --------------------------------------------------------------
+
+def _limits_to_dict(limits: Any) -> dict[str, Any]:
+    from dataclasses import asdict
+    return asdict(limits)
+
+
+def _validate_portal_limits(patch: dict[str, Any]) -> None:
+    """Range/type-check operator-edited limits. These drive live scrapes, so a
+    bad shape is rejected (400) rather than silently coerced at scrape time."""
+    def _is_num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    def _is_int(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    positive_floats = ("index_rate", "detail_rate")
+    positive_ints = ("detail_workers", "image_workers", "suspicious_stop_window")
+    optional_positive_ints = ("max_detail_per_run", "max_detail_per_category")
+    fractions = ("min_completeness", "suspicious_stop_threshold")
+
+    for k, v in patch.items():
+        if k in positive_floats:
+            if not _is_num(v) or v <= 0:
+                raise ValueError(f"{k} must be a number > 0")
+        elif k in positive_ints:
+            if not _is_int(v) or v < 1:
+                raise ValueError(f"{k} must be an integer >= 1")
+        elif k in optional_positive_ints:
+            if v is not None and (not _is_int(v) or v < 1):
+                raise ValueError(f"{k} must be an integer >= 1 or null (unlimited)")
+        elif k == "max_image_downloads":
+            if v is not None and (not _is_int(v) or v < 0):
+                raise ValueError(f"{k} must be an integer >= 0 or null (unlimited)")
+        elif k in fractions:
+            if not _is_num(v) or not (0 < v <= 1):
+                raise ValueError(f"{k} must be a number in (0, 1]")
+
 
 def _skill_to_dict(skill: Any) -> dict[str, Any]:
     return {

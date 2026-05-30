@@ -9,6 +9,7 @@ import EstimationList from './pages/EstimationList';
 import Collections from './pages/Collections';
 import CollectionDetail from './pages/CollectionDetail';
 import Settings from './pages/Settings';
+import Scrapers from './pages/Scrapers';
 import Watchdog from './pages/Watchdog';
 import WatchdogManage from './pages/WatchdogManage';
 import WatchdogEdit from './pages/WatchdogEdit';
@@ -39,6 +40,7 @@ export const routes: RouteObject[] = [
       { path: 'watchdog/:id/edit', element: <WatchdogEdit /> },
       { path: 'dedup', element: <Dedup /> },
       { path: 'settings', element: <Settings /> },
+      { path: 'scrapers', element: <Scrapers /> },
       { path: 'dev/confidence-indicator', element: <DevConfidencePreview /> },
       { path: '*', element: <NotFound /> },
     ],
