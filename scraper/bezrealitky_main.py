@@ -97,6 +97,12 @@ class BezrealitkyPortal:
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         offer = category["offer_type"]
         estate = category["estate_type"]
+        # Per-descriptor scope knobs; default True (the listAdverts API default +
+        # what bezrealitky.cz shows for CZ). A descriptor sets
+        # include_imports:false only when that category's imports are aggregator
+        # noise (PRONAJEM/REKREACNI is ~7000 vacation rentals).
+        inc_imports = bool(category.get("include_imports", True))
+        inc_short_term = bool(category.get("include_short_term", True))
         client = BezrealitkyClient(limiter=limiter)
 
         native_ids: list[str] = []
@@ -106,7 +112,8 @@ class BezrealitkyPortal:
         pages = 0
         while True:
             adverts, total = client.search(
-                offer, estate, limit=INDEX_PAGE_SIZE, offset=offset
+                offer, estate, limit=INDEX_PAGE_SIZE, offset=offset,
+                include_imports=inc_imports, include_short_term=inc_short_term,
             )
             pages += 1
             LOG.info("INDEX offset=%d items=%d total=%d", offset, len(adverts), total)

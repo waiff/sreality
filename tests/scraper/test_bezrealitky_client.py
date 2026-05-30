@@ -104,6 +104,17 @@ def test_search_str_estate_type_still_wraps():
     assert body["variables"]["et"] == ["BYT"]
 
 
+def test_search_passes_include_imports_flag():
+    payload = {"data": {"listAdverts": {"totalCount": 0, "list": []}}}
+    c = _client([FakeResponse(payload), FakeResponse(payload)])
+    c.search("PRONAJEM", ["GARAZ", "REKREACNI_OBJEKT"], limit=1, offset=0, include_imports=False)
+    c.search("PRODEJ", "BYT", limit=1, offset=0)
+    assert c._session.posts[0][1]["variables"]["inc"] is False
+    assert c._session.posts[0][1]["variables"]["st"] is True
+    # default True so the index walk matches what bezrealitky.cz shows (CZ scope)
+    assert c._session.posts[1][1]["variables"]["inc"] is True
+
+
 def test_graphql_errors_raise():
     c = _client([FakeResponse({"errors": [{"message": "boom"}]})])
     with pytest.raises(RuntimeError):

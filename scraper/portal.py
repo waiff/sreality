@@ -219,8 +219,13 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"offer_type": "PRODEJ",   "estate_type": ["KANCELAR", "NEBYTOVY_PROSTOR"], "category_main": "komercni"},
             {"offer_type": "PRONAJEM", "estate_type": ["KANCELAR", "NEBYTOVY_PROSTOR"], "category_main": "komercni"},
             # GARAZ + REKREACNI_OBJEKT both canonicalise to 'ostatni' — same.
+            # The PRONAJEM half excludes imports because REKREACNI/PRONAJEM
+            # imports are ~7000 vacation-rental aggregator listings (not real-
+            # estate market data); we lose ~13 garaz/pronájem imports too, but
+            # that's the right trade. PRODEJ keeps imports (rec. cabins for sale
+            # are legit market inventory).
             {"offer_type": "PRODEJ",   "estate_type": ["GARAZ", "REKREACNI_OBJEKT"], "category_main": "ostatni"},
-            {"offer_type": "PRONAJEM", "estate_type": ["GARAZ", "REKREACNI_OBJEKT"], "category_main": "ostatni"},
+            {"offer_type": "PRONAJEM", "estate_type": ["GARAZ", "REKREACNI_OBJEKT"], "category_main": "ostatni", "include_imports": False},
         ],
         split_threshold=None,
         limits=PortalLimits(
