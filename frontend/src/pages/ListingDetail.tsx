@@ -221,9 +221,12 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 function Header({ listing }: { listing: ListingPublic }) {
   const disposition = listing.disposition ?? '—';
   const area = fmtArea(listing.area_m2);
-  const price = fmtCzk(listing.price_czk);
+  // A null price means the seller hid it (often quoting it in the description);
+  // it's real source state, not missing data — surface it as such.
+  const hasPrice = listing.price_czk != null;
+  const price = hasPrice ? fmtCzk(listing.price_czk) : 'Cena na vyžádání';
   const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
-  const unit = listing.price_unit ? ` / ${listing.price_unit}` : '';
+  const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
 
   return (
     <div className="mt-5 flex items-start justify-between gap-6">
@@ -234,7 +237,10 @@ function Header({ listing }: { listing: ListingPublic }) {
           <span>{area}</span>
         </p>
         <h1
-          className="mt-1.5 text-[2.6rem] leading-[1.05] tabular-nums"
+          className={[
+            'mt-1.5 leading-[1.05] tabular-nums',
+            hasPrice ? 'text-[2.6rem]' : 'text-[1.6rem] text-[var(--color-ink-3)]',
+          ].join(' ')}
           style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
         >
           {price}

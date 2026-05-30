@@ -108,6 +108,15 @@ class R2Client:
         response = self._client.get_object(Bucket=self.bucket, Key=key)
         return response["Body"].read()
 
+    def presigned_get(self, key: str, expires_in: int = 604800) -> str:
+        """Time-limited GET URL for one object, so a private bucket can still
+        serve image bytes straight to the browser (no proxying through us)."""
+        return self._client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=expires_in,
+        )
+
 
 def _required(name: str) -> str:
     value = os.environ.get(name)

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ImagePublic } from '@/lib/types';
-
-const R2_BASE = import.meta.env.VITE_R2_PUBLIC_BASE as string | undefined;
+import { imageSrc } from '@/lib/imageUrl';
 
 interface Props {
   images: ImagePublic[];
@@ -61,7 +60,7 @@ function Thumbnail({
         <BrokenPlaceholder />
       ) : (
         <img
-          src={imageUrl(image)}
+          src={imageSrc(image)}
           alt=""
           loading="lazy"
           decoding="async"
@@ -196,7 +195,7 @@ function Lightbox({
         ) : (
           <img
             key={current.id}
-            src={imageUrl(current)}
+            src={imageSrc(current)}
             alt=""
             onError={() => setErrored(true)}
             className={[
@@ -209,13 +208,6 @@ function Lightbox({
       </div>
     </div>
   );
-}
-
-function imageUrl(img: ImagePublic): string {
-  if (R2_BASE && img.storage_path) {
-    return `${R2_BASE.replace(/\/$/, '')}/${img.storage_path}`;
-  }
-  return img.sreality_url;
 }
 
 function CloseGlyph() {

@@ -48,13 +48,13 @@ Node 20+ required.
 - `VITE_SUPABASE_ANON_KEY` — same page → "anon public" / "publishable" key.
   Safe to ship to the browser; reads are fenced by the `*_public` views in
   migration 008.
-- `VITE_R2_PUBLIC_BASE` — public base URL of the Cloudflare R2 image bucket.
-  Cloudflare dashboard → R2 → the images bucket → Settings → Public access:
-  either enable the **r2.dev** dev subdomain (`https://pub-<hash>.r2.dev`)
-  or attach a **custom domain**. Listing photos load from
-  `${VITE_R2_PUBLIC_BASE}/${storage_path}`. Leave blank and the UI falls
-  back to sreality's CDN URLs, which expire — images then render as
-  "Unavailable".
+- Listing photos need **no** R2 env var. They are served through the API's
+  `GET /images/{storage_path}` redirect (which mints a short-lived presigned
+  R2 URL), so the durable R2 copy reaches the browser without baking a bucket
+  base into the build or exposing the bucket publicly. The single
+  `imageSrc()` helper (`src/lib/imageUrl.ts`) builds `${VITE_API_BASE_URL}/images/${storage_path}`,
+  falling back to the original CDN URL only for a just-scraped listing whose
+  bytes the async image job hasn't downloaded yet.
 
 ## Project layout
 
@@ -114,4 +114,6 @@ time** as string constants — the deployed bundle never reads env at
 runtime.  Practical consequence: changing any `VITE_*` value (e.g.
 `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, or `VITE_R2_PUBLIC_BASE`)
 requires a redeploy (push or click "Redeploy" in Railway), not just a
-variable update.
+variable update. (Listing-image serving deliberately has **no** build-time
+R2 env — it routes through the API at runtime — so it can never silently
+regress on a missing variable the way a baked-in bucket base could.)

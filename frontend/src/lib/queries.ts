@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { imageSrc } from './imageUrl';
 import {
   type CenterRadius,
   type ListingFilters,
@@ -412,18 +413,6 @@ export interface CardsResult {
   total: number | null;
 }
 
-const R2_BASE = (import.meta.env.VITE_R2_PUBLIC_BASE as string | undefined) ?? undefined;
-
-const pickImageUrl = (img: {
-  sreality_url: string;
-  storage_path: string | null;
-}): string => {
-  if (R2_BASE && img.storage_path) {
-    return `${R2_BASE.replace(/\/$/, '')}/${img.storage_path}`;
-  }
-  return img.sreality_url;
-};
-
 export const fetchListingsForCards = async (
   f: ListingFilters,
   sort: SortSpec,
@@ -467,7 +456,7 @@ export const fetchListingsForCards = async (
     const imgs = images.get(r.sreality_id) ?? [];
     return {
       ...r,
-      image_urls: imgs.map(pickImageUrl),
+      image_urls: imgs.map(imageSrc),
     };
   });
   return { rows, total: count ?? null };
