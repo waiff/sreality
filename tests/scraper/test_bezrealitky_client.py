@@ -88,6 +88,22 @@ def test_get_detail_null_raises_gone():
         c.get_detail("999")
 
 
+def test_search_accepts_list_estate_type():
+    payload = {"data": {"listAdverts": {"totalCount": 3, "list": []}}}
+    c = _client([FakeResponse(payload)])
+    c.search("PRODEJ", ["KANCELAR", "NEBYTOVY_PROSTOR"], limit=10, offset=0)
+    _, body = c._session.posts[0]
+    assert body["variables"]["et"] == ["KANCELAR", "NEBYTOVY_PROSTOR"]
+
+
+def test_search_str_estate_type_still_wraps():
+    payload = {"data": {"listAdverts": {"totalCount": 0, "list": []}}}
+    c = _client([FakeResponse(payload)])
+    c.search("PRODEJ", "BYT", limit=10, offset=0)
+    _, body = c._session.posts[0]
+    assert body["variables"]["et"] == ["BYT"]
+
+
 def test_graphql_errors_raise():
     c = _client([FakeResponse({"errors": [{"message": "boom"}]})])
     with pytest.raises(RuntimeError):

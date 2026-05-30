@@ -74,10 +74,15 @@ class BezrealitkyPortal:
         return list(self._categories)
 
     def category_labels(self, category: dict[str, Any]) -> tuple[str | None, str | None]:
-        return (
-            ESTATE_TYPE.get(category.get("estate_type")),
-            OFFER_TYPE.get(category.get("offer_type")),
-        )
+        # Descriptors that group several estate types into one walk (KANCELAR +
+        # NEBYTOVY_PROSTOR → "komercni", GARAZ + REKREACNI_OBJEKT → "ostatni")
+        # carry the canonical `category_main` explicitly. Single-estate
+        # descriptors derive it from the ESTATE_TYPE map.
+        cm = category.get("category_main")
+        if cm is None:
+            et = category.get("estate_type")
+            cm = ESTATE_TYPE.get(et) if isinstance(et, str) else None
+        return (cm, OFFER_TYPE.get(category.get("offer_type")))
 
     def connect_index(self) -> Any:
         return db.connect()

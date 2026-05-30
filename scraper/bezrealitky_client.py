@@ -90,12 +90,22 @@ class BezrealitkyClient(BasePortalClient):
         return body.get("data") or {}
 
     def search(
-        self, offer_type: str, estate_type: str, *, limit: int, offset: int
+        self, offer_type: str, estate_type: str | list[str], *,
+        limit: int, offset: int,
     ) -> tuple[list[dict[str, Any]], int]:
-        """One index page: returns (adverts, total_count)."""
+        """One index page: returns (adverts, total_count).
+
+        `estate_type` accepts either a single enum string or a list of them, so
+        a portals config descriptor can group several estate types that
+        canonicalise to the same `category_main` (e.g. KANCELAR +
+        NEBYTOVY_PROSTOR both → 'komercni') into ONE walk — required so the
+        source-scoped `mark_inactive` (which keys on canonical cm/ct) sees the
+        union of seen ids, not two disjoint subsets that would mutually delist.
+        """
+        et = list(estate_type) if isinstance(estate_type, list) else [estate_type]
         data = self._graphql(
             _INDEX_QUERY,
-            {"ot": [offer_type], "et": [estate_type], "lim": limit, "off": offset},
+            {"ot": [offer_type], "et": et, "lim": limit, "off": offset},
         )
         result = data.get("listAdverts") or {}
         return list(result.get("list") or []), int(result.get("totalCount") or 0)
