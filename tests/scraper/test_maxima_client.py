@@ -54,6 +54,20 @@ def test_index_url_building():
     assert index_url(16) == "https://nemovitosti.maxima.cz/page/16/"
 
 
+def test_index_url_agenda():
+    # af=1 (sale) reproduces the bare default URL; af=2 (rent) appends ?af=2.
+    assert index_url(af=1) == "https://nemovitosti.maxima.cz/"
+    assert index_url(af=2) == "https://nemovitosti.maxima.cz/?af=2"
+    assert index_url(2, af=2) == "https://nemovitosti.maxima.cz/page/2/?af=2"
+    assert index_url(3, af=1) == "https://nemovitosti.maxima.cz/page/3/"
+
+
+def test_fetch_index_rent_agenda():
+    c = _client([FakeResponse(200, "<html>rent</html>")])
+    c.fetch_index(2, af=2)
+    assert c._session.calls == ["https://nemovitosti.maxima.cz/page/2/?af=2"]
+
+
 def test_detail_url_building():
     assert detail_url("/nemovitosti/b50087758/") == _DETAIL
     assert detail_url(_DETAIL) == _DETAIL

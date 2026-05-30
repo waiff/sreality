@@ -66,9 +66,21 @@ listing); the whole-catalogue walk IS complete, so promotion is a later migratio
 bazos got in 113). One job runs both phases (`scrape_maxima.yml`, every 6h) since the
 catalogue is small.
 
+**Follow-up (migration 120): rent agenda + per-category labels.** The first cut only
+walked the default (sale) view and missed the ~34 rentals behind the buy/rent toggle
+(`?af=2`), and labelled everything `null·null` (one placeholder category) so the Health
+reconciliation couldn't join. Fixed by making the config descriptors per
+(category_main, category_type, **af**): `walk_category` walks each agenda (sale af=1,
+rent af=2) once — agenda-cached so the pages are fetched a single time — and keeps the
+slice for its category. Category is derived **title-first** (`maxima_parser.category_of`,
+shared by the index walk and `parse_detail`) because the rent agenda's native ids carry
+prefixes the sale taxonomy (b/d/f/g/o) doesn't cover; a prefix-only derivation would
+dump every rental into `ostatni` and fragment the reconciliation.
+
 #### Next
-- Promote to `supports_complete_walk=true` once the pilot proves stable (the index
-  reports a total, so the walk is provably complete) → delisting sweep, source-scoped.
+- Promote to `supports_complete_walk=true` once the pilot proves stable. Note the
+  completeness signal is per-AGENDA (maxima reports a total per af, not per category),
+  so the promotion needs an agenda-level completeness check, not the per-(cm,ct) default.
 
 ### 2026-05: Per-portal operational limits in config (PR A of the Scrapers-admin track)
 Made the per-portal operational limits (index/detail rate, workers, per-run caps,
