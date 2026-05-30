@@ -42,6 +42,7 @@ const ESSENTIALS_KEYS = [
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const PROPERTY_KEYS = [
+  'portals',
   'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
   'usableAreaMin', 'usableAreaMax',
   'furnished', 'ownership', 'conditionMatch', 'buildingMaterial',
@@ -200,6 +201,17 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
           title="Property"
           active={bandActive(filters, PROPERTY_KEYS)}
         >
+          <ControlGroup title="Source portal" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['portals']}
+              labels={{ portals: 'Portal' }}
+              flat
+            />
+          </ControlGroup>
+
           <ControlGroup title="Size" bordered={false}>
             <FilterForm
               scope="browse"

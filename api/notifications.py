@@ -153,6 +153,7 @@ class WatchdogFilterSpec(BaseModel):
     # Enumerated columns.
     furnished: str | None = None
     ownership: str | None = None
+    portals: list[str] | None = None
     condition_match: list[str] | None = None
 
     # Parking lots minimum.
@@ -330,6 +331,9 @@ def _build_match_clauses(
     if spec.ownership is not None:
         where.append("l.ownership = %(ownership)s")
         params["ownership"] = spec.ownership
+    if spec.portals:
+        where.append("l.source = ANY(%(portals)s)")
+        params["portals"] = list(spec.portals)
     if spec.condition_match:
         where.append("l.condition = ANY(%(condition_match)s)")
         params["condition_match"] = list(spec.condition_match)

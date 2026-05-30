@@ -229,6 +229,22 @@ STATUS_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("inactive", "Neaktivní", "Inactive"),
 )
 
+# Source portals — mirrors the scraper-kind rows of the `portals` registry
+# table (migration 100 onward). Values match `listings.source`; labels match
+# the portal display labels. Extend this when a new ingesting portal lands
+# (and regenerate the frontend registry). On-demand URL-parser sources
+# (`idnes_reality`, `remax`) never produce `listings` rows, so they are not
+# offered as filter options.
+PORTAL_OPTIONS: tuple[EnumOption, ...] = (
+    EnumOption("sreality", "Sreality", "Sreality"),
+    EnumOption("bazos", "Bazoš", "Bazoš"),
+    EnumOption("idnes", "iDNES Reality", "iDNES Reality"),
+    EnumOption("maxima", "Maxima Reality", "Maxima Reality"),
+    EnumOption("ceskereality", "Českéreality", "Českéreality"),
+    EnumOption("bezrealitky", "Bezrealitky", "Bezrealitky"),
+    EnumOption("mmreality", "M&M Reality", "M&M Reality"),
+)
+
 
 # --- category constants ---------------------------------------------------
 # Stable category names used in the registry. Settings UI groups
@@ -640,6 +656,23 @@ def _build_registry() -> dict[str, FilterDef]:
             ui_control=UiControl.MULTISELECT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             enum_values=DISPOSITION_OPTIONS,
+        ),
+        FilterDef(
+            id="portals",
+            type=FilterType.STRING_LIST,
+            pg_column="source",
+            default=None,
+            description=(
+                "Restrict the cohort to listings from one or more source "
+                "portals (`listings.source`): sreality, bazos, idnes, "
+                "maxima, ceskereality, bezrealitky, mmreality. A listing "
+                "matches if its source is in the list. Empty list / null = "
+                "all portals."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.MULTISELECT,
+            agendas=_ALL_AGENDAS,
+            enum_values=PORTAL_OPTIONS,
         ),
         FilterDef(
             id="condition_match",
@@ -1508,4 +1541,5 @@ __all__ = [
     "POPULATION_OPTIONS",
     "DISPOSITION_MATCH_OPTIONS",
     "STATUS_OPTIONS",
+    "PORTAL_OPTIONS",
 ]

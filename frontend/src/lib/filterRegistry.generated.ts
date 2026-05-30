@@ -684,6 +684,64 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": []
     },
     {
+      "id": "portals",
+      "type": "string_list",
+      "pg_column": "source",
+      "default": null,
+      "description": "Restrict the cohort to listings from one or more source portals (`listings.source`): sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality. A listing matches if its source is in the list. Empty list / null = all portals.",
+      "category": "Property",
+      "ui_control": "multiselect",
+      "agendas": [
+        "browse",
+        "comparables",
+        "defaults",
+        "estimation",
+        "neighborhood",
+        "velocity",
+        "watchdog"
+      ],
+      "constraints": null,
+      "unit": null,
+      "enum_values": [
+        {
+          "value": "sreality",
+          "label_cs": "Sreality",
+          "label_en": "Sreality"
+        },
+        {
+          "value": "bazos",
+          "label_cs": "Bazoš",
+          "label_en": "Bazoš"
+        },
+        {
+          "value": "idnes",
+          "label_cs": "iDNES Reality",
+          "label_en": "iDNES Reality"
+        },
+        {
+          "value": "maxima",
+          "label_cs": "Maxima Reality",
+          "label_en": "Maxima Reality"
+        },
+        {
+          "value": "ceskereality",
+          "label_cs": "Českéreality",
+          "label_en": "Českéreality"
+        },
+        {
+          "value": "bezrealitky",
+          "label_cs": "Bezrealitky",
+          "label_en": "Bezrealitky"
+        },
+        {
+          "value": "mmreality",
+          "label_cs": "M&M Reality",
+          "label_en": "M&M Reality"
+        }
+      ],
+      "aliases": []
+    },
+    {
       "id": "condition_match",
       "type": "string_list",
       "pg_column": "condition",

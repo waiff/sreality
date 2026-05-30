@@ -910,6 +910,9 @@ export interface WatchdogFilterSpec {
   garage: boolean | null;
   furnished: Furnished | null;
   ownership: Ownership | null;
+  // Source portals (migration 091). A listing matches if its source is
+  // in the list; null / empty = all portals.
+  portals: string[] | null;
   min_parking_lots: number | null;
   // Derived condition scores (migrations 072 / 073). Same NULL-excluding
   // `>= N` semantics as the Browse filter.
@@ -979,6 +982,7 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   garage: null,
   furnished: null,
   ownership: null,
+  portals: null,
   min_parking_lots: null,
   building_condition_level_min: null,
   apartment_condition_level_min: null,

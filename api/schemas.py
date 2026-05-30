@@ -32,6 +32,7 @@ class FindComparablesIn(BaseModel):
     max_age_days: int | None = None
     active_only: bool = False
     floor_band: int | None = None
+    portals: list[str] | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
     energy_rating_match: list[str] | None = None
@@ -132,6 +133,7 @@ class ComputeMarketVelocityIn(BaseModel):
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
     floor_band: int | None = None
+    portals: list[str] | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
     energy_rating_match: list[str] | None = None
@@ -320,6 +322,7 @@ class CreateEstimationIn(BaseModel):
     expected_monthly_rent_czk: int | None = None
 
     floor_band: int | None = None
+    portals: list[str] | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
     energy_rating_match: list[str] | None = None
@@ -414,6 +417,7 @@ class EstimateYieldIn(BaseModel):
     max_age_days: int | None = None
     active_only: bool = False
     floor_band: int | None = None
+    portals: list[str] | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
     energy_rating_match: list[str] | None = None

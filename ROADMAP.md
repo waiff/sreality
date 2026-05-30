@@ -6,6 +6,20 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: "Filter by portal" across agendas
+A `portals` multiselect in the canonical filter registry (`toolkit/filter_registry.py`,
+`agendas=_ALL_AGENDAS`, `pg_column='source'`, enum = the scraper portals from the
+`portals` table) so the same filter works on Browse, Watchdog, the estimation/agent
+comparable surfaces, and the Settings visibility matrix — wired the usual way
+(ComparableFilters + `_shared_filter_where`, `WatchdogFilterSpec` + `_build_match_clauses`,
+the four estimation/velocity input schemas, the agent override fields, and the regenerated
+frontend registry → auto-dispatched `.in('source', …)` on `properties_public`). Migration
+118 exposes `source` on `properties_public` (the representative listing's source — also the
+Browse card's new "portál" label next to first/last-seen) and adds a `portal_filter` arg to
+`browse_stats_properties` so the Stats tab honours it too. On-demand URL-parser sources
+(`idnes_reality`, `remax`) are intentionally not offered — they never produce `listings`
+rows. Extend `PORTAL_OPTIONS` (and regenerate) when a new ingesting portal lands.
+
 ### 2026-05: M&M Reality scraper (portal 6, pilot)
 The sixth portal onto the shared Phase-4 framework — again "a fetcher + a parser +
 a config row," no pipeline divergence. M&M Reality is server-rendered HTML, but

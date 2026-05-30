@@ -382,6 +382,7 @@ def _filters_used(
         "disposition_match": filters.disposition_match,
         "area_band_pct": filters.area_band_pct,
         "floor_band": filters.floor_band,
+        "portals": list(filters.portals) if filters.portals else None,
         "condition_match": (
             list(filters.condition_match) if filters.condition_match else None
         ),
