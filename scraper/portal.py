@@ -159,10 +159,16 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # completeness guard (source-scoped). No split needed.
         supports_complete_walk=True,
         categories=[
-            {"sale_type": "prodej", "category": "byty"},
+            {"sale_type": "prodej",   "category": "byty"},
             {"sale_type": "pronajem", "category": "byty"},
-            {"sale_type": "prodej", "category": "domy"},
+            {"sale_type": "prodej",   "category": "domy"},
             {"sale_type": "pronajem", "category": "domy"},
+            {"sale_type": "prodej",   "category": "pozemky"},
+            {"sale_type": "pronajem", "category": "pozemky"},
+            {"sale_type": "prodej",   "category": "komercni-nemovitosti"},
+            {"sale_type": "pronajem", "category": "komercni-nemovitosti"},
+            {"sale_type": "prodej",   "category": "male-objekty-garaze"},
+            {"sale_type": "pronajem", "category": "male-objekty-garaze"},
         ],
         split_threshold=None,
         limits=PortalLimits(
