@@ -14,6 +14,7 @@ COPY pyproject.toml ./
 COPY scraper/ ./scraper/
 COPY toolkit/ ./toolkit/
 COPY api/ ./api/
+COPY scripts/ ./scripts/
 
 RUN pip install --upgrade pip && pip install ".[api]"
 
