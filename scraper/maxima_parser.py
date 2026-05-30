@@ -85,6 +85,7 @@ _INT_RE = re.compile(r"(\d+)")
 # zero-width spaces). The first run only is taken so a struck original + current
 # price never concatenate into an integer-overflowing number.
 _PRICE_RUN_RE = re.compile(r"\d[\d\s ​‌‍⁠]*")
+_PRICE_MAX = 2_147_483_647  # listings.price_czk is a Postgres integer
 # Map config: "center":[lon, lat]. The map JSON is passed to JSON.parse('…') with
 # the quotes backslash-escaped in the page source (\"center\":[…]), so the quotes
 # are optionally preceded by a backslash. CZ lat/lon ranges don't overlap, so a
