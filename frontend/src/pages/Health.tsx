@@ -12,6 +12,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  fetchCategoryTrends,
   fetchHealthSummary,
   fetchImageStorageOverview,
   fetchPortalHealth,
@@ -19,6 +20,8 @@ import {
   fetchScraperHealthChecks,
 } from '@/lib/queries';
 import type {
+  CategoryTrend,
+  CategoryTrendPoint,
   HealthSummary,
   HealthDayCount,
   HealthSnapBucket,
@@ -468,6 +471,7 @@ function PortalGroupCard({
                   <CategoryTable
                     liveByCategory={healthSummary.by_category}
                     rows={(scrapeRuns ?? []).filter((r) => r.source === 'sreality')}
+                    source={scraper.source}
                   />
                 ) : (
                   <CompactReconTable rows={(scrapeRuns ?? []).filter((r) => r.source === scraper.source)} />
@@ -698,10 +702,14 @@ function StaleScrapeBanner({ lastScrapeAt }: { lastScrapeAt: string | null }) {
 function CategoryTable({
   liveByCategory,
   rows,
+  source = 'sreality',
 }: {
   liveByCategory: HealthCategoryBlock[];
   rows: ScrapeRun[] | undefined;
+  source?: string;
 }) {
+  const [grain, setGrain] = useState<'hour' | 'day'>('hour');
+
   // The latest index run carrying per-category result_size (rows are
   // most-recent-first). Supplies sreality's total + what we collected.
   const run = (rows ?? []).find((r) =>
@@ -712,30 +720,51 @@ function CategoryTable({
     reconByCat.set(`${c.category_main}-${c.category_type}`, c),
   );
 
+  // Per-category trend series + total-in-DB (migration 118). One point per
+  // index run: "portal" = sreality reported total, "db" = our active count.
+  const trendsQuery = useQuery({
+    queryKey: ['category-trends', source],
+    queryFn: () => fetchCategoryTrends(source),
+    staleTime: 60_000,
+  });
+  const trendByCat = new Map<string, CategoryTrend>();
+  trendsQuery.data?.forEach((t) =>
+    trendByCat.set(`${t.category_main}-${t.category_type}`, t),
+  );
+
   const cats = [...liveByCategory].sort((a, b) => b.active_now - a.active_now);
 
   return (
     <div>
       <p className="mb-2 text-xs text-[var(--color-ink-3)] leading-snug">
-        <span className="text-[var(--color-ink-2)]">sreality</span> = the portal&rsquo;s
-        reported total{run ? <> (probed {fmtRelative(run.started_at)})</> : null};{' '}
-        <span className="text-[var(--color-ink-2)]">Index</span> = share of those listings
-        the walk collected; <span className="text-[var(--color-ink-2)]">Queue</span> = seen
-        but not yet fetched by the detail-drain (the real lag behind any apparent drift).
+        <span className="text-[var(--color-ink-2)]">total</span> = every listing we hold
+        (active + delisted); <span className="text-[var(--color-ink-2)]">portal</span> = the
+        portal&rsquo;s reported active total{run ? <> (probed {fmtRelative(run.started_at)})</> : null};{' '}
+        <span className="text-[var(--color-ink-2)]">index</span> = share of those the walk
+        collected; <span className="text-[var(--color-ink-2)]">queue</span> = seen but not yet
+        fetched by the detail-drain. Trend overlays{' '}
+        <span style={{ color: 'var(--color-copper)' }}>active on portal</span> vs{' '}
+        <span style={{ color: 'var(--color-ink-2)' }}>active in DB</span>.
       </p>
       <div className="overflow-x-auto -mx-1">
         <table className="w-full text-xs">
           <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
             <tr>
               <th className="text-left  py-1.5 px-1.5 font-medium">Category</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">Total</th>
               <th className="text-right py-1.5 px-1.5 font-medium">Active</th>
-              <th className="text-right py-1.5 px-1.5 font-medium">sreality</th>
-              <th className="text-right py-1.5 px-1.5 font-medium">Collected</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">Portal</th>
               <th className="text-right py-1.5 px-1.5 font-medium">Index</th>
               <th className="text-right py-1.5 px-1.5 font-medium">Queue</th>
-              <th className="text-left  py-1.5 px-1.5 font-medium">new 14&thinsp;d</th>
-              <th className="text-left  py-1.5 px-1.5 font-medium">flipped 7&thinsp;d</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">new&nbsp;t&thinsp;/&thinsp;7d</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">flipped&nbsp;t&thinsp;/&thinsp;7d</th>
               <th className="text-right py-1.5 px-1.5 font-medium">failed</th>
+              <th className="text-left  py-1.5 px-1.5 font-medium">
+                <div className="flex items-center justify-between gap-2">
+                  <span>trend</span>
+                  <GrainToggle grain={grain} onChange={setGrain} />
+                </div>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -744,6 +773,8 @@ function CategoryTable({
                 key={`${b.category_main}-${b.category_type}`}
                 block={b}
                 recon={reconByCat.get(`${b.category_main}-${b.category_type}`)}
+                trend={trendByCat.get(`${b.category_main}-${b.category_type}`)}
+                grain={grain}
               />
             ))}
           </tbody>
@@ -753,14 +784,71 @@ function CategoryTable({
   );
 }
 
+function GrainToggle({
+  grain,
+  onChange,
+}: {
+  grain: 'hour' | 'day';
+  onChange: (g: 'hour' | 'day') => void;
+}) {
+  return (
+    <span className="inline-flex rounded-[var(--radius-sm)] border border-[var(--color-rule)] overflow-hidden normal-case tracking-normal">
+      {(['hour', 'day'] as const).map((g) => (
+        <button
+          key={g}
+          type="button"
+          onClick={() => onChange(g)}
+          className="px-1.5 py-0.5 text-[0.6rem] font-medium transition-colors"
+          style={
+            grain === g
+              ? { background: 'var(--color-copper)', color: 'var(--color-paper-3)' }
+              : { color: 'var(--color-ink-3)' }
+          }
+        >
+          {g === 'hour' ? 'Hour' : 'Day'}
+        </button>
+      ))}
+    </span>
+  );
+}
+
+// Last bucket of an ascending day-series is today's (partial) count; the
+// trailing N buckets sum to the rolling window.
+function lastBucket(rows: HealthDayCount[]): number {
+  return rows.length ? rows[rows.length - 1].n : 0;
+}
+function sumLastN(rows: HealthDayCount[], n: number): number {
+  return rows.slice(-n).reduce((s, r) => s + r.n, 0);
+}
+
+function TodayWindowCell({
+  today,
+  window,
+  accent,
+}: {
+  today: number;
+  window: number;
+  accent: string;
+}) {
+  return (
+    <td className="py-1.5 px-1.5 text-right font-mono tabular-nums whitespace-nowrap">
+      <span style={{ color: today > 0 ? accent : 'var(--color-ink-3)' }}>{fmtCount(today)}</span>
+      <span className="text-[var(--color-ink-4)]"> / {fmtCount(window)}</span>
+    </td>
+  );
+}
+
 function CategoryTableRow({
   block,
   recon,
+  trend,
+  grain,
 }: {
   block: HealthCategoryBlock;
   recon: ScrapeRunCategory | undefined;
+  trend: CategoryTrend | undefined;
+  grain: 'hour' | 'day';
 }) {
-  const newTotal = block.new_per_day_14d.reduce((s, r) => s + r.n, 0);
   const failuresActive = block.failures_total - block.failures_given_up;
   const srealityTotal = recon?.sreality_result_size ?? null;
   const collected = recon?.collected ?? null;
@@ -781,19 +869,27 @@ function CategoryTableRow({
   // (un-drained ids aren't listings rows yet), so this is the honest estimate.
   const seen = collected ?? srealityTotal;
   const queue = seen != null ? Math.max(0, seen - block.active_now) : null;
+
+  const newToday = lastBucket(block.new_per_day_14d);
+  const new7d = sumLastN(block.new_per_day_14d, 7);
+  const flippedToday = lastBucket(block.flipped_per_day_7d);
+  const flipped7d = sumLastN(block.flipped_per_day_7d, 7);
+
+  const trendPoints = trend ? (grain === 'hour' ? trend.hourly : trend.daily) : [];
+
   return (
     <tr className="border-t border-[var(--color-rule-soft)] hover:bg-[var(--color-paper-3)]/40">
       <td className="py-1.5 px-1.5 text-[var(--color-ink)] whitespace-nowrap">
         {categoryLabel(block)}
+      </td>
+      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
+        {trend ? fmtCount(trend.total_in_db) : '—'}
       </td>
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink)]">
         {fmtCount(block.active_now)}
       </td>
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {srealityTotal != null ? fmtCount(srealityTotal) : '—'}
-      </td>
-      <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-        {collected != null ? fmtCount(collected) : '—'}
       </td>
       <td
         className="py-1.5 px-1.5 text-right font-mono tabular-nums"
@@ -808,22 +904,8 @@ function CategoryTableRow({
       >
         {queue != null ? fmtCount(queue) : '—'}
       </td>
-      <td className="py-1.5 px-1.5">
-        <div className="flex items-center gap-2">
-          <span className="font-mono tabular-nums text-[var(--color-ink)] w-10 text-right">
-            {fmtCount(newTotal)}
-          </span>
-          <Sparkline rows={block.new_per_day_14d} width={64} height={18} colour="copper" />
-        </div>
-      </td>
-      <td className="py-1.5 px-1.5">
-        <div className="flex items-center gap-2">
-          <span className="font-mono tabular-nums text-[var(--color-ink)] w-8 text-right">
-            {fmtCount(block.flipped_inactive_7d)}
-          </span>
-          <Sparkline rows={block.flipped_per_day_7d} width={64} height={18} colour="brick" />
-        </div>
-      </td>
+      <TodayWindowCell today={newToday} window={new7d} accent="var(--color-copper)" />
+      <TodayWindowCell today={flippedToday} window={flipped7d} accent="var(--color-brick)" />
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums leading-tight">
         <span style={{ color: failuresActive > 0 ? 'var(--color-ochre)' : 'var(--color-ink)' }}>
           {fmtCount(failuresActive)}
@@ -834,7 +916,66 @@ function CategoryTableRow({
           </span>
         )}
       </td>
+      <td className="py-1.5 px-1.5">
+        <TrendChart points={trendPoints} />
+      </td>
     </tr>
+  );
+}
+
+// Two-line sparkline on a shared auto-fit scale: copper = active on portal,
+// ink = active in DB. Auto-fit (not zero-based) so the gap between the two —
+// the real drift — stays visible even when both sit near the same magnitude.
+function TrendChart({
+  points,
+  width = 116,
+  height = 26,
+}: {
+  points: CategoryTrendPoint[];
+  width?: number;
+  height?: number;
+}) {
+  const pts = points.filter((p) => p.portal != null || p.db != null);
+  if (pts.length === 0) {
+    return <span className="text-[0.65rem] text-[var(--color-ink-4)]">no data</span>;
+  }
+  const vals = pts.flatMap((p) =>
+    [p.portal, p.db].filter((v): v is number => v != null),
+  );
+  const max = Math.max(...vals);
+  const min = Math.min(...vals);
+  const span = max - min || 1;
+  const stepX = pts.length > 1 ? width / (pts.length - 1) : width;
+  const lineFor = (key: 'portal' | 'db') =>
+    pts
+      .map((p, i) => {
+        const v = p[key];
+        if (v == null) return null;
+        const x = i * stepX;
+        const y = height - ((v - min) / span) * (height - 3) - 1.5;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .filter((s): s is string => s != null)
+      .join(' ');
+  return (
+    <svg width={width} height={height} className="flex-shrink-0 block" aria-hidden>
+      <polyline
+        fill="none"
+        stroke="var(--color-ink-2)"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        points={lineFor('db')}
+      />
+      <polyline
+        fill="none"
+        stroke="var(--color-copper)"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        points={lineFor('portal')}
+      />
+    </svg>
   );
 }
 
@@ -1165,59 +1306,6 @@ function FailuresPanel({
         <p className="mt-4 text-sm text-[var(--color-ink-4)]">No fetch failures recorded.</p>
       )}
     </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Sparkline                                                                   */
-/* -------------------------------------------------------------------------- */
-
-function Sparkline({
-  rows,
-  width = 100,
-  height = 30,
-  colour = 'copper',
-}: {
-  rows: HealthDayCount[];
-  width?: number;
-  height?: number;
-  colour?: 'copper' | 'brick';
-}) {
-  if (rows.length === 0) {
-    return <span className="text-[0.65rem] text-[var(--color-ink-4)]">no data</span>;
-  }
-  const max = Math.max(...rows.map((r) => r.n), 1);
-  const stepX = rows.length > 1 ? width / (rows.length - 1) : width;
-  const points = rows
-    .map((r, i) => {
-      const x = i * stepX;
-      const y = height - (r.n / max) * (height - 2) - 1;
-      return `${x},${y}`;
-    })
-    .join(' ');
-  const allZero = rows.every((r) => r.n === 0);
-  const stroke = colour === 'brick' ? 'var(--color-brick)' : 'var(--color-copper)';
-  return (
-    <svg width={width} height={height} className="flex-shrink-0 block" aria-hidden>
-      {!allZero && (
-        <polyline
-          fill="none"
-          stroke={stroke}
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          points={points}
-        />
-      )}
-      <line
-        x1="0"
-        y1={height - 0.5}
-        x2={width}
-        y2={height - 0.5}
-        stroke="var(--color-rule)"
-        strokeWidth="1"
-      />
-    </svg>
   );
 }
 

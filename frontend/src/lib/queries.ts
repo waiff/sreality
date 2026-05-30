@@ -9,6 +9,7 @@ import {
 } from './filters';
 import { applyRegistryFilters } from './registryQueryBuilder';
 import type {
+  CategoryTrend,
   HealthSummary,
   ImagePublic,
   ImageStorageOverview,
@@ -737,6 +738,14 @@ export const fetchRecentScrapeRuns = async (
   const { data, error } = await supabase.rpc('recent_scrape_runs', { p_days: days });
   if (error) throw error;
   return (data ?? []) as ScrapeRun[];
+};
+
+export const fetchCategoryTrends = async (
+  source: string = 'sreality',
+): Promise<CategoryTrend[]> => {
+  const { data, error } = await supabase.rpc('category_trends', { p_source: source });
+  if (error) throw error;
+  return (data ?? []) as CategoryTrend[];
 };
 
 export const fetchImageStorageOverview = async (): Promise<ImageStorageOverview> => {
