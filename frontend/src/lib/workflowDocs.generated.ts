@@ -1266,6 +1266,59 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bezrealitky.yml"
   },
   {
+    "filename": "scrape_ceskereality.yml",
+    "name": "Scraping: Českéreality scraper (pilot, dispatch-only)",
+    "description": "DISPATCH-ONLY scraper for ceskereality.cz on the shared portal framework. ceskereality is a structured HTML portal (like idnes): the index walk pages the search results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, parses it to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). One job runs both phases via ceskereality_main.",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "cap detail-drain claims this run",
+        "required": false,
+        "type": "string",
+        "default": "1500",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "detail-fetch requests/second ceiling (keep polite)",
+        "required": false,
+        "type": "string",
+        "default": "0.7",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "detail-fetch workers (concurrency)",
+        "required": false,
+        "type": "string",
+        "default": "2",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "ceskereality-scrape",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_ceskereality.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_ceskereality.yml"
+  },
+  {
     "filename": "scrape_idnes.yml",
     "name": "Scraping: iDNES Reality combined walk (fallback)",
     "description": "DISPATCH-ONLY combined index+detail fallback for reality.idnes.cz, mirroring sreality's scrape.yml. The scheduled pipeline is the cadence SPLIT — the fast idnes_index_walk.yml (full walk + mark_inactive + enqueue) feeds the bounded idnes_detail_drain.yml — because iDNES is large (~2400 index pages, ~60k listings) and a single combined run can't do both inside one job (the full index eats the window, starving the drain).",

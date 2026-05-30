@@ -6,6 +6,32 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: ceskereality.cz scraper (pilot, dispatch-only)
+Another portal onto the shared Phase-4 framework — a fetcher + parser + config
+row, no pipeline divergence. ceskereality.cz is a server-rendered **HTML portal**
+(no JSON listings API — its `/real-estate/ajax/*` endpoints are filter helpers),
+STRUCTURED like idnes: `ceskereality_parser` reads each detail page's schema.org
+JSON-LD product block (clean price + broker), the `i-info` spec list
+(title/value spans), precise per-listing coordinates from `data-coord-lat`/`-lng`
+(so no geocoding), and the `img.ceskereality.cz/foto/` gallery; typed fields are
+normalised to the canonical sreality labels (`soukromé→osobni`, `Dobrý→dobry`,
+`Cihlová→cihla`) for cross-portal filter agreement. `CeskerealityClient`
+subclasses `BasePortalClient` (HTML `Accept`, `?strana=N` paging, removed-listing
+signals). **Complete-walk** capable: search pages report a result total ("Máme
+tady N…") and have no deep-pagination cap (verified deep pages return real
+listings; the tail is genuinely empty), so `supports_complete_walk=true` and the
+runner marks delistings inactive under the completeness guard, source-scoped
+(rules #3/#15). The detail URL carries `/{sale}/{cat}/`, so the drain derives each
+listing's category from its own URL — one config walks many categories. Registered
+as a scraper portal (migration 116, `source='ceskereality'`, sort 27). Pilot scope:
+byty + chaty-chalupy + komerční-prostory + ostatní, both sale types (~26k
+listings). **Polite by design** — the site disallows generic bots in robots.txt,
+so conservative limits (index 0.7 req/s, 2 detail workers @ 0.7 req/s). Ships
+**dispatch-only** (`scrape_ceskereality.yml`, no cron) for an operator-reviewed
+validation run before any scheduled crawling; a follow-up adds the cron. **Next:**
+run the dispatch validation (`-f max_pages=2`), confirm ingest + coords + property
+linking, then enable the 6h schedule.
+
 ### 2026-05: Per-portal operational limits in config (PR A of the Scrapers-admin track)
 Made the per-portal operational limits (index/detail rate, workers, per-run caps,
 image limits, completeness) operator-tunable from the DB — the foundation for a

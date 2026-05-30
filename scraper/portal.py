@@ -188,6 +188,30 @@ _DEFAULTS: dict[str, PortalConfig] = {
             min_completeness=0.9,
         ),
     ),
+    "ceskereality": PortalConfig(
+        source="ceskereality",
+        # Search pages carry a result total ("Máme tady N…") and have no deep-
+        # pagination cap (deep pages return real listings; the tail is genuinely
+        # empty), so a per-category walk is provable-complete → mark_inactive runs
+        # under the completeness guard (source-scoped). No split needed. Polite
+        # rates: the site disallows generic bots in robots.txt, so we crawl slowly.
+        supports_complete_walk=True,
+        categories=[
+            {"sale_type": "prodej",   "category": "byty"},
+            {"sale_type": "pronajem", "category": "byty"},
+            {"sale_type": "prodej",   "category": "chaty-chalupy"},
+            {"sale_type": "pronajem", "category": "chaty-chalupy"},
+            {"sale_type": "prodej",   "category": "komercni-prostory"},
+            {"sale_type": "pronajem", "category": "komercni-prostory"},
+            {"sale_type": "prodej",   "category": "ostatni"},
+            {"sale_type": "pronajem", "category": "ostatni"},
+        ],
+        split_threshold=None,
+        limits=PortalLimits(
+            index_rate=0.7, detail_workers=2, detail_rate=0.7,
+            min_completeness=0.9,
+        ),
+    ),
 }
 
 
