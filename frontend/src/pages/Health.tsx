@@ -23,11 +23,9 @@ import type {
   CategoryTrend,
   CategoryTrendPoint,
   HealthSummary,
-  HealthDayCount,
   HealthSnapBucket,
   HealthFreshnessRow,
   HealthFailureRow,
-  HealthCategoryBlock,
   HealthCheckStatus,
   ImageStorageCategory,
   ImageStorageOverview,
@@ -48,6 +46,8 @@ const CATEGORY_LABELS: Record<string, string> = {
   byt: 'Byty',
   dum: 'Domy',
   komercni: 'Komerční',
+  pozemek: 'Pozemky',
+  ostatni: 'Ostatní',
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -55,7 +55,7 @@ const TYPE_LABELS: Record<string, string> = {
   prodej: 'prodej',
 };
 
-function categoryLabel(c: HealthCategoryBlock): string {
+function categoryLabel(c: { category_main: string; category_type: string }): string {
   const main = CATEGORY_LABELS[c.category_main] ?? c.category_main;
   const type = TYPE_LABELS[c.category_type] ?? c.category_type;
   return `${main} · ${type}`;
@@ -120,7 +120,7 @@ function Body({ data }: { data: HealthSummary }) {
 
   return (
     <div className="mt-5 space-y-6">
-      <PortalLedger healthSummary={data} scrapeRuns={scrapeRunsQuery.data} />
+      <PortalLedger />
 
       <section>
         <SectionHeading>Activity &amp; data quality</SectionHeading>
@@ -284,13 +284,7 @@ type ChecksState =
   | { data?: ScraperHealthChecks; isLoading: boolean; error: Error | null }
   | undefined;
 
-function PortalLedger({
-  healthSummary,
-  scrapeRuns,
-}: {
-  healthSummary: HealthSummary;
-  scrapeRuns: ScrapeRun[] | undefined;
-}) {
+function PortalLedger() {
   const portalsQuery = useQuery<PortalHealth[], Error>({
     queryKey: ['portal-health'],
     queryFn: fetchPortalHealth,
@@ -348,8 +342,6 @@ function PortalLedger({
               key={g.key}
               group={g}
               checks={g.scraper ? checksBySource.get(g.scraper.source) : undefined}
-              healthSummary={healthSummary}
-              scrapeRuns={scrapeRuns}
             />
           ))
         )}
@@ -361,17 +353,12 @@ function PortalLedger({
 function PortalGroupCard({
   group,
   checks,
-  healthSummary,
-  scrapeRuns,
 }: {
   group: PortalGroup;
   checks: ChecksState;
-  healthSummary: HealthSummary;
-  scrapeRuns: ScrapeRun[] | undefined;
 }) {
   const [open, setOpen] = useState(false);
   const { scraper, parser } = group;
-  const isSreality = scraper?.source === 'sreality';
 
   let status: RollupStatus;
   if (scraper && scraperHasActivity(scraper)) {
@@ -467,15 +454,7 @@ function PortalGroupCard({
           {scraper && scraperHasActivity(scraper) ? (
             <>
               <Disclosure label="Listings by category · reconciliation">
-                {isSreality ? (
-                  <CategoryTable
-                    liveByCategory={healthSummary.by_category}
-                    rows={(scrapeRuns ?? []).filter((r) => r.source === 'sreality')}
-                    source={scraper.source}
-                  />
-                ) : (
-                  <CompactReconTable rows={(scrapeRuns ?? []).filter((r) => r.source === scraper.source)} />
-                )}
+                <CategoryTable source={scraper.source} stage={scraper.stage} />
               </Disclosure>
               <Disclosure
                 label="Scrape health checks"
@@ -553,51 +532,6 @@ function Disclosure({
         )}
       </button>
       {open && <div className="px-3 pb-3 pt-1">{children}</div>}
-    </div>
-  );
-}
-
-/* Pilot reconciliation: pilots walk a partial index (no result_size / active
- * roll-up), so show what their latest run recorded rather than the rich
- * sreality table. */
-function CompactReconTable({ rows }: { rows: ScrapeRun[] }) {
-  const run =
-    rows.find((r) => r.index_pages > 0 && r.by_category.length > 0) ??
-    rows.find((r) => r.by_category.length > 0);
-  if (!run || run.by_category.length === 0) {
-    return <p className="text-sm text-[var(--color-ink-4)]">No per-category data recorded yet for this portal.</p>;
-  }
-  return (
-    <div className="overflow-x-auto -mx-1">
-      <table className="w-full text-xs">
-        <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
-          <tr>
-            <th className="text-left  py-1.5 px-1.5 font-medium">Category</th>
-            <th className="text-right py-1.5 px-1.5 font-medium">Found new</th>
-            <th className="text-right py-1.5 px-1.5 font-medium">Scraped new</th>
-            <th className="text-right py-1.5 px-1.5 font-medium">Inactive</th>
-            <th className="text-right py-1.5 px-1.5 font-medium">Collected</th>
-          </tr>
-        </thead>
-        <tbody>
-          {run.by_category.map((c) => (
-            <tr key={`${c.category_main}-${c.category_type}`} className="border-t border-[var(--color-rule-soft)]">
-              <td className="py-1.5 px-1.5 text-[var(--color-ink)] whitespace-nowrap">
-                {categoryPairLabel(c.category_main, c.category_type)}
-              </td>
-              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums">{fmtCount(c.listings_found_new)}</td>
-              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums">{fmtCount(c.listings_scraped_new)}</td>
-              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums">{fmtCount(c.listings_inactive)}</td>
-              <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-                {c.collected != null ? fmtCount(c.collected) : '—'}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      <p className="mt-2 text-[0.65rem] text-[var(--color-ink-4)]">
-        Latest run · {fmtRelative(run.started_at)}. Pilot portals walk a partial index, so they never infer delistings.
-      </p>
     </div>
   );
 }
@@ -700,51 +634,52 @@ function StaleScrapeBanner({ lastScrapeAt }: { lastScrapeAt: string | null }) {
 /* -------------------------------------------------------------------------- */
 
 function CategoryTable({
-  liveByCategory,
-  rows,
-  source = 'sreality',
+  source,
+  stage,
 }: {
-  liveByCategory: HealthCategoryBlock[];
-  rows: ScrapeRun[] | undefined;
-  source?: string;
+  source: string;
+  stage?: PortalStage;
 }) {
   const [grain, setGrain] = useState<'hour' | 'day'>('hour');
 
-  // The latest index run carrying per-category result_size (rows are
-  // most-recent-first). Supplies sreality's total + what we collected.
-  const run = (rows ?? []).find((r) =>
-    r.by_category?.some((c) => c.sreality_result_size != null),
-  );
-  const reconByCat = new Map<string, ScrapeRunCategory>();
-  run?.by_category.forEach((c) =>
-    reconByCat.set(`${c.category_main}-${c.category_type}`, c),
-  );
-
-  // Per-category trend series + total-in-DB (migration 118). One point per
-  // index run: "portal" = sreality reported total, "db" = our active count.
+  // One source-scoped RPC (migration 119) supplies the whole table: per-category
+  // totals/active/new/flipped/failures, the latest run's portal+collected, and
+  // the hourly/daily portal-vs-DB trend series. Already sorted by active desc.
   const trendsQuery = useQuery({
     queryKey: ['category-trends', source],
     queryFn: () => fetchCategoryTrends(source),
-    staleTime: 60_000,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
   });
-  const trendByCat = new Map<string, CategoryTrend>();
-  trendsQuery.data?.forEach((t) =>
-    trendByCat.set(`${t.category_main}-${t.category_type}`, t),
-  );
+  const cats = trendsQuery.data ?? [];
+  const isPilot = stage === 'pilot';
 
-  const cats = [...liveByCategory].sort((a, b) => b.active_now - a.active_now);
+  if (trendsQuery.isLoading && cats.length === 0) {
+    return <p className="text-sm text-[var(--color-ink-3)]">Loading categories…</p>;
+  }
+  if (trendsQuery.error) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        category_trends failed: {(trendsQuery.error as Error).message}
+      </p>
+    );
+  }
+  if (cats.length === 0) {
+    return <p className="text-sm text-[var(--color-ink-4)]">No per-category data recorded yet for this portal.</p>;
+  }
 
   return (
     <div>
       <p className="mb-2 text-xs text-[var(--color-ink-3)] leading-snug">
         <span className="text-[var(--color-ink-2)]">total</span> = every listing we hold
         (active + delisted); <span className="text-[var(--color-ink-2)]">portal</span> = the
-        portal&rsquo;s reported active total{run ? <> (probed {fmtRelative(run.started_at)})</> : null};{' '}
+        portal&rsquo;s reported active total at the last index walk;{' '}
         <span className="text-[var(--color-ink-2)]">index</span> = share of those the walk
         collected; <span className="text-[var(--color-ink-2)]">queue</span> = seen but not yet
         fetched by the detail-drain. Trend overlays{' '}
         <span style={{ color: 'var(--color-copper)' }}>active on portal</span> vs{' '}
-        <span style={{ color: 'var(--color-ink-2)' }}>active in DB</span>.
+        <span style={{ color: 'var(--color-ink-2)' }}>active in DB</span>
+        {isPilot ? <>. Pilot portals walk a partial index, so delistings aren&rsquo;t inferred.</> : null}.
       </p>
       <div className="overflow-x-auto -mx-1">
         <table className="w-full text-xs">
@@ -768,12 +703,10 @@ function CategoryTable({
             </tr>
           </thead>
           <tbody>
-            {cats.map((b) => (
+            {cats.map((c) => (
               <CategoryTableRow
-                key={`${b.category_main}-${b.category_type}`}
-                block={b}
-                recon={reconByCat.get(`${b.category_main}-${b.category_type}`)}
-                trend={trendByCat.get(`${b.category_main}-${b.category_type}`)}
+                key={`${c.category_main}-${c.category_type}`}
+                row={c}
                 grain={grain}
               />
             ))}
@@ -812,15 +745,6 @@ function GrainToggle({
   );
 }
 
-// Last bucket of an ascending day-series is today's (partial) count; the
-// trailing N buckets sum to the rolling window.
-function lastBucket(rows: HealthDayCount[]): number {
-  return rows.length ? rows[rows.length - 1].n : 0;
-}
-function sumLastN(rows: HealthDayCount[], n: number): number {
-  return rows.slice(-n).reduce((s, r) => s + r.n, 0);
-}
-
 function TodayWindowCell({
   today,
   window,
@@ -839,22 +763,18 @@ function TodayWindowCell({
 }
 
 function CategoryTableRow({
-  block,
-  recon,
-  trend,
+  row,
   grain,
 }: {
-  block: HealthCategoryBlock;
-  recon: ScrapeRunCategory | undefined;
-  trend: CategoryTrend | undefined;
+  row: CategoryTrend;
   grain: 'hour' | 'day';
 }) {
-  const failuresActive = block.failures_total - block.failures_given_up;
-  const srealityTotal = recon?.sreality_result_size ?? null;
-  const collected = recon?.collected ?? null;
+  const failuresActive = row.failures_total - row.failures_given_up;
+  const portalTotal = row.portal_total;
+  const collected = row.collected;
   const indexPct =
-    srealityTotal && srealityTotal > 0 && collected != null
-      ? (collected / srealityTotal) * 100
+    portalTotal && portalTotal > 0 && collected != null
+      ? (collected / portalTotal) * 100
       : null;
   const indexColour =
     indexPct == null
@@ -864,32 +784,26 @@ function CategoryTableRow({
         : indexPct >= 95
           ? 'var(--color-ochre)'
           : 'var(--color-brick)';
-  // Detail-drain backlog proxy: seen (collected, or sreality's total) minus
-  // what is currently active. Per-category exact queue depth isn't available
-  // (un-drained ids aren't listings rows yet), so this is the honest estimate.
-  const seen = collected ?? srealityTotal;
-  const queue = seen != null ? Math.max(0, seen - block.active_now) : null;
+  // Detail-drain backlog proxy: seen (collected, or the portal total) minus
+  // what is currently active.
+  const seen = collected ?? portalTotal;
+  const queue = seen != null ? Math.max(0, seen - row.active_now) : null;
 
-  const newToday = lastBucket(block.new_per_day_14d);
-  const new7d = sumLastN(block.new_per_day_14d, 7);
-  const flippedToday = lastBucket(block.flipped_per_day_7d);
-  const flipped7d = sumLastN(block.flipped_per_day_7d, 7);
-
-  const trendPoints = trend ? (grain === 'hour' ? trend.hourly : trend.daily) : [];
+  const trendPoints = grain === 'hour' ? row.hourly : row.daily;
 
   return (
     <tr className="border-t border-[var(--color-rule-soft)] hover:bg-[var(--color-paper-3)]/40">
       <td className="py-1.5 px-1.5 text-[var(--color-ink)] whitespace-nowrap">
-        {categoryLabel(block)}
+        {categoryLabel(row)}
       </td>
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-        {trend ? fmtCount(trend.total_in_db) : '—'}
+        {fmtCount(row.total_in_db)}
       </td>
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink)]">
-        {fmtCount(block.active_now)}
+        {fmtCount(row.active_now)}
       </td>
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink-2)]">
-        {srealityTotal != null ? fmtCount(srealityTotal) : '—'}
+        {portalTotal != null ? fmtCount(portalTotal) : '—'}
       </td>
       <td
         className="py-1.5 px-1.5 text-right font-mono tabular-nums"
@@ -904,15 +818,15 @@ function CategoryTableRow({
       >
         {queue != null ? fmtCount(queue) : '—'}
       </td>
-      <TodayWindowCell today={newToday} window={new7d} accent="var(--color-copper)" />
-      <TodayWindowCell today={flippedToday} window={flipped7d} accent="var(--color-brick)" />
+      <TodayWindowCell today={row.new_today} window={row.new_7d} accent="var(--color-copper)" />
+      <TodayWindowCell today={row.flipped_today} window={row.flipped_7d} accent="var(--color-brick)" />
       <td className="py-1.5 px-1.5 text-right font-mono tabular-nums leading-tight">
         <span style={{ color: failuresActive > 0 ? 'var(--color-ochre)' : 'var(--color-ink)' }}>
           {fmtCount(failuresActive)}
         </span>
-        {block.failures_given_up > 0 && (
+        {row.failures_given_up > 0 && (
           <span className="block text-[0.6rem] text-[var(--color-brick)]">
-            {fmtCount(block.failures_given_up)}&thinsp;given&nbsp;up
+            {fmtCount(row.failures_given_up)}&thinsp;given&nbsp;up
           </span>
         )}
       </td>
