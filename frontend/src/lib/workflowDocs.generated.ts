@@ -1369,6 +1369,64 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_maxima.yml"
   },
   {
+    "filename": "scrape_mmreality.yml",
+    "name": "Scraping: M&M Reality scraper (pilot)",
+    "description": "Scheduled (every 6h) + manual scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price- changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "50 */6 * * *",
+        "human": "Every 6 hours at :50"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap index pages walked (pilot safety). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "20",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "cap detail-drain claims this run",
+        "required": false,
+        "type": "string",
+        "default": "2000",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "detail-fetch requests/second ceiling",
+        "required": false,
+        "type": "string",
+        "default": "2.0",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "detail-fetch workers (concurrency; raise for a one-time backfill)",
+        "required": false,
+        "type": "string",
+        "default": "4",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "mmreality-scrape",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_mmreality.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_mmreality.yml"
+  },
+  {
     "filename": "seed_condition_settings.yml",
     "name": "Data: seed condition settings (rubric + markers)",
     "description": "One-shot workflow that populates the two large app_settings rows created by migration 072 — `llm_condition_rubric` and `llm_condition_marker_dictionary` — from the committed JSON files (data/condition_rubric_v1.json + data/condition_markers_curated.json).",

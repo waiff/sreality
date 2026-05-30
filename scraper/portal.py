@@ -170,6 +170,19 @@ _DEFAULTS: dict[str, PortalConfig] = {
             min_completeness=0.9,
         ),
     ),
+    "mmreality": PortalConfig(
+        source="mmreality",
+        # A single mixed-category index (no per-category slice) that can't be
+        # gated per-(category_main, category_type) the way source-scoped
+        # mark_inactive needs, so it stays partial-walk: the runner never flips
+        # its listings inactive from index absence (bazos posture, rule #3).
+        supports_complete_walk=False,
+        categories=[{"index": "nemovitosti"}],
+        split_threshold=None,
+        limits=PortalLimits(
+            index_rate=1.0, detail_workers=4, detail_rate=2.0,
+        ),
+    ),
     "maxima": PortalConfig(
         source="maxima",
         # A single-agency catalogue (~220 listings) on one mixed index. Pilot:
