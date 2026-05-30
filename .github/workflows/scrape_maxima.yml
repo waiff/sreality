@@ -1,0 +1,85 @@
+name: "Scraping: Maxima Reality scraper (pilot)"
+
+# Scheduled (every 6h) + manual scraper for nemovitosti.maxima.cz on the shared
+# portal framework. Maxima is a single real-estate agency that publishes its whole
+# catalogue (~220 listings) as one server-rendered WordPress index (no JSON API,
+# no per-category URL): the index walk pages the catalogue and enqueues
+# new/price-changed ids into listing_detail_queue, then the detail drain fetches
+# each /nemovitosti/{id}/ page, parses to a ScrapedListing, and ingests through
+# db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
+#
+# The catalogue is small, so one job runs BOTH phases (index walk + full drain)
+# comfortably inside the timeout. The per-listing category comes from the parser
+# (native-id prefix + title verb), so there is one mixed-catalogue "category" in
+# the `portals` registry row (migration 116), not a per-category list.
+#
+# A PILOT: supports_complete_walk=false, so the runner never marks listings
+# inactive from index-absence (architectural rule #3); a gone detail (404/410)
+# still flips that one listing inactive. Promotion to a complete-walk delisting
+# sweep is a deliberate later migration once proven.
+#
+# Writes 'index' + 'detail' scrape_runs rows under source='maxima' (its own
+# Health-page lane; does not touch sreality liveness / reconciliation).
+#
+# Required secret: SUPABASE_DB_URL. (Coordinates come from the page's embedded map
+# config when present, so no MAPY_CZ_API_KEY is needed.)
+
+on:
+  schedule:
+    - cron: "50 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: cap catalogue pages walked (ad-hoc partial). Blank = full walk.
+        required: false
+        default: ""
+        type: string
+      max_detail:
+        description: cap detail-drain claims this run (blank = drain the queue)
+        required: false
+        default: ""
+        type: string
+      rate:
+        description: detail-fetch requests/second ceiling
+        required: false
+        default: "1.0"
+        type: string
+      workers:
+        description: detail-fetch workers (concurrency; raise for a one-time backfill)
+        required: false
+        default: "2"
+        type: string
+
+concurrency:
+  group: maxima-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run maxima scrape
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_DETAIL: ${{ inputs.max_detail }}
+          RATE: ${{ inputs.rate || '1.0' }}
+          WORKERS: ${{ inputs.workers || '2' }}
+        run: |
+          ARGS="--rate $RATE --workers $WORKERS"
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
+          echo "python -m scraper.maxima_main $ARGS"
+          eval "python -m scraper.maxima_main $ARGS"

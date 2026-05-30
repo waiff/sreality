@@ -6,6 +6,32 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: Maxima Reality crawler (portal 5, pilot)
+Another portal onto the shared Phase-4 framework — a fetcher + a parser + a config
+row, no pipeline divergence. Maxima is a single real-estate agency that publishes its
+whole catalogue (~220 listings) as ONE server-rendered WordPress index (no JSON API,
+**no per-category URL**) at `nemovitosti.maxima.cz`. `MaximaClient`
+(`scraper/maxima_client.py`) subclasses `BasePortalClient` (HTML `Accept` + the
+`/page/N/` index + `/nemovitosti/{id}/` detail URL builders). `maxima_parser.py` parses
+the structured spec `<table>` (`th.slider_label`/`td.slider_value`), a clean `div.price`,
+and precise per-listing coordinates from the embedded OpenLayers map config
+(`\"center\":[lon,lat]`, backslash-escaped in the page source). Typed fields normalise to
+the canonical sreality labels (`Cihlová`→`cihla`, `Osobní`→`osobni`) for cross-portal
+filter agreement. Because there is no per-category URL, the **category is derived per
+listing** from its native-id prefix (b=byt, d=dum, f=pozemek, g=komercni, o=ostatni) +
+the title verb, so one mixed-catalogue config walks every category. `MaximaPortal`
+(`scraper/maxima_main.py`) implements the runner seams and drives index-walk →
+detail-drain via the one `portal_runner`. Shipped as a **pilot**
+(`supports_complete_walk=false`, migration 116, `source='maxima'`, sort 26): the runner
+never marks listings inactive from index-absence (a gone detail still flips that one
+listing); the whole-catalogue walk IS complete, so promotion is a later migration (as
+bazos got in 113). One job runs both phases (`scrape_maxima.yml`, every 6h) since the
+catalogue is small.
+
+#### Next
+- Promote to `supports_complete_walk=true` once the pilot proves stable (the index
+  reports a total, so the walk is provably complete) → delisting sweep, source-scoped.
+
 ### 2026-05: Per-portal operational limits in config (PR A of the Scrapers-admin track)
 Made the per-portal operational limits (index/detail rate, workers, per-run caps,
 image limits, completeness) operator-tunable from the DB — the foundation for a
