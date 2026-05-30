@@ -72,7 +72,11 @@ def test_search_returns_list_and_total():
     assert [a["id"] for a in adverts] == ["1", "2"]
     url, body = c._session.posts[0]
     assert url.endswith("/graphql/")
-    assert body["variables"] == {"ot": ["PRODEJ"], "et": ["BYT"], "lim": 50, "off": 0}
+    assert body["variables"] == {
+        "ot": ["PRODEJ"], "et": ["BYT"],
+        "inc": True, "st": True,
+        "lim": 50, "off": 0,
+    }
 
 
 def test_get_detail_returns_advert():
