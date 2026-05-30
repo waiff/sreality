@@ -16,11 +16,15 @@ name: "Scraping: iDNES Reality detail drain"
 # queue is empty. A gone detail (404 / redirect off /detail/) flips that listing
 # inactive + dequeues it.
 #
+# Hourly cron (the budget caps each run at ~40 min, so the next tick has a ~20-min
+# gap — no overlap). Doubles backfill throughput vs the prior every-2h cadence; the
+# concurrency group still serialises runs if GitHub slips a tick.
+#
 # Required secret: SUPABASE_DB_URL (single-row ingest uses the transaction pooler).
 
 on:
   schedule:
-    - cron: "30 */2 * * *"
+    - cron: "30 * * * *"
   workflow_dispatch:
     inputs:
       max_seconds:
