@@ -120,6 +120,7 @@ export interface ListingFilters {
   garage: TriState;
   furnished: Furnished | null;
   ownership: Ownership | null;
+  portals: string[];
   conditionMatch: string[];
   categorySubCb: number | null;
   buildingMaterial: BuildingMaterial | null;
@@ -198,6 +199,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   garage: 'any',
   furnished: null,
   ownership: null,
+  portals: [],
   conditionMatch: [],
   categorySubCb: null,
   buildingMaterial: null,
@@ -368,6 +370,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     garage: enumOr(sp.get('garage'), TRI_VALUES, 'any'),
     furnished: enumOrNull(sp.get('furnished'), FURNISHED_VALUES),
     ownership: enumOrNull(sp.get('ownership'), OWNERSHIP_VALUES),
+    portals: splitCsv(sp.get('portal')),
     conditionMatch: splitCsv(sp.get('condition')).filter(
       (c) => CONDITION_VALUES.includes(c),
     ),
@@ -533,6 +536,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.garage !== 'any') sp.set('garage', f.garage);
   if (f.furnished) sp.set('furnished', f.furnished);
   if (f.ownership) sp.set('ownership', f.ownership);
+  if (f.portals.length) sp.set('portal', f.portals.join(','));
   if (f.conditionMatch.length) sp.set('condition', f.conditionMatch.join(','));
   if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
   if (f.buildingMaterial) sp.set('build', f.buildingMaterial);
@@ -681,6 +685,7 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.garage === 'any' &&
   f.furnished == null &&
   f.ownership == null &&
+  f.portals.length === 0 &&
   f.conditionMatch.length === 0 &&
   f.categorySubCb == null &&
   f.buildingMaterial == null &&
@@ -745,6 +750,7 @@ export const REGISTRY_KEY_MAP = {
   garage: 'garage',
   furnished: 'furnished',
   ownership: 'ownership',
+  portals: 'portals',
   condition_match: 'conditionMatch',
   building_material: 'buildingMaterial',
   min_parking_lots: 'parkingLotsMin',
@@ -801,6 +807,7 @@ export function listingFiltersToRegistryView(
       registryId === 'dispositions'
       || registryId === 'districts'
       || registryId === 'condition_match'
+      || registryId === 'portals'
     ) {
       const arr = v as unknown[];
       out[registryId] = arr.length === 0 ? null : arr;
@@ -848,6 +855,10 @@ export function applyRegistryUpdate(
   if (id === 'condition_match') {
     const next = value == null ? [] : (value as string[]);
     return { ...filters, conditionMatch: next };
+  }
+  if (id === 'portals') {
+    const next = value == null ? [] : (value as string[]);
+    return { ...filters, portals: next };
   }
   if (id === 'city_index_rules') {
     const next = value == null ? [] : (value as CityIndexRule[]);

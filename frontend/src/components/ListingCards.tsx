@@ -10,6 +10,7 @@ import {
   fmtArea, fmtCzk, fmtPricePerM2,
   fmtShortDate, fmtTomDays,
 } from '@/lib/format';
+import { portalLabel } from '@/lib/portals';
 
 interface Props {
   rows: CardRow[] | null;
@@ -196,10 +197,19 @@ function Card({
             <span className="opacity-60 mr-1">od</span>
             {fmtShortDate(r.first_seen_at)}
           </CardBadge>
-          <CardBadge tone="muted" title="Naposled viděno na sreality">
+          <CardBadge
+            tone="muted"
+            title={`Naposled viděno na ${portalLabel(r.source) ?? 'portálu'}`}
+          >
             <span className="opacity-60 mr-1">viděno</span>
             {fmtShortDate(r.last_seen_at)}
           </CardBadge>
+          {portalLabel(r.source) && (
+            <CardBadge tone="muted" title="Zdrojový portál">
+              <span className="opacity-60 mr-1">portál</span>
+              {portalLabel(r.source)}
+            </CardBadge>
+          )}
           {r.tom_days != null && (
             <CardBadge tone="copper" title="Na trhu (turned in)">
               {fmtTomDays(r.tom_days)}

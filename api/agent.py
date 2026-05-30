@@ -791,6 +791,7 @@ _FCR_OVERRIDE_FIELDS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
     ("max_age_days", int),
     ("population", str),
     ("floor_band", int),
+    ("portals", list),
     ("condition_match", list),
     ("building_type_match", list),
     ("energy_rating_match", list),
@@ -841,6 +842,7 @@ def _filters_snapshot(
         "active_only": filters.active_only,
         "population": filters.population,
         "floor_band": filters.floor_band,
+        "portals": list(filters.portals) if filters.portals else None,
         "condition_match": (
             list(filters.condition_match) if filters.condition_match else None
         ),

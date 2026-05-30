@@ -1175,6 +1175,7 @@ def _build_filters(
         active_only=defaults.active_only,
         population=body.population,
         floor_band=body.floor_band,
+        portals=body.portals,
         condition_match=body.condition_match,
         building_type_match=body.building_type_match,
         energy_rating_match=body.energy_rating_match,

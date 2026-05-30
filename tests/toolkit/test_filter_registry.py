@@ -95,6 +95,9 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         # Not on `listings` — they aggregate across a property's children.
         "distinct_site_count", "price_drop_count", "price_rise_count",
         "max_price_drop_pct",
+        # Source portal (migration 091); exposed on listings_public and
+        # properties_public, filtered by the `portals` multiselect.
+        "source",
     }
     for f in fr.all_filters():
         if f.pg_column is None:

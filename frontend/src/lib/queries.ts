@@ -68,7 +68,7 @@ const TABLE_COLS =
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
   'sreality_id,district,locality,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'category_main,category_type';
+  'category_main,category_type,source';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -402,6 +402,7 @@ export interface CardRow {
   tom_days: number | null;
   category_main: string | null;
   category_type: string | null;
+  source: string | null;
   /* Up to 5 image URLs in source-sequence order. Empty when the
    * listing has no photos yet. The card uses index 0 by default and
    * the carousel chevrons step through the remaining entries. */
@@ -565,6 +566,8 @@ export const fetchBrowseStats = async (
     price_drop_count_min:    f.priceDropCountMin,
     price_rise_count_min:    f.priceRiseCountMin,
     max_price_drop_pct_min:  f.maxPriceDropPctMin,
+    /* Migration 118 — filter the Stats cohort by source portal. */
+    portal_filter:           f.portals.length ? f.portals : null,
   });
   if (error) throw error;
   return data as BrowseStats;

@@ -50,6 +50,7 @@ class ComparableFilters:
     active_only: bool = False
     population: Literal["active", "delisted", "all"] | None = None
     floor_band: int | None = None
+    portals: list[str] | None = None
     condition_match: list[str] | None = None
     building_type_match: list[str] | None = None
     energy_rating_match: list[str] | None = None
@@ -299,6 +300,9 @@ def _shared_filter_where(
         params["floor_min"] = target.floor - filters.floor_band
         params["floor_max"] = target.floor + filters.floor_band
 
+    if filters.portals:
+        where.append("l.source = ANY(%(portals)s)")
+        params["portals"] = list(filters.portals)
     if filters.condition_match:
         where.append("l.condition = ANY(%(condition_match)s)")
         params["condition_match"] = list(filters.condition_match)
@@ -527,6 +531,7 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "active_only": filters.active_only,
         "population": filters.population,
         "floor_band": filters.floor_band,
+        "portals": list(filters.portals) if filters.portals else None,
         "condition_match": (
             list(filters.condition_match)
             if filters.condition_match else None
