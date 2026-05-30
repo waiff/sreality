@@ -116,10 +116,10 @@ insert into app_settings (key, value, description, updated_by) values
 
 -- Expose the new column on the anon-readable view (registry surface, like 107).
 -- CREATE OR REPLACE must keep the existing columns in order and only append.
--- The column set has grown since 107 and differs across environments (prod
--- carries an extra scrape_cadence_minutes not in the committed sequence), so we
+-- The portals column set keeps growing across migrations (107, 114's
+-- scrape_cadence_minutes, this one), so rather than hardcode the current list we
 -- rebuild dynamically: preserve whatever portals_public currently selects and
--- append operational_limits. Robust to that drift + idempotent, and
+-- append operational_limits. Robust to migration ordering + idempotent, and
 -- portal_health_summary()'s dependency on the view is never broken.
 do $$
 declare existing_cols text;
