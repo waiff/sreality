@@ -40,6 +40,7 @@ from typing import Any
 import requests
 
 from scraper import db, hashing, image_storage, parser, portal_runner
+from scraper.portal import PortalLimits, default_config, load_portal_config
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
 from scraper.sreality_client import (
@@ -108,6 +109,21 @@ def _rotated_categories(
 
 LOG = logging.getLogger("scraper")
 
+SOURCE = "sreality"
+
+
+def _load_limits(dry_run: bool) -> PortalLimits:
+    """Sreality operational limits from the registry, baked default on any
+    hiccup. The DB is the operator-tunable surface; CLI flags still override."""
+    if dry_run:
+        return default_config(SOURCE).limits
+    try:
+        with db.connect() as conn:
+            return load_portal_config(conn, SOURCE).limits
+    except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a scrape
+        LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
+        return default_config(SOURCE).limits
+
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
@@ -135,6 +151,34 @@ def main(argv: list[str] | None = None) -> int:
                 "--images-only, --detail-only, and --limit"
             )
             return 2
+
+    # Resolve operational limits: CLI override > per-portal DB config > default.
+    # Production workflows pass explicit flags (so CLI wins and behavior is
+    # unchanged); when a flag is omitted the per-portal config value applies.
+    limits = _load_limits(args.dry_run)
+    detail_workers = (
+        args.detail_workers if args.detail_workers is not None
+        else limits.detail_workers
+    )
+    detail_rate = (
+        args.detail_rate if args.detail_rate is not None else limits.detail_rate
+    )
+    max_refetches = (
+        args.max_detail_refetches if args.max_detail_refetches is not None
+        else limits.max_detail_per_run
+    )
+    max_refetches_per_cat = (
+        args.max_detail_refetches_per_category
+        if args.max_detail_refetches_per_category is not None
+        else limits.max_detail_per_category
+    )
+    image_workers = (
+        args.image_workers if args.image_workers is not None else limits.image_workers
+    )
+    max_image_downloads = (
+        args.max_image_downloads if args.max_image_downloads is not None
+        else limits.max_image_downloads
+    )
 
     # Open a scrape_runs row for any non-dry-run invocation that actually
     # scrapes the index. The image-only backfill (images.yml) is NOT a
@@ -169,13 +213,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.images_only:
             rc = 0
         elif args.index_only:
-            rc, scrape_agg = _run_index_walk(dry_run=args.dry_run)
+            rc, scrape_agg = _run_index_walk(
+                dry_run=args.dry_run, index_rate=limits.index_rate,
+            )
         elif args.drain_only:
             rc, scrape_agg = _run_detail_drain(
-                max_claims=args.max_detail_refetches,
+                max_claims=max_refetches,
                 dry_run=args.dry_run,
-                detail_workers=args.detail_workers,
-                detail_rate=args.detail_rate,
+                detail_workers=detail_workers,
+                detail_rate=detail_rate,
             )
         elif args.detail_only is not None:
             rc, scrape_agg = _run_detail_only(
@@ -187,10 +233,10 @@ def main(argv: list[str] | None = None) -> int:
             rc, scrape_agg = _run_full(
                 limit=args.limit,
                 dry_run=args.dry_run,
-                max_refetches=args.max_detail_refetches,
-                max_refetches_per_category=args.max_detail_refetches_per_category,
-                detail_workers=args.detail_workers,
-                detail_rate=args.detail_rate,
+                max_refetches=max_refetches,
+                max_refetches_per_category=max_refetches_per_cat,
+                detail_workers=detail_workers,
+                detail_rate=detail_rate,
             )
 
         if (
@@ -201,8 +247,8 @@ def main(argv: list[str] | None = None) -> int:
             and not args.drain_only
         ):
             image_agg = _run_image_downloads(
-                max_downloads=args.max_image_downloads,
-                workers=args.image_workers,
+                max_downloads=max_image_downloads,
+                workers=image_workers,
                 active_only=args.images_active_only,
             )
             if image_agg.get("stopped_suspicious"):
@@ -342,10 +388,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--max-image-downloads",
         type=int,
-        default=1000,
+        default=None,
         help=(
-            "cap number of images downloaded this run (default: 1000). "
-            "Set to 0 for no cap — the phase drains the queue until "
+            "cap number of images downloaded this run (default: per-portal "
+            "config). Set to 0 for no cap — the phase drains the queue until "
             "empty or the suspicious-stop heuristic fires."
         ),
     )
@@ -364,26 +410,26 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--image-workers",
         type=int,
-        default=DEFAULT_IMAGE_WORKERS,
-        help=f"concurrent download/upload workers (default: {DEFAULT_IMAGE_WORKERS})",
+        default=None,
+        help="concurrent download/upload workers (default: per-portal config)",
     )
     p.add_argument(
         "--detail-workers",
         type=int,
-        default=DEFAULT_DETAIL_WORKERS,
+        default=None,
         help=(
-            "concurrent detail-fetch workers (default: "
-            f"{DEFAULT_DETAIL_WORKERS}). Network I/O runs in parallel; DB "
-            "writes stay serial on the main thread."
+            "concurrent detail-fetch workers (default: per-portal config). "
+            "Network I/O runs in parallel; DB writes stay serial on the "
+            "main thread."
         ),
     )
     p.add_argument(
         "--detail-rate",
         type=float,
-        default=DEFAULT_DETAIL_RATE,
+        default=None,
         help=(
             "global detail-fetch rate cap in requests/sec across ALL "
-            f"workers (default: {DEFAULT_DETAIL_RATE}). Auto-backs-off on "
+            "workers (default: per-portal config). Auto-backs-off on "
             "HTTP 429/403. Dial down if sreality starts blocking."
         ),
     )
@@ -721,7 +767,10 @@ class SrealityPortal:
 
     source = "sreality"
     supports_complete_walk = True
-    index_rate = DEFAULT_DETAIL_RATE
+    index_rate = DEFAULT_DETAIL_RATE  # baked floor; instance reads from config
+
+    def __init__(self, index_rate: float = DEFAULT_DETAIL_RATE) -> None:
+        self.index_rate = index_rate
 
     def categories(self) -> list[tuple[int, int]]:
         return list(_rotated_categories(CATEGORIES, datetime.now(timezone.utc).hour))
@@ -792,10 +841,12 @@ class SrealityPortal:
             return int(cur.fetchone()[0])
 
 
-def _run_index_walk(dry_run: bool) -> tuple[int, dict[str, Any]]:
+def _run_index_walk(
+    dry_run: bool, index_rate: float = DEFAULT_DETAIL_RATE,
+) -> tuple[int, dict[str, Any]]:
     """Sreality index-walk via the generic portal_runner (Phase 4). Records
     run_type='index' with index_pages>0 so Health liveness keys off it."""
-    return portal_runner.run_index_walk(SrealityPortal(), dry_run)
+    return portal_runner.run_index_walk(SrealityPortal(index_rate), dry_run)
 
 
 def _run_detail_drain(

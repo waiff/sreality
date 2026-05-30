@@ -61,12 +61,13 @@ class BezrealitkyPortal:
     complete-walk capability) comes from the `portals` registry config."""
 
     source = SOURCE
-    index_rate = 1.0
+    index_rate = 1.0  # baked floor; the instance reads it from config.limits
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
         self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
+        self.index_rate = config.limits.index_rate
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -277,14 +278,21 @@ def main(argv: list[str] | None = None) -> int:
     config = _load_config(args.dry_run)
     portal = BezrealitkyPortal(config, max_pages=args.max_pages)
 
+    # Resolve operational limits: CLI override > per-portal DB config > default.
+    workers = args.workers if args.workers is not None else config.limits.detail_workers
+    rate = args.rate if args.rate is not None else config.limits.detail_rate
+    max_detail = (
+        args.max_detail if args.max_detail is not None
+        else config.limits.max_detail_per_run
+    )
+
     # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
     # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
     rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
     if rc == 0:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
-            max_claims=args.max_detail, detail_workers=args.workers,
-            detail_rate=args.rate,
+            max_claims=max_detail, detail_workers=workers, detail_rate=rate,
         )
     return rc
 
@@ -301,14 +309,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="cap detail-drain claims per run (omit = drain the queue)",
     )
     p.add_argument(
-        "--workers", type=int, default=8,
-        help="detail-fetch workers. advert(id) is ~2-3s latency-bound, so "
-             "concurrency (not the rate cap) sets throughput — 8 lets the rate "
-             "ceiling actually be reached. Raise for a one-time backfill.",
+        "--workers", type=int, default=None,
+        help="detail-fetch workers (default: per-portal config). advert(id) is "
+             "~2-3s latency-bound, so concurrency (not the rate cap) sets "
+             "throughput. Raise for a one-time backfill.",
     )
     p.add_argument(
-        "--rate", type=float, default=1.0,
-        help="detail-fetch requests/second ceiling (default 1.0)",
+        "--rate", type=float, default=None,
+        help="detail-fetch requests/second ceiling (default: per-portal config)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
