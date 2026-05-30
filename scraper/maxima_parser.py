@@ -48,6 +48,11 @@ CATEGORY_BY_TITLE: tuple[tuple[str, str], ...] = (
     ("pozemk", "pozemek"),
     ("komer", "komercni"),
     ("kancel", "komercni"),
+    # Checked last so a specific category wins first ("byt s garáží" -> byt): a
+    # garage / catch-all "ostatní" title (e.g. "Pronájem ostatní garáže") maps to
+    # ostatni, mirroring maxima's own taxonomy (the sale side uses the 'o' prefix).
+    ("garaz", "ostatni"),
+    ("ostatn", "ostatni"),
 )
 
 # idnes/sreality building-construction labels -> the canonical codes the sreality
