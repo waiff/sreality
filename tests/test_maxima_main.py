@@ -1,6 +1,7 @@
-"""maxima_main on the portal framework: MaximaPortal (pilot, single mixed walk)
-seams + the main() that drives index-walk then detail-drain through the shared
-runner, recording an 'index' + a 'detail' scrape_runs row tagged source='maxima'.
+"""maxima_main on the portal framework: MaximaPortal (pilot, two mixed agendas
+split per (category_main, category_type) via id-prefix) seams + the main() that
+drives index-walk then detail-drain through the shared runner, recording an
+'index' + a 'detail' scrape_runs row tagged source='maxima'.
 """
 
 from __future__ import annotations
@@ -24,11 +25,19 @@ class _Conn:
         pass
 
 
+_CATEGORIES = [
+    {"category_main": "byt",      "category_type": "prodej",   "af": 1},
+    {"category_main": "dum",      "category_type": "prodej",   "af": 1},
+    {"category_main": "ostatni",  "category_type": "prodej",   "af": 1},
+    {"category_main": "byt",      "category_type": "pronajem", "af": 2},
+]
+
+
 def _config() -> PortalConfig:
     return PortalConfig(
         source="maxima",
         supports_complete_walk=False,
-        categories=[{"label": "all"}],
+        categories=_CATEGORIES,
         split_threshold=None,
     )
 
@@ -123,92 +132,132 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 # --- MaximaPortal seams -----------------------------------------------------
 
 
-def test_portal_config_pilot_single_category():
+def test_portal_config_categories_and_labels():
     p = _portal()
     assert p.source == "maxima"
     assert p.supports_complete_walk is False
-    assert p.categories() == [{"label": "all"}]
-    # One mixed walk -> no single (cm, ct) label; active_count + mark_inactive are off.
-    assert p.category_labels({"label": "all"}) == (None, None)
-    assert p.active_count(object(), {"label": "all"}) is None
-    assert p.mark_inactive(object(), {"label": "all"}, {"b1", "d2"}) == 0
+    assert p.categories() == _CATEGORIES
+    assert p.category_labels(_CATEGORIES[0]) == ("byt", "prodej")
+    assert p.category_labels(_CATEGORIES[3]) == ("byt", "pronajem")
+
+
+def test_active_count_and_mark_inactive_source_scoped(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        maxima_main.db, "active_count",
+        lambda _c, cm, ct, source: captured.setdefault("active", (cm, ct, source)) or 12,
+    )
+    assert _portal().active_count(object(), _CATEGORIES[0]) == 12
+    assert captured["active"] == ("byt", "prodej", "maxima")
+
+    monkeypatch.setattr(
+        maxima_main.db, "index_summary_native",
+        lambda _c, _s, ids: {n: {"sreality_id": -i} for i, n in enumerate(ids, 1)},
+    )
+    monkeypatch.setattr(
+        maxima_main.db, "mark_inactive",
+        lambda _c, cm, ct, pks, source: captured.update(mark=(cm, ct, source, set(pks))) or 3,
+    )
+    assert _portal().mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 3
+    assert captured["mark"][:3] == ("byt", "prodej", "maxima")
 
 
 class _IdxClient:
-    def __init__(self, *a, **k):
-        self.calls = 0
+    """A fake MaximaClient that hands back a per-agenda page sequence and records
+    how many times the agenda was actually fetched (to prove the cache works)."""
 
-    def fetch_index(self, *a, **k):
-        self.calls += 1
+    pages_by_af: dict[int, list[Any]] = {}
+    fetches: dict[int, int] = {}
+
+    def __init__(self, *a, **k):
+        self._cursor: dict[int, int] = {}
+
+    def fetch_index(self, page=None, *, af=None):
+        af = af or 1
+        _IdxClient.fetches[af] = _IdxClient.fetches.get(af, 0) + 1
         return ("<html>", 200)
 
 
-def test_walk_category_classifies_and_stops_on_empty_page(monkeypatch):
-    a = "b50000001"  # new
-    b = "d40000002"  # price changed
-    c = "g70000003"  # unchanged
+def test_walk_category_filters_by_category_and_caches_agenda(monkeypatch):
+    # One sale-agenda page with mixed categories: 2 byty, 1 dum, then an empty page.
     base = "https://nemovitosti.maxima.cz/nemovitosti/"
-    page1 = SimpleNamespace(
-        total=3, next_offset=2,
-        items=[
-            SimpleNamespace(source_id_native=a, detail_path=f"{base}{a}/", price_text="5 000 000 Kč"),
-            SimpleNamespace(source_id_native=b, detail_path=f"{base}{b}/", price_text="6 000 000 Kč"),
-            SimpleNamespace(source_id_native=c, detail_path=f"{base}{c}/", price_text="7 000 000 Kč"),
-        ],
-    )
+    b1, b2, d1 = "b50000001", "b50000002", "d40000003"  # b1 new, b2 changed, d1 dum
+    page1 = SimpleNamespace(total=3, next_offset=2, items=[
+        SimpleNamespace(source_id_native=b1, detail_path=f"{base}{b1}/", price_text="5 000 000 Kč", title="Prodej bytu 2+kk"),
+        SimpleNamespace(source_id_native=b2, detail_path=f"{base}{b2}/", price_text="6 000 000 Kč", title="Prodej bytu 3+kk"),
+        SimpleNamespace(source_id_native=d1, detail_path=f"{base}{d1}/", price_text="9 000 000 Kč", title="Prodej rodinného domu"),
+    ])
     empty = SimpleNamespace(total=3, next_offset=None, items=[])
-    pages_iter = iter([page1, empty])
-    monkeypatch.setattr(maxima_main, "parse_index", lambda _h: next(pages_iter))
+    seq = iter([page1, empty])
+    monkeypatch.setattr(maxima_main, "parse_index", lambda _h: next(seq))
+    _IdxClient.fetches = {}
     monkeypatch.setattr(maxima_main, "MaximaClient", _IdxClient)
     monkeypatch.setattr(maxima_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(
         maxima_main.db, "index_summary_native",
-        lambda _c, _s, ids: {
-            b: {"sreality_id": -2, "price_czk": 5_500_000, "last_seen_at": None},  # differs
-            c: {"sreality_id": -3, "price_czk": 7_000_000, "last_seen_at": None},  # same
-        },
+        lambda _c, _s, ids: {b2: {"sreality_id": -2, "price_czk": 5_500_000}} if b2 in ids else {},
     )
-    touched: dict[str, Any] = {}
-    monkeypatch.setattr(maxima_main.db, "touch_listings", lambda _c, pks: touched.update(pks=list(pks)))
-    captured: dict[str, Any] = {}
+    monkeypatch.setattr(maxima_main.db, "touch_listings", lambda *a, **k: None)
+    enq: list[Any] = []
     monkeypatch.setattr(
         maxima_main.db, "enqueue_detail",
-        lambda _c, source, entries: (captured.update(source=source, entries=list(entries))
-                                     or len(captured["entries"])),
+        lambda _c, source, entries: (enq.extend(entries) or len(entries)),
     )
-    seen, counts, total, pages, complete = _portal().walk_category(
-        {"label": "all"}, object(), False, _Limiter(),
+
+    portal = _portal()
+    # byt·prodej: only the two byty, and it triggers the (only) HTTP walk.
+    seen_b, counts_b, total_b, pages_b, complete_b = portal.walk_category(
+        _CATEGORIES[0], object(), False, _Limiter(),
     )
-    assert seen == {a, b, c}
-    assert total == 3
-    assert pages == 2                     # walked page 1 then the empty page 2
-    assert complete is False              # pilot: never marks inactive
-    assert touched["pks"] == [-3]         # unchanged listing touched
-    refs = {e[0]: e for e in captured["entries"]}
-    assert refs[a][3] == maxima_main.db.QUEUE_PRIORITY_NEW
-    assert refs[b][3] == maxima_main.db.QUEUE_PRIORITY_CHANGED
-    assert refs[a][1] == f"{base}{a}/"    # detail_ref is the absolute URL
-    assert c not in refs                  # unchanged is not enqueued
+    assert seen_b == {b1, b2}
+    assert total_b == 2 and complete_b is False
+    assert pages_b == 2                       # page 1 + the empty terminator
+    assert _IdxClient.fetches[1] == 2
+
+    # dum·prodej: reuses the cached agenda (no new fetch), yields just the dum.
+    seen_d, _c, total_d, pages_d, _comp = portal.walk_category(
+        _CATEGORIES[1], object(), False, _Limiter(),
+    )
+    assert seen_d == {d1}
+    assert total_d == 1
+    assert pages_d == 0                       # cache hit -> no pages counted again
+    assert _IdxClient.fetches[1] == 2         # still only the original 2 fetches
+
+    enq_ids = {e[0]: e for e in enq}
+    assert enq_ids[b1][3] == maxima_main.db.QUEUE_PRIORITY_NEW       # new
+    assert enq_ids[b2][3] == maxima_main.db.QUEUE_PRIORITY_CHANGED   # price changed
+    assert enq_ids[d1][3] == maxima_main.db.QUEUE_PRIORITY_NEW
+    assert enq_ids[b1][1] == f"{base}{b1}/"  # detail_ref is the absolute URL
 
 
-def test_walk_category_max_pages_caps(monkeypatch):
-    page = SimpleNamespace(
-        total=220, next_offset=2,
-        items=[SimpleNamespace(
-            source_id_native="b50000001",
-            detail_path="https://nemovitosti.maxima.cz/nemovitosti/b50000001/",
-            price_text="5 000 000 Kč")],
-    )
-    monkeypatch.setattr(maxima_main, "parse_index", lambda _h: page)
-    monkeypatch.setattr(maxima_main, "MaximaClient", _IdxClient)
+def test_walk_category_walks_rent_agenda(monkeypatch):
+    # Rent ids carry prefixes the sale taxonomy doesn't cover (real maxima: 'a'),
+    # so category MUST come from the title ("Pronájem bytu") -> byt, not the prefix.
+    base = "https://nemovitosti.maxima.cz/nemovitosti/"
+    rent = "a10009999"
+    page1 = SimpleNamespace(total=1, next_offset=None, items=[
+        SimpleNamespace(source_id_native=rent, detail_path=f"{base}{rent}/", price_text="19 000 Kč", title="Pronájem bytu 1 + kk"),
+    ])
+    empty = SimpleNamespace(total=1, next_offset=None, items=[])
+    seq = iter([page1, empty])
+    afs: list[int] = []
+
+    class _RentClient(_IdxClient):
+        def fetch_index(self, page=None, *, af=None):
+            afs.append(af)
+            return ("<html>", 200)
+
+    monkeypatch.setattr(maxima_main, "parse_index", lambda _h: next(seq))
+    monkeypatch.setattr(maxima_main, "MaximaClient", _RentClient)
     monkeypatch.setattr(maxima_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
     monkeypatch.setattr(maxima_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(maxima_main.db, "enqueue_detail", lambda *a, **k: 1)
-    _, _, total, pages, complete = _portal(max_pages=1).walk_category(
-        {"label": "all"}, object(), False, _Limiter(),
+
+    seen, _c, total, _p, _comp = _portal().walk_category(
+        _CATEGORIES[3], object(), False, _Limiter(),  # byt·pronajem, af=2
     )
-    assert pages == 1
-    assert complete is False
+    assert seen == {rent}
+    assert afs and all(af == 2 for af in afs)   # the rent agenda was walked with af=2
 
 
 # --- detail-drain seams -----------------------------------------------------

@@ -9,18 +9,23 @@ fetches each listing page, parses it to a `ScrapedListing`, and ingests via
 pipeline — only the per-portal fetcher (MaximaClient) + parser (maxima_parser) +
 config differ from sreality/idnes (the modularity rule in CLAUDE.md).
 
-Maxima is a SINGLE small agency catalogue (~220 listings) on ONE mixed index (no
-per-category URL), so unlike idnes there is one "category" descriptor and the
-walk pages the whole catalogue. The category is encoded in the native id's leading
-letter + the title verb, so the drain derives each listing's category from the
-detail page itself (`maxima_parser.parse_detail`), not from the queue.
+Maxima is a small agency catalogue served as TWO mixed indexes — sale (the default
+view, `af=1`) and rent (the buy/rent toggle, `af=2`) — each spanning every property
+category with no per-category URL. The config descriptors are therefore per
+(category_main, category_type, af): `walk_category` walks (or reuses, via an
+agenda-level cache) that agenda's full index, then keeps the slice whose native-id
+prefix (b=byt, d=dum, f=pozemek, g=komercni, o=ostatni) maps to the descriptor's
+category. This gives the runner real (cm, ct) labels — the Health reconciliation
+joins listings on those — while fetching each agenda's pages only once per run.
+The drain still derives each listing's category from the detail page itself
+(`maxima_parser.parse_detail`), so the queue stays category-agnostic.
 
-Like every portal's first cut (bazos/idnes/bezrealitky all started this way), maxima
-ships as a PILOT with `supports_complete_walk=false`: the runner never marks listings
-inactive from index-absence. A gone detail fetch (404/410) still flips that one
-listing inactive. The whole-catalogue walk IS provably complete (the index reports a
-total), so promotion to complete-walk + delisting sweep is a deliberate later
-migration (as bazos got in 113) once the pilot proves stable.
+Like every portal's first cut (bazos/idnes/bezrealitky/mmreality all started this way),
+maxima ships as a PILOT with `supports_complete_walk=false`: the runner never marks
+listings inactive from index-absence (maxima reports a per-AGENDA total, not a
+per-category one, so a per-(cm,ct) completeness check isn't available). A gone detail
+fetch (404/410) still flips that one listing inactive. `mark_inactive` / `active_count`
+are implemented source-scoped so promotion to complete-walk is a one-flag change.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ from typing import Any
 
 from scraper import db, portal_runner
 from scraper.maxima_client import MaximaClient, detail_url, index_url
-from scraper.maxima_parser import index_price, parse_detail, parse_index
+from scraper.maxima_parser import category_of, index_price, parse_detail, parse_index
 from scraper.portal import PortalConfig, default_config, load_portal_config
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
@@ -40,30 +45,53 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "maxima"
 
-# The whole-catalogue descriptor: maxima has one mixed index, so one "category".
-_CATALOGUE = {"label": "all"}
+
+class _AgendaWalk:
+    """One agenda's (sale or rent) collected index, walked once and shared across
+    that agenda's per-category descriptors."""
+
+    def __init__(
+        self, native_ids: list[str], ref_map: dict[str, str],
+        price_map: dict[str, int | None], cat_map: dict[str, str | None],
+        total: int | None, pages: int,
+    ) -> None:
+        self.native_ids = native_ids
+        self.ref_map = ref_map
+        self.price_map = price_map
+        self.cat_map = cat_map  # id -> category_main (title-first, prefix fallback)
+        self.total = total
+        self.pages = pages
 
 
 class MaximaPortal:
     """nemovitosti.maxima.cz as a Portal: the seams the generic runner needs,
-    wrapping the maxima client + parser. A single-agency catalogue walked as one
-    mixed index; the per-listing category comes from the parser, not the walk."""
+    wrapping the maxima client + parser.
+
+    maxima exposes TWO mixed indexes — sale (the default view, af=1) and rent
+    (the buy/rent toggle, af=2) — each spanning every property category with no
+    per-category URL. So the config descriptors are per (category_main,
+    category_type, af): each walk_category walks (or reuses, via the agenda cache)
+    that agenda's full index, then keeps the slice whose native-id prefix maps to
+    the descriptor's category. This gives the runner real (cm, ct) labels — the
+    Health reconciliation joins listings on those — while fetching each agenda's
+    pages only once per run."""
 
     source = SOURCE
     index_rate = 1.0
 
     def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
         self.supports_complete_walk = config.supports_complete_walk
+        self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        self._agenda_cache: dict[int, _AgendaWalk] = {}
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
-        return [_CATALOGUE]
+        return list(self._categories)
 
     def category_labels(self, category: dict[str, Any]) -> tuple[str | None, str | None]:
-        # One mixed walk spanning every category, so no single (cm, ct) label.
-        return (None, None)
+        return (category.get("category_main"), category.get("category_type"))
 
     def connect_index(self) -> Any:
         return db.connect()
@@ -73,28 +101,35 @@ class MaximaPortal:
         # so the transaction pooler is fine — no session pooler needed.
         return db.connect()
 
-    def walk_category(
-        self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
-    ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
-        client = MaximaClient(limiter=limiter)
+    def _walk_agenda(
+        self, af: int, conn: Any, limiter: RateLimiter,
+    ) -> tuple[_AgendaWalk, int]:
+        """Walk one agenda's full mixed index once; cache it for the agenda's
+        other category descriptors. Returns (walk, pages_fetched_this_call) so the
+        runner counts each agenda's pages exactly once (0 on a cache hit)."""
+        cached = self._agenda_cache.get(af)
+        if cached is not None:
+            return cached, 0
 
+        client = MaximaClient(limiter=limiter)
         native_ids: list[str] = []
-        price_map: dict[str, int | None] = {}
         ref_map: dict[str, str] = {}
+        price_map: dict[str, int | None] = {}
+        cat_map: dict[str, str | None] = {}
         total: int | None = None
         pages = 0
         page = 1
         while True:
-            html, status = client.fetch_index(page)
+            html, status = client.fetch_index(page, af=af)
             parsed = parse_index(html)
             pages += 1
             total = parsed.total if parsed.total is not None else total
-            LOG.info("INDEX page=%d items=%d total=%s", page, len(parsed.items), total)
+            LOG.info("INDEX af=%d page=%d items=%d total=%s", af, page, len(parsed.items), total)
             if conn is not None:
                 db.upsert_portal_raw_page(
                     conn, source=SOURCE,
-                    source_id_native=f"index/{page}",
-                    source_url=index_url(page),
+                    source_id_native=f"index/af{af}/{page}",
+                    source_url=index_url(page, af=af),
                     page_kind="index", html=html, http_status=status,
                 )
             new_on_page = 0
@@ -105,15 +140,40 @@ class MaximaPortal:
                     new_on_page += 1
                 ref_map[nid] = detail_url(item.detail_path)
                 price_map[nid] = index_price(item.price_text)
+                # Title-first so the rent agenda (whose ids carry prefixes the sale
+                # taxonomy doesn't cover) is categorised the same way parse_detail
+                # will categorise it — no Health-reconciliation fragmentation.
+                cat_map[nid] = category_of(nid, item.title)
             if self._max_pages and pages >= self._max_pages:
                 break
-            # Stop on an empty page (the catalogue runs out — page N>last returns
-            # no cards) or one that added nothing new.
+            # Stop on an empty page (catalogue exhausted) or one adding nothing new.
             if not parsed.items or new_on_page == 0:
                 break
             page += 1
 
+        walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages)
+        self._agenda_cache[af] = walk
+        return walk, pages
+
+    @staticmethod
+    def _belongs(mapped: str | None, cm: str | None) -> bool:
+        """Whether an id's derived category `mapped` belongs to descriptor category
+        `cm`. 'ostatni' is the catch-all, so an unmapped category (a new maxima
+        type) is never silently dropped."""
+        if mapped == cm:
+            return True
+        return cm == "ostatni" and mapped is None
+
+    def walk_category(
+        self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
+    ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
+        cm = category.get("category_main")
+        af = int(category.get("af") or 1)
+        walk, pages = self._walk_agenda(af, conn, limiter)
+
+        native_ids = [n for n in walk.native_ids if self._belongs(walk.cat_map.get(n), cm)]
         seen = set(native_ids)
+
         existing = (
             db.index_summary_native(conn, SOURCE, native_ids)
             if conn is not None else {}
@@ -125,7 +185,7 @@ class MaximaPortal:
             prev = existing.get(nid)
             if prev is None:
                 continue
-            if price_map.get(nid) is not None and prev["price_czk"] == price_map[nid]:
+            if walk.price_map.get(nid) is not None and prev["price_czk"] == walk.price_map[nid]:
                 unchanged_pks.append(prev["sreality_id"])
             else:
                 changed.append(nid)
@@ -134,26 +194,38 @@ class MaximaPortal:
             db.touch_listings(conn, unchanged_pks)
 
         entries = (
-            [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
-            + [(n, ref_map[n], price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
+            [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_CHANGED) for n in changed]
+            + [(n, walk.ref_map[n], walk.price_map.get(n), db.QUEUE_PRIORITY_NEW) for n in new_ids]
         )
         enqueued = (
             db.enqueue_detail(conn, SOURCE, entries)
             if conn is not None and entries else 0
         )
         LOG.info(
-            "ENQUEUE source=maxima new=%d changed=%d unchanged=%d enqueued=%d",
-            len(new_ids), len(changed), len(unchanged_pks), enqueued,
+            "ENQUEUE source=maxima cm=%s ct=%s new=%d changed=%d unchanged=%d enqueued=%d",
+            cm, category.get("category_type"), len(new_ids), len(changed),
+            len(unchanged_pks), enqueued,
         )
-        # Pilot: never drives mark_inactive (supports_complete_walk=false), so the
-        # completeness flag is informational only — report False to be explicit.
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, False
+        # maxima reports a per-AGENDA total (220/34), not per-category, so the
+        # per-category "portal expected" is what this category collected — index%
+        # is then 100% by construction. supports_complete_walk=false keeps the
+        # runner from marking inactive regardless (pilot), so this never gates a
+        # delisting; it only labels the Health reconciliation row.
+        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, False
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
-        return 0  # pilot: index-absence sweep is off (supports_complete_walk=false)
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return 0
+        existing = db.index_summary_native(conn, SOURCE, list(seen))
+        pks = {v["sreality_id"] for v in existing.values()}
+        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
-        return None
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return None
+        return db.active_count(conn, cm, ct, source=SOURCE)
 
     # --- detail-drain seams ---
     def make_client(self, limiter: RateLimiter) -> MaximaClient:

@@ -161,6 +161,16 @@ def _category_from_title(title: str | None) -> str | None:
     return None
 
 
+def category_of(native_id: str | None, title: str | None) -> str | None:
+    """category_main, title-verb first then id-prefix. The title is authoritative
+    across BOTH agendas: the rent side (af=2) uses native-id prefixes the sale
+    taxonomy (b/d/f/g/o) doesn't cover, so a prefix-first derivation would dump
+    every rental into 'ostatni'. The index walk and the detail parser both call
+    this so their category assignment can never disagree (which would fragment the
+    Health reconciliation)."""
+    return _category_from_title(title) or category_from_id(native_id)
+
+
 def _sale_type_from_title(title: str | None) -> str | None:
     if not title:
         return None
@@ -377,9 +387,10 @@ def parse_detail(
     description = _text(tree.css_first("#collapse-inzerat-text"))
     params = _detail_params(tree)
 
-    # Category is encoded in the id prefix + title verb (maxima has no per-category
-    # URL); derive it here when the caller didn't pass an override.
-    category_main = category_main or category_from_id(source_id) or _category_from_title(title)
+    # Category is encoded in the title verb (authoritative across both agendas) +
+    # the id prefix (sale only); derive it when the caller didn't pass an override.
+    # Same `category_of` the index walk uses, so the two never disagree.
+    category_main = category_main or category_of(source_id, title)
     category_type = category_type or _sale_type_from_title(title) or "prodej"
 
     price_text = _text(tree.css_first("div.price")) or params.get("cena")

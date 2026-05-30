@@ -220,10 +220,14 @@ def test_price_takes_first_run_and_clamps_to_int():
 
 
 def test_parse_detail_price_on_request_is_none():
+    # Rent listing with an 'a'-prefix id (the real maxima rent scheme) the sale
+    # taxonomy doesn't cover -> category_main must come from the title ("Pronájem
+    # bytu" -> byt), not the prefix; category_type from the verb -> pronajem.
     listing = parse_detail(
         RENT_DOHODOU_HTML,
-        source_url="https://nemovitosti.maxima.cz/nemovitosti/b50099999/",
+        source_url="https://nemovitosti.maxima.cz/nemovitosti/a10099999/",
     )
+    assert listing.category_main == "byt"
     assert listing.category_type == "pronajem"
     assert listing.price_unit == "za mesic"
     assert listing.price_czk is None
