@@ -20,7 +20,13 @@ LOG = logging.getLogger(__name__)
 BASE_URL = "https://reality.idnes.cz"
 
 # Substrings idnes serves (HTTP 200) for a listing that is no longer offered.
+# "nabídka již není aktivní" is the verified live marker: idnes keeps the listing
+# title in <h1>/og:title but replaces the detail body with a "Nabídka již není
+# aktivní" / "evidujeme nabídku jako neaktivní" stub. The rest are tolerated
+# variants kept as a defensive net.
 _GONE_MARKERS: tuple[str, ...] = (
+    "nabídka již není aktivní",
+    "evidujeme nabídku jako neaktivní",
     "nemovitost již není v nabídce",
     "inzerát již není aktivní",
     "tato nabídka již není aktuální",
