@@ -20,7 +20,7 @@ import {
   fetchListingDetailByIds,
   fetchPropertySourcesByPropertyIds,
 } from '@/lib/queries';
-import { diffCandidate, type DiffRow, type DiffVerdict, type ListingDetailLite } from '@/lib/dedupDiff';
+import { diffCandidate, type DiffVerdict, type ListingDetailLite } from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
 import { portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
