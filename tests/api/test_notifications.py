@@ -133,10 +133,14 @@ def test_build_clauses_district_chip_without_context() -> None:
     )
     where, params = _build_match_clauses(spec)
     district_clause = next(w for w in where if "district_name_0" in w)
-    assert "l.district ILIKE '%' || %(district_name_0)s || '%'" in district_clause
-    assert "l.locality ILIKE '%' || %(district_name_0)s || '%'" in district_clause
+    # Wildcards live in the bound VALUE, not as inline SQL '%' literals —
+    # a bare '%' in the query string is a malformed psycopg placeholder and
+    # raised at execute time, silently killing every matcher pass.
+    assert "l.district ILIKE %(district_name_0)s" in district_clause
+    assert "l.locality ILIKE %(district_name_0)s" in district_clause
+    assert "'%'" not in district_clause
     assert " AND " not in district_clause
-    assert params["district_name_0"] == "okres Jihlava"
+    assert params["district_name_0"] == "%okres Jihlava%"
     assert "district_ctx_0" not in params
 
 
@@ -153,8 +157,8 @@ def test_build_clauses_district_chip_with_context_anding_the_narrow() -> None:
     assert "%(district_name_0)s" in district_clause
     assert "%(district_ctx_0)s" in district_clause
     assert " AND " in district_clause
-    assert params["district_name_0"] == "Edvarda Beneše"
-    assert params["district_ctx_0"] == "Plzeň"
+    assert params["district_name_0"] == "%Edvarda Beneše%"
+    assert params["district_ctx_0"] == "%Plzeň%"
 
 
 def test_build_clauses_district_multiple_chips_are_or_joined() -> None:
@@ -171,8 +175,29 @@ def test_build_clauses_district_multiple_chips_are_or_joined() -> None:
     assert "%(district_name_0)s" in district_clause
     assert "%(district_name_1)s" in district_clause
     assert " OR " in district_clause
-    assert params["district_ctx_0"] == "Plzeň"
-    assert params["district_ctx_1"] == "Olomouc"
+    assert params["district_ctx_0"] == "%Plzeň%"
+    assert params["district_ctx_1"] == "%Olomouc%"
+
+
+def test_build_clauses_district_no_inline_percent_literals() -> None:
+    """Regression: the district ILIKE clauses must carry NO inline SQL '%'
+    wildcards. psycopg scans the query string for `%`-placeholders, so a bare
+    '%' (as in the old `ILIKE '%' || %(name)s || '%'`) is a malformed
+    placeholder that raises ProgrammingError at execute time. That raise sat
+    outside the per-subscription guard in match_once, so it silently zeroed
+    the entire watchdog feed for every watchdog with a district chip — 0
+    dispatches despite real matches. Wildcards must live in the bound VALUE."""
+    spec = WatchdogFilterSpec(
+        districts=[{"name": "Jihlava", "context": "Vysočina"}],
+    )
+    where, params = _build_match_clauses(spec)
+    district_clause = next(w for w in where if "district_name_0" in w)
+    # The only '%' in the SQL must be inside %(...)s placeholders; none bare.
+    assert "'%'" not in district_clause
+    assert "||" not in district_clause
+    # Wildcards moved into the parameter values instead.
+    assert params["district_name_0"] == "%Jihlava%"
+    assert params["district_ctx_0"] == "%Vysočina%"
 
 
 def test_filter_spec_lifts_legacy_string_districts() -> None:
