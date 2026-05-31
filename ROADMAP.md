@@ -6,6 +6,30 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-05: Dedup — image-identity auto-merge + street parse + review-card UI
+
+- **What (A):** an image-identity rung in the Tier-2 sweep (`scripts/dedup_sweep.py`)
+  — near-identical cross-portal photos (pHash ≤4 or vision ≥0.9) auto-merge a pair
+  *without* the tight 30 m geo demand, since two portals geocode one flat tens of
+  metres apart. `corroborator='image'`, `reason='tier2_image'`, reversible like every
+  auto-merge. `dedup_sweep.yml` gains a small default vision budget (50) to settle
+  pairs pHash can't compare yet.
+- **What (B):** parse sreality's structured street address (migration 122) — typed
+  `street`/`house_number`/`zip`/`street_id` on `listings`, extracted by the parser
+  from the rich `locality` shape and persisted via both write paths;
+  `listings_public` exposes street + house_number. Populates for detail-fetched
+  sreality rows (locality shape is mixed: index-only rows stay null). For geo/UI and
+  a future exact-address rung.
+- **What (C):** rebuilt the `/dedup` review card — a shared `ImageCarousel` (extracted
+  from Browse cards), per-side photo sliders, named portal chips (linking to the
+  portal page or our listing) replacing the bare "N sites" count, and a center ✓/✗
+  comparison table (price/area/disposition/street+no/floor/district/distance) from a
+  pure, unit-tested `diffCandidate`. No API change — anon public views, batched per
+  card set.
+- **Why:** more pairs auto-merge so the review queue stays small, and the pairs that
+  do need a human decision now show *why* they might match — photos, which portals,
+  and an attribute-by-attribute verdict.
+
 ### 2026-05: "Filter by portal" across agendas
 A `portals` multiselect in the canonical filter registry (`toolkit/filter_registry.py`,
 `agendas=_ALL_AGENDAS`, `pg_column='source'`, enum = the scraper portals from the

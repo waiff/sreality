@@ -38,6 +38,7 @@ import type {
   ScraperHealthChecks,
 } from '@/lib/types';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
+import { portalShort } from '@/lib/portals';
 import { WORKFLOW_DOCS } from '@/lib/workflowDocs.generated';
 
 const STALE_HOURS_WARN = 36;
@@ -194,17 +195,6 @@ const PORTAL_STAGE_LABEL: Record<PortalStage, string> = {
   on_demand: 'on demand',
   planned: 'planned',
 };
-
-/* Short labels for the per-run "Site" tag. Falls back to the raw source. */
-const PORTAL_SHORT_LABEL: Record<string, string> = {
-  sreality: 'Sreality',
-  bazos: 'Bazoš',
-  idnes: 'iDNES',
-};
-
-function portalShort(source: string): string {
-  return PORTAL_SHORT_LABEL[source] ?? source;
-}
 
 /* Workflows belonging to each scraper source's pipeline (drives the per-portal
  * schedule). Sreality owns the split scrape + its derived maintenance jobs;
