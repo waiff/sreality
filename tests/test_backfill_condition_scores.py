@@ -124,6 +124,9 @@ def test_select_pending_sql_invariants():
     # Region cardinality gate (empty list = no filter)
     assert "cardinality(" in sql
     assert "l.locality_region_id = ANY" in sql
+    # Non-sreality portals (region_id NULL) are never excluded by the
+    # region filter — otherwise they'd never get condition-scored.
+    assert "l.locality_region_id IS NULL" in sql
     # Freshness window
     assert "last_seen_at > now() - %s::interval" in sql
     # Newest first
