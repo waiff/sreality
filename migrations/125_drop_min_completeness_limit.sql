@@ -1,4 +1,4 @@
--- 121_drop_min_completeness_limit.sql
+-- 125_drop_min_completeness_limit.sql
 --
 -- Remove the operator-tunable `min_completeness` scrape limit. The completeness
 -- bar that gates mark_inactive (architectural rule #3) is now HARDCODED at 100%
@@ -17,11 +17,11 @@
 
 update portals
    set operational_limits = operational_limits - 'min_completeness',
-       operational_limits_updated_by = 'migration_121'
+       operational_limits_updated_by = 'migration_125'
  where operational_limits ? 'min_completeness';
 
 update app_settings
    set value = value - 'min_completeness',
-       updated_by = 'migration_121'
+       updated_by = 'migration_125'
  where key = 'scraper_limits_global'
    and value ? 'min_completeness';

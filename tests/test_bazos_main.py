@@ -28,11 +28,12 @@ class _Conn:
         pass
 
 
-def _portal() -> BazosPortal:
-    return BazosPortal(
-        sale_type="prodam", category="byt",
-        canon_main="byt", canon_type="prodej",
-    )
+_BYT_SALE = {"sale_type": "prodam", "category": "byt"}
+_BYT_RENT = {"sale_type": "pronajmu", "category": "byt"}
+
+
+def _portal(categories=None) -> BazosPortal:
+    return BazosPortal(categories=categories or [_BYT_SALE])
 
 
 # --- main(): two-phase run recording ---------------------------------------
@@ -94,12 +95,14 @@ def test_main_rejects_unmapped_scope(monkeypatch):
 # --- BazosPortal seams ------------------------------------------------------
 
 
-def test_portal_single_category_complete_walk():
-    p = _portal()
+def test_portal_complete_walk_and_per_scope_labels():
+    p = _portal([_BYT_SALE, _BYT_RENT])
     assert p.source == "bazos"
     assert p.supports_complete_walk is True
-    assert p.categories() == [{"sale_type": "prodam", "category": "byt"}]
-    assert p.category_labels({}) == ("byt", "prodej")
+    assert p.categories() == [_BYT_SALE, _BYT_RENT]
+    # labels come from each scope dict, not a fixed instance attr
+    assert p.category_labels(_BYT_SALE) == ("byt", "prodej")
+    assert p.category_labels(_BYT_RENT) == ("byt", "pronajem")
 
 
 def test_mark_inactive_runs_native_sweep_when_due(monkeypatch):
@@ -115,10 +118,25 @@ def test_mark_inactive_runs_native_sweep_when_due(monkeypatch):
         bazos_main.db, "record_portal_inactive_sweep",
         lambda _c, _s: recorded.__setitem__("n", recorded["n"] + 1),
     )
-    n = _portal().mark_inactive(object(), {}, {"a", "b"})
+    n = _portal().mark_inactive(object(), _BYT_RENT, {"a", "b"})
     assert n == 3
-    assert swept == {"src": "bazos", "cm": "byt", "ct": "prodej", "seen": {"a", "b"}}
+    assert swept == {"src": "bazos", "cm": "byt", "ct": "pronajem", "seen": {"a", "b"}}
     assert recorded["n"] == 1
+
+
+def test_mark_inactive_throttle_stamps_once_across_categories(monkeypatch):
+    # Both scopes sweep in one run, but the per-portal 12h clock is stamped once.
+    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: True)
+    monkeypatch.setattr(bazos_main.db, "mark_inactive_native", lambda *a, **k: 1)
+    stamps = {"n": 0}
+    monkeypatch.setattr(
+        bazos_main.db, "record_portal_inactive_sweep",
+        lambda _c, _s: stamps.__setitem__("n", stamps["n"] + 1),
+    )
+    p = _portal([_BYT_SALE, _BYT_RENT])
+    p.mark_inactive(object(), _BYT_SALE, {"a"})
+    p.mark_inactive(object(), _BYT_RENT, {"b"})
+    assert stamps["n"] == 1     # stamped once, not once per category
 
 
 def test_mark_inactive_throttled_when_not_due(monkeypatch):
@@ -127,7 +145,7 @@ def test_mark_inactive_throttled_when_not_due(monkeypatch):
         bazos_main.db, "mark_inactive_native",
         lambda *a, **k: pytest.fail("sweep must be skipped when throttled"),
     )
-    assert _portal().mark_inactive(object(), {}, {"a"}) == 0
+    assert _portal().mark_inactive(object(), _BYT_SALE, {"a"}) == 0
 
 
 def test_active_count_source_scoped(monkeypatch):
@@ -136,8 +154,8 @@ def test_active_count_source_scoped(monkeypatch):
         bazos_main.db, "active_count",
         lambda _c, cm, ct, source: captured.update(cm=cm, ct=ct, source=source) or 42,
     )
-    assert _portal().active_count(object(), {}) == 42
-    assert captured == {"cm": "byt", "ct": "prodej", "source": "bazos"}
+    assert _portal().active_count(object(), _BYT_RENT) == 42
+    assert captured == {"cm": "byt", "ct": "pronajem", "source": "bazos"}
 
 
 def test_mark_gone_flips_native_inactive(monkeypatch):
@@ -219,10 +237,7 @@ def test_walk_category_page_capped_is_incomplete(monkeypatch):
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
-    p = BazosPortal(
-        sale_type="prodam", category="byt",
-        canon_main="byt", canon_type="prodej", max_pages=1,
-    )
+    p = BazosPortal(categories=[_BYT_SALE], max_pages=1)
     _seen, _counts, result_size, _pages, complete = p.walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
     )
@@ -409,10 +424,7 @@ def test_fetch_detail_passes_geocoder_to_parser(monkeypatch):
 
     monkeypatch.setattr(bazos_main, "parse_detail", fake_parse)
     sentinel = object()
-    portal = BazosPortal(
-        sale_type="prodam", category="byt",
-        canon_main="byt", canon_type="prodej", geocoder=sentinel,
-    )
+    portal = BazosPortal(categories=[_BYT_SALE], geocoder=sentinel)
     item = portal.fetch_detail(_DetailClient("ok"), "a", "/a")
     assert item.kind == "ok"
     assert captured["geocoder"] is sentinel

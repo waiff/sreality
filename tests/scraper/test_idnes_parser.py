@@ -7,6 +7,7 @@ detail <dl> spec table, the fancybox gallery, and the embedded map config
 from __future__ import annotations
 
 from scraper.idnes_parser import (
+    _norm_ownership,
     category_from_url,
     index_price,
     parse_detail,
@@ -236,3 +237,12 @@ def test_parse_detail_price_on_request_is_none_for_rent():
     assert listing.area_m2 == 48.0
     assert listing.disposition == "2+kk"
     assert listing.lat is None and listing.lon is None   # no map config, no geocoder
+
+
+def test_norm_ownership_canonical_only():
+    assert _norm_ownership("Osobní") == "osobni"
+    assert _norm_ownership("Družstevní") == "druzstevni"
+    # idnes free-text outside the canonical filter set must not leak through
+    assert _norm_ownership("Jiné") is None
+    assert _norm_ownership("s.r.o.") is None
+    assert _norm_ownership("Podílové") is None

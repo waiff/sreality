@@ -13,7 +13,9 @@ name: "Scraping: iDNES Reality combined walk (fallback)"
 # `schedule:` cron here to revert to a combined cadence if ever needed.
 #
 # Writes 'index' + 'detail' scrape_runs rows under source='idnes'. Coordinates
-# come from the page, so no MAPY_CZ_API_KEY is needed. Required secret:
+# come from the page when present; the drain falls back to geocoding the
+# locality via Mapy.cz when the page omits the map config (optional —
+# MAPY_CZ_API_KEY; without it the fallback is a no-op). Required secret:
 # SUPABASE_DB_URL.
 
 on:
@@ -58,6 +60,7 @@ jobs:
       - name: Run idnes scrape
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
           MAX_PAGES: ${{ inputs.max_pages }}
           MAX_DETAIL: ${{ inputs.max_detail || '6000' }}
           RATE: ${{ inputs.rate || '3.0' }}

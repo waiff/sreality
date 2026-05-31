@@ -114,7 +114,7 @@ completeness bar that gates `mark_inactive` at **100%** in every complete-walk p
 (architectural rule #3) — never falsely delist a live listing — so this is a safety
 invariant, not a knob. (The knob was never actually read by the walk anyway; it used
 the module constant.) Dropped the field from `PortalLimits`, the `/admin/portals/*`
-API, and the Scrapers dashboard; migration 121 strips the dead `min_completeness` key
+API, and the Scrapers dashboard; migration 125 strips the dead `min_completeness` key
 from `scraper_limits_global` and every `portals.operational_limits`.
 
 ### 2026-05: Health dashboard — per-portal ledger
