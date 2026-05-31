@@ -30,10 +30,11 @@ BASE_URL = "https://www.bezrealitky.cz"
 # decision) + uri (the public detail URL). Cheap page; full data comes from the
 # detail query.
 _INDEX_QUERY = """
-query Index($ot: [OfferType], $et: [EstateType], $lim: Int, $off: Int) {
+query Index($ot: [OfferType], $et: [EstateType], $inc: Boolean, $st: Boolean, $lim: Int, $off: Int) {
   listAdverts(
     offerType: $ot, estateType: $et,
-    includeImports: false, limit: $lim, offset: $off,
+    includeImports: $inc, includeShortTerm: $st,
+    limit: $lim, offset: $off,
     order: TIMEORDER_DESC, locale: CS
   ) {
     totalCount
@@ -92,6 +93,7 @@ class BezrealitkyClient(BasePortalClient):
     def search(
         self, offer_type: str, estate_type: str | list[str], *,
         limit: int, offset: int,
+        include_imports: bool = True, include_short_term: bool = True,
     ) -> tuple[list[dict[str, Any]], int]:
         """One index page: returns (adverts, total_count).
 
@@ -101,11 +103,19 @@ class BezrealitkyClient(BasePortalClient):
         NEBYTOVY_PROSTOR both → 'komercni') into ONE walk — required so the
         source-scoped `mark_inactive` (which keys on canonical cm/ct) sees the
         union of seen ids, not two disjoint subsets that would mutually delist.
+
+        `include_imports` defaults to True (the listAdverts API default + what
+        bezrealitky.cz shows in its CZ-scoped count), bringing aggregator-imported
+        CZ listings — cross-source duplicates are collapsed by the dedup engine.
+        Set False per-descriptor when a category's imports are aggregator noise,
+        e.g. PRONAJEM/REKREACNI_OBJEKT is ~7000 vacation rentals.
         """
         et = list(estate_type) if isinstance(estate_type, list) else [estate_type]
         data = self._graphql(
             _INDEX_QUERY,
-            {"ot": [offer_type], "et": et, "lim": limit, "off": offset},
+            {"ot": [offer_type], "et": et,
+             "inc": include_imports, "st": include_short_term,
+             "lim": limit, "off": offset},
         )
         result = data.get("listAdverts") or {}
         return list(result.get("list") or []), int(result.get("totalCount") or 0)

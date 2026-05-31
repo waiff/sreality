@@ -72,7 +72,11 @@ def test_search_returns_list_and_total():
     assert [a["id"] for a in adverts] == ["1", "2"]
     url, body = c._session.posts[0]
     assert url.endswith("/graphql/")
-    assert body["variables"] == {"ot": ["PRODEJ"], "et": ["BYT"], "lim": 50, "off": 0}
+    assert body["variables"] == {
+        "ot": ["PRODEJ"], "et": ["BYT"],
+        "inc": True, "st": True,
+        "lim": 50, "off": 0,
+    }
 
 
 def test_get_detail_returns_advert():
@@ -102,6 +106,17 @@ def test_search_str_estate_type_still_wraps():
     c.search("PRODEJ", "BYT", limit=10, offset=0)
     _, body = c._session.posts[0]
     assert body["variables"]["et"] == ["BYT"]
+
+
+def test_search_passes_include_imports_flag():
+    payload = {"data": {"listAdverts": {"totalCount": 0, "list": []}}}
+    c = _client([FakeResponse(payload), FakeResponse(payload)])
+    c.search("PRONAJEM", ["GARAZ", "REKREACNI_OBJEKT"], limit=1, offset=0, include_imports=False)
+    c.search("PRODEJ", "BYT", limit=1, offset=0)
+    assert c._session.posts[0][1]["variables"]["inc"] is False
+    assert c._session.posts[0][1]["variables"]["st"] is True
+    # default True so the index walk matches what bezrealitky.cz shows (CZ scope)
+    assert c._session.posts[1][1]["variables"]["inc"] is True
 
 
 def test_graphql_errors_raise():
