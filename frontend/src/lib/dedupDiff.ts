@@ -11,7 +11,7 @@
  *   area   ±2 m² (AUTO_AREA_DIFF_MAX_M2 = 2.0)
  *   geo    ≤30 m tight (AUTO_RADIUS_M = 30); tier1 pairs are ≤20 m by construction.
  */
-import { fmtCzk } from './format';
+import { fmtArea, fmtCzk } from './format';
 import type { DedupCandidate, DedupPropertySide } from './types';
 
 export const PRICE_DRIFT_MAX = 0.02; // AUTO_PRICE_DRIFT_MAX

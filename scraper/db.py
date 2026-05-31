@@ -58,6 +58,10 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "parking_lots",
     "ownership",
     "description",
+    "street",
+    "house_number",
+    "zip",
+    "street_id",
 )
 
 # Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
