@@ -34,6 +34,7 @@ LOG = logging.getLogger(__name__)
 # Source: docs.anthropic.com. Update when prices change or when a
 # caller adds a new model.
 PRICES: dict[str, ModelPrice] = {
+    "claude-haiku-4-5":  ModelPrice(1.0, 5.0, 0.10, 1.25),
     "claude-sonnet-4-5": ModelPrice(3.0, 15.0, 0.30, 3.75),
     "claude-sonnet-4-6": ModelPrice(3.0, 15.0, 0.30, 3.75),
     "claude-opus-4-7":   ModelPrice(15.0, 75.0, 1.50, 18.75),
