@@ -263,11 +263,13 @@ def test_walk_complete_thresholds():
     # No reported total → trust the walk (don't silently disable delisting).
     assert scraper_main._walk_complete(0, None) is True
     assert scraper_main._walk_complete(0, 0) is True
-    # Covered enough of the reported total → complete.
+    # Collected the FULL reported total (100%) → complete. Over-collecting
+    # (concurrent additions mid-walk) still counts as complete.
     assert scraper_main._walk_complete(100, 100) is True
-    assert scraper_main._walk_complete(90, 100) is True
-    # Truncated walk → incomplete, suppress the flip.
-    assert scraper_main._walk_complete(89, 100) is False
+    assert scraper_main._walk_complete(101, 100) is True
+    # Anything short of 100% → incomplete, suppress the flip.
+    assert scraper_main._walk_complete(99, 100) is False
+    assert scraper_main._walk_complete(90, 100) is False
     assert scraper_main._walk_complete(10, 100) is False
 
 
@@ -607,7 +609,7 @@ def test_walk_category_split_national_fallback_closes_gap(patched_db, monkeypatc
         1, 2, **_split_args()
     )
     assert len(seen) == 12000      # 3000 + 3000 districts + 6000 national-fallback
-    assert complete is True        # union now >= 90% of national result_size
+    assert complete is True        # union now == national result_size (full walk)
 
 
 def test_split_cap_counts_only_fetches_not_unchanged(monkeypatch):
