@@ -164,6 +164,32 @@ def test_parse_detail_full():
     assert len(listing.raw["image_urls"]) == 2
 
 
+def test_parse_detail_category_from_breadcrumb_overrides_fallback():
+    # The page breadcrumb is authoritative: a "Pronájem" page parses as a rental
+    # even when the caller passes the sale fallback (the drain's primary scope).
+    html = DETAIL_HTML.replace(
+        "Reality » Prodej » Byty", "Reality » Pronájem » Byty"
+    )
+    url = "https://reality.bazos.cz/inzerat/219122924/pronajmu-byt-2-kk-letovice.php"
+    listing = parse_detail(
+        html, source_url=url, category_main="byt", category_type="prodej"
+    )
+    assert listing.category_main == "byt"
+    assert listing.category_type == "pronajem"   # breadcrumb wins over the fallback
+    assert listing.price_unit == "za mesic"      # price unit follows the real type
+
+
+def test_parse_detail_falls_back_when_breadcrumb_missing():
+    html = DETAIL_HTML.replace(
+        '<div class="drobky">Reality » Prodej » Byty</div>', ""
+    )
+    url = "https://reality.bazos.cz/inzerat/219122924/x.php"
+    listing = parse_detail(
+        html, source_url=url, category_main="byt", category_type="prodej"
+    )
+    assert (listing.category_main, listing.category_type) == ("byt", "prodej")
+
+
 def test_parse_detail_coords_from_map_link_outside_lokalita_cell():
     """Live bazos renders the "show on map" link OUTSIDE the Lokalita table cell
     (the fixture above happens to have it inside). Coords must still be extracted

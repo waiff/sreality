@@ -145,7 +145,10 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # provable-complete; the per-walk completeness guard + the 12h sweep
         # throttle (migration 113) keep delisting inference safe.
         supports_complete_walk=True,
-        categories=[{"sale_type": "prodam", "category": "byt"}],
+        categories=[
+            {"sale_type": "prodam", "category": "byt"},    # apartments for sale
+            {"sale_type": "pronajmu", "category": "byt"},  # apartments for rent
+        ],
         split_threshold=None,
         limits=PortalLimits(
             index_rate=0.5, detail_workers=1, detail_rate=0.5,

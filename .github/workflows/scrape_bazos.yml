@@ -22,9 +22,11 @@ name: "Scraping: Bazos crawler (pilot)"
 # drain is bounded per run (--max-detail) and the queue persists, so the ~7k
 # initial backfill spreads over ~a day of hourly runs without losing work.
 #
-# Scope (scheduled default): prodam/byt nationwide. workflow_dispatch overrides
-# every knob (set locality+radius_km to scope to a region; blank max_pages = full
-# walk).
+# Scope (scheduled default): every scope in the portal registry — nationwide
+# prodam/byt (apartments for sale) + pronajmu/byt (apartments for rent). The
+# drain reads each ad's category off its detail-page breadcrumb, so one queue +
+# one drain cover both. workflow_dispatch overrides every knob (--sale-type +
+# --category narrow to one scope; locality+radius_km scope to a region).
 
 on:
   schedule:
@@ -86,20 +88,24 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
-          # inputs.* are empty on a scheduled run, so fall back to nationwide scope.
-          SALE_TYPE: ${{ inputs.sale_type || 'prodam' }}
-          CATEGORY: ${{ inputs.category || 'byt' }}
+          # inputs.* are empty on a scheduled run. With no --sale-type/--category
+          # the crawler walks EVERY scope in the portal registry (nationwide
+          # prodam/byt + pronajmu/byt); a dispatch can narrow to one scope.
+          SALE_TYPE: ${{ inputs.sale_type }}
+          CATEGORY: ${{ inputs.category }}
           LOCALITY: ${{ inputs.locality }}
           RADIUS_KM: ${{ inputs.radius_km }}
           MAX_PAGES: ${{ inputs.max_pages }}
-          # Bound the drain so the ~7k initial backfill spreads across hourly runs
-          # and stays inside the timeout; the queue persists between runs. A detail
+          # Bound the drain so the initial backfill spreads across hourly runs and
+          # stays inside the timeout; the queue persists between runs. A detail
           # fetch costs ~3.4s (rate limit + per-listing geocoding), so ~400/run is
-          # ~23m of drain; with the ~12m nationwide index walk that's ~35m, under
+          # ~23m of drain; with the ~15m two-scope index walk that's ~38m, under
           # the 50m timeout.
           MAX_DETAIL: ${{ inputs.max_detail || '400' }}
         run: |
-          ARGS="--sale-type $SALE_TYPE --category $CATEGORY --workers 2 --rate 0.6"
+          ARGS="--workers 2 --rate 0.6"
+          if [ -n "$SALE_TYPE" ]; then ARGS="$ARGS --sale-type $SALE_TYPE"; fi
+          if [ -n "$CATEGORY" ]; then ARGS="$ARGS --category $CATEGORY"; fi
           if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi
           if [ -n "$RADIUS_KM" ]; then ARGS="$ARGS --radius-km $RADIUS_KM"; fi
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
