@@ -84,8 +84,10 @@ dump every rental into `ostatni` and fragment the reconciliation.
 
 ### 2026-05: Per-portal operational limits in config (PR A of the Scrapers-admin track)
 Made the per-portal operational limits (index/detail rate, workers, per-run caps,
-image limits, completeness) operator-tunable from the DB — the foundation for a
-Scrapers admin dashboard (PR B next). Migration 107 had deliberately kept these
+image limits) operator-tunable from the DB — the foundation for a
+Scrapers admin dashboard (PR B next). (The `min_completeness` knob shipped here too
+but was removed shortly after — see the 2026-05 "Completeness is always 100%" entry
+below; completeness is a safety invariant, not a tunable.) Migration 107 had deliberately kept these
 knobs out of the registry ("per-run CLI tuning, not portal identity"); this reverses
 that for the limit knobs, by operator request, since they vary a lot per portal (6
 req/s JSON API vs 0.6 req/s HTML crawl) and the operator wants to tune them without a
@@ -103,6 +105,17 @@ history trigger; server-side range validation → 400 on bad shape), and a **Scr
 dashboard page (`frontend/src/pages/Scrapers.tsx` + nav) with one editable card per
 registry portal plus a Global-defaults card — blank field inherits the global, edits
 apply on the next scrape with no redeploy. Cadence (cron) stays in code for now.
+
+### 2026-05: Completeness is always 100% (mark-inactive safety invariant)
+Removed the operator-tunable `min_completeness` scrape limit and hardcoded the
+completeness bar that gates `mark_inactive` at **100%** in every complete-walk portal
+(`INDEX_MIN_COMPLETENESS = 1.0` in `main` / `bazos_main` / `idnes_main` /
+`bezrealitky_main`). A listing is only inferred delisted after a FULL index walk
+(architectural rule #3) — never falsely delist a live listing — so this is a safety
+invariant, not a knob. (The knob was never actually read by the walk anyway; it used
+the module constant.) Dropped the field from `PortalLimits`, the `/admin/portals/*`
+API, and the Scrapers dashboard; migration 125 strips the dead `min_completeness` key
+from `scraper_limits_global` and every `portals.operational_limits`.
 
 ### 2026-05: Health dashboard — per-portal ledger
 Restructured the Health page from a flat data-source grid + sreality-only global

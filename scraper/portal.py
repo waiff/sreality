@@ -4,8 +4,8 @@ A portal is "operational config + a fetcher + a parser", with no per-portal
 branches in the shared `portal_runner`. This module holds the config half:
 `PortalConfig` mirrors the operational columns on the `portals` registry
 (migration 107) and now carries `PortalLimits` — the per-portal tuning knobs
-(rate / workers / per-run caps / image limits / completeness) made
-operator-editable in migration 114. `load_portal_config` reads a row, merges the
+(rate / workers / per-run caps / image limits) made operator-editable in
+migration 114. `load_portal_config` reads a row, merges the
 global default layer (`app_settings.scraper_limits_global`) under the per-portal
 overrides, and falls back to baked-in defaults so a registry hiccup never breaks
 a scrape. The behavioral half — the `Portal` protocol the runner consumes and
@@ -37,7 +37,6 @@ _LIMIT_COERCERS: dict[str, Any] = {
     "detail_rate": float,
     "max_detail_per_run": _as_opt_int,
     "max_detail_per_category": _as_opt_int,
-    "min_completeness": float,
     "image_workers": int,
     "max_image_downloads": _as_opt_int,
     "suspicious_stop_window": int,
@@ -57,7 +56,6 @@ class PortalLimits:
     detail_rate: float = 2.0
     max_detail_per_run: int | None = None
     max_detail_per_category: int | None = None
-    min_completeness: float = 0.9
     image_workers: int = 32
     max_image_downloads: int | None = 1000
     suspicious_stop_window: int = 100
@@ -136,7 +134,7 @@ _DEFAULTS: dict[str, PortalConfig] = {
         split_threshold=10000,
         limits=PortalLimits(
             index_rate=2.0, detail_workers=4, detail_rate=2.0,
-            min_completeness=0.9, image_workers=32, max_image_downloads=1000,
+            image_workers=32, max_image_downloads=1000,
         ),
     ),
     "bazos": PortalConfig(
@@ -152,7 +150,6 @@ _DEFAULTS: dict[str, PortalConfig] = {
         split_threshold=None,
         limits=PortalLimits(
             index_rate=0.5, detail_workers=1, detail_rate=0.5,
-            min_completeness=0.95,
         ),
     ),
     "idnes": PortalConfig(
@@ -176,7 +173,6 @@ _DEFAULTS: dict[str, PortalConfig] = {
         split_threshold=None,
         limits=PortalLimits(
             index_rate=3.0, detail_workers=4, detail_rate=3.0,
-            min_completeness=0.9,
         ),
     ),
     "mmreality": PortalConfig(
@@ -216,7 +212,6 @@ _DEFAULTS: dict[str, PortalConfig] = {
         split_threshold=None,
         limits=PortalLimits(
             index_rate=1.0, detail_workers=2, detail_rate=1.0,
-            min_completeness=0.9,
         ),
     ),
     "bezrealitky": PortalConfig(
@@ -250,7 +245,6 @@ _DEFAULTS: dict[str, PortalConfig] = {
         split_threshold=None,
         limits=PortalLimits(
             index_rate=1.0, detail_workers=8, detail_rate=1.0,
-            min_completeness=0.9,
         ),
     ),
 }

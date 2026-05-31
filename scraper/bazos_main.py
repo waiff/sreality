@@ -47,10 +47,10 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
 
-# Fraction of the portal-reported total a walk must collect before its
-# index-absence sweep is trusted to mark_inactive (architectural rule #3).
-# Below it the walk likely truncated and the sweep is skipped.
-INDEX_MIN_COMPLETENESS = 0.95
+# A walk must collect the FULL portal-reported total before its index-absence
+# sweep is trusted to mark_inactive (architectural rule #3); anything short of
+# 100% means the walk truncated and the sweep is skipped. Not operator-tunable.
+INDEX_MIN_COMPLETENESS = 1.0
 
 
 class _CachingGeocoder:

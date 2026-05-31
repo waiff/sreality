@@ -34,7 +34,6 @@ const FIELDS: ReadonlyArray<FieldDef> = [
   { key: 'detail_workers', label: 'Detail workers', step: '1' },
   { key: 'max_detail_per_run', label: 'Max detail / run', step: '1' },
   { key: 'max_detail_per_category', label: 'Max detail / category', step: '1' },
-  { key: 'min_completeness', label: 'Min completeness (0–1)', step: '0.01' },
   { key: 'image_workers', label: 'Image workers', step: '1' },
   { key: 'max_image_downloads', label: 'Max image downloads', step: '1' },
   { key: 'suspicious_stop_window', label: 'Suspicious-stop window', step: '1' },

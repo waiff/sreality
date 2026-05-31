@@ -245,6 +245,27 @@ def test_walk_category_page_capped_is_incomplete(monkeypatch):
     assert complete is False     # max_pages cap → never claims completeness
 
 
+def test_walk_category_below_full_is_incomplete(monkeypatch):
+    # A full (un-capped) walk that still collected < 100% of the reported total
+    # must read incomplete: the inactive sweep runs only after a 100% walk
+    # (architectural rule #3), hardcoded (INDEX_MIN_COMPLETENESS=1.0), not tunable.
+    page = SimpleNamespace(
+        items=[SimpleNamespace(source_id_native=f"n{i}", detail_path=f"/n{i}", price_text=None)
+               for i in range(19)],
+        total=20, next_offset=None,
+    )
+    monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
+    monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page]))
+    monkeypatch.setattr(bazos_main.db, "upsert_portal_raw_page", lambda *a, **k: 1)
+    monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
+    monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
+    _seen, _counts, result_size, _pages, complete = _portal().walk_category(
+        {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
+    )
+    assert result_size == 20 and complete is False   # 19/20 = 95% < 100% → suppress sweep
+
+
 class _SeqIdxClient:
     """fetch_index returns 200 for the first `ok_pages` calls, then raises
     ListingGoneError — bazos 404s an offset past the last result page."""

@@ -42,11 +42,11 @@ LOG = logging.getLogger(__name__)
 
 INDEX_PAGE_SIZE = 100
 
-# An index walk that collected at least this fraction of the API-reported
-# totalCount is treated as complete enough to drive mark_inactive; below it the
-# walk likely truncated and flipping unseen listings inactive would falsely
-# delist live ones. Mirrors scraper.main.INDEX_MIN_COMPLETENESS.
-INDEX_MIN_COMPLETENESS = 0.9
+# An index walk must collect the FULL API-reported totalCount before it drives
+# mark_inactive; anything short of 100% means the walk truncated and flipping
+# unseen listings inactive would falsely delist live ones. Not operator-tunable.
+# Mirrors scraper.main.INDEX_MIN_COMPLETENESS.
+INDEX_MIN_COMPLETENESS = 1.0
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
