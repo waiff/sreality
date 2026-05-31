@@ -255,7 +255,8 @@ def test_fetch_detail_ok_derives_category_from_url(monkeypatch):
 
     def fake_parse(html, *, source_url, category_main, category_type):
         captured["cm"], captured["ct"] = category_main, category_type
-        return SimpleNamespace(raw={})
+        # lat/lon present -> the geocode fallback is a no-op for this test.
+        return SimpleNamespace(raw={}, lat=49.2, lon=16.6, locality="Brno")
 
     monkeypatch.setattr(idnes_main, "parse_detail", fake_parse)
     ref = "https://reality.idnes.cz/detail/pronajem/dum/brno/6a18deadbeefdeadbeef0009/"
