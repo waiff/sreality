@@ -170,6 +170,24 @@ def test_building_type_unspecified_is_none():
     assert row["building_type"] is None
 
 
+def test_building_type_wood_canonicalises_to_drevo():
+    # sreality says "Dřevostavba"; the filter option is "drevo".
+    row = parse_listing(_estate(building_type={"name": "Dřevostavba", "value": 1}))
+    assert row["building_type"] == "drevo"
+
+
+def test_building_type_unmapped_is_diacritic_free():
+    row = parse_listing(_estate(building_type={"name": "Modulární", "value": 1}))
+    assert row["building_type"] == "modularni"
+
+
+def test_building_type_status_overlay_is_none():
+    # Reserved/sold listings overlay the status onto the param name.
+    for status in ("Rezervováno", "Prodáno"):
+        row = parse_listing(_estate(building_type={"name": status, "value": 1}))
+        assert row["building_type"] is None, status
+
+
 def test_condition(sample):
     # Diacritic-free + underscore-joined, matching the schema convention.
     assert parse_listing(sample)["condition"] == "velmi_dobry"
@@ -178,6 +196,12 @@ def test_condition(sample):
 def test_condition_unspecified_is_none():
     row = parse_listing(_estate(building_condition={"name": "- vyber stav", "value": 0}))
     assert row["condition"] is None
+
+
+def test_condition_status_overlay_is_none():
+    for status in ("Rezervováno", "Prodáno"):
+        row = parse_listing(_estate(building_condition={"name": status, "value": 1}))
+        assert row["condition"] is None, status
 
 
 def test_energy_rating(sample):

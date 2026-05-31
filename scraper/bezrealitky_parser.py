@@ -36,7 +36,7 @@ CONSTRUCTION: dict[str, str] = {
     "MIXED": "smisena",
     "SKELET": "skelet",
     "STONE": "kamen",
-    "WOOD": "dřevostavba",
+    "WOOD": "drevo",
     "PREFAB": "montovana",
 }
 CONDITION: dict[str, str] = {

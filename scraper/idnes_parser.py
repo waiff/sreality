@@ -260,7 +260,10 @@ def _norm_ownership(text: str | None) -> str | None:
     if not text:
         return None
     key = _strip_diacritics(text).lower().strip()
-    return OWNERSHIP.get(key, key or None)
+    # Only the canonical set ({osobni, druzstevni, statni}) the ownership filter
+    # offers; idnes free-text like "jiné" / "s.r.o." / "podílové" → None rather
+    # than polluting the column with values no filter option can match.
+    return OWNERSHIP.get(key)
 
 
 def _norm_furnished(text: str | None) -> str | None:
