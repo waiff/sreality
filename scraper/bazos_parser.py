@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -44,6 +45,28 @@ CATEGORY_MAIN: dict[str, str] = {
     "pozemek": "pozemek",
     "nebytove": "komercni",
     "komercni": "komercni",
+    "ostatni": "ostatni",
+}
+
+# Detail-page breadcrumb ("drobky": "Reality » Prodej » Byty") -> our canonical
+# labels. The breadcrumb is how a detail page self-identifies its category, which
+# is what lets ONE bazos config walk both sale + rent: the source-generic detail
+# queue carries no category, so the drain reads it off the page instead. Keys are
+# diacritic-stripped + lowercased (see `_deaccent`).
+_BREADCRUMB_TYPE: dict[str, str] = {
+    "prodej": "prodej",
+    "pronajem": "pronajem",
+}
+_BREADCRUMB_MAIN: dict[str, str] = {
+    "byty": "byt",
+    "domy": "dum",
+    "pozemky": "pozemek",
+    "chalupy, chaty": "ostatni",
+    "kancelare": "komercni",
+    "obchodni prostory": "komercni",
+    "sklady": "komercni",
+    "garaze": "komercni",
+    "hotely, penziony, restaurace": "komercni",
     "ostatni": "ostatni",
 }
 
@@ -425,6 +448,31 @@ def _detail_table(tree: HTMLParser) -> dict[str, Node]:
     return rows
 
 
+def _deaccent(text: str) -> str:
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    )
+
+
+def _category_from_breadcrumb(tree: HTMLParser) -> tuple[str | None, str | None]:
+    """(category_main, category_type) from the detail breadcrumb, or (None, None).
+
+    "Reality » Prodej » Byty" -> ('byt', 'prodej'). Lets the drain tell a sale
+    ad from a rental without the queue carrying the category."""
+    node = tree.css_first("div.drobky")
+    if node is None:
+        return (None, None)
+    cmain: str | None = None
+    ctype: str | None = None
+    for part in (node.text(separator=" ") or "").split("»"):
+        key = " ".join(_deaccent(part).strip().lower().split())
+        if ctype is None and key in _BREADCRUMB_TYPE:
+            ctype = _BREADCRUMB_TYPE[key]
+        elif cmain is None and key in _BREADCRUMB_MAIN:
+            cmain = _BREADCRUMB_MAIN[key]
+    return (cmain, ctype)
+
+
 def parse_detail(
     html: str,
     *,
@@ -435,6 +483,12 @@ def parse_detail(
 ) -> ScrapedListing:
     tree = HTMLParser(html)
     source_id = _id_from_href(source_url) or ""
+
+    # The page's own breadcrumb is authoritative for the category (sale vs rent);
+    # the passed-in values are only a fallback when it's missing/unrecognised.
+    bc_main, bc_type = _category_from_breadcrumb(tree)
+    category_main = bc_main or category_main
+    category_type = bc_type or category_type
 
     title = _text(tree.css_first("h1.nadpisdetail")) or ""
     description = _text(tree.css_first("div.popisdetail"))

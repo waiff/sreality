@@ -14,9 +14,11 @@ delisted ads inactive under the completeness guard (rule #3), throttled to once
 per window (migration 113) so a frequent walk surfaces new ads + freshness every
 run while delisting inference stays conservative.
 
-Scope: a single category + one locality per run (the queue does not carry the
-category, which `parse_detail` needs, so the drain assumes this portal's one
-category). Multi-category bazos would encode the category in the queue — deferred.
+Scope: every category in the portal registry (`prodam/byt` + `pronajmu/byt` today),
+walked in one run. The source-generic queue carries no category, so the drain reads
+each ad's category off its detail-page breadcrumb (`parse_detail`) — the same
+"detail self-identifies" pattern idnes/bezrealitky use. A `--sale-type`/`--category`
+dispatch override narrows to a single scope.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from scraper.bazos_parser import (
     parse_index,
 )
 from scraper.geocoding import GeocodeResult, GeocodingError
-from scraper.portal import PortalLimits, default_config, load_portal_config
+from scraper.portal import PortalConfig, default_config, load_portal_config
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -107,30 +109,36 @@ class BazosPortal:
     def __init__(
         self,
         *,
-        sale_type: str,
-        category: str,
-        canon_main: str,
-        canon_type: str,
+        categories: list[dict[str, str]],
         locality: str | None = None,
         radius_km: int | None = None,
         max_pages: int | None = None,
         geocoder: Geocoder | None = None,
     ) -> None:
-        self._sale_type = sale_type
-        self._category = category
-        self._canon_main = canon_main
-        self._canon_type = canon_type
+        # Each scope is a bazos URL pair {"sale_type", "category"} (e.g.
+        # prodam/byt + pronajmu/byt). The drain reads the category off each
+        # detail's breadcrumb, so one portal covers all scopes via one queue.
+        self._scopes = list(categories)
         self._geocoder = geocoder
         self._locality = locality
         self._radius_km = radius_km
         self._max_pages = max_pages
+        # The 12h delisting-sweep throttle is one clock per portal, but the
+        # runner calls mark_inactive once per category — so decide due-ness once
+        # per run and stamp once, else the first category's sweep would throttle
+        # the rest within the same run.
+        self._sweep_due: bool | None = None
+        self._sweep_stamped = False
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, str]]:
-        return [{"sale_type": self._sale_type, "category": self._category}]
+        return list(self._scopes)
 
-    def category_labels(self, category: dict[str, str]) -> tuple[str, str]:
-        return (self._canon_main, self._canon_type)
+    def category_labels(self, category: dict[str, str]) -> tuple[str | None, str | None]:
+        return (
+            CATEGORY_MAIN.get(category.get("category")),
+            SALE_TYPE.get(category.get("sale_type")),
+        )
 
     def connect_index(self) -> Any:
         return db.connect()
@@ -144,6 +152,7 @@ class BazosPortal:
         self, category: dict[str, str], conn: Any, dry_run: bool, limiter: RateLimiter,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
+        _, canon_type = self.category_labels(category)
         client = BazosClient(limiter=limiter)
         seen: set[str] = set()
         items: list[tuple[str, str, int | None]] = []  # (native, detail_path, idx_price)
@@ -183,7 +192,7 @@ class BazosPortal:
             for item in page.items:
                 if item.source_id_native not in seen:
                     seen.add(item.source_id_native)
-                    idx_price, _ = _parse_price(item.price_text, self._canon_type)
+                    idx_price, _ = _parse_price(item.price_text, canon_type)
                     items.append((item.source_id_native, item.detail_path, idx_price))
             if self._max_pages and pages >= self._max_pages:
                 break
@@ -249,20 +258,27 @@ class BazosPortal:
         # Throttled delisting sweep: the index walk runs frequently, but the
         # index-absence inference runs at most once per configured window so a
         # single rate-limited/truncated walk can't mass-delist (migration 113).
-        # The runner already gated this on walk completeness (rule #3).
-        if not db.portal_inactive_sweep_due(conn, SOURCE):
+        # The runner already gated this on walk completeness (rule #3). Due-ness
+        # is decided once per run (all categories sweep together) and stamped once.
+        if self._sweep_due is None:
+            self._sweep_due = db.portal_inactive_sweep_due(conn, SOURCE)
+        if not self._sweep_due:
             LOG.info("INACTIVE throttled source=bazos (within sweep interval)")
             return 0
-        n = db.mark_inactive_native(
-            conn, SOURCE, self._canon_main, self._canon_type, seen
-        )
-        db.record_portal_inactive_sweep(conn, SOURCE)
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return 0
+        n = db.mark_inactive_native(conn, SOURCE, cm, ct, seen)
+        if not self._sweep_stamped:
+            db.record_portal_inactive_sweep(conn, SOURCE)
+            self._sweep_stamped = True
         return n
 
     def active_count(self, conn: Any, category: dict[str, str]) -> int | None:
-        return db.active_count(
-            conn, self._canon_main, self._canon_type, source=SOURCE
-        )
+        cm, ct = self.category_labels(category)
+        if cm is None or ct is None:
+            return None
+        return db.active_count(conn, cm, ct, source=SOURCE)
 
     # --- detail-drain seams ---
     def make_client(self, limiter: RateLimiter) -> BazosClient:
@@ -278,10 +294,13 @@ class BazosPortal:
             return DrainItem(native_id=native_id, kind="gone")
         except Exception as exc:
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        # parse_detail reads the real category off the page breadcrumb; the
+        # primary scope's labels are only a fallback for a page that lacks it.
+        fb_main, fb_type = self.category_labels(self._scopes[0])
         try:
             listing = parse_detail(
                 html, source_url=url,
-                category_main=self._canon_main, category_type=self._canon_type,
+                category_main=fb_main, category_type=fb_type,
                 geocoder=self._geocoder,
             )
         except Exception as exc:
@@ -369,33 +388,49 @@ def _run_phase(portal: BazosPortal, run_type: str, runner, dry_run: bool, **kw: 
     return rc
 
 
-def _load_limits(dry_run: bool) -> PortalLimits:
+def _load_config(dry_run: bool) -> "PortalConfig":
     if dry_run:
-        return default_config(SOURCE).limits
+        return default_config(SOURCE)
     try:
         with db.connect() as conn:
-            return load_portal_config(conn, SOURCE).limits
+            return load_portal_config(conn, SOURCE)
     except Exception as exc:  # noqa: BLE001 - registry hiccup must not break a scrape
         LOG.warning("load_portal_config failed: %s; using baked-in default", exc)
-        return default_config(SOURCE).limits
+        return default_config(SOURCE)
+
+
+def _resolve_scopes(
+    args: argparse.Namespace, config: "PortalConfig"
+) -> list[dict[str, str]] | None:
+    """CLI sale_type/category (dispatch override) → that one scope; otherwise the
+    portal registry's categories (scheduled run = every configured scope)."""
+    if args.sale_type or args.category:
+        st = args.sale_type or "prodam"
+        cat = args.category or "byt"
+        if SALE_TYPE.get(st) is None or CATEGORY_MAIN.get(cat) is None:
+            LOG.error("unmapped scope sale_type=%s category=%s", st, cat)
+            return None
+        return [{"sale_type": st, "category": cat}]
+    scopes = [
+        c for c in config.categories
+        if SALE_TYPE.get(c.get("sale_type")) and CATEGORY_MAIN.get(c.get("category"))
+    ]
+    return scopes or [{"sale_type": "prodam", "category": "byt"}]
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_logging(args.verbose)
 
-    canon_type = SALE_TYPE.get(args.sale_type)
-    canon_main = CATEGORY_MAIN.get(args.category)
-    if canon_type is None or canon_main is None:
-        LOG.error(
-            "unmapped scope sale_type=%s category=%s", args.sale_type, args.category
-        )
+    config = _load_config(args.dry_run)
+    limits = config.limits
+    scopes = _resolve_scopes(args, config)
+    if scopes is None:
         return 2
+    LOG.info("SCOPES %s", scopes)
 
-    limits = _load_limits(args.dry_run)
     portal = BazosPortal(
-        sale_type=args.sale_type, category=args.category,
-        canon_main=canon_main, canon_type=canon_type,
+        categories=scopes,
         locality=args.locality, radius_km=args.radius_km, max_pages=args.max_pages,
         geocoder=_build_geocoder(),
     )
@@ -423,8 +458,14 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="bazos.cz crawler (portal framework)")
-    p.add_argument("--sale-type", default="prodam", choices=sorted(SALE_TYPE))
-    p.add_argument("--category", default="byt", choices=sorted(CATEGORY_MAIN))
+    p.add_argument(
+        "--sale-type", default=None, choices=sorted(SALE_TYPE),
+        help="single-scope override (default: every scope in the portal config)",
+    )
+    p.add_argument(
+        "--category", default=None, choices=sorted(CATEGORY_MAIN),
+        help="single-scope override (paired with --sale-type)",
+    )
     p.add_argument("--locality", default=None)
     p.add_argument("--radius-km", type=int, default=None)
     p.add_argument(

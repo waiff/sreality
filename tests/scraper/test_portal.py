@@ -67,7 +67,10 @@ def test_default_config_bazos():
     assert cfg.supports_complete_walk is True
     assert cfg.split_threshold is None
     assert cfg.splits is False
-    assert cfg.categories == [{"sale_type": "prodam", "category": "byt"}]
+    assert cfg.categories == [
+        {"sale_type": "prodam", "category": "byt"},
+        {"sale_type": "pronajmu", "category": "byt"},
+    ]
 
 
 def test_default_config_idnes():
