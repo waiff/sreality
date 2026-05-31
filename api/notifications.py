@@ -253,18 +253,24 @@ def _build_match_clauses(
         # what a District chip means.
         chip_clauses: list[str] = []
         for i, chip in enumerate(spec.districts):
+            # Wildcards live in the parameter VALUE, not as inline SQL '%'
+            # literals: psycopg parses the query string for placeholders and
+            # treats a bare '%' as a malformed one (it must be %%), so an
+            # inline "ILIKE '%' || %(name)s || '%'" raises ProgrammingError at
+            # execute time — which silently killed every matcher pass for any
+            # watchdog with district chips.
             n_key = f"district_name_{i}"
-            params[n_key] = chip.name
+            params[n_key] = f"%{chip.name}%"
             name_half = (
-                f"(l.district ILIKE '%' || %({n_key})s || '%' "
-                f"OR l.locality ILIKE '%' || %({n_key})s || '%')"
+                f"(l.district ILIKE %({n_key})s "
+                f"OR l.locality ILIKE %({n_key})s)"
             )
             if chip.context:
                 c_key = f"district_ctx_{i}"
-                params[c_key] = chip.context
+                params[c_key] = f"%{chip.context}%"
                 ctx_half = (
-                    f"(l.district ILIKE '%' || %({c_key})s || '%' "
-                    f"OR l.locality ILIKE '%' || %({c_key})s || '%')"
+                    f"(l.district ILIKE %({c_key})s "
+                    f"OR l.locality ILIKE %({c_key})s)"
                 )
                 chip_clauses.append(f"({name_half} AND {ctx_half})")
             else:
@@ -1014,69 +1020,81 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
             )
             continue
 
-        where, params = _build_match_clauses(spec)
-        where.append("l.first_seen_at > %(cursor)s")
-        params["cursor"] = cursor_ts
-        joined_where = " AND ".join(where)
+        # One failing subscription must not zero the whole feed. The
+        # connection is autocommit, so a raised execute aborts only that
+        # statement — no rollback needed — but we still isolate the rest of
+        # the per-subscription body so an unexpected error (bad SQL from a
+        # future spec field, a transient DB hiccup) skips just this
+        # subscription and the others still match.
+        try:
+            where, params = _build_match_clauses(spec)
+            where.append("l.first_seen_at > %(cursor)s")
+            params["cursor"] = cursor_ts
+            joined_where = " AND ".join(where)
 
-        # Phase 1: find the window upper bound (max first_seen_at of
-        # the next batch of matching listings, capped at the operator
-        # knob). Reading the max separately means we can advance the
-        # cursor past listings even when the dedup constraint blocked
-        # the dispatch insert (re-running the matcher won't re-evaluate
-        # the same listings forever).
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT max(first_seen_at), count(*) FROM ("
-                "  SELECT l.first_seen_at FROM properties_public l "
-                f"  WHERE {joined_where} "
-                "  ORDER BY l.first_seen_at ASC "
-                "  LIMIT %(window_size)s"
-                ") sub",
-                {**params, "window_size": settings.window_listings},
+            # Phase 1: find the window upper bound (max first_seen_at of
+            # the next batch of matching listings, capped at the operator
+            # knob). Reading the max separately means we can advance the
+            # cursor past listings even when the dedup constraint blocked
+            # the dispatch insert (re-running the matcher won't re-evaluate
+            # the same listings forever).
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT max(first_seen_at), count(*) FROM ("
+                    "  SELECT l.first_seen_at FROM properties_public l "
+                    f"  WHERE {joined_where} "
+                    "  ORDER BY l.first_seen_at ASC "
+                    "  LIMIT %(window_size)s"
+                    ") sub",
+                    {**params, "window_size": settings.window_listings},
+                )
+                row = cur.fetchone()
+            upper = row[0] if row and row[0] is not None else None
+            listings_in_window = int(row[1]) if row and row[1] is not None else 0
+            total_listings_in_window += listings_in_window
+
+            if upper is None:
+                continue
+
+            # Phase 2: insert dispatches for matches in the window.
+            insert_where = where + ["l.first_seen_at <= %(upper)s"]
+            insert_params = {
+                **params,
+                "upper": upper,
+                "subscription_id": str(sub_id),
+            }
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO notification_dispatches "
+                    "  (subscription_id, property_id, sreality_id, "
+                    "   change_kind, status, channel) "
+                    "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
+                    "       'new', 'sent', 'in_app' "
+                    "FROM properties_public l "
+                    f"WHERE {' AND '.join(insert_where)} "
+                    "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
+                    insert_params,
+                )
+                total_inserted += cur.rowcount or 0
+
+            # Phase 3: advance the cursor for this subscription. Done in a
+            # separate UPDATE so a crash between INSERT and UPDATE only
+            # costs us a re-scan of the same window on the next pass —
+            # ON CONFLICT means no duplicate dispatches.
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE notification_subscriptions "
+                    "SET last_matched_first_seen_at = %s "
+                    "WHERE id = %s AND last_matched_first_seen_at < %s",
+                    (upper, sub_id, upper),
+                )
+                if cur.rowcount:
+                    cursors_advanced += 1
+        except Exception as exc:  # noqa: BLE001 — isolate one sub, keep loop alive
+            LOG.exception(
+                "matcher: subscription %s failed, skipping: %s", sub_id, exc,
             )
-            row = cur.fetchone()
-        upper = row[0] if row and row[0] is not None else None
-        listings_in_window = int(row[1]) if row and row[1] is not None else 0
-        total_listings_in_window += listings_in_window
-
-        if upper is None:
             continue
-
-        # Phase 2: insert dispatches for matches in the window.
-        insert_where = where + ["l.first_seen_at <= %(upper)s"]
-        insert_params = {
-            **params,
-            "upper": upper,
-            "subscription_id": str(sub_id),
-        }
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO notification_dispatches "
-                "  (subscription_id, property_id, sreality_id, "
-                "   change_kind, status, channel) "
-                "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
-                "       'new', 'sent', 'in_app' "
-                "FROM properties_public l "
-                f"WHERE {' AND '.join(insert_where)} "
-                "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
-                insert_params,
-            )
-            total_inserted += cur.rowcount or 0
-
-        # Phase 3: advance the cursor for this subscription. Done in a
-        # separate UPDATE so a crash between INSERT and UPDATE only
-        # costs us a re-scan of the same window on the next pass —
-        # ON CONFLICT means no duplicate dispatches.
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE notification_subscriptions "
-                "SET last_matched_first_seen_at = %s "
-                "WHERE id = %s AND last_matched_first_seen_at < %s",
-                (upper, sub_id, upper),
-            )
-            if cur.rowcount:
-                cursors_advanced += 1
 
     return {
         "subscriptions_evaluated": len(sub_rows),
@@ -1167,23 +1185,30 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
             )
             continue
 
-        where, params = _build_match_clauses(spec)
-        joined_where = " AND ".join(where) if where else "true"
-        params["subscription_id"] = str(sub_id)
-        params["drop_ids"] = drop_ids
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO notification_dispatches "
-                "  (subscription_id, property_id, sreality_id, "
-                "   change_kind, status, channel) "
-                "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
-                "       'price_drop', 'sent', 'in_app' "
-                "FROM properties_public l "
-                f"WHERE l.property_id = ANY(%(drop_ids)s) AND {joined_where} "
-                "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
-                params,
+        try:
+            where, params = _build_match_clauses(spec)
+            joined_where = " AND ".join(where) if where else "true"
+            params["subscription_id"] = str(sub_id)
+            params["drop_ids"] = drop_ids
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO notification_dispatches "
+                    "  (subscription_id, property_id, sreality_id, "
+                    "   change_kind, status, channel) "
+                    "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
+                    "       'price_drop', 'sent', 'in_app' "
+                    "FROM properties_public l "
+                    f"WHERE l.property_id = ANY(%(drop_ids)s) AND {joined_where} "
+                    "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
+                    params,
+                )
+                total_inserted += cur.rowcount or 0
+        except Exception as exc:  # noqa: BLE001 — isolate one sub, keep loop alive
+            LOG.exception(
+                "change matcher: subscription %s failed, skipping: %s",
+                sub_id, exc,
             )
-            total_inserted += cur.rowcount or 0
+            continue
 
     return {
         "subscriptions_evaluated": len(sub_rows),
