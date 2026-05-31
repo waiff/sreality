@@ -72,7 +72,7 @@ def _geocode_fallback(listing: Any) -> Any:
         return listing
     if result.matched_type in _GEOCODE_SKIP_TYPES:
         return listing
-    return replace(listing, lat=result.lat, lon=result.lon)
+    return replace(listing, lat=result.lat, lon=result.lng)
 
 # An index walk that collected at least this fraction of the page-reported total
 # is treated as complete enough to drive mark_inactive; below it the walk likely
