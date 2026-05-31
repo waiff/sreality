@@ -65,7 +65,6 @@ class UpdatePortalLimitsIn(BaseModel):
     detail_rate: float | None = None
     max_detail_per_run: int | None = None
     max_detail_per_category: int | None = None
-    min_completeness: float | None = None
     image_workers: int | None = None
     max_image_downloads: int | None = None
     suspicious_stop_window: int | None = None
@@ -381,7 +380,7 @@ def _validate_portal_limits(patch: dict[str, Any]) -> None:
     positive_floats = ("index_rate", "detail_rate")
     positive_ints = ("detail_workers", "image_workers", "suspicious_stop_window")
     optional_positive_ints = ("max_detail_per_run", "max_detail_per_category")
-    fractions = ("min_completeness", "suspicious_stop_threshold")
+    fractions = ("suspicious_stop_threshold",)
 
     for k, v in patch.items():
         if k in positive_floats:

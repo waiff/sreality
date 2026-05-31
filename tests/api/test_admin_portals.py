@@ -152,7 +152,7 @@ def test_put_portal_limits_no_fields_400(client):
 @pytest.mark.parametrize("payload", [
     {"detail_workers": 0},          # must be >= 1
     {"detail_rate": 0},             # must be > 0
-    {"min_completeness": 1.5},      # must be in (0, 1]
+    {"suspicious_stop_threshold": 1.5},  # must be in (0, 1]
     {"max_detail_per_run": 0},      # must be >= 1 or null
 ])
 def test_put_portal_limits_bad_value_400(client, payload):

@@ -90,6 +90,13 @@ def test_core_mapping():
     assert listing.description == "Hezký byt."
 
 
+def test_wood_construction_canonicalises_to_drevo():
+    # cross-source canonical value is "drevo" (the building_type filter option),
+    # not "dřevostavba" — keep bezrealitky aligned with sreality/idnes/maxima.
+    listing = parse_advert(_advert(construction="WOOD"))
+    assert listing.building_type == "drevo"
+
+
 def test_surface_derived_flags():
     listing = parse_advert(_advert())
     # loggiaSurface=3 -> the legacy combined balcony flag is true

@@ -58,13 +58,14 @@ DEFAULT_IMAGE_WORKERS = 32
 DEFAULT_DETAIL_WORKERS = 4
 DEFAULT_DETAIL_RATE = 2.0  # requests/sec, global across all workers
 
-# A full index walk that collected at least this fraction of the total the
-# API reported (result_size) is treated as complete enough to drive
-# mark_inactive. Below it, the walk likely truncated and flipping unseen
-# listings to inactive would falsely delist live ones, so we skip. When
-# result_size is unavailable we fall back to trusting the walk (see
-# _walk_complete) rather than silently disabling delisting detection.
-INDEX_MIN_COMPLETENESS = 0.9
+# A walk must collect the FULL API-reported total (result_size) before its
+# absence sweep is trusted to mark listings inactive — anything short of 100%
+# means the walk truncated, and flipping unseen listings inactive would falsely
+# delist live ones, so we skip. Deliberately NOT operator-tunable (a partial
+# walk must never be allowed to delist). When result_size is unavailable we fall
+# back to trusting the walk (see _walk_complete) rather than silently disabling
+# delisting detection.
+INDEX_MIN_COMPLETENESS = 1.0
 
 # How many of the most recent download outcomes the suspicious-stop
 # heuristic considers. 100 is small enough to react within a minute or
@@ -864,8 +865,8 @@ def _run_detail_drain(
 
 
 def _walk_complete(collected: int, result_size: int | None) -> bool:
-    """Whether an index walk covered enough of the API-reported total to
-    safely drive mark_inactive.
+    """Whether an index walk covered the FULL API-reported total, so it can
+    safely drive mark_inactive (a 100% walk — see INDEX_MIN_COMPLETENESS).
 
     Only a *positive* signal of incompleteness suppresses the flip: if the
     API didn't report result_size (or reported <= 0) we fall back to

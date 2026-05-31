@@ -1,0 +1,103 @@
+name: "Scraping: Bazos description enrichment (LLM, every 6h + manual)"
+
+# Decoupled enrichment job. bazos listings carry no structured floor /
+# amenities / condition / building_type / energy — only price, area,
+# disposition, coords, and the seller's free text. This reads the description
+# of active listings whose latest snapshot isn't yet enriched, extracts those
+# typed fields with a cheap model (Haiku 4.5), caches the extraction in
+# listing_description_enrichments, and fills ONLY the currently-NULL listings
+# columns (the deterministic HTML-parsed price/area/disposition are never
+# overwritten). Resumable: enriched snapshots drop out of the next selection.
+#
+# Runs on two triggers:
+#   * schedule (every 6h, matching the bazos scrape cadence) — steady-state
+#     driver, decoupled from the scrape so the LLM phase never slows it.
+#   * workflow_dispatch — manual backfill / re-run with overrides.
+#
+# Cost-capped via max_cost_usd; reach the cap mid-run and the script logs an
+# "ENRICH cost cap reached" line and exits 0 with the rows done so far kept.
+# The selection is portal-generic (predicate over listings/listing_snapshots) —
+# point --source at another description-only portal to reuse it.
+#
+# Concurrency group bazos-enrichment, cancel-in-progress=false: a long run is
+# never killed mid-enrichment; the next tick queues behind it.
+#
+# Required GitHub secrets:
+#   SUPABASE_DB_URL   — same one used by every other workflow
+#   ANTHROPIC_API_KEY — Haiku 4.5 by default (--model overrides)
+
+on:
+  schedule:
+    - cron: "20 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Portal source to enrich (description-only portals)
+        required: true
+        default: "bazos"
+        type: string
+      limit:
+        description: Maximum number of listings to enrich in this run
+        required: true
+        default: "1000"
+        type: string
+      max_cost_usd:
+        description: Stop early when this run's LLM cost exceeds this cap (USD)
+        required: true
+        default: "10"
+        type: string
+      model:
+        description: Anthropic model id (blank = claude-haiku-4-5)
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: Count pending listings and exit without calling the LLM
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: bazos-enrichment
+  cancel-in-progress: false
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "psycopg[binary]>=3.2" \
+            "requests>=2.32" \
+            "anthropic>=0.40"
+
+      - name: Run bazos description enrichment
+        run: |
+          SOURCE='${{ inputs.source }}'
+          if [ -z "$SOURCE" ]; then SOURCE="bazos"; fi
+          LIMIT='${{ inputs.limit }}'
+          if [ -z "$LIMIT" ]; then LIMIT="1000"; fi
+          COST='${{ inputs.max_cost_usd }}'
+          if [ -z "$COST" ]; then COST="10"; fi
+          ARGS="--source $SOURCE --limit $LIMIT --max-cost-usd $COST"
+          if [ -n "${{ inputs.model }}" ]; then ARGS="$ARGS --model ${{ inputs.model }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "Running with: $ARGS"
+          eval python -m scripts.enrich_listing_descriptions $ARGS

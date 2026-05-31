@@ -144,10 +144,18 @@ _BUILDING_TYPE_TEXT: dict[str, str] = {
     "smisena": "smisena",
     "skeletova": "skelet",
     "drevena": "drevo",
+    "drevostavba": "drevo",
     "kamenna": "kamen",
     "montovana": "montovana",
     "nizkoenergeticka": "nizkoenergeticka",
 }
+
+# For a reserved/sold listing sreality overlays the sale STATUS onto the
+# building_condition / building_type param names ("Rezervováno", "Prodáno").
+# Reject it (→ None) so a status label never lands in an attribute column,
+# where it would corrupt the condition / building_type filters and feed
+# garbage into condition scoring. The real value is genuinely absent here.
+_STATUS_OVERLAY: frozenset[str] = frozenset({"rezervovano", "prodano"})
 
 
 def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
@@ -337,9 +345,9 @@ def _building_type(obj: Any) -> str | None:
     if not isinstance(name, str) or not name.strip():
         return None
     key = _strip_diacritics(name.strip().lower())
-    if key.startswith("-") or "vyber" in key or "nezadano" in key:
+    if key.startswith("-") or "vyber" in key or "nezadano" in key or key in _STATUS_OVERLAY:
         return None
-    return _BUILDING_TYPE_TEXT.get(key, name.strip().lower())
+    return _BUILDING_TYPE_TEXT.get(key, key)
 
 
 def _condition(obj: Any) -> str | None:
@@ -349,7 +357,7 @@ def _condition(obj: Any) -> str | None:
     if not isinstance(name, str) or not name.strip():
         return None
     key = _strip_diacritics(name.strip().lower())
-    if key.startswith("-") or "vyber" in key:
+    if key.startswith("-") or "vyber" in key or key in _STATUS_OVERLAY:
         return None
     # Diacritic-free, underscore-joined to match the schema convention and the
     # existing canonical values (e.g. "velmi_dobry", "po_rekonstrukci"); the

@@ -182,13 +182,23 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
         {"sale_type": "prodej", "category": "byty"}, object(), False, _Limiter(),
     )
     assert seen == {a, b, c}
-    assert total == 3 and complete is True       # full walk (no max_pages) >= 90%
+    assert total == 3 and complete is True       # full walk (no max_pages), collected == total
     assert touched["pks"] == [-3]                # unchanged listing touched
     refs = {e[0]: e for e in captured["entries"]}
     assert refs[a][3] == idnes_main.db.QUEUE_PRIORITY_NEW      # new
     assert refs[b][3] == idnes_main.db.QUEUE_PRIORITY_CHANGED  # changed
     assert refs[a][1] == f"{base}{a}/"           # detail_ref is the absolute URL
     assert c not in refs                          # unchanged is not enqueued
+
+
+def test_walk_complete_requires_full_walk():
+    # mark_inactive only after a 100% walk (architectural rule #3); the bar is
+    # hardcoded (INDEX_MIN_COMPLETENESS=1.0), not operator-tunable, so anything
+    # short of the full reported total must read incomplete and skip the sweep.
+    assert idnes_main._walk_complete(100, 100) is True
+    assert idnes_main._walk_complete(99, 100) is False
+    assert idnes_main._walk_complete(90, 100) is False
+    assert idnes_main._walk_complete(0, None) is True   # unknown total → trust the walk
 
 
 def test_walk_category_max_pages_suppresses_complete(monkeypatch):
@@ -255,7 +265,8 @@ def test_fetch_detail_ok_derives_category_from_url(monkeypatch):
 
     def fake_parse(html, *, source_url, category_main, category_type):
         captured["cm"], captured["ct"] = category_main, category_type
-        return SimpleNamespace(raw={})
+        # lat/lon present -> the geocode fallback is a no-op for this test.
+        return SimpleNamespace(raw={}, lat=49.2, lon=16.6, locality="Brno")
 
     monkeypatch.setattr(idnes_main, "parse_detail", fake_parse)
     ref = "https://reality.idnes.cz/detail/pronajem/dum/brno/6a18deadbeefdeadbeef0009/"

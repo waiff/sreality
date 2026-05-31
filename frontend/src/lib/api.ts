@@ -617,7 +617,6 @@ export interface PortalLimitValues {
   detail_rate?: number | null;
   max_detail_per_run?: number | null;
   max_detail_per_category?: number | null;
-  min_completeness?: number | null;
   image_workers?: number | null;
   max_image_downloads?: number | null;
   suspicious_stop_window?: number | null;
