@@ -394,9 +394,9 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     # `WatchdogFilterSpec._lift_legacy_districts` before SQL build.
     assert params["category_main"] == "byt"
     assert params["category_type"] == "pronajem"
-    assert params["district_name_0"] == "Praha"
+    assert params["district_name_0"] == "%Praha%"
     assert "district_ctx_0" not in params  # null context = no narrow
-    assert "l.district ILIKE '%' || %(district_name_0)s || '%'" in sql
+    assert "l.district ILIKE %(district_name_0)s" in sql
 
 
 def test_match_once_skips_subscription_with_no_listings() -> None:
