@@ -216,7 +216,11 @@ def _select_pending(
 
     The region filter passes the list as int[] and gates on
     cardinality so the empty-list case (no filter) compiles to no
-    additional restriction.
+    additional restriction. `locality_region_id` is a sreality-only
+    column, so listings from the other portals (idnes/bezrealitky/bazos/
+    mmreality — region_id NULL) are ALWAYS included even when a region
+    filter is active; otherwise a region-filtered run would silently
+    score only sreality and never the other portals.
 
     `max_age_days <= 0` drops the freshness clause entirely — score
     every active listing regardless of when it was last seen. The
@@ -245,6 +249,7 @@ def _select_pending(
         "  AND ( "
         "    cardinality(%s::int[]) = 0 "
         "    OR l.locality_region_id = ANY(%s::int[]) "
+        "    OR l.locality_region_id IS NULL "
         "  ) "
         "ORDER BY l.last_seen_at DESC "
         "LIMIT %s"
