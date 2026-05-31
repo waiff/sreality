@@ -58,6 +58,10 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "parking_lots",
     "ownership",
     "description",
+    "street",
+    "house_number",
+    "zip",
+    "street_id",
 )
 
 # Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
@@ -97,6 +101,10 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "parking_lots": "integer",
     "ownership": "text",
     "description": "text",
+    "street": "text",
+    "house_number": "text",
+    "zip": "text",
+    "street_id": "integer",
 }
 assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"

@@ -13,12 +13,15 @@ name: Tier-2 dedup sweep (multi-portal)
 # Inert until a second portal (bazos) lands rows at scale -- with sreality-only
 # data there are no cross-source pairs, so the sweep finds nothing.
 #
-# Vision is OFF by default (max_vision_calls=0): without it, auto-merge fires
-# only on a near-exact address match; everything else queues. Turn it on (and,
-# from PR5, the pHash rung) to let auto-merge corroborate by image. The
-# max_vision_calls cap bounds the worst-case LLM spend per run.
+# Vision has a small default budget (max_vision_calls=50): the free pHash rung is
+# the primary path, and the bounded vision calls settle image-identity candidates
+# whose photos pHash couldn't compare yet (a side still unhashed). The
+# max_vision_calls cap bounds the worst-case LLM spend per run; set it to 0 to run
+# pHash-only.
 #
-# Required GitHub secret: SUPABASE_DB_URL (+ ANTHROPIC_API_KEY only if vision on).
+# Required GitHub secret: SUPABASE_DB_URL. Vision additionally needs an LLM key
+# (ANTHROPIC_API_KEY / GEMINI_API_KEY) + R2_* for image bytes; absent these the
+# vision rung degrades to a logged no-op and pHash carries the sweep.
 
 on:
   schedule:
@@ -36,9 +39,9 @@ on:
         default: "200"
         type: string
       max_vision_calls:
-        description: Cap vision corroborations per run (0 = vision off)
+        description: Vision calls cap (settles image-identity pairs pHash can't; 0 = free)
         required: false
-        default: "0"
+        default: "50"
         type: string
       dry_run:
         description: Report candidate-pair count and exit without writing
@@ -62,6 +65,7 @@ jobs:
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -82,7 +86,7 @@ jobs:
         run: |
           ARGS="--limit ${{ inputs.limit || '2000' }}"
           ARGS="$ARGS --max-auto-merges ${{ inputs.max_auto_merges || '200' }}"
-          ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '0' }}"
+          ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '50' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           echo "python -m scripts.dedup_sweep $ARGS"
           python -m scripts.dedup_sweep $ARGS

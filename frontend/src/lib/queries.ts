@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { imageSrc } from './imageUrl';
+import type { ListingDetailLite } from './dedupDiff';
 import {
   type CenterRadius,
   type ListingFilters,
@@ -709,6 +710,54 @@ export const fetchImagesByListingIds = async (
   return out;
 };
 
+/* /dedup review card: per-side portal chips. Batched over the candidate
+ * properties on screen (≤100), keyed on property_id. property_sources_public
+ * is one row per (child listing) of a property — post-merge a property spans
+ * several portals, which is exactly what the chips show. */
+export const fetchPropertySourcesByPropertyIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, PropertySource[]>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('property_sources_public')
+    .select(
+      'property_id,sreality_id,source,source_url,source_id_native,is_active,price_czk,first_seen_at,last_seen_at',
+    )
+    .in('property_id', ids as number[])
+    .order('is_active', { ascending: false })
+    .order('first_seen_at', { ascending: true });
+  if (error) throw error;
+  const out = new Map<number, PropertySource[]>();
+  for (const row of (data ?? []) as unknown as PropertySource[]) {
+    const arr = out.get(row.property_id);
+    if (arr) arr.push(row);
+    else out.set(row.property_id, [row]);
+  }
+  return out;
+};
+
+/* /dedup review card: the street / house-number / floor the candidate payload
+ * doesn't carry (migration 122 exposes street + house_number on
+ * listings_public). Batched over the on-screen sides' sreality_ids. */
+const DEDUP_DETAIL_COLS =
+  'sreality_id,street,house_number,floor,disposition,district,price_czk,area_m2';
+
+export const fetchListingDetailByIds = async (
+  ids: ReadonlyArray<number>,
+): Promise<Map<number, ListingDetailLite>> => {
+  if (ids.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('listings_public')
+    .select(DEDUP_DETAIL_COLS)
+    .in('sreality_id', ids as number[]);
+  if (error) throw error;
+  const out = new Map<number, ListingDetailLite>();
+  for (const row of (data ?? []) as unknown as ListingDetailLite[]) {
+    out.set(row.sreality_id, row);
+  }
+  return out;
+};
+
 export const fetchImagesByListing = async (
   sreality_id: number,
 ): Promise<ImagePublic[]> => {
@@ -984,12 +1033,21 @@ export const watchdogKeys = {
     ['watchdog', 'dispatches', params] as const,
 };
 
+const sortedIds = (ids: ReadonlyArray<number>): number[] =>
+  [...ids].sort((a, b) => a - b);
+
 export const dedupKeys = {
   all: ['dedup'] as const,
   candidates: (params: Record<string, unknown>) =>
     ['dedup', 'candidates', params] as const,
   merges: (params: Record<string, unknown>) =>
     ['dedup', 'merges', params] as const,
+  sources: (propertyIds: ReadonlyArray<number>) =>
+    ['dedup', 'sources', sortedIds(propertyIds)] as const,
+  images: (srealityIds: ReadonlyArray<number>) =>
+    ['dedup', 'images', sortedIds(srealityIds)] as const,
+  detail: (srealityIds: ReadonlyArray<number>) =>
+    ['dedup', 'detail', sortedIds(srealityIds)] as const,
 };
 
 export const curationKeys = {

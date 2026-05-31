@@ -52,6 +52,16 @@ AUTO_ADDR_SIM_MIN = 0.9
 AUTO_PHASH_HAMMING_MAX = 6
 AUTO_VISION_SIM_MIN = 0.85
 
+# Image-identity rung: identical photos are the strongest cross-portal "same flat"
+# signal and hold even when the two portals geocode the address tens of metres
+# apart -- so this rung deliberately drops the tight 30m geo demand and relies on
+# the generation gate (150m, price/area bands) plus a stricter image threshold.
+# Stricter than the AUTO_*_corroborator thresholds above: a corroborator only needs
+# to nudge an already-tight pair over the line, but the image rung carries the merge
+# on its own at loose geo, so it must be near-certain.
+AUTO_PHASH_IDENTICAL_MAX = 4
+AUTO_VISION_IDENTICAL_MIN = 0.9
+
 VisionFn = Callable[[int, int], float | None]
 PhashFn = Callable[[int, int], int | None]
 
@@ -87,9 +97,12 @@ def classify_pair(s: PairSignals) -> PairDecision:
     """Pure classifier: the auto-merge policy in one place.
 
     Reject unless disposition-compatible with full price/area data inside the
-    generation gate. Auto-merge only when the match is tight (<=30m, <=2% price,
-    <=2m2 area) AND an independent corroborator agrees (near-exact address, or
-    a close pHash [PR5], or a high vision score). Everything else queues for
+    generation gate. Two auto-merge paths: (1) the match is tight (<=30m, <=2%
+    price, <=2m2 area) AND an independent corroborator agrees (near-exact
+    address, a close pHash, or a high vision score); or (2) the image-identity
+    rung -- photos near-identical (pHash <=4 or vision >=0.9) with area inside
+    the generation tolerance, which carries the merge even at loose geo (two
+    portals geocode one flat tens of metres apart). Everything else queues for
     review -- the conservative half of the operator's auto-merge decision.
     """
     if not _disposition_compatible(s.disposition_a, s.disposition_b):
@@ -117,6 +130,24 @@ def classify_pair(s: PairSignals) -> PairDecision:
     )
     if tight and corroborator is not None:
         return PairDecision("auto_merge", corroborator, 0.95)
+
+    # Image-identity rung: near-identical photos auto-merge WITHOUT the tight geo
+    # match. disposition-compatibility, distance <= 150m, and price <= 8% are
+    # already guaranteed above; we only need to re-confirm area is inside the
+    # generation tolerance (the SQL applies it, but classify_pair is pure + tested
+    # in isolation, so it owns the check too).
+    area_in_gate = area_diff <= max(
+        GEN_AREA_DIFF_MAX_M2, GEN_AREA_DIFF_MAX_PCT * max(s.area_a, s.area_b),
+    )
+    image_identical = (
+        s.phash_hamming is not None and s.phash_hamming <= AUTO_PHASH_IDENTICAL_MAX
+    ) or (
+        s.vision_similarity is not None
+        and s.vision_similarity >= AUTO_VISION_IDENTICAL_MIN
+    )
+    if image_identical and area_in_gate:
+        return PairDecision("auto_merge", "image", 0.97)
+
     return PairDecision("queue", corroborator, 0.6)
 
 
@@ -243,13 +274,21 @@ def run_sweep(
 
         decision = classify_pair(signals)
 
-        # Vision escalation: only for the tight-but-uncorroborated few, bounded.
+        # Vision escalation, bounded by the budget. Spend a call on either:
+        #   - the tight-but-uncorroborated few (distance <= 30m), where a high
+        #     score nudges the existing tight+corroborator path over the line; or
+        #   - image-identity candidates the cheap pHash rung couldn't settle
+        #     because a side is still unhashed -- vision can confirm the photos
+        #     are identical and auto-merge via the image rung even at loose geo.
         if (
             decision.action == "queue"
             and decision.corroborator is None
             and compare_fn is not None
             and vision_budget > 0
-            and signals.distance_m <= AUTO_RADIUS_M
+            and (
+                signals.distance_m <= AUTO_RADIUS_M
+                or signals.phash_hamming is None
+            )
         ):
             vision_budget -= 1
             stats["vision_calls"] += 1
