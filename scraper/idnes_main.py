@@ -17,16 +17,21 @@ source-scoped so it only ever touches idnes rows (rule #15). The detail URL
 carries the category (`/detail/{sale}/{cat}/…`), so the drain derives each
 listing's category from its own URL — one config walks many categories without
 the queue-encodes-category limitation that constrains bazos. Coordinates come
-straight from the page's embedded map config, so there is no geocoding step.
+straight from the page's embedded map config when present; when the page omits
+it (~a third of listings) the drain falls back to geocoding the locality via
+Mapy.cz (`_geocode_fallback`) so those listings still appear on the map and in
+radius/location filters instead of being silently dropped.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+from dataclasses import replace
 from typing import Any
 
 from scraper import db, portal_runner
+from scraper.geocoding import geocode
 from scraper.idnes_client import IdnesClient, detail_url, index_url
 from scraper.idnes_parser import (
     CATEGORY_MAIN,
@@ -43,6 +48,31 @@ from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 SOURCE = "idnes"
+
+# Geocode tiers too coarse to be worth a coordinate: a region/country centroid
+# would drop the pin in the middle of the country, which is worse than NULL for
+# both map display and the radius filter. City / district / street are kept.
+_GEOCODE_SKIP_TYPES = frozenset({"regional.region", "regional.country"})
+
+
+def _geocode_fallback(listing: Any) -> Any:
+    """Fill lat/lon by geocoding the locality when the page carried no map config.
+
+    No-op (returns the listing unchanged) when coords are already present, the
+    locality is missing, MAPY_CZ_API_KEY is unset, or Mapy.cz fails — geocoding
+    must never break a detail fetch. Bounded latency for the hot drain path.
+    """
+    if listing.lat is not None and listing.lon is not None:
+        return listing
+    if not listing.locality:
+        return listing
+    try:
+        result = geocode(listing.locality, timeout_s=5.0, max_retries=1)
+    except Exception:  # noqa: BLE001 - geocoding (incl. unset key) must never fail the fetch
+        return listing
+    if result.matched_type in _GEOCODE_SKIP_TYPES:
+        return listing
+    return replace(listing, lat=result.lat, lon=result.lon)
 
 # An index walk that collected at least this fraction of the page-reported total
 # is treated as complete enough to drive mark_inactive; below it the walk likely
@@ -205,6 +235,7 @@ class IdnesPortal:
             )
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
+        listing = _geocode_fallback(listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},
