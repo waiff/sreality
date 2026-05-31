@@ -501,6 +501,76 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/discover_condition_markers.yml"
   },
   {
+    "filename": "enrich_bazos.yml",
+    "name": "Scraping: Bazos description enrichment (LLM, every 6h + manual)",
+    "description": "Decoupled enrichment job. bazos listings carry no structured floor / amenities / condition / building_type / energy — only price, area, disposition, coords, and the seller's free text. This reads the description of active listings whose latest snapshot isn't yet enriched, extracts those typed fields with a cheap model (Haiku 4.5), caches the extraction in listing_description_enrichments, and fills ONLY the currently-NULL listings columns (the deterministic HTML-parsed price/area/disposition are never overwritten). Resumable: enriched snapshots drop out of the next selection.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 */6 * * *",
+        "human": "Every 6 hours at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "Portal source to enrich (description-only portals)",
+        "required": true,
+        "type": "string",
+        "default": "bazos",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Maximum number of listings to enrich in this run",
+        "required": true,
+        "type": "string",
+        "default": "1000",
+        "options": null
+      },
+      {
+        "name": "max_cost_usd",
+        "description": "Stop early when this run's LLM cost exceeds this cap (USD)",
+        "required": true,
+        "type": "string",
+        "default": "10",
+        "options": null
+      },
+      {
+        "name": "model",
+        "description": "Anthropic model id (blank = claude-haiku-4-5)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Count pending listings and exit without calling the LLM",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "bazos-enrichment",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/enrich_bazos.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/enrich_bazos.yml"
+  },
+  {
     "filename": "fetch-fixtures.yml",
     "name": "Fixtures: source HTML (anonymized)",
     "description": "Manual trigger only. Fetches each listing URL, runs the anonymization in scripts/fetch_and_anonymize_fixtures.py, and commits the resulting fixtures to the current branch. Operator runs this once per source refresh; tests then read the saved files instead of hitting the internet.",
