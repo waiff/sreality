@@ -97,6 +97,10 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "parking_lots": "integer",
     "ownership": "text",
     "description": "text",
+    "street": "text",
+    "house_number": "text",
+    "zip": "text",
+    "street_id": "integer",
 }
 assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"

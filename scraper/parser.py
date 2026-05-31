@@ -195,6 +195,10 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "parking_lots": _int_or_none(raw.get("parking")),
         "ownership": OWNERSHIP.get(_cb_value(raw.get("ownership"))),
         "description": _description(raw),
+        "street": _loc_str(loc, "street"),
+        "house_number": _loc_str(loc, "housenumber") or _loc_str(loc, "streetnumber"),
+        "zip": _loc_str(loc, "zip"),
+        "street_id": _id_or_none(loc.get("street_id")),
     }
 
 
@@ -266,6 +270,19 @@ def _locality_value(loc: dict[str, Any]) -> str | None:
     if len(parts) == 2 and parts[0] == parts[1]:
         parts = parts[:1]
     return " - ".join(parts)
+
+
+def _loc_str(loc: dict[str, Any], key: str) -> str | None:
+    """A structured-address string field from the rich `locality` shape.
+
+    Only the detail response carries street / housenumber / zip / street_id; the
+    index-only `{name, value, accuracy}` shape lacks them, so this returns None
+    there. bazos and other crawler sources carry none of these either.
+    """
+    val = loc.get(key)
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        val = str(val)
+    return val.strip() or None if isinstance(val, str) else None
 
 
 def _district(loc: dict[str, Any]) -> str | None:

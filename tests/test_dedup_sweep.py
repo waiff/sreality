@@ -69,6 +69,50 @@ def test_disposition_loose_equivalence_is_compatible():
                               address_similarity=0.95)).action == "auto_merge"
 
 
+# --- image-identity rung (auto-merge at loose geo on near-identical photos) ---
+
+
+def test_image_identity_auto_merges_at_loose_geo():
+    # 90m is outside the 30m tight gate but inside the 150m generation gate, and
+    # there is no address/vision corroborator -- yet identical photos (pHash 3 <=
+    # AUTO_PHASH_IDENTICAL_MAX) carry the merge on their own.
+    d = classify_pair(_sig(distance_m=90.0, address_similarity=0.4, phash_hamming=3))
+    assert d.action == "auto_merge"
+    assert d.corroborator == "image"
+    assert d.confidence == 0.97
+
+
+def test_image_identity_via_vision_score():
+    # Same loose-geo pair, settled by a high vision score instead of pHash.
+    d = classify_pair(_sig(distance_m=90.0, address_similarity=0.4,
+                           vision_similarity=0.92))
+    assert d.action == "auto_merge"
+    assert d.corroborator == "image"
+
+
+def test_loose_geo_without_image_identity_queues():
+    # Identical inputs minus the image signal: no tight match, no corroborator,
+    # so it queues for review rather than auto-merging.
+    d = classify_pair(_sig(distance_m=90.0, address_similarity=0.4,
+                           phash_hamming=None, vision_similarity=None))
+    assert d.action == "queue"
+
+
+def test_image_identity_does_not_override_disposition_reject():
+    # Even perfectly identical photos must not merge across incompatible
+    # dispositions -- the disposition gate fires before the image rung.
+    d = classify_pair(_sig(disposition_a="2+kk", disposition_b="3+kk",
+                           distance_m=90.0, phash_hamming=0))
+    assert d.action == "reject"
+
+
+def test_phash_just_above_identical_threshold_does_not_loose_merge():
+    # pHash 5 corroborates a TIGHT pair (<= AUTO_PHASH_HAMMING_MAX=6) but is NOT
+    # identical enough (> AUTO_PHASH_IDENTICAL_MAX=4) to carry a loose-geo merge.
+    d = classify_pair(_sig(distance_m=90.0, address_similarity=0.4, phash_hamming=5))
+    assert d.action == "queue"
+
+
 # --- dispatch wiring ------------------------------------------------------
 
 

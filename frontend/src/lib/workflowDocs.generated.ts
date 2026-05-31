@@ -339,10 +339,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_vision_calls",
-        "description": "Cap vision corroborations per run (0 = vision off)",
+        "description": "Vision calls cap (settles image-identity pairs pHash can't; 0 = free)",
         "required": false,
         "type": "string",
-        "default": "0",
+        "default": "50",
         "options": null
       },
       {
@@ -359,6 +359,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "ANTHROPIC_API_KEY",
+      "GEMINI_API_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_ACCOUNT_ID",
       "R2_BUCKET_NAME",
