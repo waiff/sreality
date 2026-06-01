@@ -1004,6 +1004,9 @@ export interface WatchdogFilterSpec {
   garage: boolean | null;
   furnished: Furnished | null;
   ownership: Ownership | null;
+  // Raw sreality condition enum (Stav objektu). Matches l.condition = ANY(...);
+  // null / empty = any. Honoured by the matcher (_build_match_clauses).
+  condition_match: string[] | null;
   // Source portals (migration 091). A listing matches if its source is
   // in the list; null / empty = all portals.
   portals: string[] | null;
@@ -1078,6 +1081,7 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   garage: null,
   furnished: null,
   ownership: null,
+  condition_match: null,
   portals: null,
   min_parking_lots: null,
   building_condition_level_min: null,
