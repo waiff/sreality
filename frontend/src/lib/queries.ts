@@ -70,7 +70,7 @@ const TABLE_COLS =
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
   'sreality_id,district,locality,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
-  'category_main,category_type,source';
+  'category_main,category_type,source,mf_gross_yield_pct';
 
 export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
@@ -405,6 +405,9 @@ export interface CardRow {
   category_main: string | null;
   category_type: string | null;
   source: string | null;
+  /* MF gross rental yield % (migration 133). Non-null only on sale
+   * apartments that resolved to an MF territory. */
+  mf_gross_yield_pct: number | null;
   /* Up to 5 image URLs in source-sequence order. Empty when the
    * listing has no photos yet. The card uses index 0 by default and
    * the carousel chevrons step through the remaining entries. */

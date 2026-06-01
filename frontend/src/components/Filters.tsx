@@ -90,7 +90,18 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
   // that refuses to move and a number input that swallows keystrokes.
   const handleRegistryChange = (
     updates: ReadonlyArray<{ id: string; value: unknown }>,
-  ) => onChange(applyRegistryUpdates(filters, updates));
+  ) => {
+    let next = applyRegistryUpdates(filters, updates);
+    // Yield only applies to sale apartments; clear it when leaving Prodej so
+    // a hidden, still-active filter never silently zeroes the rent cohort.
+    if (
+      next.categoryType !== 'prodej' &&
+      (next.mfGrossYieldPctMin != null || next.mfGrossYieldPctMax != null)
+    ) {
+      next = { ...next, mfGrossYieldPctMin: null, mfGrossYieldPctMax: null };
+    }
+    onChange(next);
+  };
 
   // Rich widgets the controls library can't generically express get
   // plugged in via customWidgets — keyed by registry id. The widgets
@@ -197,18 +208,23 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
             />
           </ControlGroup>
 
-          <ControlGroup title="Yield" bordered={false}>
-            <FilterForm
-              scope="browse"
-              state={registryView}
-              onChange={handleRegistryChange}
-              includeOnly={['min_mf_gross_yield_pct']}
-              labels={{
-                min_mf_gross_yield_pct: 'MF gross yield %',
-              }}
-              flat
-            />
-          </ControlGroup>
+          {/* Yield is the MF reference rent ÷ asking price — only meaningful
+              for sale apartments, so it's offered on the Prodej tab only.
+              (Rentals have no asking price; their yield is always NULL.) */}
+          {filters.categoryType === 'prodej' && (
+            <ControlGroup title="Yield" bordered={false}>
+              <FilterForm
+                scope="browse"
+                state={registryView}
+                onChange={handleRegistryChange}
+                includeOnly={['min_mf_gross_yield_pct']}
+                labels={{
+                  min_mf_gross_yield_pct: 'MF gross yield %',
+                }}
+                flat
+              />
+            </ControlGroup>
+          )}
         </CollapsibleGroup>
 
         <CollapsibleGroup
