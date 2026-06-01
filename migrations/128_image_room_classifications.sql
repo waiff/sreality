@@ -70,7 +70,7 @@ For EACH image, return exactly one room_type from this set:
 
 Use ONLY what is visible. When a shot spans two areas, choose the dominant one.
 If you cannot tell, use "other" with low confidence. confidence is one of
-"high" | "medium" | "low".$PROMPT$),
+"high" | "medium" | "low".$PROMPT$::text),
     'Room-type classifier prompt for the dedup engine''s visual layer.',
     'migration_128'
   ),

@@ -60,7 +60,7 @@ Please provide your analysis using the following structure:
 
 5. FINAL CONCLUSION: Summarize the definitive proof or red flags that led to your verdict.
 
-You MUST call record_visual_match exactly once with your verdict (High|Medium|Low) and a rationale summarizing the definitive proof or red flags.$PROMPT$),
+You MUST call record_visual_match exactly once with your verdict (High|Medium|Low) and a rationale summarizing the definitive proof or red flags.$PROMPT$::text),
     'Forensic same-property visual comparison prompt (dedup engine visual layer).',
     'migration_129'
   ),

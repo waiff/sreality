@@ -183,9 +183,9 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append(s)
-        if "dedup_eligibility, count(*)" in s:
-            self._rows = [("eligible", 4), ("location_unclear", 100), ("disposition_unclear", 5)]
-        elif "FROM listings l" in s and "dedup_eligibility = 'eligible'" in s:
+        if "count(*) FILTER" in s and "FROM listings WHERE is_active" in s:
+            self._rows = [(4, 100, 5)]  # eligible, flagged_location, flagged_disposition
+        elif "FROM listings l" in s and "l.street IS NOT NULL" in s:
             self._rows = list(self._conn.eligible_rows)
         elif "INSERT INTO property_identity_candidates" in s:
             self._conn.enqueued.append(params)

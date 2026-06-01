@@ -6,7 +6,7 @@ engine keys on the two identifiers the operator trusts — STREET and DISPOSITIO
 
   A. Eligibility. A listing matches only with BOTH a street and a disposition;
      otherwise it's flagged (location_unclear / disposition_unclear) and never
-     compared. (Enforced as listings.dedup_eligibility, migration 127.)
+     compared. Computed inline (a partial index backs the scan, migration 127).
   B. Exact-address auto-merge. Same street + house number + disposition + floor
      => same property. Guarded: if area is known on both and differs by >5%,
      don't blind-merge — route to visual (a building can have같은-floor units).

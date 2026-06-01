@@ -6,9 +6,9 @@ Replaces the old geo `scripts.dedup_sweep`.
 
 Pipeline (rules A-E; see toolkit.dedup_engine for the rule text):
 
-  0. Load ELIGIBLE listings (dedup_eligibility='eligible', active) grouped by
-     street_key. Only listings with street + disposition participate (rule A,
-     enforced by the generated column — the engine just selects on it).
+  0. Load ELIGIBLE listings (street + disposition both present, active) grouped
+     by street_key. Eligibility is computed inline (rule A; a partial index
+     backs the scan — see migration 127).
   1. Within each (street_key) group, classify every cross-property pair
      (classify_pair). Rule B exact-address pairs auto-merge immediately
      (5% area guard); rule C contradictions are rejected; the rest are visual
@@ -59,14 +59,17 @@ MAX_GROUP_SIZE = 40
 
 
 # Eligible, active listings that can still be matched, with everything the rules
-# need. Ordered so grouping by street_key is a simple consecutive walk.
+# need. Rule A eligibility (street + disposition both present) is computed inline
+# — see migration 127 for why it isn't a stored column. Ordered so grouping by
+# street_key is a simple consecutive walk.
 _ELIGIBLE_SQL = """
     SELECT
       l.sreality_id, l.property_id, l.source,
       l.street, l.street_id, l.disposition, l.house_number, l.floor, l.area_m2
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
-    WHERE l.dedup_eligibility = 'eligible'
+    WHERE l.street IS NOT NULL AND l.street <> ''
+      AND l.disposition IS NOT NULL
       AND l.is_active = true
     ORDER BY l.street_id NULLS LAST, lower(l.street), l.disposition
 """
@@ -102,16 +105,26 @@ def _group_by_street(keys: list[ListingKey]) -> dict[str, list[ListingKey]]:
 
 
 def _eligibility_counts(conn: Any) -> dict[str, int]:
+    """Rule A breakdown over active listings (eligibility computed inline)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT dedup_eligibility, count(*) FROM listings "
-            "WHERE is_active = true GROUP BY dedup_eligibility"
+            """
+            SELECT
+              count(*) FILTER (
+                WHERE street IS NOT NULL AND street <> '' AND disposition IS NOT NULL
+              ) AS eligible,
+              count(*) FILTER (WHERE street IS NULL OR street = '') AS flagged_location,
+              count(*) FILTER (
+                WHERE street IS NOT NULL AND street <> '' AND disposition IS NULL
+              ) AS flagged_disposition
+            FROM listings WHERE is_active = true
+            """
         )
-        rows = dict(cur.fetchall())
+        row = cur.fetchone()
     return {
-        "eligible": int(rows.get("eligible", 0)),
-        "flagged_location": int(rows.get("location_unclear", 0)),
-        "flagged_disposition": int(rows.get("disposition_unclear", 0)),
+        "eligible": int(row[0]),
+        "flagged_location": int(row[1]),
+        "flagged_disposition": int(row[2]),
     }
 
 
