@@ -1216,13 +1216,16 @@ def _reference_rent_for_run(
     if estimate_kind != "rent":
         return None
     with recorder.computation("reference rent (Cenová mapa MF)") as step:
-        amenities, is_novostavba = _subject_amenities(conn, resolution)
-        ref = compute_reference_rent(
-            conn,
-            lat=target.lat, lng=target.lng, area_m2=target.area_m2,
-            disposition=target.disposition,
-            amenities=amenities, is_novostavba=is_novostavba,
-        )
+        try:
+            amenities, is_novostavba = _subject_amenities(conn, resolution)
+            ref = compute_reference_rent(
+                conn,
+                lat=target.lat, lng=target.lng, area_m2=target.area_m2,
+                disposition=target.disposition,
+                amenities=amenities, is_novostavba=is_novostavba,
+            )
+        except Exception:  # noqa: BLE001 - secondary reference never fails a run
+            ref = None
         if ref is None:
             step.set_summary({"matched": False})
         else:
