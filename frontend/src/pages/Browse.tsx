@@ -15,10 +15,13 @@ import {
   isDefault,
   regionKeyFromFilters,
   regionLabelFromFilters,
+  filtersToWatchdogSpec,
+  watchdogNameSuggestion,
   DEFAULT_FILTERS,
   type ListingFilters,
   type MapBounds,
 } from '@/lib/filters';
+import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import { fetchRegionDispositionAnnotations, isApiConfigured } from '@/lib/api';
 import {
   fetchCityIndexDefinitions,
@@ -193,6 +196,9 @@ export default function Browse() {
    * the new centre. The `ts` field guarantees identity changes on
    * each pick so re-picking the same place still triggers a flyTo. */
   const [mapFlyTo, setMapFlyTo] = useState<MapFlyToCommand | null>(null);
+  /* "Create watchdog from Browse": held here so the button in FilterSummary
+   * opens the name-prompt modal seeded from the current filter set. */
+  const [watchdogModalOpen, setWatchdogModalOpen] = useState(false);
   const handleLocationPick = useCallback((s: MapySuggestion) => {
     if (!s.position) return;
     setMapFlyTo({
@@ -466,6 +472,7 @@ export default function Browse() {
               false
             }
             onClearBounds={filters.bounds ? () => setBounds(null) : undefined}
+            onCreateWatchdog={() => setWatchdogModalOpen(true)}
           />
           <div className="mt-4">
             <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
@@ -569,6 +576,20 @@ export default function Browse() {
           </div>
         )}
       </div>
+
+      {watchdogModalOpen
+        ? (() => {
+            const { spec, unsupported } = filtersToWatchdogSpec(filters);
+            return (
+              <CreateWatchdogModal
+                spec={spec}
+                unsupported={unsupported}
+                suggestedName={watchdogNameSuggestion(filters)}
+                onClose={() => setWatchdogModalOpen(false)}
+              />
+            );
+          })()
+        : null}
     </div>
   );
 }
@@ -604,33 +625,45 @@ function FilterSummary({
   count,
   loading,
   onClearBounds,
+  onCreateWatchdog,
 }: {
   filters: ListingFilters;
   count: number | null;
   loading: boolean;
   onClearBounds?: () => void;
+  onCreateWatchdog: () => void;
 }) {
   return (
-    <div>
-      <h1 className="text-2xl leading-tight">Browse</h1>
-      <div className="mt-1 flex items-center gap-2 flex-wrap">
-        <p className="text-sm text-[var(--color-ink-2)]">
-          {loading && count == null ? 'Loading…' : summarise(filters, count)}
-        </p>
-        {onClearBounds && (
-          <button
-            type="button"
-            onClick={onClearBounds}
-            className="group inline-flex items-center gap-1 px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
-            title="Clear the map area filter and widen back to the full cohort"
-          >
-            <span>Map area applied</span>
-            <span aria-hidden className="opacity-60 group-hover:opacity-100">
-              ×
-            </span>
-          </button>
-        )}
+    <div className="flex items-start justify-between gap-4">
+      <div className="min-w-0">
+        <h1 className="text-2xl leading-tight">Browse</h1>
+        <div className="mt-1 flex items-center gap-2 flex-wrap">
+          <p className="text-sm text-[var(--color-ink-2)]">
+            {loading && count == null ? 'Loading…' : summarise(filters, count)}
+          </p>
+          {onClearBounds && (
+            <button
+              type="button"
+              onClick={onClearBounds}
+              className="group inline-flex items-center gap-1 px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
+              title="Clear the map area filter and widen back to the full cohort"
+            >
+              <span>Map area applied</span>
+              <span aria-hidden className="opacity-60 group-hover:opacity-100">
+                ×
+              </span>
+            </button>
+          )}
+        </div>
       </div>
+      <button
+        type="button"
+        onClick={onCreateWatchdog}
+        className="shrink-0 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]/60 transition-colors"
+        title="Save the current filters as a watchdog — get notified when a new listing matches"
+      >
+        + Create watchdog
+      </button>
     </div>
   );
 }

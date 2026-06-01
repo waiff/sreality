@@ -986,6 +986,10 @@ export interface WatchdogFilterSpec {
   // Price per m² bounds (price_czk / NULLIF(area_m2, 0)).
   min_price_per_m2: number | null;
   max_price_per_m2: number | null;
+  // MF gross rental yield % bounds (migration 133). Sale apartments only;
+  // the matcher honours these (api/notifications.py _build_match_clauses).
+  min_mf_gross_yield_pct: number | null;
+  max_mf_gross_yield_pct: number | null;
   min_area_m2: number | null;
   max_area_m2: number | null;
   min_usable_area: number | null;
@@ -1000,6 +1004,9 @@ export interface WatchdogFilterSpec {
   garage: boolean | null;
   furnished: Furnished | null;
   ownership: Ownership | null;
+  // Raw sreality condition enum (Stav objektu). Matches l.condition = ANY(...);
+  // null / empty = any. Honoured by the matcher (_build_match_clauses).
+  condition_match: string[] | null;
   // Source portals (migration 091). A listing matches if its source is
   // in the list; null / empty = all portals.
   portals: string[] | null;
@@ -1058,6 +1065,8 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   max_price_czk: null,
   min_price_per_m2: null,
   max_price_per_m2: null,
+  min_mf_gross_yield_pct: null,
+  max_mf_gross_yield_pct: null,
   min_area_m2: null,
   max_area_m2: null,
   min_usable_area: null,
@@ -1072,6 +1081,7 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   garage: null,
   furnished: null,
   ownership: null,
+  condition_match: null,
   portals: null,
   min_parking_lots: null,
   building_condition_level_min: null,
