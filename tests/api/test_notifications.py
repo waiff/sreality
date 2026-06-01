@@ -525,3 +525,42 @@ def test_match_changes_once_noops_when_no_recent_drops() -> None:
     assert not any(
         "INSERT INTO notification_dispatches" in sql for sql, _ in conn.executed
     )
+
+
+# --- kickoff (Run estimation) regression --------------------------------------
+
+
+from api.notifications import _insert_pending_run
+
+
+def test_insert_pending_run_does_not_reference_nonexistent_columns() -> None:
+    """Regression: estimation_runs has NO category_main / category_type
+    columns. The kickoff INSERT must not name them (doing so 500s the
+    `/dispatches/{id}/estimate` endpoint, which silently no-ops the
+    'Run estimation' button). category_main/type ride in input_spec instead."""
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "INSERT INTO estimation_runs" in s, [(4242,)], 1),
+    ]
+    conn = _FakeConn(script)
+
+    spec = {
+        "lat": 50.0, "lng": 14.0, "area_m2": 60.0, "disposition": "2+kk",
+        "floor": 3, "exclude_ids": [99],
+        "category_main": "byt", "category_type": "prodej",
+    }
+    run_id = _insert_pending_run(
+        conn,  # type: ignore[arg-type]
+        sreality_id=99, spec=spec, estimate_kind="sale",
+    )
+    assert run_id == 4242
+
+    insert_sql, params = next(
+        (sql, p) for sql, p in conn.executed if "INSERT INTO estimation_runs" in sql
+    )
+    # The two phantom columns must NOT appear in the INSERT column list.
+    cols_clause = insert_sql.split("VALUES")[0]
+    assert "category_main" not in cols_clause
+    assert "category_type" not in cols_clause
+    # And the category survives inside the input_spec jsonb param instead.
+    spec_param = next(p for p in params if isinstance(p, str) and '"category_main"' in p)
+    assert '"category_type": "prodej"' in spec_param

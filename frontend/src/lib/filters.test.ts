@@ -20,11 +20,13 @@ import {
   DEFAULT_FILTERS,
   applyRegistryUpdate,
   applyRegistryUpdates,
+  filtersToWatchdogSpec,
   fromSearchParams,
   isDefault,
   type ListingFilters,
   listingFiltersToRegistryView,
   toSearchParams,
+  watchdogNameSuggestion,
 } from './filters';
 
 describe('URL round-trip', () => {
@@ -315,5 +317,131 @@ describe('applyRegistryUpdates (batched)', () => {
 
   it('returns the original filters for an empty batch', () => {
     expect(applyRegistryUpdates(DEFAULT_FILTERS, [])).toBe(DEFAULT_FILTERS);
+  });
+});
+
+describe('filtersToWatchdogSpec', () => {
+  it('maps category, dispositions and district chips', () => {
+    const f: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      categoryMain: 'byt',
+      categoryType: 'prodej',
+      dispositions: ['2+kk', '2+1'],
+      districts: [{ name: 'Jihlava', context: null }],
+    };
+    const { spec } = filtersToWatchdogSpec(f);
+    expect(spec.category_main).toBe('byt');
+    expect(spec.category_type).toBe('prodej');
+    expect(spec.dispositions).toEqual(['2+kk', '2+1']);
+    expect(spec.districts).toEqual([{ name: 'Jihlava', context: null }]);
+  });
+
+  it('empty multi-selects become null (matcher "no constraint" sentinel)', () => {
+    const { spec } = filtersToWatchdogSpec(DEFAULT_FILTERS);
+    expect(spec.dispositions).toBeNull();
+    expect(spec.districts).toBeNull();
+    expect(spec.portals).toBeNull();
+    expect(spec.condition_match).toBeNull();
+    expect(spec.city_index_rules).toBeNull();
+  });
+
+  it('carries the advanced predicates the matcher honours', () => {
+    const f: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      priceMin: 1_000_000,
+      priceMax: 5_000_000,
+      mfGrossYieldPctMin: 4,
+      maxPriceDropPctMin: 10,
+      priceDropCountMin: 1,
+      minCityPopulation: 50_000,
+      maxCityPopulation: 200_000,
+      cityIndexRules: [{ index_name: 'safety', op: '>=', value: 7 }],
+      nearCityProximity: {
+        index_rules: [{ index_name: 'safety', op: '>=', value: 8 }],
+        population_min: 100_000,
+        radius_km: 15,
+      },
+    };
+    const { spec } = filtersToWatchdogSpec(f);
+    expect(spec.min_price_czk).toBe(1_000_000);
+    expect(spec.max_price_czk).toBe(5_000_000);
+    expect(spec.min_mf_gross_yield_pct).toBe(4);
+    expect(spec.max_price_drop_pct_min).toBe(10);
+    expect(spec.price_drop_count_min).toBe(1);
+    expect(spec.min_city_population).toBe(50_000);
+    expect(spec.max_city_population).toBe(200_000);
+    expect(spec.city_index_rules).toEqual([{ index_name: 'safety', op: '>=', value: 7 }]);
+    expect(spec.near_city_proximity?.radius_km).toBe(15);
+  });
+
+  it('center+radius location maps to lat/lng/radius_m; viewport does not', () => {
+    const cr = { lat: 50.08, lng: 14.42, radius_m: 1500 };
+    const viewport = filtersToWatchdogSpec({
+      ...DEFAULT_FILTERS,
+      locationMode: 'viewport',
+      centerRadius: cr,
+    });
+    expect(viewport.spec.lat).toBeNull();
+    expect(viewport.spec.radius_m).toBeNull();
+
+    const centered = filtersToWatchdogSpec({
+      ...DEFAULT_FILTERS,
+      locationMode: 'center_radius',
+      centerRadius: cr,
+    });
+    expect(centered.spec.lat).toBe(50.08);
+    expect(centered.spec.lng).toBe(14.42);
+    expect(centered.spec.radius_m).toBe(1500);
+  });
+
+  it('tri-state amenities pivot to bool | null', () => {
+    const { spec } = filtersToWatchdogSpec({
+      ...DEFAULT_FILTERS,
+      hasBalcony: 'yes',
+      garage: 'no',
+      cellar: 'any',
+    });
+    expect(spec.has_balcony).toBe(true);
+    expect(spec.garage).toBe(false);
+    expect(spec.cellar).toBeNull();
+  });
+
+  it('reports set-but-unmonitored Browse filters in `unsupported`', () => {
+    const { unsupported } = filtersToWatchdogSpec({
+      ...DEFAULT_FILTERS,
+      status: 'active',
+      lastSeenMaxDays: 7,
+      tags: [3],
+      buildingMaterial: 'cihla',
+    });
+    expect(unsupported).toContain('listing status');
+    expect(unsupported).toContain('last/first-seen date range');
+    expect(unsupported).toContain('tags');
+    expect(unsupported).toContain('building material');
+  });
+
+  it('a default filter set has nothing unsupported', () => {
+    expect(filtersToWatchdogSpec(DEFAULT_FILTERS).unsupported).toEqual([]);
+  });
+});
+
+describe('watchdogNameSuggestion', () => {
+  it('builds category · dispositions · districts', () => {
+    expect(
+      watchdogNameSuggestion({
+        ...DEFAULT_FILTERS,
+        categoryMain: 'byt',
+        categoryType: 'prodej',
+        dispositions: ['2+kk', '2+1'],
+        districts: [
+          { name: 'Jihlava', context: null },
+          { name: 'Havlíčkův Brod', context: null },
+        ],
+      }),
+    ).toBe('byt prodej · 2+kk, 2+1 · Jihlava, Havlíčkův Brod');
+  });
+
+  it('falls back to just the category when nothing else is set', () => {
+    expect(watchdogNameSuggestion(DEFAULT_FILTERS)).toBe('byt pronajem');
   });
 });

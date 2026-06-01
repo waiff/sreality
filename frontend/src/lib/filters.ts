@@ -1,4 +1,8 @@
 import type { Disposition, Furnished, Ownership } from './types';
+import {
+  DEFAULT_WATCHDOG_FILTER_SPEC,
+  type WatchdogFilterSpec,
+} from './types';
 
 export type TriState = 'any' | 'yes' | 'no';
 export type ListingStatus = 'active' | 'inactive' | 'any';
@@ -671,6 +675,27 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
   return `Showing ${bits.join(' ')}`;
 };
 
+/* A short, human default name for a watchdog created from the current Browse
+ * filters — `category type · dispositions · districts`, e.g.
+ * "byt prodej · 2+kk, 2+1 · Jihlava, HB". Operator can overwrite it in the
+ * Create-watchdog dialog. */
+export const watchdogNameSuggestion = (f: ListingFilters): string => {
+  const parts: string[] = [`${f.categoryMain} ${f.categoryType}`];
+  if (f.dispositions.length) {
+    parts.push(
+      f.dispositions.slice(0, 4).join(', ')
+      + (f.dispositions.length > 4 ? '…' : ''),
+    );
+  }
+  if (f.districts.length) {
+    parts.push(
+      f.districts.slice(0, 3).map((d) => d.name).join(', ')
+      + (f.districts.length > 3 ? '…' : ''),
+    );
+  }
+  return parts.join(' · ');
+};
+
 export const isDefault = (f: ListingFilters): boolean =>
   f.categoryMain === 'byt' &&
   f.categoryType === 'pronajem' &&
@@ -898,4 +923,108 @@ export function applyRegistryUpdates(
   let next = filters;
   for (const u of updates) next = applyRegistryUpdate(next, u.id, u.value);
   return next;
+}
+
+/* ------------------------------------------------------------------------- *
+ * Browse filters → Watchdog spec (Create-watchdog-from-Browse).
+ *
+ * The watchdog matcher (`api/notifications._build_match_clauses`) honours a
+ * subset of the Browse filter set — the attribute predicates that make sense
+ * "the moment a new listing matches". Browse filters that the matcher has no
+ * clause for are NOT silently dropped: `filtersToWatchdogSpec` reports them in
+ * `unsupported` so the UI can tell the operator what won't be watched.
+ *
+ * Honoured (mapped): category, disposition, district chips, price / price-per-m²
+ * / MF-yield / area / usable / estate bounds, tri-state amenities, furnished,
+ * ownership, portals, condition_match, parking-lots min, condition-level mins,
+ * the price-history mins (distinct-site / price-drop / price-rise count, max
+ * price-drop %), and ALL the city-quality predicates (index rules, population
+ * min/max, near-city proximity). center+radius → lat/lng/radius_m.
+ *
+ * NOT honoured by the matcher (reported as unsupported when set): listing
+ * `status`, the last-seen / first-seen / time-on-market day ranges (a watchdog
+ * fires on brand-new listings, so "seen N days ago" is meaningless), the map
+ * `bounds` viewport (use a district chip or center+radius instead),
+ * `buildingMaterial`, `garden_area` bounds, and `tags`. */
+
+const UNSUPPORTED_LABELS: ReadonlyArray<{
+  test: (f: ListingFilters) => boolean;
+  label: string;
+}> = [
+  { test: (f) => f.status !== 'any', label: 'listing status' },
+  { test: (f) => f.bounds != null, label: 'map area' },
+  {
+    test: (f) =>
+      f.lastSeenMinDays != null || f.lastSeenMaxDays != null
+      || f.firstSeenMinDays != null || f.firstSeenMaxDays != null,
+    label: 'last/first-seen date range',
+  },
+  { test: (f) => f.tomDaysMin != null || f.tomDaysMax != null, label: 'time on market' },
+  { test: (f) => f.buildingMaterial != null, label: 'building material' },
+  { test: (f) => f.gardenAreaMin != null || f.gardenAreaMax != null, label: 'garden area' },
+  { test: (f) => f.tags.length > 0, label: 'tags' },
+];
+
+export interface FiltersToWatchdogResult {
+  spec: WatchdogFilterSpec;
+  /* Human-readable names of set-but-unmonitored Browse filters. */
+  unsupported: string[];
+}
+
+export function filtersToWatchdogSpec(
+  filters: ListingFilters,
+): FiltersToWatchdogResult {
+  const f = filters;
+  const arr = <T>(xs: T[]): T[] | null => (xs.length === 0 ? null : xs);
+  /* center+radius is the only spatial mode a watchdog can express (the matcher
+   * has no viewport clause). All three of lat/lng/radius are needed or none. */
+  const cr = f.locationMode === 'center_radius' ? f.centerRadius : null;
+
+  const spec: WatchdogFilterSpec = {
+    ...DEFAULT_WATCHDOG_FILTER_SPEC,
+    category_main: f.categoryMain,
+    category_type: f.categoryType,
+    category_sub_cb: f.categorySubCb,
+    dispositions: arr(f.dispositions),
+    districts: arr(f.districts),
+    lat: cr ? cr.lat : null,
+    lng: cr ? cr.lng : null,
+    radius_m: cr ? cr.radius_m : null,
+    min_price_czk: f.priceMin,
+    max_price_czk: f.priceMax,
+    min_price_per_m2: f.pricePerM2Min,
+    max_price_per_m2: f.pricePerM2Max,
+    min_mf_gross_yield_pct: f.mfGrossYieldPctMin,
+    max_mf_gross_yield_pct: f.mfGrossYieldPctMax,
+    min_area_m2: f.areaMin,
+    max_area_m2: f.areaMax,
+    min_usable_area: f.usableAreaMin,
+    max_usable_area: f.usableAreaMax,
+    min_estate_area: f.estateAreaMin,
+    max_estate_area: f.estateAreaMax,
+    has_balcony: triToBoolNullable(f.hasBalcony),
+    has_lift: triToBoolNullable(f.hasLift),
+    has_parking: triToBoolNullable(f.hasParking),
+    terrace: triToBoolNullable(f.terrace),
+    cellar: triToBoolNullable(f.cellar),
+    garage: triToBoolNullable(f.garage),
+    furnished: f.furnished,
+    ownership: f.ownership,
+    portals: arr(f.portals),
+    condition_match: arr(f.conditionMatch),
+    min_parking_lots: f.parkingLotsMin,
+    building_condition_level_min: f.buildingConditionLevelMin,
+    apartment_condition_level_min: f.apartmentConditionLevelMin,
+    distinct_site_count_min: f.distinctSiteCountMin,
+    price_drop_count_min: f.priceDropCountMin,
+    price_rise_count_min: f.priceRiseCountMin,
+    max_price_drop_pct_min: f.maxPriceDropPctMin,
+    city_index_rules: arr(f.cityIndexRules),
+    min_city_population: f.minCityPopulation,
+    max_city_population: f.maxCityPopulation,
+    near_city_proximity: f.nearCityProximity,
+  };
+
+  const unsupported = UNSUPPORTED_LABELS.filter((u) => u.test(f)).map((u) => u.label);
+  return { spec, unsupported };
 }

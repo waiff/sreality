@@ -986,6 +986,10 @@ export interface WatchdogFilterSpec {
   // Price per m² bounds (price_czk / NULLIF(area_m2, 0)).
   min_price_per_m2: number | null;
   max_price_per_m2: number | null;
+  // MF gross rental yield % bounds (migration 133). Sale apartments only;
+  // the matcher honours these (api/notifications.py _build_match_clauses).
+  min_mf_gross_yield_pct: number | null;
+  max_mf_gross_yield_pct: number | null;
   min_area_m2: number | null;
   max_area_m2: number | null;
   min_usable_area: number | null;
@@ -1058,6 +1062,8 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   max_price_czk: null,
   min_price_per_m2: null,
   max_price_per_m2: null,
+  min_mf_gross_yield_pct: null,
+  max_mf_gross_yield_pct: null,
   min_area_m2: null,
   max_area_m2: null,
   min_usable_area: null,

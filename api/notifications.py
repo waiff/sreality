@@ -734,6 +734,10 @@ def kickoff_estimation_for_dispatch(
         "disposition": listing.get("disposition"),
         "floor": listing.get("floor"),
         "exclude_ids": [sreality_id],
+        # category_main/type are NOT columns on estimation_runs; carry them in
+        # input_spec so run_pending_estimation can build ComparableFilters.
+        "category_main": listing.get("category_main"),
+        "category_type": listing.get("category_type"),
     }
     estimate_kind = (
         "sale" if listing.get("category_type") == "prodej" else "rent"
@@ -744,8 +748,6 @@ def kickoff_estimation_for_dispatch(
         sreality_id=sreality_id,
         spec=spec,
         estimate_kind=estimate_kind,
-        category_main=listing.get("category_main"),
-        category_type=listing.get("category_type"),
     )
     _link_dispatch_run(conn, dispatch_id, run_id)
     return (_fetch_dispatch(conn, dispatch_id) or {}, run_id)
@@ -768,30 +770,28 @@ def _insert_pending_run(
     sreality_id: int,
     spec: dict[str, Any],
     estimate_kind: str,
-    category_main: str | None,
-    category_type: str | None,
 ) -> int:
     """INSERT a 'pending' estimation_runs row that the background task
-    will UPDATE to a terminal status once estimate_yield returns."""
+    will UPDATE to a terminal status once estimate_yield returns.
+
+    category_main/category_type ride inside `spec` (input_spec jsonb) —
+    estimation_runs has no such columns.
+    """
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO estimation_runs ("
             "  source, mode, status, estimate_kind, "
             "  input_sreality_id, input_spec, "
-            "  category_main, category_type, "
             "  trace"
             ") VALUES ("
             "  'ui', 'deterministic', 'pending', %s, "
             "  %s, %s::jsonb, "
-            "  %s, %s, "
             "  %s::jsonb"
             ") RETURNING id",
             (
                 estimate_kind,
                 sreality_id,
                 json.dumps(spec),
-                category_main,
-                category_type,
                 json.dumps({
                     "version": 2,
                     "summary": "queued from watchdog notification",
@@ -851,8 +851,7 @@ def run_pending_estimation(run_id: int) -> None:
         conn = scraper_db.connect()
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT input_sreality_id, input_spec, estimate_kind, "
-                "       category_main, category_type "
+                "SELECT input_sreality_id, input_spec, estimate_kind "
                 "FROM estimation_runs WHERE id = %s",
                 (run_id,),
             )
@@ -864,8 +863,9 @@ def run_pending_estimation(run_id: int) -> None:
         sreality_id = row[0]
         spec = row[1] or {}
         estimate_kind = row[2] or "rent"
-        category_main = row[3]
-        category_type = row[4]
+        # category_main/type travel in input_spec (no such columns on the table).
+        category_main = spec.get("category_main")
+        category_type = spec.get("category_type")
 
         if (
             spec.get("lat") is None

@@ -96,6 +96,11 @@ export default function Watchdog() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: watchdogKeys.all });
     },
+    onError: (err: Error) => {
+      // Surface the failure instead of silently reverting the button — a
+      // server-side error here previously looked like "nothing happens".
+      window.alert(`Couldn't start the estimation: ${err.message}`);
+    },
   });
 
   const markSeenMut = useMutation({

@@ -6,6 +6,26 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Create watchdog from Browse + fix Run-estimation kickoff
+- **Create watchdog from Browse.** A "+ Create watchdog" button next to the Browse
+  headline saves the current filter set as a watchdog after a name-prompt dialog
+  (`CreateWatchdogModal`). `filtersToWatchdogSpec` (frontend/src/lib/filters.ts)
+  maps every Browse filter the matcher honours — category, dispositions, district
+  chips, price / price-per-m² / MF-yield / area bounds, tri-state amenities,
+  furnished/ownership/portals/condition, condition-level mins, the price-history
+  mins (price-drop count, **max price-drop %**), and all city-quality predicates
+  (index rules, **population min/max**, **near-city proximity**). center+radius →
+  lat/lng/radius_m. Browse-only filters the watchdog matcher has no clause for
+  (status, date ranges, map viewport, building material, garden area, tags) are
+  reported in the dialog so the operator isn't surprised. The new watchdog appears
+  in the Watchdog feed / Manage list like any other.
+- **Fix: "Run estimation" on the watchdog feed did nothing.** `_insert_pending_run`
+  INSERTed into `estimation_runs.category_main/category_type`, columns that don't
+  exist → the endpoint 500'd and the button silently reverted (no `onError`). Moved
+  category into `input_spec` jsonb (already read back by `run_pending_estimation`),
+  added an `onError` alert, and a regression test asserting the INSERT never names
+  the phantom columns.
+
 ### 2026-06: MF gross-yield Browse filter
 
 - **What:** a derived `listings.mf_gross_yield_pct` (MF reference rent × 12 / asking price)
