@@ -834,8 +834,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "images.yml",
-    "name": "Scraping: Sreality image backlog drain",
-    "description": "THE image-download workflow. Images are fully decoupled from the scrape (scrape.yml is index + detail only), so this is the single owner of all image downloading — both newest active listings and the deep INACTIVE/ historical backlog. Runs the image-download phase only, every 2 hours.",
+    "name": "Scraping: image backlog drain (sharded)",
+    "description": "THE backlog image-download workflow. Images are fully decoupled from every portal's crawl (the crawls only record image-URL rows; this job uploads the bytes to R2), so this is the owner of the deep backlog across ALL portals (sreality, idnes, bazos, bezrealitky, maxima, mmreality). Source-agnostic.",
     "manual": true,
     "schedules": [
       {
@@ -849,7 +849,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "max_image_downloads",
-        "description": "Override images-per-run cap (blank = 0 = drain to empty / suspicious-stop)",
+        "description": "Override per-shard images-per-run cap (blank = 18000; 0 = drain to empty / suspicious-stop)",
         "required": false,
         "type": "string",
         "default": null,
@@ -857,7 +857,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "image_workers",
-        "description": "Override concurrent workers (blank = 32)",
+        "description": "Override concurrent workers per shard (blank = 32)",
         "required": false,
         "type": "string",
         "default": null,
@@ -865,7 +865,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "images_active_only",
-        "description": "Restrict to active listings only. Default false: drain the full backlog incl. inactive (the hourly scrape already covers active).",
+        "description": "Restrict to active listings only. Default false: drain the full backlog incl. inactive (the fresh fast lane already covers new actives).",
         "required": false,
         "type": "boolean",
         "default": "false",
@@ -879,12 +879,59 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "images-backfill",
-    "cancelInProgress": false,
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
     "timeoutMinutes": 110,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/images.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/images.yml"
+  },
+  {
+    "filename": "images_fresh.yml",
+    "name": "Scraping: fresh-listing image fast lane",
+    "description": "Low-latency image fetch for the NEWEST active listings across ALL portals, so a freshly-scraped card renders a photo within minutes instead of waiting for the 2-hourly sharded backlog drain (images.yml). The frontend can only show an image once its bytes are in R2 (storage_path set) — original portal URLs are hotlink/expiry-protected — so racing those URLs on fresh listings is also what prevents the image loss we already saw (~43k+ sreality images lost to expiry).",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/15 * * * *",
+        "human": "Every 15 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_image_downloads",
+        "description": "Override per-run cap (blank = 2500)",
+        "required": false,
+        "type": "string",
+        "default": null,
+        "options": null
+      },
+      {
+        "name": "image_workers",
+        "description": "Override concurrent workers (blank = 32)",
+        "required": false,
+        "type": "string",
+        "default": null,
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SCRAPE_CHAIN_TOKEN",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "images-fresh",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/images_fresh.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/images_fresh.yml"
   },
   {
     "filename": "index_walk.yml",

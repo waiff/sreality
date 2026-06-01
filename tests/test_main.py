@@ -730,6 +730,41 @@ def test_images_only_does_not_open_scrape_run(monkeypatch):
     assert calls["finalize"] == 0
 
 
+def test_parse_shard_parses_and_validates():
+    assert scraper_main._parse_shard(None) is None
+    assert scraper_main._parse_shard("") is None
+    assert scraper_main._parse_shard("0/4") == (0, 4)
+    assert scraper_main._parse_shard("3/4") == (3, 4)
+
+
+@pytest.mark.parametrize("bad", ["4/4", "5/4", "-1/4", "1", "1/0", "a/b"])
+def test_parse_shard_rejects_bad_input(bad):
+    with pytest.raises(SystemExit):
+        scraper_main._parse_shard(bad)
+
+
+def test_parse_sources_splits_and_trims():
+    assert scraper_main._parse_sources(None) is None
+    assert scraper_main._parse_sources("") is None
+    assert scraper_main._parse_sources("idnes") == ("idnes",)
+    assert scraper_main._parse_sources(" idnes , bazos ") == ("idnes", "bazos")
+
+
+def test_images_only_passes_shard_and_sources_through(monkeypatch):
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(scraper_main.db, "connect", lambda: _NoopConn())
+    monkeypatch.setattr(
+        scraper_main, "_run_image_downloads",
+        lambda **k: captured.update(k) or {"images_stored": 0, "by_category": {}},
+    )
+    rc = scraper_main.main(
+        ["--images-only", "--image-shard", "1/4", "--image-sources", "idnes,bazos"]
+    )
+    assert rc == 0
+    assert captured["shard"] == (1, 4)
+    assert captured["sources"] == ("idnes", "bazos")
+
+
 def test_main_finalizes_run_even_when_scrape_crashes(monkeypatch):
     """If the scrape work raises, main() must still finalize the run row in its
     `finally` — otherwise the row is orphaned ('stuck') and freezes Health."""

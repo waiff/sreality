@@ -1,30 +1,32 @@
-name: "Scraping: Sreality image backlog drain"
+name: "Scraping: image backlog drain (sharded)"
 
-# THE image-download workflow. Images are fully decoupled from the scrape
-# (scrape.yml is index + detail only), so this is the single owner of all
-# image downloading — both newest active listings and the deep INACTIVE/
-# historical backlog. Runs the image-download phase only, every 2 hours.
+# THE backlog image-download workflow. Images are fully decoupled from every
+# portal's crawl (the crawls only record image-URL rows; this job uploads the
+# bytes to R2), so this is the owner of the deep backlog across ALL portals
+# (sreality, idnes, bazos, bezrealitky, maxima, mmreality). Source-agnostic.
 #
-# Configured for the operator's spec:
-#   * Drains ALL pending images by default (active + inactive); tick
-#     images_active_only to restrict to active listings only. The selection
-#     orders active listings first, so fresh listings get pictures soonest.
-#   * --max-image-downloads defaults to a BOUNDED per-run cap (see the run
-#     step) so each run exits cleanly inside the timeout instead of draining
-#     a huge backlog to a SIGKILL. Per-image commits mean progress is never
-#     lost; the next tick continues. Override to 0 to drain-to-empty on demand.
-#     The suspicious-stop heuristic (transient-failure rate > 30% over the last
-#     100 outcomes) still bails early if sreality's CDN starts blocking.
-#   * --image-workers 32 — dial via workflow_dispatch if the CDN throttles.
-#   * Concurrency group `images-backfill` with cancel-in-progress
-#     false. If a still-draining run is in flight when the next 2h
-#     cron tick arrives, the new run queues and succeeds the old one.
+# Horizontally sharded: the single ~11k img/hr drainer could not keep pace with
+# 5-portal inflow (~14k/hr) on top of a ~900k backlog, so the queue grew and
+# fresh listings rendered imageless. This runs the image phase as N=4 parallel
+# jobs, each owning the `image_id mod 4 == shard` slice (--image-shard k/4), for
+# ~4x throughput with no cross-job coordination. The near-real-time fresh fast
+# lane (images_fresh.yml) owns new-listing latency separately.
 #
-# Image failures that look like the parent listing was taken down
-# trigger an inline freshness check, which flips the listing to
-# is_active = false AND bulk-marks its remaining images as
-# unavailable_reason = 'listing_taken_down'. Those outcomes do NOT
-# count toward the suspicious-stop ratio.
+#   * Default drains ALL pending images (active + inactive); the selection
+#     orders active listings first so what's left of the fresh gap drains first.
+#   * Per-shard --max-image-downloads is sized to EXIT CLEANLY inside the
+#     110-min timeout (so scrape_run finalize runs, no orphaned/stuck rows)
+#     rather than being SIGKILLed. Per-image commits mean progress is never lost;
+#     the next 2-hourly tick continues the drain. Override to 0 to drain-to-empty.
+#   * Each shard has its OWN suspicious-stop circuit-breaker (transient-failure
+#     rate > 30% over its last 100 outcomes) and its own runner IP, so per-IP
+#     request rate stays at today's proven level — only aggregate load rises.
+#   * Per-shard concurrency group with cancel-in-progress false: a still-draining
+#     shard is never killed mid-run; the next tick queues behind it.
+#
+# Image failures that look like the parent listing was taken down trigger an
+# inline freshness check, which flips the listing inactive AND bulk-marks its
+# remaining images unavailable. Those outcomes do NOT count toward suspicious-stop.
 
 on:
   schedule:
@@ -32,27 +34,33 @@ on:
   workflow_dispatch:
     inputs:
       max_image_downloads:
-        description: "Override images-per-run cap (blank = 0 = drain to empty / suspicious-stop)"
+        description: "Override per-shard images-per-run cap (blank = 18000; 0 = drain to empty / suspicious-stop)"
         required: false
         type: string
       image_workers:
-        description: "Override concurrent workers (blank = 32)"
+        description: "Override concurrent workers per shard (blank = 32)"
         required: false
         type: string
       images_active_only:
-        description: "Restrict to active listings only. Default false: drain the full backlog incl. inactive (the hourly scrape already covers active)."
+        description: "Restrict to active listings only. Default false: drain the full backlog incl. inactive (the fresh fast lane already covers new actives)."
         required: false
         type: boolean
         default: false
 
-concurrency:
-  group: images-backfill
-  cancel-in-progress: false
-
 jobs:
   images:
+    strategy:
+      fail-fast: false        # one shard's CDN hiccup must not cancel the others
+      max-parallel: 4
+      matrix:
+        shard: [0, 1, 2, 3]
     runs-on: ubuntu-latest
     timeout-minutes: 110   # under the 2h cron interval so we never overlap ourselves
+    # Per-shard group so the 4 shards run in parallel, but a single shard never
+    # overlaps its own previous (still-draining) run.
+    concurrency:
+      group: images-backfill-${{ matrix.shard }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -65,7 +73,7 @@ jobs:
       - name: Install
         run: pip install -e .
 
-      - name: Run image-download phase
+      - name: Run image-download phase (shard ${{ matrix.shard }}/4)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -75,21 +83,18 @@ jobs:
         run: |
           MAX_IMG="${{ inputs.max_image_downloads }}"
           if [ -z "$MAX_IMG" ]; then
-            # Bounded so the run EXITS CLEANLY within the 110-min timeout instead
-            # of draining-to-empty against a huge backlog and being SIGKILLed
-            # ("cancelled"). Per-image commits mean progress is never lost either
-            # way; a clean exit just keeps the run-history honest and frees the
-            # runner. Sized below measured throughput; the next 2-hourly tick
-            # continues the drain. Override to 0 to drain-to-empty on demand.
-            MAX_IMG="40000"
+            # Sized BELOW one shard's measured ~11k/hr × ~100 min so the run
+            # finishes the cap and exits cleanly (finalize runs) well before the
+            # 110-min timeout. 4 shards × 18000 ≈ 72k per 2h tick ≈ 36k/hr
+            # aggregate — comfortably above the ~14k/hr inflow, so the ~900k
+            # backlog drains over ~1.5-2 days, then stays cleared.
+            MAX_IMG="18000"
           fi
           WORKERS="${{ inputs.image_workers }}"
           if [ -z "$WORKERS" ]; then
             WORKERS="32"
           fi
-          ARGS="--images-only --max-image-downloads $MAX_IMG --image-workers $WORKERS"
-          # Default (scheduled / unticked) drains the full backlog incl.
-          # inactive; only restrict when the operator explicitly ticks it.
+          ARGS="--images-only --max-image-downloads $MAX_IMG --image-workers $WORKERS --image-shard ${{ matrix.shard }}/4"
           if [ "${{ inputs.images_active_only }}" = "true" ]; then
             ARGS="$ARGS --images-active-only"
           fi
@@ -97,13 +102,23 @@ jobs:
           echo "Running with: $ARGS"
           python -m scraper.main $ARGS
 
-      # Keep the Health "Image mirror" tile current. Its RPC reads a
-      # precomputed matview (migration 115) instead of scanning the full
-      # images table on every load; this refreshes it off the request path.
-      # if: always() so the stats stay fresh even if the drain bailed early
-      # (e.g. the suspicious-stop heuristic) — the counts still moved.
+  # Refresh the Health "Image mirror" matview ONCE after all shards finish,
+  # rather than 4x concurrently (REFRESH takes an exclusive lock). always() so
+  # the stats stay fresh even if some shards bailed early — the counts moved.
+  refresh-stats:
+    needs: images
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e .
       - name: Refresh image-storage stats matview
-        if: always()
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: python -m scripts.refresh_image_stats

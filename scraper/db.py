@@ -808,6 +808,9 @@ def pending_image_downloads(
     max_attempts: int = 5,
     limit: int = 1000,
     active_only: bool = False,
+    *,
+    shard: tuple[int, int] | None = None,
+    sources: tuple[str, ...] | None = None,
 ) -> list[tuple[int, int, int | None, str, str | None, str | None]]:
     """Return (image_id, sreality_id, sequence, sreality_url, category_main, category_type)
     rows that still need download.
@@ -821,6 +824,12 @@ def pending_image_downloads(
     `is_active = true` — the backfill workflow's prioritisation knob,
     so the cap-bounded slice goes to listings users can still browse.
 
+    `shard=(k, n)` partitions the pending queue by `image_id mod n == k`,
+    so N parallel drainer jobs each own a disjoint slice — the horizontal
+    scale-out knob. `sources` restricts to specific `listings.source`
+    values (per-CDN scoping). Both are pure selection predicates; the
+    download path stays source-agnostic.
+
     Ordering puts active listings first (when both kinds are in scope)
     and newest within each tier so freshly-discovered active images
     drain before old inactive ones. The category columns come from the
@@ -833,6 +842,18 @@ def pending_image_downloads(
         if active_only
         else "ORDER BY (l.is_active IS TRUE) DESC NULLS LAST, i.id DESC"
     )
+    # Append predicates conditionally so the default call's params stay
+    # exactly (max_attempts, limit) — tests assert that shape.
+    extra = ""
+    params: list[Any] = [max_attempts]
+    if sources:
+        extra += " AND l.source = ANY(%s)"
+        params.append(list(sources))
+    if shard is not None:
+        k, n = shard
+        extra += " AND (i.id %% %s) = %s"
+        params.extend([n, k])
+    params.append(limit)
     sql = f"""
         SELECT i.id, i.sreality_id, i.sequence, i.sreality_url,
                l.category_main, l.category_type
@@ -841,12 +862,12 @@ def pending_image_downloads(
         WHERE i.storage_path IS NULL
           AND i.unavailable_reason IS NULL
           AND i.download_attempts < %s
-          {where_active}
+          {where_active}{extra}
         {order_clause}
         LIMIT %s
     """
     with conn.cursor() as cur:
-        cur.execute(sql, (max_attempts, limit))
+        cur.execute(sql, tuple(params))
         return list(cur.fetchall())
 
 

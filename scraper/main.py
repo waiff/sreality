@@ -251,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
                 max_downloads=max_image_downloads,
                 workers=image_workers,
                 active_only=args.images_active_only,
+                shard=_parse_shard(args.image_shard),
+                sources=_parse_sources(args.image_sources),
             )
             if image_agg.get("stopped_suspicious"):
                 # Exit non-zero so the cron-scheduled backfill workflow
@@ -413,6 +415,28 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=int,
         default=None,
         help="concurrent download/upload workers (default: per-portal config)",
+    )
+    p.add_argument(
+        "--image-shard",
+        type=str,
+        default=None,
+        metavar="K/N",
+        help=(
+            "process only images where (image_id mod N) == K — for matrix "
+            "parallelism, each job claims one shard. 0-indexed (e.g. 0/4). "
+            "Lets N drainer jobs share the backlog with no coordination."
+        ),
+    )
+    p.add_argument(
+        "--image-sources",
+        type=str,
+        default=None,
+        metavar="S1,S2",
+        help=(
+            "restrict the image phase to these listing.source values "
+            "(comma-separated, e.g. 'idnes' or 'bazos,bezrealitky'). "
+            "Default: all sources."
+        ),
     )
     p.add_argument(
         "--detail-workers",
@@ -1326,12 +1350,42 @@ def _clear_failure(conn: Any, sid: int) -> None:
         LOG.warning("could not clear failure for id=%d: %s", sid, e)
 
 
+def _parse_shard(spec: str | None) -> tuple[int, int] | None:
+    """Parse a 'K/N' image-shard spec into (k, n); validate 0 <= k < n."""
+    if not spec:
+        return None
+    try:
+        k_s, n_s = spec.split("/", 1)
+        k, n = int(k_s), int(n_s)
+    except ValueError:
+        raise SystemExit(f"--image-shard must be K/N integers, got {spec!r}")
+    if not (n >= 1 and 0 <= k < n):
+        raise SystemExit(f"--image-shard must satisfy 0 <= K < N, got {spec!r}")
+    return (k, n)
+
+
+def _parse_sources(spec: str | None) -> tuple[str, ...] | None:
+    """Parse a comma-separated --image-sources list; None when unset."""
+    if not spec:
+        return None
+    out = tuple(s.strip() for s in spec.split(",") if s.strip())
+    return out or None
+
+
 def _run_image_downloads(
     max_downloads: int,
     workers: int,
     active_only: bool = False,
+    *,
+    shard: tuple[int, int] | None = None,
+    sources: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Drain pending image downloads. Returns aggregates for scrape_runs.
+
+    `shard=(k, n)` restricts this run to the `image_id mod n == k` slice so
+    N parallel matrix jobs each drain a disjoint partition (horizontal
+    scale-out). `sources` scopes to specific listing sources. Both are
+    pure selection predicates passed through to `pending_image_downloads`.
 
     Loops in batches until either (a) the pending queue is empty,
     (b) the per-run cap is reached (if max_downloads > 0), or (c) the
@@ -1389,9 +1443,11 @@ def _run_image_downloads(
 
     with db.connect() as conn:
         LOG.info(
-            "IMAGES start cap=%s workers=%d active_only=%s",
+            "IMAGES start cap=%s workers=%d active_only=%s shard=%s sources=%s",
             "unlimited" if max_downloads <= 0 else max_downloads,
             workers, active_only,
+            f"{shard[0]}/{shard[1]}" if shard else "none",
+            ",".join(sources) if sources else "all",
         )
 
         # Loop draining one batch at a time. Re-querying between
@@ -1405,6 +1461,7 @@ def _run_image_downloads(
             this_batch = min(batch_size, remaining or batch_size)
             pending = db.pending_image_downloads(
                 conn, limit=this_batch, active_only=active_only,
+                shard=shard, sources=sources,
             )
             if not pending:
                 break

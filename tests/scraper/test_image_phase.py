@@ -288,6 +288,36 @@ def test_pending_image_downloads_default_orders_active_first():
     assert "(l.is_active IS TRUE) DESC NULLS LAST, i.id DESC" in sql
 
 
+def test_pending_image_downloads_shard_appends_modulo():
+    conn = _ScriptedConn([])
+    scraper_db.pending_image_downloads(conn, limit=500, shard=(2, 4))
+    sql, params = conn.cursor_obj.executed[0]
+    assert "(i.id %% %s) = %s" in sql
+    # max_attempts, then shard (n, k), then limit — modulus N before remainder K.
+    assert params == (5, 4, 2, 500)
+
+
+def test_pending_image_downloads_sources_filter():
+    conn = _ScriptedConn([])
+    scraper_db.pending_image_downloads(conn, limit=500, sources=("idnes", "bazos"))
+    sql, params = conn.cursor_obj.executed[0]
+    assert "l.source = ANY(%s)" in sql
+    assert params == (5, ["idnes", "bazos"], 500)
+
+
+def test_pending_image_downloads_shard_and_sources_and_active():
+    conn = _ScriptedConn([])
+    scraper_db.pending_image_downloads(
+        conn, limit=500, active_only=True, shard=(0, 3), sources=("idnes",)
+    )
+    sql, params = conn.cursor_obj.executed[0]
+    assert "l.is_active = true" in sql
+    assert "l.source = ANY(%s)" in sql
+    assert "(i.id %% %s) = %s" in sql
+    # Order of bound params: max_attempts, sources, shard(n, k), limit.
+    assert params == (5, ["idnes"], 3, 0, 500)
+
+
 # ---- _run_image_downloads gates --------------------------------------------
 
 
