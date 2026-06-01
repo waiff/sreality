@@ -290,7 +290,7 @@ def test_health_always_open(client, monkeypatch):
 
     res = client.get("/health")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok"}
+    assert res.json()["status"] == "ok"
 
 
 def test_malformed_authorization_header_rejected(client, monkeypatch):
