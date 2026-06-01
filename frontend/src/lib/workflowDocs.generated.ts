@@ -1204,6 +1204,64 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_population.yml"
   },
   {
+    "filename": "refresh_stale_images.yml",
+    "name": "Jobs: refresh stale image URLs",
+    "description": "Re-opens active listings whose photos aren't in R2 yet so their (possibly rotated) source image URLs get refreshed. Portals rotate image CDN URLs over weeks; a listing whose images the newest-first backfill never reached before its URLs rotated is stuck — the stored URL 404s, the frontend fallback can't load it, and the image downloader can't fetch it. This sweep (scripts.refresh_stale_image_urls) re-enqueues such listings into the source-generic listing_detail_queue; the detail drain re-fetches them, record_images repoints each not-yet-stored image's URL to the current one, and the image backfill (images.yml) then stores the bytes.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 */6 * * *",
+        "human": "Every 6 hours at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max listings to re-enqueue this run",
+        "required": false,
+        "type": "string",
+        "default": "5000",
+        "options": null
+      },
+      {
+        "name": "min_age",
+        "description": "Only sweep listings older than this Postgres interval (unless they have a confirmed-stale image)",
+        "required": false,
+        "type": "string",
+        "default": "3 days",
+        "options": null
+      },
+      {
+        "name": "cooldown",
+        "description": "Per-listing cooldown — skip listings re-enqueued within this interval",
+        "required": false,
+        "type": "string",
+        "default": "14 days",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report counts and exit without enqueuing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "refresh-stale-images",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/refresh_stale_images.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_stale_images.yml"
+  },
+  {
     "filename": "scrape.yml",
     "name": "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)",
     "description": "DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live pipeline is now the cadence split — index_walk.yml (fast, frequent, marks delistings + enqueues) feeds detail_drain.yml (async, batched writes). This combined index+detail walk (_run_full) is kept intact as the instant revert: if the split misbehaves, re-add `schedule: - cron: \"0 * * * *\"` here and disable the two new crons — no code change, the proven pipeline is back. It also remains the way to run an ad-hoc full walk by hand.",
