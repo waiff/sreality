@@ -589,7 +589,7 @@ const DETAIL_COLS =
   'building_type,condition,energy_rating,' +
   'estate_area,usable_area,garden_area,category_sub_cb,' +
   'furnished,terrace,cellar,garage,parking_lots,ownership,' +
-  'description';
+  'description,mf_reference_rent_czk,mf_gross_yield_pct,mf_reference_rent';
 
 export const fetchListingById = async (
   sreality_id: number,

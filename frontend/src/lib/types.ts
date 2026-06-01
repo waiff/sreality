@@ -16,6 +16,31 @@ export type Disposition =
 export type Furnished = 'ano' | 'ne' | 'castecne';
 export type Ownership = 'osobni' | 'druzstevni' | 'statni';
 
+/* Migration 134 — MF Cenová mapa reference-rent formula breakdown stored on
+ * sale apartments (listings.mf_reference_rent). */
+export interface MfReferenceRentAdjustment {
+  attribute: string;
+  czk_per_m2: number;
+}
+
+export interface MfReferenceRent {
+  territory: {
+    ruian_code: number;
+    level: 'ku' | 'obec';
+    name: string;
+    kraj: string | null;
+  };
+  vk: number;
+  is_novostavba: boolean;
+  source_revision: number;
+  base_per_m2: number;
+  adjustments: MfReferenceRentAdjustment[];
+  adjustments_sum_per_m2: number;
+  total_per_m2: number;
+  area_m2: number;
+  monthly_rent_czk: number;
+}
+
 export interface ListingPublic {
   sreality_id: number;
   first_seen_at: string;
@@ -64,6 +89,13 @@ export interface ListingPublic {
    * haven't been re-fetched and had no description in their last
    * snapshot. */
   description: string | null;
+  /* Migration 133/134 — MF Cenová mapa secondary rent reference (sale
+   * apartments only; null otherwise). `_czk` is the monthly reference rent,
+   * `_pct` the gross yield, and `mf_reference_rent` the formula breakdown
+   * behind both. */
+  mf_reference_rent_czk: number | null;
+  mf_gross_yield_pct: number | null;
+  mf_reference_rent: MfReferenceRent | null;
 }
 
 export interface ListingSnapshotPublic {
