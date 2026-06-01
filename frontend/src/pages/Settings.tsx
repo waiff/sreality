@@ -24,12 +24,18 @@ import {
   listAgentTools,
   getFilterSchema,
   setFilterVisibility,
+  getRentMapStatus,
+  listRentMapRevisions,
+  uploadRentMapFile,
+  triggerRentMapFetch,
   type Skill,
   type AppSetting,
   type AgentTool,
   type SkillUpdate,
   type Agenda,
   type FilterSchemaEntry,
+  type RentMapRevision,
+  type RentMapIngestResult,
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
@@ -63,6 +69,20 @@ export default function Settings() {
           (URL parser, listing summary, image comparison).
         </p>
         <AppSettingsSection />
+      </section>
+
+      <section className="mt-10">
+        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
+          Cenová mapa nájemného (MF)
+        </h2>
+        <p className="text-sm text-[var(--color-ink-3)] mb-3">
+          The Ministry of Finance rent price map feeds the secondary rent
+          reference shown on every rental estimate. It auto-grabs monthly from
+          mf.gov.cz; you can also upload a fresh <span className="font-mono">.xlsx</span>{' '}
+          or pull the latest now. Every upload is kept in history; the latest
+          revision is always the one in use.
+        </p>
+        <RentMapSection />
       </section>
 
       <section className="mt-10">
@@ -101,6 +121,156 @@ export default function Settings() {
         </h2>
         <ThemeToggle />
       </section>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Rent map (MF Cenová mapa nájemného)                                   */
+/* -------------------------------------------------------------------- */
+
+function RentMapSection() {
+  const qc = useQueryClient();
+  const statusQ = useQuery({
+    queryKey: ['admin', 'rentmap'],
+    queryFn: getRentMapStatus,
+  });
+  const revsQ = useQuery({
+    queryKey: ['admin', 'rentmap', 'revisions'],
+    queryFn: listRentMapRevisions,
+  });
+  const [busy, setBusy] = useState<'upload' | 'fetch' | null>(null);
+  const [result, setResult] = useState<RentMapIngestResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['admin', 'rentmap'] });
+  };
+
+  const uploadMut = useMutation({
+    mutationFn: (file: File) => uploadRentMapFile(file),
+    onMutate: () => { setBusy('upload'); setError(null); setResult(null); },
+    onSuccess: (r) => { setResult(r); refresh(); },
+    onError: (e: unknown) =>
+      setError(e instanceof Error ? e.message : 'Upload failed'),
+    onSettled: () => setBusy(null),
+  });
+
+  const fetchMut = useMutation({
+    mutationFn: () => triggerRentMapFetch(),
+    onMutate: () => { setBusy('fetch'); setError(null); setResult(null); },
+    onSuccess: (r) => { setResult(r); refresh(); },
+    onError: (e: unknown) =>
+      setError(e instanceof Error ? e.message : 'Fetch failed'),
+    onSettled: () => setBusy(null),
+  });
+
+  const current: RentMapRevision | null = statusQ.data?.current ?? null;
+  const revisions = revsQ.data?.data ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-4 bg-[var(--color-paper)]">
+        <div className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          Current revision
+        </div>
+        {current ? (
+          <div className="mt-2 text-sm">
+            <span className="font-medium">{current.source_date ?? '—'}</span>{' '}
+            <span className="text-[var(--color-ink-3)]">
+              · {current.row_count.toLocaleString('cs-CZ')} territories ·{' '}
+              {current.source_filename}
+            </span>
+            <div className="text-xs text-[var(--color-ink-3)] mt-0.5">
+              ingested{' '}
+              {current.uploaded_at ? fmtAbsolute(current.uploaded_at) : '—'}
+              {current.uploaded_by ? ` by ${current.uploaded_by}` : ''}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-2 text-sm text-[var(--color-ink-3)]">
+            No revision ingested yet.
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-3">
+        <label className="inline-flex items-center gap-2 text-sm cursor-pointer border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2">
+          <span>Upload .xlsx</span>
+          <input
+            type="file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="hidden"
+            disabled={busy !== null}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) uploadMut.mutate(f);
+              e.target.value = '';
+            }}
+          />
+        </label>
+        <button
+          type="button"
+          className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 disabled:opacity-50"
+          disabled={busy !== null}
+          onClick={() => fetchMut.mutate()}
+        >
+          {busy === 'fetch' ? 'Fetching…' : 'Fetch latest from MF'}
+        </button>
+        {busy === 'upload' && (
+          <span className="text-sm text-[var(--color-ink-3)]">Uploading…</span>
+        )}
+      </div>
+
+      {result && (
+        <p className="text-sm text-[var(--color-sage)]">
+          {result.ingested
+            ? `Ingested revision ${result.source_revision} — ${result.territory_count.toLocaleString('cs-CZ')} territories (${result.source_date ?? '—'}).`
+            : `No change — this file (sha ${result.file_sha256.slice(0, 8)}) was already ingested.`}
+        </p>
+      )}
+      {error && <p className="text-sm text-[var(--color-brick)]">{error}</p>}
+
+      <div>
+        <div className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-2">
+          History
+        </div>
+        {revisions.length === 0 ? (
+          <p className="text-sm text-[var(--color-ink-3)]">No revisions yet.</p>
+        ) : (
+          <table className="w-full text-sm border border-[var(--color-rule)]">
+            <thead>
+              <tr className="text-left text-xs uppercase tracking-[0.1em] text-[var(--color-ink-3)] border-b border-[var(--color-rule)]">
+                <th className="px-3 py-2 font-medium">Rev</th>
+                <th className="px-3 py-2 font-medium">Source date</th>
+                <th className="px-3 py-2 font-medium">Territories</th>
+                <th className="px-3 py-2 font-medium">File</th>
+                <th className="px-3 py-2 font-medium">Ingested</th>
+              </tr>
+            </thead>
+            <tbody>
+              {revisions.map((r) => (
+                <tr
+                  key={r.source_revision}
+                  className="border-b border-[var(--color-rule)] last:border-0"
+                >
+                  <td className="px-3 py-2 tabular-nums">{r.source_revision}</td>
+                  <td className="px-3 py-2">{r.source_date ?? '—'}</td>
+                  <td className="px-3 py-2 tabular-nums">
+                    {r.row_count.toLocaleString('cs-CZ')}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs text-[var(--color-ink-3)] truncate max-w-[14rem]">
+                    {r.source_filename}
+                  </td>
+                  <td className="px-3 py-2 text-xs text-[var(--color-ink-3)]">
+                    {r.uploaded_at ? fmtAbsolute(r.uploaded_at) : '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

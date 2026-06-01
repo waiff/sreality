@@ -16,10 +16,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from api import dependencies as deps
+from api import rent_map
 from api.agent import list_agent_tools
 from api.skills import (
     SkillNotFound,
@@ -359,6 +360,61 @@ def put_portal_limits(
         )
     effective = _limits_to_dict(load_portal_config(conn, source).limits)
     return {"source": source, "overrides": merged, "effective": effective}
+
+
+# --- rent map: MF Cenová mapa nájemného (revision history + ingest) --------
+
+@router.get("/rent-map")
+def get_rent_map_status(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    return {"current": rent_map.current_revision(conn)}
+
+
+@router.get("/rent-map/revisions")
+def get_rent_map_revisions(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    return {"data": rent_map.list_revisions(conn)}
+
+
+@router.post("/rent-map/revisions")
+def post_rent_map_upload(
+    file: UploadFile = File(...),
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Operator uploads a Cenová mapa XLSX from Settings. Re-uploading an
+    unchanged file (same sha256) is a no-op."""
+    data = file.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty upload")
+    try:
+        return rent_map.ingest_bytes(
+            conn, data,
+            source_filename=file.filename or "upload.xlsx",
+            uploaded_by="settings_ui",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/rent-map/fetch")
+def post_rent_map_fetch(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Fetch the current XLSX from the MF page now and ingest it."""
+    try:
+        data, filename = rent_map.fetch_latest_xlsx()
+    except Exception as exc:  # noqa: BLE001 - network/parse, report as 502
+        raise HTTPException(
+            status_code=502, detail=f"fetch failed: {exc}",
+        ) from exc
+    try:
+        return rent_map.ingest_bytes(
+            conn, data, source_filename=filename, uploaded_by="settings_ui_fetch",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # --- helpers --------------------------------------------------------------

@@ -78,6 +78,7 @@ from toolkit import (
 )
 from toolkit.image_similarity import ImageCompareError
 from toolkit.region_annotations import RegionAnnotationError
+from toolkit.rent_map import compute_reference_rent
 from toolkit.summaries import SummarizeError
 
 @contextlib.asynccontextmanager
@@ -992,11 +993,32 @@ def post_estimate_yield(
         building_condition_level_min=body.building_condition_level_min,
         apartment_condition_level_min=body.apartment_condition_level_min,
     )
-    return estimate_yield(
+    result = estimate_yield(
         conn, target, filters, body.purchase_price_czk,
         estimate_kind=body.estimate_kind,
         expected_monthly_rent_czk=body.expected_monthly_rent_czk,
     )
+    # Secondary MF Cenová mapa reference (rent only). Best-effort: the
+    # amenity filters double as the subject's attributes for this ad-hoc
+    # surface (the /estimations flow reads the real subject listing).
+    if body.estimate_kind == "rent":
+        reference_rent = compute_reference_rent(
+            conn,
+            lat=target.lat, lng=target.lng, area_m2=target.area_m2,
+            disposition=target.disposition,
+            amenities={
+                "balcony": body.has_balcony is True,
+                "terrace": body.terrace is True,
+                "furnished": body.furnished == "ano",
+                "garage": body.garage is True,
+                "elevator": body.has_lift is True,
+                "other_material": False,
+            },
+            is_novostavba=False,
+        )
+        if reference_rent is not None:
+            result["data"]["reference_rent"] = reference_rent
+    return result
 
 
 # --- curation -------------------------------------------------------------

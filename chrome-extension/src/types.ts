@@ -10,6 +10,18 @@ export interface YieldScenario {
   updated_at: string;
 }
 
+/* MF Cenová mapa secondary rent reference (migration 131). Null on sale
+ * runs, territory misses, and runs predating a rent-map revision. */
+export interface ReferenceRent {
+  territory: { name: string; kraj: string | null };
+  vk: number;
+  is_novostavba: boolean;
+  base_per_m2: number;
+  total_per_m2: number;
+  monthly_rent_czk: number;
+  source_date: string | null;
+}
+
 export interface EstimationRun {
   id: number;
   status: 'pending' | 'running' | 'success' | 'failed';
@@ -20,6 +32,7 @@ export interface EstimationRun {
   estimated_sale_price_czk: number | null;
   input_spec: { area_m2?: number | null } | null;
   scenario: YieldScenario | null;
+  reference_rent: ReferenceRent | null;
   error_message: string | null;
 }
 

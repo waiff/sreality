@@ -631,6 +631,51 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/fetch-fixtures.yml"
   },
   {
+    "filename": "fetch_rent_map.yml",
+    "name": "Jobs: fetch MF rent map (monthly)",
+    "description": "Auto-grab the Ministry of Finance \"Cenová mapa nájemného\" (rent price map) from the MF infografika page, parse it, and append a new rent_map revision — unless the file's sha256 already exists (then it's a no-op). The MF data updates 4×/year (published within 45 days of each quarter end), so a monthly cron mostly no-ops and catches the new release within ~30 days. The same data also lands via manual upload from the Settings page; both share api.rent_map.ingest_bytes, so the latest revision always wins.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 3 5 * *",
+        "human": "0 3 5 * *"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source_url",
+        "description": "Override the MF page URL to scrape the XLSX link from",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Parse + report counts without writing a revision",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "rent-map-fetch",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/fetch_rent_map.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/fetch_rent_map.yml"
+  },
+  {
     "filename": "fetch_sreality_fixtures.yml",
     "name": "Fixtures: sreality v1 JSON",
     "description": "Manual trigger only. Fetches a real search response + one real detail response from a GitHub runner IP (this repo's dev sandbox is 403'd by sreality), scrubs emails/phone numbers, and commits the result as tests/fixtures/sample_search.json + sample_listing.json on the current branch. The live /api/v1/estates API is snake_case (id key `hash_id`, detail wrapped under `result`); these fixtures pin the true shape so the parser tests guard reality instead of the HAR-derived camelCase guess.",

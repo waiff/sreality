@@ -228,6 +228,25 @@ function mountPanel(): {
     ydisp.appendChild(yval);
     body.appendChild(ydisp);
 
+    const ref = state.run?.reference_rent ?? null;
+    if (ref != null) {
+      const refRow = document.createElement('div');
+      refRow.className = 'ref-rent';
+      const rl = document.createElement('span');
+      rl.className = 'ref-rent-label';
+      rl.textContent = 'MF cenová mapa';
+      const rv = document.createElement('span');
+      rv.className = 'ref-rent-value';
+      rv.textContent = `${ref.monthly_rent_czk.toLocaleString('cs-CZ')} Kč`;
+      rv.title =
+        `${ref.total_per_m2} Kč/m² · ${ref.territory.name}` +
+        (ref.territory.kraj ? `, ${ref.territory.kraj}` : '') +
+        (ref.is_novostavba ? ' · novostavba' : '');
+      refRow.appendChild(rl);
+      refRow.appendChild(rv);
+      body.appendChild(refRow);
+    }
+
     const fields = document.createElement('div');
     fields.className = 'fields';
     fields.appendChild(buildField({

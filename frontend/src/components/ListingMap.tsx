@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
-import type { CityIndexDefinition, CuratedCity, MapRow } from '@/lib/queries';
+import type {
+  CityIndexDefinition,
+  CuratedCity,
+  MapRow,
+  RentMapKraj,
+  RentMapPolygon,
+} from '@/lib/queries';
 import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
@@ -105,6 +111,133 @@ type CityFeatureProps = {
 
 type CityFC = GeoJSON.FeatureCollection<GeoJSON.Point, CityFeatureProps>;
 
+/* -------------------------------------------------------------------------- */
+/* MF rent-price choropleth ("Cenová mapa nájemného"). One polygon per Czech  */
+/* obec / katastrální území, coloured by the selected size category's         */
+/* reference rent (Kč/m²). VK1..VK4 is a SINGLE-select; switching VK does not */
+/* refetch — it re-derives the `rent` property on each feature and re-setData.*/
+/* -------------------------------------------------------------------------- */
+
+export type RentVk = 1 | 2 | 3 | 4;
+
+/* Radio labels mirror the official MF map exactly. */
+const RENT_VK_LABELS: Record<RentVk, string> = {
+  1: '1+kk, 1+1',
+  2: '2+kk, 2+1',
+  3: '3+kk, 3+1',
+  4: '4+kk, 4+1',
+};
+
+/* Light-blue → indigo continuous ramp (Kč/m²), reproducing the MF scale.
+ * The same stops feed both the MapLibre fill `interpolate` expression and
+ * the inline legend gradient so the two never drift. */
+const RENT_RAMP: ReadonlyArray<readonly [number, string]> = [
+  [150, '#eaf0f6'],
+  [250, '#9ec3e6'],
+  [350, '#5a7fd6'],
+  [450, '#3b4fb5'],
+  [550, '#2a2a8a'],
+  [600, '#1a1a5e'],
+];
+
+/* NULL rent → neutral grey (no reference value for that territory). */
+const RENT_NULL_COLOR = 'rgba(140, 140, 140, 0.35)';
+
+/* -1 sentinel for "no rent" — MapLibre paint expressions can't compare
+ * against literal null, so the fill expression gates on `< 0`. */
+const rentForVk = (p: RentMapPolygon, vk: RentVk): number | null => {
+  switch (vk) {
+    case 1: return p.vk1_per_m2;
+    case 2: return p.vk2_per_m2;
+    case 3: return p.vk3_per_m2;
+    case 4: return p.vk4_per_m2;
+  }
+};
+
+const czIntFmt = new Intl.NumberFormat('cs-CZ', { maximumFractionDigits: 0 });
+
+type RentFeatureProps = {
+  ruian_code: number;
+  name: string;
+  kraj: string;
+  /* -1 sentinel for "no reference rent" (see rentForVk). */
+  rent: number;
+};
+
+type RentFC = GeoJSON.FeatureCollection<
+  GeoJSON.Polygon | GeoJSON.MultiPolygon,
+  RentFeatureProps
+>;
+
+/* Parse each row's ST_AsGeoJSON geometry string once, attach the
+ * selected-VK rent as a flat `rent` property, and build one
+ * FeatureCollection. Rows whose geometry fails to parse are skipped
+ * rather than crashing the whole layer. */
+const toRentFC = (polygons: RentMapPolygon[], vk: RentVk): RentFC => ({
+  type: 'FeatureCollection',
+  features: polygons.flatMap((p) => {
+    let geometry: GeoJSON.Geometry;
+    try {
+      geometry = JSON.parse(p.geojson) as GeoJSON.Geometry;
+    } catch {
+      return [];
+    }
+    if (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon') {
+      return [];
+    }
+    const rent = rentForVk(p, vk);
+    return [{
+      type: 'Feature' as const,
+      id: p.ruian_code,
+      geometry,
+      properties: {
+        ruian_code: p.ruian_code,
+        name: p.name,
+        kraj: p.kraj ?? '',
+        rent: typeof rent === 'number' && Number.isFinite(rent) ? rent : -1,
+      },
+    }];
+  }),
+});
+
+type KrajFC = GeoJSON.FeatureCollection<
+  GeoJSON.Polygon | GeoJSON.MultiPolygon,
+  { name: string }
+>;
+
+const toKrajFC = (kraje: RentMapKraj[]): KrajFC => ({
+  type: 'FeatureCollection',
+  features: kraje.flatMap((k) => {
+    let geometry: GeoJSON.Geometry;
+    try {
+      geometry = JSON.parse(k.geojson) as GeoJSON.Geometry;
+    } catch {
+      return [];
+    }
+    if (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon') {
+      return [];
+    }
+    return [{
+      type: 'Feature' as const,
+      geometry,
+      properties: { name: k.name },
+    }];
+  }),
+});
+
+const rentPopupHtml = (p: RentFeatureProps): string => {
+  const rentText = p.rent >= 0 ? `${czIntFmt.format(p.rent)} Kč/m²` : '—';
+  const place = p.kraj ? `${p.name}, ${p.kraj}` : p.name;
+  return `
+    <div class="lp">
+      <div class="lp-row">
+        <p class="lp-price">${escape(p.name)}</p>
+      </div>
+      <p class="lp-meta">Obec: ${escape(place)}, Nájemné referenčního bytu: ${escape(rentText)}</p>
+    </div>
+  `;
+};
+
 interface Props {
   rows: MapRow[];
   total: number | null;
@@ -158,6 +291,20 @@ interface Props {
   cityIndexDefinitions?: CityIndexDefinition[];
   onToggleShowCities?: (next: boolean) => void;
   onColorByIndexChange?: (indexName: string | null) => void;
+  /* MF rent-price choropleth ("Cenová mapa nájemného"). The Browse page
+   * hands in the full ~7.6K territory polygons + the 14 kraj borders
+   * (fetched once, cached forever) when the layer is enabled. The fill
+   * sits BELOW the listing markers and city pins so those stay clickable
+   * on top. `rentVk` selects which size category's reference rent colours
+   * the choropleth; `showKraje` toggles the kraj boundary overlay. */
+  rentMapPolygons?: RentMapPolygon[];
+  rentMapKraje?: RentMapKraj[];
+  showRentMap?: boolean;
+  rentVk?: RentVk;
+  showKraje?: boolean;
+  onToggleShowRentMap?: (next: boolean) => void;
+  onRentVkChange?: (vk: RentVk) => void;
+  onToggleShowKraje?: (next: boolean) => void;
 }
 
 export default function ListingMap({
@@ -179,6 +326,14 @@ export default function ListingMap({
   cityIndexDefinitions,
   onToggleShowCities,
   onColorByIndexChange,
+  rentMapPolygons,
+  rentMapKraje,
+  showRentMap = false,
+  rentVk = 1,
+  showKraje = false,
+  onToggleShowRentMap,
+  onRentVkChange,
+  onToggleShowKraje,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -230,6 +385,88 @@ export default function ListingMap({
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 
     map.on('load', () => {
+      /* MF rent-price choropleth. Added FIRST of all overlays so it sits
+       * UNDER the city pins and listing dots — it's a background layer.
+       * Initially empty; the rent-map-data effect below populates the
+       * GeoJSON when props arrive. Switching VK re-derives the per-feature
+       * `rent` and re-setsData (no refetch). */
+      map.addSource('rent-map', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'rent-map-fill',
+        type: 'fill',
+        source: 'rent-map',
+        layout: { visibility: 'none' },
+        paint: {
+          /* -1 sentinel → neutral grey; otherwise interpolate the shared
+           * RENT_RAMP. Inline literal, matching the other paint
+           * expressions in this file. */
+          'fill-color': [
+            'case',
+            ['<', ['get', 'rent'], 0], RENT_NULL_COLOR,
+            [
+              'interpolate', ['linear'], ['get', 'rent'],
+              ...RENT_RAMP.flatMap(([stop, color]) => [stop, color]),
+            ],
+          ],
+          'fill-opacity': 0.62,
+        },
+      });
+      map.addLayer({
+        id: 'rent-map-line',
+        type: 'line',
+        source: 'rent-map',
+        layout: { visibility: 'none' },
+        paint: {
+          'line-color': 'rgba(60, 60, 90, 0.25)',
+          'line-width': 0.4,
+        },
+      });
+
+      /* Optional kraj-boundary overlay (the "Kraje" checkbox). Stronger
+       * line than the per-obec borders so region edges read clearly. */
+      map.addSource('rent-kraje', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'rent-kraje-line',
+        type: 'line',
+        source: 'rent-kraje',
+        layout: { visibility: 'none' },
+        paint: {
+          'line-color': 'rgba(40, 40, 70, 0.55)',
+          'line-width': 1.4,
+        },
+      });
+
+      /* Hover popup for the choropleth. The fill is the hit target;
+       * mirrors the city-pin popup approach. Only wired here — the layer
+       * visibility toggle handles whether it's actually reachable. */
+      map.on('mouseenter', 'rent-map-fill', () => {
+        map.getCanvas().style.cursor = 'pointer';
+      });
+      map.on('mouseleave', 'rent-map-fill', () => {
+        map.getCanvas().style.cursor = '';
+      });
+      map.on('click', 'rent-map-fill', (e) => {
+        const f = e.features?.[0];
+        if (!f) return;
+        const props = f.properties as unknown as RentFeatureProps;
+        popupRef.current?.remove();
+        popupRef.current = new maplibregl.Popup({
+          closeButton: true,
+          closeOnClick: true,
+          maxWidth: '300px',
+          className: 'listing-popup rent-map-popup',
+        })
+          .setLngLat(e.lngLat)
+          .setHTML(rentPopupHtml(props))
+          .addTo(map);
+      });
+
       /* Phase QUAL — curated city pins. Added FIRST so listing dots
        * render above them. Initially empty; the cities-data effect
        * below populates the GeoJSON when props arrive. The colour
@@ -548,6 +785,49 @@ export default function ListingMap({
     };
   }, []);
 
+  /* MF rent choropleth — rebuild the `rent-map` FeatureCollection when
+   * the polygons, the selected VK, or the enabled flag changes. Switching
+   * VK re-derives the flat `rent` property and re-setsData; the data is
+   * already loaded so this never refetches. Visibility toggling keeps the
+   * source loaded so flipping the layer on/off is instant. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const src = map.getSource('rent-map') as GeoJSONSource | undefined;
+    if (!src) return;
+    const polygons = rentMapPolygons ?? [];
+    if (showRentMap && polygons.length > 0) {
+      src.setData(toRentFC(polygons, rentVk));
+    }
+    const vis = showRentMap && polygons.length > 0 ? 'visible' : 'none';
+    if (map.getLayer('rent-map-fill')) {
+      map.setLayoutProperty('rent-map-fill', 'visibility', vis);
+    }
+    if (map.getLayer('rent-map-line')) {
+      map.setLayoutProperty('rent-map-line', 'visibility', vis);
+    }
+  }, [rentMapPolygons, rentVk, showRentMap, ready]);
+
+  /* MF rent choropleth — kraj-boundary overlay. Independent of VK; gated
+   * on both the rent map being shown AND the "Kraje" checkbox. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const src = map.getSource('rent-kraje') as GeoJSONSource | undefined;
+    if (!src) return;
+    const kraje = rentMapKraje ?? [];
+    if (kraje.length > 0) {
+      src.setData(toKrajFC(kraje));
+    }
+    if (map.getLayer('rent-kraje-line')) {
+      map.setLayoutProperty(
+        'rent-kraje-line',
+        'visibility',
+        showRentMap && showKraje && kraje.length > 0 ? 'visible' : 'none',
+      );
+    }
+  }, [rentMapKraje, showRentMap, showKraje, ready]);
+
   /* Phase QUAL — push the filtered city set into the `cities` source
    * whenever the operator changes the city-quality filter, the color-
    * by-index, or the underlying data. The MapLibre `interpolate` paint
@@ -734,6 +1014,99 @@ export default function ListingMap({
           onColorByIndexChange={onColorByIndexChange}
           cityCount={cities.length}
         />
+      )}
+      <RentMapControls
+        showRentMap={showRentMap}
+        rentVk={rentVk}
+        showKraje={showKraje}
+        polygonCount={rentMapPolygons?.length ?? 0}
+        onToggleShowRentMap={onToggleShowRentMap}
+        onRentVkChange={onRentVkChange}
+        onToggleShowKraje={onToggleShowKraje}
+      />
+    </div>
+  );
+}
+
+function RentMapControls({
+  showRentMap,
+  rentVk,
+  showKraje,
+  polygonCount,
+  onToggleShowRentMap,
+  onRentVkChange,
+  onToggleShowKraje,
+}: {
+  showRentMap: boolean;
+  rentVk: RentVk;
+  showKraje: boolean;
+  polygonCount: number;
+  onToggleShowRentMap?: (next: boolean) => void;
+  onRentVkChange?: (vk: RentVk) => void;
+  onToggleShowKraje?: (next: boolean) => void;
+}) {
+  const rampGradient = `linear-gradient(to right, ${RENT_RAMP
+    .map(([, color]) => color)
+    .join(', ')})`;
+  return (
+    <div className="pointer-events-none absolute bottom-3 right-3 flex flex-col gap-2 items-end">
+      <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)]">
+        <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
+          <input
+            type="checkbox"
+            checked={showRentMap}
+            onChange={(e) => onToggleShowRentMap?.(e.target.checked)}
+          />
+          <span>Cenová mapa nájemného</span>
+        </label>
+      </div>
+      {showRentMap && (
+        <div className="pointer-events-auto flex flex-col gap-2 px-2.5 py-2 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] min-w-[180px]">
+          <div className="flex flex-col gap-1">
+            {([1, 2, 3, 4] as RentVk[]).map((vk) => (
+              <label
+                key={vk}
+                className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer"
+              >
+                <input
+                  type="radio"
+                  name="rent-vk"
+                  checked={rentVk === vk}
+                  onChange={() => onRentVkChange?.(vk)}
+                />
+                <span>{RENT_VK_LABELS[vk]}</span>
+              </label>
+            ))}
+          </div>
+          <div className="border-t border-[var(--color-rule)] pt-1.5">
+            <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showKraje}
+                onChange={(e) => onToggleShowKraje?.(e.target.checked)}
+              />
+              <span>Kraje</span>
+            </label>
+          </div>
+          <div className="flex flex-col gap-1 border-t border-[var(--color-rule)] pt-1.5">
+            <span className="text-[0.65rem] text-[var(--color-ink-3)]">
+              Nájemné (Kč/m²)
+            </span>
+            <div
+              className="h-1.5 rounded-sm"
+              style={{ background: rampGradient }}
+            />
+            <div className="flex justify-between text-[0.65rem] text-[var(--color-ink-3)] tabular-nums">
+              <span>{czIntFmt.format(RENT_RAMP[0][0])}</span>
+              <span>{czIntFmt.format(RENT_RAMP[RENT_RAMP.length - 1][0])}</span>
+            </div>
+            {polygonCount === 0 && (
+              <span className="text-[0.65rem] text-[var(--color-ink-3)]">
+                Načítání…
+              </span>
+            )}
+          </div>
+        </div>
       )}
     </div>
   );

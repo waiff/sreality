@@ -6,7 +6,7 @@ import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
-import type { MapFlyToCommand } from '@/components/ListingMap';
+import type { MapFlyToCommand, RentVk } from '@/components/ListingMap';
 import type { MapySuggestion } from '@/lib/maps';
 import {
   fromSearchParams,
@@ -28,6 +28,8 @@ import {
   fetchListingsForMap,
   fetchListingsForTable,
   fetchBrowseStats,
+  fetchRentMapChoropleth,
+  fetchRentMapKraje,
   parseSort,
   sortToParam,
   DEFAULT_SORT,
@@ -37,6 +39,8 @@ import {
   type CityIndexValue,
   type CuratedCity,
   type MapResult,
+  type RentMapKraj,
+  type RentMapPolygon,
   type SortField,
   type SortSpec,
   type TableResult,
@@ -65,6 +69,19 @@ export default function Browse() {
    * on every map gesture. */
   const showCities = searchParams.get('cities') !== '0';
   const colorByIndexName = searchParams.get('colorby') ?? null;
+  /* MF rent-price choropleth ("Cenová mapa nájemného"). Off by default
+   * so it doesn't clutter the listings view — only painted when the
+   * operator explicitly enables it (`?rentmap=1`). `rentvk` selects the
+   * size category (VK1..VK4, default 1); `kraje` toggles the kraj
+   * boundary overlay. Like the city-overlay knobs these live in the URL
+   * (so a shared link reproduces the view) and are NOT serialised by
+   * `toSearchParams`, so `preserveExtras` must carry them. */
+  const showRentMap = searchParams.get('rentmap') === '1';
+  const rentVkParam = parseInt(searchParams.get('rentvk') ?? '1', 10);
+  const rentVk = ([1, 2, 3, 4].includes(rentVkParam)
+    ? rentVkParam
+    : 1) as RentVk;
+  const showKraje = searchParams.get('kraje') === '1';
 
   /* Copy URL keys that live outside `toSearchParams` (tab, sort, the
    * city-overlay knobs). Used by every URL rewriter on this page so
@@ -73,7 +90,7 @@ export default function Browse() {
    * want to reset paging should not call `preserveExtras`. */
   const preserveExtras = useCallback(
     (sp: URLSearchParams): URLSearchParams => {
-      for (const key of ['tab', 'sort', 'cities', 'colorby']) {
+      for (const key of ['tab', 'sort', 'cities', 'colorby', 'rentmap', 'rentvk', 'kraje']) {
         const v = searchParams.get(key);
         if (v != null) sp.set(key, v);
       }
@@ -96,6 +113,34 @@ export default function Browse() {
       const sp = new URLSearchParams(searchParams);
       if (next) sp.set('colorby', next);
       else sp.delete('colorby');
+      setSearchParams(sp, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const setShowRentMap = useCallback(
+    (next: boolean) => {
+      const sp = new URLSearchParams(searchParams);
+      if (next) sp.set('rentmap', '1');
+      else sp.delete('rentmap');
+      setSearchParams(sp, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+  const setRentVk = useCallback(
+    (next: RentVk) => {
+      const sp = new URLSearchParams(searchParams);
+      if (next === 1) sp.delete('rentvk');
+      else sp.set('rentvk', String(next));
+      setSearchParams(sp, { replace: true });
+    },
+    [searchParams, setSearchParams],
+  );
+  const setShowKraje = useCallback(
+    (next: boolean) => {
+      const sp = new URLSearchParams(searchParams);
+      if (next) sp.set('kraje', '1');
+      else sp.delete('kraje');
       setSearchParams(sp, { replace: true });
     },
     [searchParams, setSearchParams],
@@ -230,6 +275,28 @@ export default function Browse() {
   const cityValuesQuery = useQuery<CityIndexValue[], Error>({
     queryKey: ['city_index_values'],
     queryFn: fetchCityIndexValues,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+
+  /* MF rent-price choropleth. The ~7.6K polygons + 14 kraj borders are
+   * an operator-static reference dataset, so fetch once and cache forever
+   * (`staleTime: Infinity`). Gated on the map tab being active AND the
+   * layer being enabled so we never pay the ~MB transfer unless the
+   * operator actually turns the choropleth on. The kraj overlay is
+   * fetched alongside (only when the rent map is shown) so toggling the
+   * "Kraje" checkbox is instant once it's loaded. */
+  const rentMapQuery = useQuery<RentMapPolygon[], Error>({
+    queryKey: ['rent_map_choropleth'],
+    queryFn: fetchRentMapChoropleth,
+    enabled: tabFromUrl === 'map' && showRentMap,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const rentKrajeQuery = useQuery<RentMapKraj[], Error>({
+    queryKey: ['rent_map_kraje'],
+    queryFn: fetchRentMapKraje,
+    enabled: tabFromUrl === 'map' && showRentMap,
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -452,6 +519,14 @@ export default function Browse() {
                     cityIndexValuesAll={cityOverlay.cityIndexValuesAll}
                     cityIndexDefinitions={cityDefsQuery.data ?? []}
                     onColorByIndexChange={setColorByIndex}
+                    rentMapPolygons={rentMapQuery.data ?? []}
+                    rentMapKraje={rentKrajeQuery.data ?? []}
+                    showRentMap={showRentMap}
+                    rentVk={rentVk}
+                    showKraje={showKraje}
+                    onToggleShowRentMap={setShowRentMap}
+                    onRentVkChange={setRentVk}
+                    onToggleShowKraje={setShowKraje}
                   />
                 </Suspense>
               </div>
