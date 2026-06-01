@@ -25,13 +25,12 @@ import {
 import {
   clusterCandidates,
   diffCluster,
-  type ClusterDiffRow,
   type DedupCluster,
   type DiffVerdict,
   type ListingDetailLite,
 } from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
-import { portalShort } from '@/lib/portals';
+import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
 import type {
@@ -413,22 +412,54 @@ function ClusterCard({
           </button>
         </div>
       </div>
-      {/* Browse-sized panels: a fixed ~13rem min column so images stay small
-          and a cluster of 3-4 wraps instead of stretching half the page. */}
-      <div
-        className="grid gap-3"
-        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(13rem, 1fr))' }}
-      >
-        {members.map((side) => (
-          <PropertyPanel
-            key={side.property_id}
-            side={side}
-            urls={urlsFor(side, imagesMap)}
-            sources={sourcesMap.get(side.property_id) ?? []}
-          />
-        ))}
+      {/* Images and the comparison rows share ONE table + colgroup, so each
+          member column lines up exactly under its photo. Fixed ~13rem member
+          columns keep the photos Browse-sized; the table left-aligns and a big
+          cluster scrolls horizontally rather than stretching. */}
+      <div className="overflow-x-auto">
+        <table className="border-collapse text-[0.8rem]" style={{ width: 'auto' }}>
+          <colgroup>
+            <col style={{ width: '6.5rem' }} />
+            <col style={{ width: '1.75rem' }} />
+            {members.map((m) => (
+              <col key={m.property_id} style={{ width: '13rem' }} />
+            ))}
+          </colgroup>
+          <tbody>
+            <tr>
+              <td />
+              <td />
+              {members.map((side) => (
+                <td key={side.property_id} className="align-top px-1 pb-2">
+                  <PropertyPanel
+                    side={side}
+                    urls={urlsFor(side, imagesMap)}
+                    sources={sourcesMap.get(side.property_id) ?? []}
+                  />
+                </td>
+              ))}
+            </tr>
+            {rows.map((r) => (
+              <tr key={r.key} className="border-t border-[var(--color-rule-soft)]">
+                <td className="py-1 pr-2 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] whitespace-nowrap align-middle">
+                  {r.label}
+                </td>
+                <td className="py-1 text-center align-middle">
+                  <span className="inline-flex"><Verdict v={r.verdict} /></span>
+                </td>
+                {r.values.map((v, i) => (
+                  <td
+                    key={members[i]?.property_id ?? i}
+                    className="py-1 px-1 text-left tabular-nums text-[var(--color-ink)] align-middle"
+                  >
+                    {v}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
-      <ClusterDiffTable rows={rows} members={members} />
       {cluster.visual ? (
         <VisualVerdictNote
           verdict={cluster.visual.verdict}
@@ -437,35 +468,6 @@ function ClusterCard({
         />
       ) : null}
     </div>
-  );
-}
-
-/* The N-way comparison table: a column per cluster member + a single ✓/✗ that
- * says whether all known values agree. */
-function ClusterDiffTable({ rows, members }: { rows: ClusterDiffRow[]; members: DedupPropertySide[] }) {
-  return (
-    <table className="w-full mt-3 border-collapse text-[0.8rem]">
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.key} className="border-t border-[var(--color-rule-soft)]">
-            <td className="py-1 pr-2 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] whitespace-nowrap align-middle">
-              {r.label}
-            </td>
-            <td className="py-1 w-6 text-center align-middle">
-              <span className="inline-flex"><Verdict v={r.verdict} /></span>
-            </td>
-            {r.values.map((v, i) => (
-              <td
-                key={members[i]?.property_id ?? i}
-                className="py-1 px-2 text-left tabular-nums text-[var(--color-ink)]"
-              >
-                {v}
-              </td>
-            ))}
-          </tr>
-        ))}
-      </tbody>
-    </table>
   );
 }
 
@@ -577,9 +579,17 @@ function PortalChip({ source }: { source: PropertySource }) {
     tone,
   ].join(' ');
   const label = portalShort(source.source);
-  if (source.source_url) {
+  // sreality's scraper stores no source_url; rebuild the portal URL from the
+  // native id (= sreality_id for sreality rows). Only fall back to the in-app
+  // view when we genuinely can't reach the origin portal.
+  const external = portalListingUrl(
+    source.source,
+    source.source_url,
+    source.source_id_native ?? source.sreality_id,
+  );
+  if (external) {
     return (
-      <a href={source.source_url} target="_blank" rel="noopener noreferrer" className={cls}>
+      <a href={external} target="_blank" rel="noopener noreferrer" className={cls}>
         {label} ↗
       </a>
     );
