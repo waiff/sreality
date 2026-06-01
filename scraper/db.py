@@ -824,11 +824,18 @@ def pending_image_downloads(
     `is_active = true` — the backfill workflow's prioritisation knob,
     so the cap-bounded slice goes to listings users can still browse.
 
-    `shard=(k, n)` partitions the pending queue by `image_id mod n == k`,
-    so N parallel drainer jobs each own a disjoint slice — the horizontal
-    scale-out knob. `sources` restricts to specific `listings.source`
-    values (per-CDN scoping). Both are pure selection predicates; the
-    download path stays source-agnostic.
+    `shard=(k, n)` partitions the pending queue by the PARENT LISTING —
+    `hash(sreality_id) mod n == k` — so N parallel drainer jobs each own a
+    disjoint slice (horizontal scale-out) AND a single listing's photos all
+    fall in ONE shard. Sharding on `image_id` instead would stripe a
+    listing's photos across shards that drain at slightly different rates,
+    so a recent listing renders half its photos until the slowest shard
+    catches up; keying on the listing makes a listing flip to complete in
+    one burst. The id is HASHED (not raw modulo) because sreality ids are
+    multiples of 4, so `sreality_id % n` would pile everything into one
+    shard. `sources` restricts to specific `listings.source` values
+    (per-CDN scoping). Both are pure selection predicates; the download
+    path stays source-agnostic.
 
     Ordering puts active listings first (when both kinds are in scope)
     and newest within each tier so freshly-discovered active images
@@ -851,7 +858,11 @@ def pending_image_downloads(
         params.append(list(sources))
     if shard is not None:
         k, n = shard
-        extra += " AND (i.id %% %s) = %s"
+        # Hash the listing id (not the image id) so a listing's photos all land
+        # in one shard, and hash it (not raw modulo) because sreality ids are
+        # multiples of 4 — raw `sreality_id % n` collapses everything into one
+        # shard. `& 2147483647` clears the sign bit (no abs() overflow risk).
+        extra += " AND (hashint8(i.sreality_id) & 2147483647) %% %s = %s"
         params.extend([n, k])
     params.append(limit)
     sql = f"""
