@@ -165,3 +165,177 @@ export function diffCandidate(
     },
   ];
 }
+
+/* ---- N-way clusters ------------------------------------------------------- */
+/* A pairwise candidate (A-B) plus (B-C) plus (A-C) all describe ONE real-world
+ * property seen as 3 listings. Rather than show three two-up rows (the same
+ * idnes listing appearing in several of them), we union the pairs into one
+ * cluster and render it once with a column per member. */
+
+export interface ClusterVisual {
+  verdict: string;       // High | Medium | Low (engine's forensic read)
+  rationale: string | null;
+  room: string | null;
+}
+
+export interface DedupCluster {
+  key: string;                  // stable key (sorted property ids)
+  members: DedupPropertySide[]; // one per distinct property, oldest-id first
+  candidateIds: number[];       // every candidate edge inside the cluster
+  tier: string;
+  /* The engine's room-aware verdict, if any edge recorded one (the new
+   * street+disposition engine's queued pairs carry it; old geo pairs don't). */
+  visual: ClusterVisual | null;
+}
+
+/* Union-find over the candidate pairs → connected components. */
+export function clusterCandidates(candidates: DedupCandidate[]): DedupCluster[] {
+  const parent = new Map<number, number>();
+  const find = (x: number): number => {
+    let r = x;
+    while (parent.get(r) !== r) r = parent.get(r) as number;
+    let c = x;
+    while (parent.get(c) !== r) {
+      const next = parent.get(c) as number;
+      parent.set(c, r);
+      c = next;
+    }
+    return r;
+  };
+  const ensure = (x: number) => {
+    if (!parent.has(x)) parent.set(x, x);
+  };
+  const union = (a: number, b: number) => {
+    ensure(a); ensure(b);
+    parent.set(find(a), find(b));
+  };
+
+  for (const c of candidates) union(c.left_property.property_id, c.right_property.property_id);
+
+  const sideById = new Map<number, DedupPropertySide>();
+  const edges = new Map<number, number[]>();   // root → candidate ids
+  const tierByRoot = new Map<number, string>();
+  const visualByRoot = new Map<number, ClusterVisual>();
+  for (const c of candidates) {
+    sideById.set(c.left_property.property_id, c.left_property);
+    sideById.set(c.right_property.property_id, c.right_property);
+    const root = find(c.left_property.property_id);
+    (edges.get(root) ?? edges.set(root, []).get(root)!).push(c.id);
+    if (!tierByRoot.has(root)) tierByRoot.set(root, c.tier);
+    if (!visualByRoot.has(root)) {
+      const m = c.markers_matched ?? {};
+      if (typeof m.verdict === 'string') {
+        visualByRoot.set(root, {
+          verdict: m.verdict,
+          rationale: typeof m.rationale === 'string' ? m.rationale : null,
+          room: typeof m.room_type === 'string' ? m.room_type : null,
+        });
+      }
+    }
+  }
+
+  const membersByRoot = new Map<number, number[]>();
+  for (const pid of parent.keys()) {
+    const root = find(pid);
+    (membersByRoot.get(root) ?? membersByRoot.set(root, []).get(root)!).push(pid);
+  }
+
+  const clusters: DedupCluster[] = [];
+  for (const [root, pids] of membersByRoot) {
+    const ids = [...pids].sort((a, b) => a - b);
+    const members = ids
+      .map((id) => sideById.get(id))
+      .filter((s): s is DedupPropertySide => s != null);
+    clusters.push({
+      key: ids.join('-'),
+      members,
+      candidateIds: [...new Set(edges.get(root) ?? [])].sort((a, b) => a - b),
+      tier: tierByRoot.get(root) ?? 'tier1',
+      visual: visualByRoot.get(root) ?? null,
+    });
+  }
+  // Biggest clusters first; stable thereafter.
+  clusters.sort((a, b) => b.members.length - a.members.length || a.key.localeCompare(b.key));
+  return clusters;
+}
+
+export interface ClusterDiffRow {
+  key: string;
+  label: string;
+  verdict: DiffVerdict;   // do all KNOWN values agree (pairwise-compatible)?
+  values: string[];       // one display string per member, in member order
+}
+
+type Compat = (a: string, b: string) => boolean;
+
+/* A row agrees when every pair of present values is compatible; unknown if
+ * fewer than two members supply the value. */
+function clusterVerdict<T>(
+  raw: (T | null)[],
+  compatible: (a: T, b: T) => boolean,
+): DiffVerdict {
+  const present = raw.filter((v): v is T => v != null);
+  if (present.length < 2) return 'unknown';
+  for (let i = 0; i < present.length; i++) {
+    for (let j = i + 1; j < present.length; j++) {
+      if (!compatible(present[i], present[j])) return 'mismatch';
+    }
+  }
+  return 'match';
+}
+
+const priceCompat: Compat = (a, b) => {
+  const na = Number(a); const nb = Number(b);
+  return Math.abs(na - nb) / Math.max(na, nb) <= PRICE_DRIFT_MAX;
+};
+
+export function diffCluster(
+  members: DedupPropertySide[],
+  detailById: (id: number | null) => ListingDetailLite | null | undefined,
+): ClusterDiffRow[] {
+  const detail = members.map((m) => detailById(m.sreality_id));
+  const streets = members.map((_, i) => streetLine(detail[i]));
+  const floors = members.map((_, i) => (detail[i]?.floor != null ? String(detail[i]!.floor) : null));
+
+  return [
+    {
+      key: 'price', label: 'Price',
+      verdict: clusterVerdict(
+        members.map((m) => (m.price_czk != null ? String(m.price_czk) : null)),
+        priceCompat,
+      ),
+      values: members.map((m) => fmtCzk(m.price_czk)),
+    },
+    {
+      key: 'area', label: 'Area',
+      verdict: clusterVerdict(
+        members.map((m) => m.area_m2),
+        (a, b) => Math.abs(a - b) <= AREA_DIFF_MAX_M2,
+      ),
+      values: members.map((m) => fmtArea(m.area_m2)),
+    },
+    {
+      key: 'disposition', label: 'Disposition',
+      verdict: clusterVerdict(
+        members.map((m) => m.disposition),
+        (a, b) => a === b || (DISPOSITION_LOOSE[a] ?? []).includes(b),
+      ),
+      values: members.map((m) => m.disposition ?? EM_DASH),
+    },
+    {
+      key: 'street', label: 'Street + No.',
+      verdict: clusterVerdict(streets.map(normalize), (a, b) => a === b),
+      values: streets.map((s) => s ?? EM_DASH),
+    },
+    {
+      key: 'floor', label: 'Floor',
+      verdict: clusterVerdict(floors, (a, b) => a === b),
+      values: members.map((_, i) => floors[i] ?? EM_DASH),
+    },
+    {
+      key: 'district', label: 'District',
+      verdict: clusterVerdict(members.map((m) => normalize(m.district)), (a, b) => a === b),
+      values: members.map((m) => m.district ?? EM_DASH),
+    },
+  ];
+}
