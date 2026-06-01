@@ -53,6 +53,7 @@ from api.routes.admin import router as admin_router
 from api.routes.dedup import router as dedup_router
 from api.routes.images import router as images_router
 from api.routes.notifications import router as notifications_router
+from scraper import image_storage
 from scraper.db import sweep_stuck_scrape_runs
 from scraper.source_dispatcher import ParseError
 from toolkit import (
@@ -116,6 +117,19 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
                 )
         except Exception:
             logging.exception("stuck-row sweep failed on startup")
+
+    # The /images/{key} route presigns R2 to serve listing photos. If R2 isn't
+    # configured ON THIS SERVICE (the scraper's R2 secrets live in GitHub
+    # Actions, a different runtime), every photo 503s and the whole UI looks
+    # imageless while the DB still reports them "stored". Shout it at boot so
+    # the misconfig is never silent again (see CLAUDE.md "Image storage (R2)").
+    if not image_storage.is_configured():
+        logging.warning(
+            "R2 image storage is NOT configured on this API service "
+            "(need R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / "
+            "R2_BUCKET_NAME) — GET /images/{key} will return 503 and listing "
+            "photos will not display."
+        )
 
     stop_event: asyncio.Event = asyncio.Event()
     task: asyncio.Task[None] | None = None
@@ -187,7 +201,16 @@ app.include_router(images_router)
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    # `image_storage` lets the operator (or a monitor) see at a glance whether
+    # this service can serve /images/{key}; "unconfigured" means every listing
+    # photo 503s even though the bytes are in R2. Stays a flat string map so
+    # Railway's healthcheck keeps treating any 200 as healthy.
+    return {
+        "status": "ok",
+        "image_storage": (
+            "configured" if image_storage.is_configured() else "unconfigured"
+        ),
+    }
 
 
 @app.get("/maps/suggest")
