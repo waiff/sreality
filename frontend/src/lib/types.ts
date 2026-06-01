@@ -498,11 +498,42 @@ export interface EstimationRun {
    * 10 CZK/m² fond, subject sale price). Mutated through PATCH
    * /estimations/:id/scenario, latest-wins. */
   scenario: YieldScenario | null;
+  /* Migration 131 — secondary rent reference from the MF "Cenová mapa
+   * nájemného". Populated only on rent runs whose subject resolved to a
+   * mapped territory; null on sale runs, territory misses, and runs
+   * created before a rent-map revision was ingested. Read-only — never
+   * overrides the comparables-based primary estimate. */
+  reference_rent: ReferenceRent | null;
   /* Server-derived display string emitted only by GET /estimations:
    * listings.district for sreality runs, else the latest
    * parsed_url_cache extraction.locality.value for the run's input_url.
    * Null when neither path resolves. Not returned by GET /estimations/:id. */
   locality_display?: string | null;
+}
+
+/* Migration 131 — the MF Cenová mapa secondary rent reference breakdown
+ * stored on estimation_runs.reference_rent. */
+export interface ReferenceRentAdjustment {
+  attribute: string;
+  czk_per_m2: number;
+}
+
+export interface ReferenceRent {
+  territory: {
+    ruian_code: number;
+    level: 'ku' | 'obec';
+    name: string;
+    kraj: string | null;
+  };
+  vk: number;
+  is_novostavba: boolean;
+  source_revision: number;
+  source_date: string | null;
+  base_per_m2: number;
+  adjustments: ReferenceRentAdjustment[];
+  total_per_m2: number;
+  area_m2: number;
+  monthly_rent_czk: number;
 }
 
 /* Phase AI slice B — one row per operator feedback submission on

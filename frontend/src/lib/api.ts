@@ -648,6 +648,63 @@ export const updatePortalLimits = (
     json: patch,
   });
 
+/* ----- rent map: MF Cenová mapa nájemného (migration 132) ------------------
+ * Revision history + manual upload + on-demand fetch, all on the bearer-exempt
+ * /admin/* surface. The same data also auto-grabs monthly via fetch_rent_map.yml. */
+
+export interface RentMapRevision {
+  source_revision: number;
+  source_date: string | null;
+  source_filename: string;
+  row_count: number;
+  uploaded_by: string | null;
+  uploaded_at: string | null;
+}
+
+export interface RentMapIngestResult {
+  ingested: boolean;
+  source_revision: number | null;
+  source_date: string | null;
+  source_filename: string;
+  file_sha256: string;
+  territory_count: number;
+  adjustment_count: number;
+}
+
+export const getRentMapStatus = (): Promise<{ current: RentMapRevision | null }> =>
+  request<{ current: RentMapRevision | null }>('/admin/rent-map');
+
+export const listRentMapRevisions = (): Promise<{ data: RentMapRevision[] }> =>
+  request<{ data: RentMapRevision[] }>('/admin/rent-map/revisions');
+
+export const triggerRentMapFetch = (): Promise<RentMapIngestResult> =>
+  request<RentMapIngestResult>('/admin/rent-map/fetch', { method: 'POST' });
+
+export async function uploadRentMapFile(
+  file: File,
+): Promise<RentMapIngestResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(`${BASE_URL}/admin/rent-map/revisions`, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+    },
+    body: form,
+  });
+  const text = await res.text();
+  const body: unknown = text ? JSON.parse(text) : null;
+  if (!res.ok) {
+    const detail =
+      typeof body === 'object' && body && 'detail' in body
+        ? String((body as { detail: unknown }).detail)
+        : `upload failed (${res.status})`;
+    throw new ApiError(detail, res.status, body);
+  }
+  return body as RentMapIngestResult;
+}
+
 /* ----- filter registry + visibility (PR 1 / migration 059) ----------------
  * The canonical filter list lives in toolkit/filter_registry.py. `getFilterSchema`
  * returns the live registry plus the agenda × filter visibility matrix.

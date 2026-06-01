@@ -898,6 +898,54 @@ export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
 };
 
 /* -------------------------------------------------------------------------- */
+/* MF rent-price choropleth ("Cenová mapa nájemného"). One polygon per Czech  */
+/* obec / katastrální území, coloured by reference rent (Kč/m²) per size      */
+/* category VK1..VK4. The optional kraj overlay draws the 14 region borders.  */
+/* Both are operator-static reference datasets — fetch once, cache forever    */
+/* (staleTime: Infinity in the Browse useQuery). `geojson` is the raw         */
+/* ST_AsGeoJSON string; the map layer JSON.parses it into a Feature geometry. */
+/* -------------------------------------------------------------------------- */
+
+export interface RentMapPolygon {
+  ruian_code: number;
+  level: 'ku' | 'obec';
+  name: string;
+  kraj: string | null;
+  geojson: string;
+  vk1_per_m2: number | null;
+  vk2_per_m2: number | null;
+  vk3_per_m2: number | null;
+  vk4_per_m2: number | null;
+}
+
+export interface RentMapKraj {
+  ruian_code: number;
+  name: string;
+  geojson: string;
+}
+
+export const fetchRentMapChoropleth = async (): Promise<RentMapPolygon[]> => {
+  /* `.range(0, 9999)` bypasses PostgREST's default 1,000-row cap. The
+   * view has ~7,600 rows (one per obec / katastrální území). */
+  const { data, error } = await supabase
+    .from('rent_map_choropleth_public')
+    .select('*')
+    .range(0, 9999);
+  if (error) throw error;
+  return (data ?? []) as RentMapPolygon[];
+};
+
+export const fetchRentMapKraje = async (): Promise<RentMapKraj[]> => {
+  /* 14 kraje; `.range` kept for symmetry / headroom. */
+  const { data, error } = await supabase
+    .from('rent_map_kraje_public')
+    .select('*')
+    .range(0, 999);
+  if (error) throw error;
+  return (data ?? []) as RentMapKraj[];
+};
+
+/* -------------------------------------------------------------------------- */
 /* Estimations (U2). Hits the Railway FastAPI service via lib/api.ts; pages   */
 /* combine these helpers with useQuery / useMutation directly, matching the   */
 /* convention used by Supabase fetchers above.                                */

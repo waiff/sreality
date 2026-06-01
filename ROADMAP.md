@@ -6,6 +6,30 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Secondary rent reference — MF Cenová mapa nájemného
+
+- **What:** every rental estimate now carries a second, independent reference figure from the
+  Ministry of Finance's quarterly *Cenová mapa nájemného* (hedonic-model reference rent per
+  territory), shown alongside the comparables-based primary estimate (never overrides it).
+- **Data model (migrations 131/132):** `estimation_runs.reference_rent jsonb` + history-tracked
+  `rent_map_revisions` / `rent_map_values` / `rent_map_adjustments` (latest-revision-wins
+  `*_public` views, the curated-cities pattern) + a materialized `rent_map_choropleth` for the map.
+- **Join:** the spreadsheet's `Kód obce` IS the ČÚZK/RÚIAN code = `admin_boundaries.id` (all 7,630
+  codes verified — 1,582 ku + 6,048 obec, no collision); `toolkit.rent_map.compute_reference_rent`
+  resolves the subject's lat/lng to its territory by PIP and applies VK + amenity adjustments
+  (novostavba variant for new builds). Read-only — not a new toolkit write exception.
+- **Ingest:** stdlib XLSX parser (`zipfile`+`xml.etree`, no `openpyxl`); monthly auto-grab
+  (`fetch_rent_map.yml` → `scripts.fetch_rent_map`, scrapes the MF infografika page) + manual
+  upload / fetch-now from Settings (`POST /admin/rent-map/*`), `file_sha256`-deduped.
+- **Surfaces:** Estimation Detail block, Chrome-extension panel line, `/estimations` +
+  `/estimate_yield` payloads, and a Browse map choropleth (VK1–VK4 radio + Kraje overlay + Kč/m²
+  legend, reproducing the official MF map).
+
+#### Next
+
+- Switchable older/novostavba toggle on the map + an as-of revision picker for historical
+  comparison (the revision history is already stored).
+
 ### 2026-06: Dedup engine rebuilt — street + disposition keyed, room-aware visual
 
 - **What:** replaced the geo-proximity matcher (the inline Tier-1 `ST_DWithin` probe in

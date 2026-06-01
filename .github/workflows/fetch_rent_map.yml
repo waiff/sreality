@@ -1,0 +1,67 @@
+name: "Jobs: fetch MF rent map (monthly)"
+
+# Auto-grab the Ministry of Finance "Cenová mapa nájemného" (rent price map)
+# from the MF infografika page, parse it, and append a new rent_map revision —
+# unless the file's sha256 already exists (then it's a no-op). The MF data
+# updates 4×/year (published within 45 days of each quarter end), so a monthly
+# cron mostly no-ops and catches the new release within ~30 days. The same
+# data also lands via manual upload from the Settings page; both share
+# api.rent_map.ingest_bytes, so the latest revision always wins.
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  schedule:
+    - cron: "0 3 5 * *"
+  workflow_dispatch:
+    inputs:
+      source_url:
+        description: Override the MF page URL to scrape the XLSX link from
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: Parse + report counts without writing a revision
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: rent-map-fetch
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      GITHUB_ACTOR: ${{ github.actor }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[api,geo]"
+
+      - name: Fetch + ingest rent map
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.source_url }}" ]; then
+            ARGS="$ARGS --source-url ${{ inputs.source_url }}"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python -m scripts.fetch_rent_map $ARGS

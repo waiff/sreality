@@ -793,6 +793,42 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   snapshot. Powers the `summarize-1` annotated-charts feature; FACTS not opinions (toolkit
   rule #1) — it describes the distribution, never recommends a price.
 
+## Secondary rent reference (MF Cenová mapa nájemného)
+
+Every **rental** estimate carries a second, independent reference figure from the Czech
+Ministry of Finance's quarterly *Cenová mapa nájemného* (a hedonic-model reference rent per
+territory), shown ALONGSIDE the comparables-based primary estimate — it never overrides it.
+Stored on `estimation_runs.reference_rent jsonb` (migration 131; NULL = sale run / territory
+miss / no revision ingested yet). Surfaced on Estimation Detail, the Chrome-extension panel,
+the `/estimations` + `/estimate_yield` API payloads, and as a Browse map choropleth layer
+(VK1–VK4 selectable, optional Kraje overlay — reproduces the official MF map).
+
+- **Source store (migration 132, history-tracked):** `rent_map_revisions` (one row per ingested
+  XLSX; `file_sha256` UNIQUE so re-fetching an unchanged file no-ops) + long-form
+  `rent_map_values` (per RÚIAN territory × VK1–4, standard + novostavba rent) +
+  `rent_map_adjustments` (per-VK amenity Kč/m², older + novostavba tables). The `*_public` views
+  are latest-revision-wins (the curated-cities pattern, rule #17). The Browse map reads the
+  materialized `rent_map_choropleth` (polygons + the four VK rents, REFRESHed on each ingest) so
+  the anon read is a precomputed scan under the 3 s statement timeout.
+- **The join:** the spreadsheet's `Kód obce` IS the ČÚZK/RÚIAN code = `admin_boundaries.id`
+  (verified: all 7,630 codes match — 1,582 `ku` + 6,048 `obec` — with zero id-space collision).
+  The calc resolves the subject's lat/lng to its containing `ku`/`obec` polygon (PIP, same
+  pattern as `toolkit/comparables`) and looks up the rent by that code.
+- **The calc:** `toolkit.rent_map.compute_reference_rent` is **READ-ONLY — NOT a new toolkit
+  write exception (rule #5)**: base reference rent (VK from the disposition's leading room count:
+  1→VK1 … ≥4→VK4) + per-amenity adjustments (balkón/terasa/vybavenost/garáž/výtah, + *jiný
+  konstrukční materiál* for new builds), × area. New builds (`condition='novostavba'`) use the
+  novostavba reference column + novostavba adjustment table; everything else uses the older-flat
+  column + older adjustments. Best-effort: any miss → NULL, never fails an estimation run. It
+  reproduces the MF sheet's own worked example exactly (Litoměřice older 3+1, 68 m², +výtah
+  +balkon +garáž → 291 Kč/m² → 19 788 Kč).
+- **Ingest (write path, out of the read-only toolkit):** `api.rent_map.ingest_bytes` →
+  `insert_revision` (parse → revision INSERT → COPY values/adjustments → REFRESH the matview).
+  Refreshed two ways: the monthly `fetch_rent_map.yml` workflow (`scripts.fetch_rent_map`, scrapes
+  the current XLSX off the MF *infografika* page — MF updates 4×/year) AND a manual `.xlsx` upload
+  / "Fetch latest now" from the Settings page (`POST /admin/rent-map/*`). The XLSX is parsed with
+  stdlib `zipfile`+`xml.etree` (no `openpyxl`). No new secrets — uses `SUPABASE_DB_URL`.
+
 ## Coding conventions
 
 - Python 3.12. Type hints on every function signature.

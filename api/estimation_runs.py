@@ -50,6 +50,7 @@ from psycopg.types.json import Jsonb
 from api import schemas as s
 from scraper import source_dispatcher
 from toolkit import ComparableFilters, TargetSpec
+from toolkit.rent_map import compute_reference_rent
 
 if TYPE_CHECKING:
     import psycopg
@@ -347,6 +348,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "special_instructions", "contextual_text",
     "skill_name", "skill_version",
     "scenario",
+    "reference_rent",
 )
 
 _INSERT_COLUMNS: tuple[str, ...] = tuple(
@@ -691,6 +693,9 @@ def _execute_estimation_run(
         return
 
     d = result["data"]
+    reference_rent = _reference_rent_for_run(
+        conn, recorder, resolution, target, body.estimate_kind,
+    )
     summary_text = _summary_line(d, filters.radius_m)
     trace = recorder.to_dict(summary_text)
     merged_warnings = list(resolution.parse_warnings)
@@ -701,6 +706,7 @@ def _execute_estimation_run(
     _update_run_terminal(
         conn, run_id,
         status="success",
+        reference_rent=reference_rent,
         estimated_monthly_rent_czk=d.get("estimated_monthly_rent_czk"),
         rent_p25_czk=d.get("rent_p25_czk"),
         rent_p75_czk=d.get("rent_p75_czk"),
@@ -1144,6 +1150,97 @@ def _load_subject_condition(
     }
 
 
+_STANDARD_MATERIALS = frozenset({"panel", "cihla"})
+
+
+def _load_subject_amenities(
+    conn: "psycopg.Connection", sreality_id: int,
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT has_balcony, terrace, furnished, garage, has_lift, "
+            "building_type, condition FROM listings WHERE sreality_id = %s",
+            (sreality_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    keys = ("has_balcony", "terrace", "furnished", "garage", "has_lift",
+            "building_type", "condition")
+    return dict(zip(keys, row))
+
+
+def _subject_amenities(
+    conn: "psycopg.Connection", resolution: _Resolution,
+) -> tuple[dict[str, bool], bool]:
+    """Amenity flags + new-build signal for the reference-rent calc.
+
+    sreality runs read the authoritative `listings` columns; URL / spec
+    runs fall back to whatever the parsed spec carries (best-effort — the
+    base reference rent still computes from lat/lng/area/disposition).
+    """
+    src: dict[str, Any] | None = None
+    if resolution.input_sreality_id is not None:
+        src = _load_subject_amenities(conn, resolution.input_sreality_id)
+    if src is None:
+        src = resolution.target_spec or {}
+    is_novostavba = src.get("condition") == "novostavba"
+    building_type = src.get("building_type")
+    amenities = {
+        "balcony": bool(src.get("has_balcony")),
+        "terrace": bool(src.get("terrace")),
+        "furnished": src.get("furnished") == "ano",
+        "garage": bool(src.get("garage")),
+        "elevator": bool(src.get("has_lift")),
+        "other_material": bool(
+            is_novostavba
+            and building_type
+            and building_type not in _STANDARD_MATERIALS
+        ),
+    }
+    return amenities, is_novostavba
+
+
+def _reference_rent_for_run(
+    conn: "psycopg.Connection",
+    recorder: TraceRecorder,
+    resolution: _Resolution,
+    target: TargetSpec,
+    estimate_kind: str,
+) -> dict[str, Any] | None:
+    """MF Cenová mapa secondary reference, emitted as a trace step.
+
+    Rent estimates only; best-effort (compute_reference_rent swallows
+    its own errors and returns None on any miss).
+    """
+    if estimate_kind != "rent":
+        return None
+    with recorder.computation("reference rent (Cenová mapa MF)") as step:
+        try:
+            amenities, is_novostavba = _subject_amenities(conn, resolution)
+            ref = compute_reference_rent(
+                conn,
+                lat=target.lat, lng=target.lng, area_m2=target.area_m2,
+                disposition=target.disposition,
+                amenities=amenities, is_novostavba=is_novostavba,
+            )
+        except Exception:  # noqa: BLE001 - secondary reference never fails a run
+            ref = None
+        if ref is None:
+            step.set_summary({"matched": False})
+        else:
+            step.set_summary({
+                "matched": True,
+                "territory": ref["territory"]["name"],
+                "vk": ref["vk"],
+                "is_novostavba": ref["is_novostavba"],
+                "base_per_m2": ref["base_per_m2"],
+                "total_per_m2": ref["total_per_m2"],
+                "monthly_rent_czk": ref["monthly_rent_czk"],
+            })
+    return ref
+
+
 def _build_target(
     spec: dict[str, Any] | None,
     input_sreality_id: int | None = None,
@@ -1303,6 +1400,13 @@ def _run_agent_path(
     d = agent_result.data
     md = agent_result.metadata
     status = "success" if md.get("stop_reason") == "record_estimate" else "failed"
+    reference_rent = (
+        _reference_rent_for_run(
+            conn, recorder, resolution, target, body.estimate_kind,
+        )
+        if status == "success"
+        else None
+    )
     trace = recorder.to_dict(_agent_summary_line(d, md))
     merged_warnings = list(resolution.parse_warnings)
     merged_warnings.extend(d.get("warnings") or [])
@@ -1331,6 +1435,7 @@ def _run_agent_path(
         warnings=merged_warnings or None,
         error_message=err,
         subject_summary=subject_summary,
+        reference_rent=reference_rent,
     )
     flush_trace_payloads(conn, run_id, recorder)
 
@@ -1343,7 +1448,7 @@ def _update_run_terminal(
     """Parameterised UPDATE that writes only the supplied columns."""
     for k in (
         "comparables_used", "comparables_excluded",
-        "trace", "warnings", "subject_summary",
+        "trace", "warnings", "subject_summary", "reference_rent",
     ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])
@@ -1366,7 +1471,7 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
         "input_spec", "comparables_used", "comparables_excluded",
         "trace", "warnings",
         "parse_confidence_per_field", "subject_summary",
-        "scenario",
+        "scenario", "reference_rent",
     ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])

@@ -205,6 +205,12 @@ function EstimationDetailBody({
         <>
           <RentRange run={run} />
           <Hairline />
+          {run.reference_rent && (
+            <>
+              <ReferenceRentBlock run={run} />
+              <Hairline />
+            </>
+          )}
         </>
       )}
 
@@ -700,6 +706,80 @@ function RentRange({ run }: { run: EstimationRun }) {
           triple={{ p25, p50: median, p75 }}
           format={(n) => fmtCzk(n)}
         />
+      </div>
+    </div>
+  );
+}
+
+const REF_ADJ_LABELS: Record<string, string> = {
+  balcony: 'balkón',
+  terrace: 'terasa',
+  furnished: 'vybavenost',
+  garage: 'garáž',
+  elevator: 'výtah',
+  other_material: 'jiný konstrukční materiál',
+};
+const REF_VK_DISPOSITION: Record<number, string> = {
+  1: '1+kk, 1+1',
+  2: '2+kk, 2+1',
+  3: '3+kk, 3+1',
+  4: '4+ pokoje',
+};
+
+/* Secondary reference rent from the MF "Cenová mapa nájemného" (migration
+ * 131). Shown next to the comparables-based primary estimate; never
+ * overrides it. Renders only when the subject mapped to an MF territory. */
+function ReferenceRentBlock({ run }: { run: EstimationRun }) {
+  const ref = run.reference_rent;
+  if (!ref) return null;
+  const t = ref.territory;
+  const perM2 = (n: number) => `${n.toLocaleString('cs-CZ')} Kč/m²`;
+  return (
+    <div>
+      <SectionLabel>Reference · Cenová mapa MF</SectionLabel>
+      <div className="mt-3 border border-[var(--color-rule)] p-4">
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-2xl tabular-nums">
+            {fmtCzk(ref.monthly_rent_czk)}
+          </span>
+          <span className="text-xs text-[var(--color-ink-3)]">/ měsíc</span>
+        </div>
+        <p className="mt-1 text-sm text-[var(--color-ink-3)]">
+          {t.name}
+          {t.kraj ? `, ${t.kraj}` : ''} · {REF_VK_DISPOSITION[ref.vk] ?? `VK${ref.vk}`}
+          {ref.is_novostavba ? ' · novostavba' : ''}
+        </p>
+        <dl className="mt-3 space-y-1 text-sm">
+          <div className="flex justify-between gap-3">
+            <dt className="text-[var(--color-ink-3)]">
+              Nájemné referenčního bytu
+            </dt>
+            <dd className="tabular-nums">{perM2(ref.base_per_m2)}</dd>
+          </div>
+          {ref.adjustments.map((a) => (
+            <div key={a.attribute} className="flex justify-between gap-3">
+              <dt className="text-[var(--color-ink-3)]">
+                + {REF_ADJ_LABELS[a.attribute] ?? a.attribute}
+              </dt>
+              <dd className="tabular-nums">+{perM2(a.czk_per_m2)}</dd>
+            </div>
+          ))}
+          <div className="flex justify-between gap-3 border-t border-[var(--color-rule)] pt-1">
+            <dt>Celkem za m²</dt>
+            <dd className="tabular-nums">{perM2(ref.total_per_m2)}</dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-[var(--color-ink-3)]">
+              × plocha {ref.area_m2.toLocaleString('cs-CZ')} m²
+            </dt>
+            <dd className="tabular-nums">{fmtCzk(ref.monthly_rent_czk)}</dd>
+          </div>
+        </dl>
+        <p className="mt-2 text-[0.7rem] text-[var(--color-ink-3)]">
+          Ministerstvo financí — cenová mapa nájemného
+          {ref.source_date ? ` (${ref.source_date})` : ''}. Sekundární
+          reference vedle hlavního odhadu.
+        </p>
       </div>
     </div>
   );
