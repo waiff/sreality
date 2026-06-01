@@ -1324,7 +1324,7 @@ function RecentScrapesPanel({
       t: new Date(r.started_at).getTime(),
       scraped_new: r.listings_scraped_new,
       inactive: r.listings_inactive,
-      images_stored: r.images_stored,
+      images_found: r.images_discovered,
     }));
 
   return (
@@ -1381,8 +1381,8 @@ function RecentScrapesPanel({
             />
             <Line
               type="monotone"
-              dataKey="images_stored"
-              name="images stored"
+              dataKey="images_found"
+              name="images found"
               stroke="var(--color-sage)"
               strokeWidth={1.5}
               dot={false}
@@ -1402,8 +1402,12 @@ function RecentScrapesPanel({
               <th className="text-right py-1.5 px-1.5 font-medium">Found new</th>
               <th className="text-right py-1.5 px-1.5 font-medium">Scraped new</th>
               <th className="text-right py-1.5 px-1.5 font-medium">Inactive</th>
-              <th className="text-right py-1.5 px-1.5 font-medium">Imgs disc.</th>
-              <th className="text-right py-1.5 px-1.5 font-medium">Imgs stored</th>
+              <th
+                className="text-right py-1.5 px-1.5 font-medium"
+                title="image-URL rows this run recorded. Bytes are uploaded to R2 asynchronously by the image drain — see R2 coverage in the Image mirror tile."
+              >
+                Imgs found
+              </th>
               <th className="text-right py-1.5 px-1.5 font-medium">Errors</th>
             </tr>
           </thead>
@@ -1485,9 +1489,6 @@ function ScrapeRunRow({ run }: { run: ScrapeRun }) {
         <td className="py-1.5 px-1.5 text-right font-mono tabular-nums align-top">
           {fmtCount(run.images_discovered)}
         </td>
-        <td className="py-1.5 px-1.5 text-right font-mono tabular-nums align-top">
-          {fmtCount(run.images_stored)}
-        </td>
         <td
           className="py-1.5 px-1.5 text-right font-mono tabular-nums align-top"
           style={{ color: run.errors > 0 ? 'var(--color-brick)' : undefined }}
@@ -1527,9 +1528,6 @@ function ScrapeRunCategoryRow({ cat }: { cat: ScrapeRunCategory }) {
       </td>
       <td className="py-1 px-1.5 text-right font-mono tabular-nums text-[0.7rem] text-[var(--color-ink-2)]">
         {fmtCount(cat.images_discovered)}
-      </td>
-      <td className="py-1 px-1.5 text-right font-mono tabular-nums text-[0.7rem] text-[var(--color-ink-2)]">
-        {fmtCount(cat.images_stored)}
       </td>
       <td className="py-1 px-1.5"></td>
     </tr>

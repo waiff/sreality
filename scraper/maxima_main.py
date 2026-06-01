@@ -312,7 +312,7 @@ def _finalize(run_id: int | None, agg: dict[str, Any]) -> None:
                 listings_updated=agg.get("listings_updated", 0),
                 listings_inactive=agg.get("listings_inactive", 0),
                 images_discovered=agg.get("images_discovered", 0),
-                images_stored=agg.get("images_discovered", 0),
+                images_stored=0,  # crawl records image-URL rows only; bytes uploaded async by images.yml
                 errors=agg.get("errors", 0),
                 by_category=agg.get("by_category", []),
             )
