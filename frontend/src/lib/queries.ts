@@ -562,6 +562,9 @@ export const fetchBrowseStats = async (
      * out when either bound is set. */
     price_per_m2_min:        f.pricePerM2Min,
     price_per_m2_max:        f.pricePerM2Max,
+    /* Migration 133 — MF gross rental yield % bounds (sale apartments). */
+    mf_gross_yield_pct_min:  f.mfGrossYieldPctMin,
+    mf_gross_yield_pct_max:  f.mfGrossYieldPctMax,
     /* Migration 095 — multi-portal / price-history derived predicates.
      * Property grain only; columns maintained by the recompute job. */
     distinct_site_count_min: f.distinctSiteCountMin,

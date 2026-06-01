@@ -60,12 +60,18 @@ def main(argv: list[str] | None = None) -> int:
             source_filename=filename,
             uploaded_by=os.environ.get("GITHUB_ACTOR") or "fetch_rent_map",
         )
-    if result["ingested"]:
-        LOG.info("INGESTED revision=%s source_date=%s territories=%d",
-                 result["source_revision"], result["source_date"],
-                 result["territory_count"])
-    else:
-        LOG.info("NO-OP: sha256=%s already ingested", result["file_sha256"][:12])
+        if result["ingested"]:
+            LOG.info("INGESTED revision=%s source_date=%s territories=%d",
+                     result["source_revision"], result["source_date"],
+                     result["territory_count"])
+            # New rents → every sale apartment's MF yield is stale; recompute.
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute("SELECT recompute_mf_gross_yields()")
+                (n,) = cur.fetchone()
+            LOG.info("MF yields recomputed: %d rows changed", n)
+        else:
+            LOG.info("NO-OP: sha256=%s already ingested",
+                     result["file_sha256"][:12])
     return 0
 
 

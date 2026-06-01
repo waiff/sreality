@@ -1096,6 +1096,31 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/property_maintenance.yml"
   },
   {
+    "filename": "recompute_mf_yields.yml",
+    "name": "Jobs: recompute MF gross yields (hourly)",
+    "description": "Recompute listings.mf_gross_yield_pct (MF Cenová mapa reference rent / asking price) for every sale apartment. The yield shifts when a listing's price changes (scrape) or the rent map updates (quarterly), so a cheap, idempotent set-based recompute runs hourly to keep new + re-priced listings filterable in Browse within the hour. The same function also runs after each rent-map ingest (scripts.fetch_rent_map). Only changed rows are written.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "25 * * * *",
+        "human": "Every hour at :25"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "recompute-mf-yields",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/recompute_mf_yields.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_mf_yields.yml"
+  },
+  {
     "filename": "recompute_property_stats.yml",
     "name": "Jobs: recompute property stats (daily full reconcile)",
     "description": "DAILY FULL SWEEP for the canonical `properties` parent. Attaches any straggler unlinked listings (incl. the one-time native-id backfill), then recomputes EVERY property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots. Finally it clears the dirty_properties queue (everything was just recomputed).",

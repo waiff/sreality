@@ -90,6 +90,8 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         # toolkit / matcher re-render the expression against the raw
         # columns. The PostgREST path treats it as a real column.
         "price_per_m2",
+        # Migration 133 — MF gross rental yield % (sale apartments).
+        "mf_gross_yield_pct",
         # Property-grain derived columns (migrations 091/095), exposed via
         # properties_public and filtered by the Browse property-grain RPC.
         # Not on `listings` — they aggregate across a property's children.
@@ -316,3 +318,16 @@ def test_codegen_check_passes() -> None:
             "and commit the updated frontend/src/lib/filterRegistry.generated.ts\n\n"
             f"stdout:\n{result.stdout}\n\nstderr:\n{result.stderr}"
         )
+
+
+def test_mf_gross_yield_filter_registered():
+    """The MF gross yield filter is a Browse+Watchdog float range on the
+    mf_gross_yield_pct column (migration 133)."""
+    for fid in ("min_mf_gross_yield_pct", "max_mf_gross_yield_pct"):
+        f = fr.REGISTRY[fid]
+        assert f.pg_column == "mf_gross_yield_pct"
+        assert f.type == fr.FilterType.FLOAT
+        assert f.ui_control == fr.UiControl.RANGE_SLIDER
+        assert f.agendas == frozenset({fr.Agenda.BROWSE, fr.Agenda.WATCHDOG})
+        assert fr.Agenda.COMPARABLES not in f.agendas
+        assert fr.Agenda.ESTIMATION not in f.agendas

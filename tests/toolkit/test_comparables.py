@@ -764,3 +764,20 @@ def test_relaxed_final_filters_used_reflects_last_action():
         min_results=5,
     )
     assert res["metadata"]["filters_used"]["radius_m"] == 1200
+
+
+def test_mf_gross_yield_pct_bounds_applied():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(min_mf_gross_yield_pct=4.0, max_mf_gross_yield_pct=6.0),
+    )
+    assert "l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s" in sql
+    assert "l.mf_gross_yield_pct <= %(max_mf_gross_yield_pct)s" in sql
+    assert params["min_mf_gross_yield_pct"] == 4.0
+    assert params["max_mf_gross_yield_pct"] == 6.0
+
+
+def test_mf_gross_yield_pct_absent_when_unset():
+    sql, params = build_query(TargetSpec(lat=50.0, lng=14.0), ComparableFilters())
+    assert "mf_gross_yield_pct" not in sql
+    assert "min_mf_gross_yield_pct" not in params
