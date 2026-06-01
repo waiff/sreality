@@ -206,6 +206,20 @@ function Card({
             {fmtPricePerM2(r.price_czk, r.area_m2)}
           </p>
         </div>
+        {r.mf_gross_yield_pct != null && (
+          <p
+            className="mt-0.5 text-[0.62rem] text-[var(--color-ink-3)] tabular-nums"
+            title="Hrubý výnos dle cenové mapy nájemného MF (nájem ÷ cena)"
+          >
+            Výnos MF{' '}
+            <span className="text-[var(--color-ink)] font-medium">
+              {r.mf_gross_yield_pct.toLocaleString('cs-CZ', {
+                minimumFractionDigits: 1,
+                maximumFractionDigits: 1,
+              })}{' '}%
+            </span>
+          </p>
+        )}
       </div>
     </Link>
   );
