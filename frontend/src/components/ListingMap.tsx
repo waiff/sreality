@@ -1049,7 +1049,7 @@ function RentMapControls({
     .map(([, color]) => color)
     .join(', ')})`;
   return (
-    <div className="pointer-events-none absolute bottom-3 right-3 flex flex-col gap-2 items-end">
+    <div className="pointer-events-none absolute bottom-10 right-3 flex flex-col gap-2 items-end">
       <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)]">
         <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
           <input
