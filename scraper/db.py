@@ -255,11 +255,10 @@ def upsert_listing_with_property(
     """upsert_listing + maintain the listing's canonical `properties` parent.
 
     The listing write and its property linkage commit in one transaction so a
-    partial failure can't leave a listing unlinked. New listings run through
-    the Tier-1 spatial matcher (`_match_or_create_property`); for sreality the
-    matcher is inert (every existing property already has a sreality child,
-    which the same-source exclusion skips), so this preserves the historical
-    singleton-per-listing behaviour until a second source lands.
+    partial failure can't leave a listing unlinked. New listings become their
+    own singleton property (`_create_singleton_property`); cross-listing
+    grouping is the out-of-band street+disposition dedup engine's job, not the
+    insert path.
     """
     sreality_id = row["sreality_id"]
     with conn.transaction():
@@ -334,69 +333,24 @@ def _ensure_property(conn: psycopg.Connection, listing_pk: int, source: str) -> 
         property_id = found[0] if found else None
 
     if property_id is None:
-        _match_or_create_property(conn, listing_pk, source)
+        _create_singleton_property(conn, listing_pk, source)
     else:
         _cheap_property_rollup(conn, listing_pk)
 
 
-def _match_or_create_property(
+def _create_singleton_property(
     conn: psycopg.Connection, listing_pk: int, source: str,
 ) -> None:
-    """Tier-1 insert-time matcher (multi-portal dedup design).
+    """Give a newly-seen listing its own singleton `properties` parent.
 
-    Probe `properties` for a spatial+price+area near-match that doesn't already
-    have a child from this `source`:
-      * exactly one hit  -> attach (this property gains a second source);
-      * zero hits        -> new singleton property (the historical behaviour);
-      * two or more hits  -> new singleton + enqueue each ambiguous pair into
-        `property_identity_candidates` for operator review. Never guess.
-
-    The same-source exclusion is what keeps this inert for sreality-only data:
-    a new sreality listing's neighbours all already carry a sreality child, so
-    nothing matches and it falls through to a fresh singleton.
+    No matching at insert time: the street+disposition dedup engine
+    (`toolkit.dedup_engine` + `scripts.dedup_engine`) owns ALL grouping and runs
+    out-of-band. The old geo Tier-1 spatial probe (20m/price/area) was removed
+    when matching moved to street+disposition — insert-time geo proximity is no
+    longer how properties are linked. Every new listing starts as a singleton;
+    the engine merges it onto a sibling later if street+disposition (+ visual)
+    agree.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT price_czk, area_m2 FROM listings WHERE sreality_id = %s",
-            (listing_pk,),
-        )
-        keyrow = cur.fetchone()
-    price = keyrow[0] if keyrow else None
-    area = keyrow[1] if keyrow else None
-
-    hits: list[int] = []
-    if price is not None and area is not None:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT p.id FROM properties p
-                WHERE p.geom IS NOT NULL
-                  AND p.current_price_czk IS NOT NULL
-                  AND p.area_m2 IS NOT NULL
-                  AND ST_DWithin(
-                        p.geom,
-                        (SELECT geom FROM listings WHERE sreality_id = %(pk)s),
-                        20)
-                  AND p.current_price_czk BETWEEN %(price)s * 0.98 AND %(price)s * 1.02
-                  AND p.area_m2 BETWEEN %(area)s - 1 AND %(area)s + 1
-                  AND NOT EXISTS (
-                        SELECT 1 FROM listings c
-                        WHERE c.property_id = p.id AND c.source = %(source)s)
-                LIMIT 2
-                """,
-                {"pk": listing_pk, "price": price, "area": area, "source": source},
-            )
-            hits = [int(r[0]) for r in cur.fetchall()]
-
-    if len(hits) == 1:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
-                (hits[0], listing_pk),
-            )
-        _cheap_property_rollup(conn, listing_pk)
-        return
-
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -420,25 +374,6 @@ def _match_or_create_property(
             "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
             (new_pid, listing_pk),
         )
-
-    if len(hits) >= 2:
-        markers = Jsonb({
-            "price_czk": price,
-            "area_m2": float(area) if area is not None else None,
-            "radius_m": 20,
-        })
-        with conn.cursor() as cur:
-            for h in hits:
-                lo, hi = (h, new_pid) if h < new_pid else (new_pid, h)
-                cur.execute(
-                    """
-                    INSERT INTO property_identity_candidates
-                        (left_property_id, right_property_id, tier, markers_matched)
-                    VALUES (%s, %s, 'tier1', %s)
-                    ON CONFLICT (left_property_id, right_property_id) DO NOTHING
-                    """,
-                    (lo, hi, markers),
-                )
 
 
 def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
