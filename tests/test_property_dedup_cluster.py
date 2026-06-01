@@ -138,3 +138,74 @@ def test_dismiss_cluster_marks_all(monkeypatch):
     monkeypatch.setattr(conn, "cursor", lambda: _DCur(conn))
     result = dedup.dismiss_cluster(conn, [10, 11])
     assert result == {"dismissed": [10, 11], "status": "dismissed"}
+
+
+# --- merge_property_set (operator-checked subset) --------------------------
+
+class _SetCur:
+    def __init__(self, conn: "_SetConn") -> None:
+        self._conn = conn
+        self._rows: list[tuple[Any, ...]] = []
+
+    def __enter__(self) -> "_SetCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        s = " ".join(sql.split())
+        self._conn.executed.append((s, params))
+        if "FROM properties WHERE id = ANY" in s and "status = 'active'" in s:
+            self._rows = [(pid,) for pid in self._conn.active_ids]
+        elif "FROM property_identity_candidates WHERE status = 'proposed'" in s:
+            self._rows = list(self._conn.dangling)
+        else:
+            self._rows = []
+
+    def fetchone(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
+
+
+class _SetConn:
+    def __init__(self, active_ids: list[int], dangling: list[tuple[Any, ...]] | None = None) -> None:
+        self.active_ids = active_ids
+        self.dangling = dangling or []
+        self.executed: list[tuple[str, Any]] = []
+
+    def cursor(self) -> _SetCur:
+        return _SetCur(self)
+
+    def transaction(self) -> _Ctx:
+        return _Ctx()
+
+
+def test_merge_property_set_oldest_survives(monkeypatch):
+    """Operator ticks properties {7,3,9}; oldest active (3) survives, 7+9 merge in."""
+    calls = _stub_merge(monkeypatch)
+    # active query returns oldest-first; survivor=3
+    conn = _SetConn(active_ids=[3, 7, 9])
+    result = dedup.merge_property_set(conn, [7, 3, 9])
+    assert result is not None
+    assert result["survivor_id"] == 3
+    assert result["retired_ids"] == [7, 9]
+    assert [c["retired"] for c in calls] == [7, 9]
+    assert all(c["survivor"] == 3 for c in calls)
+    assert all(c["reason"] == "manual_subset" for c in calls)
+
+
+def test_merge_property_set_needs_two(monkeypatch):
+    _stub_merge(monkeypatch)
+    assert dedup.merge_property_set(_SetConn(active_ids=[5]), [5]) is None
+    # de-dups, so a single distinct id is a no-op
+    assert dedup.merge_property_set(_SetConn(active_ids=[5]), [5, 5]) is None
+
+
+def test_merge_property_set_one_active_raises(monkeypatch):
+    _stub_merge(monkeypatch)
+    with pytest.raises(MergeError):
+        # two requested but only one is still active
+        dedup.merge_property_set(_SetConn(active_ids=[3]), [3, 7])

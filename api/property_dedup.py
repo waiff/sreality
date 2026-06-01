@@ -210,6 +210,105 @@ def merge_cluster(
     }
 
 
+def merge_property_set(
+    conn: psycopg.Connection, property_ids: list[int],
+) -> dict[str, Any] | None:
+    """Merge an explicit SET of properties into one (the operator-checked subset).
+
+    Unlike merge_cluster (which works off candidate edges), this takes the
+    property ids the operator ticked — so "merge exactly these, regardless of
+    which pairwise edges exist between them" works directly. The oldest is the
+    survivor; every other merges into it under one reversible group.
+
+    Candidate hygiene afterward: edges fully inside the set are marked 'merged';
+    edges with ONE endpoint in the set (a still-proposed match to an UNCHECKED
+    property) are re-pointed onto the survivor so the remaining proposal stays
+    valid and points at an active property — never a merged-away ghost. None =
+    nothing to do (fewer than two active properties).
+    """
+    ids = sorted({int(p) for p in property_ids})
+    if len(ids) < 2:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM properties WHERE id = ANY(%s) AND status = 'active' "
+            "ORDER BY first_seen_at ASC, id ASC",
+            (ids,),
+        )
+        active = [int(r[0]) for r in cur.fetchall()]
+    if len(active) < 2:
+        raise MergeError("fewer than two active properties in the selection")
+    survivor, retired_ids = active[0], active[1:]
+
+    group: str | None = None
+    moved = 0
+    for retired in retired_ids:
+        result = merge_properties(
+            conn, survivor_id=survivor, retired_id=retired,
+            reason="manual_subset", source="operator", merge_group_id=group,
+        )
+        group = result["data"]["merge_group_id"]
+        moved += int(result["data"]["listings_moved"])
+
+    _repoint_proposed_candidates(conn, survivor, retired_ids)
+
+    return {
+        "merge_group_id": group,
+        "survivor_id": survivor,
+        "retired_ids": retired_ids,
+        "listings_moved": moved,
+    }
+
+
+def _repoint_proposed_candidates(
+    conn: psycopg.Connection, survivor: int, retired_ids: list[int],
+) -> None:
+    """Keep the still-proposed candidate queue consistent after a merge.
+
+    Any 'proposed' candidate that referenced a now-retired property is re-pointed
+    onto the survivor (preserving the ordered-pair invariant left<right, deduping
+    via ON CONFLICT). A pair that collapses to (survivor, survivor) — both ends
+    were merged — is just dropped. Done in Python for clarity over a clever SQL.
+    """
+    retired = set(retired_ids)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, left_property_id, right_property_id "
+            "FROM property_identity_candidates "
+            "WHERE status = 'proposed' "
+            "AND (left_property_id = ANY(%s) OR right_property_id = ANY(%s))",
+            (retired_ids, retired_ids),
+        )
+        rows = cur.fetchall()
+        for cid, left, right in rows:
+            a = survivor if int(left) in retired else int(left)
+            b = survivor if int(right) in retired else int(right)
+            if a == b:
+                # both endpoints merged into the survivor — fully resolved.
+                cur.execute(
+                    "UPDATE property_identity_candidates "
+                    "SET status = 'merged', reviewed_at = now(), reviewed_action = 'operator' "
+                    "WHERE id = %s",
+                    (cid,),
+                )
+                continue
+            lo, hi = sorted((a, b))
+            # Re-point this edge onto the survivor; if that pair already exists
+            # drop this now-redundant row, else move it.
+            cur.execute(
+                "DELETE FROM property_identity_candidates WHERE id = %s "
+                "AND EXISTS (SELECT 1 FROM property_identity_candidates x "
+                "  WHERE x.left_property_id = %s AND x.right_property_id = %s AND x.id <> %s)",
+                (cid, lo, hi, cid),
+            )
+            cur.execute(
+                "UPDATE property_identity_candidates "
+                "SET left_property_id = %s, right_property_id = %s "
+                "WHERE id = %s",
+                (lo, hi, cid),
+            )
+
+
 def dismiss_cluster(
     conn: psycopg.Connection, candidate_ids: list[int],
 ) -> dict[str, Any] | None:

@@ -603,6 +603,22 @@ export const fetchListingById = async (
   return (data as unknown as ListingPublic | null) ?? null;
 };
 
+/* Resolve a property_id to its representative listing's sreality_id.
+ * Lets /listing?property=ID (e.g. the dedup merge feed's link) land on the
+ * survivor's detail page. properties_public exposes sreality_id = repr id. */
+export const fetchPropertyReprId = async (
+  property_id: number,
+): Promise<number | null> => {
+  const { data, error } = await supabase
+    .from('properties_public')
+    .select('sreality_id')
+    .eq('property_id', property_id)
+    .maybeSingle();
+  if (error) throw error;
+  const row = data as unknown as { sreality_id: number | null } | null;
+  return row?.sreality_id ?? null;
+};
+
 export const fetchSnapshotsByListing = async (
   sreality_id: number,
 ): Promise<ListingSnapshotPublic[]> => {

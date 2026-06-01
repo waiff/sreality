@@ -27,11 +27,12 @@ def _key(
     sid: int, *, pid: int | None = None, source: str = "sreality",
     street: str = "id:42", disp: str = "2+kk", hn: str | None = "10",
     floor: int | None = 3, area: float | None = 60.0,
+    description: str | None = None,
 ) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid if pid is not None else sid,
         source=source, street_key=street, disposition=disp,
-        house_number=hn, floor=floor, area_m2=area,
+        house_number=hn, floor=floor, area_m2=area, description=description,
     )
 
 
@@ -110,6 +111,37 @@ def test_house_number_contradiction_rejects() -> None:
     d = classify_pair(_key(1, hn="10", floor=None), _key(2, hn="12", floor=None))
     assert d.action == "reject"
     assert d.detail == "house_number_contradiction"
+
+
+def test_unit_marker_contradiction_rejects_different_plots() -> None:
+    # the real Kostelec development: pozemek č.4 vs č.3, identical otherwise
+    a = _key(1, hn=None, description="dům 4+kk, pozemek č.4 o velikosti 479 m²")
+    b = _key(2, hn=None, description="dům 4+kk, pozemek č.3 o velikosti 484 m²")
+    d = classify_pair(a, b)
+    assert d.action == "reject"
+    assert d.detail == "unit_marker_contradiction"
+
+
+def test_unit_marker_contradiction_house_and_flat_variants() -> None:
+    assert classify_pair(
+        _key(1, hn=None, description="dům 3A na klíč"),
+        _key(2, hn=None, description="dům 5C na klíč"),
+    ).detail == "unit_marker_contradiction"
+    assert classify_pair(
+        _key(1, hn=None, description="prodej byt 42 v centru"),
+        _key(2, hn=None, description="prodej byt 45 v centru"),
+    ).detail == "unit_marker_contradiction"
+
+
+def test_same_unit_marker_does_not_block() -> None:
+    # identical descriptions (same unit, or no unit token) → not a contradiction
+    a = _key(1, hn=None, description="komerční nemovitost v centru, jednotka č. 5")
+    b = _key(2, hn=None, description="komerční nemovitost v centru, jednotka č. 5")
+    assert classify_pair(a, b).action == "candidate"
+    # unit keyword present on only one side → no contradiction
+    c = _key(3, hn=None, description="pozemek č.4")
+    e = _key(4, hn=None, description="hezký dům u lesa")
+    assert classify_pair(c, e).action == "candidate"
 
 
 def test_street_mismatch_rejects() -> None:
@@ -215,10 +247,11 @@ class _FakeConn:
 
 def _row(sid: int, pid: int, *, street_id: int = 42, disp: str = "2+kk",
          hn: str | None = "10", floor: int | None = 3, area: float | None = 60.0,
-         source: str = "sreality") -> tuple[Any, ...]:
+         source: str = "sreality", description: str | None = None) -> tuple[Any, ...]:
     # matches _ELIGIBLE_SQL column order:
-    # sreality_id, property_id, source, street, street_id, disposition, house_number, floor, area_m2
-    return (sid, pid, source, "Nádražní", street_id, disp, hn, floor, area)
+    # sreality_id, property_id, source, street, street_id, disposition,
+    # house_number, floor, area_m2, description
+    return (sid, pid, source, "Nádražní", street_id, disp, hn, floor, area, description)
 
 
 def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:

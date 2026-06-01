@@ -1061,6 +1061,16 @@ export const dismissDedupCluster = (
     json: { candidate_ids: candidateIds },
   });
 
+/* Merge an explicit operator-checked SUBSET of a cluster by property id; the
+ * unchecked rest stays in the proposal queue (re-pointed server-side). */
+export const mergeDedupPropertySet = (
+  propertyIds: number[],
+): Promise<ClusterMergeResult> =>
+  request<ClusterMergeResult>('/dedup/properties/merge', {
+    method: 'POST',
+    json: { property_ids: propertyIds },
+  });
+
 export const listDedupMerges = (
   params: { limit?: number; offset?: number } = {},
 ): Promise<MergesResponse> =>
