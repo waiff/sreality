@@ -385,11 +385,20 @@ begin
 end;
 $$;
 
-create extension if not exists pg_cron;
-
--- Named schedule → idempotent (re-applying upserts the job by name).
-select cron.schedule(
-  'refresh-health-dashboard',
-  '*/10 * * * *',
-  $$select public.refresh_health_matviews();$$
-);
+-- pg_cron schedules the refresh in-DB (every 10 min). Wrapped in a guarded
+-- block so this migration still applies on a Postgres without pg_cron — e.g.
+-- the CI migration-replay container, where it logs a notice and skips the
+-- schedule (the matviews + RPCs above apply everywhere). On Supabase pg_cron is
+-- available, so the named job is created — idempotent: re-applying upserts it.
+do $cron$
+begin
+  create extension if not exists pg_cron;
+  perform cron.schedule(
+    'refresh-health-dashboard',
+    '*/10 * * * *',
+    $$select public.refresh_health_matviews();$$
+  );
+exception when others then
+  raise notice 'pg_cron unavailable; health matview refresh not scheduled (%). Refresh via refresh_health_matviews() on another scheduler.', sqlerrm;
+end
+$cron$;
