@@ -87,22 +87,21 @@ def _find(conn: _FakeConn, needle: str) -> tuple[str, Any] | None:
     return next((e for e in conn.executed if needle in e[0]), None)
 
 
-def test_attach_stragglers_spatial_link_before_singleton_insert():
-    """The deferred Tier-1 match must run BEFORE the singleton insert, so a
-    straggler with a single cross-source hit links instead of becoming a
-    duplicate singleton."""
+def test_attach_stragglers_singletons_only_no_spatial_link():
+    """Stragglers become singletons; the old geo spatial-link step is gone.
+
+    Matching is the out-of-band street+disposition dedup engine's job, so
+    attach must NOT run any ST_DWithin probe or enqueue dirty_properties — it
+    only inserts a singleton per unlinked listing and links it.
+    """
     conn = _FakeConn()
     _attach_stragglers(conn)
     order = _sqls(conn)
-    spatial = next(i for i, s in enumerate(order) if "ST_DWithin(p.geom, s.geom, 20)" in s)
     insert = next(i for i, s in enumerate(order) if "INSERT INTO properties" in s)
     link = next(i for i, s in enumerate(order) if "p.repr_listing_id = l.sreality_id" in s)
-    assert spatial < insert < link
-    # The deferred matcher keeps the inline matcher's exact gates.
-    spatial_sql = order[spatial]
-    assert "BETWEEN s.price_czk * 0.98 AND s.price_czk * 1.02" in spatial_sql
-    assert "c.source = s.source" in spatial_sql
-    assert "m.hits = 1" in spatial_sql
+    assert insert < link
+    assert not any("ST_DWithin" in s for s in order)
+    assert not any("INSERT INTO dirty_properties" in s for s in order)
 
 
 def test_attach_stragglers_full_runs_native_id_backfill():
@@ -118,27 +117,8 @@ def test_attach_stragglers_incremental_skips_native_id_backfill():
     _attach_stragglers(conn, skip_native_backfill=True)
     order = _sqls(conn)
     assert not any("source_id_native = sreality_id::text" in s for s in order)
-    assert any("ST_DWithin(p.geom, s.geom, 20)" in s for s in order)  # link still runs
-
-
-def test_attach_stragglers_enqueues_spatially_linked_properties():
-    """A straggler that links to an existing property dirties that property."""
-    conn = _FakeConn([
-        (lambda s: "ST_DWithin(p.geom, s.geom, 20)" in s, [(7,), (7,), (9,)]),
-    ])
-    _attach_stragglers(conn, skip_native_backfill=True)
-    enq = _find(conn, "INSERT INTO dirty_properties")
-    assert enq is not None
-    sql, params = enq
-    assert "unnest(%(ids)s::bigint[])" in sql
-    assert "ON CONFLICT (property_id) DO UPDATE SET marked_at = now()" in sql
-    assert params == {"ids": [7, 7, 9]}
-
-
-def test_attach_stragglers_no_enqueue_when_no_links():
-    conn = _FakeConn()  # spatial link returns nothing
-    _attach_stragglers(conn, skip_native_backfill=True)
-    assert _find(conn, "INSERT INTO dirty_properties") is None
+    # still inserts singletons even when the backfill is skipped
+    assert any("INSERT INTO properties" in s for s in order)
 
 
 class _DrainCur:

@@ -16,9 +16,11 @@ import {
 } from '@/lib/api';
 import {
   dedupKeys,
+  fetchDedupEngineRuns,
   fetchImagesByListingIds,
   fetchListingDetailByIds,
   fetchPropertySourcesByPropertyIds,
+  type DedupEngineRun,
 } from '@/lib/queries';
 import { diffCandidate, type DiffRow, type DiffVerdict, type ListingDetailLite } from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
@@ -55,6 +57,12 @@ export default function Dedup() {
   const mergesQ = useQuery<MergesResponse, Error>({
     queryKey: dedupKeys.merges({ limit: 50 }),
     queryFn: () => listDedupMerges({ limit: 50 }),
+    placeholderData: keepPreviousData,
+  });
+
+  const engineRunsQ = useQuery<DedupEngineRun[], Error>({
+    queryKey: dedupKeys.engineRuns(14),
+    queryFn: () => fetchDedupEngineRuns(14),
     placeholderData: keepPreviousData,
   });
 
@@ -117,16 +125,18 @@ export default function Dedup() {
     <div className="px-6 py-8 max-w-5xl mx-auto">
       <Header proposed={candidates.length} />
 
+      <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
+
       <Section
         title="Needs review"
-        eyebrow="Proposed cross-source matches"
+        eyebrow="Proposed matches"
         isEmpty={candidates.length === 0}
         empty={
           candidatesQ.isLoading
             ? 'Loading…'
             : candidatesQ.error
               ? `Failed to load: ${candidatesQ.error.message}`
-              : 'Nothing awaiting review. Candidates appear as the dedup sweep finds cross-source pairs it can’t confidently auto-merge — which needs a second portal’s listings flowing in.'
+              : 'Nothing awaiting review. The engine queues a pair here only when two listings share a street and disposition but it can’t confidently confirm they’re the same property by photos.'
         }
       >
         <div className="space-y-3">
@@ -171,6 +181,110 @@ export default function Dedup() {
 
 /* -------------------------------------------------------------------------- */
 
+/* What the autonomous engine did — eligibility breakdown + how each recent run
+ * resolved its candidates (auto-merged by address / identical photos / a High
+ * visual verdict, vs left for review). Reads dedup_engine_runs_public. */
+function AutomationDashboard({
+  runs,
+  loading,
+}: {
+  runs: DedupEngineRun[];
+  loading: boolean;
+}) {
+  const latest = runs[0] ?? null;
+  const autoTotal = latest
+    ? latest.auto_address + latest.auto_phash + latest.auto_visual
+    : 0;
+  return (
+    <section className="mt-8">
+      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        Automation
+      </p>
+      <h2 className="mt-1 text-xl" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+        Engine activity
+      </h2>
+      {latest == null ? (
+        <div className="mt-3 px-6 py-8 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
+          {loading ? 'Loading…' : 'The dedup engine hasn’t run yet. Stats appear after its first run.'}
+        </div>
+      ) : (
+        <>
+          <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Stat label="Eligible" value={latest.eligible} hint="street + disposition" />
+            <Stat label="Loc. unclear" value={latest.flagged_location} hint="no street" muted />
+            <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
+            <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
+          </div>
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <Stat label="By address" value={latest.auto_address} small />
+            <Stat label="By photos" value={latest.auto_phash} small />
+            <Stat label="By visual" value={latest.auto_visual} small />
+            <Stat label="Queued" value={latest.queued} small />
+          </div>
+          {runs.length > 1 ? <RunTrend runs={runs} /> : null}
+          <p className="mt-2 text-[0.7rem] text-[var(--color-ink-4)]">
+            Last run {fmtRelative(latest.started_at)} · {fmtCount(latest.pairs_considered)} pairs examined ·
+            {' '}{fmtCount(latest.vision_calls)} vision calls
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  hint,
+  accent,
+  muted,
+  small,
+}: {
+  label: string;
+  value: number;
+  hint?: string;
+  accent?: boolean;
+  muted?: boolean;
+  small?: boolean;
+}) {
+  const valueColor = accent
+    ? 'text-[var(--color-copper-2)]'
+    : muted
+      ? 'text-[var(--color-ink-3)]'
+      : 'text-[var(--color-ink)]';
+  return (
+    <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2">
+      <div className={`font-mono tabular-nums ${small ? 'text-base' : 'text-xl'} ${valueColor}`}>
+        {fmtCount(value)}
+      </div>
+      <div className="text-[0.62rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)]">{label}</div>
+      {hint ? <div className="text-[0.62rem] text-[var(--color-ink-4)]">{hint}</div> : null}
+    </div>
+  );
+}
+
+/* A tiny sparkline-ish bar row: auto-merges per recent run, newest on the right. */
+function RunTrend({ runs }: { runs: DedupEngineRun[] }) {
+  const ordered = [...runs].reverse();
+  const max = Math.max(1, ...ordered.map((r) => r.auto_address + r.auto_phash + r.auto_visual));
+  return (
+    <div className="mt-3 flex items-end gap-1 h-12" title="Auto-merges per recent run">
+      {ordered.map((r) => {
+        const total = r.auto_address + r.auto_phash + r.auto_visual;
+        const h = Math.round((total / max) * 100);
+        return (
+          <div
+            key={r.id}
+            className="flex-1 bg-[var(--color-copper)]/70 rounded-t-[var(--radius-xs)] min-h-[2px]"
+            style={{ height: `${Math.max(h, 3)}%` }}
+            title={`${total} auto-merged`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 function Header({ proposed }: { proposed: number }) {
   return (
     <header>
@@ -184,9 +298,10 @@ function Header({ proposed }: { proposed: number }) {
         Cross-source review
       </h1>
       <p className="mt-2 text-sm text-[var(--color-ink-2)] max-w-2xl">
-        The dedup sweep groups the same real-world property listed on multiple
-        portals into one. High-confidence matches merge automatically (reversible
-        below); ambiguous ones wait here for your call.
+        The dedup engine groups listings that share a street and disposition into
+        one real-world property. An exact address (or near-identical photos)
+        merges automatically; pairs it can’t confirm by photos wait here for your
+        call. Every merge is reversible below.
         {proposed > 0 ? (
           <span className="text-[var(--color-ink)]"> {fmtCount(proposed)} awaiting review.</span>
         ) : null}
@@ -257,10 +372,12 @@ function CandidateCard({
   const rightDetail = R.sreality_id != null ? detailMap.get(R.sreality_id) ?? null : null;
   const rows = diffCandidate(candidate, leftDetail, rightDetail);
 
-  const corroborator =
-    typeof candidate.markers_matched?.corroborator === 'string'
-      ? (candidate.markers_matched.corroborator as string)
-      : null;
+  const m = candidate.markers_matched ?? {};
+  const corroborator = typeof m.corroborator === 'string' ? m.corroborator : null;
+  const visualVerdict = typeof m.verdict === 'string' ? (m.verdict as string) : null;
+  const visualRationale = typeof m.rationale === 'string' ? (m.rationale as string) : null;
+  const visualRoom = typeof m.room_type === 'string' ? (m.room_type as string) : null;
+  const engineReason = typeof m.reason === 'string' ? (m.reason as string) : null;
 
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-4">
@@ -272,6 +389,9 @@ function CandidateCard({
           ) : null}
           {corroborator ? (
             <span className="text-[var(--color-ink-4)]">· {corroborator}</span>
+          ) : null}
+          {engineReason && !corroborator ? (
+            <span className="text-[var(--color-ink-4)]">· {engineReason.replace(/_/g, ' ')}</span>
           ) : null}
         </div>
         <div className="flex items-center gap-2">
@@ -306,6 +426,41 @@ function CandidateCard({
         />
       </div>
       <DiffTable rows={rows} />
+      {visualVerdict ? (
+        <VisualVerdictNote verdict={visualVerdict} rationale={visualRationale} room={visualRoom} />
+      ) : null}
+    </div>
+  );
+}
+
+/* The engine's room-aware forensic read, shown when it ran the visual layer but
+ * didn't reach a confident-enough verdict to auto-merge — so the operator sees
+ * WHY this pair is here, not just that it is. High never reaches the queue
+ * (it auto-merges), so this surfaces the Medium/Low/inconclusive cases. */
+function VisualVerdictNote({
+  verdict,
+  rationale,
+  room,
+}: {
+  verdict: string;
+  rationale: string | null;
+  room: string | null;
+}) {
+  const tone =
+    verdict === 'High'
+      ? 'border-[var(--color-sage)]/60 text-[var(--color-sage)]'
+      : verdict === 'Medium'
+        ? 'border-[var(--color-copper)]/50 text-[var(--color-copper-2)]'
+        : 'border-[var(--color-rule)] text-[var(--color-ink-3)]';
+  return (
+    <div className={`mt-3 rounded-[var(--radius-sm)] border ${tone} bg-[var(--color-paper)] p-2.5`}>
+      <div className="flex items-center gap-2 text-[0.62rem] tracking-[0.12em] uppercase">
+        <span className="font-semibold">Visual: {verdict}</span>
+        {room ? <span className="text-[var(--color-ink-4)]">· {room.replace(/_/g, ' ')}</span> : null}
+      </div>
+      {rationale ? (
+        <p className="mt-1 text-[0.78rem] leading-snug text-[var(--color-ink-2)]">{rationale}</p>
+      ) : null}
     </div>
   );
 }
