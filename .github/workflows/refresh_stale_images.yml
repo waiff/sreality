@@ -1,0 +1,74 @@
+name: "Jobs: refresh stale image URLs"
+
+# Re-opens active listings whose photos aren't in R2 yet so their (possibly rotated)
+# source image URLs get refreshed. Portals rotate image CDN URLs over weeks; a listing
+# whose images the newest-first backfill never reached before its URLs rotated is stuck —
+# the stored URL 404s, the frontend fallback can't load it, and the image downloader can't
+# fetch it. This sweep (scripts.refresh_stale_image_urls) re-enqueues such listings into
+# the source-generic listing_detail_queue; the detail drain re-fetches them, record_images
+# repoints each not-yet-stored image's URL to the current one, and the image backfill
+# (images.yml) then stores the bytes.
+#
+# Targeted + bounded: only active listings with an un-downloaded image that are either
+# older than --min-age (the stranded backlog) or have a confirmed-stale
+# (unavailable_reason='source_unavailable') image. listings.images_refreshed_at is a
+# per-listing cooldown so a genuinely-removed photo can't loop. Low priority, so it never
+# delays genuine new-listing detail fetches.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  schedule:
+    - cron: "20 */6 * * *"   # every 6 hours, offset from the other jobs
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max listings to re-enqueue this run"
+        required: false
+        default: "5000"
+        type: string
+      min_age:
+        description: "Only sweep listings older than this Postgres interval (unless they have a confirmed-stale image)"
+        required: false
+        default: "3 days"
+        type: string
+      cooldown:
+        description: "Per-listing cooldown — skip listings re-enqueued within this interval"
+        required: false
+        default: "14 days"
+        type: string
+      dry_run:
+        description: "Report counts and exit without enqueuing"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: refresh-stale-images
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run stale-image refresh sweep
+        run: |
+          python -m scripts.refresh_stale_image_urls \
+            --limit "${{ inputs.limit || '5000' }}" \
+            --min-age "${{ inputs.min_age || '3 days' }}" \
+            --cooldown "${{ inputs.cooldown || '14 days' }}" \
+            ${{ inputs.dry_run == true && '--dry-run' || '' }}
