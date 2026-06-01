@@ -925,14 +925,26 @@ export interface RentMapKraj {
 }
 
 export const fetchRentMapChoropleth = async (): Promise<RentMapPolygon[]> => {
-  /* `.range(0, 9999)` bypasses PostgREST's default 1,000-row cap. The
-   * view has ~7,600 rows (one per obec / katastrální území). */
-  const { data, error } = await supabase
-    .from('rent_map_choropleth_public')
-    .select('*')
-    .range(0, 9999);
-  if (error) throw error;
-  return (data ?? []) as RentMapPolygon[];
+  /* The view has ~7,630 rows (one per obec / katastrální území), but
+   * PostgREST hard-caps every response at 1,000 rows on this project
+   * (db-max-rows) — neither `.range(0, 9999)` nor `.limit()` lifts it.
+   * So page through with a stable `order` until a short page signals
+   * the end. Fetched once and cached (staleTime: Infinity), so the ~8
+   * requests only happen when the operator first enables the layer. */
+  const PAGE = 1000;
+  const out: RentMapPolygon[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('rent_map_choropleth_public')
+      .select('*')
+      .order('ruian_code', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    const rows = (data ?? []) as RentMapPolygon[];
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+  }
+  return out;
 };
 
 export const fetchRentMapKraje = async (): Promise<RentMapKraj[]> => {
