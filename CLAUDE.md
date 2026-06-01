@@ -694,10 +694,16 @@ Database:
   compatibility; the v1 scraper connects to Postgres directly and does not need them.
   (`SUPABASE_SERVICE_ROLE_KEY` is the 2025 `sb_secret_...` token, **not** a JWT.)
 
-Image storage (Cloudflare R2, S3-compatible) — all optional; if any is missing the
-image-download phase logs a skip and exits zero:
+Image storage (Cloudflare R2, S3-compatible):
 - `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` (usually
   `sreality-images`).
+- **TWO runtimes need these, set them on BOTH:** (1) the **scraper** (GitHub Actions secrets)
+  to *download* image bytes — optional there, a missing var just logs a skip and exits zero;
+  (2) the **FastAPI service** (Railway env vars) to *serve* them, since `GET /images/{key}`
+  presigns R2 (the frontend's image path since PR #255). If the **API** service is missing
+  them, every listing photo 503s and the UI looks imageless even though the DB reports the
+  bytes "stored" — the API logs a boot WARNING and `GET /health` reports
+  `image_storage: "unconfigured"` in that case.
 
 LLM + maps (FastAPI service + scoring jobs):
 - `ANTHROPIC_API_KEY` — required for the URL parser, summarize/vision tools, condition

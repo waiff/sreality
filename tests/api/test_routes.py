@@ -26,10 +26,16 @@ def client(monkeypatch):
     api_main.app.dependency_overrides.clear()
 
 
-def test_health_endpoint(client):
+def test_health_endpoint(client, monkeypatch):
+    # Reports R2 serve-path status so a missing-R2 misconfig (every /images 503s)
+    # is visible to a monitor instead of silently blanking the UI.
+    monkeypatch.setattr(api_main.image_storage, "is_configured", lambda: False)
     res = client.get("/health")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok"}
+    assert res.json() == {"status": "ok", "image_storage": "unconfigured"}
+
+    monkeypatch.setattr(api_main.image_storage, "is_configured", lambda: True)
+    assert client.get("/health").json()["image_storage"] == "configured"
 
 
 def test_find_comparables_passes_target_and_filters(client, monkeypatch):
