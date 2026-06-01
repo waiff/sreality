@@ -422,9 +422,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         default=None,
         metavar="K/N",
         help=(
-            "process only images where (image_id mod N) == K — for matrix "
-            "parallelism, each job claims one shard. 0-indexed (e.g. 0/4). "
-            "Lets N drainer jobs share the backlog with no coordination."
+            "process only images whose parent listing has "
+            "(hash(sreality_id) mod N) == K — for matrix parallelism, each "
+            "job claims one shard. 0-indexed (e.g. 0/4). Keying on the "
+            "listing keeps a listing's photos in one shard (no striping)."
         ),
     )
     p.add_argument(

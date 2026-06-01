@@ -292,7 +292,7 @@ def test_pending_image_downloads_shard_appends_modulo():
     conn = _ScriptedConn([])
     scraper_db.pending_image_downloads(conn, limit=500, shard=(2, 4))
     sql, params = conn.cursor_obj.executed[0]
-    assert "(i.id %% %s) = %s" in sql
+    assert "(hashint8(i.sreality_id) & 2147483647) %% %s = %s" in sql
     # max_attempts, then shard (n, k), then limit — modulus N before remainder K.
     assert params == (5, 4, 2, 500)
 
@@ -313,7 +313,7 @@ def test_pending_image_downloads_shard_and_sources_and_active():
     sql, params = conn.cursor_obj.executed[0]
     assert "l.is_active = true" in sql
     assert "l.source = ANY(%s)" in sql
-    assert "(i.id %% %s) = %s" in sql
+    assert "(hashint8(i.sreality_id) & 2147483647) %% %s = %s" in sql
     # Order of bound params: max_attempts, sources, shard(n, k), limit.
     assert params == (5, ["idnes"], 3, 0, 500)
 
