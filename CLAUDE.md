@@ -118,6 +118,36 @@ delistings surface via a gone detail fetch (immediate per-listing flip via
 `mark_listing_inactive_native`) + the toolkit's "active = seen within 7 days" rule.
 Registered as a scraper portal (migration 117, sort 35).
 
+**Data source (remax-czech.cz).** A scheduled scraper (`scraper/remax_client.py`,
+`remax_parser.py`, `remax_main.py`, workflow `scrape_remax.yml` — pilot, every 6h +
+dispatch) tagged `source='remax'`. RE/MAX is a national franchise catalogue (~7,900
+listings) served as STRUCTURED server-rendered HTML (no JSON API), so
+`remax_parser` is deterministic: the search cards are `<div class="pl-items__item"
+data-url=… data-price=… data-gps=… data-title=…>` (price, coordinates and title
+straight off the card), and the detail page is a `pd-detail-info__row` →
+`__label`/`__value` spec block + a clean integer `data-advert-price` + per-listing
+coordinates in `data-gps` (DMS, e.g. `50°05'26.1"N,14°29'33.4"E` — parsed to
+decimal, CZ-bbox-guarded, no geocoding step) + a `mlsf.remax-czech.cz/data//zs/{id}/`
+gallery (the `_th350` thumbnail strips to the full-resolution original). Typed
+fields are normalised to the SAME canonical labels sreality/idnes emit
+(`Cihlová→cihla`, `Velmi dobrý→velmi_dobry`, `Osobní→osobni`, `2+kk`). Like maxima,
+the index is TWO mixed indexes — sale (`?sale=1` prodej) and rent (`?sale=2`
+pronájem), `?stranka=N` paging (21/page) — with no per-category URL; each config
+descriptor pairs a category with its offer-type flag and `walk_category` walks (or
+reuses, via the agenda cache) that agenda once and keeps the title-derived slice for
+its category (giving the runner real (cm, ct) Health-reconciliation labels). The
+drain re-derives each listing's category from the detail page ("Typ nemovitosti" +
+title verb). A PILOT: `supports_complete_walk=false` (remax reports a per-AGENDA
+total and the per-category slice is title-derived — not a portal-reported per-(cm,ct)
+total — so a safe per-category completeness check isn't available; the runner never
+flips listings inactive from index absence, rule #3); a gone detail (404/410 or a
+redirect off the detail path) still flips that one listing inactive. Registered as a
+scraper portal by CONVERTING the existing on-demand-parser row (migration 135). NOTE:
+remax ALSO has an on-demand URL parser (`scraper/source_parsers/remax.py`, LLM,
+`source_kind='remax'`) used by the estimation preview — a separate entry point
+unchanged by the scheduled scraper, routed by domain in `source_dispatcher`
+independent of the `portals` row's `kind`.
+
 ## Territories
 
 The repo is split into **three** top-level territories with deliberately different
@@ -918,7 +948,10 @@ cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrap
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The mmreality scrape is
 `scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", every 6h + dispatch; runs
-both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The idnes scrape is
+both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
+scrape is `scrape_remax.yml` ("Scraping: RE/MAX scraper (pilot)", every 6h + dispatch; runs both
+phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds` budget so the
+~7,900-listing backlog drains over several ticks). The idnes scrape is
 **cadence-split** like sreality (iDNES is large — ~2400 index pages, ~60k listings — so a
 combined run's full index starves the drain): `idnes_index_walk.yml` ("Scraping: iDNES Reality
 index walk", `idnes_main --index-only`, cron `15 */6`, full complete-walk + mark_inactive +

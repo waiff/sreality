@@ -1617,6 +1617,72 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_mmreality.yml"
   },
   {
+    "filename": "scrape_remax.yml",
+    "name": "Scraping: RE/MAX scraper (pilot)",
+    "description": "Scheduled (every 6h) + manual scraper for remax-czech.cz on the shared portal framework. RE/MAX is a national franchise catalogue (~7,900 listings) served as a single server-rendered search index (no JSON API, no per-category URL) split only by an offer-type flag (sale=1 prodej / sale=2 pronájem): the index walk pages each agenda and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /reality/detail/{id}/ page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + singleton property).",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "40 */6 * * *",
+        "human": "Every 6 hours at :40"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap search pages walked per agenda (ad-hoc partial). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "cap detail-drain claims this run (blank = per-portal config)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget for the detail drain (seconds)",
+        "required": false,
+        "type": "string",
+        "default": "1500",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "detail-fetch requests/second ceiling",
+        "required": false,
+        "type": "string",
+        "default": "2.0",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "detail-fetch workers (concurrency; raise for a one-time backfill)",
+        "required": false,
+        "type": "string",
+        "default": "4",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "remax-scrape",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_remax.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_remax.yml"
+  },
+  {
     "filename": "seed_condition_settings.yml",
     "name": "Data: seed condition settings (rubric + markers)",
     "description": "One-shot workflow that populates the two large app_settings rows created by migration 072 — `llm_condition_rubric` and `llm_condition_marker_dictionary` — from the committed JSON files (data/condition_rubric_v1.json + data/condition_markers_curated.json).",

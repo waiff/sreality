@@ -92,6 +92,16 @@ def test_default_config_mmreality():
     assert cfg.categories == [{"index": "nemovitosti"}]
 
 
+def test_default_config_remax():
+    cfg = default_config("remax")
+    assert cfg.supports_complete_walk is False  # mixed per-agenda index → partial walk
+    assert cfg.split_threshold is None
+    assert cfg.splits is False
+    assert len(cfg.categories) == 10            # 5 categories × prodej + pronajem
+    assert {c["sale"] for c in cfg.categories} == {1, 2}
+    assert all("category_main" in c and "category_type" in c for c in cfg.categories)
+
+
 def test_default_config_unknown_raises():
     with pytest.raises(ValueError):
         default_config("nope")

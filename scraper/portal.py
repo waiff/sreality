@@ -214,6 +214,33 @@ _DEFAULTS: dict[str, PortalConfig] = {
             index_rate=1.0, detail_workers=2, detail_rate=1.0,
         ),
     ),
+    "remax": PortalConfig(
+        source="remax",
+        # TWO mixed indexes — sale (sale=1) and rent (sale=2) — no per-category
+        # URL. Each descriptor pairs a category with its offer-type flag;
+        # walk_category walks that agenda once (cached) and keeps the
+        # title-derived slice for its category. Pilot: supports_complete_walk=
+        # false (remax reports a per-AGENDA total, and the per-category slice is
+        # title-derived — not a portal-reported per-(cm,ct) total — so a safe
+        # per-category completeness check isn't available).
+        supports_complete_walk=False,
+        categories=[
+            {"category_main": "byt",      "category_type": "prodej",   "sale": 1},
+            {"category_main": "dum",      "category_type": "prodej",   "sale": 1},
+            {"category_main": "pozemek",  "category_type": "prodej",   "sale": 1},
+            {"category_main": "komercni", "category_type": "prodej",   "sale": 1},
+            {"category_main": "ostatni",  "category_type": "prodej",   "sale": 1},
+            {"category_main": "byt",      "category_type": "pronajem", "sale": 2},
+            {"category_main": "dum",      "category_type": "pronajem", "sale": 2},
+            {"category_main": "pozemek",  "category_type": "pronajem", "sale": 2},
+            {"category_main": "komercni", "category_type": "pronajem", "sale": 2},
+            {"category_main": "ostatni",  "category_type": "pronajem", "sale": 2},
+        ],
+        split_threshold=None,
+        limits=PortalLimits(
+            index_rate=1.0, detail_workers=4, detail_rate=2.0,
+        ),
+    ),
     "bezrealitky": PortalConfig(
         source="bezrealitky",
         # GraphQL listAdverts gives a totalCount and has no deep-pagination cap,

@@ -131,6 +131,44 @@ Browse card's new "portál" label next to first/last-seen) and adds a `portal_fi
 (`idnes_reality`, `remax`) are intentionally not offered — they never produce `listings`
 rows. Extend `PORTAL_OPTIONS` (and regenerate) when a new ingesting portal lands.
 
+### 2026-06: RE/MAX scraper (portal 7, pilot)
+The seventh portal onto the shared Phase-4 framework — again "a fetcher + a parser +
+a config row", no per-portal branches. remax-czech.cz is a national franchise
+catalogue (~7,900 listings) of STRUCTURED server-rendered HTML, so `remax_parser.py`
+is deterministic (no LLM): the search cards carry `data-url`/`data-price`/`data-gps`/
+`data-title`, and the detail page is a `pd-detail-info__row` → `__label`/`__value`
+spec block + a clean integer `data-advert-price` + per-listing `data-gps` (DMS →
+decimal, CZ-bbox-guarded, no geocoding) + a `mlsf.remax-czech.cz/data//zs/{id}/`
+gallery (the `_th350` thumbnail strips to the full-resolution original). Typed fields
+normalise to the canonical sreality labels (`Cihlová→cihla`, `Velmi dobrý→velmi_dobry`,
+`Osobní→osobni`). `RemaxClient` (`scraper/remax_client.py`) subclasses
+`BasePortalClient` (HTML `Accept` + the `?sale={1,2}&stranka=N` index + the
+`/reality/detail/{id}/` detail URL builders + a redirect-off-detail gone signal);
+`RemaxPortal` (`scraper/remax_main.py`) implements the runner seams. Like maxima, the
+index is TWO mixed agendas (sale=1 prodej / sale=2 pronájem) with no per-category URL,
+so each descriptor pairs a category with its offer-type flag and `walk_category` walks
+that agenda once (cached) and keeps the title-derived slice for its category (real
+(cm, ct) Health-reconciliation labels); the drain re-derives each listing's category
+from the detail "Typ nemovitosti" + title verb. Shipped as a **pilot**
+(`supports_complete_walk=false`): remax reports a per-AGENDA total and the per-category
+slice is title-derived, so a safe per-(cm,ct) completeness check isn't available — the
+runner never flips listings inactive from index absence (rule #3); a gone detail still
+flips that one. **Registered by CONVERTING the existing on-demand-parser `portals` row
+to a scraper (migration 135)** — the LLM URL parser (`source_kind='remax'`, estimation
+preview) is a separate entry point and keeps working, routed by domain in
+`source_dispatcher` independent of the row's `kind`. One job runs both phases
+(`scrape_remax.yml`, every 6h), drain bounded by `max_detail_per_run` + a
+`--max-seconds` budget so the backlog drains over several ticks. Also **added `remax`
+to `PORTAL_OPTIONS`** (it now ingests `listings` rows — the pending follow-up from the
+"Filter by portal" entry above) and regenerated the frontend registry.
+
+#### Next
+- Promote to `supports_complete_walk=true` once the pilot proves stable. remax exposes
+  per-category index URLs (`/reality/byty/?sale=N` with their own per-category totals),
+  so a future migration could walk those for a provable per-(cm,ct) completeness check
+  + delisting sweep (the idnes posture), replacing today's title-derived slice.
+- Refresh the `remax_sample.html` fixture so the on-demand-parser real-fixture test lights up.
+
 ### 2026-05: M&M Reality scraper (portal 6, pilot)
 The sixth portal onto the shared Phase-4 framework — again "a fetcher + a parser +
 a config row," no pipeline divergence. M&M Reality is server-rendered HTML, but

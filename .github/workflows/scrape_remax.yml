@@ -1,0 +1,97 @@
+name: "Scraping: RE/MAX scraper (pilot)"
+
+# Scheduled (every 6h) + manual scraper for remax-czech.cz on the shared portal
+# framework. RE/MAX is a national franchise catalogue (~7,900 listings) served as
+# a single server-rendered search index (no JSON API, no per-category URL) split
+# only by an offer-type flag (sale=1 prodej / sale=2 pronájem): the index walk
+# pages each agenda and enqueues new/price-changed ids into listing_detail_queue,
+# then the detail drain fetches each /reality/detail/{id}/ page, parses to a
+# ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0
+# idempotency + singleton property).
+#
+# One job runs BOTH phases (index walk + bounded drain). The drain is capped per
+# run (operational_limits.max_detail_per_run, default 3000) + a wall-clock budget
+# so it finalizes cleanly inside the timeout; the queue persists, so the rest
+# drains on the next tick. The per-listing category comes from the parser ("Typ
+# nemovitosti" + title verb); the index walk slices each agenda by the card title
+# for the Health reconciliation labels (migration 135).
+#
+# A PILOT: supports_complete_walk=false, so the runner never marks listings
+# inactive from index-absence (architectural rule #3); a gone detail (404/410 or
+# a redirect off the detail path) still flips that one listing inactive.
+#
+# The on-demand RE/MAX URL parser (scraper/source_parsers/remax.py, used by the
+# estimation preview) is a SEPARATE entry point and is unaffected by this crawl.
+#
+# Writes 'index' + 'detail' scrape_runs rows under source='remax' (its own
+# Health-page lane; does not touch sreality liveness / reconciliation).
+#
+# Required secret: SUPABASE_DB_URL. (Coordinates come from each card's / detail
+# page's data-gps, so no MAPY_CZ_API_KEY is needed. Image bytes are downloaded
+# separately by images.yml.)
+
+on:
+  schedule:
+    - cron: "40 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: cap search pages walked per agenda (ad-hoc partial). Blank = full walk.
+        required: false
+        default: ""
+        type: string
+      max_detail:
+        description: cap detail-drain claims this run (blank = per-portal config)
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: wall-clock budget for the detail drain (seconds)
+        required: false
+        default: "1500"
+        type: string
+      rate:
+        description: detail-fetch requests/second ceiling
+        required: false
+        default: "2.0"
+        type: string
+      workers:
+        description: detail-fetch workers (concurrency; raise for a one-time backfill)
+        required: false
+        default: "4"
+        type: string
+
+concurrency:
+  group: remax-scrape
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run remax scrape
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_DETAIL: ${{ inputs.max_detail }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '1500' }}
+          RATE: ${{ inputs.rate || '2.0' }}
+          WORKERS: ${{ inputs.workers || '4' }}
+        run: |
+          ARGS="--rate $RATE --workers $WORKERS --max-seconds $MAX_SECONDS"
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
+          echo "python -m scraper.remax_main $ARGS"
+          eval "python -m scraper.remax_main $ARGS"

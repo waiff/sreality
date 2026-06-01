@@ -688,7 +688,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "source",
       "default": null,
-      "description": "Restrict the cohort to listings from one or more source portals (`listings.source`): sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality. A listing matches if its source is in the list. Empty list / null = all portals.",
+      "description": "Restrict the cohort to listings from one or more source portals (`listings.source`): sreality, bazos, idnes, maxima, ceskereality, bezrealitky, mmreality, remax. A listing matches if its source is in the list. Empty list / null = all portals.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
@@ -737,6 +737,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "mmreality",
           "label_cs": "M&M Reality",
           "label_en": "M&M Reality"
+        },
+        {
+          "value": "remax",
+          "label_cs": "RE/MAX",
+          "label_en": "RE/MAX"
         }
       ],
       "aliases": []
