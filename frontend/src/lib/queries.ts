@@ -1048,6 +1048,43 @@ export const dedupKeys = {
     ['dedup', 'images', sortedIds(srealityIds)] as const,
   detail: (srealityIds: ReadonlyArray<number>) =>
     ['dedup', 'detail', sortedIds(srealityIds)] as const,
+  engineRuns: (limit: number) => ['dedup', 'engine-runs', limit] as const,
+};
+
+export interface DedupEngineRun {
+  id: number;
+  started_at: string;
+  ended_at: string | null;
+  eligible: number;
+  flagged_location: number;
+  flagged_disposition: number;
+  pairs_considered: number;
+  rejected: number;
+  auto_address: number;
+  auto_phash: number;
+  auto_visual: number;
+  queued: number;
+  vision_calls: number;
+  cost_usd: number;
+}
+
+/* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
+ * dedup_engine_runs_public view (migration 130) directly — operational counters,
+ * no secrets, same posture as the rest of the page's public-view reads. */
+export const fetchDedupEngineRuns = async (
+  limit = 14,
+): Promise<DedupEngineRun[]> => {
+  const { data, error } = await supabase
+    .from('dedup_engine_runs_public')
+    .select(
+      'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
+        'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
+        'vision_calls,cost_usd',
+    )
+    .order('started_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return (data ?? []) as unknown as DedupEngineRun[];
 };
 
 export const curationKeys = {

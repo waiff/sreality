@@ -19,8 +19,8 @@ name: "Jobs: property maintenance (incremental)"
 #
 # The DAILY FULL sweep (recompute_property_stats.yml, no --incremental) stays the
 # reconcile backstop: it recomputes every property and clears the queue, so a
-# missed enqueue self-heals within 24h. Tier-2 fuzzy dedup (dedup_sweep) is
-# unchanged.
+# missed enqueue self-heals within 24h. The street+disposition dedup engine
+# (dedup_engine) runs separately and owns all cross-listing grouping.
 #
 # Cadence: every 5 min. GitHub throttles scheduled workflows, so the effective
 # cadence can be slightly slower — fine for a property-aggregation surface. The

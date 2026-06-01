@@ -3,15 +3,11 @@
 Two phases, both idempotent:
 
 1. Attach stragglers. Any `listings` row with `property_id IS NULL` — an
-   old-code insert, or (Phase 2) a row written by the batched detail-drain,
-   which deliberately defers Tier-1 matching off the hot write path — is
-   resolved here. First the same Tier-1 spatial probe the inline matcher runs
-   (`scraper.db._match_or_create_property`): a straggler with exactly one
-   same-source-excluded near-match (geom 20 m / price ±2% / area ±1 m²) links
-   to that property (the cross-portal dedup link). Whatever remains unlinked
-   (zero hits, or ambiguous ≥2 hits) gets its own singleton, mirroring
-   migration 092. Ambiguous candidate pairs are NOT recorded here — the daily
-   Tier-2 fuzzy sweep (`scripts.dedup_sweep`) is the backstop for those.
+   old-code insert, or a row written by the batched detail-drain — gets its own
+   singleton property here, mirroring migration 092. No cross-listing matching
+   happens at this step: the old geo Tier-1 spatial probe was removed when
+   grouping moved to the street+disposition dedup engine (`toolkit.dedup_engine`
+   / `scripts.dedup_engine`), which runs out-of-band and owns ALL merges.
 
 2. Recompute every property from its children. Per property:
      is_active           = bool_or(children.is_active)   (decision #3 rollup)
@@ -90,44 +86,6 @@ _ATTACH_LINK_SQL = """
     FROM properties p
     WHERE p.repr_listing_id = l.sreality_id
       AND l.property_id IS NULL
-"""
-
-# Tier-1 spatial match, set-based — the deferred-matcher half of Phase 2.
-# Reproduces _match_or_create_property's single-hit branch over all unlinked
-# stragglers at once: a straggler with exactly one same-source-excluded
-# near-match (20 m / ±2% price / ±1 m² area) links to that property. The
-# same-source exclusion keeps it inert for sreality-only neighbourhoods (every
-# nearby property already has a sreality child) and fires only on genuine
-# cross-portal matches. Stragglers with 0 or ≥2 hits stay NULL and fall through
-# to the singleton insert below; ambiguous pairs are left for the Tier-2 sweep.
-_ATTACH_SPATIAL_LINK_SQL = """
-    WITH straggler AS (
-        SELECT sreality_id, geom, price_czk, area_m2, source
-        FROM listings
-        WHERE property_id IS NULL
-          AND geom IS NOT NULL
-          AND price_czk IS NOT NULL
-          AND area_m2 IS NOT NULL
-    ),
-    m AS (
-        SELECT s.sreality_id, min(p.id) AS pid, count(*) AS hits
-        FROM straggler s
-        JOIN properties p
-          ON p.geom IS NOT NULL
-         AND p.current_price_czk IS NOT NULL
-         AND p.area_m2 IS NOT NULL
-         AND ST_DWithin(p.geom, s.geom, 20)
-         AND p.current_price_czk BETWEEN s.price_czk * 0.98 AND s.price_czk * 1.02
-         AND p.area_m2 BETWEEN s.area_m2 - 1 AND s.area_m2 + 1
-         AND NOT EXISTS (
-               SELECT 1 FROM listings c
-               WHERE c.property_id = p.id AND c.source = s.source)
-        GROUP BY s.sreality_id
-    )
-    UPDATE listings l SET property_id = m.pid
-    FROM m
-    WHERE m.hits = 1 AND l.sreality_id = m.sreality_id
-    RETURNING l.property_id
 """
 
 _RECOMPUTE_BATCH_SQL = """
@@ -262,12 +220,6 @@ _DELETE_DIRTY_SQL = """
 """
 
 # Enqueue the spatially-linked stragglers so the recompute below picks them up.
-_ENQUEUE_DIRTY_SQL = """
-    INSERT INTO dirty_properties (property_id)
-    SELECT DISTINCT u FROM unnest(%(ids)s::bigint[]) AS u
-    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
-"""
-
 # Full sweep clears the queue (it recomputed everything), but only rows that
 # existed at its start -- anything dirtied mid-sweep is left for the next pass.
 _CLEAR_DIRTY_SQL = "DELETE FROM dirty_properties WHERE marked_at <= %(cutoff)s"
@@ -310,29 +262,23 @@ def _batch_ranges(max_id: int, batch_size: int) -> Iterator[tuple[int, int]]:
 
 
 def _attach_stragglers(conn: Any, *, skip_native_backfill: bool = False) -> int:
-    """Resolve property_id-NULL listings: Tier-1 spatial link, then singletons.
+    """Give every property_id-NULL listing its own singleton property.
 
     The native-id backfill is a one-time legacy fix that scans the whole listings
-    table, so the */5 incremental pass skips it (daily full mode runs it). The
-    spatially-linked stragglers join an EXISTING property, so that property gains
-    a child and must be recomputed -- enqueue them dirty. Fresh singletons are
-    inserted already-correct (one child, no price history), so they need no
-    recompute and are not enqueued.
+    table, so the */5 incremental pass skips it (daily full mode runs it). No
+    cross-listing matching happens here anymore: the old geo Tier-1 spatial link
+    was removed when grouping moved to the street+disposition dedup engine
+    (`toolkit.dedup_engine` / `scripts.dedup_engine`), which runs out-of-band.
+    Fresh singletons are inserted already-correct (one child, no price history),
+    so they need no recompute and are not enqueued dirty.
     """
     with conn.cursor() as cur:
         if not skip_native_backfill:
             cur.execute(_ATTACH_BACKFILL_NATIVE_ID_SQL)
-        cur.execute(_ATTACH_SPATIAL_LINK_SQL)
-        linked_pids = [int(r[0]) for r in cur.fetchall()]
-        linked = len(linked_pids)
         cur.execute(_ATTACH_INSERT_SQL)
         inserted = cur.rowcount or 0
         cur.execute(_ATTACH_LINK_SQL)
-        if linked_pids:
-            cur.execute(_ENQUEUE_DIRTY_SQL, {"ids": linked_pids})
-    if linked:
-        LOG.info("RECOMPUTE attach spatial_linked=%d", linked)
-    return inserted + linked
+    return inserted
 
 
 def _drain_dirty(conn: Any, batch_size: int, cutoff: Any) -> int:

@@ -307,14 +307,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_scores.yml"
   },
   {
-    "filename": "dedup_sweep.yml",
-    "name": "Tier-2 dedup sweep (multi-portal)",
-    "description": "Cross-source dedup sweep (multi-portal dedup PR3). Finds property pairs the cheap insert-time Tier-1 matcher missed -- the same real-world property listed on two portals whose coords/area/price differ enough to slip Tier-1's tight gate -- scores each through a confidence ladder (disposition equivalence -> address similarity -> pHash [PR5] -> vision), then auto-merges the high-confidence few (reversible + audited) and queues the rest for the /dedup review UI. CROSS-SOURCE ONLY: same-portal pairs are legitimately distinct units and never touched.",
+    "filename": "dedup_engine.yml",
+    "name": "Dedup engine (street + disposition)",
+    "description": "Street + disposition keyed dedup engine. Groups listings that share a street and disposition into one real-world property, autonomously. Replaces the old geo-proximity Tier-2 sweep. Rules: (A) only listings with BOTH a street and a disposition are eligible; (B) same street + house number + disposition + floor auto-merges (with a 5% area guard); (C) same street + disposition with no contradicting floor/area/house-number becomes a visual candidate; (D) the visual layer confirms — >=2 near-identical interior photos (pHash), else a room-aware forensic comparison stopping at the first High verdict — and merges on confirmation; (E) everything else is queued for the operator's /dedup page.",
     "manual": true,
     "schedules": [
       {
-        "cron": "45 3 * * *",
-        "human": "Daily at 03:45 UTC"
+        "cron": "45 4 * * *",
+        "human": "Daily at 04:45 UTC"
       }
     ],
     "onPush": false,
@@ -322,32 +322,32 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "paths": null,
     "inputs": [
       {
-        "name": "limit",
-        "description": "Max candidate pairs generated per run",
+        "name": "max_pairs",
+        "description": "Max visual candidate pairs examined per run",
         "required": false,
         "type": "string",
         "default": "2000",
         "options": null
       },
       {
-        "name": "max_auto_merges",
-        "description": "Cap auto-merges per run (overflow is queued)",
+        "name": "max_vision_calls",
+        "description": "Cap forensic vision calls per run (0 = pHash-only)",
         "required": false,
         "type": "string",
         "default": "200",
         "options": null
       },
       {
-        "name": "max_vision_calls",
-        "description": "Vision calls cap (settles image-identity pairs pHash can't; 0 = free)",
+        "name": "max_room_attempts",
+        "description": "Max like-room forensic comparisons per candidate pair",
         "required": false,
         "type": "string",
-        "default": "50",
+        "default": "4",
         "options": null
       },
       {
         "name": "dry_run",
-        "description": "Report candidate-pair count and exit without writing",
+        "description": "Report eligible counts + street groups and exit without writing",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -366,12 +366,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "dedup-sweep",
+    "concurrencyGroup": "dedup-engine",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 45,
     "permissions": "contents: read",
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_sweep.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_sweep.yml"
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_engine.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_engine.yml"
   },
   {
     "filename": "detail_drain.yml",

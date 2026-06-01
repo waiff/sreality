@@ -6,6 +6,31 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup engine rebuilt — street + disposition keyed, room-aware visual
+
+- **What:** replaced the geo-proximity matcher (the inline Tier-1 `ST_DWithin` probe in
+  `scraper/db.py` and the batched spatial straggler-attach in `recompute_property_stats.py`)
+  with a street + disposition keyed engine (`toolkit/dedup_engine.py` pure rules +
+  `scripts/dedup_engine.py` orchestrator, `dedup_engine.yml` daily). Rules A–E: (A) only
+  listings with BOTH a street and a disposition are eligible (computed inline, partial index,
+  migration 127); (B) same street + house number + disposition + floor → auto-merge, 5% area
+  guard; (C) same street + disposition → visual candidate unless a hard floor / >20%-area /
+  house-number contradiction; (D) layered visual — ≥2 near-identical interior photos (pHash,
+  facade/floor-plan excluded), else a room-aware forensic comparison (operator prompt) on like
+  rooms in priority order, stop at first High; (E) the rest queue on `/dedup`.
+- **New cached LLM tools** (write-allowed, toolkit rule #5): `classify_listing_images`
+  (migration 128, room taxonomy) and `compare_listings_visually` (migration 129, forensic
+  same-property verdict). Operator prompts seeded into `app_settings`.
+- **Automation dashboard:** `dedup_engine_runs` (migration 130) + public view feed a new
+  "Engine activity" section on `/dedup` — eligibility breakdown, per-run auto-merge counts by
+  path (address / photos / visual) vs queued, and a trend. The review card now also shows the
+  engine's visual verdict + rationale for queued pairs.
+- **Retired** `dedup_sweep.py` / `dedup_sweep.yml`. Merges stay reversible (the
+  `property_merge_events` ledger + one-click Undo).
+- **Why:** street + disposition is the identifier the operator trusts; geo proximity merged
+  the wrong things and missed cross-portal pairs that geocode differently. Same-development
+  units (same street + disposition) are exactly what the room-aware visual layer disambiguates.
+
 ### 2026-05: Dedup — image-identity auto-merge + street parse + review-card UI
 
 - **What (A):** an image-identity rung in the Tier-2 sweep (`scripts/dedup_sweep.py`)
