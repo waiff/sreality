@@ -26,10 +26,14 @@ router = APIRouter(prefix="/images", tags=["images"])
 # `{native_id}/{seq:04d}.jpg`; native_id is negative for non-sreality portals.
 _KEY_RE = re.compile(r"^-?\d+/\d{4}\.jpg$")
 
-# Presign lifetime (R2/SigV4 max is 7 days); the 302 is cached for a touch less
-# so a cached redirect never outlives its target.
+# Presign lifetime (R2/SigV4 max is 7 days). The 302 is cached only briefly on purpose:
+# a long cache means a serve-path change (e.g. an R2 credential rotation) leaves browsers
+# and the edge following a *cached* redirect to a presigned URL signed with the
+# rotated-out key — broken images for days, not fixable by a client hard-reload. A short
+# TTL makes such a change self-heal within the hour. (imageUrl.ts also carries a
+# cache-bust token to flush already-cached redirects on demand.)
 _PRESIGN_TTL = 604800
-_REDIRECT_MAX_AGE = 518400  # 6 days
+_REDIRECT_MAX_AGE = 3600  # 1 hour
 
 _client: image_storage.R2Client | None = None
 

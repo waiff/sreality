@@ -15,6 +15,13 @@
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 
+// Cache-bust token appended to every API image URL. The /images route keys only on
+// the path, so the query is ignored server-side — but changing this value makes the
+// browser/edge treat it as a fresh URL, flushing any redirect cached against the old
+// URL. BUMP THIS after a serve-path change (e.g. an R2 credential rotation) to clear
+// cover images that browsers cached while the path was broken.
+const IMG_CACHE_BUST = '2';
+
 export interface ImageRef {
   sreality_url: string;
   storage_path: string | null;
@@ -22,7 +29,7 @@ export interface ImageRef {
 
 export const imageSrc = (img: ImageRef): string => {
   if (API_BASE && img.storage_path) {
-    return `${API_BASE}/images/${img.storage_path}`;
+    return `${API_BASE}/images/${img.storage_path}?v=${IMG_CACHE_BUST}`;
   }
   return img.sreality_url;
 };
