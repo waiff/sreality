@@ -533,7 +533,7 @@ def delete_subscription(
 _LISTING_PROJECTION = (
     "l.sreality_id, l.category_main, l.category_type, l.price_czk, "
     "l.price_unit, l.area_m2, l.disposition, l.locality, l.district, "
-    "l.is_active, l.first_seen_at, l.last_seen_at"
+    "l.is_active, l.first_seen_at, l.last_seen_at, l.mf_gross_yield_pct"
 )
 
 
@@ -620,6 +620,8 @@ def _dispatch_row_to_dict(cols: list[str], row: tuple[Any, ...]) -> dict[str, An
         out["area_m2"] = float(out["area_m2"])
     if out.get("gross_yield_pct") is not None:
         out["gross_yield_pct"] = float(out["gross_yield_pct"])
+    if out.get("mf_gross_yield_pct") is not None:
+        out["mf_gross_yield_pct"] = float(out["mf_gross_yield_pct"])
     return out
 
 
@@ -727,6 +729,11 @@ def kickoff_estimation_for_dispatch(
         _link_dispatch_run(conn, dispatch_id, run_id)
         return (_fetch_dispatch(conn, dispatch_id) or {}, None)
 
+    # The watchdog "Estimate rent" action always runs a RENTAL estimate — even
+    # for a sale listing — so the operator sees "what would this flat rent for"
+    # (the input to a yield calc). That means the comparable cohort must be
+    # rentals (category_type='pronajem'), regardless of the subject's own
+    # category_type. category_main (byt/dum/…) carries through unchanged.
     spec = {
         "lat": float(listing["lat"]),
         "lng": float(listing["lng"]),
@@ -737,11 +744,9 @@ def kickoff_estimation_for_dispatch(
         # category_main/type are NOT columns on estimation_runs; carry them in
         # input_spec so run_pending_estimation can build ComparableFilters.
         "category_main": listing.get("category_main"),
-        "category_type": listing.get("category_type"),
+        "category_type": "pronajem",
     }
-    estimate_kind = (
-        "sale" if listing.get("category_type") == "prodej" else "rent"
-    )
+    estimate_kind = "rent"
 
     run_id = _insert_pending_run(
         conn,

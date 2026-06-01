@@ -564,3 +564,43 @@ def test_insert_pending_run_does_not_reference_nonexistent_columns() -> None:
     # And the category survives inside the input_spec jsonb param instead.
     spec_param = next(p for p in params if isinstance(p, str) and '"category_main"' in p)
     assert '"category_type": "prodej"' in spec_param
+
+
+import api.notifications as nf
+
+
+def test_kickoff_always_runs_a_rent_estimate_even_for_a_sale_listing(monkeypatch) -> None:
+    """The watchdog 'Estimate rent' action runs a RENTAL estimate regardless of
+    the subject listing's own category_type — a sale flat gets a "what would it
+    rent for" figure. So input_spec must carry category_type='pronajem' and the
+    run's estimate_kind must be 'rent', even when the listing is 'prodej'."""
+    monkeypatch.setattr(
+        nf, "_fetch_dispatch",
+        lambda conn, did: {"sreality_id": 12345, "estimation_run_id": None},
+    )
+    monkeypatch.setattr(
+        nf, "_resolve_listing_for_estimate",
+        lambda conn, sid: {
+            "lat": 50.08, "lng": 14.42, "area_m2": 62.0, "disposition": "2+kk",
+            "floor": 3, "category_main": "byt", "category_type": "prodej",
+            "price_czk": 4_500_000, "price_unit": "czk",
+        },
+    )
+    monkeypatch.setattr(nf, "_link_dispatch_run", lambda conn, did, rid: None)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_insert(conn, *, sreality_id, spec, estimate_kind):
+        captured["spec"] = spec
+        captured["estimate_kind"] = estimate_kind
+        return 777
+
+    monkeypatch.setattr(nf, "_insert_pending_run", _fake_insert)
+
+    _dispatch, run_id = nf.kickoff_estimation_for_dispatch(object(), "d-1")  # type: ignore[arg-type]
+
+    assert run_id == 777
+    assert captured["estimate_kind"] == "rent"
+    # Forces a rental comparable cohort even though the subject is 'prodej'.
+    assert captured["spec"]["category_type"] == "pronajem"
+    assert captured["spec"]["category_main"] == "byt"

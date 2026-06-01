@@ -1144,6 +1144,11 @@ export interface WatchdogDispatch {
   is_active: boolean | null;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  /* MF (Ministry of Finance) reference gross rental yield % — the
+   * deterministic Cenová-mapa figure carried on the listing (migration 133).
+   * Sale apartments only; null on rentals / non-apartments / no territory.
+   * Shown alongside the comparables-based estimation yield. */
+  mf_gross_yield_pct: number | null;
 }
 
 export interface WatchdogDispatchesResponse {

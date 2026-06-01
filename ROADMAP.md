@@ -6,6 +6,19 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Watchdog feed — rent estimate + MF-yield column
+- The per-row action is now **"Estimate rent"** and always runs a **rental**
+  estimate, even for a sale listing — `kickoff_estimation_for_dispatch` forces
+  `estimate_kind='rent'` and a `category_type='pronajem'` comparable cohort
+  (previously it mirrored the subject's category, so a sale listing produced a
+  sale-price estimate). The operator gets "what would this flat rent for", the
+  input to a yield read.
+- New **MF yield** column in the feed, beside the comparables-based estimation
+  yield: the deterministic Ministry-of-Finance reference gross yield already
+  carried on the listing (`listings.mf_gross_yield_pct`, migration 133), added
+  to the dispatch projection and surfaced read-only (sale apartments only;
+  "—" otherwise).
+
 ### 2026-06: Create watchdog from Browse + fix Run-estimation kickoff
 - **Create watchdog from Browse.** A "+ Create watchdog" button next to the Browse
   headline saves the current filter set as a watchdog after a name-prompt dialog

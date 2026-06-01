@@ -211,9 +211,11 @@ function Header({
         </h1>
         <p className="mt-2 text-sm text-[var(--color-ink-2)]">
           Saved filters fire a notification the moment a freshly scraped
-          listing matches. Click <em>Run estimation</em> on any row to
-          kick off a deterministic yield calculation in the background —
-          the result appears here when it lands.
+          listing matches. Click <em>Estimate rent</em> on any row to
+          kick off a deterministic monthly-rent calculation in the
+          background — the result appears here when it lands. The
+          <em> MF yield</em> column shows the Ministry-of-Finance
+          reference gross yield already on the listing.
         </p>
         {matcherResult ? (
           <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)]">
@@ -361,6 +363,7 @@ function DispatchesTable({
               <Th align="left">When</Th>
               <Th align="left">Watchdog</Th>
               <Th align="left">Estimation</Th>
+              <Th align="right">MF yield</Th>
               <Th align="right"> </Th>
             </tr>
           </thead>
@@ -484,6 +487,9 @@ function Row({
         <EstimationCell dispatch={dispatch} />
       </td>
       <td className="px-4 py-2.5 align-middle text-right">
+        <MfYieldCell dispatch={dispatch} />
+      </td>
+      <td className="px-4 py-2.5 align-middle text-right">
         <KickoffButton
           dispatch={dispatch}
           onKickoff={() => onKickoff(dispatch.id)}
@@ -556,6 +562,23 @@ function EstimationCell({ dispatch }: { dispatch: WatchdogDispatch }) {
   );
 }
 
+/* MF (Ministry of Finance) reference gross yield carried on the listing —
+ * the deterministic Cenová-mapa figure, shown next to the comparables-based
+ * estimation yield. Sale apartments only; '—' otherwise. */
+function MfYieldCell({ dispatch }: { dispatch: WatchdogDispatch }) {
+  if (dispatch.mf_gross_yield_pct == null) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  return (
+    <span
+      className="font-mono tabular-nums text-[var(--color-ink)]"
+      title="Ministry-of-Finance reference gross rental yield (Cenová mapa nájemného)"
+    >
+      {dispatch.mf_gross_yield_pct.toFixed(1)}%
+    </span>
+  );
+}
+
 function KickoffButton({
   dispatch,
   onKickoff,
@@ -588,9 +611,10 @@ function KickoffButton({
       type="button"
       onClick={onKickoff}
       disabled={pending}
+      title="Estimate the monthly rent this property would fetch (rental comparables)"
       className="px-2.5 py-1 text-[0.75rem] rounded-[var(--radius-sm)] border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]/60 transition-colors disabled:opacity-50"
     >
-      {pending ? 'Starting…' : 'Run estimation'}
+      {pending ? 'Starting…' : 'Estimate rent'}
     </button>
   );
 }
