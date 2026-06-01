@@ -130,6 +130,106 @@ def merge_candidate(
     )
 
 
+def merge_cluster(
+    conn: psycopg.Connection, candidate_ids: list[int],
+) -> dict[str, Any] | None:
+    """Merge a CLUSTER of proposed candidates into one property in one group.
+
+    A cluster is several pairwise candidates that connect the same real-world
+    property (A-B, B-C, A-C ...). We collect every distinct property across the
+    given candidate ids, pick the oldest as the single survivor, and merge every
+    other into it under ONE merge_group_id — so the whole cluster reverses with
+    one Undo. Merging always targets the single oldest survivor (never a chain),
+    so no intermediate property is retired before it's used. None = 404 (no rows).
+    """
+    if not candidate_ids:
+        return None
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, left_property_id, right_property_id, status "
+            "FROM property_identity_candidates WHERE id = ANY(%s)",
+            (candidate_ids,),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return None
+    for cid, _l, _r, status in rows:
+        if status != "proposed":
+            raise MergeError(f"candidate {cid} is not proposed (status={status})")
+
+    prop_ids: set[int] = set()
+    for _cid, left, right, _status in rows:
+        prop_ids.add(int(left))
+        prop_ids.add(int(right))
+    if len(prop_ids) < 2:
+        raise MergeError("cluster has fewer than two distinct properties")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM properties WHERE id = ANY(%s) AND status = 'active' "
+            "ORDER BY first_seen_at ASC, id ASC LIMIT 1",
+            (list(prop_ids),),
+        )
+        srow = cur.fetchone()
+    if srow is None:
+        raise MergeError("no active property in the cluster")
+    survivor = int(srow[0])
+    retired_ids = sorted(p for p in prop_ids if p != survivor)
+
+    group: str | None = None
+    moved = 0
+    for retired in retired_ids:
+        result = merge_properties(
+            conn,
+            survivor_id=survivor,
+            retired_id=retired,
+            reason="manual_cluster",
+            source="operator",
+            merge_group_id=group,
+        )
+        group = result["data"]["merge_group_id"]
+        moved += int(result["data"]["listings_moved"])
+
+    # merge_properties only marks the (survivor, retired) candidate row per call;
+    # cluster-internal pairs (retired_i, retired_j) are now stale — mark them all.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE property_identity_candidates "
+            "SET status = 'merged', reviewed_at = now(), "
+            "    reviewed_action = 'operator', merge_group_id = %s "
+            "WHERE id = ANY(%s) AND status = 'proposed'",
+            (group, candidate_ids),
+        )
+
+    return {
+        "merge_group_id": group,
+        "survivor_id": survivor,
+        "retired_ids": retired_ids,
+        "listings_moved": moved,
+        "candidates_resolved": len(rows),
+    }
+
+
+def dismiss_cluster(
+    conn: psycopg.Connection, candidate_ids: list[int],
+) -> dict[str, Any] | None:
+    """Dismiss every proposed candidate in a cluster. None = nothing dismissed."""
+    if not candidate_ids:
+        return None
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "UPDATE property_identity_candidates "
+            "SET status = 'dismissed', reviewed_at = now(), "
+            "    reviewed_action = 'operator' "
+            "WHERE id = ANY(%s) AND status = 'proposed' RETURNING id",
+            (candidate_ids,),
+        )
+        dismissed = [int(r[0]) for r in cur.fetchall()]
+    if not dismissed:
+        return None
+    return {"dismissed": dismissed, "status": "dismissed"}
+
+
 def dismiss_candidate(
     conn: psycopg.Connection, candidate_id: int,
 ) -> dict[str, Any] | None:

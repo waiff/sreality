@@ -13,12 +13,17 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from api import dependencies as deps
 from api import property_dedup as dedup
 from toolkit.property_identity import MergeError
 
 router = APIRouter(prefix="/dedup", tags=["dedup"])
+
+
+class ClusterAction(BaseModel):
+    candidate_ids: list[int]
 
 
 @router.get("/candidates")
@@ -60,6 +65,36 @@ def post_dismiss_candidate(
     if result is None:
         raise HTTPException(
             status_code=404, detail="candidate not found or not proposed",
+        )
+    return result
+
+
+@router.post("/clusters/merge")
+def post_merge_cluster(
+    body: ClusterAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Merge a cluster of candidates into one property under one reversible group."""
+    try:
+        result = dedup.merge_cluster(conn, body.candidate_ids)
+    except MergeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="no candidates found")
+    return result
+
+
+@router.post("/clusters/dismiss")
+def post_dismiss_cluster(
+    body: ClusterAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    result = dedup.dismiss_cluster(conn, body.candidate_ids)
+    if result is None:
+        raise HTTPException(
+            status_code=404, detail="no proposed candidates found",
         )
     return result
 

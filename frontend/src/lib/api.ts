@@ -978,6 +978,32 @@ export const dismissDedupCandidate = (
     { method: 'POST' },
   );
 
+export interface ClusterMergeResult {
+  merge_group_id: string;
+  survivor_id: number;
+  retired_ids: number[];
+  listings_moved: number;
+  candidates_resolved: number;
+}
+
+/* Merge a whole cluster of candidates (A-B, B-C, ...) into one property under
+ * one reversible merge group. */
+export const mergeDedupCluster = (
+  candidateIds: number[],
+): Promise<ClusterMergeResult> =>
+  request<ClusterMergeResult>('/dedup/clusters/merge', {
+    method: 'POST',
+    json: { candidate_ids: candidateIds },
+  });
+
+export const dismissDedupCluster = (
+  candidateIds: number[],
+): Promise<{ dismissed: number[]; status: string }> =>
+  request<{ dismissed: number[]; status: string }>('/dedup/clusters/dismiss', {
+    method: 'POST',
+    json: { candidate_ids: candidateIds },
+  });
+
 export const listDedupMerges = (
   params: { limit?: number; offset?: number } = {},
 ): Promise<MergesResponse> =>

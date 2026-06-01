@@ -4,7 +4,9 @@ import {
   AREA_DIFF_MAX_M2,
   PRICE_DRIFT_MAX,
   TIGHT_RADIUS_M,
+  clusterCandidates,
   diffCandidate,
+  diffCluster,
   type ListingDetailLite,
 } from './dedupDiff';
 import type { DedupCandidate, DedupPropertySide } from './types';
@@ -128,5 +130,82 @@ describe('diffCandidate', () => {
     expect(diffCandidate(candidate({})).map((r) => r.key)).toEqual([
       'price', 'area', 'disposition', 'street', 'floor', 'district', 'distance',
     ]);
+  });
+});
+
+describe('clusterCandidates', () => {
+  it('merges transitive pairs (A-B, B-C) into one 3-member cluster', () => {
+    const cands = [
+      candidate({ id: 10, left_property: side({ property_id: 1 }), right_property: side({ property_id: 2 }) }),
+      candidate({ id: 11, left_property: side({ property_id: 2 }), right_property: side({ property_id: 3 }) }),
+    ];
+    const clusters = clusterCandidates(cands);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].members.map((m) => m.property_id)).toEqual([1, 2, 3]);
+    expect(clusters[0].candidateIds).toEqual([10, 11]);
+  });
+
+  it('collapses the redundant fan-out (idnes X paired with two sreality rows) into one cluster', () => {
+    // mirrors the screenshot: #129114 vs #32402 and #129114 vs #54628
+    const cands = [
+      candidate({ id: 1, left_property: side({ property_id: 32402 }), right_property: side({ property_id: 129114 }) }),
+      candidate({ id: 2, left_property: side({ property_id: 54628 }), right_property: side({ property_id: 129114 }) }),
+    ];
+    const clusters = clusterCandidates(cands);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0].members).toHaveLength(3);
+    expect(clusters[0].candidateIds).toEqual([1, 2]);
+  });
+
+  it('keeps unrelated pairs as separate clusters', () => {
+    const cands = [
+      candidate({ id: 1, left_property: side({ property_id: 1 }), right_property: side({ property_id: 2 }) }),
+      candidate({ id: 2, left_property: side({ property_id: 8 }), right_property: side({ property_id: 9 }) }),
+    ];
+    const clusters = clusterCandidates(cands);
+    expect(clusters).toHaveLength(2);
+  });
+
+  it('picks up the engine visual verdict from an edge', () => {
+    const cands = [
+      candidate({ id: 1, markers_matched: { verdict: 'Medium', rationale: 'similar kitchen', room_type: 'kitchen' } }),
+    ];
+    expect(clusterCandidates(cands)[0].visual).toEqual({
+      verdict: 'Medium', rationale: 'similar kitchen', room: 'kitchen',
+    });
+  });
+});
+
+describe('diffCluster', () => {
+  const noDetail = () => null;
+
+  it('all-agree → match; one outlier → mismatch (N-way)', () => {
+    const members = [
+      side({ property_id: 1, area_m2: 100 }),
+      side({ property_id: 2, area_m2: 100 }),
+      side({ property_id: 3, area_m2: 100 }),
+    ];
+    const r = diffCluster(members, noDetail);
+    expect(r.find((x) => x.key === 'area')!.verdict).toBe('match');
+    expect(r.find((x) => x.key === 'area')!.values).toHaveLength(3);
+
+    const outlier = diffCluster(
+      [side({ property_id: 1, area_m2: 100 }), side({ property_id: 2, area_m2: 100 }), side({ property_id: 3, area_m2: 200 })],
+      noDetail,
+    );
+    expect(outlier.find((x) => x.key === 'area')!.verdict).toBe('mismatch');
+  });
+
+  it('fewer than two known values → unknown', () => {
+    const members = [side({ property_id: 1, district: 'Praha' }), side({ property_id: 2, district: null })];
+    expect(diffCluster(members, noDetail).find((x) => x.key === 'district')!.verdict).toBe('unknown');
+  });
+
+  it('loose disposition equivalence agrees across the cluster', () => {
+    const members = [
+      side({ property_id: 1, disposition: '2+kk' }),
+      side({ property_id: 2, disposition: '2+1' }),
+    ];
+    expect(diffCluster(members, noDetail).find((x) => x.key === 'disposition')!.verdict).toBe('match');
   });
 });

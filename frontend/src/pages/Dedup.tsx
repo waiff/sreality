@@ -8,10 +8,10 @@ import {
 } from '@tanstack/react-query';
 
 import {
-  dismissDedupCandidate,
+  dismissDedupCluster,
   listDedupCandidates,
   listDedupMerges,
-  mergeDedupCandidate,
+  mergeDedupCluster,
   unmergeMergeGroup,
 } from '@/lib/api';
 import {
@@ -22,13 +22,19 @@ import {
   fetchPropertySourcesByPropertyIds,
   type DedupEngineRun,
 } from '@/lib/queries';
-import { diffCandidate, type DiffRow, type DiffVerdict, type ListingDetailLite } from '@/lib/dedupDiff';
+import {
+  clusterCandidates,
+  diffCluster,
+  type ClusterDiffRow,
+  type DedupCluster,
+  type DiffVerdict,
+  type ListingDetailLite,
+} from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
 import { portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
 import type {
-  DedupCandidate,
   DedupCandidatesResponse,
   DedupPropertySide,
   ImagePublic,
@@ -67,6 +73,7 @@ export default function Dedup() {
   });
 
   const candidates = candidatesQ.data?.data ?? [];
+  const clusters = useMemo(() => clusterCandidates(candidates), [candidates]);
   const merges = mergesQ.data?.data ?? [];
   const activeMerges = useMemo(() => merges.filter((m) => !m.fully_undone), [merges]);
 
@@ -117,9 +124,13 @@ export default function Dedup() {
   const detailMap = detailQ.data ?? new Map();
 
   const invalidate = () => qc.invalidateQueries({ queryKey: dedupKeys.all });
-  const mergeMut = useMutation({ mutationFn: mergeDedupCandidate, onSuccess: invalidate });
-  const dismissMut = useMutation({ mutationFn: dismissDedupCandidate, onSuccess: invalidate });
+  const mergeMut = useMutation({ mutationFn: mergeDedupCluster, onSuccess: invalidate });
+  const dismissMut = useMutation({ mutationFn: dismissDedupCluster, onSuccess: invalidate });
   const unmergeMut = useMutation({ mutationFn: unmergeMergeGroup, onSuccess: invalidate });
+
+  /* A cluster is "busy" while either mutation is running for its exact id set. */
+  const sameIds = (a: number[] | undefined, b: number[]) =>
+    a != null && a.length === b.length && a.every((v, i) => v === b[i]);
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -140,18 +151,18 @@ export default function Dedup() {
         }
       >
         <div className="space-y-3">
-          {candidates.map((c) => (
-            <CandidateCard
-              key={c.id}
-              candidate={c}
+          {clusters.map((cl) => (
+            <ClusterCard
+              key={cl.key}
+              cluster={cl}
               imagesMap={imagesMap}
               sourcesMap={sourcesMap}
               detailMap={detailMap}
-              onMerge={() => mergeMut.mutate(c.id)}
-              onDismiss={() => dismissMut.mutate(c.id)}
+              onMerge={() => mergeMut.mutate(cl.candidateIds)}
+              onDismiss={() => dismissMut.mutate(cl.candidateIds)}
               busy={
-                (mergeMut.isPending && mergeMut.variables === c.id)
-                || (dismissMut.isPending && dismissMut.variables === c.id)
+                (mergeMut.isPending && sameIds(mergeMut.variables, cl.candidateIds))
+                || (dismissMut.isPending && sameIds(dismissMut.variables, cl.candidateIds))
               }
             />
           ))}
@@ -349,8 +360,11 @@ function urlsFor(side: DedupPropertySide, imagesMap: ImagesMap): string[] {
   return (imagesMap.get(side.sreality_id) ?? []).map(imageSrc);
 }
 
-function CandidateCard({
-  candidate,
+/* One review card per CLUSTER — N member columns (not always two), a column
+ * each. The grid caps at 3 columns so photos stay Browse-card-sized; a 4th+
+ * member wraps to the next row. Merge/Dismiss act on the whole cluster. */
+function ClusterCard({
+  cluster,
   imagesMap,
   sourcesMap,
   detailMap,
@@ -358,7 +372,7 @@ function CandidateCard({
   onDismiss,
   busy,
 }: {
-  candidate: DedupCandidate;
+  cluster: DedupCluster;
   imagesMap: ImagesMap;
   sourcesMap: SourcesMap;
   detailMap: DetailMap;
@@ -366,32 +380,18 @@ function CandidateCard({
   onDismiss: () => void;
   busy: boolean;
 }) {
-  const L = candidate.left_property;
-  const R = candidate.right_property;
-  const leftDetail = L.sreality_id != null ? detailMap.get(L.sreality_id) ?? null : null;
-  const rightDetail = R.sreality_id != null ? detailMap.get(R.sreality_id) ?? null : null;
-  const rows = diffCandidate(candidate, leftDetail, rightDetail);
-
-  const m = candidate.markers_matched ?? {};
-  const corroborator = typeof m.corroborator === 'string' ? m.corroborator : null;
-  const visualVerdict = typeof m.verdict === 'string' ? (m.verdict as string) : null;
-  const visualRationale = typeof m.rationale === 'string' ? (m.rationale as string) : null;
-  const visualRoom = typeof m.room_type === 'string' ? (m.room_type as string) : null;
-  const engineReason = typeof m.reason === 'string' ? (m.reason as string) : null;
+  const { members, tier } = cluster;
+  const rows = diffCluster(members, (id) => (id != null ? detailMap.get(id) ?? null : null));
+  const n = members.length;
+  const mergeLabel = n > 2 ? `Merge ${n}` : 'Merge';
 
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-4">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
         <div className="flex items-center gap-2 text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
-          <span>{candidate.tier}</span>
-          {candidate.confidence != null ? (
-            <span className="text-[var(--color-ink-4)]">· {(candidate.confidence * 100).toFixed(0)}% conf</span>
-          ) : null}
-          {corroborator ? (
-            <span className="text-[var(--color-ink-4)]">· {corroborator}</span>
-          ) : null}
-          {engineReason && !corroborator ? (
-            <span className="text-[var(--color-ink-4)]">· {engineReason.replace(/_/g, ' ')}</span>
+          <span>{tier}</span>
+          {n > 2 ? (
+            <span className="text-[var(--color-ink-4)]">· {n} listings</span>
           ) : null}
         </div>
         <div className="flex items-center gap-2">
@@ -409,27 +409,63 @@ function CandidateCard({
             disabled={busy}
             className={`${BTN} bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
           >
-            {busy ? 'Working…' : 'Merge'}
+            {busy ? 'Working…' : mergeLabel}
           </button>
         </div>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <PropertyPanel
-          side={L}
-          urls={urlsFor(L, imagesMap)}
-          sources={sourcesMap.get(L.property_id) ?? []}
-        />
-        <PropertyPanel
-          side={R}
-          urls={urlsFor(R, imagesMap)}
-          sources={sourcesMap.get(R.property_id) ?? []}
-        />
+      {/* Browse-sized panels: a fixed ~13rem min column so images stay small
+          and a cluster of 3-4 wraps instead of stretching half the page. */}
+      <div
+        className="grid gap-3"
+        style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(13rem, 1fr))' }}
+      >
+        {members.map((side) => (
+          <PropertyPanel
+            key={side.property_id}
+            side={side}
+            urls={urlsFor(side, imagesMap)}
+            sources={sourcesMap.get(side.property_id) ?? []}
+          />
+        ))}
       </div>
-      <DiffTable rows={rows} />
-      {visualVerdict ? (
-        <VisualVerdictNote verdict={visualVerdict} rationale={visualRationale} room={visualRoom} />
+      <ClusterDiffTable rows={rows} members={members} />
+      {cluster.visual ? (
+        <VisualVerdictNote
+          verdict={cluster.visual.verdict}
+          rationale={cluster.visual.rationale}
+          room={cluster.visual.room}
+        />
       ) : null}
     </div>
+  );
+}
+
+/* The N-way comparison table: a column per cluster member + a single ✓/✗ that
+ * says whether all known values agree. */
+function ClusterDiffTable({ rows, members }: { rows: ClusterDiffRow[]; members: DedupPropertySide[] }) {
+  return (
+    <table className="w-full mt-3 border-collapse text-[0.8rem]">
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.key} className="border-t border-[var(--color-rule-soft)]">
+            <td className="py-1 pr-2 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] whitespace-nowrap align-middle">
+              {r.label}
+            </td>
+            <td className="py-1 w-6 text-center align-middle">
+              <span className="inline-flex"><Verdict v={r.verdict} /></span>
+            </td>
+            {r.values.map((v, i) => (
+              <td
+                key={members[i]?.property_id ?? i}
+                className="py-1 px-2 text-left tabular-nums text-[var(--color-ink)]"
+              >
+                {v}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
@@ -552,38 +588,6 @@ function PortalChip({ source }: { source: PropertySource }) {
     <Link to={`/listing/${source.sreality_id}`} className={cls}>
       {label}
     </Link>
-  );
-}
-
-function DiffTable({ rows }: { rows: DiffRow[] }) {
-  return (
-    <table className="w-full mt-3 border-collapse text-[0.8rem]">
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.key} className="border-t border-[var(--color-rule-soft)]">
-            <td className="py-1 pr-2 text-[0.65rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] whitespace-nowrap align-middle">
-              {r.label}
-            </td>
-            {r.single ? (
-              <td colSpan={3} className="py-1 text-center text-[var(--color-ink-2)] tabular-nums">
-                <span className="inline-flex items-center gap-1.5">
-                  <Verdict v={r.verdict} />
-                  {r.a}
-                </span>
-              </td>
-            ) : (
-              <>
-                <td className="py-1 px-2 text-right tabular-nums text-[var(--color-ink)]">{r.a}</td>
-                <td className="py-1 w-6 text-center align-middle">
-                  <span className="inline-flex"><Verdict v={r.verdict} /></span>
-                </td>
-                <td className="py-1 px-2 text-left tabular-nums text-[var(--color-ink)]">{r.b}</td>
-              </>
-            )}
-          </tr>
-        ))}
-      </tbody>
-    </table>
   );
 }
 
