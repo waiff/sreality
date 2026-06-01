@@ -449,20 +449,33 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     **source-scoped** to enforce this — a portal's index walk only flips its own rows.
     (Originally `mark_inactive` scoped by `(category_main, category_type)` alone, so every
     sreality walk swept bazos rows — same canon categories, never in sreality's `seen_ids` —
-    to `is_active=false`; migration 109 era fixed it.) The Tier-1 matcher (geo + price + area
-    proximity) seeds candidate groupings; as of Phase 2 it runs **batched in the maintenance
-    job**, not inline (rule #19/#20).
+    to `is_active=false`; migration 109 era fixed it.) **New listings get a singleton property
+    at insert time — there is no insert-time matching.** All grouping is done out-of-band by the
+    **street + disposition dedup engine** (see below), so neither `scraper/db.py` nor the
+    maintenance job's straggler-attach does any spatial/geo probe anymore.
     Today sreality + bazos ingest; further portals follow the design in
     `docs/design/multi-portal-dedup.md`. Frontend Browse reads `properties_public`.
-    The dedup feature is **complete**: beyond Tier-1, a daily Tier-2 fuzzy sweep
-    (`scripts/dedup_sweep.py`) generates cross-source candidate pairs (150m + disposition +
-    price/area bands) and **auto-merges only the high-confidence few** (≤30m + an independent
-    corroborator — near-exact address, low-Hamming `images.phash`, or vision); the rest queue
-    on the operator's `/dedup` review page. Merges are **reversible**: `toolkit/property_identity.py`
-    re-points `listings.property_id` onto the survivor + soft-retires the loser
-    (`properties.status='merged_away'`) and logs `property_merge_events` so `unmerge_group` is a
-    deterministic replay. Cross-source matching is **geo-based**, so a portal's listings need
-    coordinates to participate. Region stats also read the property grain (migration 103).
+    **Dedup engine (street + disposition keyed).** `toolkit/dedup_engine.py` (pure rules) +
+    `scripts/dedup_engine.py` (orchestrator, `dedup_engine.yml`, daily) replaced the old
+    geo-proximity matcher. Rules: **(A)** only listings with BOTH a `street` and a `disposition`
+    are eligible (computed inline; a partial index backs the scan, migration 127); the rest are
+    `location_unclear` / `disposition_unclear` and never matched. **(B)** same street + house
+    number + disposition + floor → auto-merge, with a 5% area guard that demotes
+    mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
+    a hard floor / >20%-area / house-number contradiction rejects it; nothing is ever compared
+    that doesn't share street + disposition. **(D)** layered visual confirmation: ≥2
+    near-identical INTERIOR photos (pHash; facade/floor-plan excluded) auto-merge, else a
+    room-aware forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on
+    like rooms in priority order, stop at the first **High** verdict → auto-merge. **(E)**
+    everything else queues on the operator's `/dedup` review page. The visual layer's two cached
+    LLM tools — `classify_listing_images` (migration 128) and `compare_listings_visually`
+    (migration 129) — are write-allowed exceptions (toolkit rule #5). A `dedup_engine_runs` row
+    (migration 130) per run powers the `/dedup` automation dashboard. Merges are **reversible**:
+    `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
+    the loser (`properties.status='merged_away'`) and logs `property_merge_events` so
+    `unmerge_group` is a deterministic replay. Because matching keys on street, a listing needs a
+    parsed street to participate (sreality detail rows carry one; other portals as their parsers
+    improve). Region stats also read the property grain (migration 103).
 16. **Watchdog and Browse share one definition of "matches."** Saved watchdog filters live
     in `notification_subscriptions` (migration 056); the background matcher in
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
@@ -507,8 +520,9 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (re-sighting reactivation) — enqueue the affected `property_id` into `dirty_properties`
     (migration 106) with a cheap set-based `INSERT ... ON CONFLICT DO UPDATE SET marked_at`.
     `property_maintenance.yml` (`recompute_property_stats --incremental`, cron `*/5`) attaches
-    new stragglers (the batched **Tier-1 matcher**, skipping the one-time native-id backfill)
-    and recomputes **only the queued properties** (the full recompute SQL scoped to
+    new stragglers (singletons only — the old geo Tier-1 matcher was removed; grouping is the
+    dedup engine's job, rule #15) and recomputes **only the queued properties** (the full
+    recompute SQL scoped to
     `id = ANY(...)`), so a new/edited/delisted listing reaches `properties` + Browse within ~5
     min and the job is **O(changes)**, not O(all properties). The drain is race-free +
     terminating: it claims rows dirtied at/before a run cutoff and deletes only those untouched
@@ -516,7 +530,8 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     New listings (`property_id` NULL) are resolved by straggler-attach, not the queue. The
     **daily full sweep** (`recompute_property_stats.yml`, no `--incremental`, 04:15 UTC) is the
     reconcile backstop — it recomputes every property and clears the queue, so a missed enqueue
-    self-heals within 24h. Tier-2 fuzzy dedup (`dedup_sweep.py`, daily) is unchanged. Both
+    self-heals within 24h. The street+disposition dedup engine (`dedup_engine.py`, daily) runs
+    separately (rule #15). Both
     maintenance jobs share the `sreality-property-maintenance` concurrency group so they never
     mutate `properties` concurrently. Inline merge/unmerge still call `recompute_one` directly
     (they keep the survivor current without waiting for the cron). One accepted lag: a
@@ -850,10 +865,11 @@ enqueue) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain",
 cron `30 */2`, bounded `--max-detail`). `scrape_idnes.yml` ("Scraping: iDNES Reality combined
 walk (fallback)") is the **dispatch-only** combined entry point (ad-hoc full runs + small
 `-f max_pages=N` validation passes). The dedup/properties track adds
-`property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers via
-the batched Tier-1 matcher + recomputes only changed properties; rule #20),
+`property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
+singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
-property + clears the dirty queue), `dedup_sweep.yml` (daily Tier-2 sweep + auto-merge), and
+property + clears the dirty queue), `dedup_engine.yml` (daily street+disposition dedup engine +
+auto-merge; rule #15), and
 `compute_image_phash.yml` (6-hourly pHash backfill). Run any directly:
 - CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
   Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
@@ -873,9 +889,10 @@ from the slow "download each ad" write:
   (`--max-detail-refetches`, default 6000), fetches details on a rate-limited pool, and writes
   them **batched** via `db.write_detail_batch` (set-based `jsonb_to_recordset`, one transaction
   per ~100 listings, ~0.1–0.2 s/listing). Uses the **session pooler** (`connect_session()`) for
-  prepared statements. New listings land with `property_id` NULL — the **Tier-1 matcher is
-  deferred** to `recompute_property_stats`'s straggler-attach (so the hot write path carries no
-  spatial probe). A gone fetch flips that listing inactive + dequeues it; a transient error bumps
+  prepared statements. New listings land with `property_id` NULL and become **singletons** via
+  `recompute_property_stats`'s straggler-attach (the hot write path carries no matching at all;
+  grouping is the dedup engine's job, rule #15). A gone fetch flips that listing inactive +
+  dequeues it; a transient error bumps
   the queue row's `attempts` (given up after 5) and stays queued. Records `run_type='detail'`,
   `index_pages=0`. The queue persists across runs, so a bounded run never loses work; a
   SIGKILLed claim is recovered by the next run's `reclaim_stale_claims`.

@@ -129,7 +129,14 @@ def _eligibility_counts(conn: Any) -> dict[str, int]:
 
 
 def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: dict[str, Any]) -> bool:
-    """Merge the two listings' properties (older survives). Returns True on success."""
+    """Merge the two listings' properties (older survives). Returns True on success.
+
+    The in-memory ListingKeys hold the property_id as loaded at run start; a
+    merge earlier this run may have retired one of them. merge_properties raises
+    MergeError on a non-active survivor/retired, which we catch and skip — the
+    daily re-run sees the settled state and completes the chain. The job is
+    idempotent and converges over runs, so a deferred chain merge is harmless.
+    """
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
         return False
     # Survivor = the older property (smaller id is a stable proxy for first_seen).

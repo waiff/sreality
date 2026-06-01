@@ -22,8 +22,9 @@ name: "Jobs: recompute property stats (daily full reconcile)"
 # independently, so a timeout or cancel preserves completed batches and the
 # next run simply recomputes from current state.
 #
-# Cadence: daily (04:15 UTC), after the Tier-2 fuzzy dedup sweep (dedup_sweep at
-# 03:45). Tune the cron below or trigger manually from the Actions tab.
+# Cadence: daily (04:15 UTC), before the street+disposition dedup engine
+# (dedup_engine at 04:45) so property stats are fresh when it runs. Tune the
+# cron below or trigger manually from the Actions tab.
 #
 # Required GitHub secret:
 #   SUPABASE_DB_URL  -- same one used by every other workflow.
