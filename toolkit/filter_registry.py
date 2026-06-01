@@ -973,6 +973,41 @@ def _build_registry() -> dict[str, FilterDef]:
             aliases=("price_per_m2_max", "pricePerM2Max"),
         ),
         FilterDef(
+            id="min_mf_gross_yield_pct",
+            type=FilterType.FLOAT,
+            pg_column="mf_gross_yield_pct",
+            default=None,
+            description=(
+                "Lower bound on MF gross rental yield % (`mf_gross_yield_pct"
+                " >= N`). Inclusive. Yield = MF Cenová mapa reference monthly"
+                " rent × 12 / asking price × 100; sale apartments only, so"
+                " non-apartment / rental / unpriced listings fall out when"
+                " set. Browse + Watchdog only."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.RANGE_SLIDER,
+            agendas=_UI_AGENDAS,
+            constraints={"min": 0, "max": 12, "step": 0.1},
+            unit="%",
+            aliases=("mf_gross_yield_pct_min", "mfGrossYieldPctMin"),
+        ),
+        FilterDef(
+            id="max_mf_gross_yield_pct",
+            type=FilterType.FLOAT,
+            pg_column="mf_gross_yield_pct",
+            default=None,
+            description=(
+                "Upper bound on MF gross rental yield %. See "
+                "`min_mf_gross_yield_pct`. Inclusive."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.RANGE_SLIDER,
+            agendas=_UI_AGENDAS,
+            constraints={"min": 0, "max": 12, "step": 0.1},
+            unit="%",
+            aliases=("mf_gross_yield_pct_max", "mfGrossYieldPctMax"),
+        ),
+        FilterDef(
             id="min_area_m2",
             type=FilterType.FLOAT,
             pg_column="area_m2",

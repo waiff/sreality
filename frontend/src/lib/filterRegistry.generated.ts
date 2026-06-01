@@ -1376,6 +1376,54 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ]
     },
     {
+      "id": "min_mf_gross_yield_pct",
+      "type": "float",
+      "pg_column": "mf_gross_yield_pct",
+      "default": null,
+      "description": "Lower bound on MF gross rental yield % (`mf_gross_yield_pct >= N`). Inclusive. Yield = MF Cenová mapa reference monthly rent × 12 / asking price × 100; sale apartments only, so non-apartment / rental / unpriced listings fall out when set. Browse + Watchdog only.",
+      "category": "Property",
+      "ui_control": "range_slider",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 12,
+        "step": 0.1
+      },
+      "unit": "%",
+      "enum_values": null,
+      "aliases": [
+        "mf_gross_yield_pct_min",
+        "mfGrossYieldPctMin"
+      ]
+    },
+    {
+      "id": "max_mf_gross_yield_pct",
+      "type": "float",
+      "pg_column": "mf_gross_yield_pct",
+      "default": null,
+      "description": "Upper bound on MF gross rental yield %. See `min_mf_gross_yield_pct`. Inclusive.",
+      "category": "Property",
+      "ui_control": "range_slider",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 12,
+        "step": 0.1
+      },
+      "unit": "%",
+      "enum_values": null,
+      "aliases": [
+        "mf_gross_yield_pct_max",
+        "mfGrossYieldPctMax"
+      ]
+    },
+    {
       "id": "min_area_m2",
       "type": "float",
       "pg_column": "area_m2",

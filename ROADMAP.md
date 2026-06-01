@@ -6,6 +6,24 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: MF gross-yield Browse filter
+
+- **What:** a derived `listings.mf_gross_yield_pct` (MF reference rent × 12 / asking price)
+  on every sale apartment, filterable in Browse + Watchdog as a "from/to %" range. Builds on
+  the MF Cenová mapa store below.
+- **Compute (migration 133):** `recompute_mf_gross_yields()` set-based SQL (PIP territory →
+  rent-map join → ÷ price), backfilled (31,348 rows, median ~3.5%). A `< 100 000` CZK sale-price
+  floor drops placeholder / rent-magnitude prices mis-tagged `prodej` (which gave absurd %) while
+  keeping genuine high-yield deals. Runs hourly (`recompute_mf_yields.yml`) + after each rent-map
+  ingest.
+- **Filter:** `min/max_mf_gross_yield_pct` in `filter_registry` (`_UI_AGENDAS`, float range);
+  exposed on `listings_public`/`properties_public`; Map/Table auto-dispatch, Stats RPC + Watchdog
+  matcher + `ComparableFilters` all carry it.
+
+#### Next
+
+- Watchdog yield-band alert presets; a "sort by yield" column on the Browse table.
+
 ### 2026-06: Secondary rent reference — MF Cenová mapa nájemného
 
 - **What:** every rental estimate now carries a second, independent reference figure from the

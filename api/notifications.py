@@ -135,6 +135,9 @@ class WatchdogFilterSpec(BaseModel):
     # out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
+    # MF gross rental yield % (migration 133). Sale apartments only.
+    min_mf_gross_yield_pct: float | None = None
+    max_mf_gross_yield_pct: float | None = None
     min_area_m2: float | None = None
     max_area_m2: float | None = None
     min_usable_area: float | None = None
@@ -293,6 +296,12 @@ def _build_match_clauses(
             "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
         )
         params["max_price_per_m2"] = spec.max_price_per_m2
+    if spec.min_mf_gross_yield_pct is not None:
+        where.append("l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s")
+        params["min_mf_gross_yield_pct"] = spec.min_mf_gross_yield_pct
+    if spec.max_mf_gross_yield_pct is not None:
+        where.append("l.mf_gross_yield_pct <= %(max_mf_gross_yield_pct)s")
+        params["max_mf_gross_yield_pct"] = spec.max_mf_gross_yield_pct
     if spec.min_area_m2 is not None:
         where.append("l.area_m2 >= %(min_area_m2)s")
         params["min_area_m2"] = spec.min_area_m2

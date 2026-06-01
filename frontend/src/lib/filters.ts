@@ -94,6 +94,10 @@ export interface ListingFilters {
    * NULL area_m2 rows fall out when either bound is set. */
   pricePerM2Min: number | null;
   pricePerM2Max: number | null;
+  /* MF gross rental yield % bounds (migration 133). Sale apartments only;
+   * NULL on everything else, so non-matching listings fall out when set. */
+  mfGrossYieldPctMin: number | null;
+  mfGrossYieldPctMax: number | null;
   areaMin: number | null;
   areaMax: number | null;
   status: ListingStatus;
@@ -182,6 +186,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   priceMax: null,
   pricePerM2Min: null,
   pricePerM2Max: null,
+  mfGrossYieldPctMin: null,
+  mfGrossYieldPctMax: null,
   areaMin: null,
   areaMax: null,
   status: 'any',
@@ -336,6 +342,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   );
   const [priceMin, priceMax] = parseRange(sp.get('price'));
   const [ppm2Min, ppm2Max] = parseRange(sp.get('ppm2'));
+  const [yieldMin, yieldMax] = parseRange(sp.get('yield'));
   const [areaMin, areaMax] = parseRange(sp.get('area'));
   const [estateMin, estateMax] = parseRange(sp.get('estate'));
   const [usableMin, usableMax] = parseRange(sp.get('usable'));
@@ -353,6 +360,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     priceMax,
     pricePerM2Min: ppm2Min,
     pricePerM2Max: ppm2Max,
+    mfGrossYieldPctMin: yieldMin,
+    mfGrossYieldPctMax: yieldMax,
     areaMin,
     areaMax,
     status: enumOr(sp.get('status'), STATUS_VALUES, legacyStatus),
@@ -515,6 +524,9 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.pricePerM2Min != null || f.pricePerM2Max != null) {
     sp.set('ppm2', fmtRange(f.pricePerM2Min, f.pricePerM2Max));
   }
+  if (f.mfGrossYieldPctMin != null || f.mfGrossYieldPctMax != null) {
+    sp.set('yield', fmtRange(f.mfGrossYieldPctMin, f.mfGrossYieldPctMax));
+  }
   if (f.areaMin != null || f.areaMax != null) {
     sp.set('area', fmtRange(f.areaMin, f.areaMax));
   }
@@ -668,6 +680,8 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.priceMax == null &&
   f.pricePerM2Min == null &&
   f.pricePerM2Max == null &&
+  f.mfGrossYieldPctMin == null &&
+  f.mfGrossYieldPctMax == null &&
   f.areaMin == null &&
   f.areaMax == null &&
   f.status === 'any' &&
@@ -736,6 +750,8 @@ export const REGISTRY_KEY_MAP = {
   max_price_czk: 'priceMax',
   min_price_per_m2: 'pricePerM2Min',
   max_price_per_m2: 'pricePerM2Max',
+  min_mf_gross_yield_pct: 'mfGrossYieldPctMin',
+  max_mf_gross_yield_pct: 'mfGrossYieldPctMax',
   min_area_m2: 'areaMin',
   max_area_m2: 'areaMax',
   min_estate_area: 'estateAreaMin',

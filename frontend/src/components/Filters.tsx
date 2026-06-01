@@ -39,6 +39,7 @@ const ESSENTIALS_KEYS = [
   'categoryMain', 'categoryType', 'districts', 'locationMode', 'centerRadius',
   'dispositions', 'categorySubCb',
   'priceMin', 'priceMax', 'pricePerM2Min', 'pricePerM2Max',
+  'mfGrossYieldPctMin', 'mfGrossYieldPctMax',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const PROPERTY_KEYS = [
@@ -191,6 +192,19 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
               labels={{
                 min_price_czk: 'Price',
                 min_price_per_m2: 'Price / m²',
+              }}
+              flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Yield" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['min_mf_gross_yield_pct']}
+              labels={{
+                min_mf_gross_yield_pct: 'MF gross yield %',
               }}
               flat
             />

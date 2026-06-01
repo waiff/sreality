@@ -828,6 +828,20 @@ the `/estimations` + `/estimate_yield` API payloads, and as a Browse map choropl
   the current XLSX off the MF *infografika* page — MF updates 4×/year) AND a manual `.xlsx` upload
   / "Fetch latest now" from the Settings page (`POST /admin/rent-map/*`). The XLSX is parsed with
   stdlib `zipfile`+`xml.etree` (no `openpyxl`). No new secrets — uses `SUPABASE_DB_URL`.
+- **MF gross yield Browse filter (migration 133).** Every **sale apartment** carries a derived
+  `listings.mf_gross_yield_pct` (= MF reference monthly rent × 12 / asking price × 100) +
+  `mf_reference_rent_czk`, computed set-based by the `recompute_mf_gross_yields()` SQL function
+  (PIP-resolve territory → rent-map join → ÷ price). NULL where not computable (non-apartment,
+  rental, no territory) **and** where the asking price is implausible for a sale (`< 100 000` CZK —
+  excludes "cena v RK"/placeholder + rent-magnitude prices mis-tagged `prodej`, which would
+  otherwise yield absurd %; genuine high-yield deals are preserved). The function runs **hourly**
+  (`recompute_mf_yields.yml` → `scripts.recompute_mf_yields`) and **after each rent-map ingest**
+  (inside `scripts.fetch_rent_map`); cheap + idempotent (`is distinct from` guard). Exposed on
+  `listings_public` / `properties_public` and filterable in Browse **and** Watchdog via the
+  `min/max_mf_gross_yield_pct` registry filter (`_UI_AGENDAS`, float range slider) — Map/Table
+  auto-dispatch `.gte/.lte` on `properties_public`, the Stats RPC `browse_stats_properties` gained
+  two params, and the Watchdog matcher + `_shared_filter_where`/`ComparableFilters` carry it for
+  saved alerts. Real-data distribution sanity: median ~3.5%, p99 ~10%.
 
 ## Coding conventions
 

@@ -1,0 +1,43 @@
+name: "Jobs: recompute MF gross yields (hourly)"
+
+# Recompute listings.mf_gross_yield_pct (MF Cenová mapa reference rent / asking
+# price) for every sale apartment. The yield shifts when a listing's price
+# changes (scrape) or the rent map updates (quarterly), so a cheap, idempotent
+# set-based recompute runs hourly to keep new + re-priced listings filterable
+# in Browse within the hour. The same function also runs after each rent-map
+# ingest (scripts.fetch_rent_map). Only changed rows are written.
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  schedule:
+    - cron: "25 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: recompute-mf-yields
+  cancel-in-progress: false
+
+jobs:
+  recompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Recompute MF yields
+        run: python -m scripts.recompute_mf_yields

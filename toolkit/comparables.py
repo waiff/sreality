@@ -63,6 +63,10 @@ class ComparableFilters:
     # falls out when either bound is set.
     min_price_per_m2: float | None = None
     max_price_per_m2: float | None = None
+    # MF gross rental yield % (migration 133). Sale apartments only; NULL on
+    # everything else, so they fall out when either bound is set.
+    min_mf_gross_yield_pct: float | None = None
+    max_mf_gross_yield_pct: float | None = None
     # Default None means "no category filter" — search every category.
     # There is deliberately no implicit apartment-rental default: callers
     # that want one category pass it explicitly (the request schemas in
@@ -339,6 +343,12 @@ def _shared_filter_where(
             "l.price_czk::numeric / NULLIF(l.area_m2, 0) <= %(max_price_per_m2)s"
         )
         params["max_price_per_m2"] = filters.max_price_per_m2
+    if filters.min_mf_gross_yield_pct is not None:
+        where.append("l.mf_gross_yield_pct >= %(min_mf_gross_yield_pct)s")
+        params["min_mf_gross_yield_pct"] = filters.min_mf_gross_yield_pct
+    if filters.max_mf_gross_yield_pct is not None:
+        where.append("l.mf_gross_yield_pct <= %(max_mf_gross_yield_pct)s")
+        params["max_mf_gross_yield_pct"] = filters.max_mf_gross_yield_pct
 
     if filters.locality_district_id is not None:
         where.append("l.locality_district_id = %(locality_district_id)s")
@@ -551,6 +561,8 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "max_price_czk": filters.max_price_czk,
         "min_price_per_m2": filters.min_price_per_m2,
         "max_price_per_m2": filters.max_price_per_m2,
+        "min_mf_gross_yield_pct": filters.min_mf_gross_yield_pct,
+        "max_mf_gross_yield_pct": filters.max_mf_gross_yield_pct,
         "category_main": filters.category_main,
         "category_type": filters.category_type,
         "category_sub_cb": filters.category_sub_cb,
