@@ -26,6 +26,10 @@ class ClusterAction(BaseModel):
     candidate_ids: list[int]
 
 
+class PropertySetAction(BaseModel):
+    property_ids: list[int]
+
+
 @router.get("/candidates")
 def get_candidates(
     status: str | None = "proposed",
@@ -82,6 +86,22 @@ def post_merge_cluster(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="no candidates found")
+    return result
+
+
+@router.post("/properties/merge")
+def post_merge_property_set(
+    body: PropertySetAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Merge an explicit operator-chosen set of properties into one (subset merge)."""
+    try:
+        result = dedup.merge_property_set(conn, body.property_ids)
+    except MergeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=400, detail="need at least two properties")
     return result
 
 

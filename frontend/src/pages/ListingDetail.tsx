@@ -3,6 +3,7 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchListingById,
+  fetchPropertyReprId,
   fetchPropertySources,
   fetchSnapshotsForListings,
   fetchFreshnessChecksByListing,
@@ -48,8 +49,29 @@ const DAY_MS = 86_400_000;
 
 export default function ListingDetail() {
   const { sreality_id: idParam } = useParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   // sreality_id is negative for non-sreality portals (synthetic id seq, migration 097)
   const sid = idParam && /^-?\d+$/.test(idParam) ? Number(idParam) : null;
+
+  // /listing?property=ID (the dedup merge feed links this) → resolve the
+  // property's representative listing and redirect to /listing/{reprId}.
+  const propertyParam = new URLSearchParams(location.search).get('property');
+  const propertyId =
+    sid == null && propertyParam && /^\d+$/.test(propertyParam)
+      ? Number(propertyParam)
+      : null;
+  const reprQ = useQuery<number | null, Error>({
+    queryKey: ['property-repr', propertyId],
+    queryFn: () => fetchPropertyReprId(propertyId as number),
+    enabled: propertyId != null,
+    staleTime: 60_000,
+  });
+  useLayoutEffect(() => {
+    if (reprQ.data != null) {
+      navigate(`/listing/${reprQ.data}`, { replace: true });
+    }
+  }, [reprQ.data, navigate]);
 
   const listingQ = useQuery<ListingPublic | null, Error>({
     queryKey: ['listing', sid],
@@ -99,7 +121,18 @@ export default function ListingDetail() {
   });
 
   if (sid == null) {
-    return <NoListingState id={idParam ?? null} reason="invalid" />;
+    // Resolving ?property=ID → redirect (handled by the effect above). Show a
+    // loading state while it resolves; only "not found" if there's no such
+    // property (or the param was neither a sreality id nor a property id).
+    if (propertyId != null && (reprQ.isLoading || reprQ.data != null)) {
+      return (
+        <Page>
+          <Crumb />
+          <div className="mt-8 text-sm text-[var(--color-ink-3)]">Loading…</div>
+        </Page>
+      );
+    }
+    return <NoListingState id={idParam ?? propertyParam} reason="invalid" />;
   }
 
   if (listingQ.isLoading) {

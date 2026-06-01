@@ -27,6 +27,7 @@ orchestrator that feeds these and calls merge_properties / the vision tools.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass, field
 
@@ -62,6 +63,54 @@ class ListingKey:
     house_number: str | None
     floor: int | None
     area_m2: float | None
+    description: str | None = None
+
+
+# Unit markers in the description that identify a SPECIFIC unit within one
+# development (developer projects list near-identical plots/houses/flats with
+# only the unit number differing — "pozemek č. 3" vs "č. 4", "dům 3A" vs "5C",
+# "byt 42" vs "45"). When two listings name DIFFERENT units under the same
+# keyword they are distinct properties, even though street/disposition/photos
+# (shared marketing renders) all match.
+#
+# "<keyword> [č./č/no/number] <token>" where the token is a number optionally
+# followed by a letter or /number (3, 3A, 12/4). Diacritics are stripped first
+# so "dům"→"dum" matches.
+_UNIT_RE = re.compile(
+    r"\b(pozemek|dum|byt|jednotka|parcela|chata|rd)\b"
+    r"(?:\s*(?:c|cislo|no|number)\.?)?\s*"
+    r"(\d+[a-z]?(?:/\d+)?)\b"
+)
+
+
+def _unit_markers(description: str | None) -> dict[str, set[str]]:
+    """Map each unit keyword → the set of unit tokens it names in the text.
+
+    e.g. "...dům, pozemek č.4 o velikosti..." → {'pozemek': {'4'}}. Diacritics
+    stripped + lowercased so 'dům'→'dum'. Empty when nothing matches.
+    """
+    if not description:
+        return {}
+    decomposed = unicodedata.normalize("NFKD", description.lower())
+    ascii_text = "".join(c for c in decomposed if not unicodedata.combining(c))
+    out: dict[str, set[str]] = {}
+    for kw, token in _UNIT_RE.findall(ascii_text):
+        out.setdefault(kw, set()).add(token)
+    return out
+
+
+def _unit_markers_contradict(a: str | None, b: str | None) -> bool:
+    """True when both descriptions name the SAME unit keyword but DIFFERENT
+    tokens for it (e.g. pozemek 3 vs pozemek 4) — distinct units, never merge.
+
+    Conservative: only fires on a shared keyword whose token sets are disjoint.
+    A keyword present in only one description, or with overlapping tokens, does
+    NOT contradict (avoids false rejections from prose like "byt 2+kk")."""
+    ma, mb = _unit_markers(a), _unit_markers(b)
+    for kw in ma.keys() & mb.keys():
+        if ma[kw].isdisjoint(mb[kw]):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -129,6 +178,12 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
     area_diff = _area_pct_diff(a.area_m2, b.area_m2)
     if area_diff is not None and area_diff > CANDIDATE_AREA_MAX_PCT:
         return PairDecision("reject", None, "area_contradiction")
+    # Distinct units of one development (pozemek č.3 vs č.4, dům 3A vs 5C, …):
+    # the descriptions name the same keyword with different unit tokens. The
+    # photos can't disambiguate (shared renders), so this MUST gate before the
+    # visual layer — a hard reject, like the other rule-C contradictions.
+    if _unit_markers_contradict(a.description, b.description):
+        return PairDecision("reject", None, "unit_marker_contradiction")
 
     # Rule B: exact address (street + house number + disposition + floor), with
     # the 5% area guard. house_number must be present + equal on both, floor

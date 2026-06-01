@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   keepPreviousData,
@@ -12,6 +12,7 @@ import {
   listDedupCandidates,
   listDedupMerges,
   mergeDedupCluster,
+  mergeDedupPropertySet,
   unmergeMergeGroup,
 } from '@/lib/api';
 import {
@@ -124,12 +125,17 @@ export default function Dedup() {
 
   const invalidate = () => qc.invalidateQueries({ queryKey: dedupKeys.all });
   const mergeMut = useMutation({ mutationFn: mergeDedupCluster, onSuccess: invalidate });
+  const mergeSetMut = useMutation({ mutationFn: mergeDedupPropertySet, onSuccess: invalidate });
   const dismissMut = useMutation({ mutationFn: dismissDedupCluster, onSuccess: invalidate });
   const unmergeMut = useMutation({ mutationFn: unmergeMergeGroup, onSuccess: invalidate });
 
-  /* A cluster is "busy" while either mutation is running for its exact id set. */
   const sameIds = (a: number[] | undefined, b: number[]) =>
     a != null && a.length === b.length && a.every((v, i) => v === b[i]);
+  // A subset merge for THIS cluster is in flight when the property-set mutation's
+  // ids are all members of the cluster.
+  const subsetBusyFor = (memberIds: number[]) =>
+    mergeSetMut.isPending
+    && (mergeSetMut.variables ?? []).every((id) => memberIds.includes(id));
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
@@ -157,11 +163,13 @@ export default function Dedup() {
               imagesMap={imagesMap}
               sourcesMap={sourcesMap}
               detailMap={detailMap}
-              onMerge={() => mergeMut.mutate(cl.candidateIds)}
+              onMergeAll={() => mergeMut.mutate(cl.candidateIds)}
+              onMergeSubset={(propertyIds) => mergeSetMut.mutate(propertyIds)}
               onDismiss={() => dismissMut.mutate(cl.candidateIds)}
               busy={
                 (mergeMut.isPending && sameIds(mergeMut.variables, cl.candidateIds))
                 || (dismissMut.isPending && sameIds(dismissMut.variables, cl.candidateIds))
+                || subsetBusyFor(cl.members.map((m) => m.property_id))
               }
             />
           ))}
@@ -359,15 +367,17 @@ function urlsFor(side: DedupPropertySide, imagesMap: ImagesMap): string[] {
   return (imagesMap.get(side.sreality_id) ?? []).map(imageSrc);
 }
 
-/* One review card per CLUSTER — N member columns (not always two), a column
- * each. The grid caps at 3 columns so photos stay Browse-card-sized; a 4th+
- * member wraps to the next row. Merge/Dismiss act on the whole cluster. */
+/* One review card per CLUSTER — N member columns (not always two). Each member
+ * has a checkbox: with NONE or ALL ticked, Merge folds the whole cluster; with
+ * a SUBSET (≥2) ticked, only those merge and the rest stay in the queue. Photos
+ * stay Browse-sized; the table scrolls horizontally for a large cluster. */
 function ClusterCard({
   cluster,
   imagesMap,
   sourcesMap,
   detailMap,
-  onMerge,
+  onMergeAll,
+  onMergeSubset,
   onDismiss,
   busy,
 }: {
@@ -375,14 +385,32 @@ function ClusterCard({
   imagesMap: ImagesMap;
   sourcesMap: SourcesMap;
   detailMap: DetailMap;
-  onMerge: () => void;
+  onMergeAll: () => void;
+  onMergeSubset: (propertyIds: number[]) => void;
   onDismiss: () => void;
   busy: boolean;
 }) {
   const { members, tier } = cluster;
   const rows = diffCluster(members, (id) => (id != null ? detailMap.get(id) ?? null : null));
   const n = members.length;
-  const mergeLabel = n > 2 ? `Merge ${n}` : 'Merge';
+
+  const [checked, setChecked] = useState<Set<number>>(new Set());
+  const toggle = (pid: number) =>
+    setChecked((prev) => {
+      const next = new Set(prev);
+      if (next.has(pid)) next.delete(pid);
+      else next.add(pid);
+      return next;
+    });
+  // Partial selection = ≥2 ticked but not all → Merge acts on the subset only.
+  const isSubset = checked.size >= 2 && checked.size < n;
+  const mergeLabel = isSubset
+    ? `Merge ${checked.size} selected`
+    : n > 2
+      ? `Merge ${n}`
+      : 'Merge';
+  const mergeDisabled = busy || checked.size === 1; // one ticked = nothing to merge
+  const onMerge = () => (isSubset ? onMergeSubset([...checked]) : onMergeAll());
 
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-4">
@@ -391,6 +419,11 @@ function ClusterCard({
           <span>{tier}</span>
           {n > 2 ? (
             <span className="text-[var(--color-ink-4)]">· {n} listings</span>
+          ) : null}
+          {checked.size >= 2 ? (
+            <span className="text-[var(--color-copper-2)]">· {checked.size} selected</span>
+          ) : checked.size === 1 ? (
+            <span className="text-[var(--color-ink-4)]">· tick ≥2 to merge a subset</span>
           ) : null}
         </div>
         <div className="flex items-center gap-2">
@@ -405,7 +438,7 @@ function ClusterCard({
           <button
             type="button"
             onClick={onMerge}
-            disabled={busy}
+            disabled={mergeDisabled}
             className={`${BTN} bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
           >
             {busy ? 'Working…' : mergeLabel}
@@ -435,6 +468,8 @@ function ClusterCard({
                     side={side}
                     urls={urlsFor(side, imagesMap)}
                     sources={sourcesMap.get(side.property_id) ?? []}
+                    checked={checked.has(side.property_id)}
+                    onToggle={() => toggle(side.property_id)}
                   />
                 </td>
               ))}
@@ -507,17 +542,38 @@ function PropertyPanel({
   side,
   urls,
   sources,
+  checked,
+  onToggle,
 }: {
   side: DedupPropertySide;
   urls: string[];
   sources: PropertySource[];
+  checked: boolean;
+  onToggle: () => void;
 }) {
+  const ring = checked ? 'border-[var(--color-copper)] ring-1 ring-[var(--color-copper)]' : 'border-[var(--color-rule-soft)]';
   return (
-    <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper)] p-3">
+    <div className={`rounded-[var(--radius-sm)] border ${ring} bg-[var(--color-paper)] p-3`}>
       <ImageCarousel
         urls={urls}
         className="rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)] mb-2"
-      />
+      >
+        {/* Top-right selection checkbox — tick ≥2 in a cluster to merge only
+            those (the rest stay in the queue). */}
+        <label
+          className="absolute top-1.5 right-1.5 z-10 flex items-center justify-center w-6 h-6
+            rounded-[var(--radius-xs)] bg-[var(--color-paper)]/90 border border-[var(--color-rule)]
+            cursor-pointer hover:border-[var(--color-copper)]"
+          title="Select for a partial merge"
+        >
+          <input
+            type="checkbox"
+            checked={checked}
+            onChange={onToggle}
+            className="accent-[var(--color-copper)] cursor-pointer"
+          />
+        </label>
+      </ImageCarousel>
       <div className="flex items-baseline justify-between gap-2">
         <span className="font-mono tabular-nums text-[var(--color-ink)]">
           {fmtCzk(side.price_czk)}
@@ -530,7 +586,16 @@ function PropertyPanel({
       <div className="mt-0.5 text-[0.8rem] text-[var(--color-ink-3)] truncate">
         {side.district ?? '—'}
       </div>
-      <PortalChips sources={sources} fallbackId={side.sreality_id} />
+      <PortalChips sources={sources} />
+      {/* Secondary link to the listing's detail page in our own DB. */}
+      {side.sreality_id != null ? (
+        <Link
+          to={`/listing/${side.sreality_id}`}
+          className="mt-1.5 inline-block text-[0.7rem] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          view in database →
+        </Link>
+      ) : null}
     </div>
   );
 }
@@ -539,26 +604,10 @@ function PropertyPanel({
  * count. Chip links to the portal's own page (source_url) in a new tab when
  * known, else to our internal listing view. Active source = sage tint,
  * inactive = muted, mirroring the Browse CardBadge tones. */
-function PortalChips({
-  sources,
-  fallbackId,
-}: {
-  sources: PropertySource[];
-  fallbackId: number | null;
-}) {
-  if (sources.length === 0) {
-    if (fallbackId == null) return null;
-    return (
-      <div className="mt-2">
-        <Link
-          to={`/listing/${fallbackId}`}
-          className="inline-block text-[0.75rem] text-[var(--color-copper)] hover:underline underline-offset-2"
-        >
-          open listing →
-        </Link>
-      </div>
-    );
-  }
+function PortalChips({ sources }: { sources: PropertySource[] }) {
+  // The panel's "view in database →" link covers the no-sources case, so here we
+  // only render the portal chips when we actually have per-source rows.
+  if (sources.length === 0) return null;
   return (
     <div className="mt-2 flex flex-wrap gap-1">
       {sources.map((s) => (

@@ -65,7 +65,8 @@ MAX_GROUP_SIZE = 40
 _ELIGIBLE_SQL = """
     SELECT
       l.sreality_id, l.property_id, l.source,
-      l.street, l.street_id, l.disposition, l.house_number, l.floor, l.area_m2
+      l.street, l.street_id, l.disposition, l.house_number, l.floor, l.area_m2,
+      left(l.description, 600) AS description
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE l.street IS NOT NULL AND l.street <> ''
@@ -93,6 +94,7 @@ def _load_eligible(conn: Any) -> list[ListingKey]:
             house_number=r[6],
             floor=int(r[7]) if r[7] is not None else None,
             area_m2=float(r[8]) if r[8] is not None else None,
+            description=r[9],
         ))
     return keys
 
