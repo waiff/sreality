@@ -749,6 +749,16 @@ overlay that can be heatmap-color-coded by any chosen index.
   values reached the browser and every other city (Dobříš included)
   showed em-dashes / a grey, value-less shape. Mirrors the same fix
   `fetchRentMapChoropleth` already used.
+- **Obec re-link correction** (migration 140): the polygons exposed 6
+  curated cities that migration 081's name-walk had linked to the WRONG
+  obec — a larger, differently-named neighbour (Šlapanice→Brno,
+  Odry→Ostrava, Hranice/Jeseník→Olomouc, Chrudim→České Lhotice,
+  Mělník→Úžice), which drew a giant blob AND mis-scoped their
+  `ST_Covers` city-quality filter. Re-linked by exact obec name match
+  (tie-broken by nearest centroid); pure spatial containment was unsafe
+  because several Mapy.cz centroids land just outside the town in a tiny
+  neighbour. 202 correct links + the 20 cities with no same-name obec
+  are untouched.
 - **Tooling**: `scripts/seed_curated_cities.py` reads the operator
   CSV, geocodes each (Město, Kraj) pair via Mapy.cz, writes to the
   DB. Per-city radius is derived from the Mapy.cz bbox (clamped
