@@ -1803,6 +1803,82 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_mmreality.yml"
   },
   {
+    "filename": "scrape_price_stats.yml",
+    "name": "Scraping: Sreality price stats (ceny-nemovitosti, weekly + manual)",
+    "description": "Ingests the aggregate market statistics sreality publishes at /ceny-nemovitosti (NOT individual listings) into the price_stat_* tables. For each active dataset (one named filter set) × tracked municipality × {prodej, pronájem} it fetches the per-month series from the login-gated estate_prices JSON API, then recomputes the per-city derived metrics (CAGR growth, gross yield) + refreshes the map choropleth. Design: docs/design/price-stats-datasets.md.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 4 * * 1",
+        "human": "0 4 * * 1"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "probe (test auth) | resolve (refresh localities) | full",
+        "required": true,
+        "type": "choice",
+        "default": "full",
+        "options": [
+          "probe",
+          "resolve",
+          "full"
+        ]
+      },
+      {
+        "name": "dataset_id",
+        "description": "Single dataset id to run (empty = all active datasets)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "start_year",
+        "description": "Earliest year to fetch",
+        "required": false,
+        "type": "string",
+        "default": "2015",
+        "options": null
+      },
+      {
+        "name": "window_years",
+        "description": "CAGR window (years) for the derived growth metrics",
+        "required": false,
+        "type": "string",
+        "default": "5",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Fetch + log but write nothing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SREALITY_LOGIN_EMAIL",
+      "SREALITY_LOGIN_PASSWORD",
+      "SREALITY_SESSION_COOKIE",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "price-stats",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_price_stats.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_price_stats.yml"
+  },
+  {
     "filename": "scrape_remax.yml",
     "name": "Scraping: RE/MAX scraper (pilot)",
     "description": "Scheduled (every 6h) + manual scraper for remax-czech.cz on the shared portal framework. RE/MAX is a national franchise catalogue (~7,900 listings) served as a single server-rendered search index (no JSON API, no per-category URL) split only by an offer-type flag (sale=1 prodej / sale=2 pronájem): the index walk pages each agenda and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /reality/detail/{id}/ page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + singleton property).",

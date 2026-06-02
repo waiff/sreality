@@ -47,6 +47,14 @@ geo = [
   "shapely>=2.0",
   "pyproj>=3.6",
 ]
+# Used only by scraper/sreality_auth.py to mint a logged-in Seznam session
+# cookie for the ceny-nemovitosti `estate_prices` stats API (which the listing
+# scraper never needs). Kept out of the default install so the scraper / API
+# images stay slim — only the price-stats workflow installs it. A captured
+# cookie (SREALITY_SESSION_COOKIE) bypasses it entirely.
+pricestats = [
+  "playwright>=1.40",
+]
 
 [build-system]
 requires = ["setuptools>=68"]
