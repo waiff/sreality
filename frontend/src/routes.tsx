@@ -8,6 +8,7 @@ import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
 import Collections from './pages/Collections';
 import CollectionDetail from './pages/CollectionDetail';
+import Datasets from './pages/Datasets';
 import Settings from './pages/Settings';
 import Scrapers from './pages/Scrapers';
 import Watchdog from './pages/Watchdog';
@@ -33,6 +34,7 @@ export const routes: RouteObject[] = [
       { path: 'building/:id', element: <BuildingDetail /> },
       { path: 'collections', element: <Collections /> },
       { path: 'collection/:id', element: <CollectionDetail /> },
+      { path: 'datasets', element: <Datasets /> },
       { path: 'watchdog', element: <Watchdog /> },
       { path: 'watchdog/manage', element: <WatchdogManage /> },
       { path: 'watchdog/:id/edit', element: <WatchdogEdit /> },
