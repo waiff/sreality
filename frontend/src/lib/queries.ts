@@ -69,7 +69,7 @@ const TABLE_COLS =
   'sreality_id,district,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
-  'sreality_id,district,locality,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'property_id,sreality_id,district,locality,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'category_main,category_type,source,mf_gross_yield_pct';
 
 export type SortField =
@@ -401,6 +401,9 @@ export const fetchListingsForTable = async (
 /* -------------------------------------------------------------------------- */
 
 export interface CardRow {
+  /* The canonical property this card represents (Browse is property-grain via
+   * properties_public). Used by the Browse merge-mode dedup action. */
+  property_id: number;
   sreality_id: number;
   district: string | null;
   locality: string | null;

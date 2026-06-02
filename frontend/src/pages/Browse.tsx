@@ -1,6 +1,6 @@
 import { Suspense, lazy, useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
@@ -22,7 +22,7 @@ import {
   type MapBounds,
 } from '@/lib/filters';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
-import { fetchRegionDispositionAnnotations, isApiConfigured } from '@/lib/api';
+import { fetchRegionDispositionAnnotations, isApiConfigured, mergeDedupPropertySet } from '@/lib/api';
 import {
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
@@ -201,6 +201,37 @@ export default function Browse() {
   /* "Create watchdog from Browse": held here so the button in FilterSummary
    * opens the name-prompt modal seeded from the current filter set. */
   const [watchdogModalOpen, setWatchdogModalOpen] = useState(false);
+
+  /* Dedup merge mode: a toggle turns the cards into a multi-select; the picked
+   * property_ids are merged into one via the existing dedup endpoint. */
+  const queryClient = useQueryClient();
+  const [mergeMode, setMergeMode] = useState(false);
+  const [selectedForMerge, setSelectedForMerge] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const toggleSelectForMerge = useCallback((propertyId: number) => {
+    setSelectedForMerge((prev) => {
+      const next = new Set(prev);
+      if (next.has(propertyId)) next.delete(propertyId);
+      else next.add(propertyId);
+      return next;
+    });
+  }, []);
+  const exitMergeMode = useCallback(() => {
+    setMergeMode(false);
+    setSelectedForMerge(new Set());
+  }, []);
+  const mergeMut = useMutation({
+    mutationFn: (propertyIds: number[]) => mergeDedupPropertySet(propertyIds),
+    onSuccess: () => {
+      // The merged-away properties drop out of properties_public; refresh every
+      // Browse cohort view so the survivor replaces the duplicates.
+      for (const key of ['cards', 'map', 'table', 'stats']) {
+        queryClient.invalidateQueries({ queryKey: [key] });
+      }
+      exitMergeMode();
+    },
+  });
   const handleLocationPick = useCallback((s: MapySuggestion) => {
     if (!s.position) return;
     setMapFlyTo({
@@ -493,8 +524,17 @@ export default function Browse() {
             onClearBounds={filters.bounds ? () => setBounds(null) : undefined}
             onCreateWatchdog={() => setWatchdogModalOpen(true)}
           />
-          <div className="mt-4">
+          <div className="mt-4 flex items-center justify-between gap-3">
             <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
+            {tabFromUrl === 'map' && (
+              <MergeModeBar
+                active={mergeMode}
+                selectedCount={selectedForMerge.size}
+                busy={mergeMut.isPending}
+                onToggle={() => (mergeMode ? exitMergeMode() : setMergeMode(true))}
+                onMerge={() => mergeMut.mutate([...selectedForMerge])}
+              />
+            )}
           </div>
         </div>
 
@@ -519,6 +559,9 @@ export default function Browse() {
                 onSort={writeSort}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
                 onClearBounds={() => setBounds(null)}
+                mergeMode={mergeMode}
+                selectedPropertyIds={selectedForMerge}
+                onToggleSelect={toggleSelectForMerge}
               />
               <div className="min-h-0 h-full">
                 <Suspense fallback={<MapSkeleton />}>
@@ -692,6 +735,59 @@ function MapSkeleton() {
   return (
     <div className="h-full min-h-[480px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] flex items-center justify-center">
       <p className="text-sm text-[var(--color-ink-3)] tracking-wide">Loading map…</p>
+    </div>
+  );
+}
+
+/* Dedup merge-mode toolbar: a toggle that turns the Listings cards into a
+ * multi-select, plus a "Merge N" CTA that folds the picked properties into one
+ * via the dedup endpoint. Off → just the toggle. On → toggle (now "Cancel") +
+ * the Merge CTA (disabled until ≥2 picked). */
+function MergeModeBar({
+  active,
+  selectedCount,
+  busy,
+  onToggle,
+  onMerge,
+}: {
+  active: boolean;
+  selectedCount: number;
+  busy: boolean;
+  onToggle: () => void;
+  onMerge: () => void;
+}) {
+  const btn = 'px-3 py-1.5 text-sm rounded-[var(--radius-sm)] transition-colors disabled:opacity-50';
+  return (
+    <div className="flex items-center gap-2 shrink-0">
+      {active && (
+        <>
+          <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
+            {selectedCount === 0
+              ? 'Pick listings to merge'
+              : `${selectedCount} selected`}
+          </span>
+          <button
+            type="button"
+            onClick={onMerge}
+            disabled={busy || selectedCount < 2}
+            className={`${btn} bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
+          >
+            {busy ? 'Merging…' : `Merge ${selectedCount >= 2 ? selectedCount : ''}`.trim()}
+          </button>
+        </>
+      )}
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={busy}
+        className={`${btn} border ${
+          active
+            ? 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)]'
+            : 'border-[var(--color-copper)] text-[var(--color-copper-2)] hover:bg-[var(--color-copper-soft)]'
+        }`}
+      >
+        {active ? 'Cancel' : 'Merge mode'}
+      </button>
     </div>
   );
 }
