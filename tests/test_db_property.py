@@ -92,7 +92,13 @@ def test_new_listing_creates_singleton(monkeypatch):
     result = db.upsert_listing_with_property(conn, {"sreality_id": 555}, {}, "h")
 
     assert result == "new"
-    assert _find(conn.executed, "INSERT INTO properties") is not None
+    ins = _find(conn.executed, "INSERT INTO properties")
+    assert ins is not None
+    # The singleton must carry the FULL display payload at creation, not just
+    # structural columns — otherwise the Browse card has no city/condition until
+    # the next full recompute (portal inserts never enter the dirty drain, so
+    # that's up to ~24h). Guards against the column list being trimmed again.
+    assert "locality" in ins[0] and "condition" in ins[0]
     link = _find(conn.executed, "UPDATE listings SET property_id =")
     assert link is not None and link[1] == (42, 555)
     # the removed geo matcher: no probe, no rollup, no candidate
@@ -111,7 +117,10 @@ def test_linked_listing_refreshes_via_rollup(monkeypatch):
     result = db.upsert_listing_with_property(conn, {"sreality_id": 777}, {}, "h")
 
     assert result == "updated"
-    assert _find(conn.executed, "UPDATE properties p SET") is not None
+    roll = _find(conn.executed, "UPDATE properties p SET")
+    assert roll is not None
+    # The singleton rollup keeps the display payload in sync on re-fetch.
+    assert "locality" in roll[0] and "condition" in roll[0]
     assert _find(conn.executed, "INSERT INTO properties") is None
     assert _find(conn.executed, "SELECT p.id FROM properties p") is None
 
