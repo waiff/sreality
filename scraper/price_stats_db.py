@@ -22,7 +22,7 @@ LOG = logging.getLogger(__name__)
 _DATASET_COLS = (
     "id, slug, name, description, category_main_cb, building_condition, "
     "building_type, ownership, usable_area_from, usable_area_to, distance, "
-    "is_active"
+    "is_active, start_ym, end_ym, obec_ids"
 )
 
 
@@ -102,6 +102,51 @@ def list_localities(conn: psycopg.Connection) -> list[dict[str, Any]]:
         cur.execute(
             "SELECT entity_type, entity_id, name, obec_id "
             "FROM price_stat_localities ORDER BY name"
+        )
+        return cur.fetchall()
+
+
+def resolve_obce(conn: psycopg.Connection, obec_ids: list[int]) -> int:
+    """Cache localities for selected obce straight from admin_boundaries.
+
+    admin_boundaries.sreality_id (obec level) IS the sreality municipality
+    entity_id, so a selected obec maps to a sreality entity with no
+    localities/suggest call. The entity coordinate is the obec centroid; obec_id
+    is set directly (no PIP). Obce without a sreality_id are skipped (not
+    scrapeable).
+    """
+    if not obec_ids:
+        return 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO price_stat_localities (
+                entity_type, entity_id, name, lat, lon, geom, obec_id, resolved_at
+            )
+            SELECT 'muni', b.sreality_id, b.name,
+                   ST_Y(ST_Centroid(b.geom::geometry)),
+                   ST_X(ST_Centroid(b.geom::geometry)),
+                   ST_Centroid(b.geom::geometry)::geography, b.id, now()
+              FROM admin_boundaries b
+             WHERE b.id = ANY(%s) AND b.level = 'obec' AND b.sreality_id IS NOT NULL
+            ON CONFLICT (entity_type, entity_id) DO UPDATE SET
+                name = EXCLUDED.name, obec_id = EXCLUDED.obec_id,
+                lat = EXCLUDED.lat, lon = EXCLUDED.lon, geom = EXCLUDED.geom,
+                resolved_at = now()
+            """,
+            (obec_ids,),
+        )
+        return cur.rowcount
+
+
+def localities_for_obec_ids(
+    conn: psycopg.Connection, obec_ids: list[int]
+) -> list[dict[str, Any]]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT entity_type, entity_id, name, obec_id "
+            "FROM price_stat_localities WHERE obec_id = ANY(%s) ORDER BY name",
+            (obec_ids,),
         )
         return cur.fetchall()
 

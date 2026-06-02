@@ -38,6 +38,45 @@ def _load_city_names(path: Path) -> list[str]:
     return [str(c).strip() for c in cities if str(c).strip()]
 
 
+def _parse_ym(s: str | None) -> tuple[int, int] | None:
+    if not s:
+        return None
+    try:
+        year, month = str(s).split("-")
+        return (int(year), int(month))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _dataset_window(
+    dataset: dict[str, Any],
+    default_start: tuple[int, int],
+    default_end: tuple[int, int],
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Per-dataset scrape window, falling back to the CLI/today defaults."""
+    return (
+        _parse_ym(dataset.get("start_ym")) or default_start,
+        _parse_ym(dataset.get("end_ym")) or default_end,
+    )
+
+
+def _dataset_localities(
+    conn: Any,
+    dataset: dict[str, Any],
+    global_localities: list[dict[str, Any]],
+    *,
+    dry_run: bool,
+) -> list[dict[str, Any]]:
+    """Localities for a dataset: its selected obce, else the global list."""
+    obec_ids = dataset.get("obec_ids")
+    if obec_ids:
+        ids = [int(x) for x in obec_ids]
+        if not dry_run:
+            db.resolve_obce(conn, ids)
+        return db.localities_for_obec_ids(conn, ids)
+    return global_localities
+
+
 def resolve_localities(
     conn: Any, client: PriceStatsClient, city_names: list[str], *, dry_run: bool
 ) -> int:
@@ -162,10 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.resolve_only:
         return 0
 
-    localities = db.list_localities(conn)
-    if not localities:
-        LOG.warning("no resolved localities; nothing to fetch")
-        return 0
+    global_localities = db.list_localities(conn)
 
     if args.dataset_id is not None:
         ds = db.get_dataset(conn, args.dataset_id)
@@ -177,9 +213,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     for dataset in datasets:
+        locs = _dataset_localities(conn, dataset, global_localities, dry_run=args.dry_run)
+        if not locs:
+            LOG.warning("dataset %s has no localities to fetch", dataset["id"])
+            continue
+        ds_start, ds_end = _dataset_window(dataset, start_ym, end_ym)
         run_dataset(
-            conn, client, dataset, localities,
-            start_ym=start_ym, end_ym=end_ym,
+            conn, client, dataset, locs,
+            start_ym=ds_start, end_ym=ds_end,
             window_years=args.window_years, chunk_months=args.chunk_months,
             dry_run=args.dry_run,
         )
