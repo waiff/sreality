@@ -1,18 +1,23 @@
 name: "Data: refresh city populations (Wikidata)"
 
+# FALLBACK SOURCE. The preferred population source is now the official
+# ČSÚ DataStat export "Počet obyvatel v obcích k 1. 1." — download the
+# JSON from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02,
+# commit it to data/csu_population.json, and run "Data: seed curated
+# cities" (which ingests the JSON directly). Use this Wikidata fetcher
+# only when you can't get the official file.
+#
 # Pulls the latest population reading for every curated city from
 # Wikidata's public SPARQL endpoint, writes
 # data/csu_population_<year>.csv, and commits it back to the branch.
-# The next run of `Seed curated cities` will pick the CSV up and
-# upsert into `city_population`.
+# The seed reads that CSV only when data/csu_population.json is absent.
 #
 # Wikidata mirrors ČSÚ's official municipality population numbers
 # under property `P1082` (point in time qualified by `P585`). The
 # fetcher selects the latest reading at or before the chosen cutoff
 # year so we never get a hypothetical-future row by accident.
 #
-# No DB access required — the workflow just refreshes a committed
-# CSV. Seed picks it up via its existing CSV path.
+# No DB access required — the workflow just refreshes a committed CSV.
 
 on:
   workflow_dispatch:

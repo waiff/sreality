@@ -775,6 +775,17 @@ overlay that can be heatmap-color-coded by any chosen index.
   `.github/workflows/refresh_population.yml` for operator-triggered
   refresh; no DB access required (the workflow just regenerates
   the committed CSV).
+- **Population source switched to the official ČSÚ DataStat file.**
+  The Wikidata fetcher is now a fallback; the preferred source is the
+  official export "Počet obyvatel v obcích k 1. 1." (download from
+  https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02). The operator
+  commits the downloaded JSON-stat file to `data/csu_population.json`;
+  `scripts/csu_population.py` parses it (takes the latest year, derives
+  each municipality's kraj from the JSON-stat `child` map, drops the
+  kraj-level aggregates) and `scripts/seed_curated_cities.py` matches
+  municipalities to curated cities by `(name, kraj)`
+  (diacritics-insensitive) and upserts `city_population`. The seed
+  prefers the JSON and falls back to the legacy CSV when it's absent.
 - **Price-per-m² filter everywhere.** Two new `FilterDef`s in
   `toolkit/filter_registry.py` (`min/max_price_per_m2`,
   `pg_column='price_per_m2'`, all-agenda) make per-m² bounds a

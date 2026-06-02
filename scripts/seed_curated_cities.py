@@ -9,8 +9,13 @@ Steps:
   2. Geocode each (Mesto, Kraj) pair via Mapy.cz; cache results in
      data/curated_cities_geocoded.json so re-runs are deterministic and
      auditable.
-  3. Optionally fetch latest CSU municipality population from
-     data/csu_population_2024.csv (committed alongside if available).
+  3. Optionally load latest CSU municipality population. Preferred source is
+     the official ČSÚ DataStat JSON-stat export at data/csu_population.json —
+     download "Počet obyvatel v obcích k 1. 1." from
+     https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02 and commit it
+     there. A legacy data/csu_population_2024.csv is still read as a fallback
+     when the JSON is absent. Either is optional — a missing file just leaves
+     city_population untouched. See scripts/csu_population.py for the parser.
   4. Connect to Supabase via SUPABASE_DB_URL and upsert.
 
 Idempotent: a second run with the same CSV bumps source_revision and
@@ -33,9 +38,14 @@ from typing import Any
 
 import psycopg
 
+from scripts import csu_population
+
 ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data" / "obce_v_datech_2025.csv"
 GEOCODE_CACHE_PATH = ROOT / "data" / "curated_cities_geocoded.json"
+# Preferred population source: the official ČSÚ DataStat JSON-stat export.
+# Legacy CSV is the fallback when the JSON is absent.
+POPULATION_JSON_PATH = ROOT / "data" / "csu_population.json"
 POPULATION_CSV_PATH = ROOT / "data" / "csu_population_2024.csv"
 
 LOG = logging.getLogger("seed_curated_cities")
@@ -283,6 +293,25 @@ def read_population_csv(path: Path) -> dict[tuple[str, str], tuple[int, int]]:
     return out
 
 
+def load_population(
+    curated_rows: list[CsvRow],
+    json_path: Path,
+    csv_path: Path,
+) -> dict[tuple[str, str], tuple[int, int]]:
+    """Load latest municipality population, keyed on the curated (name, kraj).
+
+    Prefers the official ČSÚ DataStat JSON-stat export (json_path); falls back
+    to the legacy CSV when the JSON is absent. Both optional — missing both
+    returns {} and leaves city_population untouched.
+    """
+    if json_path.exists():
+        parsed = csu_population.load_population_jsonstat(json_path)
+        curated = [(r.name, r.kraj_name) for r in curated_rows]
+        matched, _misses = csu_population.match_to_curated(parsed, curated)
+        return matched
+    return read_population_csv(csv_path)
+
+
 # --- DB writes -----------------------------------------------------------
 
 
@@ -420,8 +449,13 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="seed_curated_cities")
     p.add_argument("--csv", default=str(CSV_PATH),
                    help="Path to obce_v_datech_*.csv")
+    p.add_argument("--population-json", default=str(POPULATION_JSON_PATH),
+                   help="Path to the ČSÚ DataStat JSON-stat population export "
+                        "(preferred; download OBY02AT02 from "
+                        "https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02)")
     p.add_argument("--population-csv", default=str(POPULATION_CSV_PATH),
-                   help="Path to csu_population_*.csv (optional)")
+                   help="Path to legacy csu_population_*.csv (fallback when "
+                        "--population-json is absent)")
     p.add_argument("--geocode-cache", default=str(GEOCODE_CACHE_PATH))
     p.add_argument("--dry-run", action="store_true",
                    help="Geocode + plan, but don't write to the DB")
@@ -474,7 +508,9 @@ def main(argv: list[str] | None = None) -> int:
                   len(missing), [(r.name, r.kraj_name) for r in missing[:5]])
         return 2
 
-    population = read_population_csv(Path(args.population_csv))
+    population = load_population(
+        rows, Path(args.population_json), Path(args.population_csv),
+    )
 
     if args.dry_run:
         LOG.info("Dry-run: would seed %d cities, %d index values, %d "

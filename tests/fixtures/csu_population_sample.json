@@ -1,0 +1,61 @@
+{
+  "version": "2.0",
+  "class": "dataset",
+  "label": "Počet obyvatel podle pohlaví - vlastní výběr (trimmed test fixture)",
+  "id": ["IndicatorType", "UZ25", "CasR"],
+  "size": [1, 6, 2],
+  "role": {
+    "geo": ["UZ25"],
+    "metric": ["IndicatorType"],
+    "time": ["CasR"]
+  },
+  "dimension": {
+    "IndicatorType": {
+      "label": "Ukazatel",
+      "category": {
+        "index": {"2406P": 0},
+        "label": {"2406P": "Počet obyvatel k 1. 1. (počáteční stav)"}
+      }
+    },
+    "UZ25": {
+      "label": "Kraje a obce",
+      "category": {
+        "index": {
+          "CZ010": 0,
+          "CZ064": 1,
+          "554782": 2,
+          "582786": 3,
+          "581429": 4,
+          "591429": 5
+        },
+        "label": {
+          "CZ010": "Hlavní město Praha",
+          "CZ064": "Jihomoravský kraj",
+          "554782": "Praha",
+          "582786": "Brno",
+          "581429": "Březina",
+          "591429": "Březina"
+        },
+        "child": {
+          "CZ010": ["554782"],
+          "CZ064": ["582786", "581429", "591429"]
+        }
+      }
+    },
+    "CasR": {
+      "label": "Roky",
+      "category": {
+        "index": {"2026": 0, "2025": 1},
+        "label": {"2026": "2026", "2025": "2025"}
+      }
+    }
+  },
+  "value": [
+    1400000, 1390000,
+    1200000, 1190000,
+    1407084, 1397880,
+    400000, 399000,
+    800, 790,
+    1200, 1180
+  ]
+}
