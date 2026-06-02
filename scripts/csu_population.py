@@ -165,6 +165,67 @@ def parse_population_jsonstat(
     return out
 
 
+def parse_population_by_code(doc: dict[str, Any]) -> dict[int, tuple[int, int]]:
+    """Return ``{obec_code: (population, as_of_year)}`` for the latest year.
+
+    Keys are the integer ČSÚ/RÚIAN municipality codes (the UZ25 child codes),
+    which ARE ``admin_boundaries.id``. Kraj-level aggregates are dropped. Used
+    to load population for EVERY obec, independent of the curated-city list.
+    """
+    dims: list[str] = doc["id"]
+    sizes: list[int] = doc["size"]
+    values = doc["value"]
+    role = doc.get("role", {})
+    geo_dim = (role.get("geo") or ["UZ25"])[0]
+    time_dim = (role.get("time") or ["CasR"])[0]
+    dim_pos = {name: i for i, name in enumerate(dims)}
+    if geo_dim not in dim_pos or time_dim not in dim_pos:
+        raise ValueError(f"JSON-stat missing geo/time dim (id={dims})")
+    strides = _strides(sizes)
+    geo_cat = doc["dimension"][geo_dim]["category"]
+    geo_index: dict[str, int] = geo_cat["index"]
+    child: dict[str, list[str]] = geo_cat.get("child", {})
+    if not child:
+        raise ValueError("JSON-stat geo dimension has no `child` map")
+    muni_codes = {c for codes in child.values() for c in codes}
+
+    time_cat = doc["dimension"][time_dim]["category"]
+    time_index: dict[str, int] = time_cat["index"]
+    latest_year_code = max(time_index, key=lambda y: int(y))
+    latest_year = int(latest_year_code)
+    time_pos = time_index[latest_year_code]
+
+    base_coord = [0] * len(dims)
+    base_coord[dim_pos[time_dim]] = time_pos
+
+    out: dict[int, tuple[int, int]] = {}
+    for code, gpos in geo_index.items():
+        if code not in muni_codes:
+            continue  # kraj-level aggregate
+        try:
+            code_int = int(code)
+        except ValueError:
+            continue
+        coord = list(base_coord)
+        coord[dim_pos[geo_dim]] = gpos
+        raw = _value_at(values, sum(c * s for c, s in zip(coord, strides)))
+        if raw is None:
+            continue
+        try:
+            pop = int(round(float(raw)))
+        except (TypeError, ValueError):
+            continue
+        if pop <= 0:
+            continue
+        out[code_int] = (pop, latest_year)
+    LOG.info("Parsed population for %d obce (latest year %d)", len(out), latest_year)
+    return out
+
+
+def load_population_by_code(path: Path) -> dict[int, tuple[int, int]]:
+    return parse_population_by_code(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
 def load_population_jsonstat(path: Path) -> dict[tuple[str, str], tuple[int, int]]:
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     return parse_population_jsonstat(doc)

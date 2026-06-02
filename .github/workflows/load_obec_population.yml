@@ -1,0 +1,42 @@
+name: "Jobs: load obec population (manual)"
+
+# Load ČSÚ municipality population into admin_boundaries.population for EVERY
+# obec (not just the 206 curated cities). Reads the committed DataStat export
+# data/csu_population.json (OBY02AT02 — download from
+# https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02). Idempotent: only
+# changed rows are written. Dispatch this after committing a refreshed export.
+# This is the population source the "within X km of a municipality with
+# population > N" proximity filter reads.
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: load-obec-population
+  cancel-in-progress: false
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Load obec population
+        run: python -m scripts.load_obec_population
