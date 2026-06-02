@@ -186,7 +186,7 @@ function EstimationDetailBody({
       <Page>
         <Crumb />
         <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
-        <SubjectFactsBlock subject={subjectQ.data ?? null} />
+        <SubjectFactsBlock subject={subjectQ.data ?? null} attrs={run.subject_attributes} />
         <SubjectMapBlock subject={subjectQ.data ?? null} spec={run.input_spec ?? null} />
         <Hairline />
         <FailedBlock run={run} />
@@ -214,7 +214,7 @@ function EstimationDetailBody({
       {/* Subject — rendered like a listing (photo dossier + identity + facts
           + map), unifying with the Listing-Detail surface. */}
       <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
-      <SubjectFactsBlock subject={subjectQ.data ?? null} />
+      <SubjectFactsBlock subject={subjectQ.data ?? null} attrs={run.subject_attributes} />
       <SubjectMapBlock subject={subjectQ.data ?? null} spec={run.input_spec ?? null} />
 
       {/* Estimate run — the headline result + yield calculator. */}
@@ -245,27 +245,44 @@ function EstimationDetailBody({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Subject facts — the Listing-Detail facts grid, for a resolved subject row  */
+/* Subject facts — the Listing-Detail facts grid. Reads a resolved listings    */
+/* row when we have one, else the parsed subject_attributes (same field names) */
+/* so a pasted-URL subject renders its facts too.                              */
 /* -------------------------------------------------------------------------- */
 
-function SubjectFactsBlock({ subject }: { subject: ListingPublic | null }) {
-  if (!subject) return null;
+function SubjectFactsBlock({
+  subject,
+  attrs,
+}: {
+  subject: ListingPublic | null;
+  attrs: Record<string, unknown> | null;
+}) {
+  const src = (subject ?? attrs ?? null) as Record<string, unknown> | null;
+  if (!src) return null;
+  const str = (k: string): string | null => {
+    const v = src[k];
+    return typeof v === 'string' && v.length > 0 ? v : null;
+  };
+  const bool = (k: string): boolean | null => {
+    const v = src[k];
+    return typeof v === 'boolean' ? v : null;
+  };
   const cap = (s: string | null): string | null =>
     s ? s.charAt(0).toUpperCase() + s.slice(1) : null;
   const yesNo = (v: boolean | null): string | null =>
     v == null ? null : v ? 'Yes' : 'No';
   const facts: Array<{ label: string; value: string | null; mono?: boolean }> = [
-    { label: 'Building', value: cap(subject.building_type) },
-    { label: 'Condition', value: cap(subject.condition) },
-    { label: 'Energy class', value: subject.energy_rating, mono: true },
-    { label: 'Ownership', value: cap(subject.ownership) },
-    { label: 'Furnished', value: cap(subject.furnished) },
-    { label: 'Balcony', value: yesNo(subject.has_balcony) },
-    { label: 'Terrace', value: yesNo(subject.terrace) },
-    { label: 'Lift', value: yesNo(subject.has_lift) },
-    { label: 'Cellar', value: yesNo(subject.cellar) },
-    { label: 'Garage', value: yesNo(subject.garage) },
-    { label: 'Parking', value: yesNo(subject.has_parking) },
+    { label: 'Building', value: cap(str('building_type')) },
+    { label: 'Condition', value: cap(str('condition')) },
+    { label: 'Energy class', value: str('energy_rating'), mono: true },
+    { label: 'Ownership', value: cap(str('ownership')) },
+    { label: 'Furnished', value: cap(str('furnished')) },
+    { label: 'Balcony', value: yesNo(bool('has_balcony')) },
+    { label: 'Terrace', value: yesNo(bool('terrace')) },
+    { label: 'Lift', value: yesNo(bool('has_lift')) },
+    { label: 'Cellar', value: yesNo(bool('cellar')) },
+    { label: 'Garage', value: yesNo(bool('garage')) },
+    { label: 'Parking', value: yesNo(bool('has_parking')) },
   ].filter((f) => f.value != null);
   if (facts.length === 0) return null;
   return (

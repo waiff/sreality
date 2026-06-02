@@ -492,6 +492,11 @@ export interface EstimationRun {
   parse_confidence: Confidence | null;
   parse_confidence_per_field: Record<string, Confidence> | null;
   source_html: string | null;
+  /* Migration 138 — typed subject attributes (mirroring listings_public field
+   * names) for a parsed subject with no resolved listings row, so the UI can
+   * render its facts grid. NULL when input_sreality_id is set (read the
+   * listings row instead). */
+  subject_attributes: Record<string, unknown> | null;
   /* Sum of llm_calls.cost_usd rows linked to this run via
    * estimation_run_id. The backend uses COALESCE(..., 0) so the
    * value is never null in practice, but the type tolerates it for

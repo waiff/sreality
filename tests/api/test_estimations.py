@@ -58,6 +58,11 @@ class _State:
 def _patch_persistence(monkeypatch) -> _State:
     state = _State()
 
+    # Default: a pasted URL doesn't match an already-scraped listings row, so
+    # resolution falls through to the (mocked) dispatcher. Tests that want the
+    # match path override this.
+    monkeypatch.setattr(er, "_match_listing_by_url", lambda conn, url: None)
+
     def fake_insert(conn, **fields: Any) -> int:
         rid = state.next_id
         state.next_id += 1
@@ -94,6 +99,7 @@ def _patch_persistence(monkeypatch) -> _State:
                     "error_message", "parent_run_id", "rerun_reason",
                     "source_kind", "parse_confidence",
                     "parse_confidence_per_field", "source_html",
+                    "subject_attributes",
                     "skill_name", "skill_version",
                 )
             },
@@ -1312,6 +1318,98 @@ def test_post_with_non_sreality_url_persists_provenance(client, monkeypatch):
     inserted = state.inserts[1]
     assert inserted["source_kind"] == "bezrealitky"
     assert inserted["parse_confidence"] == "medium"
+
+
+def test_subject_attributes_from_result_maps_typed_fields():
+    result = _result(
+        sreality_id=None,
+        source_kind="bezrealitky",
+        source_url="https://www.bezrealitky.cz/listing/abc",
+        full_extraction={
+            "building_type": {"value": "cihla"},
+            "condition": {"value": "po_rekonstrukci"},
+            "ownership": {"value": "osobni"},
+            "has_lift": {"value": True},
+            "terrace": {"value": False},
+        },
+    )
+    attrs = er._subject_attributes_from_result(result)
+    assert attrs is not None
+    assert attrs["building_type"] == "cihla"
+    assert attrs["condition"] == "po_rekonstrukci"
+    assert attrs["ownership"] == "osobni"
+    assert attrs["has_lift"] is True
+    assert attrs["terrace"] is False
+    # disposition / area come from the narrow spec
+    assert attrs["disposition"] == "2+kk"
+    assert attrs["area_m2"] == 50.0
+
+
+def test_subject_attributes_from_result_none_when_nothing_typed():
+    result = _result(sreality_id=None, full_extraction={}, spec={})
+    assert er._subject_attributes_from_result(result) is None
+
+
+def test_post_known_portal_url_reuses_scraped_listing(client, monkeypatch):
+    """A pasted link to a portal we scrape, already in our DB, reuses that row
+    (deterministic — no dispatcher / LLM) and resolves a subject listing."""
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    monkeypatch.setattr(er, "_match_listing_by_url", lambda conn, url: {
+        "sreality_id": -42,
+        "spec": {
+            "lat": 50.0, "lng": 14.4, "area_m2": 60.0,
+            "disposition": "2+kk", "floor": 3, "exclude_ids": [],
+        },
+        "price_czk": 5_000_000,
+        "category_type": "prodej",
+    })
+
+    def boom(*_a, **_k):
+        raise AssertionError("dispatcher must not run when the URL matches a row")
+
+    monkeypatch.setattr(sd, "parse_listing_url", boom)
+    monkeypatch.setattr(er.source_dispatcher, "parse_listing_url", boom)
+
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["input_sreality_id"] == -42
+    assert body["source_kind"] is None
+    assert body["subject_attributes"] is None  # UI reads listings_public instead
+    inserted = state.inserts[1]
+    assert inserted["input_sreality_id"] == -42
+    assert inserted["subject_attributes"] is None
+
+
+def test_post_non_sreality_url_captures_subject_attributes(client, monkeypatch):
+    """A fresh (not-in-DB) non-sreality URL parses via the dispatcher and stores
+    the parsed typed attributes so the subject still renders its facts."""
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    _patch_dispatcher_returns(monkeypatch, _result(
+        source_kind="bezrealitky",
+        sreality_id=None,
+        source_url="https://www.bezrealitky.cz/listing/abc",
+        full_extraction={
+            "building_type": {"value": "panel"},
+            "condition": {"value": "dobry"},
+            "has_lift": {"value": True},
+        },
+    ))
+    res = client.post(
+        "/estimations",
+        json={"url": "https://www.bezrealitky.cz/listing/abc"},
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["input_sreality_id"] is None
+    assert body["subject_attributes"]["building_type"] == "panel"
+    assert body["subject_attributes"]["condition"] == "dobry"
+    assert body["subject_attributes"]["has_lift"] is True
 
 
 def test_post_when_dispatch_fails_persists_failed_row(client, monkeypatch):
