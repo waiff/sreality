@@ -187,10 +187,16 @@ def test_run_full_calls_mark_inactive_per_category_when_no_limit(patched_db):
     expected_pairs = {
         ("byt", "pronajem"),
         ("byt", "prodej"),
+        ("byt", "drazba"),
+        ("byt", "podil"),
         ("dum", "pronajem"),
         ("dum", "prodej"),
+        ("dum", "drazba"),
+        ("dum", "podil"),
         ("komercni", "pronajem"),
         ("komercni", "prodej"),
+        ("komercni", "drazba"),
+        ("komercni", "podil"),
     }
     actual_pairs = {(cm, ct) for cm, ct, _ids in patched_db["mark_inactive"]}
     assert actual_pairs == expected_pairs
@@ -230,8 +236,9 @@ def test_run_full_isolates_one_crashing_category_marks_the_rest(
     caught, that category's sweep is skipped, and every other category still
     walks and runs mark_inactive.
     """
-    # CATEGORIES order: (1,2) byt/pronajem, (1,1) byt/prodej,
-    # (2,2) dum/pronajem, ... — make dum/pronajem raise during iteration.
+    # Make dum/pronajem (2, 2) raise mid-iteration; its position in the walk
+    # order is irrelevant (the run rotates CATEGORIES by hour), so assert on the
+    # pairs below by membership, not index.
     def crashing_iter_index(self):
         if (self.category_main, self.category_type) == (2, 2):
             yield {"hash_id": 99999, "price_czk": 1}

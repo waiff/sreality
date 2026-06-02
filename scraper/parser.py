@@ -28,7 +28,9 @@ CATEGORY_TYPE: dict[int, str] = {
     2: "pronajem",
     3: "drazba",
     # cb=4 is "prodej podílu nemovitosti" (sale of a fractional ownership
-    # share). Surfaces from the prodej index walk; not its own search slice.
+    # share). It IS its own search slice (category_type_cb=4 is a valid filter),
+    # walked as its own pair in main.CATEGORIES so it gets a complete index walk
+    # and mark_inactive.
     4: "podil",
 }
 

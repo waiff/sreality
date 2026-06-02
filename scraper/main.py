@@ -78,17 +78,29 @@ SUSPICIOUS_STOP_WINDOW = 100
 SUSPICIOUS_STOP_THRESHOLD = 0.30
 
 # All sreality category pairs we collect, as (category_main_cb,
-# category_type_cb). Rentals first (the established slice), then sales,
-# then commercial. Adding/removing a pair is the only knob needed to
-# expand or contract scrape coverage; everything downstream
-# (parser, db schema, snapshot history) is already category-agnostic.
+# category_type_cb), grouped by category_main: rent, sale, auction, share.
+# Adding/removing a pair is the only knob needed to expand or contract scrape
+# coverage; everything downstream (parser, db schema, snapshot history) is
+# already category-agnostic. drazba (auction) and podil (fractional-ownership
+# sale) are their OWN search slices (category_type_cb=3/4 are valid filters,
+# each returns a few dozen-to-low-hundred results nationally). Without them
+# those listings get no complete index walk, so mark_inactive never runs for
+# them (it is scoped per (source, category_main, category_type)) and a delisted
+# auction/share stays is_active=true forever — see the stuck-active backlog the
+# missing slices left behind.
 CATEGORIES: tuple[tuple[int, int], ...] = (
     (1, 2),  # byt / pronajem
     (1, 1),  # byt / prodej
+    (1, 3),  # byt / drazba
+    (1, 4),  # byt / podil
     (2, 2),  # dum / pronajem
     (2, 1),  # dum / prodej
+    (2, 3),  # dum / drazba
+    (2, 4),  # dum / podil
     (4, 2),  # komercni / pronajem
     (4, 1),  # komercni / prodej
+    (4, 3),  # komercni / drazba
+    (4, 4),  # komercni / podil
 )
 
 
