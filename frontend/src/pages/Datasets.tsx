@@ -390,6 +390,7 @@ const TYPE_OPTS: Array<[string, string]> = [['1', 'Byty'], ['2', 'Domy']];
 const COND_OPTS: Array<[string, string]> = [['', 'Any condition'], ['1', 'Velmi dobrý'], ['6', 'Novostavba'], ['8', 'Před rekonstrukcí'], ['2', 'Dobrý'], ['9', 'Po rekonstrukci']];
 const CONSTR_OPTS: Array<[string, string]> = [['', 'Any construction'], ['5', 'Panel'], ['2', 'Cihla'], ['10', 'Ostatní']];
 const OWN_OPTS: Array<[string, string]> = [['', 'Any ownership'], ['1', 'Osobní'], ['2', 'Družstevní'], ['3', 'Státní']];
+const PERIOD_OPTS: Array<[string, string]> = [['monthly', 'Monthly'], ['quarterly', 'Quarterly'], ['semiannual', 'Semiannual'], ['annual', 'Annual']];
 
 function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated: (d: PriceStatDataset) => void }) {
   const [name, setName] = useState('');
@@ -405,6 +406,7 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
   const [pickerOpen, setPickerOpen] = useState(false);
   const [startYm, setStartYm] = useState(`${FIRST_YEAR}-01`);
   const [endYm, setEndYm] = useState(CUR_YM);
+  const [periodicity, setPeriodicity] = useState('monthly');
 
   const mutation = useMutation({
     mutationFn: () => createPriceStatDataset({
@@ -416,6 +418,7 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
       obec_ids: obecIds.length ? obecIds : null,
       min_population: minPop, max_population: maxPop,
       start_ym: startYm, end_ym: endYm,
+      periodicity: periodicity as 'monthly' | 'quarterly' | 'semiannual' | 'annual',
     }),
     onSuccess: (d) => onCreated(d as PriceStatDataset),
   });
@@ -446,6 +449,9 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         </Field>
         <Field label="Scrape to">
           <YmPicker value={endYm} onChange={setEndYm} />
+        </Field>
+        <Field label="Periodicity">
+          <SelectBox value={periodicity} onChange={setPeriodicity} options={PERIOD_OPTS} />
         </Field>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-3">

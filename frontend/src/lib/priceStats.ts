@@ -20,6 +20,7 @@ export interface PriceStatDataset {
   obec_ids?: number[] | null;
   min_population?: number | null;
   max_population?: number | null;
+  periodicity?: 'monthly' | 'quarterly' | 'semiannual' | 'annual';
 }
 
 export interface PriceStatCityMetric {
