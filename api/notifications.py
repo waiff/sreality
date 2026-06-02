@@ -183,6 +183,17 @@ class WatchdogFilterSpec(BaseModel):
     min_city_population: int | None = None
     max_city_population: int | None = None
     near_city_proximity: dict[str, Any] | None = None
+    # Fast polygon-edge proximity (migration 142). Precomputed columns on
+    # properties_public; `>= value`. Same definition as Browse (lockstep via
+    # toolkit.comparables._city_quality_clauses).
+    near_pop_5km_min: int | None = None
+    near_pop_15km_min: int | None = None
+    near_jobs_5km_min: float | None = None
+    near_jobs_15km_min: float | None = None
+    near_youth_5km_min: float | None = None
+    near_youth_15km_min: float | None = None
+    near_overall_5km_min: float | None = None
+    near_overall_15km_min: float | None = None
 
     @model_validator(mode="after")
     def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
@@ -392,6 +403,14 @@ def _build_match_clauses(
         min_city_population=spec.min_city_population,
         max_city_population=spec.max_city_population,
         near_city_proximity=spec.near_city_proximity,
+        near_pop_5km_min=spec.near_pop_5km_min,
+        near_pop_15km_min=spec.near_pop_15km_min,
+        near_jobs_5km_min=spec.near_jobs_5km_min,
+        near_jobs_15km_min=spec.near_jobs_15km_min,
+        near_youth_5km_min=spec.near_youth_5km_min,
+        near_youth_15km_min=spec.near_youth_15km_min,
+        near_overall_5km_min=spec.near_overall_5km_min,
+        near_overall_15km_min=spec.near_overall_15km_min,
     )
     city_clauses, city_params = _city_quality_clauses(cq_filters)
     where.extend(city_clauses)

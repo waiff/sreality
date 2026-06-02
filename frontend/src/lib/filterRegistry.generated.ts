@@ -1708,9 +1708,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     {
       "id": "min_city_population",
       "type": "int",
-      "pg_column": null,
+      "pg_column": "home_obec_pop",
       "default": null,
-      "description": "Lower bound on the listing's curated-city population (latest `city_population` row). Applies only to listings inside the curated-city footprint; others fall through to the city-quality activation check.",
+      "description": "Lower bound on the population of the listing's OWN municipality (`home_obec_pop >= N`, ČSÚ population of the obec whose polygon contains the listing). Precomputed by recompute_city_proximity (migration 142) for every listing country-wide — not just the 206 curated cities.",
       "category": "City quality",
       "ui_control": "number_input",
       "agendas": [
@@ -1724,14 +1724,16 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [
+        "minCityPopulation"
+      ]
     },
     {
       "id": "max_city_population",
       "type": "int",
-      "pg_column": null,
+      "pg_column": "home_obec_pop",
       "default": null,
-      "description": "Upper bound on curated-city population. See `min_city_population`.",
+      "description": "Upper bound on the listing's own-municipality population (`home_obec_pop <= N`). See `min_city_population`.",
       "category": "City quality",
       "ui_control": "number_input",
       "agendas": [
@@ -1745,7 +1747,9 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       },
       "unit": null,
       "enum_values": null,
-      "aliases": []
+      "aliases": [
+        "maxCityPopulation"
+      ]
     },
     {
       "id": "near_city_proximity",
@@ -1763,6 +1767,190 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "unit": null,
       "enum_values": null,
       "aliases": []
+    },
+    {
+      "id": "near_pop_5km_min",
+      "type": "int",
+      "pg_column": "near_pop_5km",
+      "default": null,
+      "description": "Within 5 km of a municipality whose population is at least N (`near_pop_5km >= N`; polygon-edge distance). E.g. 50000 for 'within 5 km of a town of 50k+'.",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 10000,
+        "max": 1500000,
+        "step": 10000
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearPop5kmMin"
+      ]
+    },
+    {
+      "id": "near_pop_15km_min",
+      "type": "int",
+      "pg_column": "near_pop_15km",
+      "default": null,
+      "description": "Within 15 km of a municipality whose population is at least N (`near_pop_15km >= N`; polygon-edge distance).",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 10000,
+        "max": 1500000,
+        "step": 10000
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearPop15kmMin"
+      ]
+    },
+    {
+      "id": "near_jobs_5km_min",
+      "type": "float",
+      "pg_column": "near_jobs_5km",
+      "default": null,
+      "description": "Within 5 km of a curated city whose job-offer index (`pracovni_mista`, 0–10) is at least T (`near_jobs_5km >= T`).",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 10,
+        "step": 0.5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearJobs5kmMin"
+      ]
+    },
+    {
+      "id": "near_jobs_15km_min",
+      "type": "float",
+      "pg_column": "near_jobs_15km",
+      "default": null,
+      "description": "Within 15 km of a curated city whose job-offer index (`pracovni_mista`, 0–10) is at least T (`near_jobs_15km >= T`).",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 10,
+        "step": 0.5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearJobs15kmMin"
+      ]
+    },
+    {
+      "id": "near_youth_5km_min",
+      "type": "float",
+      "pg_column": "near_youth_5km",
+      "default": null,
+      "description": "Within 5 km of a curated city whose young-migration index (`stehovani_mladych`, 0–10) is at least T (`near_youth_5km >= T`).",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 10,
+        "step": 0.5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearYouth5kmMin"
+      ]
+    },
+    {
+      "id": "near_youth_15km_min",
+      "type": "float",
+      "pg_column": "near_youth_15km",
+      "default": null,
+      "description": "Within 15 km of a curated city whose young-migration index (`stehovani_mladych`, 0–10) is at least T (`near_youth_15km >= T`).",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 10,
+        "step": 0.5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearYouth15kmMin"
+      ]
+    },
+    {
+      "id": "near_overall_5km_min",
+      "type": "float",
+      "pg_column": "near_overall_5km",
+      "default": null,
+      "description": "Within 5 km of a curated city whose overall quality index (`celkove_hodnoceni`, 0–10) is at least T (`near_overall_5km >= T`).",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 10,
+        "step": 0.5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearOverall5kmMin"
+      ]
+    },
+    {
+      "id": "near_overall_15km_min",
+      "type": "float",
+      "pg_column": "near_overall_15km",
+      "default": null,
+      "description": "Within 15 km of a curated city whose overall quality index (`celkove_hodnoceni`, 0–10) is at least T (`near_overall_15km >= T`).",
+      "category": "City quality",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 0,
+        "max": 10,
+        "step": 0.5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "nearOverall15kmMin"
+      ]
     },
     {
       "id": "distinct_site_count_min",

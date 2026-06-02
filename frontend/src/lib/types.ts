@@ -1045,6 +1045,16 @@ export interface WatchdogFilterSpec {
     population_min: number | null;
     radius_km: number;
   } | null;
+  /* Fast polygon-edge proximity (migration 142). Precomputed-column
+   * predicates the matcher reads off properties_public — `>= value`. */
+  near_pop_5km_min: number | null;
+  near_pop_15km_min: number | null;
+  near_jobs_5km_min: number | null;
+  near_jobs_15km_min: number | null;
+  near_youth_5km_min: number | null;
+  near_youth_15km_min: number | null;
+  near_overall_5km_min: number | null;
+  near_overall_15km_min: number | null;
 }
 
 export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
@@ -1095,6 +1105,14 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   min_city_population: null,
   max_city_population: null,
   near_city_proximity: null,
+  near_pop_5km_min: null,
+  near_pop_15km_min: null,
+  near_jobs_5km_min: null,
+  near_jobs_15km_min: null,
+  near_youth_5km_min: null,
+  near_youth_15km_min: null,
+  near_overall_5km_min: null,
+  near_overall_15km_min: null,
 };
 
 export interface WatchdogSubscription {

@@ -63,6 +63,8 @@ const SIGNALS_KEYS = [
 const CURATION_KEYS = [
   'tags', 'cityIndexRules', 'minCityPopulation', 'maxCityPopulation',
   'nearCityProximity',
+  'nearPop5kmMin', 'nearPop15kmMin', 'nearJobs5kmMin', 'nearJobs15kmMin',
+  'nearYouth5kmMin', 'nearYouth15kmMin', 'nearOverall5kmMin', 'nearOverall15kmMin',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const bandActive = (
@@ -385,11 +387,27 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
                 'city_index_rules',
                 'min_city_population',
                 'max_city_population',
+                'near_pop_5km_min',
+                'near_pop_15km_min',
+                'near_jobs_5km_min',
+                'near_jobs_15km_min',
+                'near_youth_5km_min',
+                'near_youth_15km_min',
+                'near_overall_5km_min',
+                'near_overall_15km_min',
               ]}
               labels={{
                 city_index_rules: 'Rules (city must satisfy all)',
-                min_city_population: 'Min population',
-                max_city_population: 'Max population',
+                min_city_population: 'Min population (own city)',
+                max_city_population: 'Max population (own city)',
+                near_pop_5km_min: 'Pop ≥ N within 5 km',
+                near_pop_15km_min: 'Pop ≥ N within 15 km',
+                near_jobs_5km_min: 'Jobs index ≥ T within 5 km',
+                near_jobs_15km_min: 'Jobs index ≥ T within 15 km',
+                near_youth_5km_min: 'Young-migration ≥ T within 5 km',
+                near_youth_15km_min: 'Young-migration ≥ T within 15 km',
+                near_overall_5km_min: 'Overall index ≥ T within 5 km',
+                near_overall_15km_min: 'Overall index ≥ T within 15 km',
               }}
               customWidgets={customWidgets}
               flat

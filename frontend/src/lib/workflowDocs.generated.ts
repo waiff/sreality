@@ -1190,6 +1190,40 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/property_maintenance.yml"
   },
   {
+    "filename": "recompute_city_proximity.yml",
+    "name": "Jobs: recompute city proximity (hourly)",
+    "description": "Recompute properties.home_obec_pop + near_{pop,jobs,youth,overall}_{5,15}km (migration 142) so the Browse / Watchdog city-proximity + Min Population filters read precomputed indexed columns instead of a per-request spatial RPC. Incremental hourly run fills newly-ingested properties within the hour; the same function rebuilds everything after a population / city-index load.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "40 * * * *",
+        "human": "Every hour at :40"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "full",
+        "description": "Rebuild every property (not just new ones)",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "recompute-city-proximity",
+    "cancelInProgress": false,
+    "timeoutMinutes": 25,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/recompute_city_proximity.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_city_proximity.yml"
+  },
+  {
     "filename": "recompute_mf_yields.yml",
     "name": "Jobs: recompute MF gross yields (hourly)",
     "description": "Recompute listings.mf_gross_yield_pct (MF Cenová mapa reference rent / asking price) for every sale apartment. The yield shifts when a listing's price changes (scrape) or the rent map updates (quarterly), so a cheap, idempotent set-based recompute runs hourly to keep new + re-priced listings filterable in Browse within the hour. The same function also runs after each rent-map ingest (scripts.fetch_rent_map). Only changed rows are written.",
