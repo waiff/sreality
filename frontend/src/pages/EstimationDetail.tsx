@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -32,6 +32,7 @@ import {
 } from '@/lib/api';
 import RangeStrip from '@/components/region/RangeStrip';
 import Timeline from '@/components/estimation/Timeline';
+import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 import { PickButton } from '@/components/controls';
 import {
   buildRerunPayload,
@@ -39,7 +40,6 @@ import {
   type RerunInput,
   type RerunOverrides,
 } from '@/lib/rerun';
-import { imageSrc } from '@/lib/imageUrl';
 import type {
   ComparableExcluded,
   ComparableUsed,
@@ -64,7 +64,6 @@ const ComparablesMap = lazy(
 const ComparableModal = lazy(
   () => import('@/components/estimation/ComparableModal'),
 );
-const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
 
 /* Shared by Header (image carousel) and YieldBlock (sale-price prefill).
  * Hoisted to the EstimationDetail body so both consumers read from one
@@ -166,11 +165,25 @@ function EstimationDetailBody({
   const imagesQ = useSubjectImages(run, subjectQ.data != null);
   const [detailOpen, setDetailOpen] = useState(false);
 
+  const hasRealListing = subjectQ.data != null;
+  const subjectListing = subjectAsListing(run, subjectQ.data ?? null);
+  const subjectImages = imagesQ.data ?? [];
+
+  const subject = (
+    <SubjectSection
+      run={run}
+      listing={subjectListing}
+      images={subjectImages}
+      imagesLoading={imagesQ.isLoading}
+      hasRealListing={hasRealListing}
+    />
+  );
+
   if (isInFlight) {
     return (
       <Page>
         <Crumb />
-        <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
+        {subject}
         <Hairline />
         <InFlightBlock run={run} />
         <Hairline />
@@ -185,9 +198,7 @@ function EstimationDetailBody({
     return (
       <Page>
         <Crumb />
-        <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
-        <SubjectFactsBlock subject={subjectQ.data ?? null} attrs={run.subject_attributes} />
-        <SubjectMapBlock subject={subjectQ.data ?? null} spec={run.input_spec ?? null} />
+        {subject}
         <Hairline />
         <FailedBlock run={run} />
         <Hairline />
@@ -211,14 +222,13 @@ function EstimationDetailBody({
   return (
     <Page>
       <Crumb />
-      {/* Subject — rendered like a listing (photo dossier + identity + facts
-          + map), unifying with the Listing-Detail surface. */}
-      <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
-      <SubjectFactsBlock subject={subjectQ.data ?? null} attrs={run.subject_attributes} />
-      <SubjectMapBlock subject={subjectQ.data ?? null} spec={run.input_spec ?? null} />
+      {/* Subject — rendered with the shared Listing-Detail overview so the two
+          surfaces are one. */}
+      {subject}
 
       {/* Estimate run — the headline result + yield calculator. */}
       <Hairline />
+      <EstimateHeadline run={run} />
       <YieldBlock run={run} subject={subjectQ.data ?? null} />
       {run.reference_rent && (
         <>
@@ -245,98 +255,139 @@ function EstimationDetailBody({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Subject facts — the Listing-Detail facts grid. Reads a resolved listings    */
-/* row when we have one, else the parsed subject_attributes (same field names) */
-/* so a pasted-URL subject renders its facts too.                              */
+/* Subject — run meta + the shared Listing-Detail overview                    */
 /* -------------------------------------------------------------------------- */
 
-function SubjectFactsBlock({
-  subject,
-  attrs,
+function SubjectSection({
+  run,
+  listing,
+  images,
+  imagesLoading,
+  hasRealListing,
 }: {
-  subject: ListingPublic | null;
-  attrs: Record<string, unknown> | null;
+  run: EstimationRun;
+  listing: ListingPublic | null;
+  images: ImagePublic[];
+  imagesLoading: boolean;
+  hasRealListing: boolean;
 }) {
-  const src = (subject ?? attrs ?? null) as Record<string, unknown> | null;
-  if (!src) return null;
-  const str = (k: string): string | null => {
-    const v = src[k];
-    return typeof v === 'string' && v.length > 0 ? v : null;
-  };
-  const bool = (k: string): boolean | null => {
-    const v = src[k];
-    return typeof v === 'boolean' ? v : null;
-  };
-  const cap = (s: string | null): string | null =>
-    s ? s.charAt(0).toUpperCase() + s.slice(1) : null;
-  const yesNo = (v: boolean | null): string | null =>
-    v == null ? null : v ? 'Yes' : 'No';
-  const facts: Array<{ label: string; value: string | null; mono?: boolean }> = [
-    { label: 'Building', value: cap(str('building_type')) },
-    { label: 'Condition', value: cap(str('condition')) },
-    { label: 'Energy class', value: str('energy_rating'), mono: true },
-    { label: 'Ownership', value: cap(str('ownership')) },
-    { label: 'Furnished', value: cap(str('furnished')) },
-    { label: 'Balcony', value: yesNo(bool('has_balcony')) },
-    { label: 'Terrace', value: yesNo(bool('terrace')) },
-    { label: 'Lift', value: yesNo(bool('has_lift')) },
-    { label: 'Cellar', value: yesNo(bool('cellar')) },
-    { label: 'Garage', value: yesNo(bool('garage')) },
-    { label: 'Parking', value: yesNo(bool('has_parking')) },
-  ].filter((f) => f.value != null);
-  if (facts.length === 0) return null;
   return (
-    <div className="mt-7">
-      <SectionLabel>Subject</SectionLabel>
-      <dl className="mt-3 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-        {facts.map((f) => (
-          <div key={f.label}>
-            <dt className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-              {f.label}
-            </dt>
-            <dd
-              className={[
-                'mt-1 text-sm text-[var(--color-ink)]',
-                f.mono ? 'font-mono tabular-nums' : '',
-              ].join(' ')}
+    <>
+      <div className="mt-1 flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
+        <div className="flex items-center gap-3 min-w-0">
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+            Estimation · run #{run.id}
+          </p>
+          <span
+            className="text-[0.72rem] text-[var(--color-ink-4)]"
+            title={fmtAbsolute(run.created_at)}
+          >
+            {fmtRelative(run.created_at)}
+          </span>
+          {hasRealListing && run.input_sreality_id != null && (
+            <Link
+              to={`/listing/${run.input_sreality_id}`}
+              className="text-[0.72rem] text-[var(--color-copper)] hover:underline underline-offset-2"
             >
-              {f.value}
-            </dd>
-          </div>
-        ))}
-      </dl>
+              View full listing →
+            </Link>
+          )}
+        </div>
+        <div className="shrink-0 flex items-center gap-1.5">
+          <ConfidencePill confidence={run.confidence} />
+          <SourceBadge source={run.source} />
+        </div>
+      </div>
+      {listing ? (
+        <ListingOverview
+          listing={listing}
+          images={images}
+          imagesLoading={imagesLoading}
+          showStatus={hasRealListing}
+        />
+      ) : (
+        <p className="mt-5 text-sm text-[var(--color-ink-3)]">
+          No subject listing details available.
+        </p>
+      )}
+    </>
+  );
+}
+
+/* The estimate result, leading the "Estimate run" section with the gross
+ * monthly rent (or sale price) + gross yield. */
+function EstimateHeadline({ run }: { run: EstimationRun }) {
+  const kind = run.estimate_kind ?? 'rent';
+  const value =
+    kind === 'sale'
+      ? run.estimated_sale_price_czk != null
+        ? fmtCzk(run.estimated_sale_price_czk)
+        : 'No estimate produced'
+      : run.estimated_monthly_rent_czk != null
+        ? `${fmtCzk(run.estimated_monthly_rent_czk)} / mo`
+        : 'No estimate produced';
+  return (
+    <div>
+      <SectionLabel>Estimate run</SectionLabel>
+      <h2
+        className="mt-1.5 text-[2.4rem] leading-[1.05] tabular-nums"
+        style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+      >
+        {value}
+      </h2>
+      {run.gross_yield_pct != null && (
+        <p className="mt-1 text-sm font-mono tabular-nums text-[var(--color-ink-2)]">
+          gross yield{' '}
+          <span className="text-[var(--color-ink)]">
+            {run.gross_yield_pct.toFixed(2)}&nbsp;%
+          </span>
+        </p>
+      )}
     </div>
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Subject map — compact, mirrors the Listing-Detail map for parity           */
-/* -------------------------------------------------------------------------- */
-
-function SubjectMapBlock({
-  subject,
-  spec,
-}: {
-  subject: ListingPublic | null;
-  spec: EstimationRun['input_spec'];
-}) {
-  const lat = subject?.lat ?? spec?.lat ?? null;
-  const lng = subject?.lng ?? spec?.lng ?? null;
-  if (lat == null || lng == null) return null;
-  return (
-    <div className="mt-6">
-      <SectionLabel>Location</SectionLabel>
-      <div className="mt-2">
-        <Suspense
-          fallback={
-            <div className="h-40 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
-          }
-        >
-          <DetailMap lat={lat} lng={lng} isActive={subject?.is_active ?? true} />
-        </Suspense>
-      </div>
-    </div>
-  );
+/* The estimation subject as a ListingPublic: the resolved listings row when we
+ * have one (sreality, or a scraped non-sreality row matched by URL), otherwise
+ * a synthetic built from the parsed spec + subject_attributes so a pasted-URL
+ * subject still renders through the shared overview. */
+function subjectAsListing(
+  run: EstimationRun,
+  real: ListingPublic | null,
+): ListingPublic | null {
+  if (real) return real;
+  const spec = run.input_spec;
+  const a = run.subject_attributes ?? {};
+  if (!spec && !run.subject_attributes) return null;
+  const str = (v: unknown): string | null =>
+    typeof v === 'string' && v.length > 0 ? v : null;
+  const num = (v: unknown): number | null =>
+    typeof v === 'number' ? v : null;
+  const bool = (v: unknown): boolean | null =>
+    typeof v === 'boolean' ? v : null;
+  return {
+    sreality_id: run.input_sreality_id ?? 0,
+    is_active: true,
+    last_seen_at: run.created_at,
+    area_m2: spec?.area_m2 ?? num(a.area_m2),
+    disposition: (spec?.disposition ?? str(a.disposition)) as ListingPublic['disposition'],
+    locality: str(a.locality),
+    district: str(a.district),
+    lat: spec?.lat ?? null,
+    lng: spec?.lng ?? null,
+    floor: spec?.floor ?? num(a.floor),
+    building_type: str(a.building_type),
+    condition: str(a.condition),
+    energy_rating: str(a.energy_rating),
+    ownership: str(a.ownership) as ListingPublic['ownership'],
+    furnished: str(a.furnished) as ListingPublic['furnished'],
+    has_balcony: bool(a.has_balcony),
+    terrace: bool(a.terrace),
+    has_lift: bool(a.has_lift),
+    cellar: bool(a.cellar),
+    garage: bool(a.garage),
+    has_parking: bool(a.has_parking),
+  } as unknown as ListingPublic;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -495,335 +546,6 @@ function BackArrow() {
       />
     </svg>
   );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Header                                                                     */
-/* -------------------------------------------------------------------------- */
-
-/* The header is the case-file cover for an estimation. Left column is a
- * photo dossier (carousel of listing photos, same chevron/counter chrome
- * as the browse cards). Right column carries the run identity, the big
- * estimated headline, and the listing facts that tell the operator what
- * they're looking at. Badges (confidence + source) ride the top-right
- * corner. Falls back gracefully when the subject listing isn't in our DB
- * yet — the right column degrades to just the estimate number + run
- * metadata, and the photo well shows a neutral placeholder. */
-function Header({
-  run, subject, images,
-}: {
-  run: EstimationRun;
-  subject: ListingPublic | null;
-  images: ImagePublic[];
-}) {
-  const failed = run.status === 'failed';
-  const kind = run.estimate_kind ?? 'rent';
-  const headline = failed
-    ? 'Estimation failed'
-    : kind === 'sale'
-      ? run.estimated_sale_price_czk != null
-        ? fmtCzk(run.estimated_sale_price_czk)
-        : 'No estimate produced'
-      : run.estimated_monthly_rent_czk != null
-        ? `${fmtCzk(run.estimated_monthly_rent_czk)} / mo`
-        : 'No estimate produced';
-
-  return (
-    <div className="mt-5">
-      <div className="grid gap-5 sm:gap-6 sm:grid-cols-[minmax(0,260px),1fr]">
-        <SubjectImageStrip
-          images={images}
-          subject={subject}
-          spec={run.input_spec ?? null}
-          inputUrl={run.input_url}
-        />
-
-        <div className="min-w-0 flex flex-col">
-          <div className="flex items-start justify-between gap-4">
-            <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-              Estimation · run #{run.id}
-            </p>
-            <div className="shrink-0 flex flex-col items-end gap-1.5">
-              {!failed && <ConfidencePill confidence={run.confidence} />}
-              <SourceBadge source={run.source} />
-            </div>
-          </div>
-          <h1
-            className="mt-1.5 text-[2.4rem] leading-[1.05] tabular-nums"
-            style={{
-              fontFamily: 'var(--font-display)',
-              fontWeight: 600,
-              color: failed ? 'var(--color-brick)' : 'var(--color-ink)',
-            }}
-          >
-            {headline}
-          </h1>
-          {!failed && run.gross_yield_pct != null && (
-            <p className="mt-1.5 text-sm font-mono tabular-nums text-[var(--color-ink-2)]">
-              gross yield <span className="text-[var(--color-ink)]">{run.gross_yield_pct.toFixed(2)}&nbsp;%</span>
-            </p>
-          )}
-          <p
-            className="mt-2 text-[0.75rem] tracking-wide text-[var(--color-ink-3)]"
-            title={fmtAbsolute(run.created_at)}
-          >
-            {fmtRelative(run.created_at)}
-          </p>
-
-          <SubjectIdentity
-            run={run}
-            subject={subject}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* "Photo dossier" — the photo strip that pins this estimation to a
- * tangible listing. Carousel chrome is the same vocabulary the browse
- * cards use (translucent paper-3 chevrons + tabular counter), keeping
- * the gestural language consistent across the app. When there are no
- * photos (listing not yet in our DB, or images table empty), the well
- * shows a quiet placeholder rather than a broken-photo glyph — the
- * absence is information, not an error. */
-function SubjectImageStrip({
-  images, subject, spec, inputUrl,
-}: {
-  images: ImagePublic[];
-  subject: ListingPublic | null;
-  spec: EstimationRun['input_spec'];
-  inputUrl: string | null;
-}) {
-  const [index, setIndex] = useState(0);
-  const urls = useMemo(() => images.map(imageSrc), [images]);
-  const safeIndex = urls.length === 0 ? 0 : Math.min(index, urls.length - 1);
-  const hasMany = urls.length > 1;
-
-  const step = useCallback(
-    (delta: number) => (e: MouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (urls.length === 0) return;
-      setIndex((cur) => (cur + delta + urls.length) % urls.length);
-    },
-    [urls.length],
-  );
-
-  const inactive = subject ? !subject.is_active : false;
-  const sid = subject?.sreality_id;
-
-  const placeholderText = subject
-    ? 'no photos'
-    : inputUrl
-      ? 'listing not yet in archive'
-      : spec
-        ? 'spec-only estimation'
-        : 'no subject listing';
-
-  const content = (
-    <div
-      className={[
-        'aspect-[5/4] w-full overflow-hidden relative rounded-[var(--radius-sm)]',
-        'border border-[var(--color-rule)] bg-[var(--color-inset)]',
-      ].join(' ')}
-    >
-      {urls.length > 0 ? (
-        <img
-          src={urls[safeIndex]}
-          alt=""
-          loading="lazy"
-          className={[
-            'w-full h-full object-cover',
-            inactive ? 'saturate-[0.55] brightness-[0.95]' : '',
-          ].join(' ')}
-          onError={(e) => {
-            (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
-          }}
-        />
-      ) : (
-        <div className="w-full h-full flex items-center justify-center px-4 text-center text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-          {placeholderText}
-        </div>
-      )}
-
-      {subject && (
-        <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
-          <span
-            className={[
-              'inline-flex items-center px-1.5 py-0.5 text-[0.6rem] tracking-[0.12em]',
-              'uppercase rounded-[var(--radius-xs)] border backdrop-blur-sm font-medium',
-              inactive
-                ? 'bg-[var(--color-paper-3)]/90 border-[var(--color-brick)]/70 text-[var(--color-brick)]'
-                : 'bg-[var(--color-paper-3)]/90 border-[var(--color-sage)]/70 text-[var(--color-sage)]',
-            ].join(' ')}
-          >
-            {inactive ? 'Neaktivní' : 'Aktivní'}
-          </span>
-        </div>
-      )}
-
-      {hasMany && (
-        <>
-          <button
-            type="button"
-            onClick={step(-1)}
-            aria-label="Previous photo"
-            className="absolute top-1/2 left-1 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-colors"
-          >
-            <CarouselChevron dir="left" />
-          </button>
-          <button
-            type="button"
-            onClick={step(1)}
-            aria-label="Next photo"
-            className="absolute top-1/2 right-1 -translate-y-1/2 w-6 h-6 flex items-center justify-center rounded-full bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-colors"
-          >
-            <CarouselChevron dir="right" />
-          </button>
-          <span className="absolute bottom-1 right-1 px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm">
-            {safeIndex + 1} / {urls.length}
-          </span>
-        </>
-      )}
-    </div>
-  );
-
-  if (sid != null) {
-    return (
-      <Link
-        to={`/listing/${sid}`}
-        className="block group focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus)] rounded-[var(--radius-sm)]"
-        title="Open listing detail"
-      >
-        {content}
-      </Link>
-    );
-  }
-  return content;
-}
-
-function CarouselChevron({ dir }: { dir: 'left' | 'right' }) {
-  const d = dir === 'left' ? 'M7.5 3 L4 6 L7.5 9' : 'M4.5 3 L8 6 L4.5 9';
-  return (
-    <svg
-      width="12" height="12" viewBox="0 0 12 12" aria-hidden fill="none"
-      stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"
-    >
-      <path d={d} />
-    </svg>
-  );
-}
-
-/* Listing identity — the "what is this estimation about" line(s). Pulls
- * from the persisted listings_public row when available; falls back to
- * the spec stored on the run so spec-only estimations still read
- * cleanly. Title is the Czech taxonomy ("Byt 2+kk · 71 m²"), one line
- * for locality, one mono row for sale price + price/m² when those make
- * sense. Goes silent (returns null) when there is genuinely nothing to
- * show beyond the spec lat/lng. */
-function SubjectIdentity({
-  run, subject,
-}: {
-  run: EstimationRun;
-  subject: ListingPublic | null;
-}) {
-  const spec = run.input_spec ?? null;
-
-  const categoryMain = subject?.category_main ?? null;
-  const categoryType = subject?.category_type ?? null;
-  const disposition = subject?.disposition ?? spec?.disposition ?? null;
-  const area = subject?.area_m2 ?? spec?.area_m2 ?? null;
-  const floor = subject?.floor ?? spec?.floor ?? null;
-  const totalFloors = subject?.total_floors ?? null;
-
-  const title = formatListingTitle(categoryMain, categoryType, disposition, area);
-  const place = subject
-    ? [subject.locality, subject.district].filter(Boolean).join(', ')
-    : null;
-
-  const isSale = categoryType === 'prodej';
-  const isRent = categoryType === 'pronajem';
-  const showListingPrice = subject?.price_czk != null;
-  const listingPriceLabel = isSale
-    ? 'sale price'
-    : isRent
-      ? 'monthly rent'
-      : 'list price';
-  const ppm2 =
-    subject?.price_czk != null && subject.area_m2 != null
-      ? fmtPricePerM2(subject.price_czk, subject.area_m2)
-      : null;
-
-  const floorLine =
-    floor != null
-      ? totalFloors != null
-        ? `${floor}. patro / ${totalFloors}`
-        : `${floor}. patro`
-      : null;
-
-  if (!title && !place && !showListingPrice && !floorLine) return null;
-
-  return (
-    <div className="mt-4 pt-4 border-t border-[var(--color-rule)]">
-      {title && (
-        <h2
-          className="text-[1rem] leading-snug text-[var(--color-ink)]"
-          style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
-        >
-          {title}
-        </h2>
-      )}
-      {place && (
-        <p className="mt-0.5 text-[0.82rem] text-[var(--color-ink-2)] truncate">
-          {place}
-        </p>
-      )}
-      <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-[0.78rem] font-mono tabular-nums text-[var(--color-ink-2)]">
-        {showListingPrice && (
-          <span>
-            <span className="text-[0.65rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)] mr-1">
-              {listingPriceLabel}
-            </span>
-            <span className="text-[var(--color-ink)]">{fmtCzk(subject!.price_czk)}</span>
-          </span>
-        )}
-        {ppm2 && (
-          <span className="text-[var(--color-ink-3)]">{ppm2}</span>
-        )}
-        {floorLine && (
-          <span className="text-[var(--color-ink-3)]">{floorLine}</span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function formatListingTitle(
-  categoryMain: string | null,
-  categoryType: string | null,
-  disposition: string | null,
-  areaM2: number | null,
-): string | null {
-  const kind = (() => {
-    if (categoryMain === 'byt') return 'Byt';
-    if (categoryMain === 'dum') return 'Dům';
-    if (categoryMain === 'komercni') return 'Komerční prostor';
-    return null;
-  })();
-  const deal =
-    categoryType === 'pronajem'
-      ? 'k pronájmu'
-      : categoryType === 'prodej'
-        ? 'na prodej'
-        : null;
-  const parts: string[] = [];
-  if (kind && deal) parts.push(`${kind} ${deal}`);
-  else if (kind) parts.push(kind);
-  else if (disposition || areaM2 != null) parts.push('Nemovitost');
-  if (disposition) parts.push(disposition);
-  if (areaM2 != null) parts.push(fmtArea(areaM2));
-  return parts.length > 0 ? parts.join(' · ') : null;
 }
 
 function ConfidencePill({ confidence }: { confidence: Confidence | null }) {
@@ -1103,7 +825,7 @@ function YieldBlock({
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
-        <SectionLabel>Estimate run · yield</SectionLabel>
+        <SectionLabel>Yield</SectionLabel>
         <div className="flex items-baseline gap-3">
           {hasOverrides && (
             <button
