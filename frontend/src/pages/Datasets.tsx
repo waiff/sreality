@@ -2,8 +2,8 @@
  * (a filter set), see dataset-wide growth + yield, a per-municipality obec
  * choropleth (rent / sale growth, gross yield), and the per-city table. Reads
  * the *_public views only; dataset CRUD lives behind the API. */
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMemo, useState, type ReactNode } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchCityMetrics,
   fetchChoropleth,
@@ -12,6 +12,7 @@ import {
   type PriceStatCityMetric,
   type PriceStatDataset,
 } from '@/lib/priceStats';
+import { createPriceStatDataset } from '@/lib/api';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 
 const METRIC_ORDER: DatasetMetric[] = ['rent_cagr_pct', 'sale_cagr_pct', 'gross_yield_pct'];
@@ -31,8 +32,10 @@ const median = (xs: number[]): number | null => {
 };
 
 export default function Datasets() {
+  const qc = useQueryClient();
   const [datasetId, setDatasetId] = useState<number | null>(null);
   const [metric, setMetric] = useState<DatasetMetric>('rent_cagr_pct');
+  const [showNew, setShowNew] = useState(false);
 
   const datasetsQ = useQuery<PriceStatDataset[], Error>({
     queryKey: priceStatsKeys.datasets,
@@ -89,13 +92,32 @@ export default function Datasets() {
             Rental & sale-price growth and gross yield per municipality, per filter set.
           </p>
         </div>
-        <DatasetPicker
-          datasets={datasets}
-          value={activeId}
-          onChange={(id) => setDatasetId(id)}
-          loading={datasetsQ.isLoading}
-        />
+        <div className="flex items-center gap-2">
+          <DatasetPicker
+            datasets={datasets}
+            value={activeId}
+            onChange={(id) => setDatasetId(id)}
+            loading={datasetsQ.isLoading}
+          />
+          <button
+            onClick={() => setShowNew((v) => !v)}
+            className="text-sm border border-[var(--color-line)] rounded-sm px-3 py-2 text-[var(--color-ink-2)] hover:text-[var(--color-ink-1)]"
+          >
+            {showNew ? 'Close' : '+ New dataset'}
+          </button>
+        </div>
       </header>
+
+      {showNew && (
+        <NewDatasetForm
+          onClose={() => setShowNew(false)}
+          onCreated={(d) => {
+            qc.invalidateQueries({ queryKey: priceStatsKeys.datasets });
+            setDatasetId(d.id);
+            setShowNew(false);
+          }}
+        />
+      )}
 
       {active && <FilterChips dataset={active} />}
 
@@ -257,6 +279,148 @@ function CityTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+const slugify = (s: string): string =>
+  s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 100);
+
+const TYPE_OPTS: Array<[string, string]> = [['1', 'Byty'], ['2', 'Domy']];
+const COND_OPTS: Array<[string, string]> = [
+  ['', 'Any condition'], ['1', 'Velmi dobrý'], ['6', 'Novostavba'],
+  ['8', 'Před rekonstrukcí'], ['2', 'Dobrý'], ['9', 'Po rekonstrukci'],
+];
+const CONSTR_OPTS: Array<[string, string]> = [
+  ['', 'Any construction'], ['5', 'Panel'], ['2', 'Cihla'], ['10', 'Ostatní'],
+];
+const OWN_OPTS: Array<[string, string]> = [
+  ['', 'Any ownership'], ['1', 'Osobní'], ['2', 'Družstevní'], ['3', 'Státní'],
+];
+
+const INPUT_CLS =
+  'w-full text-sm border border-[var(--color-line)] rounded-sm bg-[var(--color-paper)] px-2.5 py-1.5';
+
+function NewDatasetForm({
+  onClose, onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (d: PriceStatDataset) => void;
+}) {
+  const [name, setName] = useState('');
+  const [categoryMain, setCategoryMain] = useState('1');
+  const [condition, setCondition] = useState('');
+  const [construction, setConstruction] = useState('');
+  const [ownership, setOwnership] = useState('');
+  const [areaFrom, setAreaFrom] = useState('');
+  const [areaTo, setAreaTo] = useState('');
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      createPriceStatDataset({
+        slug: slugify(name),
+        name: name.trim(),
+        category_main_cb: Number(categoryMain),
+        building_condition: condition || null,
+        building_type: construction || null,
+        ownership: ownership || null,
+        usable_area_from: areaFrom ? Number(areaFrom) : null,
+        usable_area_to: areaTo ? Number(areaTo) : null,
+      }),
+    onSuccess: (d) => onCreated(d as PriceStatDataset),
+  });
+
+  const canSubmit = name.trim().length > 0 && slugify(name).length > 0 && !mutation.isPending;
+
+  return (
+    <form
+      onSubmit={(e) => { e.preventDefault(); if (canSubmit) mutation.mutate(); }}
+      className="mt-4 border border-[var(--color-line)] rounded-sm p-4"
+    >
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <Field label="Name" className="lg:col-span-3">
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Byty · novostavba · cihla · 60–120 m²"
+            className={INPUT_CLS}
+          />
+        </Field>
+        <Field label="Type">
+          <SelectBox value={categoryMain} onChange={setCategoryMain} options={TYPE_OPTS} />
+        </Field>
+        <Field label="Condition (stav)">
+          <SelectBox value={condition} onChange={setCondition} options={COND_OPTS} />
+        </Field>
+        <Field label="Construction (konstrukce)">
+          <SelectBox value={construction} onChange={setConstruction} options={CONSTR_OPTS} />
+        </Field>
+        <Field label="Ownership (vlastnictví)">
+          <SelectBox value={ownership} onChange={setOwnership} options={OWN_OPTS} />
+        </Field>
+        <Field label="Area from (m²)">
+          <input type="number" min={0} value={areaFrom}
+            onChange={(e) => setAreaFrom(e.target.value)} className={INPUT_CLS} />
+        </Field>
+        <Field label="Area to (m²)">
+          <input type="number" min={0} value={areaTo}
+            onChange={(e) => setAreaTo(e.target.value)} className={INPUT_CLS} />
+        </Field>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button
+          type="submit"
+          disabled={!canSubmit}
+          className="text-sm rounded-sm px-3 py-1.5 border border-[var(--color-accent)] text-[var(--color-accent)] disabled:opacity-50"
+        >
+          {mutation.isPending ? 'Creating…' : 'Create dataset'}
+        </button>
+        <button type="button" onClick={onClose}
+          className="text-sm text-[var(--color-ink-3)] hover:text-[var(--color-ink-1)]">
+          Cancel
+        </button>
+        {mutation.isError && (
+          <span className="text-sm text-[#b2182b]">
+            {(mutation.error as Error).message || 'Could not create dataset'}
+          </span>
+        )}
+      </div>
+      <p className="mt-2 text-xs text-[var(--color-ink-3)]">
+        Covers both prodej &amp; pronájem across the tracked municipalities.
+        Blank fields = no filter. Populates on the next price-stats run.
+      </p>
+    </form>
+  );
+}
+
+function Field({
+  label, className, children,
+}: {
+  label: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className={`block ${className ?? ''}`}>
+      <span className="block mb-1 text-xs text-[var(--color-ink-3)]">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function SelectBox({
+  value, onChange, options,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<[string, string]>;
+}) {
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={INPUT_CLS}>
+      {options.map(([v, label]) => (
+        <option key={v} value={v}>{label}</option>
+      ))}
+    </select>
   );
 }
 
