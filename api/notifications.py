@@ -249,10 +249,11 @@ def _build_match_clauses(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
-        # Same per-chip predicate as `browse_stats` (migration 074):
-        #   (district ILIKE *name* OR locality ILIKE *name*)
-        #   AND (no context, OR district/locality ILIKE *context*)
-        # OR'd across chips. Keeps Browse and Watchdog in lockstep on
+        # Same per-chip predicate as `browse_stats` (migration 141):
+        #   (district/locality/okres/region ILIKE *name*)
+        #   AND (no context, OR district/locality/okres/region ILIKE *context*)
+        # OR'd across chips. Matching the geo-derived okres/region too lets a
+        # kraj/okres pick resolve. Keeps Browse and Watchdog in lockstep on
         # what a District chip means.
         chip_clauses: list[str] = []
         for i, chip in enumerate(spec.districts):
@@ -266,14 +267,18 @@ def _build_match_clauses(
             params[n_key] = f"%{chip.name}%"
             name_half = (
                 f"(l.district ILIKE %({n_key})s "
-                f"OR l.locality ILIKE %({n_key})s)"
+                f"OR l.locality ILIKE %({n_key})s "
+                f"OR l.okres ILIKE %({n_key})s "
+                f"OR l.region ILIKE %({n_key})s)"
             )
             if chip.context:
                 c_key = f"district_ctx_{i}"
                 params[c_key] = f"%{chip.context}%"
                 ctx_half = (
                     f"(l.district ILIKE %({c_key})s "
-                    f"OR l.locality ILIKE %({c_key})s)"
+                    f"OR l.locality ILIKE %({c_key})s "
+                    f"OR l.okres ILIKE %({c_key})s "
+                    f"OR l.region ILIKE %({c_key})s)"
                 )
                 chip_clauses.append(f"({name_half} AND {ctx_half})")
             else:
