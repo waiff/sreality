@@ -6,6 +6,15 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Watchdog feed — Portal column
+- New **Portal** column in the watchdog notification feed showing the portal the
+  property was last seen on (`listings.source`), as a clickable chip that opens
+  the listing on that portal — the stored `source_url`, else a reconstructed
+  sreality URL from the native id (`portalListingUrl`), else the in-app listing
+  view. Added `l.source` / `l.source_url` to the dispatch projection +
+  `WatchdogDispatch` type; clicking marks the dispatch read like the listing
+  link.
+
 ### 2026-06: Exclude-a-location district filter (Browse + Watchdog)
 
 - A district chip can now be flipped from INCLUDE to **EXCLUDE** via a per-chip

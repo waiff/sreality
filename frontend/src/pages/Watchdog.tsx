@@ -21,6 +21,7 @@ import {
   fmtCzk,
   fmtRelative,
 } from '@/lib/format';
+import { portalListingUrl, portalShort } from '@/lib/portals';
 import type {
   WatchdogDispatch,
   WatchdogDispatchesResponse,
@@ -214,8 +215,9 @@ function Header({
           listing matches. Click <em>Estimate rent</em> on any row to
           kick off a deterministic monthly-rent calculation in the
           background — the result appears here when it lands. The
-          <em> MF yield</em> column shows the Ministry-of-Finance
-          reference gross yield already on the listing.
+          <em> Portal</em> column links to the listing on the portal it was
+          last seen on; the <em>MF yield</em> column shows the
+          Ministry-of-Finance reference gross yield already on the listing.
         </p>
         {matcherResult ? (
           <p className="mt-2 text-[0.75rem] text-[var(--color-ink-3)]">
@@ -362,6 +364,7 @@ function DispatchesTable({
               <Th align="right">Price</Th>
               <Th align="left">When</Th>
               <Th align="left">Watchdog</Th>
+              <Th align="left">Portal</Th>
               <Th align="left">Estimation</Th>
               <Th align="right">MF yield</Th>
               <Th align="right"> </Th>
@@ -484,6 +487,9 @@ function Row({
         </span>
       </td>
       <td className="px-4 py-2.5 align-middle">
+        <PortalCell dispatch={dispatch} onMarkSeen={onMarkSeen} unread={unread} />
+      </td>
+      <td className="px-4 py-2.5 align-middle">
         <EstimationCell dispatch={dispatch} />
       </td>
       <td className="px-4 py-2.5 align-middle text-right">
@@ -512,6 +518,61 @@ function PriceCell({ dispatch }: { dispatch: WatchdogDispatch }) {
         <span className="ml-1 text-[var(--color-ink-3)] text-[0.7rem]">/mo</span>
       ) : null}
     </>
+  );
+}
+
+/* The portal the property was last seen on, as a clickable chip. Links to the
+ * portal's own listing page — the stored source_url when known, else a
+ * reconstructed sreality URL from the native id (portalListingUrl); when neither
+ * is available it falls back to our internal listing detail. Clicking marks the
+ * dispatch read, like the listing-name link. */
+function PortalCell({
+  dispatch,
+  onMarkSeen,
+  unread,
+}: {
+  dispatch: WatchdogDispatch;
+  onMarkSeen: (dispatchId: string) => void;
+  unread: boolean;
+}) {
+  if (!dispatch.source) {
+    return <span className="text-[var(--color-ink-4)]">—</span>;
+  }
+  const label = portalShort(dispatch.source);
+  const onClick = () => {
+    if (unread) onMarkSeen(dispatch.id);
+  };
+  const chip =
+    'inline-flex items-center gap-1 px-2 py-0.5 text-[0.65rem] tracking-wide '
+    + 'rounded-[var(--radius-xs)] bg-[var(--color-paper)] border '
+    + 'border-[var(--color-rule)] text-[var(--color-ink-2)] '
+    + 'hover:text-[var(--color-copper)] hover:border-[var(--color-rule-strong)] transition-colors';
+  const externalUrl = portalListingUrl(
+    dispatch.source, dispatch.source_url, dispatch.sreality_id,
+  );
+  if (externalUrl) {
+    return (
+      <a
+        href={externalUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={onClick}
+        className={chip}
+        title={`Open on ${label}`}
+      >
+        {label} ↗
+      </a>
+    );
+  }
+  return (
+    <Link
+      to={`/listing/${dispatch.sreality_id}`}
+      onClick={onClick}
+      className={chip}
+      title={`Last seen on ${label}`}
+    >
+      {label}
+    </Link>
   );
 }
 
