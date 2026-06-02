@@ -159,17 +159,21 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     /* Each chip becomes:
      *   (district ilike *name* OR locality ilike *name*)
      *   AND (no context, OR district/locality ilike *context*)
-     * OR'd across chips. Mapy.cz suggests at every granularity (kraj,
-     * okres, obec, část obce, street, POI); listings carry the geo-derived
-     * `okres` / `region` (kraj) + the canonical `district`, and the
-     * part-of-municipality / street / POI name appears in the `locality`
-     * free-text — so matching all four lets a pick at any level resolve
-     * (migration 141). The context half (parent municipality from
-     * `regionalStructure`) is what stops a "Edvarda Beneše" pick in Plzeň
-     * from also matching the streets of the same name in Olomouc / Hradec
-     * Králové. Kept in lockstep with browse_stats (migration 141) which
-     * applies the same predicate via `unnest(names, contexts) WITH
-     * ORDINALITY`. */
+     * Mapy.cz suggests at every granularity (kraj, okres, obec, část obce,
+     * street, POI); listings carry the geo-derived `okres` / `region`
+     * (kraj) + the canonical `district`, and the part-of-municipality /
+     * street / POI name appears in the `locality` free-text — so matching
+     * all four lets a pick at any level resolve (migration 141). The
+     * context half (parent municipality from `regionalStructure`) is what
+     * stops a "Edvarda Beneše" pick in Plzeň from also matching the streets
+     * of the same name in Olomouc / Hradec Králové.
+     *
+     * Chips split by `excluded`: INCLUDE chips are OR'd (match any), then
+     * AND'd with NOT-(OR of the EXCLUDE chips) so an excluded locality is
+     * subtracted from the cohort. Combined into a single `and(...)` tree so
+     * PostgREST AND's the two groups. Kept in lockstep with the watchdog
+     * matcher (`_build_match_clauses`) and browse_stats (migration 146),
+     * which apply the same include/exclude split. */
     const chipClause = (d: { name: string; context: string | null }): string => {
       const namePat = escapeIlikePattern(d.name);
       const cols = (pat: string): string =>
@@ -179,7 +183,12 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
       const ctxPat = escapeIlikePattern(d.context);
       return `and(${nameHalf},or(${cols(ctxPat)}))`;
     };
-    r = r.or(f.districts.map(chipClause).join(','));
+    const inc = f.districts.filter((d) => !d.excluded).map(chipClause);
+    const exc = f.districts.filter((d) => d.excluded).map(chipClause);
+    const groups: string[] = [];
+    if (inc.length) groups.push(`or(${inc.join(',')})`);
+    if (exc.length) groups.push(`not.or(${exc.join(',')})`);
+    if (groups.length) r = r.or(`and(${groups.join(',')})`);
   }
   if (f.buildingMaterial.length) {
     r = r.in('building_type', buildingMaterialToValues(f.buildingMaterial));
@@ -536,6 +545,11 @@ export const fetchBrowseStats = async (
     districts_filter:        f.districts.length ? f.districts.map((d) => d.name) : null,
     districts_context_filter: f.districts.length
       ? f.districts.map((d) => d.context ?? '')
+      : null,
+    /* Parallel exclude flags (migration 146) — full-length array so the RPC's
+     * unnest stays aligned with names; absent excluded => include. */
+    districts_excluded_filter: f.districts.length
+      ? f.districts.map((d) => d.excluded === true)
       : null,
     dispositions_filter:     f.dispositions.length ? f.dispositions : null,
     price_min_filter:        f.priceMin,

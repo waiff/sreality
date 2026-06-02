@@ -282,7 +282,10 @@ function summariseFilter(spec: WatchdogFilterSpec): string {
   if (spec.districts && spec.districts.length) {
     const head = spec.districts
       .slice(0, 3)
-      .map((d) => (d.context ? `${d.name} · ${d.context}` : d.name))
+      .map((d) => {
+        const base = d.context ? `${d.name} · ${d.context}` : d.name;
+        return d.excluded ? `−${base}` : base;
+      })
       .join(', ');
     bits.push(
       spec.districts.length > 3

@@ -155,6 +155,49 @@ describe('URL round-trip', () => {
     const round = fromSearchParams(toSearchParams(f));
     expect(round.districts).toEqual(f.districts);
   });
+
+  it('round-trips an excluded chip (districts_excl=1)', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [{ name: 'Praha', context: null, excluded: true }],
+    };
+    const sp = toSearchParams(f);
+    expect(sp.get('districts')).toBe('Praha');
+    expect(sp.get('districts_excl')).toBe('1');
+    expect(fromSearchParams(sp).districts).toEqual(f.districts);
+  });
+
+  it('omits districts_excl when no chip is excluded (clean URL)', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [{ name: 'Praha', context: null }],
+    };
+    expect(toSearchParams(f).has('districts_excl')).toBe(false);
+  });
+
+  it('treats a legacy URL with no districts_excl as all-include', () => {
+    const round = fromSearchParams(
+      new URLSearchParams({ districts: 'Praha,Brno' }),
+    );
+    expect(round.districts).toEqual([
+      { name: 'Praha', context: null },
+      { name: 'Brno', context: null },
+    ]);
+    expect(round.districts.every((d) => !d.excluded)).toBe(true);
+  });
+
+  it('round-trips a mix of include and exclude chips (parallel flags)', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [
+        { name: 'Praha', context: null, excluded: true },
+        { name: 'Brno', context: null },
+      ],
+    };
+    const sp = toSearchParams(f);
+    expect(sp.get('districts_excl')).toBe('1,0');
+    expect(fromSearchParams(sp).districts).toEqual(f.districts);
+  });
 });
 
 describe('isDefault', () => {
