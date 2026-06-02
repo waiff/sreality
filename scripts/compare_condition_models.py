@@ -270,7 +270,13 @@ def _select_baseline_scored(
     region_ids: list[int],
     limit: int,
 ) -> list[dict[str, Any]]:
-    """Listings whose LATEST snapshot has a baseline-model score row."""
+    """Listings whose LATEST snapshot has a baseline-model score row.
+
+    The cache stores the dated response model (e.g.
+    `claude-sonnet-4-5-20250929`), so match the alias OR the alias plus a
+    `-YYYYMMDD` snapshot suffix rather than exact-equals.
+    """
+    like_pattern = baseline_model + "-%"
     sql = (
         "WITH latest_snapshot AS ( "
         "  SELECT sreality_id, MAX(id) AS snapshot_id "
@@ -283,7 +289,7 @@ def _select_baseline_scored(
         "  ON ls.sreality_id = cs.sreality_id "
         " AND ls.snapshot_id = cs.snapshot_id "
         "JOIN listings l ON l.sreality_id = cs.sreality_id "
-        "WHERE cs.model = %s "
+        "WHERE ( cs.model = %s OR cs.model LIKE %s ) "
         "  AND l.is_active = true "
         "  AND ( cardinality(%s::int[]) = 0 "
         "        OR l.locality_region_id = ANY(%s::int[]) ) "
@@ -291,7 +297,7 @@ def _select_baseline_scored(
         "LIMIT %s"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (baseline_model, region_ids, region_ids, limit))
+        cur.execute(sql, (baseline_model, like_pattern, region_ids, region_ids, limit))
         return [
             {
                 "sreality_id": int(r[0]),
