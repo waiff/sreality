@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any
 
 from collections.abc import Iterator
@@ -37,8 +38,21 @@ PRICES: dict[str, ModelPrice] = {
     "claude-haiku-4-5":  ModelPrice(1.0, 5.0, 0.10, 1.25),
     "claude-sonnet-4-5": ModelPrice(3.0, 15.0, 0.30, 3.75),
     "claude-sonnet-4-6": ModelPrice(3.0, 15.0, 0.30, 3.75),
+    # Opus 4.5 (Nov 2025) cut the Opus tier to $5/$25; 4.7 kept the older
+    # $15/$75. Confirm against docs.anthropic.com if it drifts.
+    "claude-opus-4-5":   ModelPrice(5.0, 25.0, 0.50, 6.25),
     "claude-opus-4-7":   ModelPrice(15.0, 75.0, 1.50, 18.75),
 }
+
+# Dated snapshot suffix, e.g. "-20251001" on "claude-haiku-4-5-20251001".
+# Anthropic responses (and batch results) can carry the dated id while
+# callers request the stable alias; strip it so both price off one row.
+_DATE_SUFFIX = re.compile(r"-\d{8}$")
+
+
+def normalise_model(model: str) -> str:
+    """Drop a trailing -YYYYMMDD snapshot suffix to reach the stable alias."""
+    return _DATE_SUFFIX.sub("", model)
 
 
 class AnthropicProvider:
@@ -72,7 +86,10 @@ class AnthropicProvider:
         return self._completion_from_raw(raw, fallback_model=model)
 
     def price_for(self, model: str) -> ModelPrice | None:
-        return PRICES.get(model)
+        price = PRICES.get(model)
+        if price is None:
+            price = PRICES.get(normalise_model(model))
+        return price
 
     # --- Message Batches API ----------------------------------------------
 

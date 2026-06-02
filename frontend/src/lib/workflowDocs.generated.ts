@@ -111,6 +111,80 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
   },
   {
+    "filename": "compare_condition_models.yml",
+    "name": "Scoring: Condition model A/B (Haiku vs Sonnet)",
+    "description": "Read-only validation harness for a cheaper condition-scoring model. For a sample of listings that already have a baseline-model score on their latest snapshot, it re-runs the SAME scoring request through a candidate model and reports per-axis agreement (exact / within-1 / mean abs diff / bias) plus the candidate vs baseline cost ratio.",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "candidate_model",
+        "description": "Cheaper model to validate (e.g. claude-haiku-4-5)",
+        "required": true,
+        "type": "string",
+        "default": "claude-haiku-4-5",
+        "options": null
+      },
+      {
+        "name": "baseline_model",
+        "description": "Model whose existing scores are the comparison baseline",
+        "required": true,
+        "type": "string",
+        "default": "claude-sonnet-4-5",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Number of already-scored listings to re-score with the candidate",
+        "required": true,
+        "type": "string",
+        "default": "40",
+        "options": null
+      },
+      {
+        "name": "region_ids",
+        "description": "Comma-separated locality_region_id list (empty = all regions)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "n_images",
+        "description": "Images per listing (0 = text-only, matches production scoring)",
+        "required": true,
+        "type": "string",
+        "default": "0",
+        "options": null
+      },
+      {
+        "name": "max_cost_usd",
+        "description": "Stop once the candidate-model spend for this run crosses this (USD)",
+        "required": true,
+        "type": "string",
+        "default": "2",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 20,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/compare_condition_models.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/compare_condition_models.yml"
+  },
+  {
     "filename": "compute_image_phash.yml",
     "name": "Compute image pHash (multi-portal dedup)",
     "description": "Backfills images.phash (a 64-bit perceptual dHash per stored image) for the Tier-2 dedup sweep's cheap image corroborator. Downloads stored bytes from R2, hashes them, writes images.phash. Idempotent + resumable; a no-op if R2 env vars are missing.",
