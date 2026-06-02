@@ -1,40 +1,36 @@
 /* Obec choropleth for a price-stats dataset: rent-growth / sale-growth /
- * gross-yield per municipality. Mirrors the MF rent-map choropleth pattern in
- * ListingMap (geojson source + inline interpolate paint). Each metric is its
- * own fill layer toggled by visibility, so switching metric never rebuilds a
- * paint expression — the FeatureCollection carries all three values. */
+ * yield-change per municipality, over the page's chosen [from,to] window.
+ * Driven by the price_stat_growth RPC. Diverging ramp uses the system's own
+ * brick (negative) → sage (positive) semantics; thin/no-data obce greyed.
+ * Each metric is its own fill layer toggled by visibility (no paint rebuild). */
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
-import type { PriceStatPolygon } from '@/lib/priceStats';
+import type { PriceStatGrowthRow } from '@/lib/priceStats';
 
-export type DatasetMetric = 'rent_cagr_pct' | 'sale_cagr_pct' | 'gross_yield_pct';
+export type DatasetMetric = 'rent_cagr_pct' | 'sale_cagr_pct' | 'yield_change_pp_pa';
 
 type Ramp = ReadonlyArray<readonly [number, string]>;
 
+// Brick → paper-neutral → sage. The app's existing negative/positive hues.
 const GROWTH_RAMP: Ramp = [
-  [-8, '#b2182b'], [-4, '#e8845f'], [0, '#efe9dd'],
-  [4, '#6fae72'], [8, '#1a7a4c'],
+  [-8, '#a04b3d'], [-3, '#c89a8e'], [0, '#dcd6c8'], [3, '#9aae84'], [8, '#5e7a4a'],
 ];
 const YIELD_RAMP: Ramp = [
-  [2, '#efe9dd'], [4, '#bcd9a6'], [6, '#7fae5a'],
-  [8, '#3f8f48'], [10, '#1a5e2e'],
+  [-0.6, '#a04b3d'], [-0.2, '#c89a8e'], [0, '#dcd6c8'], [0.2, '#9aae84'], [0.6, '#5e7a4a'],
 ];
-const NO_DATA = 'rgba(150, 145, 132, 0.35)';
-
-/* A market is too thin to trust below this many active offers in the window —
- * the real cause of wild month-to-month swings; greyed out on the map. */
+const NO_DATA = 'rgba(122, 125, 134, 0.28)';
 const MIN_ACTIVE = 3;
 
 export const METRICS: Record<
   DatasetMetric,
-  { label: string; ramp: Ramp; suffix: string; layer: string; vProp: string; hasProp: string }
+  { label: string; ramp: Ramp; suffix: string; layer: string; vProp: string; hasProp: string; digits: number }
 > = {
-  rent_cagr_pct: { label: 'Rent growth p.a.', ramp: GROWTH_RAMP, suffix: '%', layer: 'obce-rent', vProp: 'v_rent', hasProp: 'h_rent' },
-  sale_cagr_pct: { label: 'Sale-price growth p.a.', ramp: GROWTH_RAMP, suffix: '%', layer: 'obce-sale', vProp: 'v_sale', hasProp: 'h_sale' },
-  gross_yield_pct: { label: 'Gross yield', ramp: YIELD_RAMP, suffix: '%', layer: 'obce-yield', vProp: 'v_yield', hasProp: 'h_yield' },
+  rent_cagr_pct: { label: 'Rent growth p.a.', ramp: GROWTH_RAMP, suffix: '%', layer: 'obce-rent', vProp: 'v_rent', hasProp: 'h_rent', digits: 1 },
+  sale_cagr_pct: { label: 'Sale-price growth p.a.', ramp: GROWTH_RAMP, suffix: '%', layer: 'obce-sale', vProp: 'v_sale', hasProp: 'h_sale', digits: 1 },
+  yield_change_pp_pa: { label: 'Yield change p.a.', ramp: YIELD_RAMP, suffix: 'pp', layer: 'obce-yield', vProp: 'v_yield', hasProp: 'h_yield', digits: 2 },
 };
 
-function value(p: PriceStatPolygon, metric: DatasetMetric): number | null {
+function value(p: PriceStatGrowthRow, metric: DatasetMetric): number | null {
   const raw = p[metric];
   if (raw == null || !Number.isFinite(raw)) return null;
   const minActive =
@@ -55,9 +51,9 @@ interface FeatureProps {
 }
 type FC = GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon, FeatureProps>;
 
-const toFC = (polygons: PriceStatPolygon[]): FC => ({
+const toFC = (rows: PriceStatGrowthRow[]): FC => ({
   type: 'FeatureCollection',
-  features: polygons.flatMap((p) => {
+  features: rows.flatMap((p) => {
     let geometry: GeoJSON.Geometry;
     try {
       geometry = JSON.parse(p.geojson) as GeoJSON.Geometry;
@@ -67,13 +63,13 @@ const toFC = (polygons: PriceStatPolygon[]): FC => ({
     if (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon') return [];
     const r = value(p, 'rent_cagr_pct');
     const s = value(p, 'sale_cagr_pct');
-    const y = value(p, 'gross_yield_pct');
+    const y = value(p, 'yield_change_pp_pa');
     return [{
       type: 'Feature' as const,
       id: p.obec_id,
       geometry,
       properties: {
-        obec_name: p.obec_name,
+        obec_name: p.locality_name,
         v_rent: r ?? 0, h_rent: r == null ? 0 : 1,
         v_sale: s ?? 0, h_sale: s == null ? 0 : 1,
         v_yield: y ?? 0, h_yield: y == null ? 0 : 1,
@@ -83,11 +79,11 @@ const toFC = (polygons: PriceStatPolygon[]): FC => ({
 });
 
 interface Props {
-  polygons: PriceStatPolygon[];
+  rows: PriceStatGrowthRow[];
   metric: DatasetMetric;
 }
 
-export default function DatasetMap({ polygons, metric }: Props) {
+export default function DatasetMap({ rows, metric }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [ready, setReady] = useState(false);
@@ -117,12 +113,10 @@ export default function DatasetMap({ polygons, metric }: Props) {
             'fill-color': [
               'case',
               ['==', ['get', m.hasProp], 0], NO_DATA,
-              [
-                'interpolate', ['linear'], ['get', m.vProp],
-                ...m.ramp.flatMap(([stop, color]) => [stop, color]),
-              ],
+              ['interpolate', ['linear'], ['get', m.vProp],
+                ...m.ramp.flatMap(([stop, color]) => [stop, color])],
             ],
-            'fill-opacity': 0.7,
+            'fill-opacity': 0.72,
           },
         });
       }
@@ -130,10 +124,10 @@ export default function DatasetMap({ polygons, metric }: Props) {
         id: 'obce-line',
         type: 'line',
         source: 'obce',
-        paint: { 'line-color': 'rgba(60,60,90,0.25)', 'line-width': 0.4 },
+        paint: { 'line-color': 'rgba(26,28,34,0.16)', 'line-width': 0.4 },
       });
 
-      popupRef.current = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+      popupRef.current = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: 'ds-popup' });
       for (const m of Object.values(METRICS)) {
         map.on('mousemove', m.layer, (e) => {
           const f = e.features?.[0];
@@ -142,7 +136,7 @@ export default function DatasetMap({ polygons, metric }: Props) {
           const pr = f.properties as Record<string, unknown>;
           const has = Number(pr[m.hasProp]);
           const v = Number(pr[m.vProp]);
-          const txt = has ? `${v.toFixed(1)}${m.suffix}` : 'thin / no data';
+          const txt = has ? `${v.toFixed(m.digits)} ${m.suffix}` : 'thin / no data';
           popupRef.current!
             .setLngLat(e.lngLat)
             .setHTML(`<strong>${String(pr.obec_name)}</strong><br/>${m.label}: ${txt}`)
@@ -153,7 +147,6 @@ export default function DatasetMap({ polygons, metric }: Props) {
           popupRef.current?.remove();
         });
       }
-
       setReady(true);
     });
 
@@ -165,16 +158,12 @@ export default function DatasetMap({ polygons, metric }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Apply features once the map is ready AND whenever the data changes. Gating
-  // on `ready` as STATE (not a ref) is what makes this re-run after the map's
-  // async load completes — data usually arrives before then.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
-    (map.getSource('obce') as GeoJSONSource | undefined)?.setData(toFC(polygons));
-  }, [polygons, ready]);
+    (map.getSource('obce') as GeoJSONSource | undefined)?.setData(toFC(rows));
+  }, [rows, ready]);
 
-  // Toggle which metric's fill layer is visible.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -190,26 +179,28 @@ export default function DatasetMap({ polygons, metric }: Props) {
 
   return (
     <div className="relative">
-      <div ref={containerRef} className="h-[560px] w-full rounded-sm border border-[var(--color-line)]" />
+      <div ref={containerRef} className="h-[560px] w-full rounded-[var(--radius-md)] border border-[var(--color-rule)]" />
       <Legend metric={metric} />
     </div>
   );
 }
 
 function Legend({ metric }: { metric: DatasetMetric }) {
-  const { ramp, label, suffix } = METRICS[metric];
-  const stops = ramp.map(([s]) => s);
+  const { ramp, label, suffix, digits } = METRICS[metric];
+  const lo = ramp[0][0];
+  const hi = ramp[ramp.length - 1][0];
   const gradient = `linear-gradient(to right, ${ramp.map(([, c]) => c).join(', ')})`;
   return (
-    <div className="absolute bottom-3 left-3 bg-[var(--color-paper)]/95 border border-[var(--color-line)] rounded-sm px-3 py-2 text-[0.7rem]">
+    <div className="absolute bottom-3 left-3 bg-[var(--color-paper-3)]/95 border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 text-[0.7rem]">
       <div className="mb-1 text-[var(--color-ink-2)]">{label}</div>
-      <div className="h-1.5 w-44 rounded-sm" style={{ background: gradient }} />
+      <div className="h-1.5 w-44 rounded-[var(--radius-xs)]" style={{ background: gradient }} />
       <div className="mt-1 flex justify-between text-[var(--color-ink-3)] tabular-nums">
-        <span>{stops[0]}{suffix}</span>
-        <span>{stops[stops.length - 1]}{suffix}</span>
+        <span>{lo.toFixed(digits)}{suffix}</span>
+        <span>0</span>
+        <span>+{hi.toFixed(digits)}{suffix}</span>
       </div>
       <div className="mt-1 flex items-center gap-1 text-[var(--color-ink-3)]">
-        <span className="inline-block h-2 w-2 rounded-sm" style={{ background: NO_DATA }} />
+        <span className="inline-block h-2 w-2 rounded-[2px]" style={{ background: NO_DATA }} />
         thin / no data
       </div>
     </div>
