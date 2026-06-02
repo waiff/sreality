@@ -343,3 +343,48 @@ def test_run_engine_rejects_floor_contradiction(monkeypatch: Any) -> None:
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
     assert stats["rejected"] == 1
     assert stats["auto_address"] == 0 and stats["queued"] == 0
+
+
+def test_run_engine_auto_merge_off_queues_exact_address(monkeypatch: Any) -> None:
+    """Auto-merge toggle off: an exact-address pair queues for review, no merge."""
+    import scripts.dedup_engine as eng
+
+    merges: list[Any] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, **kw: merges.append(kw) or {"data": {}},
+    )
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # would normally auto-merge
+    stats = eng.run_engine(
+        conn, classify_fn=None, compare_fn=None, max_vision_calls=0,
+        auto_merge_enabled=False,
+    )
+    assert merges == []
+    assert stats["auto_address"] == 0
+    assert stats["queued"] == 1
+    assert len(conn.enqueued) == 1
+
+
+def test_run_engine_auto_merge_off_queues_candidate_without_vision(monkeypatch: Any) -> None:
+    """Auto-merge toggle off: a rule-C candidate queues without spending vision."""
+    import scripts.dedup_engine as eng
+
+    merges: list[Any] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, **kw: merges.append(kw) or {"data": {}},
+    )
+    vision: list[int] = []
+
+    def classify(sid: int) -> dict:
+        vision.append(sid)
+        return {"data": {"images": []}}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=lambda *a, **k: None,
+        max_vision_calls=10, auto_merge_enabled=False,
+    )
+    assert merges == []
+    assert stats["queued"] == 1
+    assert vision == []  # no forensic vision spent when off

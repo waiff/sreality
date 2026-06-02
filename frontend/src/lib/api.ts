@@ -593,6 +593,9 @@ export const updateSkill = (
 export const listAppSettings = (): Promise<{ data: AppSetting[] }> =>
   request<{ data: AppSetting[] }>('/admin/app_settings');
 
+export const getAppSetting = (key: string): Promise<AppSetting> =>
+  request<AppSetting>(`/admin/app_settings/${encodeURIComponent(key)}`);
+
 export const updateAppSetting = (
   key: string,
   value: unknown,

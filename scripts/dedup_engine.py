@@ -275,6 +275,23 @@ def _group_ids_by_room(images: list[dict[str, Any]]) -> dict[str, list[int]]:
     return out
 
 
+def _auto_merge_enabled(conn: Any) -> bool:
+    """Read the operator's /dedup auto-merge toggle (app_settings). Default on."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = 'dedup_auto_merge_enabled'"
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return True
+    v = row[0]
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(v)
+
+
 def run_engine(
     conn: Any,
     *,
@@ -283,11 +300,16 @@ def run_engine(
     max_pairs: int = 2000,
     max_vision_calls: int = 200,
     max_room_attempts: int = 4,
+    auto_merge_enabled: bool = True,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
 
     classify_fn(sreality_id) -> classify_listing_images envelope.
     compare_fn(a, b, room_type, ids_a, ids_b) -> {verdict, rationale} | None.
+
+    When auto_merge_enabled is False (the operator's /dedup toggle), the engine
+    still finds candidates but queues every one for manual review instead of
+    auto-merging — and skips the forensic vision step (no LLM spend).
     """
     stats = _eligibility_counts(conn)
     stats.update({
@@ -330,13 +352,28 @@ def run_engine(
                     markers = {"reason": decision.reason, "confidence": 0.99,
                                "street_key": street_key, "house_number": a.house_number,
                                "floor": a.floor}
-                    if _merge_pair(conn, a, b, "address_exact", markers):
-                        stats["auto_address"] += 1
+                    if auto_merge_enabled:
+                        if _merge_pair(conn, a, b, "address_exact", markers):
+                            stats["auto_address"] += 1
+                    else:
+                        _enqueue_candidate(
+                            conn, a, b,
+                            {**markers, "reason": "auto_merge_off:address_exact"},
+                        )
+                        stats["queued"] += 1
                     continue
 
                 # rule C candidate -> rule D visual
                 pairs_left -= 1
                 stats["pairs_considered"] += 1
+                if not auto_merge_enabled:
+                    # Auto-merge off: queue for manual review without spending vision.
+                    _enqueue_candidate(conn, a, b, {
+                        "tier": "street_disposition", "street_key": street_key,
+                        "reason": "auto_merge_off", "confidence": 0.6,
+                    })
+                    stats["queued"] += 1
+                    continue
                 outcome = _resolve_visual(
                     conn, a, b, classify_fn=classify_fn, compare_fn=compare_fn,
                     vision_budget=vision_budget, max_room_attempts=max_room_attempts,
@@ -451,19 +488,25 @@ def main() -> int:
             )
             return 0
 
+        auto_merge_enabled = _auto_merge_enabled(conn)
+        LOG.info("ENGINE auto_merge_enabled=%s", auto_merge_enabled)
+
         classify_fn = None
         compare_fn = None
-        if args.max_vision_calls > 0:
+        if auto_merge_enabled and args.max_vision_calls > 0:
             classify_fn = _build_classify_fn(conn)
             compare_fn = _build_compare_fn(conn)
-        else:
+        elif auto_merge_enabled:
             # pHash fast-path still needs room labels to gate on interior shots.
             classify_fn = _build_classify_fn(conn)
+        # When auto-merge is off the engine never reaches the visual step, so we
+        # skip building the (LLM-backed) classify/compare fns entirely.
 
         stats = run_engine(
             conn, classify_fn=classify_fn, compare_fn=compare_fn,
             max_pairs=args.max_pairs, max_vision_calls=args.max_vision_calls,
             max_room_attempts=args.max_room_attempts,
+            auto_merge_enabled=auto_merge_enabled,
         )
         _write_run_row(conn, stats)
 
