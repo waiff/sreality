@@ -159,21 +159,25 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     /* Each chip becomes:
      *   (district ilike *name* OR locality ilike *name*)
      *   AND (no context, OR district/locality ilike *context*)
-     * OR'd across chips. Mapy.cz suggests at every granularity (okres,
-     * obec, část obce, street, POI); listings only carry the canonical
-     * okres in `district`, but the part-of-municipality / street / POI
-     * name does appear in the `locality` free-text. The context half
-     * (parent municipality from `regionalStructure`) is what stops a
-     * "Edvarda Beneše" pick in Plzeň from also matching the streets
-     * of the same name in Olomouc / Hradec Králové. Kept in lockstep
-     * with browse_stats (migration 074) which applies the same
-     * predicate via `unnest(names, contexts) WITH ORDINALITY`. */
+     * OR'd across chips. Mapy.cz suggests at every granularity (kraj,
+     * okres, obec, část obce, street, POI); listings carry the geo-derived
+     * `okres` / `region` (kraj) + the canonical `district`, and the
+     * part-of-municipality / street / POI name appears in the `locality`
+     * free-text — so matching all four lets a pick at any level resolve
+     * (migration 141). The context half (parent municipality from
+     * `regionalStructure`) is what stops a "Edvarda Beneše" pick in Plzeň
+     * from also matching the streets of the same name in Olomouc / Hradec
+     * Králové. Kept in lockstep with browse_stats (migration 141) which
+     * applies the same predicate via `unnest(names, contexts) WITH
+     * ORDINALITY`. */
     const chipClause = (d: { name: string; context: string | null }): string => {
       const namePat = escapeIlikePattern(d.name);
-      const nameHalf = `or(district.ilike.${namePat},locality.ilike.${namePat})`;
+      const cols = (pat: string): string =>
+        `district.ilike.${pat},locality.ilike.${pat},okres.ilike.${pat},region.ilike.${pat}`;
+      const nameHalf = `or(${cols(namePat)})`;
       if (!d.context) return nameHalf;
       const ctxPat = escapeIlikePattern(d.context);
-      return `and(${nameHalf},or(district.ilike.${ctxPat},locality.ilike.${ctxPat}))`;
+      return `and(${nameHalf},or(${cols(ctxPat)}))`;
     };
     r = r.or(f.districts.map(chipClause).join(','));
   }
