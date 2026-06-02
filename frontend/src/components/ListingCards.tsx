@@ -362,13 +362,15 @@ function CardBadge({
   );
 }
 
-/* Six headline sort orders for the cards lane. Two bookend the file
- * by date (first_seen_at — when the listing entered our archive),
- * two by price, two by price/m². The default keeps last_seen_at desc
- * so the dropdown's "selected" option matches the URL on a fresh
- * load even though that order isn't in the menu — operators land on
- * "newest in archive" mentally and the existing default already
- * approximates that. */
+/* Headline sort orders for the cards lane. Two bookend the file by
+ * date (first_seen_at — when the listing entered our archive), two
+ * by price, two by price/m², two by MF gross yield. The default keeps
+ * last_seen_at desc so the dropdown's "selected" option matches the
+ * URL on a fresh load even though that order isn't in the menu —
+ * operators land on "newest in archive" mentally and the existing
+ * default already approximates that. mf_gross_yield_pct is only
+ * populated for sale apartments; the query orders nullsFirst:false so
+ * every rental / non-apartment listing sorts to the end either way. */
 const SORT_PRESETS: ReadonlyArray<{ label: string; spec: SortSpec }> = [
   { label: 'Newest first',      spec: { field: 'first_seen_at', direction: 'desc' } },
   { label: 'Oldest first',      spec: { field: 'first_seen_at', direction: 'asc'  } },
@@ -376,6 +378,8 @@ const SORT_PRESETS: ReadonlyArray<{ label: string; spec: SortSpec }> = [
   { label: 'Price: high → low', spec: { field: 'price_czk',     direction: 'desc' } },
   { label: 'Price/m²: low → high', spec: { field: 'price_per_m2', direction: 'asc'  } },
   { label: 'Price/m²: high → low', spec: { field: 'price_per_m2', direction: 'desc' } },
+  { label: 'Výnos MF: high → low', spec: { field: 'mf_gross_yield_pct', direction: 'desc' } },
+  { label: 'Výnos MF: low → high', spec: { field: 'mf_gross_yield_pct', direction: 'asc'  } },
 ];
 
 function SortDropdown({

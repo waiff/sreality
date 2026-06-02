@@ -76,7 +76,8 @@ export type SortField =
   | 'sreality_id' | 'district' | 'disposition'
   | 'area_m2' | 'price_czk' | 'price_per_m2'
   | 'first_seen_at' | 'last_seen_at' | 'is_active'
-  | 'estate_area' | 'usable_area' | 'parking_lots';
+  | 'estate_area' | 'usable_area' | 'parking_lots'
+  | 'mf_gross_yield_pct';
 
 export type SortDirection = 'asc' | 'desc';
 
@@ -92,6 +93,7 @@ const SORTABLE_FIELDS: ReadonlyArray<SortField> = [
   'area_m2', 'price_czk', 'price_per_m2',
   'first_seen_at', 'last_seen_at', 'is_active',
   'estate_area', 'usable_area', 'parking_lots',
+  'mf_gross_yield_pct',
 ];
 
 export const parseSort = (raw: string | null): SortSpec => {
