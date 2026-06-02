@@ -1,0 +1,88 @@
+name: "Scoring: Condition model A/B (Haiku vs Sonnet)"
+
+# Read-only validation harness for a cheaper condition-scoring model. For a
+# sample of listings that already have a baseline-model score on their latest
+# snapshot, it re-runs the SAME scoring request through a candidate model and
+# reports per-axis agreement (exact / within-1 / mean abs diff / bias) plus
+# the candidate vs baseline cost ratio.
+#
+# It NEVER writes listing_condition_scores or the listings.*_condition_level
+# columns, so the production Sonnet baseline is untouched. The candidate calls
+# do log to llm_calls (real candidate-model cost), bounded by limit + cost cap
+# (a 40-listing run is well under $1). Dispatch-only; run before flipping
+# app_settings.llm_condition_model.
+#
+# Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_model:
+        description: Cheaper model to validate (e.g. claude-haiku-4-5)
+        required: true
+        default: "claude-haiku-4-5"
+        type: string
+      baseline_model:
+        description: Model whose existing scores are the comparison baseline
+        required: true
+        default: "claude-sonnet-4-5"
+        type: string
+      limit:
+        description: Number of already-scored listings to re-score with the candidate
+        required: true
+        default: "40"
+        type: string
+      region_ids:
+        description: Comma-separated locality_region_id list (empty = all regions)
+        required: false
+        default: ""
+        type: string
+      n_images:
+        description: Images per listing (0 = text-only, matches production scoring)
+        required: true
+        default: "0"
+        type: string
+      max_cost_usd:
+        description: Stop once the candidate-model spend for this run crosses this (USD)
+        required: true
+        default: "2"
+        type: string
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "psycopg[binary]>=3.2" \
+            "requests>=2.32" \
+            "boto3>=1.35" \
+            "anthropic>=0.40"
+
+      - name: Run condition-model comparison
+        run: |
+          python -m scripts.compare_condition_models \
+            --candidate-model '${{ inputs.candidate_model }}' \
+            --baseline-model '${{ inputs.baseline_model }}' \
+            --limit '${{ inputs.limit }}' \
+            --region-ids '${{ inputs.region_ids }}' \
+            --n-images '${{ inputs.n_images }}' \
+            --max-cost-usd '${{ inputs.max_cost_usd }}'
