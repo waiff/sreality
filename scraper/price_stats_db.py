@@ -22,7 +22,7 @@ LOG = logging.getLogger(__name__)
 _DATASET_COLS = (
     "id, slug, name, description, category_main_cb, building_condition, "
     "building_type, ownership, usable_area_from, usable_area_to, distance, "
-    "is_active, start_ym, end_ym, obec_ids"
+    "is_active, start_ym, end_ym, obec_ids, periodicity"
 )
 
 
