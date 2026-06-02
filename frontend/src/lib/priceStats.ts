@@ -15,6 +15,11 @@ export interface PriceStatDataset {
   usable_area_from: number | null;
   usable_area_to: number | null;
   distance: number;
+  start_ym?: string | null;
+  end_ym?: string | null;
+  obec_ids?: number[] | null;
+  min_population?: number | null;
+  max_population?: number | null;
 }
 
 export interface PriceStatCityMetric {
