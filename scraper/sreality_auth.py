@@ -165,8 +165,13 @@ def login_via_browser(
                 ['form.login button[type="submit"]',
                  'button:has-text("Přihlásit")'],
             )
-            # Land back on sreality with the session set.
-            page.wait_for_load_state("networkidle", timeout=timeout_ms)
+            # Seznam redirects back to sreality (return_url) after login. Wait
+            # for THAT redirect, not networkidle — sreality is ad-heavy and
+            # never goes idle, which falsely times out a successful login.
+            try:
+                page.wait_for_url(lambda u: "sreality.cz" in u, timeout=timeout_ms)
+            except Exception:
+                pass
             page.goto("https://www.sreality.cz/", wait_until="domcontentloaded")
             cookies = _collect_cookies(context)
             if not cookies:
