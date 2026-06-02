@@ -1,6 +1,9 @@
 import { Suspense, lazy, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { useNewEstimationModal } from '@/components/NewEstimationModal';
+import {
+  useNewEstimationModal,
+  type NewEstimationPrefill,
+} from '@/components/NewEstimationModal';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchListingById,
@@ -172,11 +175,33 @@ export default function ListingDetail() {
   const sources = sourcesQ.data?.sources ?? [];
   const currentSource = sources.find((s) => s.sreality_id === listing.sreality_id);
 
+  // Bind the page's "New estimation" CTA to THIS listing: pre-fill its URL +
+  // estimate type so the modal drops the URL field and just runs the estimate.
+  const newEstimationPrefill = useMemo<NewEstimationPrefill | undefined>(() => {
+    const url =
+      currentSource?.source_url
+      ?? (listing.source === 'sreality'
+        ? `https://www.sreality.cz/detail/${listing.category_type ?? 'prodej'}/${listing.category_main ?? 'byt'}/x/x/${listing.sreality_id}`
+        : undefined);
+    if (!url) return undefined;
+    const categoryMain =
+      listing.category_main === 'byt'
+      || listing.category_main === 'dum'
+      || listing.category_main === 'komercni'
+        ? listing.category_main
+        : undefined;
+    return {
+      url,
+      categoryMain,
+      estimateKind: listing.category_type === 'pronajem' ? 'rent' : 'sale',
+    };
+  }, [currentSource, listing]);
+
   return (
     <Page>
       <div className="flex items-center justify-between gap-3">
         <Crumb />
-        <NewEstimationButton />
+        <NewEstimationButton prefill={newEstimationPrefill} />
       </div>
       {/* Merged top section: identity + price + property facts in one block,
           above the images. The MF rent estimate + description sit directly
@@ -272,12 +297,12 @@ function Crumb() {
   );
 }
 
-function NewEstimationButton() {
+function NewEstimationButton({ prefill }: { prefill?: NewEstimationPrefill }) {
   const { open } = useNewEstimationModal();
   return (
     <button
       type="button"
-      onClick={open}
+      onClick={() => open(prefill)}
       className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
     >
       <span className="text-[0.95em] leading-none">+</span>
