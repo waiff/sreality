@@ -1081,3 +1081,13 @@ it rather than duplicating a list here.
   migration 022 (`terrace`, `garage`, `parking_lots`) are the correct fields for new analytical
   work. The legacy columns stay populated for backward compatibility with existing queries /
   RPCs.
+- The Czech admin hierarchy on a listing is **derived from `geom`, not parsed from the address**
+  (migration 140). `listings.obec` / `okres` / `region` (municipality / district / kraj) are set
+  by a BEFORE INSERT/UPDATE-OF-geom trigger (`listings_set_admin_geo`) that PIPs the coordinate
+  into `admin_boundaries` and walks `parent_id` — so they're populated **instantly at scrape time**
+  and **uniform across every source** (only ~5% of listings, foreign points, lack a CZ match). The
+  trustworthy anchor is the coordinate (~95% coverage, straight from each portal's map/GPS data);
+  the free-text `locality` is portal-specific display text and unreliable for grouping. The legacy
+  display `district` text column is filled from okres (or obec for Prague) only when NULL, so
+  sreality's richer "City - Quarter" labels are preserved. Don't re-derive hierarchy from `locality`;
+  read the normalized columns.
