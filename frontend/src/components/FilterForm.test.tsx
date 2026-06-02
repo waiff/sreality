@@ -54,16 +54,35 @@ describe('<FilterForm>', () => {
     render(
       <FilterForm
         scope="browse"
-        state={{ min_price_czk: 5000, max_price_czk: 15_000 }}
+        state={{ min_garden_area: 100, max_garden_area: 800 }}
         onChange={vi.fn()}
-        includeOnly={['min_price_czk']}      // only one half listed
+        includeOnly={['min_garden_area']}    // only one half listed
         flat
       />,
     );
-    // The dual-thumb slider exposes two range inputs ("Price minimum"
-    // and "Price maximum"). If pairing fired, both inputs exist.
+    // garden area keeps the dual-thumb slider (range_slider + full
+    // bounds). The slider exposes two range inputs; if pairing fired,
+    // both exist.
     const sliders = screen.getAllByRole('slider');
     expect(sliders).toHaveLength(2);
+  });
+
+  it('renders a range_inputs filter as paired number inputs, not a slider', () => {
+    render(
+      <FilterForm
+        scope="browse"
+        state={{ min_price_czk: 5000, max_price_czk: 15_000 }}
+        onChange={vi.fn()}
+        includeOnly={['min_price_czk']}
+        labels={{ min_price_czk: 'Price' }}
+        flat
+      />,
+    );
+    // price opts into range_inputs, so it renders plain number inputs
+    // (NumberCell = type=text inputMode=numeric → role "textbox") even
+    // though it still carries min/max/step bounds metadata.
+    expect(screen.queryAllByRole('slider')).toHaveLength(0);
+    expect(screen.getAllByRole('textbox').length).toBeGreaterThanOrEqual(2);
   });
 
   it("renders pill_group filters as <button aria-pressed>", () => {
@@ -121,21 +140,21 @@ describe('<FilterForm>', () => {
     render(
       <FilterForm
         scope="browse"
-        state={{ min_price_czk: 5000, max_price_czk: 15_000 }}
+        state={{ min_garden_area: 1000, max_garden_area: 3000 }}
         onChange={onChange}
-        includeOnly={['min_price_czk']}
+        includeOnly={['min_garden_area']}
         flat
       />,
     );
     const sliders = screen.getAllByRole('slider') as HTMLInputElement[];
-    fireEvent.change(sliders[0], { target: { value: '8000' } });
+    fireEvent.change(sliders[0], { target: { value: '2000' } });
     expect(onChange).toHaveBeenCalledTimes(1);
     const lastCall = onChange.mock.calls.at(-1)![0] as Array<{
       id: string; value: unknown;
     }>;
     expect(lastCall).toHaveLength(2);
     expect(lastCall.map((u) => u.id).sort()).toEqual([
-      'max_price_czk', 'min_price_czk',
+      'max_garden_area', 'min_garden_area',
     ]);
   });
 

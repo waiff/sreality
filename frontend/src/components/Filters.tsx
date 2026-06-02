@@ -36,24 +36,25 @@ interface SidebarProps {
  * from Essentials: the viewport bbox changes on every map pan, so counting
  * it would pin the dot permanently on. */
 const ESSENTIALS_KEYS = [
-  'categoryMain', 'categoryType', 'districts', 'locationMode', 'centerRadius',
-  'dispositions', 'categorySubCb',
+  'categoryMain', 'categoryType', 'status', 'portals',
+  'districts', 'locationMode', 'centerRadius',
+  'dispositions',
+  'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
+  'usableAreaMin', 'usableAreaMax',
+  'conditionMatch', 'buildingMaterial',
   'priceMin', 'priceMax', 'pricePerM2Min', 'pricePerM2Max',
   'mfGrossYieldPctMin', 'mfGrossYieldPctMax',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const PROPERTY_KEYS = [
-  'portals',
-  'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
-  'usableAreaMin', 'usableAreaMax',
-  'furnished', 'ownership', 'conditionMatch', 'buildingMaterial',
+  'furnished', 'ownership',
   'buildingConditionLevelMin', 'apartmentConditionLevelMin',
   'hasBalcony', 'hasLift', 'hasParking', 'terrace', 'cellar', 'garage',
   'parkingLotsMin',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const SIGNALS_KEYS = [
-  'status', 'firstSeenMinDays', 'firstSeenMaxDays',
+  'firstSeenMinDays', 'firstSeenMaxDays',
   'lastSeenMinDays', 'lastSeenMaxDays', 'tomDaysMin', 'tomDaysMax',
   'distinctSiteCountMin', 'priceDropCountMin', 'priceRiseCountMin',
   'maxPriceDropPctMin',
@@ -149,11 +150,23 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['category_main', 'category_type']}
+              includeOnly={['category_main', 'category_type', 'status']}
               labels={{
                 category_main: 'Type',
                 category_type: 'Listing for',
+                status: 'Status',
               }}
+              flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Source portal" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['portals']}
+              labels={{ portals: 'Portal' }}
               flat
             />
           </ControlGroup>
@@ -185,10 +198,38 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['dispositions', 'category_sub_cb']}
+              includeOnly={['dispositions']}
               labels={{
                 dispositions: 'Disposition',
-                category_sub_cb: 'Subtype',
+              }}
+              flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Size" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['min_area_m2', 'min_estate_area', 'min_usable_area']}
+              labels={{
+                min_area_m2: 'Area',
+                min_estate_area: 'Lot area',
+                min_usable_area: 'Usable area',
+              }}
+              flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Condition & material" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['condition_match', 'building_material']}
+              labels={{
+                condition_match: 'Condition (Stav objektu)',
+                building_material: 'Building material',
               }}
               flat
             />
@@ -231,46 +272,18 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
           title="Property"
           active={bandActive(filters, PROPERTY_KEYS)}
         >
-          <ControlGroup title="Source portal" bordered={false}>
-            <FilterForm
-              scope="browse"
-              state={registryView}
-              onChange={handleRegistryChange}
-              includeOnly={['portals']}
-              labels={{ portals: 'Portal' }}
-              flat
-            />
-          </ControlGroup>
-
-          <ControlGroup title="Size" bordered={false}>
-            <FilterForm
-              scope="browse"
-              state={registryView}
-              onChange={handleRegistryChange}
-              includeOnly={['min_area_m2', 'min_estate_area', 'min_usable_area']}
-              labels={{
-                min_area_m2: 'Area',
-                min_estate_area: 'Lot area',
-                min_usable_area: 'Usable area',
-              }}
-              flat
-            />
-          </ControlGroup>
-
           <ControlGroup title="Building" bordered={false}>
             <FilterForm
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
               includeOnly={[
-                'furnished', 'ownership', 'condition_match', 'building_material',
+                'furnished', 'ownership',
                 'building_condition_level_min', 'apartment_condition_level_min',
               ]}
               labels={{
                 furnished: 'Furnished',
                 ownership: 'Ownership',
-                condition_match: 'Condition (Stav objektu)',
-                building_material: 'Building material',
                 building_condition_level_min: 'Min building condition (1–5)',
                 apartment_condition_level_min: 'Min apartment condition (1–5)',
               }}
@@ -306,19 +319,17 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
           title="Market signals"
           active={bandActive(filters, SIGNALS_KEYS)}
         >
-          <ControlGroup title="Status & velocity" bordered={false}>
+          <ControlGroup title="Velocity" bordered={false}>
             <FilterForm
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
               includeOnly={[
-                'status',
                 'first_seen_min_days',
                 'last_seen_min_days',
                 'tom_days_min',
               ]}
               labels={{
-                status: 'Status',
                 first_seen_min_days: 'First seen (days ago)',
                 last_seen_min_days: 'Last seen (days ago)',
                 tom_days_min: 'Turned in (days)',

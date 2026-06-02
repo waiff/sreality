@@ -18,8 +18,8 @@
  *   - plain `string` / `int` / `float` / `bool`          → `.eq(col, value)`
  *
  * Irregular filter shapes (status enum → boolean column predicate,
- * days-ago → ISO timestamp, building_material → 1-to-many enum
- * expansion, districts → multi-column ILIKE OR predicate, tags →
+ * days-ago → ISO timestamp, building_material → many-buckets-to-many
+ * building_type expansion, districts → multi-column ILIKE OR predicate, tags →
  * not yet wired in PostgREST) stay hand-coded in `queries.ts` and
  * are listed in HAND_CODED_BROWSE_FILTERS so the dispatcher skips
  * them. The drift test (`registryQueryBuilder.test.ts`) asserts

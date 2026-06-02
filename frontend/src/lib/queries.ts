@@ -177,7 +177,7 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
     };
     r = r.or(f.districts.map(chipClause).join(','));
   }
-  if (f.buildingMaterial != null) {
+  if (f.buildingMaterial.length) {
     r = r.in('building_type', buildingMaterialToValues(f.buildingMaterial));
   }
   const bbox = effectiveBbox(f);
@@ -512,7 +512,7 @@ export const fetchBrowseStats = async (
   const triToBool = (t: typeof f.hasBalcony): boolean | null =>
     t === 'any' ? null : t === 'yes';
 
-  const buildingTypeArray = f.buildingMaterial
+  const buildingTypeArray = f.buildingMaterial.length
     ? [...buildingMaterialToValues(f.buildingMaterial)]
     : null;
 

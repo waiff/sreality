@@ -1025,7 +1025,7 @@ export interface WatchdogFilterSpec {
   // matching the Browse sidebar filter set. The Watchdog form
   // surfaces them in a later PR — until then, API callers can set
   // them directly through POST/PUT /notifications/subscriptions.
-  building_material: 'cihla' | 'panel' | 'smisena' | 'ostatni' | null;
+  building_material: Array<'cihla' | 'panel' | 'smisena' | 'ostatni'> | null;
   min_garden_area: number | null;
   max_garden_area: number | null;
   tags: number[] | null;
@@ -1090,7 +1090,7 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   price_drop_count_min: null,
   price_rise_count_min: null,
   max_price_drop_pct_min: null,
-  building_material: null,
+  building_material: [],
   min_garden_area: null,
   max_garden_area: null,
   tags: null,
