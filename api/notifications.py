@@ -58,12 +58,15 @@ class DistrictChip(BaseModel):
 
     Mirrors the frontend's `DistrictChip` (`frontend/src/lib/filters.ts`).
     `name` is the primary phrase to match (ILIKE substring across
-    `district` and `locality`); `context` is the parent municipality
-    from Mapy.cz's `regionalStructure` that narrows the match when set.
+    `district` / `locality` / `okres` / `region`); `context` is the parent
+    municipality from Mapy.cz's `regionalStructure` that narrows the match
+    when set; `excluded` flips the chip from an INCLUDE to an EXCLUDE filter
+    (NOT-ed in the matcher WHERE) so an alert can subtract a locality.
     """
 
     name: str
     context: str | None = None
+    excluded: bool = False
 
 
 class WatchdogFilterSpec(BaseModel):
@@ -260,13 +263,15 @@ def _build_match_clauses(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
-        # Same per-chip predicate as `browse_stats` (migration 141):
+        # Same per-chip predicate as `browse_stats` (migration 146):
         #   (district/locality/okres/region ILIKE *name*)
         #   AND (no context, OR district/locality/okres/region ILIKE *context*)
-        # OR'd across chips. Matching the geo-derived okres/region too lets a
-        # kraj/okres pick resolve. Keeps Browse and Watchdog in lockstep on
+        # Matching the geo-derived okres/region too lets a kraj/okres pick
+        # resolve. INCLUDE chips are OR'd (match any); EXCLUDE chips are NOT-ed
+        # (subtract their matches). Keeps Browse and Watchdog in lockstep on
         # what a District chip means.
-        chip_clauses: list[str] = []
+        inc_clauses: list[str] = []
+        exc_clauses: list[str] = []
         for i, chip in enumerate(spec.districts):
             # Wildcards live in the parameter VALUE, not as inline SQL '%'
             # literals: psycopg parses the query string for placeholders and
@@ -291,10 +296,14 @@ def _build_match_clauses(
                     f"OR l.okres ILIKE %({c_key})s "
                     f"OR l.region ILIKE %({c_key})s)"
                 )
-                chip_clauses.append(f"({name_half} AND {ctx_half})")
+                clause = f"({name_half} AND {ctx_half})"
             else:
-                chip_clauses.append(name_half)
-        where.append("(" + " OR ".join(chip_clauses) + ")")
+                clause = name_half
+            (exc_clauses if chip.excluded else inc_clauses).append(clause)
+        if inc_clauses:
+            where.append("(" + " OR ".join(inc_clauses) + ")")
+        if exc_clauses:
+            where.append("NOT (" + " OR ".join(exc_clauses) + ")")
 
     if spec.min_price_czk is not None:
         where.append("l.price_czk >= %(min_price_czk)s")

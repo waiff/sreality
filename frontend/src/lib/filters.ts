@@ -78,12 +78,17 @@ export interface NearCityProximity {
  * "Edvarda Beneše" doesn't drag in the Olomouc + Hradec Králové
  * streets of the same name. Picks at the municipality / okres / kraj
  * level (or coarser) leave context null and behave exactly like the
- * pre-context chips. The same shape is sent to the watchdog matcher
+ * pre-context chips. `excluded` flips the chip from an INCLUDE to an
+ * EXCLUDE filter: an excluded chip removes its matches from the cohort
+ * instead of requiring them (NOT-ed in the query, red in the UI).
+ * Absent / false = the legacy include behaviour. The same shape is
+ * sent to the watchdog matcher
  * (`api/notifications.WatchdogFilterSpec.districts`) so Browse and
  * Watchdog stay aligned via the shared filter registry. */
 export interface DistrictChip {
   name: string;
   context: string | null;
+  excluded?: boolean;
 }
 
 export interface ListingFilters {
@@ -313,22 +318,31 @@ const splitCsv = (s: string | null): string[] =>
 
 const joinCsv = (xs: string[]): string => xs.map(encodeURIComponent).join(',');
 
-/* Parse the parallel `districts` (names) + `districts_ctx` (contexts)
- * query params into a `DistrictChip[]`. Empty-string entries in the
- * contexts CSV stand for "no context for this chip" — that's how we
- * keep the URL clean when only some chips carry a parent. Missing
- * `districts_ctx` entirely means every chip has `context: null`,
- * matching the legacy URL shape (`?districts=Praha`). */
+/* Parse the parallel `districts` (names) + `districts_ctx` (contexts) +
+ * `districts_excl` (exclude flags) query params into a `DistrictChip[]`.
+ * Empty-string entries in the contexts CSV stand for "no context for
+ * this chip" — that's how we keep the URL clean when only some chips
+ * carry a parent. Missing `districts_ctx` entirely means every chip has
+ * `context: null`, matching the legacy URL shape (`?districts=Praha`).
+ * `districts_excl` is a parallel CSV of `1`/`0`; absent means every chip
+ * is an include (legacy), so the flag only widens the schema. */
 const parseDistrictChips = (
   namesRaw: string | null,
   ctxRaw: string | null,
+  exclRaw: string | null,
 ): DistrictChip[] => {
   const names = splitCsv(namesRaw);
   if (names.length === 0) return [];
   const ctxs = splitCsv(ctxRaw);
+  const excls = splitCsv(exclRaw);
   return names.map((name, i) => {
     const ctx = ctxs[i];
-    return { name, context: ctx == null || ctx === '' ? null : ctx };
+    const chip: DistrictChip = {
+      name,
+      context: ctx == null || ctx === '' ? null : ctx,
+    };
+    if (excls[i] === '1') chip.excluded = true;
+    return chip;
   });
 };
 
@@ -387,7 +401,11 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   return {
     categoryMain: enumOr(sp.get('cat'), CATEGORY_MAIN_VALUES, 'byt'),
     categoryType: enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
-    districts: parseDistrictChips(sp.get('districts'), sp.get('districts_ctx')),
+    districts: parseDistrictChips(
+      sp.get('districts'),
+      sp.get('districts_ctx'),
+      sp.get('districts_excl'),
+    ),
     dispositions,
     priceMin,
     priceMax,
@@ -559,6 +577,14 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
         joinCsv(f.districts.map((d) => d.context ?? '')),
       );
     }
+    /* Same discipline for the exclude flags: only emit when at least one
+     * chip is excluded, so an all-include filter's URL is unchanged. */
+    if (f.districts.some((d) => d.excluded)) {
+      sp.set(
+        'districts_excl',
+        joinCsv(f.districts.map((d) => (d.excluded ? '1' : '0'))),
+      );
+    }
   }
   if (f.dispositions.length) sp.set('disposition', f.dispositions.join(','));
   if (f.priceMin != null || f.priceMax != null) {
@@ -679,9 +705,12 @@ export const regionKeyFromFilters = (f: ListingFilters): string => {
  * as context so it can say "in Praha" rather than "(filtered cohort)". */
 export const regionLabelFromFilters = (f: ListingFilters): string => {
   const base = categoryHeading(f);
-  if (f.districts.length) {
-    const shown = f.districts.slice(0, 3).map((d) => d.name).join(', ');
-    const extra = f.districts.length > 3 ? ` +${f.districts.length - 3}` : '';
+  /* Only INCLUDE chips belong in an "in X" cohort label — an excluded
+   * district is a subtraction, not a place the cohort is "in". */
+  const inc = f.districts.filter((d) => !d.excluded);
+  if (inc.length) {
+    const shown = inc.slice(0, 3).map((d) => d.name).join(', ');
+    const extra = inc.length > 3 ? ` +${inc.length - 3}` : '';
     return `${base} in ${shown}${extra}`;
   }
   if (f.locationMode === 'center_radius' && f.centerRadius) {
@@ -706,7 +735,10 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
   if (f.districts.length) {
     const shown = f.districts
       .slice(0, 3)
-      .map((d) => (d.context ? `${d.name} · ${d.context}` : d.name))
+      .map((d) => {
+        const base = d.context ? `${d.name} · ${d.context}` : d.name;
+        return d.excluded ? `−${base}` : base;
+      })
       .join(', ');
     const extra = f.districts.length > 3 ? ` +${f.districts.length - 3}` : '';
     bits.push(`in ${shown}${extra}`);
@@ -736,7 +768,10 @@ export const watchdogNameSuggestion = (f: ListingFilters): string => {
   }
   if (f.districts.length) {
     parts.push(
-      f.districts.slice(0, 3).map((d) => d.name).join(', ')
+      f.districts
+        .slice(0, 3)
+        .map((d) => (d.excluded ? `−${d.name}` : d.name))
+        .join(', ')
       + (f.districts.length > 3 ? '…' : ''),
     );
   }

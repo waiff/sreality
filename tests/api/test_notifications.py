@@ -200,6 +200,43 @@ def test_build_clauses_district_no_inline_percent_literals() -> None:
     assert params["district_ctx_0"] == "%Vysočina%"
 
 
+def test_build_clauses_district_excluded_chip_is_negated() -> None:
+    """An excluded chip becomes a NOT (...) group that subtracts its
+    matches. With every chip excluded there is no positive include group —
+    only the negation. Mirrors Browse's `not.or(...)` and browse_stats'
+    EXCLUDE gate (migration 146)."""
+    spec = WatchdogFilterSpec(
+        districts=[{"name": "Praha", "context": None, "excluded": True}],
+    )
+    where, params = _build_match_clauses(spec)
+    district_clauses = [w for w in where if "district_name_0" in w]
+    assert len(district_clauses) == 1
+    assert district_clauses[0].startswith("NOT (")
+    assert "l.district ILIKE %(district_name_0)s" in district_clauses[0]
+    assert params["district_name_0"] == "%Praha%"
+    assert "'%'" not in district_clauses[0]  # wildcards stay in the value
+
+
+def test_build_clauses_district_mixed_include_exclude() -> None:
+    """Include + exclude chips emit two WHERE entries — an OR'd include
+    group AND a NOT(...) exclude group — keeping the matcher in lockstep
+    with Browse (queries.ts) and browse_stats (migration 146). Params are
+    keyed by original chip position regardless of the split."""
+    spec = WatchdogFilterSpec(
+        districts=[
+            {"name": "Praha", "context": None},
+            {"name": "Modřany", "context": None, "excluded": True},
+        ],
+    )
+    where, params = _build_match_clauses(spec)
+    inc = next(w for w in where if "district_name_0" in w)
+    exc = next(w for w in where if "district_name_1" in w)
+    assert not inc.startswith("NOT (")
+    assert exc.startswith("NOT (")
+    assert params["district_name_0"] == "%Praha%"
+    assert params["district_name_1"] == "%Modřany%"
+
+
 def test_filter_spec_lifts_legacy_string_districts() -> None:
     """Pre-migration-070 request bodies passing `districts: ["Praha"]`
     still validate — the field_validator lifts each string to a

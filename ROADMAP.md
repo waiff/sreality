@@ -6,6 +6,24 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Exclude-a-location district filter (Browse + Watchdog)
+
+- A district chip can now be flipped from INCLUDE to **EXCLUDE** via a per-chip
+  `−`/`+` toggle in `LocationTypeahead` — the chip turns red (brick token) with a
+  leading minus and **subtracts** its matches from the cohort instead of requiring
+  them. `DistrictChip` gained an optional `excluded` flag
+  (`frontend/src/lib/filters.ts` + the Pydantic mirror in `api/notifications.py`).
+- **Consistency (rule 16)** across all four sites that encode "what a district chip
+  means": Browse Map/Table/Cards (`queries.ts` builds
+  `and(or(<include>), not.or(<exclude>))`), Browse Stats (`browse_stats_properties`,
+  migration 146 — new `districts_excluded_filter boolean[]` param, include/exclude
+  gates), and the Watchdog matcher (`_build_match_clauses` appends a `NOT (...)`
+  group). The same `LocationTypeahead` renders in both Browse and Watchdog, and the
+  flag round-trips through the URL (`districts_excl`) and the watchdog `filter_spec`
+  JSONB with no migration on `notification_subscriptions`.
+- Verified live: Praha include (10,691) + Praha exclude (42,190) = 52,881 (all
+  byt/prodej) — an exact partition.
+
 ### 2026-06: Fast city-proximity filters + Min Population fix
 
 - **Bug:** the Min Population filter returned **zero** results. It routed through

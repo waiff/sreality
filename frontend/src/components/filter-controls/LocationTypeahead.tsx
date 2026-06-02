@@ -10,18 +10,20 @@
  *   value: DistrictChip[] | null  — selected chips
  *   onChange(next)                — null normalises to no constraint
  *
- * Each chip is `{name, context}`. On pick, the suggestion's `name`
- * field becomes the chip's `name`; `deriveContext` walks
+ * Each chip is `{name, context, excluded?}`. On pick, the suggestion's
+ * `name` field becomes the chip's `name`; `deriveContext` walks
  * `regionalStructure` for the nearest `regional.municipality` and
  * sets that as `context` (or null for picks already at the
  * municipality / region / country level). The downstream filter
- * (queries.ts applyFilters + browse_stats migration 074 + the
+ * (queries.ts applyFilters + browse_stats migration 146 + the
  * Watchdog matcher in api/notifications.py) matches each chip as
- *   (district ILIKE *name* OR locality ILIKE *name*)
- *   AND (context IS NULL OR district ILIKE *context* OR locality ILIKE *context*)
- * OR'd across chips. This is the registry-aligned widget for both
- * Browse and Watchdog — the same component renders in both surfaces
- * through `customWidgets={{districts: LocationTypeahead}}`.
+ *   (district/locality/okres/region ILIKE *name*)
+ *   AND (context IS NULL OR district/locality/okres/region ILIKE *context*)
+ * INCLUDE chips OR'd (match any), then AND NOT-(OR of EXCLUDE chips). The
+ * per-chip `−`/`+` button toggles `excluded` (red chip = subtract this
+ * locality). This is the registry-aligned widget for both Browse and
+ * Watchdog — the same component renders in both surfaces through
+ * `customWidgets={{districts: LocationTypeahead}}`.
  *
  * onPick (independent of the chip filter) fires once per pick so the
  * Browse map can fly the viewport to the picked place's centre —
@@ -142,6 +144,17 @@ export function LocationTypeahead({
     emit(selected.filter((c) => !sameChip(c, chip)));
   };
 
+  /* Flip a chip between INCLUDE and EXCLUDE. Identity is name+context
+   * (sameChip), so toggling never duplicates or drops the chip — it only
+   * subtracts/adds its matches from the cohort. */
+  const toggleExclude = (chip: DistrictChip) => {
+    emit(
+      selected.map((c) =>
+        sameChip(c, chip) ? { ...c, excluded: !(c.excluded === true) } : c,
+      ),
+    );
+  };
+
   const isLoading = suggestQ.isFetching && debounced.length >= MIN_QUERY_LEN;
   const tooShort = debounced.length > 0 && debounced.length < MIN_QUERY_LEN;
 
@@ -187,22 +200,38 @@ export function LocationTypeahead({
               ? `${chip.name} · ${chip.context}`
               : chip.name;
             const key = `${chip.name}::${chip.context ?? ''}`;
+            const excluded = chip.excluded === true;
+            /* Excluded chips read as a negative filter: brick (the
+             * inactive/failures semantic colour) + a leading minus. The
+             * −/+ button toggles the mode; × removes the chip. */
+            const palette = excluded
+              ? 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
+              : 'bg-[var(--color-copper-soft)] text-[var(--color-copper)]';
             return (
               <li key={key}>
-                <button
-                  type="button"
-                  onClick={() => remove(chip)}
-                  className="group inline-flex items-center gap-1.5 px-2 py-1 text-xs rounded-[var(--radius-sm)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
-                  aria-label={`Remove ${label}`}
+                <span
+                  className={`inline-flex items-center gap-1 pl-1 pr-1 py-0.5 text-xs rounded-[var(--radius-sm)] ${palette}`}
                 >
-                  <span>{label}</span>
-                  <span
-                    className="text-[var(--color-copper)]/60 group-hover:text-[var(--color-copper)]"
-                    aria-hidden
+                  <button
+                    type="button"
+                    onClick={() => toggleExclude(chip)}
+                    className="inline-flex h-4 w-4 items-center justify-center rounded-[var(--radius-xs)] font-semibold leading-none opacity-70 hover:opacity-100 transition-opacity"
+                    aria-label={excluded ? `Include ${label}` : `Exclude ${label}`}
+                    title={excluded ? 'Click to include' : 'Click to exclude'}
+                  >
+                    {excluded ? '+' : '−'}
+                  </button>
+                  <span className="px-0.5">{excluded ? `− ${label}` : label}</span>
+                  <button
+                    type="button"
+                    onClick={() => remove(chip)}
+                    className="inline-flex h-4 w-4 items-center justify-center rounded-[var(--radius-xs)] leading-none opacity-60 hover:opacity-100 transition-opacity"
+                    aria-label={`Remove ${label}`}
+                    title="Remove"
                   >
                     ×
-                  </span>
-                </button>
+                  </button>
+                </span>
               </li>
             );
           })}
