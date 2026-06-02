@@ -254,3 +254,31 @@ def test_missing_api_key_raises():
             system="", messages=[Message(role="user", content=[TextBlock(text="x")])],
             tools=[], model="claude-sonnet-4-5",
         )
+
+
+# --- pricing / billing-gap guards -----------------------------------------
+
+def test_every_app_settings_model_is_priced():
+    """Each model an app_settings.*_model row can name must resolve to a
+    price; an unmapped model silently records cost_usd=0 (the billing gap
+    this guards against). Keep in sync with the production defaults."""
+    p = AnthropicProvider()
+    for model in (
+        "claude-haiku-4-5",
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-5",
+        "claude-opus-4-7",
+    ):
+        assert p.price_for(model) is not None, f"{model} not in PRICES"
+
+
+def test_price_for_strips_dated_snapshot_suffix():
+    p = AnthropicProvider()
+    dated = p.price_for("claude-haiku-4-5-20251001")
+    assert dated is not None
+    assert dated == p.price_for("claude-haiku-4-5")
+
+
+def test_price_for_unknown_model_is_none():
+    assert AnthropicProvider().price_for("gpt-9") is None
