@@ -384,7 +384,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
               state={registryView}
               onChange={handleRegistryChange}
               includeOnly={[
-                'city_index_rules',
                 'min_city_population',
                 'max_city_population',
                 'near_pop_5km_min',
@@ -397,7 +396,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
                 'near_overall_15km_min',
               ]}
               labels={{
-                city_index_rules: 'Rules (city must satisfy all)',
                 min_city_population: 'Min population (own city)',
                 max_city_population: 'Max population (own city)',
                 near_pop_5km_min: 'Pop ≥ N within 5 km',
@@ -413,6 +411,25 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
               flat
             />
             <CityPopulationHint />
+          </ControlGroup>
+
+          {/* Legacy flexible filter — kept for the ~30 indexes the fast
+              predefined filters above don't cover (bezpečnost, lékárny,
+              školy, …). Matches inside the curated-city footprint via the
+              city-quality RPC (slower than the precomputed columns above). */}
+          <ControlGroup title="Advanced city-quality rules" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['city_index_rules']}
+              labels={{
+                city_index_rules:
+                  'Curated city must satisfy all rules (any of ~30 indexes)',
+              }}
+              customWidgets={customWidgets}
+              flat
+            />
           </ControlGroup>
         </CollapsibleGroup>
       </div>
