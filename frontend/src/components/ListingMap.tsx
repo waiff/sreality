@@ -384,6 +384,14 @@ export default function ListingMap({
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const [ready, setReady] = useState(false);
+  /* City-overlay min-value threshold. When set, cities whose selected
+   * color-by-index reading is below it render grey ("off"). Purely a map
+   * visual, so it lives here rather than in URL/Browse state. Resets when
+   * the color-by index changes — each index has its own scale. */
+  const [colorByMin, setColorByMin] = useState<number | null>(null);
+  useEffect(() => {
+    setColorByMin(null);
+  }, [colorByIndex?.index_name]);
   /* The map fits to results exactly once — the first time a non-empty
    * row set arrives after the map is ready. Subsequent filter changes
    * never re-zoom, so the operator stays anchored on whatever area
@@ -968,8 +976,12 @@ export default function ListingMap({
         }
         const v = idxVals.get(c.city_id);
         const hasReading = typeof v === 'number' && Number.isFinite(v);
-        const value = hasReading ? (v as number) : -1;
-        const valueLabel = colorByIndex && hasReading ? value.toFixed(1) : '';
+        /* Below the operator's min threshold → treat as "no reading" so
+         * it falls onto the existing grey path (grey fill, no label). */
+        const passesMin =
+          hasReading && (colorByMin == null || (v as number) >= colorByMin);
+        const value = passesMin ? (v as number) : -1;
+        const valueLabel = colorByIndex && passesMin ? value.toFixed(1) : '';
         return {
           type: 'Feature',
           id: c.city_id,
@@ -1003,6 +1015,7 @@ export default function ListingMap({
     cityPolygons,
     showCities,
     colorByIndex,
+    colorByMin,
     cityIndexValues,
     cityIndexValuesAll,
     cityIndexDefinitions,
@@ -1133,6 +1146,8 @@ export default function ListingMap({
           colorByIndex={colorByIndex ?? null}
           cityIndexDefinitions={cityIndexDefinitions ?? []}
           onColorByIndexChange={onColorByIndexChange}
+          colorByMin={colorByMin}
+          onColorByMinChange={setColorByMin}
           cityCount={cities.length}
         />
       )}
@@ -1239,6 +1254,8 @@ function CityMapControls({
   colorByIndex,
   cityIndexDefinitions,
   onColorByIndexChange,
+  colorByMin,
+  onColorByMinChange,
   cityCount,
 }: {
   showCities: boolean;
@@ -1246,6 +1263,8 @@ function CityMapControls({
   colorByIndex: CityIndexDefinition | null;
   cityIndexDefinitions: ReadonlyArray<CityIndexDefinition>;
   onColorByIndexChange?: (indexName: string | null) => void;
+  colorByMin: number | null;
+  onColorByMinChange?: (next: number | null) => void;
   cityCount: number;
 }) {
   return (
@@ -1294,6 +1313,27 @@ function CityMapControls({
             <span>{colorByIndex.scale_min}</span>
             <span className="text-[var(--color-ink-2)]">{indexLabel(colorByIndex)}</span>
             <span>{colorByIndex.scale_max}</span>
+          </div>
+          <div className="flex items-center gap-1.5 pt-0.5">
+            <span className="text-[0.65rem] text-[var(--color-ink-2)]">Min:</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              step="any"
+              placeholder="—"
+              value={colorByMin ?? ''}
+              onChange={(e) => {
+                const raw = e.target.value.trim();
+                const n = Number(raw);
+                onColorByMinChange?.(
+                  raw === '' || Number.isNaN(n) ? null : n,
+                );
+              }}
+              className="w-16 text-[0.7rem] bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded px-1 py-0.5 tabular-nums"
+            />
+            <span className="text-[0.6rem] text-[var(--color-ink-3)]">
+              below → grey
+            </span>
           </div>
         </div>
       )}
