@@ -140,33 +140,30 @@ def login_via_browser(
         try:
             page.goto(_LOGIN_URL, wait_until="domcontentloaded")
             _dismiss_consent(page)
-            # Seznam's login page holds MANY forms (#veto-email, #veto-password,
-            # #recover-*), several with a disabled `name=username` field — so a
-            # bare selector hits a disabled one. Scope to the active form / the
-            # enabled field.
+            # Seznam's login page holds MANY hidden template forms; the ACTIVE
+            # one is `form.login` and its fields are ID-based with NO name attr
+            # (`#login-username` / `#login-password`) — the `name=username`
+            # fields are the disabled templates. Two-step: email → Pokračovat →
+            # password → Přihlásit (same form, password revealed in step 2).
             _fill_editable(
                 page,
-                ['#veto-email input[name="username"]',
-                 'input[name="username"]:not([disabled])'],
+                ['#login-username', 'form.login input[autocomplete="username"]'],
                 email, timeout_ms,
             )
             _click_first(
                 page,
-                ['#veto-email button[type="submit"]',
-                 'button:has-text("Pokračovat")',
-                 'button[type="submit"]:visible'],
+                ['form.login button[type="submit"]',
+                 'button:has-text("Pokračovat")'],
             )
             _fill_editable(
                 page,
-                ['#veto-password input[type="password"]',
-                 'input[type="password"]:not([disabled])'],
+                ['#login-password', 'form.login input[type="password"]'],
                 password, timeout_ms,
             )
             _click_first(
                 page,
-                ['#veto-password button[type="submit"]',
-                 'button:has-text("Přihlásit")',
-                 'button[type="submit"]:visible'],
+                ['form.login button[type="submit"]',
+                 'button:has-text("Přihlásit")'],
             )
             # Land back on sreality with the session set.
             page.wait_for_load_state("networkidle", timeout=timeout_ms)
