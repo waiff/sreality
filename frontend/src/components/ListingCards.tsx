@@ -33,6 +33,12 @@ interface Props {
   onSort: (next: SortSpec) => void;
   onClearFilters: () => void;
   onClearBounds: () => void;
+  /* Dedup merge mode: when on, cards show a selection checkbox and a click
+   * toggles selection instead of navigating. selected holds the picked
+   * property_ids. */
+  mergeMode: boolean;
+  selectedPropertyIds: ReadonlySet<number>;
+  onToggleSelect: (propertyId: number) => void;
 }
 
 export default function ListingCards({
@@ -49,6 +55,9 @@ export default function ListingCards({
   onSort,
   onClearFilters,
   onClearBounds,
+  mergeMode,
+  selectedPropertyIds,
+  onToggleSelect,
 }: Props) {
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && rows != null && rows.length === 0;
@@ -94,6 +103,9 @@ export default function ListingCards({
                   r={r}
                   hovered={hoveredIds.has(r.sreality_id)}
                   onHover={onHover}
+                  mergeMode={mergeMode}
+                  selected={selectedPropertyIds.has(r.property_id)}
+                  onToggleSelect={onToggleSelect}
                 />
               </li>
             ))}
@@ -112,10 +124,16 @@ function Card({
   r,
   hovered,
   onHover,
+  mergeMode,
+  selected,
+  onToggleSelect,
 }: {
   r: CardRow;
   hovered: boolean;
   onHover: (ids: ReadonlyArray<number> | null) => void;
+  mergeMode: boolean;
+  selected: boolean;
+  onToggleSelect: (propertyId: number) => void;
 }) {
   const title = formatTitle(r);
   const place = [r.locality, r.district].filter(Boolean).join(', ');
@@ -127,28 +145,49 @@ function Card({
    * rather than archived). Surface drops to --color-inset, matching
    * "filed away" in the paper / archive language; image gets a
    * gentle desaturation so it still reads as a photo. */
-  const surface = hovered
-    ? 'bg-[var(--color-paper-2)] border-[var(--color-copper)]'
-    : inactive
-      ? 'bg-[var(--color-inset)] border-[var(--color-rule-soft)] hover:border-[var(--color-rule)]'
-      : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
+  const surface = selected
+    ? 'bg-[var(--color-paper-2)] border-[var(--color-copper)] ring-1 ring-[var(--color-copper)]'
+    : hovered
+      ? 'bg-[var(--color-paper-2)] border-[var(--color-copper)]'
+      : inactive
+        ? 'bg-[var(--color-inset)] border-[var(--color-rule-soft)] hover:border-[var(--color-rule)]'
+        : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
   const titleColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   const priceColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   const imageFilter = inactive
     ? 'saturate-[0.55] brightness-[0.95]'
     : '';
 
-  return (
-    <Link
-      to={`/listing/${r.sreality_id}`}
-      onMouseEnter={() => onHover([r.sreality_id])}
-      onMouseLeave={() => onHover(null)}
-      className={[
-        'group block rounded-[var(--radius-sm)] border transition-colors overflow-hidden',
-        surface,
-      ].join(' ')}
-    >
+  const wrapperClass = [
+    'group block rounded-[var(--radius-sm)] border transition-colors overflow-hidden',
+    mergeMode ? 'cursor-pointer' : '',
+    surface,
+  ].join(' ');
+
+  // The card body, rendered once and wrapped below by either a <Link> (normal)
+  // or a selectable <div> (merge mode). Building it as a value — not a nested
+  // component — keeps ImageCarousel's internal state across re-renders.
+  const body = (
+    <>
       <ImageCarousel urls={r.image_urls} imgClassName={imageFilter} hoverZoom fadeChevrons>
+        {mergeMode && (
+          <div className="absolute top-1 left-1 z-10">
+            <span
+              className={[
+                'flex items-center justify-center w-6 h-6 rounded-[var(--radius-xs)] border',
+                selected
+                  ? 'bg-[var(--color-copper)] border-[var(--color-copper)] text-white'
+                  : 'bg-[var(--color-paper)]/90 border-[var(--color-rule)] text-transparent',
+              ].join(' ')}
+              aria-label={selected ? 'Selected' : 'Not selected'}
+            >
+              <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor"
+                strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M2.5 6.2 5 8.5l4.5-5" />
+              </svg>
+            </span>
+          </div>
+        )}
         {/* Metadata margin: four file-tab badges stacked down the
           * right edge of the photo. Status leads (sage / brick), the
           * two date badges sit muted in the middle, the copper TOM
@@ -221,6 +260,37 @@ function Card({
           </p>
         )}
       </div>
+    </>
+  );
+
+  // In merge mode the card is a toggle, not a link — clicking selects it for
+  // the dedup merge instead of navigating to the detail page.
+  if (mergeMode) {
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onToggleSelect(r.property_id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggleSelect(r.property_id);
+          }
+        }}
+        className={wrapperClass}
+      >
+        {body}
+      </div>
+    );
+  }
+  return (
+    <Link
+      to={`/listing/${r.sreality_id}`}
+      onMouseEnter={() => onHover([r.sreality_id])}
+      onMouseLeave={() => onHover(null)}
+      className={wrapperClass}
+    >
+      {body}
     </Link>
   );
 }
