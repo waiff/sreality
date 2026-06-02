@@ -191,7 +191,7 @@ describe('hand-coded skip set', () => {
     const r = new _Recorder();
     applyRegistryFilters(r, {
       ...DEFAULT_FILTERS,
-      buildingMaterial: 'cihla',
+      buildingMaterial: ['cihla'],
     });
     // building_material → IN over building_type values is handled in
     // queries.ts:applyFilters, NOT here.

@@ -709,20 +709,21 @@ def _build_registry() -> dict[str, FilterDef]:
         ),
         FilterDef(
             id="building_material",
-            type=FilterType.STRING,
+            type=FilterType.STRING_LIST,
             pg_column="building_type",  # mapped via Browse's 4-bucket grouping
             default=None,
             description=(
-                "Operator-friendly building material bucket. The four "
-                "values (cihla / panel / smisena / ostatni) map onto "
-                "the granular building_type column; `ostatni` expands "
-                "to skelet / drevo / kamen / montovana / "
-                "nizkoenergeticka under the hood."
+                "Operator-friendly building material buckets (multi-select). "
+                "The four values (cihla / panel / smisena / ostatni) map onto "
+                "the granular building_type column; a listing matches if its "
+                "building_type is in the union of the selected buckets. "
+                "`ostatni` expands to skelet / drevo / kamen / montovana / "
+                "nizkoenergeticka under the hood. Empty list / null = no "
+                "constraint."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.SINGLE_SELECT,
+            ui_control=UiControl.MULTISELECT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
-            constraints={"enum": [o.value for o in BUILDING_MATERIAL_OPTIONS]},
             enum_values=BUILDING_MATERIAL_OPTIONS,
         ),
         FilterDef(
@@ -916,7 +917,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "Inclusive."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 100_000, "step": 500},
             unit="CZK",
@@ -933,7 +934,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "Inclusive."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 100_000, "step": 500},
             unit="CZK",
@@ -952,7 +953,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "unit price is the comparable metric."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 500_000, "step": 1_000},
             unit="CZK/m²",
@@ -968,7 +969,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "`min_price_per_m2`. Inclusive."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 500_000, "step": 1_000},
             unit="CZK/m²",
@@ -1021,7 +1022,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "where there is no target to band around."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 0, "max": 300, "step": 5},
             unit="m²",
@@ -1037,7 +1038,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "`min_area_m2`."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 0, "max": 300, "step": 5},
             unit="m²",
@@ -1054,7 +1055,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "apartments usually have null estate_area."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 5000, "step": 50},
             unit="m²",
@@ -1067,7 +1068,7 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description="Upper bound on plot area in m². See `min_estate_area`.",
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 5000, "step": 50},
             unit="m²",
@@ -1085,7 +1086,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "`area_m2` for the same listing."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 500, "step": 5},
             unit="m²",
@@ -1098,7 +1099,7 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description="Upper bound on usable_area in m². See `min_usable_area`.",
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_SLIDER,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=_ALL_AGENDAS,
             constraints={"min": 0, "max": 500, "step": 5},
             unit="m²",

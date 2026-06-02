@@ -306,23 +306,23 @@ function FilterRow({
   const onChange = (v: unknown) => emit([{ id: def.id, value: v }]);
 
   // When paired with a max-side, render the pair as either:
-  //   - a dual-thumb RangeSlider when the registry's constraints
-  //     declare a complete min + max + step bounds set (typical for
-  //     bounded filters like price / area / estate_area), or
-  //   - paired RangeInputs (open-ended) when bounds aren't complete.
+  //   - a dual-thumb RangeSlider when the registry declares a complete
+  //     min + max + step bounds set AND its ui_control is `range_slider`
+  //     (the default for bounded filters like garden area / yield), or
+  //   - paired RangeInputs (open-ended number fields) when the filter
+  //     opts into `range_inputs` OR its bounds aren't complete.
   //
-  // The registry's `ui_control` choice is a preference, not a hard
-  // override — adding bounds to a `range_inputs` entry auto-upgrades
-  // its UI to a slider without touching this dispatcher. That matches
-  // the Browse sidebar's existing slider widget without forcing every
-  // surface to opt in by hand.
+  // `ui_control` is authoritative here: a filter can carry bounds (still
+  // useful as validation/agent metadata) yet ask for plain inputs by
+  // declaring `range_inputs` — that's how price / price-per-m² / area /
+  // estate / usable render as inputs without dropping their bounds.
   if (maxDef) {
     const c = def.constraints ?? {};
     const hasFullBounds =
       typeof c.min === 'number' &&
       typeof c.max === 'number' &&
       typeof c.step === 'number';
-    if (hasFullBounds) {
+    if (hasFullBounds && def.ui_control !== 'range_inputs') {
       return (
         <Section label={label}>
           <RangeSlider

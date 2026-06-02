@@ -131,7 +131,7 @@ export interface ListingFilters {
   portals: string[];
   conditionMatch: string[];
   categorySubCb: number | null;
-  buildingMaterial: BuildingMaterial | null;
+  buildingMaterial: BuildingMaterial[];
   estateAreaMin: number | null;
   estateAreaMax: number | null;
   usableAreaMin: number | null;
@@ -212,7 +212,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   portals: [],
   conditionMatch: [],
   categorySubCb: null,
-  buildingMaterial: null,
+  buildingMaterial: [],
   estateAreaMin: null,
   estateAreaMax: null,
   usableAreaMin: null,
@@ -250,7 +250,7 @@ export const BUILDING_MATERIAL_OTHER_VALUES = [
   'skelet', 'drevo', 'kamen', 'montovana', 'nizkoenergeticka',
 ] as const;
 
-export const buildingMaterialToValues = (
+const buildingMaterialBucketToValues = (
   m: BuildingMaterial,
 ): readonly string[] => {
   if (m === 'cihla')   return ['cihla'];
@@ -258,6 +258,15 @@ export const buildingMaterialToValues = (
   if (m === 'smisena') return ['smisena'];
   return BUILDING_MATERIAL_OTHER_VALUES;
 };
+
+/* Expand a multi-select of operator-friendly buckets into the union of
+ * granular `building_type` values to match against (deduped). Empty in,
+ * empty out — the caller skips the predicate entirely in that case. */
+export const buildingMaterialToValues = (
+  materials: readonly BuildingMaterial[],
+): readonly string[] => [
+  ...new Set(materials.flatMap((m) => buildingMaterialBucketToValues(m))),
+];
 
 const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
   '1+kk', '1+1', '2+kk', '2+1',
@@ -388,7 +397,9 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
       (c) => CONDITION_VALUES.includes(c),
     ),
     categorySubCb: parseIntOrNull(sp.get('subcat')),
-    buildingMaterial: enumOrNull(sp.get('build'), BUILDING_MATERIAL_VALUES),
+    buildingMaterial: splitCsv(sp.get('build')).filter((m): m is BuildingMaterial =>
+      (BUILDING_MATERIAL_VALUES as ReadonlyArray<string>).includes(m),
+    ),
     estateAreaMin: estateMin,
     estateAreaMax: estateMax,
     usableAreaMin: usableMin,
@@ -555,7 +566,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.portals.length) sp.set('portal', f.portals.join(','));
   if (f.conditionMatch.length) sp.set('condition', f.conditionMatch.join(','));
   if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
-  if (f.buildingMaterial) sp.set('build', f.buildingMaterial);
+  if (f.buildingMaterial.length) sp.set('build', f.buildingMaterial.join(','));
   if (f.estateAreaMin != null || f.estateAreaMax != null) {
     sp.set('estate', fmtRange(f.estateAreaMin, f.estateAreaMax));
   }
@@ -727,7 +738,7 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.portals.length === 0 &&
   f.conditionMatch.length === 0 &&
   f.categorySubCb == null &&
-  f.buildingMaterial == null &&
+  f.buildingMaterial.length === 0 &&
   f.estateAreaMin == null &&
   f.estateAreaMax == null &&
   f.usableAreaMin == null &&
@@ -849,6 +860,7 @@ export function listingFiltersToRegistryView(
       || registryId === 'districts'
       || registryId === 'condition_match'
       || registryId === 'portals'
+      || registryId === 'building_material'
     ) {
       const arr = v as unknown[];
       out[registryId] = arr.length === 0 ? null : arr;
@@ -900,6 +912,10 @@ export function applyRegistryUpdate(
   if (id === 'portals') {
     const next = value == null ? [] : (value as string[]);
     return { ...filters, portals: next };
+  }
+  if (id === 'building_material') {
+    const next = value == null ? [] : (value as BuildingMaterial[]);
+    return { ...filters, buildingMaterial: next };
   }
   if (id === 'city_index_rules') {
     const next = value == null ? [] : (value as CityIndexRule[]);
@@ -960,7 +976,7 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
     label: 'last/first-seen date range',
   },
   { test: (f) => f.tomDaysMin != null || f.tomDaysMax != null, label: 'time on market' },
-  { test: (f) => f.buildingMaterial != null, label: 'building material' },
+  { test: (f) => f.buildingMaterial.length > 0, label: 'building material' },
   { test: (f) => f.gardenAreaMin != null || f.gardenAreaMax != null, label: 'garden area' },
   { test: (f) => f.tags.length > 0, label: 'tags' },
 ];

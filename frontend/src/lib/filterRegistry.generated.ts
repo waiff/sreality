@@ -860,24 +860,17 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     },
     {
       "id": "building_material",
-      "type": "string",
+      "type": "string_list",
       "pg_column": "building_type",
       "default": null,
-      "description": "Operator-friendly building material bucket. The four values (cihla / panel / smisena / ostatni) map onto the granular building_type column; `ostatni` expands to skelet / drevo / kamen / montovana / nizkoenergeticka under the hood.",
+      "description": "Operator-friendly building material buckets (multi-select). The four values (cihla / panel / smisena / ostatni) map onto the granular building_type column; a listing matches if its building_type is in the union of the selected buckets. `ostatni` expands to skelet / drevo / kamen / montovana / nizkoenergeticka under the hood. Empty list / null = no constraint.",
       "category": "Property",
-      "ui_control": "single_select",
+      "ui_control": "multiselect",
       "agendas": [
         "browse",
         "watchdog"
       ],
-      "constraints": {
-        "enum": [
-          "cihla",
-          "panel",
-          "smisena",
-          "ostatni"
-        ]
-      },
+      "constraints": null,
       "unit": null,
       "enum_values": [
         {
@@ -1271,7 +1264,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on listing price in CZK. For rentals this is the monthly rent; for sales the total asking price. Inclusive.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",
@@ -1300,7 +1293,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on listing price in CZK. See `min_price_czk` for the rental-vs-sale semantics. Inclusive.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",
@@ -1329,7 +1322,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on price per square metre (`price_czk / area_m2`). Inclusive. Listings with NULL area_m2 fall out when this bound is set. Useful for sale filtering where absolute price varies wildly with size but unit price is the comparable metric.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",
@@ -1358,7 +1351,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on price per square metre. See `min_price_per_m2`. Inclusive.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",
@@ -1435,7 +1428,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Absolute floor on `area_m2` (square metres). Distinct from the target-relative `area_band_pct` used by the analytical surfaces; this is for Browse / Watchdog where there is no target to band around.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "watchdog"
@@ -1459,7 +1452,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Absolute ceiling on `area_m2` (square metres). See `min_area_m2`.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "watchdog"
@@ -1483,7 +1476,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on plot area in m². Mostly relevant for `category_main='dum'` (houses) and `pozemek` (land) — apartments usually have null estate_area.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",
@@ -1511,7 +1504,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on plot area in m². See `min_estate_area`.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",
@@ -1539,7 +1532,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on usable_area in m². Distinct from `area_m2` (the headline) — usable area excludes balconies, cellars, parking. Often smaller than `area_m2` for the same listing.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",
@@ -1567,7 +1560,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on usable_area in m². See `min_usable_area`.",
       "category": "Property",
-      "ui_control": "range_slider",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "comparables",

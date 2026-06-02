@@ -412,7 +412,7 @@ describe('filtersToWatchdogSpec', () => {
       status: 'active',
       lastSeenMaxDays: 7,
       tags: [3],
-      buildingMaterial: 'cihla',
+      buildingMaterial: ['cihla'],
     });
     expect(unsupported).toContain('listing status');
     expect(unsupported).toContain('last/first-seen date range');
