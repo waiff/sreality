@@ -659,7 +659,7 @@ function FilterSummary({
       <button
         type="button"
         onClick={onCreateWatchdog}
-        className="shrink-0 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]/60 transition-colors"
+        className="shrink-0 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
         title="Save the current filters as a watchdog — get notified when a new listing matches"
       >
         + Create watchdog
