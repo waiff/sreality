@@ -55,7 +55,6 @@ import type {
   ListingSummaryBatchRow,
   Population,
   SkillRefinement,
-  SubjectSummary,
   Trace,
 } from '@/lib/types';
 
@@ -187,13 +186,6 @@ function EstimationDetailBody({
         <>
           <Hairline />
           <YieldBlock run={run} subject={subjectQ.data ?? null} />
-        </>
-      )}
-
-      {!isFailed && run.subject_summary && (
-        <>
-          <Hairline />
-          <SubjectSummaryBlock summary={run.subject_summary} />
         </>
       )}
 
@@ -1296,46 +1288,6 @@ function OperatorInputsPanel({ run }: { run: EstimationRun }) {
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Subject summary (top of page when sreality_id is set)                      */
-/* -------------------------------------------------------------------------- */
-
-function SubjectSummaryBlock({ summary }: { summary: SubjectSummary }) {
-  const body = summary.summary;
-  const empty =
-    !body.location_summary &&
-    !body.building_summary &&
-    !body.apartment_summary;
-  if (empty) return null;
-  return (
-    <div>
-      <SectionLabel>Subject summary</SectionLabel>
-      {body.headline && (
-        <p className="mt-3 text-[1.05rem] text-[var(--color-ink)] leading-snug">
-          {body.headline}
-        </p>
-      )}
-      <div className="mt-4 grid gap-4 md:grid-cols-3">
-        <SummaryCell label="Location" text={body.location_summary} />
-        <SummaryCell label="Building" text={body.building_summary} />
-        <SummaryCell label="Apartment" text={body.apartment_summary} />
-      </div>
-    </div>
-  );
-}
-
-function SummaryCell({ label, text }: { label: string; text?: string | null }) {
-  return (
-    <div>
-      <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-        {label}
-      </p>
-      <p className="mt-1.5 text-sm text-[var(--color-ink)] leading-relaxed">
-        {text || <span className="text-[var(--color-ink-4)]">—</span>}
-      </p>
-    </div>
-  );
-}
 
 /* -------------------------------------------------------------------------- */
 /* Comparables — map + table + popup                                          */
