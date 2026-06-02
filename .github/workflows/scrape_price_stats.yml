@@ -75,6 +75,9 @@ jobs:
       SREALITY_LOGIN_EMAIL: ${{ secrets.SREALITY_LOGIN_EMAIL }}
       SREALITY_LOGIN_PASSWORD: ${{ secrets.SREALITY_LOGIN_PASSWORD }}
       SREALITY_SESSION_COOKIE: ${{ secrets.SREALITY_SESSION_COOKIE }}
+      # Login-failure screenshot + HTML land here (scraper/sreality_auth.py),
+      # uploaded as an artifact on failure for diagnosing layout changes.
+      SREALITY_AUTH_DEBUG_DIR: sreality-auth-debug
     steps:
       - uses: actions/checkout@v4
 
@@ -112,3 +115,12 @@ jobs:
 
           echo "Running with: $ARGS"
           eval python -m scraper.price_stats_main $ARGS
+
+      - name: Upload login-debug artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sreality-auth-debug
+          path: sreality-auth-debug/
+          if-no-files-found: ignore
+          retention-days: 5

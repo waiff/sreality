@@ -140,16 +140,33 @@ def login_via_browser(
         try:
             page.goto(_LOGIN_URL, wait_until="domcontentloaded")
             _dismiss_consent(page)
-            page.fill('input[name="username"]', email)
-            _click_first(
+            # Seznam's login page holds MANY forms (#veto-email, #veto-password,
+            # #recover-*), several with a disabled `name=username` field — so a
+            # bare selector hits a disabled one. Scope to the active form / the
+            # enabled field.
+            _fill_editable(
                 page,
-                ['button[type="submit"]', 'button:has-text("Pokračovat")'],
+                ['#veto-email input[name="username"]',
+                 'input[name="username"]:not([disabled])'],
+                email, timeout_ms,
             )
-            page.wait_for_selector('input[type="password"]', timeout=timeout_ms)
-            page.fill('input[type="password"]', password)
             _click_first(
                 page,
-                ['button[type="submit"]', 'button:has-text("Přihlásit")'],
+                ['#veto-email button[type="submit"]',
+                 'button:has-text("Pokračovat")',
+                 'button[type="submit"]:visible'],
+            )
+            _fill_editable(
+                page,
+                ['#veto-password input[type="password"]',
+                 'input[type="password"]:not([disabled])'],
+                password, timeout_ms,
+            )
+            _click_first(
+                page,
+                ['#veto-password button[type="submit"]',
+                 'button:has-text("Přihlásit")',
+                 'button[type="submit"]:visible'],
             )
             # Land back on sreality with the session set.
             page.wait_for_load_state("networkidle", timeout=timeout_ms)
@@ -160,15 +177,44 @@ def login_via_browser(
             LOG.info("sreality login OK (%d cookies)", len(cookies))
             return cookies
         except Exception as exc:
-            shot = debug_dir / "sreality_login_failure.png"
-            try:
-                page.screenshot(path=str(shot))
-                LOG.error("login failed; screenshot at %s", shot)
-            except Exception:  # pragma: no cover
-                pass
+            _dump_debug(page, debug_dir)
             raise AuthError(f"sreality login failed: {exc}") from exc
         finally:
             browser.close()
+
+
+def _fill_editable(page, selectors: list[str], value: str, timeout_ms: int) -> None:
+    """Fill the first selector that resolves to a visible, editable field."""
+    last: Exception | None = None
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            loc.wait_for(state="visible", timeout=timeout_ms)
+            loc.fill(value, timeout=timeout_ms)
+            return
+        except Exception as exc:  # try the next candidate selector
+            last = exc
+    raise AuthError(f"no editable field for {selectors}: {last}")
+
+
+def _dump_debug(page, debug_dir: Path) -> None:
+    try:
+        debug_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:  # pragma: no cover
+        pass
+    try:
+        LOG.error("login failed on url=%s title=%r", page.url, page.title())
+    except Exception:  # pragma: no cover
+        pass
+    for name, fn in (
+        ("sreality_login_failure.png", lambda p: page.screenshot(path=p, full_page=True)),
+        ("sreality_login_failure.html", lambda p: Path(p).write_text(page.content())),
+    ):
+        try:
+            fn(str(debug_dir / name))
+            LOG.error("saved %s", debug_dir / name)
+        except Exception:  # pragma: no cover
+            pass
 
 
 def _collect_cookies(context) -> dict[str, str]:
@@ -180,20 +226,33 @@ def _collect_cookies(context) -> dict[str, str]:
     return out
 
 
+_CONSENT_SELECTORS = (
+    'button:has-text("Souhlasím")',
+    'button:has-text("Souhlasím se vším")',
+    'button:has-text("Přijmout vše")',
+    'button:has-text("Přijmout")',
+    '[data-testid="cw-button-agree-with-ads"]',
+    "#didomi-notice-agree-button",
+)
+
+
 def _dismiss_consent(page) -> None:
-    for sel in (
-        'button:has-text("Souhlasím")',
-        'button:has-text("Přijmout")',
-        '[data-testid="cw-button-agree-with-ads"]',
-        "#didomi-notice-agree-button",
-    ):
-        try:
-            el = page.locator(sel).first
-            if el.is_visible(timeout=2000):
-                el.click()
-                return
-        except Exception:
-            continue
+    """Accept the Seznam consent wall if present — on the page or in any frame.
+
+    The wall can disable the login form until accepted, which is why a
+    `name=username` field shows up disabled. Best-effort: never raises.
+    """
+    targets = [page, *page.frames]
+    for target in targets:
+        for sel in _CONSENT_SELECTORS:
+            try:
+                el = target.locator(sel).first
+                if el.is_visible(timeout=1500):
+                    el.click()
+                    page.wait_for_timeout(500)
+                    return
+            except Exception:
+                continue
 
 
 def _click_first(page, selectors: list[str]) -> None:
