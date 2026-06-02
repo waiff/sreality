@@ -9,6 +9,8 @@ checks once the fetch-fixtures workflow has run.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from scraper.bazos_parser import (
@@ -78,7 +80,7 @@ INDEX_HTML = """
 
 DETAIL_HTML = """
 <!DOCTYPE html><html><body>
-<div class="drobky">Reality » Prodej » Byty</div>
+<div class="drobky"><a href="https://www.bazos.cz/">Hlavní stránka</a> > <a href="https://reality.bazos.cz/">Reality</a> > <a href="https://reality.bazos.cz/prodam/">Prodej</a> > <a href="https://reality.bazos.cz/prodam/byt/">Byty</a> > <b>Inzerát č. 219122924</b></div>
 <h1 class="nadpisdetail">Prodám byt 2+kk Letovice</h1>
 <span class="velikost10">[12.5. 2026]</span>
 <table class="listadvalues">
@@ -167,9 +169,10 @@ def test_parse_detail_full():
 def test_parse_detail_category_from_breadcrumb_overrides_fallback():
     # The page breadcrumb is authoritative: a "Pronájem" page parses as a rental
     # even when the caller passes the sale fallback (the drain's primary scope).
-    html = DETAIL_HTML.replace(
-        "Reality » Prodej » Byty", "Reality » Pronájem » Byty"
-    )
+    # Flipping the breadcrumb LINK segments (prodam -> pronajmu) is what a real
+    # rental page looks like — the regression that mis-tagged ~6.6k rentals as
+    # sales was the parser reading the localised TEXT, not these href segments.
+    html = DETAIL_HTML.replace("/prodam/", "/pronajmu/")
     url = "https://reality.bazos.cz/inzerat/219122924/pronajmu-byt-2-kk-letovice.php"
     listing = parse_detail(
         html, source_url=url, category_main="byt", category_type="prodej"
@@ -179,10 +182,28 @@ def test_parse_detail_category_from_breadcrumb_overrides_fallback():
     assert listing.price_unit == "za mesic"      # price unit follows the real type
 
 
-def test_parse_detail_falls_back_when_breadcrumb_missing():
-    html = DETAIL_HTML.replace(
-        '<div class="drobky">Reality » Prodej » Byty</div>', ""
+def test_parse_detail_category_from_real_breadcrumb_markup():
+    # Verbatim breadcrumb captured from a live reality.bazos.cz detail page: a
+    # plain ">" separator (NOT "»") and the category carried in the link hrefs.
+    # Guards against the format the hand-authored "»" fixture missed.
+    html = """
+<!DOCTYPE html><html><body>
+<div class="drobky"><a href="https://www.bazos.cz/" title="Inzerce Bazoš">Hlavní stránka</a>  > <a href="https://reality.bazos.cz/">Reality</a> > <a href="https://reality.bazos.cz/pronajmu/">Pronájem</a> > <a href="https://reality.bazos.cz/pronajmu/byt/">Byty</a> > <b>Inzerát č. 219625164</b></div>
+<h1 class="nadpisdetail">Pronájem bytu 3+kk 79,7 m, Pardubice</h1>
+<table><tr><td>Cena:</td><td>20 000 Kč</td></tr></table>
+<div class="popisdetail">Pronájem bytu 3+kk.</div>
+</body></html>
+"""
+    url = "https://reality.bazos.cz/inzerat/219625164/pronajem-bytu-3kk.php"
+    listing = parse_detail(
+        html, source_url=url, category_main="byt", category_type="prodej"
     )
+    assert (listing.category_main, listing.category_type) == ("byt", "pronajem")
+    assert listing.price_unit == "za mesic"
+
+
+def test_parse_detail_falls_back_when_breadcrumb_missing():
+    html = re.sub(r'<div class="drobky">.*?</div>', "", DETAIL_HTML)
     url = "https://reality.bazos.cz/inzerat/219122924/x.php"
     listing = parse_detail(
         html, source_url=url, category_main="byt", category_type="prodej"
