@@ -34,18 +34,23 @@ import type {
   ListingFreshnessCheckPublic,
   PropertySource,
 } from '@/lib/types';
-import SnapshotTimeline from '@/components/SnapshotTimeline';
+import {
+  listingUrlRows,
+  buildPriceSeries,
+  summarizePriceHistory,
+} from '@/lib/priceHistory';
 
 const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
 const Gallery = lazy(() => import('@/components/listing-detail/Gallery'));
+const PriceLineChart = lazy(
+  () => import('@/components/listing-detail/PriceLineChart'),
+);
 const CurationBlock = lazy(
   () => import('@/components/listing-detail/CurationBlock'),
 );
 const ManualEstimatesBlock = lazy(
   () => import('@/components/listing-detail/ManualEstimatesBlock'),
 );
-
-const DAY_MS = 86_400_000;
 
 export default function ListingDetail() {
   const { sreality_id: idParam } = useParams();
@@ -169,14 +174,18 @@ export default function ListingDetail() {
   return (
     <Page>
       <Crumb />
+      {/* Merged top section: identity + price + property facts in one block,
+          above the images. The MF rent estimate + description sit directly
+          below it. */}
+      <LatestActiveLink listing={listing} sources={sources} />
       <Header listing={listing} />
+      <KeyFactsBlock listing={listing} />
+      <ReferenceRentBlock listing={listing} />
+      <DescriptionBlock listing={listing} />
       <Hairline />
       <MapBlock listing={listing} />
       <Hairline />
       <GalleryBlock images={images} isActive={listing.is_active} loading={imagesQ.isLoading} />
-      <Hairline />
-      <DescriptionBlock listing={listing} />
-      <KeyFactsBlock listing={listing} />
       <Hairline />
       <Suspense fallback={null}>
         <CurationBlock sreality_id={listing.sreality_id} />
@@ -186,20 +195,44 @@ export default function ListingDetail() {
         <ManualEstimatesBlock sreality_id={listing.sreality_id} />
       </Suspense>
       <Hairline />
-      <TimestampsBlock listing={listing} />
-      <Hairline />
-      <HistoryBlock listing={listing} snapshots={snapshots} checks={checks} />
+      <ListingHistoryBlock listing={listing} sources={sources} snapshots={snapshots} />
       <Hairline />
       <FreshnessBlock sreality_id={listing.sreality_id} checks={checks} />
-      {sources.length > 1 ? (
-        <>
-          <Hairline />
-          <SourcesBlock sources={sources} currentId={listing.sreality_id} />
-        </>
-      ) : null}
       <Hairline />
       <OutboundBlock sreality_id={listing.sreality_id} source={currentSource} />
     </Page>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Latest-active-listing link (shown when this record is one of several        */
+/* observations of a property and a different, still-live one exists)          */
+/* -------------------------------------------------------------------------- */
+
+function LatestActiveLink({
+  listing,
+  sources,
+}: {
+  listing: ListingPublic;
+  sources: PropertySource[];
+}) {
+  const liveSibling = sources
+    .filter((s) => s.is_active && s.sreality_id !== listing.sreality_id)
+    .sort(
+      (a, b) =>
+        new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime(),
+    )[0];
+  if (!liveSibling) return null;
+  return (
+    <Link
+      to={`/listing/${liveSibling.sreality_id}`}
+      className="mt-4 inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] px-3 py-1.5 text-[0.8rem] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
+    >
+      <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]" aria-hidden />
+      View the current active listing
+      <span className="capitalize text-[var(--color-ink-3)]">· {liveSibling.source}</span>
+      <OutArrow />
+    </Link>
   );
 }
 
@@ -295,7 +328,6 @@ function Header({ listing }: { listing: ListingPublic }) {
             </>
           )}
         </p>
-        <ReferenceRentBlock listing={listing} />
       </div>
       <StatusPill isActive={listing.is_active} lastSeenAt={listing.last_seen_at} />
     </div>
@@ -319,7 +351,7 @@ function ReferenceRentBlock({ listing }: { listing: ListingPublic }) {
   if (!ref) return null;
   const perM2 = (n: number) => `${n.toLocaleString('cs-CZ')} Kč/m²`;
   return (
-    <div className="mt-4 max-w-[27rem] border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-3">
+    <div className="mt-6 max-w-[27rem] border border-[var(--color-rule)] rounded-[var(--radius-sm)] p-3">
       <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
         Odhad nájmu · cenová mapa MF
       </p>
@@ -419,7 +451,7 @@ function MapBlock({ listing }: { listing: ListingPublic }) {
       <div className="mt-2">
         <Suspense
           fallback={
-            <div className="h-60 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+            <div className="h-40 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
           }
         >
           <DetailMap lat={listing.lat} lng={listing.lng} isActive={listing.is_active} />
@@ -489,12 +521,7 @@ function GalleryBlock({
 function DescriptionBlock({ listing }: { listing: ListingPublic }) {
   const text = listing.description?.trim() ?? '';
   if (!text) return null;
-  return (
-    <>
-      <DescriptionBody text={text} />
-      <Hairline />
-    </>
-  );
+  return <DescriptionBody text={text} />;
 }
 
 function DescriptionBody({ text }: { text: string }) {
@@ -509,7 +536,7 @@ function DescriptionBody({ text }: { text: string }) {
   }, [text]);
 
   return (
-    <div>
+    <div className="mt-7">
       <SectionLabel>Description</SectionLabel>
       <p
         ref={ref}
@@ -544,22 +571,18 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
       : String(listing.floor)
     : null;
 
-  /* Three sub-sections to keep cells from wrapping awkwardly under the
-   * 18 facts surface (was 8 before migration 022). Each row uses the
-   * same 2/3/4-col responsive grid, so the visual rhythm matches the
-   * earlier single-block layout. Fields that are universally NULL for a
-   * given category (estate_area / garden_area on apartments, furnished
-   * on for-sale listings) drop out automatically — Detail() filters
-   * each list before rendering. */
+  /* Merged into the top section, above the images. Disposition, usable area
+   * and district are intentionally omitted here — they're already in the
+   * header above, so this grid carries only the facts the header doesn't.
+   * Fields that are universally NULL for a given category (estate_area /
+   * garden_area on apartments, furnished on for-sale listings) drop out
+   * automatically via pruneNulls. */
 
   const property: Fact[] = pruneNulls([
-    { label: 'Disposition', value: listing.disposition, mono: true },
     { label: 'Subtype', value: fmtCategorySubOrNull(listing.category_sub_cb) },
-    { label: 'Usable area', value: fmtAreaOrNull(listing.usable_area), mono: true },
     { label: 'Lot area', value: fmtAreaOrNull(listing.estate_area), mono: true },
     { label: 'Garden area', value: fmtAreaOrNull(listing.garden_area), mono: true },
     { label: 'Floor', value: floor, mono: true },
-    { label: 'District', value: listing.district },
   ]);
 
   const building: Fact[] = pruneNulls([
@@ -592,9 +615,12 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
     },
   ]);
 
+  if (property.length === 0 && building.length === 0 && amenities.length === 0) {
+    return null;
+  }
   return (
-    <div className="space-y-7">
-      <FactsGrid title="Property" facts={property} />
+    <div className="mt-8 space-y-7">
+      {property.length > 0 && <FactsGrid title="Property" facts={property} />}
       {building.length > 0 && <FactsGrid title="Building" facts={building} />}
       {amenities.length > 0 && <FactsGrid title="Amenities" facts={amenities} />}
     </div>
@@ -647,196 +673,164 @@ function FactsGrid({ title, facts }: { title: string; facts: Fact[] }) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Timestamps                                                                 */
+/* Listing & price history (URLs · price chart · summary)                     */
 /* -------------------------------------------------------------------------- */
 
-function TimestampsBlock({ listing }: { listing: ListingPublic }) {
-  const firstT = new Date(listing.first_seen_at).getTime();
-  const lastT = new Date(listing.last_seen_at).getTime();
-  const endT = listing.is_active ? Date.now() : lastT;
-  const days = Math.max(0, Math.floor((endT - firstT) / DAY_MS));
+function ListingHistoryBlock({
+  listing,
+  sources,
+  snapshots,
+}: {
+  listing: ListingPublic;
+  sources: PropertySource[];
+  snapshots: ListingSnapshotPublic[];
+}) {
+  const urls = useMemo(() => listingUrlRows(sources, listing), [sources, listing]);
+  // Date.now() is read once per render and threaded into the pure helpers so
+  // they stay deterministic (and unit-testable in lib/priceHistory.test.ts).
+  const now = Date.now();
+  const series = useMemo(
+    () => buildPriceSeries(urls, snapshots, now),
+    [urls, snapshots, now],
+  );
+  const stats = useMemo(
+    () => summarizePriceHistory(urls, snapshots, listing.price_czk, now),
+    [urls, snapshots, listing.price_czk, now],
+  );
 
   return (
     <div>
-      <SectionLabel>History</SectionLabel>
-      <div className="mt-3 grid grid-cols-3 gap-6">
-        <TsCell label="First seen" iso={listing.first_seen_at} />
-        <TsCell label="Last seen" iso={listing.last_seen_at} />
-        <div>
-          <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-            {listing.is_active ? 'Days on market' : 'Lifetime'}
-          </p>
-          <p className="mt-1 text-sm font-mono tabular-nums text-[var(--color-ink)]">
-            {days} {days === 1 ? 'day' : 'days'}
-          </p>
-        </div>
+      <div className="flex items-baseline justify-between">
+        <SectionLabel>Listing &amp; price history</SectionLabel>
+        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
+          {urls.length} {urls.length === 1 ? 'URL' : 'URLs'}
+        </p>
       </div>
+
+      <div className="mt-4 grid grid-cols-2 sm:grid-cols-5 gap-4">
+        <Stat
+          label="First seen"
+          value={fmtShortDate(new Date(stats.firstSeenT).toISOString())}
+          title={fmtAbsolute(new Date(stats.firstSeenT).toISOString())}
+        />
+        <Stat
+          label="Last seen"
+          value={stats.anyActive ? 'now' : fmtShortDate(new Date(stats.lastSeenT).toISOString())}
+          title={fmtAbsolute(new Date(stats.lastSeenT).toISOString())}
+        />
+        <Stat label="Days on market" value={String(stats.days)} mono />
+        <Stat label="Price changes" value={String(stats.changes)} mono />
+        <Stat
+          label="Price change"
+          value={stats.pct == null ? '—' : fmtPct(stats.pct)}
+          mono
+          pct={stats.pct}
+        />
+      </div>
+
+      {series.length > 0 && (
+        <div className="mt-6">
+          <Suspense
+            fallback={
+              <div className="h-[230px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+            }
+          >
+            <PriceLineChart series={series} />
+          </Suspense>
+        </div>
+      )}
+
+      <ul className="mt-6 space-y-2">
+        {urls.map((u) => (
+          <li
+            key={u.id}
+            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-sm text-[var(--color-ink)] capitalize">{u.source}</span>
+              {u.id === listing.sreality_id ? (
+                <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+                  this listing
+                </span>
+              ) : null}
+              <UrlStatusPill active={u.isActive} />
+            </div>
+            <div className="flex items-center gap-3 text-[0.8rem] text-[var(--color-ink-3)] tabular-nums">
+              <span className="font-mono text-[var(--color-ink-2)]">{fmtCzk(u.price)}</span>
+              <span title={`${u.firstSeen} – ${u.lastSeen}`}>
+                {fmtShortDate(u.firstSeen)} – {u.isActive ? 'now' : fmtShortDate(u.lastSeen)}
+              </span>
+              {u.url ? (
+                <a
+                  href={u.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)]"
+                >
+                  open ↗
+                </a>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
 
-function TsCell({ label, iso }: { label: string; iso: string }) {
+function Stat({
+  label,
+  value,
+  title,
+  mono,
+  pct,
+}: {
+  label: string;
+  value: string;
+  title?: string;
+  mono?: boolean;
+  pct?: number | null;
+}) {
+  const color =
+    pct == null || pct === 0
+      ? undefined
+      : pct > 0
+        ? 'var(--color-brick)'
+        : 'var(--color-sage)';
   return (
     <div>
       <p className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
         {label}
       </p>
       <p
-        className="mt-1 text-sm text-[var(--color-ink)] cursor-help"
-        title={fmtAbsolute(iso)}
+        className={['mt-1 text-sm text-[var(--color-ink)]', mono ? 'font-mono tabular-nums' : ''].join(' ')}
+        title={title}
+        style={color ? { color } : undefined}
       >
-        {fmtRelative(iso)}
+        {value}
       </p>
     </div>
   );
 }
 
-/* -------------------------------------------------------------------------- */
-/* Snapshot history (the hero block)                                          */
-/* -------------------------------------------------------------------------- */
-
-function HistoryBlock({
-  listing,
-  snapshots,
-  checks,
-}: {
-  listing: ListingPublic;
-  snapshots: ListingSnapshotPublic[];
-  checks: ListingFreshnessCheckPublic[];
-}) {
-  const sorted = useMemo(
-    () => [...snapshots].sort((a, b) => new Date(a.scraped_at).getTime() - new Date(b.scraped_at).getTime()),
-    [snapshots],
-  );
-  return (
-    <div>
-      <div className="flex items-baseline justify-between">
-        <SectionLabel>Price history</SectionLabel>
-        <p className="text-[0.7rem] tracking-wide text-[var(--color-ink-4)] font-mono tabular-nums">
-          {sorted.length} {sorted.length === 1 ? 'snapshot' : 'snapshots'}
-        </p>
-      </div>
-
-      <div className="mt-4">
-        <SnapshotTimeline
-          firstSeenAt={listing.first_seen_at}
-          lastSeenAt={listing.last_seen_at}
-          isActive={listing.is_active}
-          snapshots={sorted}
-          freshnessChecks={checks}
-        />
-      </div>
-
-      {sorted.length === 1 && (
-        <p className="mt-3 text-sm text-[var(--color-ink-2)]">
-          No price changes recorded — only seen once at{' '}
-          <span className="font-mono tabular-nums">{fmtCzk(sorted[0].price_czk)}</span>
-          {' '}on{' '}
-          <span title={fmtAbsolute(sorted[0].scraped_at)}>{shortDate(sorted[0].scraped_at)}</span>.
-        </p>
-      )}
-
-      {sorted.length >= 2 && <SnapshotTable snapshots={sorted} />}
-    </div>
-  );
-}
-
-function SnapshotTable({ snapshots }: { snapshots: ListingSnapshotPublic[] }) {
-  return (
-    <div className="mt-5 border border-[var(--color-rule)] rounded-[var(--radius-md)] overflow-hidden">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="text-left text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] bg-[var(--color-paper-2)]">
-            <th className="px-3 py-2 font-medium">ID</th>
-            <th className="px-3 py-2 font-medium">Scraped</th>
-            <th className="px-3 py-2 font-medium text-right">Price</th>
-            <th className="px-3 py-2 font-medium text-right">Δ</th>
-            <th className="px-3 py-2 font-medium text-right">Desc</th>
-          </tr>
-        </thead>
-        <tbody>
-          {snapshots.map((s, i) => {
-            const prev = i > 0 ? snapshots[i - 1].price_czk : null;
-            const delta = s.price_czk != null && prev != null ? s.price_czk - prev : null;
-            const prevDesc = i > 0 ? snapshots[i - 1].description ?? '' : null;
-            const descChanged = prevDesc != null && prevDesc !== (s.description ?? '');
-            return (
-              <tr
-                key={s.id}
-                className="border-t border-[var(--color-rule-soft)]"
-              >
-                <td className="px-3 py-2 font-mono tabular-nums text-[var(--color-ink-3)] text-[0.78rem]">
-                  {s.id}
-                </td>
-                <td className="px-3 py-2 text-[var(--color-ink-2)] cursor-help" title={fmtAbsolute(s.scraped_at)}>
-                  {fmtRelative(s.scraped_at)}
-                </td>
-                <td className="px-3 py-2 font-mono tabular-nums text-right text-[var(--color-ink)]">
-                  {fmtCzk(s.price_czk)}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  <DeltaCell delta={delta} />
-                </td>
-                <td className="px-3 py-2 text-right">
-                  <DescChangeCell changed={descChanged} hasPrior={i > 0} />
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function DescChangeCell({ changed, hasPrior }: { changed: boolean; hasPrior: boolean }) {
-  if (!hasPrior) {
-    return <span className="text-[var(--color-ink-4)]">—</span>;
-  }
-  if (!changed) {
-    return <span className="font-mono tabular-nums text-[var(--color-ink-3)]">·</span>;
-  }
+function UrlStatusPill({ active }: { active: boolean }) {
   return (
     <span
-      className="cursor-help text-[var(--color-copper)]"
-      title="Description changed at this snapshot"
+      className={[
+        'inline-block px-1.5 py-0.5 text-[0.6rem] tracking-wide uppercase rounded-[var(--radius-xs)] border border-[var(--color-rule)]',
+        active ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-ink-4)]',
+      ].join(' ')}
     >
-      ✎
+      {active ? 'active' : 'inactive'}
     </span>
   );
 }
 
-function DeltaCell({ delta }: { delta: number | null }) {
-  if (delta == null) {
-    return <span className="text-[var(--color-ink-4)]">—</span>;
-  }
-  if (delta === 0) {
-    return <span className="font-mono tabular-nums text-[var(--color-ink-3)]">±0</span>;
-  }
-  const up = delta > 0;
-  const colour = up ? 'var(--color-brick)' : 'var(--color-sage)';
-  return (
-    <span
-      className="inline-flex items-center gap-1 font-mono tabular-nums"
-      style={{ color: colour }}
-    >
-      <Triangle up={up} />
-      {fmtCzk(Math.abs(delta))}
-    </span>
-  );
+function fmtPct(pct: number): string {
+  const sign = pct > 0 ? '+' : '';
+  return `${sign}${pct.toLocaleString('cs-CZ', { maximumFractionDigits: 1 })} %`;
 }
 
-function Triangle({ up }: { up: boolean }) {
-  return (
-    <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden>
-      {up ? (
-        <polygon points="4,0.5 7.5,7 0.5,7" fill="currentColor" />
-      ) : (
-        <polygon points="0.5,1 7.5,1 4,7.5" fill="currentColor" />
-      )}
-    </svg>
-  );
-}
 
 /* -------------------------------------------------------------------------- */
 /* Freshness checks                                                           */
@@ -1033,71 +1027,6 @@ function OutboundBlock({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Listed-on-N-sites — multi-portal link history                              */
-/* -------------------------------------------------------------------------- */
-
-function SourcesBlock({
-  sources,
-  currentId,
-}: {
-  sources: PropertySource[];
-  currentId: number;
-}) {
-  return (
-    <div>
-      <SectionLabel>Listed on {sources.length} sites</SectionLabel>
-      <ul className="mt-3 space-y-2">
-        {sources.map((s) => (
-          <li
-            key={s.sreality_id}
-            className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-[var(--radius-sm)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)] px-3 py-2"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-sm text-[var(--color-ink)] capitalize">{s.source}</span>
-              {s.sreality_id === currentId ? (
-                <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-                  this listing
-                </span>
-              ) : null}
-              <SourceStatusPill active={s.is_active} />
-            </div>
-            <div className="flex items-center gap-3 text-[0.8rem] text-[var(--color-ink-3)] tabular-nums">
-              <span className="font-mono text-[var(--color-ink-2)]">{fmtCzk(s.price_czk)}</span>
-              <span title={`${s.first_seen_at} – ${s.last_seen_at}`}>
-                {fmtShortDate(s.first_seen_at)} – {s.is_active ? 'now' : fmtShortDate(s.last_seen_at)}
-              </span>
-              {s.source_url ? (
-                <a
-                  href={s.source_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[var(--color-copper)] hover:text-[var(--color-copper-2)]"
-                >
-                  open ↗
-                </a>
-              ) : null}
-            </div>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function SourceStatusPill({ active }: { active: boolean }) {
-  return (
-    <span
-      className={[
-        'inline-block px-1.5 py-0.5 text-[0.6rem] tracking-wide uppercase rounded-[var(--radius-xs)] border border-[var(--color-rule)]',
-        active ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-ink-4)]',
-      ].join(' ')}
-    >
-      {active ? 'active' : 'inactive'}
-    </span>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 /* Empty / 404 state                                                          */
 /* -------------------------------------------------------------------------- */
 
@@ -1146,17 +1075,6 @@ function yesNo(v: boolean | null): string | null {
 function capitalise(s: string | null): string | null {
   if (!s) return null;
   return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
-function shortDate(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return '—';
-  return d.toLocaleDateString('cs-CZ', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  });
 }
 
 function BackArrow() {
