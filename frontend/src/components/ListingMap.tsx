@@ -10,6 +10,16 @@ import type {
 import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
+import type { PriceStatDataset, PriceStatGrowthRow } from '@/lib/priceStats';
+import {
+  GROWTH_METRICS,
+  GROWTH_METRIC_ORDER,
+  GROWTH_NO_DATA,
+  growthToFeatureCollection,
+  type GrowthMetric,
+} from '@/lib/growthChoropleth';
+
+const psgLayerId = (m: GrowthMetric) => `psg-${m}`;
 
 /* Polygon approximation of a metres-radius circle around (lat, lng).
  * Same haversine ring the small <LocationControl> uses — 96 points is
@@ -349,6 +359,22 @@ interface Props {
   onToggleShowRentMap?: (next: boolean) => void;
   onRentVkChange?: (vk: RentVk) => void;
   onToggleShowKraje?: (next: boolean) => void;
+  /* Price-stats growth overlay ("Růst cen a nájmů"). The Browse page hands in
+   * the per-obec growth rows for the chosen dataset + window (price_stat_growth
+   * RPC), the dataset list for the picker, and the active metric. Fill sits
+   * BELOW the listing markers + city pins. Mirrors the rent-map overlay. */
+  growthRows?: PriceStatGrowthRow[];
+  growthDatasets?: PriceStatDataset[];
+  showGrowth?: boolean;
+  growthDatasetId?: number | null;
+  growthMetric?: GrowthMetric;
+  growthFrom?: string;
+  growthTo?: string;
+  onToggleShowGrowth?: (next: boolean) => void;
+  onGrowthDatasetChange?: (id: number) => void;
+  onGrowthMetricChange?: (m: GrowthMetric) => void;
+  onGrowthFromChange?: (ym: string) => void;
+  onGrowthToChange?: (ym: string) => void;
 }
 
 export default function ListingMap({
@@ -379,6 +405,18 @@ export default function ListingMap({
   onToggleShowRentMap,
   onRentVkChange,
   onToggleShowKraje,
+  growthRows,
+  growthDatasets,
+  showGrowth = false,
+  growthDatasetId = null,
+  growthMetric = 'rent_cagr_pct',
+  growthFrom = '',
+  growthTo = '',
+  onToggleShowGrowth,
+  onGrowthDatasetChange,
+  onGrowthMetricChange,
+  onGrowthFromChange,
+  onGrowthToChange,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -497,6 +535,39 @@ export default function ListingMap({
           'line-color': 'rgba(40, 40, 70, 0.55)',
           'line-width': 1.4,
         },
+      });
+
+      /* Price-stats growth overlay — one fill layer per metric, all hidden
+       * until the data-effect flips the active one on. Same background slot as
+       * the rent-map choropleth (below the listing dots + city pins). */
+      map.addSource('ps-growth', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      for (const gm of GROWTH_METRIC_ORDER) {
+        const cfg = GROWTH_METRICS[gm];
+        map.addLayer({
+          id: psgLayerId(gm),
+          type: 'fill',
+          source: 'ps-growth',
+          layout: { visibility: 'none' },
+          paint: {
+            'fill-color': [
+              'case',
+              ['==', ['get', cfg.hasProp], 0], GROWTH_NO_DATA,
+              ['interpolate', ['linear'], ['get', cfg.vProp],
+                ...cfg.ramp.flatMap(([stop, color]) => [stop, color])],
+            ],
+            'fill-opacity': 0.7,
+          },
+        });
+      }
+      map.addLayer({
+        id: 'ps-growth-line',
+        type: 'line',
+        source: 'ps-growth',
+        layout: { visibility: 'none' },
+        paint: { 'line-color': 'rgba(26,28,34,0.16)', 'line-width': 0.4 },
       });
 
       /* Hover popup for the choropleth. The fill is the hit target;
@@ -938,6 +1009,29 @@ export default function ListingMap({
     }
   }, [rentMapKraje, showRentMap, showKraje, ready]);
 
+  /* Price-stats growth overlay — rebuild the FeatureCollection on data change,
+   * and show only the active-metric fill layer when the overlay is enabled. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+    const src = map.getSource('ps-growth') as GeoJSONSource | undefined;
+    if (!src) return;
+    const data = growthRows ?? [];
+    if (showGrowth && data.length > 0) src.setData(growthToFeatureCollection(data));
+    const on = showGrowth && data.length > 0;
+    for (const gm of GROWTH_METRIC_ORDER) {
+      if (map.getLayer(psgLayerId(gm))) {
+        map.setLayoutProperty(
+          psgLayerId(gm), 'visibility',
+          on && gm === growthMetric ? 'visible' : 'none',
+        );
+      }
+    }
+    if (map.getLayer('ps-growth-line')) {
+      map.setLayoutProperty('ps-growth-line', 'visibility', on ? 'visible' : 'none');
+    }
+  }, [growthRows, showGrowth, growthMetric, ready]);
+
   /* Phase QUAL — push the filtered city set into the `cities` source
    * whenever the operator changes the city-quality filter, the color-
    * by-index, the boundary polygons, or the underlying data. The shared
@@ -1164,6 +1258,111 @@ export default function ListingMap({
         onRentVkChange={onRentVkChange}
         onToggleShowKraje={onToggleShowKraje}
       />
+      <GrowthMapControls
+        showGrowth={showGrowth}
+        datasets={growthDatasets ?? []}
+        datasetId={growthDatasetId}
+        metric={growthMetric}
+        from={growthFrom}
+        to={growthTo}
+        rowCount={growthRows?.length ?? 0}
+        onToggle={onToggleShowGrowth}
+        onDatasetChange={onGrowthDatasetChange}
+        onMetricChange={onGrowthMetricChange}
+        onFromChange={onGrowthFromChange}
+        onToChange={onGrowthToChange}
+      />
+    </div>
+  );
+}
+
+const PSG_FIRST_YEAR = 2015;
+const PSG_NOW = new Date();
+const PSG_YEARS = Array.from(
+  { length: PSG_NOW.getFullYear() - PSG_FIRST_YEAR + 1 },
+  (_, i) => String(PSG_FIRST_YEAR + i),
+);
+const PSG_MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '0'));
+const PSG_SELECT_CLS =
+  'text-[0.7rem] bg-[var(--color-paper-2)] border border-[var(--color-rule)] rounded px-1 py-0.5';
+
+function PsgYmPicker({ value, onChange }: { value: string; onChange?: (v: string) => void }) {
+  const [y, m] = (value || `${PSG_FIRST_YEAR}-01`).split('-');
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      <select value={y} onChange={(e) => onChange?.(`${e.target.value}-${m}`)} className={PSG_SELECT_CLS}>
+        {PSG_YEARS.map((yr) => <option key={yr} value={yr}>{yr}</option>)}
+      </select>
+      <select value={m} onChange={(e) => onChange?.(`${y}-${e.target.value}`)} className={PSG_SELECT_CLS}>
+        {PSG_MONTHS.map((mo) => <option key={mo} value={mo}>{mo}</option>)}
+      </select>
+    </span>
+  );
+}
+
+function GrowthMapControls({
+  showGrowth, datasets, datasetId, metric, from, to, rowCount,
+  onToggle, onDatasetChange, onMetricChange, onFromChange, onToChange,
+}: {
+  showGrowth: boolean;
+  datasets: PriceStatDataset[];
+  datasetId: number | null;
+  metric: GrowthMetric;
+  from: string;
+  to: string;
+  rowCount: number;
+  onToggle?: (next: boolean) => void;
+  onDatasetChange?: (id: number) => void;
+  onMetricChange?: (m: GrowthMetric) => void;
+  onFromChange?: (ym: string) => void;
+  onToChange?: (ym: string) => void;
+}) {
+  const cfg = GROWTH_METRICS[metric];
+  const gradient = `linear-gradient(to right, ${cfg.ramp.map(([, c]) => c).join(', ')})`;
+  return (
+    <div className="pointer-events-none absolute top-3 left-3 flex flex-col gap-2 items-start">
+      <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)]">
+        <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
+          <input type="checkbox" checked={showGrowth} onChange={(e) => onToggle?.(e.target.checked)} />
+          <span>Růst cen a nájmů</span>
+        </label>
+      </div>
+      {showGrowth && (
+        <div className="pointer-events-auto flex flex-col gap-2 px-2.5 py-2 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)] min-w-[210px]">
+          {datasets.length === 0 ? (
+            <span className="text-[0.7rem] text-[var(--color-ink-3)]">Žádné datasety</span>
+          ) : (
+            <select
+              className={PSG_SELECT_CLS + ' max-w-[200px]'}
+              value={datasetId ?? ''}
+              onChange={(e) => onDatasetChange?.(Number(e.target.value))}
+            >
+              {datasets.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+          )}
+          <div className="flex flex-col gap-1">
+            {GROWTH_METRIC_ORDER.map((gm) => (
+              <label key={gm} className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
+                <input type="radio" name="psg-metric" checked={metric === gm} onChange={() => onMetricChange?.(gm)} />
+                <span>{GROWTH_METRICS[gm].label}</span>
+              </label>
+            ))}
+          </div>
+          <div className="flex items-center gap-1 border-t border-[var(--color-rule)] pt-1.5 text-[0.7rem] text-[var(--color-ink-2)]">
+            <PsgYmPicker value={from} onChange={onFromChange} />
+            <span className="text-[var(--color-ink-3)]">→</span>
+            <PsgYmPicker value={to} onChange={onToChange} />
+          </div>
+          <div className="flex flex-col gap-1 border-t border-[var(--color-rule)] pt-1.5">
+            <div className="h-1.5 rounded-sm" style={{ background: gradient }} />
+            <div className="flex justify-between text-[0.65rem] text-[var(--color-ink-3)] tabular-nums">
+              <span>{cfg.ramp[0][0].toFixed(cfg.digits)}{cfg.suffix}</span>
+              <span>+{cfg.ramp[cfg.ramp.length - 1][0].toFixed(cfg.digits)}{cfg.suffix}</span>
+            </div>
+            {rowCount === 0 && <span className="text-[0.65rem] text-[var(--color-ink-3)]">Načítání…</span>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

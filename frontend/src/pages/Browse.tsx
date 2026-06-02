@@ -8,6 +8,8 @@ import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
 import type { MapFlyToCommand, RentVk } from '@/components/ListingMap';
 import type { MapySuggestion } from '@/lib/maps';
+import { fetchDatasets, fetchGrowth, priceStatsKeys } from '@/lib/priceStats';
+import type { GrowthMetric } from '@/lib/growthChoropleth';
 import {
   fromSearchParams,
   toSearchParams,
@@ -87,6 +89,16 @@ export default function Browse() {
     ? rentVkParam
     : 1) as RentVk;
   const showKraje = searchParams.get('kraje') === '1';
+
+  /* Price-stats growth overlay control state — kept in component state (not
+   * URL) since it's a transient map-exploration knob. */
+  const [showGrowth, setShowGrowth] = useState(false);
+  const [growthDatasetId, setGrowthDatasetId] = useState<number | null>(null);
+  const [growthMetric, setGrowthMetric] = useState<GrowthMetric>('rent_cagr_pct');
+  const [growthFrom, setGrowthFrom] = useState('2015-01');
+  const [growthTo, setGrowthTo] = useState(
+    () => `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`,
+  );
 
   /* Copy URL keys that live outside `toSearchParams` (tab, sort, the
    * city-overlay knobs). Used by every URL rewriter on this page so
@@ -357,6 +369,22 @@ export default function Browse() {
     gcTime: Infinity,
   });
 
+  /* Price-stats growth overlay data: the dataset list (for the picker) +
+   * per-obec growth for the chosen dataset + window. */
+  const psDatasetsQuery = useQuery({
+    queryKey: priceStatsKeys.datasets,
+    queryFn: fetchDatasets,
+    enabled: tabFromUrl === 'map' && showGrowth,
+    staleTime: 60_000,
+  });
+  const psGrowthDatasetId = growthDatasetId ?? psDatasetsQuery.data?.[0]?.id ?? null;
+  const psGrowthQuery = useQuery({
+    queryKey: priceStatsKeys.growth(psGrowthDatasetId ?? -1, growthFrom, growthTo),
+    queryFn: () => fetchGrowth(psGrowthDatasetId as number, growthFrom, growthTo),
+    enabled: tabFromUrl === 'map' && showGrowth && psGrowthDatasetId != null,
+    staleTime: 60_000,
+  });
+
   const cardsQuery = useQuery<CardsResult, Error>({
     queryKey: ['cards', filters, sort, page],
     queryFn: () => fetchListingsForCards(filters, sort, page),
@@ -597,6 +625,18 @@ export default function Browse() {
                     onToggleShowRentMap={setShowRentMap}
                     onRentVkChange={setRentVk}
                     onToggleShowKraje={setShowKraje}
+                    growthRows={psGrowthQuery.data ?? []}
+                    growthDatasets={psDatasetsQuery.data ?? []}
+                    showGrowth={showGrowth}
+                    growthDatasetId={psGrowthDatasetId}
+                    growthMetric={growthMetric}
+                    growthFrom={growthFrom}
+                    growthTo={growthTo}
+                    onToggleShowGrowth={setShowGrowth}
+                    onGrowthDatasetChange={setGrowthDatasetId}
+                    onGrowthMetricChange={setGrowthMetric}
+                    onGrowthFromChange={setGrowthFrom}
+                    onGrowthToChange={setGrowthTo}
                   />
                 </Suspense>
               </div>
