@@ -60,8 +60,17 @@ const ATTACHMENT_MAX_FILES = 20;
 /* affordances on EstimationList / empty states to the same modal instance.   */
 /* -------------------------------------------------------------------------- */
 
+/* Optional pre-fill when the modal is opened from a specific listing (e.g. the
+ * Listing Detail page). A `url` locks the subject to that listing and hides the
+ * URL field — the operator only picks the estimate type and hits Estimate. */
+export interface NewEstimationPrefill {
+  url?: string;
+  categoryMain?: CategoryMain;
+  estimateKind?: EstimateKind;
+}
+
 interface ModalCtx {
-  open: () => void;
+  open: (prefill?: NewEstimationPrefill) => void;
   close: () => void;
   isOpen: boolean;
 }
@@ -78,9 +87,13 @@ export function useNewEstimationModal(): ModalCtx {
 
 export function NewEstimationProvider({ children }: { children: ReactNode }) {
   const [isOpen, setOpen] = useState(false);
+  const [prefill, setPrefill] = useState<NewEstimationPrefill | null>(null);
   const value = useMemo<ModalCtx>(
     () => ({
-      open: () => setOpen(true),
+      open: (p?: NewEstimationPrefill) => {
+        setPrefill(p ?? null);
+        setOpen(true);
+      },
       close: () => setOpen(false),
       isOpen,
     }),
@@ -89,7 +102,9 @@ export function NewEstimationProvider({ children }: { children: ReactNode }) {
   return (
     <ctx.Provider value={value}>
       {children}
-      {isOpen && <NewEstimationModal onClose={() => setOpen(false)} />}
+      {isOpen && (
+        <NewEstimationModal onClose={() => setOpen(false)} prefill={prefill} />
+      )}
     </ctx.Provider>
   );
 }
@@ -115,11 +130,25 @@ function categoryTypeFor(kind: EstimateKind): string {
   return kind === 'rent' ? 'pronajem' : 'prodej';
 }
 
-function NewEstimationModal({ onClose }: { onClose: () => void }) {
+function NewEstimationModal({
+  onClose,
+  prefill,
+}: {
+  onClose: () => void;
+  prefill?: NewEstimationPrefill | null;
+}) {
+  // A prefilled url binds the subject to that listing (Listing Detail → New
+  // estimation): the URL field is hidden and only the type selectors + Estimate
+  // remain.
+  const urlLocked = Boolean(prefill?.url);
   const [kind, setKind] = useState<Kind>('apartment');
-  const [estimateKind, setEstimateKind] = useState<EstimateKind>('rent');
-  const [categoryMain, setCategoryMain] = useState<CategoryMain>('byt');
-  const [url, setUrl] = useState('');
+  const [estimateKind, setEstimateKind] = useState<EstimateKind>(
+    prefill?.estimateKind ?? 'rent',
+  );
+  const [categoryMain, setCategoryMain] = useState<CategoryMain>(
+    prefill?.categoryMain ?? 'byt',
+  );
+  const [url, setUrl] = useState(prefill?.url ?? '');
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [contextualText, setContextualText] = useState('');
   const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
@@ -320,30 +349,39 @@ function NewEstimationModal({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
-          <label
-            htmlFor="new-estimation-url"
-            className="mt-4 block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+          {!urlLocked && (
+            <label
+              htmlFor="new-estimation-url"
+              className="mt-4 block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]"
+            >
+              Listing URL
+            </label>
+          )}
+          <div
+            className={[
+              'mt-2 flex items-stretch gap-2',
+              urlLocked ? 'mt-4 justify-end' : '',
+            ].join(' ')}
           >
-            Listing URL
-          </label>
-          <div className="mt-2 flex items-stretch gap-2">
-            <input
-              id="new-estimation-url"
-              type="url"
-              inputMode="url"
-              autoFocus
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  submit();
-                }
-              }}
-              placeholder={placeholder}
-              disabled={pending}
-              className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
-            />
+            {!urlLocked && (
+              <input
+                id="new-estimation-url"
+                type="url"
+                inputMode="url"
+                autoFocus
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    submit();
+                  }
+                }}
+                placeholder={placeholder}
+                disabled={pending}
+                className="flex-1 min-w-0 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+              />
+            )}
             <button
               type="button"
               onClick={submit}

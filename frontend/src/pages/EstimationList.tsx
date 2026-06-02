@@ -138,7 +138,7 @@ function Header() {
       </div>
       <button
         type="button"
-        onClick={open}
+        onClick={() => open()}
         className="shrink-0 inline-flex items-center gap-2 px-4 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
       >
         <span>+ New estimation</span>
@@ -592,7 +592,7 @@ function EmptyState({ filtered }: { filtered: boolean }) {
       </p>
       <button
         type="button"
-        onClick={open}
+        onClick={() => open()}
         className="mt-4 inline-block text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
       >
         Start an estimation →
