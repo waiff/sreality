@@ -30,6 +30,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm install
       - run: npm run typecheck
+      # Rules of Hooks (a runtime React contract tsc can't see). Catches a hook
+      # called conditionally / after an early return — the bug that blanked
+      # Listing Detail. Errors fail the build; exhaustive-deps stays a warning.
+      - run: npm run lint
       - name: Build
         run: npm run build
         env:

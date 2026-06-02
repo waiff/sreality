@@ -130,6 +130,36 @@ export default function ListingDetail() {
     staleTime: 5 * 60_000,
   });
 
+  // Bind the page's "New estimation" CTA to THIS listing: pre-fill its URL +
+  // estimate type so the modal drops the URL field and just runs the estimate.
+  // MUST stay above the early returns below — a hook after a conditional return
+  // is the React #310 "rendered more hooks than during the previous render" trap
+  // (it fired on every listing once listingQ resolved, white-screening the page).
+  const newEstimationPrefill = useMemo<NewEstimationPrefill | undefined>(() => {
+    const listing = listingQ.data;
+    if (!listing) return undefined;
+    const currentSource = (sourcesQ.data?.sources ?? []).find(
+      (s) => s.sreality_id === listing.sreality_id,
+    );
+    const url =
+      currentSource?.source_url
+      ?? (listing.source === 'sreality'
+        ? `https://www.sreality.cz/detail/${listing.category_type ?? 'prodej'}/${listing.category_main ?? 'byt'}/x/x/${listing.sreality_id}`
+        : undefined);
+    if (!url) return undefined;
+    const categoryMain =
+      listing.category_main === 'byt'
+      || listing.category_main === 'dum'
+      || listing.category_main === 'komercni'
+        ? listing.category_main
+        : undefined;
+    return {
+      url,
+      categoryMain,
+      estimateKind: listing.category_type === 'pronajem' ? 'rent' : 'sale',
+    };
+  }, [listingQ.data, sourcesQ.data]);
+
   if (sid == null) {
     // Resolving ?property=ID → redirect (handled by the effect above). Show a
     // loading state while it resolves; only "not found" if there's no such
@@ -175,28 +205,6 @@ export default function ListingDetail() {
   const images = imagesQ.data ?? [];
   const sources = sourcesQ.data?.sources ?? [];
   const currentSource = sources.find((s) => s.sreality_id === listing.sreality_id);
-
-  // Bind the page's "New estimation" CTA to THIS listing: pre-fill its URL +
-  // estimate type so the modal drops the URL field and just runs the estimate.
-  const newEstimationPrefill = useMemo<NewEstimationPrefill | undefined>(() => {
-    const url =
-      currentSource?.source_url
-      ?? (listing.source === 'sreality'
-        ? `https://www.sreality.cz/detail/${listing.category_type ?? 'prodej'}/${listing.category_main ?? 'byt'}/x/x/${listing.sreality_id}`
-        : undefined);
-    if (!url) return undefined;
-    const categoryMain =
-      listing.category_main === 'byt'
-      || listing.category_main === 'dum'
-      || listing.category_main === 'komercni'
-        ? listing.category_main
-        : undefined;
-    return {
-      url,
-      categoryMain,
-      estimateKind: listing.category_type === 'pronajem' ? 'rent' : 'sale',
-    };
-  }, [currentSource, listing]);
 
   return (
     <Page>
