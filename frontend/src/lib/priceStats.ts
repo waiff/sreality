@@ -66,6 +66,9 @@ export const priceStatsKeys = {
   datasets: ['price_stat_datasets'] as const,
   cityMetrics: (id: number) => ['price_stat_city_metrics', id] as const,
   choropleth: (id: number) => ['price_stat_choropleth', id] as const,
+  growth: (id: number, from: string | null, to: string | null) =>
+    ['price_stat_growth', id, from, to] as const,
+  obecTree: ['price_stat_obce_tree'] as const,
   series: (id: number, t: string, e: number) =>
     ['price_stat_series', id, t, e] as const,
 };
@@ -102,6 +105,57 @@ export const fetchChoropleth = async (
     .range(0, 9999);
   if (error) throw error;
   return (data ?? []) as unknown as PriceStatPolygon[];
+};
+
+/* Live per-obec growth for any [from,to] window via the price_stat_growth RPC
+ * (computed from observations server-side; no re-scrape). Drives the revamped
+ * Datasets page + the Browse overlay. from/to are 'YYYY-MM' or null (open). */
+export interface PriceStatGrowthRow {
+  obec_id: number;
+  locality_name: string;
+  geojson: string;
+  sale_latest_price: number | null;
+  sale_cagr_pct: number | null;
+  sale_min_active: number | null;
+  rent_latest_price: number | null;
+  rent_cagr_pct: number | null;
+  rent_min_active: number | null;
+  gross_yield_pct: number | null;
+  yield_change_pp_pa: number | null;
+}
+
+export const fetchGrowth = async (
+  datasetId: number,
+  from: string | null,
+  to: string | null,
+): Promise<PriceStatGrowthRow[]> => {
+  const { data, error } = await supabase.rpc('price_stat_growth', {
+    p_dataset_id: datasetId,
+    p_from: from,
+    p_to: to,
+  });
+  if (error) throw error;
+  return (data ?? []) as PriceStatGrowthRow[];
+};
+
+/* The kraj→okres→obec tree for the city picker (no geometry). */
+export interface ObecNode {
+  id: number;
+  level: 'kraj' | 'okres' | 'obec';
+  name: string;
+  parent_id: number | null;
+  population: number | null;
+  sreality_id: number | null;
+}
+
+export const fetchObecTree = async (): Promise<ObecNode[]> => {
+  const { data, error } = await supabase
+    .from('price_stat_obce_picker_public')
+    .select('id,level,name,parent_id,population,sreality_id')
+    .order('name')
+    .range(0, 9999);
+  if (error) throw error;
+  return (data ?? []) as unknown as ObecNode[];
 };
 
 export const fetchCitySeries = async (
