@@ -372,13 +372,19 @@ def _create_singleton_property(
             """
             INSERT INTO properties (
                 repr_listing_id, category_main, category_type, disposition,
-                area_m2, district, geom, current_price_czk,
+                area_m2, district, locality, geom, current_price_czk,
+                has_balcony, has_parking, has_lift, building_type, condition,
+                ownership, furnished, terrace, cellar, garage, category_sub_cb,
+                estate_area, usable_area, garden_area, parking_lots,
                 is_active, first_seen_at, last_seen_at,
                 source_count, distinct_site_count
             )
             SELECT
                 sreality_id, category_main, category_type, disposition,
-                area_m2, district, geom, price_czk,
+                area_m2, district, locality, geom, price_czk,
+                has_balcony, has_parking, has_lift, building_type, condition,
+                ownership, furnished, terrace, cellar, garage, category_sub_cb,
+                estate_area, usable_area, garden_area, parking_lots,
                 is_active, first_seen_at, last_seen_at, 1, 1
             FROM listings WHERE sreality_id = %s
             RETURNING id
@@ -407,13 +413,29 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
                 distinct_site_count = agg.dcnt,
                 last_seen_at        = agg.last_seen,
                 is_active           = agg.active,
-                current_price_czk   = CASE WHEN agg.cnt = 1 THEN l.price_czk     ELSE p.current_price_czk END,
-                area_m2             = CASE WHEN agg.cnt = 1 THEN l.area_m2        ELSE p.area_m2 END,
-                district            = CASE WHEN agg.cnt = 1 THEN l.district       ELSE p.district END,
-                disposition         = CASE WHEN agg.cnt = 1 THEN l.disposition    ELSE p.disposition END,
-                geom                = CASE WHEN agg.cnt = 1 THEN l.geom           ELSE p.geom END,
-                category_main       = CASE WHEN agg.cnt = 1 THEN l.category_main  ELSE p.category_main END,
-                category_type       = CASE WHEN agg.cnt = 1 THEN l.category_type  ELSE p.category_type END
+                current_price_czk   = CASE WHEN agg.cnt = 1 THEN l.price_czk      ELSE p.current_price_czk END,
+                area_m2             = CASE WHEN agg.cnt = 1 THEN l.area_m2         ELSE p.area_m2 END,
+                district            = CASE WHEN agg.cnt = 1 THEN l.district        ELSE p.district END,
+                locality            = CASE WHEN agg.cnt = 1 THEN l.locality        ELSE p.locality END,
+                disposition         = CASE WHEN agg.cnt = 1 THEN l.disposition     ELSE p.disposition END,
+                geom                = CASE WHEN agg.cnt = 1 THEN l.geom            ELSE p.geom END,
+                category_main       = CASE WHEN agg.cnt = 1 THEN l.category_main   ELSE p.category_main END,
+                category_type       = CASE WHEN agg.cnt = 1 THEN l.category_type   ELSE p.category_type END,
+                has_balcony         = CASE WHEN agg.cnt = 1 THEN l.has_balcony     ELSE p.has_balcony END,
+                has_parking         = CASE WHEN agg.cnt = 1 THEN l.has_parking     ELSE p.has_parking END,
+                has_lift            = CASE WHEN agg.cnt = 1 THEN l.has_lift        ELSE p.has_lift END,
+                building_type       = CASE WHEN agg.cnt = 1 THEN l.building_type   ELSE p.building_type END,
+                condition           = CASE WHEN agg.cnt = 1 THEN l.condition       ELSE p.condition END,
+                ownership           = CASE WHEN agg.cnt = 1 THEN l.ownership       ELSE p.ownership END,
+                furnished           = CASE WHEN agg.cnt = 1 THEN l.furnished       ELSE p.furnished END,
+                terrace             = CASE WHEN agg.cnt = 1 THEN l.terrace         ELSE p.terrace END,
+                cellar              = CASE WHEN agg.cnt = 1 THEN l.cellar          ELSE p.cellar END,
+                garage              = CASE WHEN agg.cnt = 1 THEN l.garage          ELSE p.garage END,
+                category_sub_cb     = CASE WHEN agg.cnt = 1 THEN l.category_sub_cb ELSE p.category_sub_cb END,
+                estate_area         = CASE WHEN agg.cnt = 1 THEN l.estate_area     ELSE p.estate_area END,
+                usable_area         = CASE WHEN agg.cnt = 1 THEN l.usable_area     ELSE p.usable_area END,
+                garden_area         = CASE WHEN agg.cnt = 1 THEN l.garden_area     ELSE p.garden_area END,
+                parking_lots        = CASE WHEN agg.cnt = 1 THEN l.parking_lots    ELSE p.parking_lots END
             FROM listings l
             JOIN LATERAL (
                 SELECT count(*) AS cnt, count(DISTINCT source) AS dcnt,
