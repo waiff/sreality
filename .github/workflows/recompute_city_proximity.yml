@@ -1,0 +1,50 @@
+name: "Jobs: recompute city proximity (hourly)"
+
+# Recompute properties.home_obec_pop + near_{pop,jobs,youth,overall}_{5,15}km
+# (migration 142) so the Browse / Watchdog city-proximity + Min Population
+# filters read precomputed indexed columns instead of a per-request spatial
+# RPC. Incremental hourly run fills newly-ingested properties within the hour;
+# the same function rebuilds everything after a population / city-index load.
+#
+# Dispatch with full=true after scripts/load_obec_population or a city-index
+# upload, since those shift the precomputed maxes for existing rows.
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  schedule:
+    - cron: "40 * * * *"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "Rebuild every property (not just new ones)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: recompute-city-proximity
+  cancel-in-progress: false
+
+jobs:
+  recompute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Recompute city proximity
+        run: python -m scripts.recompute_city_proximity ${{ (github.event_name == 'workflow_dispatch' && inputs.full) && '--full' || '' }}

@@ -1208,29 +1208,32 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="min_city_population",
             type=FilterType.INT,
-            pg_column=None,
+            pg_column="home_obec_pop",
             default=None,
             description=(
-                "Lower bound on the listing's curated-city population "
-                "(latest `city_population` row). Applies only to "
-                "listings inside the curated-city footprint; others "
-                "fall through to the city-quality activation check."
+                "Lower bound on the population of the listing's OWN "
+                "municipality (`home_obec_pop >= N`, ČSÚ population of the "
+                "obec whose polygon contains the listing). Precomputed by "
+                "recompute_city_proximity (migration 142) for every listing "
+                "country-wide — not just the 206 curated cities."
             ),
             category=CATEGORY_CITY_QUALITY,
             ui_control=UiControl.NUMBER_INPUT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 0, "max": 1500000, "step": 1000},
+            aliases=("minCityPopulation",),
         ),
         FilterDef(
             id="max_city_population",
             type=FilterType.INT,
-            pg_column=None,
+            pg_column="home_obec_pop",
             default=None,
-            description="Upper bound on curated-city population. See `min_city_population`.",
+            description="Upper bound on the listing's own-municipality population (`home_obec_pop <= N`). See `min_city_population`.",
             category=CATEGORY_CITY_QUALITY,
             ui_control=UiControl.NUMBER_INPUT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 0, "max": 1500000, "step": 1000},
+            aliases=("maxCityPopulation",),
         ),
         FilterDef(
             id="near_city_proximity",
@@ -1250,6 +1253,136 @@ def _build_registry() -> dict[str, FilterDef]:
             category=CATEGORY_CITY_QUALITY,
             ui_control=UiControl.NEAR_CITY_RULE,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+        ),
+
+        # --- fast polygon-edge proximity (migration 142) -----------------
+        # Precomputed columns on `properties`: each stores the MAX metric
+        # found within a FIXED radius (5 / 15 km) of the listing, measured to
+        # the municipality POLYGON EDGE (0 m when inside). The threshold stays
+        # dynamic — the filter is `column >= value`. Population proximity
+        # considers obce with pop >= 10000; index proximity the 206 curated
+        # cities. Unlike near_city_proximity (centroid + per-request RPC),
+        # these are plain indexed-column predicates: no anon timeout.
+        FilterDef(
+            id="near_pop_5km_min",
+            type=FilterType.INT,
+            pg_column="near_pop_5km",
+            default=None,
+            description=(
+                "Within 5 km of a municipality whose population is at least N "
+                "(`near_pop_5km >= N`; polygon-edge distance). E.g. 50000 for "
+                "'within 5 km of a town of 50k+'."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 10000, "max": 1500000, "step": 10000},
+            aliases=("nearPop5kmMin",),
+        ),
+        FilterDef(
+            id="near_pop_15km_min",
+            type=FilterType.INT,
+            pg_column="near_pop_15km",
+            default=None,
+            description=(
+                "Within 15 km of a municipality whose population is at least N "
+                "(`near_pop_15km >= N`; polygon-edge distance)."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 10000, "max": 1500000, "step": 10000},
+            aliases=("nearPop15kmMin",),
+        ),
+        FilterDef(
+            id="near_jobs_5km_min",
+            type=FilterType.FLOAT,
+            pg_column="near_jobs_5km",
+            default=None,
+            description=(
+                "Within 5 km of a curated city whose job-offer index "
+                "(`pracovni_mista`, 0–10) is at least T (`near_jobs_5km >= T`)."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 10, "step": 0.5},
+            aliases=("nearJobs5kmMin",),
+        ),
+        FilterDef(
+            id="near_jobs_15km_min",
+            type=FilterType.FLOAT,
+            pg_column="near_jobs_15km",
+            default=None,
+            description=(
+                "Within 15 km of a curated city whose job-offer index "
+                "(`pracovni_mista`, 0–10) is at least T (`near_jobs_15km >= T`)."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 10, "step": 0.5},
+            aliases=("nearJobs15kmMin",),
+        ),
+        FilterDef(
+            id="near_youth_5km_min",
+            type=FilterType.FLOAT,
+            pg_column="near_youth_5km",
+            default=None,
+            description=(
+                "Within 5 km of a curated city whose young-migration index "
+                "(`stehovani_mladych`, 0–10) is at least T (`near_youth_5km >= T`)."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 10, "step": 0.5},
+            aliases=("nearYouth5kmMin",),
+        ),
+        FilterDef(
+            id="near_youth_15km_min",
+            type=FilterType.FLOAT,
+            pg_column="near_youth_15km",
+            default=None,
+            description=(
+                "Within 15 km of a curated city whose young-migration index "
+                "(`stehovani_mladych`, 0–10) is at least T (`near_youth_15km >= T`)."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 10, "step": 0.5},
+            aliases=("nearYouth15kmMin",),
+        ),
+        FilterDef(
+            id="near_overall_5km_min",
+            type=FilterType.FLOAT,
+            pg_column="near_overall_5km",
+            default=None,
+            description=(
+                "Within 5 km of a curated city whose overall quality index "
+                "(`celkove_hodnoceni`, 0–10) is at least T (`near_overall_5km >= T`)."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 10, "step": 0.5},
+            aliases=("nearOverall5kmMin",),
+        ),
+        FilterDef(
+            id="near_overall_15km_min",
+            type=FilterType.FLOAT,
+            pg_column="near_overall_15km",
+            default=None,
+            description=(
+                "Within 15 km of a curated city whose overall quality index "
+                "(`celkove_hodnoceni`, 0–10) is at least T (`near_overall_15km >= T`)."
+            ),
+            category=CATEGORY_CITY_QUALITY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
+            constraints={"min": 0, "max": 10, "step": 0.5},
+            aliases=("nearOverall15kmMin",),
         ),
 
         # --- multi-portal / price-history signals (Slice 2a/2b) ---------

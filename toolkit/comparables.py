@@ -122,6 +122,18 @@ class ComparableFilters:
     # all hold for C. `radius_km` defaults to 5 in the UI but the SQL
     # requires it explicit.
     near_city_proximity: dict[str, Any] | None = None
+    # Fast polygon-edge proximity (migration 142). Precomputed columns on
+    # properties_public, filtered `>= value`. BROWSE / WATCHDOG only — the
+    # listings-grain comparables agenda never sets these (agenda-gated), so
+    # the `l.home_obec_pop` / `l.near_*` references never materialise here.
+    near_pop_5km_min: int | None = None
+    near_pop_15km_min: int | None = None
+    near_jobs_5km_min: float | None = None
+    near_jobs_15km_min: float | None = None
+    near_youth_5km_min: float | None = None
+    near_youth_15km_min: float | None = None
+    near_overall_5km_min: float | None = None
+    near_overall_15km_min: float | None = None
 
 
 _DISPOSITION_LOOSE: dict[str, tuple[str, ...]] = {
@@ -182,7 +194,36 @@ def _city_quality_clauses(
     pop_min = filters.min_city_population
     pop_max = filters.max_city_population
 
-    if rules or pop_min is not None or pop_max is not None:
+    # Population now reads the precomputed home_obec_pop column (migration 142)
+    # — the listing's OWN municipality population, country-wide, no curated-city
+    # join. Browse / Watchdog grain only (properties_public exposes it); the
+    # listings-grain comparables agenda never sets these.
+    if pop_min is not None:
+        where.append("l.home_obec_pop >= %(min_city_population)s")
+        params["min_city_population"] = pop_min
+    if pop_max is not None:
+        where.append("l.home_obec_pop <= %(max_city_population)s")
+        params["max_city_population"] = pop_max
+
+    # Fast polygon-edge proximity columns (migration 142). Plain `>= value`
+    # predicates against the precomputed maxes within a fixed 5 / 15 km.
+    _PROX_COLS = (
+        ("near_pop_5km_min", "near_pop_5km"),
+        ("near_pop_15km_min", "near_pop_15km"),
+        ("near_jobs_5km_min", "near_jobs_5km"),
+        ("near_jobs_15km_min", "near_jobs_15km"),
+        ("near_youth_5km_min", "near_youth_5km"),
+        ("near_youth_15km_min", "near_youth_15km"),
+        ("near_overall_5km_min", "near_overall_5km"),
+        ("near_overall_15km_min", "near_overall_15km"),
+    )
+    for attr, col in _PROX_COLS:
+        val = getattr(filters, attr, None)
+        if val is not None:
+            where.append(f"l.{col} >= %({attr})s")
+            params[attr] = val
+
+    if rules:
         # Polygon containment (migration 081) when the curated city is
         # wired to an obec admin_boundary; centroid+radius is the
         # fallback for cities that didn't match a RÚIAN obec by name.
@@ -200,12 +241,6 @@ def _city_quality_clauses(
             sub_where.append(_index_rule_predicate(f"viq_{i}", rule, idx_p, val_p))
             params[idx_p] = rule["index_name"]
             params[val_p] = rule["value"]
-        if pop_min is not None:
-            sub_where.append("c.population >= %(min_city_population)s")
-            params["min_city_population"] = pop_min
-        if pop_max is not None:
-            sub_where.append("c.population <= %(max_city_population)s")
-            params["max_city_population"] = pop_max
         where.append(
             "EXISTS (SELECT 1 FROM curated_cities_public c "
             "LEFT JOIN admin_boundaries_public b "

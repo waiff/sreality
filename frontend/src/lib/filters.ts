@@ -179,6 +179,18 @@ export interface ListingFilters {
   minCityPopulation: number | null;
   maxCityPopulation: number | null;
   nearCityProximity: NearCityProximity | null;
+  /* Fast polygon-edge proximity (migration 142). Each is a precomputed
+   * `properties` column filtered as `>= value`: the MAX metric found within
+   * a fixed 5 / 15 km of the listing (population of obce >= 10k, or one of
+   * the three curated-city indexes). No per-request spatial RPC. */
+  nearPop5kmMin: number | null;
+  nearPop15kmMin: number | null;
+  nearJobs5kmMin: number | null;
+  nearJobs15kmMin: number | null;
+  nearYouth5kmMin: number | null;
+  nearYouth15kmMin: number | null;
+  nearOverall5kmMin: number | null;
+  nearOverall15kmMin: number | null;
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -234,6 +246,14 @@ export const DEFAULT_FILTERS: ListingFilters = {
   minCityPopulation: null,
   maxCityPopulation: null,
   nearCityProximity: null,
+  nearPop5kmMin: null,
+  nearPop15kmMin: null,
+  nearJobs5kmMin: null,
+  nearJobs15kmMin: null,
+  nearYouth5kmMin: null,
+  nearYouth15kmMin: null,
+  nearOverall5kmMin: null,
+  nearOverall15kmMin: null,
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -423,6 +443,14 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     minCityPopulation: parseIntOrNull(sp.get('cq_pop_min')),
     maxCityPopulation: parseIntOrNull(sp.get('cq_pop_max')),
     nearCityProximity: parseNearCityProximity(sp.get('cq_prox')),
+    nearPop5kmMin: parseIntOrNull(sp.get('np5')),
+    nearPop15kmMin: parseIntOrNull(sp.get('np15')),
+    nearJobs5kmMin: parseFloatOrNull(sp.get('nj5')),
+    nearJobs15kmMin: parseFloatOrNull(sp.get('nj15')),
+    nearYouth5kmMin: parseFloatOrNull(sp.get('ny5')),
+    nearYouth15kmMin: parseFloatOrNull(sp.get('ny15')),
+    nearOverall5kmMin: parseFloatOrNull(sp.get('no5')),
+    nearOverall15kmMin: parseFloatOrNull(sp.get('no15')),
   };
 };
 
@@ -606,6 +634,14 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.nearCityProximity) {
     sp.set('cq_prox', fmtNearCityProximity(f.nearCityProximity));
   }
+  if (f.nearPop5kmMin != null) sp.set('np5', String(f.nearPop5kmMin));
+  if (f.nearPop15kmMin != null) sp.set('np15', String(f.nearPop15kmMin));
+  if (f.nearJobs5kmMin != null) sp.set('nj5', String(f.nearJobs5kmMin));
+  if (f.nearJobs15kmMin != null) sp.set('nj15', String(f.nearJobs15kmMin));
+  if (f.nearYouth5kmMin != null) sp.set('ny5', String(f.nearYouth5kmMin));
+  if (f.nearYouth15kmMin != null) sp.set('ny15', String(f.nearYouth15kmMin));
+  if (f.nearOverall5kmMin != null) sp.set('no5', String(f.nearOverall5kmMin));
+  if (f.nearOverall15kmMin != null) sp.set('no15', String(f.nearOverall15kmMin));
   return sp;
 };
 
@@ -759,7 +795,15 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.cityIndexRules.length === 0 &&
   f.minCityPopulation == null &&
   f.maxCityPopulation == null &&
-  f.nearCityProximity == null;
+  f.nearCityProximity == null &&
+  f.nearPop5kmMin == null &&
+  f.nearPop15kmMin == null &&
+  f.nearJobs5kmMin == null &&
+  f.nearJobs15kmMin == null &&
+  f.nearYouth5kmMin == null &&
+  f.nearYouth15kmMin == null &&
+  f.nearOverall5kmMin == null &&
+  f.nearOverall15kmMin == null;
 
 
 /* -------------------------------------------------------------------------- */
@@ -825,6 +869,14 @@ export const REGISTRY_KEY_MAP = {
   min_city_population: 'minCityPopulation',
   max_city_population: 'maxCityPopulation',
   near_city_proximity: 'nearCityProximity',
+  near_pop_5km_min: 'nearPop5kmMin',
+  near_pop_15km_min: 'nearPop15kmMin',
+  near_jobs_5km_min: 'nearJobs5kmMin',
+  near_jobs_15km_min: 'nearJobs15kmMin',
+  near_youth_5km_min: 'nearYouth5kmMin',
+  near_youth_15km_min: 'nearYouth15kmMin',
+  near_overall_5km_min: 'nearOverall5kmMin',
+  near_overall_15km_min: 'nearOverall15kmMin',
 } as const satisfies Record<string, keyof ListingFilters>;
 
 type RegistryKey = keyof typeof REGISTRY_KEY_MAP;
@@ -1039,6 +1091,14 @@ export function filtersToWatchdogSpec(
     min_city_population: f.minCityPopulation,
     max_city_population: f.maxCityPopulation,
     near_city_proximity: f.nearCityProximity,
+    near_pop_5km_min: f.nearPop5kmMin,
+    near_pop_15km_min: f.nearPop15kmMin,
+    near_jobs_5km_min: f.nearJobs5kmMin,
+    near_jobs_15km_min: f.nearJobs15kmMin,
+    near_youth_5km_min: f.nearYouth5kmMin,
+    near_youth_15km_min: f.nearYouth15kmMin,
+    near_overall_5km_min: f.nearOverall5kmMin,
+    near_overall_15km_min: f.nearOverall15kmMin,
   };
 
   const unsupported = UNSUPPORTED_LABELS.filter((u) => u.test(f)).map((u) => u.label);

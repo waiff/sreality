@@ -100,6 +100,14 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         # Source portal (migration 091); exposed on listings_public and
         # properties_public, filtered by the `portals` multiselect.
         "source",
+        # Property-grain city-proximity columns (migration 142), precomputed by
+        # recompute_city_proximity and exposed on properties_public. home_obec_pop
+        # backs Min/Max Population; the near_* columns back polygon-edge proximity.
+        "home_obec_pop",
+        "near_pop_5km", "near_pop_15km",
+        "near_jobs_5km", "near_jobs_15km",
+        "near_youth_5km", "near_youth_15km",
+        "near_overall_5km", "near_overall_15km",
     }
     for f in fr.all_filters():
         if f.pg_column is None:

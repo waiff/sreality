@@ -242,10 +242,13 @@ async function resolveTagPrefilter(
  * main listings query AND's it via `.in('sreality_id', ids)`. Returns
  * null when no city-quality filter is set so the fast path stays
  * unchanged. */
+/* min/max city population and the near_* proximity filters are NOT here:
+ * since migration 142 they're precomputed columns on properties_public, so
+ * they dispatch directly via applyRegistryFilters (no prefilter RPC, no anon
+ * 3s timeout). Only the flexible any-index rule list + the legacy centroid
+ * near_city_proximity still need the spatial RPC. */
 const hasCityQualityFilter = (f: ListingFilters): boolean =>
   f.cityIndexRules.length > 0
-  || f.minCityPopulation != null
-  || f.maxCityPopulation != null
   || f.nearCityProximity != null;
 
 async function resolveCityQualityPrefilter(
@@ -259,8 +262,10 @@ async function resolveCityQualityPrefilter(
   const { data, error } = await supabase
     .rpc('listings_with_city_quality', {
       p_index_rules: f.cityIndexRules.length === 0 ? null : f.cityIndexRules,
-      p_pop_min: f.minCityPopulation,
-      p_pop_max: f.maxCityPopulation,
+      /* pop bounds moved to the home_obec_pop column filter (migration 142);
+       * never sent through this RPC anymore. */
+      p_pop_min: null,
+      p_pop_max: null,
       p_proximity: f.nearCityProximity,
     })
     .range(0, 99999);
@@ -561,6 +566,15 @@ export const fetchBrowseStats = async (
     city_pop_min:            f.minCityPopulation,
     city_pop_max:            f.maxCityPopulation,
     city_proximity:          f.nearCityProximity,
+    /* Migration 142/143 — fast polygon-edge proximity precomputed columns. */
+    near_pop_5km_min:        f.nearPop5kmMin,
+    near_pop_15km_min:       f.nearPop15kmMin,
+    near_jobs_5km_min:       f.nearJobs5kmMin,
+    near_jobs_15km_min:      f.nearJobs15kmMin,
+    near_youth_5km_min:      f.nearYouth5kmMin,
+    near_youth_15km_min:     f.nearYouth15kmMin,
+    near_overall_5km_min:    f.nearOverall5kmMin,
+    near_overall_15km_min:   f.nearOverall15kmMin,
     /* Migration 083 — price-per-m² bounds. NULL area_m2 listings fall
      * out when either bound is set. */
     price_per_m2_min:        f.pricePerM2Min,
