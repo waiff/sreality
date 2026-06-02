@@ -1029,6 +1029,26 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ingest_boundaries.yml"
   },
   {
+    "filename": "load_obec_population.yml",
+    "name": "Jobs: load obec population (manual)",
+    "description": "Load ČSÚ municipality population into admin_boundaries.population for EVERY obec (not just the 206 curated cities). Reads the committed DataStat export data/csu_population.json (OBY02AT02 — download from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02). Idempotent: only changed rows are written. Dispatch this after committing a refreshed export. This is the population source the \"within X km of a municipality with population > N\" proximity filter reads.",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "load-obec-population",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/load_obec_population.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/load_obec_population.yml"
+  },
+  {
     "filename": "migrations.yml",
     "name": "CI: migration smoke-test",
     "description": "Applies the full migrations/ chain (001 -> latest) to a throwaway Postgres + PostGIS container whenever anything under migrations/ changes, catching a migration that does not apply cleanly before it reaches the production Supabase database (there is no staging DB). It pre-creates the Supabase roles the migrations GRANT to (anon / authenticated / service_role) and the pg_trgm extension migrations 067 / 074 rely on, applies every *.sql in numeric order, then runs a small sanity query. Hermetic: no secrets, never touches production.",
