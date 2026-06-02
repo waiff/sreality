@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import {
   useMutation,
   useQuery,
@@ -7,7 +7,6 @@ import {
 } from '@tanstack/react-query';
 
 import {
-  createWatchdogSubscription,
   getWatchdogSubscription,
   updateWatchdogSubscription,
 } from '@/lib/api';
@@ -26,14 +25,13 @@ import {
 
 export default function WatchdogEdit() {
   const { id } = useParams<{ id?: string }>();
-  const isEdit = Boolean(id);
   const navigate = useNavigate();
   const qc = useQueryClient();
 
   const existingQ = useQuery({
-    queryKey: id ? watchdogKeys.subscription(id) : ['watchdog', 'new'],
-    queryFn: () => (id ? getWatchdogSubscription(id) : Promise.resolve(null)),
-    enabled: isEdit,
+    queryKey: watchdogKeys.subscription(id ?? ''),
+    queryFn: () => getWatchdogSubscription(id as string),
+    enabled: Boolean(id),
   });
 
   const [name, setName] = useState('');
@@ -41,32 +39,24 @@ export default function WatchdogEdit() {
     DEFAULT_WATCHDOG_FILTER_SPEC,
   );
   const [isActive, setIsActive] = useState(true);
-  const [hydrated, setHydrated] = useState(!isEdit);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    if (isEdit && existingQ.data && !hydrated) {
+    if (existingQ.data && !hydrated) {
       setName(existingQ.data.name);
       setSpec({ ...DEFAULT_WATCHDOG_FILTER_SPEC, ...existingQ.data.filter_spec });
       setIsActive(existingQ.data.is_active);
       setHydrated(true);
     }
-  }, [isEdit, existingQ.data, hydrated]);
+  }, [existingQ.data, hydrated]);
 
   const saveMut = useMutation({
-    mutationFn: async () => {
-      if (isEdit && id) {
-        return updateWatchdogSubscription(id, {
-          name,
-          filter_spec: spec,
-          is_active: isActive,
-        });
-      }
-      return createWatchdogSubscription({
+    mutationFn: async () =>
+      updateWatchdogSubscription(id as string, {
         name,
         filter_spec: spec,
         is_active: isActive,
-      });
-    },
+      }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: watchdogKeys.all });
       navigate('/watchdog/manage');
@@ -76,9 +66,13 @@ export default function WatchdogEdit() {
   const canSave = name.trim().length > 0 && !saveMut.isPending;
   const submitError = saveMut.error?.message ?? null;
 
+  // Watchdog creation now lives on Browse ("Create watchdog" from a saved
+  // filter). This page is edit-only; a missing id has nowhere to go.
+  if (!id) return <Navigate to="/watchdog/manage" replace />;
+
   return (
     <div className="px-6 py-8 max-w-3xl mx-auto">
-      <Header isEdit={isEdit} />
+      <Header />
 
       <form
         className="mt-6 space-y-8"
@@ -207,11 +201,7 @@ export default function WatchdogEdit() {
             disabled={!canSave}
             className="px-4 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors disabled:opacity-50"
           >
-            {saveMut.isPending
-              ? 'Saving…'
-              : isEdit
-                ? 'Save changes'
-                : 'Create watchdog'}
+            {saveMut.isPending ? 'Saving…' : 'Save changes'}
           </button>
         </div>
       </form>
@@ -223,7 +213,7 @@ export default function WatchdogEdit() {
 /* Header                                                                     */
 /* -------------------------------------------------------------------------- */
 
-function Header({ isEdit }: { isEdit: boolean }) {
+function Header() {
   return (
     <header>
       <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
@@ -233,7 +223,7 @@ function Header({ isEdit }: { isEdit: boolean }) {
         className="mt-1.5 text-[2.1rem] leading-tight"
         style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
       >
-        {isEdit ? 'Edit watchdog' : 'New watchdog'}
+        Edit watchdog
       </h1>
       <p className="mt-2 text-sm text-[var(--color-ink-2)]">
         Set the filter once; the matcher fires a notification whenever

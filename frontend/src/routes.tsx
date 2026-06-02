@@ -25,7 +25,6 @@ export const routes: RouteObject[] = [
     children: [
       { index: true, element: <Navigate to="/browse" replace /> },
       { path: 'browse', element: <Browse /> },
-      { path: 'listing', element: <ListingDetail /> },
       { path: 'listing/:sreality_id', element: <ListingDetail /> },
       { path: 'health', element: <Health /> },
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
@@ -36,7 +35,6 @@ export const routes: RouteObject[] = [
       { path: 'collection/:id', element: <CollectionDetail /> },
       { path: 'watchdog', element: <Watchdog /> },
       { path: 'watchdog/manage', element: <WatchdogManage /> },
-      { path: 'watchdog/new', element: <WatchdogEdit /> },
       { path: 'watchdog/:id/edit', element: <WatchdogEdit /> },
       { path: 'dedup', element: <Dedup /> },
       { path: 'settings', element: <Settings /> },

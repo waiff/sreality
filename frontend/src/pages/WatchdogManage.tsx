@@ -93,10 +93,11 @@ function Header() {
           ← Back to feed
         </Link>
         <Link
-          to="/watchdog/new"
+          to="/browse"
           className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
+          title="Watchdogs are created by saving a filter on the Browse page."
         >
-          + New watchdog
+          + New in Browse
         </Link>
       </div>
     </header>
@@ -245,14 +246,15 @@ function EmptyState() {
         No watchdogs yet
       </p>
       <p className="mt-2 text-sm text-[var(--color-ink-2)]">
-        Create a saved filter to start receiving notifications whenever a
-        new listing matches.
+        Watchdogs are saved Browse filters. Set up your filters on the
+        Browse page and click “Create watchdog” to start receiving
+        notifications whenever a new listing matches.
       </p>
       <Link
-        to="/watchdog/new"
+        to="/browse"
         className="mt-4 inline-block text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
       >
-        Create a watchdog →
+        Go to Browse →
       </Link>
     </div>
   );
