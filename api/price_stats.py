@@ -25,7 +25,8 @@ if TYPE_CHECKING:
 _COLS = (
     "id, slug, name, description, category_main_cb, building_condition, "
     "building_type, ownership, usable_area_from, usable_area_to, distance, "
-    "is_active, created_at, updated_at"
+    "is_active, created_at, updated_at, start_ym, end_ym, obec_ids, "
+    "min_population, max_population"
 )
 
 
@@ -37,11 +38,14 @@ def create_dataset(conn: "psycopg.Connection", body: s.PriceStatDatasetIn) -> di
                 INSERT INTO price_stat_datasets (
                     slug, name, description, category_main_cb, building_condition,
                     building_type, ownership, usable_area_from, usable_area_to,
-                    distance, created_by
+                    distance, start_ym, end_ym, obec_ids, min_population,
+                    max_population, created_by
                 ) VALUES (
                     %(slug)s, %(name)s, %(description)s, %(category_main_cb)s,
                     %(building_condition)s, %(building_type)s, %(ownership)s,
-                    %(usable_area_from)s, %(usable_area_to)s, %(distance)s, 'api'
+                    %(usable_area_from)s, %(usable_area_to)s, %(distance)s,
+                    %(start_ym)s, %(end_ym)s, %(obec_ids)s, %(min_population)s,
+                    %(max_population)s, 'api'
                 ) RETURNING {_COLS}
                 """,
                 body.model_dump(),

@@ -677,6 +677,12 @@ class PriceStatDatasetIn(BaseModel):
     usable_area_from:   int | None = Field(default=None, ge=0)
     usable_area_to:     int | None = Field(default=None, ge=0)
     distance:           int = Field(default=0, ge=0)
+    # scrape window (YYYY-MM) + city selection
+    start_ym:           str | None = None
+    end_ym:             str | None = None
+    obec_ids:           list[int] | None = None
+    min_population:     int | None = Field(default=None, ge=0)
+    max_population:     int | None = Field(default=None, ge=0)
 
 
 class PriceStatDatasetUpdateIn(BaseModel):
@@ -691,3 +697,8 @@ class PriceStatDatasetUpdateIn(BaseModel):
     usable_area_to:     int | None = Field(default=None, ge=0)
     distance:           int | None = Field(default=None, ge=0)
     is_active:          bool | None = None
+    start_ym:           str | None = None
+    end_ym:             str | None = None
+    obec_ids:           list[int] | None = None
+    min_population:     int | None = Field(default=None, ge=0)
+    max_population:     int | None = Field(default=None, ge=0)
