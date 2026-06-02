@@ -230,6 +230,16 @@ def test_min_max_pairs_have_companion() -> None:
         "price_drop_count_min",
         "price_rise_count_min",
         "max_price_drop_pct_min",
+        # City-proximity (migration 142) — "at least N within radius"; an upper
+        # bound is meaningless, so these are min-only by design.
+        "near_pop_5km_min",
+        "near_pop_15km_min",
+        "near_jobs_5km_min",
+        "near_jobs_15km_min",
+        "near_youth_5km_min",
+        "near_youth_15km_min",
+        "near_overall_5km_min",
+        "near_overall_15km_min",
     })
     ids = set(fr.REGISTRY.keys())
     for fid in ids:
