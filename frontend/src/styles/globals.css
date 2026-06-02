@@ -328,6 +328,24 @@
   .rm-pin:active { cursor: grabbing; }
 }
 
+/* Distance scale — overrides maplibre-gl's default black-on-white bar so it
+ * matches the paper surface and ink rule the rest of the map overlays use.
+ * Lives bottom-left (the attribution sits bottom-right). */
+@layer components {
+  .maplibregl-ctrl-scale {
+    background: color-mix(in srgb, var(--color-paper-3) 88%, transparent) !important;
+    border: 2px solid var(--color-rule-strong) !important;
+    border-top: none !important;
+    border-bottom-right-radius: var(--radius-sm) !important;
+    color: var(--color-ink-2) !important;
+    font-family: var(--font-mono) !important;
+    font-size: 0.62rem !important;
+    line-height: 1.5 !important;
+    font-variant-numeric: tabular-nums !important;
+    padding: 0 5px !important;
+  }
+}
+
 /* Layered dual-handle range slider. Two <input type="range"> stacked on
  * a single track; only the thumbs receive pointer events so the track can
  * be drawn behind. */

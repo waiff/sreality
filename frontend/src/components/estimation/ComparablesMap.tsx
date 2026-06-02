@@ -47,6 +47,7 @@ export default function ComparablesMap({ subject, comparables, onPick }: Props) 
     });
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
     map.on('load', () => {
       map.addSource('subject', {
@@ -171,7 +172,7 @@ export default function ComparablesMap({ subject, comparables, onPick }: Props) 
 
 function Legend() {
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] text-[0.7rem] tracking-wide text-[var(--color-ink-2)] flex items-center gap-3">
+    <div className="pointer-events-none absolute bottom-9 left-3 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] text-[0.7rem] tracking-wide text-[var(--color-ink-2)] flex items-center gap-3">
       <span className="inline-flex items-center gap-1.5">
         <span className="w-2 h-2 rounded-full" style={{ background: '#b6612d' }} aria-hidden />
         subject

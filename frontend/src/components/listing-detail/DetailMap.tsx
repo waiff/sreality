@@ -26,6 +26,7 @@ export default function DetailMap({ lat, lng, isActive }: Props) {
     });
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
     map.on('load', () => {
       map.addSource('pin', {
