@@ -3,7 +3,7 @@
  * ListingMap (geojson source + inline interpolate paint). Each metric is its
  * own fill layer toggled by visibility, so switching metric never rebuilds a
  * paint expression — the FeatureCollection carries all three values. */
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import type { PriceStatPolygon } from '@/lib/priceStats';
 
@@ -90,7 +90,7 @@ interface Props {
 export default function DatasetMap({ polygons, metric }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
-  const readyRef = useRef(false);
+  const [ready, setReady] = useState(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
 
   useEffect(() => {
@@ -154,29 +154,30 @@ export default function DatasetMap({ polygons, metric }: Props) {
         });
       }
 
-      readyRef.current = true;
-      (map.getSource('obce') as GeoJSONSource | undefined)?.setData(toFC(polygons));
+      setReady(true);
     });
 
     return () => {
       map.remove();
       mapRef.current = null;
-      readyRef.current = false;
+      setReady(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reload features when the data changes.
+  // Apply features once the map is ready AND whenever the data changes. Gating
+  // on `ready` as STATE (not a ref) is what makes this re-run after the map's
+  // async load completes — data usually arrives before then.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
+    if (!map || !ready) return;
     (map.getSource('obce') as GeoJSONSource | undefined)?.setData(toFC(polygons));
-  }, [polygons]);
+  }, [polygons, ready]);
 
   // Toggle which metric's fill layer is visible.
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !readyRef.current) return;
+    if (!map || !ready) return;
     for (const m of Object.values(METRICS)) {
       if (map.getLayer(m.layer)) {
         map.setLayoutProperty(
@@ -185,7 +186,7 @@ export default function DatasetMap({ polygons, metric }: Props) {
         );
       }
     }
-  }, [metric]);
+  }, [metric, ready]);
 
   return (
     <div className="relative">
