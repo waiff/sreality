@@ -344,6 +344,7 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "parent_run_id", "rerun_reason",
     "source_kind", "parse_confidence", "parse_confidence_per_field",
     "source_html",
+    "subject_attributes",
     "special_instructions", "contextual_text",
     "skill_name", "skill_version",
     "scenario",
@@ -419,6 +420,10 @@ class _Resolution:
     subject_listing_price_czk: int | None = None
     subject_listing_category_type: str | None = None
     yield_input_derivation: dict[str, Any] | None = None
+    # Typed subject attributes (building_type / condition / amenities / …) for a
+    # subject with no resolved listings row — lets the UI render the subject like
+    # a listing. None when input_sreality_id is set (the UI reads listings_public).
+    subject_attributes: dict[str, Any] | None = None
 
 
 _EMPTY_RESOLUTION = _Resolution(
@@ -524,6 +529,7 @@ def create_estimation_run(
         parse_confidence=resolution.parse_confidence,
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
+        subject_attributes=resolution.subject_attributes,
         special_instructions=body.special_instructions,
         contextual_text=body.contextual_text,
         skill_name=skill_obj.name if skill_obj is not None else None,
@@ -918,6 +924,78 @@ def preview_estimation(
 
 # --- _resolve_input + helpers ---------------------------------------------
 
+_SUBJECT_ATTR_FIELDS: tuple[str, ...] = (
+    "building_type", "condition", "energy_rating",
+    "ownership", "furnished",
+    "has_balcony", "terrace", "has_lift", "cellar", "garage", "has_parking",
+    "disposition", "area_m2", "floor", "locality", "district",
+)
+
+
+def _match_listing_by_url(
+    conn: "psycopg.Connection", url: str,
+) -> dict[str, Any] | None:
+    """Match a pasted URL to an existing scraped `listings` row (any portal we
+    already scrape), so a known-portal subject reuses the scraper's parsed
+    attributes instead of an LLM parse. Coordinates are required (the
+    comparables search is spatial); most-recently-seen row wins. Returns None
+    when there's no usable match so the caller falls back to URL parsing.
+    """
+    canon = source_dispatcher.canonical_url(url)
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sreality_id, "
+            "ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng, "
+            "area_m2, disposition, floor, price_czk, category_type "
+            "FROM listings "
+            "WHERE geom IS NOT NULL AND source_url IS NOT NULL "
+            "AND (source_url = %(url)s OR source_url = %(canon)s "
+            "     OR rtrim(source_url, '/') = %(canon)s) "
+            "ORDER BY last_seen_at DESC NULLS LAST LIMIT 1",
+            {"url": url, "canon": canon},
+        )
+        row = cur.fetchone()
+    if row is None or row[1] is None or row[2] is None:
+        return None
+    return {
+        "sreality_id": int(row[0]),
+        "spec": {
+            "lat": float(row[1]), "lng": float(row[2]), "area_m2": row[3],
+            "disposition": row[4], "floor": row[5], "exclude_ids": [],
+        },
+        "price_czk": row[6],
+        "category_type": row[7],
+    }
+
+
+def _subject_attributes_from_result(
+    result: "source_dispatcher.ParseResult",
+) -> dict[str, Any] | None:
+    """Typed subject attributes (mirroring listings_public field names) for a
+    parsed subject with no resolved listings row — lets the UI render it like a
+    listing. Pulls from the parse result's wide_spec / full_extraction. None
+    when nothing typed was extracted."""
+    listing = _listing_from_result(result)
+    spec = result.spec or {}
+    fx = result.full_extraction or {}
+
+    def from_extraction(name: str) -> Any:
+        env = fx.get(name)
+        return env["value"] if isinstance(env, dict) and "value" in env else None
+
+    attrs: dict[str, Any] = {}
+    for f in _SUBJECT_ATTR_FIELDS:
+        if f in ("disposition", "area_m2", "floor"):
+            attrs[f] = spec.get(f)
+        elif f in listing and listing.get(f) is not None:
+            attrs[f] = listing.get(f)
+        else:
+            attrs[f] = from_extraction(f)
+    if not any(v is not None for v in attrs.values()):
+        return None
+    return attrs
+
+
 def _resolve_input(
     conn: "psycopg.Connection",
     sreality_client: "SrealityClient",
@@ -926,12 +1004,37 @@ def _resolve_input(
 ) -> _Resolution:
     """Build a _Resolution from the request body.
 
-    URL path: dispatch through scraper.source_dispatcher (which routes
-    sreality through the existing deterministic flow and any other
-    domain through the LLM-driven per-source parser). Spec path: pass
+    URL path: if the link is from a portal we already scrape and the listing is
+    already in our DB, reuse that scraped row (deterministic, no LLM). Otherwise
+    dispatch through scraper.source_dispatcher (sreality → deterministic flow;
+    any other domain → LLM-driven per-source parser), capturing the parsed
+    attributes so the subject can still render like a listing. Spec path: pass
     through with all parse-* fields None.
     """
     if body.url is not None:
+        # Non-sreality portals don't resolve to a listings row through the
+        # dispatcher, but we scrape them — so try the already-scraped row first.
+        # sreality keeps its deterministic re-fetch branch in the dispatcher.
+        if source_dispatcher.classify_url(body.url) != "sreality":
+            matched = _match_listing_by_url(conn, body.url)
+            if matched is not None:
+                spec = dict(matched["spec"])
+                if body.spec_overrides:
+                    spec = {**spec, **body.spec_overrides}
+                return _Resolution(
+                    input_url=body.url,
+                    input_sreality_id=matched["sreality_id"],
+                    target_spec=spec,
+                    source_kind=None,
+                    parse_confidence=None,
+                    parse_confidence_per_field=None,
+                    source_html=None,
+                    parse_warnings=[],
+                    subject_listing_price_czk=_coerce_int(matched.get("price_czk")),
+                    subject_listing_category_type=matched.get("category_type"),
+                    subject_attributes=None,
+                )
+
         result = source_dispatcher.parse_listing_url(
             body.url,
             sreality_client=sreality_client,
@@ -942,6 +1045,13 @@ def _resolve_input(
         if body.spec_overrides:
             spec = {**spec, **body.spec_overrides}
         subject_listing = _listing_from_result(result)
+        # When the parse resolved to a real listings row (sreality), the UI reads
+        # listings_public; otherwise carry the parsed attributes for the UI.
+        subject_attributes = (
+            None
+            if result.sreality_id is not None
+            else _subject_attributes_from_result(result)
+        )
         return _Resolution(
             input_url=body.url,
             input_sreality_id=result.sreality_id,
@@ -953,6 +1063,7 @@ def _resolve_input(
             parse_warnings=list(result.warnings),
             subject_listing_price_czk=_coerce_int(subject_listing.get("price_czk")),
             subject_listing_category_type=subject_listing.get("category_type"),
+            subject_attributes=subject_attributes,
         )
     assert body.spec is not None
     return _Resolution(
@@ -1427,7 +1538,7 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
     for k in (
         "input_spec", "comparables_used", "comparables_excluded",
         "trace", "warnings",
-        "parse_confidence_per_field",
+        "parse_confidence_per_field", "subject_attributes",
         "scenario", "reference_rent",
     ):
         if fields.get(k) is not None:
