@@ -428,6 +428,10 @@ export default function ListingMap({
     mapRef.current = map;
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+    /* Distance scale, bottom-LEFT so it never collides with the
+     * OpenFreeMap attribution (maplibre defaults it bottom-right). The
+     * bottom-left city controls are lifted clear of it below. */
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
     map.on('load', () => {
       /* MF rent-price choropleth. Added FIRST of all overlays so it sits
@@ -1249,7 +1253,7 @@ function CityMapControls({
   cityCount: number;
 }) {
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 flex flex-col gap-2 items-start">
+    <div className="pointer-events-none absolute bottom-9 left-3 flex flex-col gap-2 items-start">
       <div className="pointer-events-auto flex items-center gap-2 px-2.5 py-1.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-3)]/95 backdrop-blur-sm border border-[var(--color-rule)] shadow-[0_2px_6px_rgba(0,0,0,0.04)]">
         <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer">
           <input
