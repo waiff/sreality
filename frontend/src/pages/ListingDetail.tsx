@@ -43,6 +43,7 @@ import {
   buildPriceSeries,
   summarizePriceHistory,
 } from '@/lib/priceHistory';
+import ErrorBoundary from '@/components/ErrorBoundary';
 
 const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
 const Gallery = lazy(() => import('@/components/listing-detail/Gallery'));
@@ -729,9 +730,13 @@ function ListingHistoryBlock({
   snapshots: ListingSnapshotPublic[];
 }) {
   const urls = useMemo(() => listingUrlRows(sources, listing), [sources, listing]);
-  // Date.now() is read once per render and threaded into the pure helpers so
-  // they stay deterministic (and unit-testable in lib/priceHistory.test.ts).
-  const now = Date.now();
+  // Date.now() is captured once at mount (not per render) and threaded into the
+  // pure helpers so they stay deterministic (and unit-testable). Reading it per
+  // render made `now` a fresh value every time, defeating the useMemo deps
+  // below: `series` got a new reference on every one of the page's staggered
+  // query resolutions, re-rendering PriceLineChart mid-measure and tripping
+  // recharts' "rendered more hooks" (#310) crash.
+  const [now] = useState(() => Date.now());
   const series = useMemo(
     () => buildPriceSeries(urls, snapshots, now),
     [urls, snapshots, now],
@@ -773,13 +778,22 @@ function ListingHistoryBlock({
 
       {series.length > 0 && (
         <div className="mt-6">
-          <Suspense
+          <ErrorBoundary
+            label="price-chart"
             fallback={
-              <div className="h-[230px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+              <div className="flex h-[230px] items-center justify-center rounded-[var(--radius-md)] border border-dashed border-[var(--color-rule)] text-sm text-[var(--color-ink-3)]">
+                Price chart unavailable
+              </div>
             }
           >
-            <PriceLineChart series={series} />
-          </Suspense>
+            <Suspense
+              fallback={
+                <div className="h-[230px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+              }
+            >
+              <PriceLineChart series={series} />
+            </Suspense>
+          </ErrorBoundary>
         </div>
       )}
 
