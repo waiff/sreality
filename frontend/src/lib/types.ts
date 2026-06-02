@@ -1164,6 +1164,11 @@ export interface WatchdogDispatch {
    * Sale apartments only; null on rentals / non-apartments / no territory.
    * Shown alongside the comparables-based estimation yield. */
   mf_gross_yield_pct: number | null;
+  /* The portal the property was last seen on (`listings.source`, e.g.
+   * 'sreality') + the listing's URL on that portal (`source_url`, may be null
+   * for older sreality rows). Drives the Portal column's clickable chip. */
+  source: string | null;
+  source_url: string | null;
 }
 
 export interface WatchdogDispatchesResponse {
