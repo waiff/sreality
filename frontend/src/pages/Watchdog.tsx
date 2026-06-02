@@ -236,6 +236,12 @@ function Header({
         ) : null}
       </div>
       <div className="flex items-center gap-3">
+        <Link
+          to="/watchdog/manage"
+          className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
+        >
+          Manage watchdogs
+        </Link>
         <button
           type="button"
           onClick={onRunMatcher}
@@ -245,12 +251,6 @@ function Header({
         >
           {matcherPending ? 'Running…' : 'Run matcher now'}
         </button>
-        <Link
-          to="/watchdog/manage"
-          className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
-        >
-          Manage watchdogs
-        </Link>
       </div>
     </header>
   );
@@ -644,10 +644,10 @@ function EmptyState({
       </p>
       {!hasAnyWatchdog ? (
         <Link
-          to="/watchdog/new"
+          to="/browse"
           className="mt-4 inline-block text-sm text-[var(--color-copper)] hover:underline underline-offset-2"
         >
-          Create a watchdog →
+          Create a watchdog in Browse →
         </Link>
       ) : null}
     </div>

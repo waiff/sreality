@@ -5,15 +5,20 @@ import {
   useNewEstimationModal,
 } from './NewEstimationModal';
 
-const navLinks: ReadonlyArray<{ to: string; label: string }> = [
-  { to: '/browse',      label: 'Browse' },
-  { to: '/listing',     label: 'Listing' },
-  { to: '/estimations', label: 'Estimations' },
-  { to: '/collections', label: 'Collections' },
-  { to: '/watchdog',    label: 'Watchdog' },
-  { to: '/dedup',       label: 'Dedup' },
-  { to: '/health',      label: 'Health' },
-  { to: '/scrapers',    label: 'Scrapers' },
+type NavItem =
+  | { kind: 'link'; to: string; label: string; disabled?: boolean }
+  | { kind: 'divider' };
+
+const navItems: ReadonlyArray<NavItem> = [
+  { kind: 'link', to: '/browse',      label: 'Browse' },
+  { kind: 'link', to: '/watchdog',    label: 'Watchdog' },
+  { kind: 'link', to: '/estimations', label: 'Estimations' },
+  { kind: 'link', to: '/collections', label: 'Collections', disabled: true },
+  { kind: 'divider' },
+  { kind: 'link', to: '/dedup',       label: 'Dedup' },
+  { kind: 'link', to: '/health',      label: 'Health' },
+  { kind: 'link', to: '/scrapers',    label: 'Scrapers' },
+  { kind: 'link', to: '/settings',    label: 'General Settings' },
 ];
 
 export default function Shell() {
@@ -36,28 +41,50 @@ function TopBar() {
       <div className="px-6 h-14 flex items-center gap-8">
         <BrandMark />
         <nav className="flex items-center gap-1">
-          {navLinks.map((link) => (
-            <NavLink
-              key={link.to}
-              to={link.to}
-              className={({ isActive }) =>
-                [
-                  'relative px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
-                  isActive
-                    ? 'text-[var(--color-ink)]'
-                    : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
-                ].join(' ')
-              }
-            >
-              {({ isActive }) => (
-                <NavLabel active={isActive}>{link.label}</NavLabel>
-              )}
-            </NavLink>
-          ))}
+          {navItems.map((item, i) => {
+            if (item.kind === 'divider') {
+              return (
+                <span
+                  key={`divider-${i}`}
+                  className="mx-2 h-4 w-px bg-[var(--color-rule)]"
+                  aria-hidden
+                />
+              );
+            }
+            if (item.disabled) {
+              return (
+                <span
+                  key={item.to}
+                  title="Collections is being reworked — not available yet."
+                  aria-disabled="true"
+                  className="relative px-3 py-1.5 text-sm tracking-wide text-[var(--color-ink-4)] opacity-50 cursor-not-allowed select-none"
+                >
+                  {item.label}
+                </span>
+              );
+            }
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={({ isActive }) =>
+                  [
+                    'relative px-3 py-1.5 text-sm tracking-wide rounded-[var(--radius-xs)] transition-colors',
+                    isActive
+                      ? 'text-[var(--color-ink)]'
+                      : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+                  ].join(' ')
+                }
+              >
+                {({ isActive }) => (
+                  <NavLabel active={isActive}>{item.label}</NavLabel>
+                )}
+              </NavLink>
+            );
+          })}
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <NewEstimationCta />
-          <SettingsGear />
         </div>
       </div>
     </header>
@@ -92,26 +119,6 @@ function NewEstimationCta() {
   );
 }
 
-function SettingsGear() {
-  return (
-    <NavLink
-      to="/settings"
-      aria-label="Settings"
-      title="Settings"
-      className={({ isActive }) =>
-        [
-          'inline-flex items-center justify-center w-9 h-9 rounded-[var(--radius-sm)] transition-colors',
-          isActive
-            ? 'text-[var(--color-ink)] bg-[var(--color-paper-2)] border border-[var(--color-rule)]'
-            : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] border border-transparent',
-        ].join(' ')
-      }
-    >
-      <GearGlyph />
-    </NavLink>
-  );
-}
-
 function PlusGlyph() {
   return (
     <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden>
@@ -121,15 +128,6 @@ function PlusGlyph() {
         strokeWidth="1.4"
         strokeLinecap="round"
       />
-    </svg>
-  );
-}
-
-function GearGlyph() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="8" cy="8" r="2.2" />
-      <path d="M8 1.4v1.7M8 12.9v1.7M14.6 8h-1.7M3.1 8H1.4M12.66 3.34l-1.2 1.2M4.54 11.46l-1.2 1.2M12.66 12.66l-1.2-1.2M4.54 4.54l-1.2-1.2" />
     </svg>
   );
 }
