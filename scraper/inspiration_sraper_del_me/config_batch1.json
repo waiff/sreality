@@ -1,0 +1,39 @@
+{
+    "credentials": {
+        "email": "hejtmanekp@gmail.com",
+        "password": "WEQMgK3vbP0Vwh"
+    },
+    "filters": {
+        "typ": "Byty",
+        "kategorie": "Prodej",
+        "stav_objektu": "velmi dobrý",
+        "uzitna_plocha_od": 30,
+        "uzitna_plocha_do": 80,
+        "konstrukce": "Panel",
+        "vlastnictvi": "Osobní",
+        "v_okoli": "Nezadáno"
+    },
+    "cities": [
+        "Teplice",
+        "Most",
+        "Ústí nad Labem",
+        "Chomutov",
+        "Sokolov",
+        "Beroun"
+    ],
+    "date_range": {
+        "start_year": 2015,
+        "end_year": 2026
+    },
+    "scraping": {
+        "min_delay_seconds": 3,
+        "max_delay_seconds": 7,
+        "page_load_timeout_seconds": 120,
+        "retry_attempts": 3,
+        "retry_delay_seconds": 10
+    },
+    "output": {
+        "directory": "output_batch1",
+        "filename_prefix": "sreality_batch1"
+    }
+}

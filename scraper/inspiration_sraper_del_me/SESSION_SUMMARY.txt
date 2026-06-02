@@ -1,0 +1,20 @@
+SREALITY SCRAPER VALIDATION - SESSION SUMMARY
+=============================================
+
+PROBLEM: Data values jumping wildly (50%+) between months - filters not working.
+
+SOLUTION IMPLEMENTED:
+1. Date picker uses popup with month grid + Potvrdit button (not text input)
+2. Correct selectors found from HTML inspection:
+   - .ob-c-date-range-input__caption div (year)
+   - .ob-c-date-range-input__nav-button--prev (back arrow)
+   - .ob-c-date-range-input__cell[aria-label="Měsíc Rok"] (months)
+   - .ob-c-date-range-input__submit-button (Potvrdit)
+3. Use dblclick() for single-month selection
+4. Wait 4 seconds after city change before opening date picker
+5. Close any open picker before city/date change
+
+LAST TEST: Sequential run worked perfectly with realistic gradual price changes.
+Random run failed due to timing - fixed with longer waits.
+
+AWAITING: New validation JSON to confirm fix works.
