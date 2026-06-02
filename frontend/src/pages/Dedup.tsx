@@ -9,11 +9,14 @@ import {
 
 import {
   dismissDedupCluster,
+  getAppSetting,
+  isApiConfigured,
   listDedupCandidates,
   listDedupMerges,
   mergeDedupCluster,
   mergeDedupPropertySet,
   unmergeMergeGroup,
+  updateAppSetting,
 } from '@/lib/api';
 import {
   dedupKeys,
@@ -140,6 +143,8 @@ export default function Dedup() {
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
       <Header proposed={candidates.length} />
+
+      <AutoDedupToggle />
 
       <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
 
@@ -325,6 +330,70 @@ function Header({ proposed }: { proposed: number }) {
         ) : null}
       </p>
     </header>
+  );
+}
+
+/* Operator on/off switch for the engine's automatic merging (app_settings key
+ * `dedup_auto_merge_enabled`). Off ⇒ the engine still finds candidates but
+ * queues every one here for manual review instead of merging. */
+const DEDUP_AUTO_KEY = 'dedup_auto_merge_enabled';
+
+function AutoDedupToggle() {
+  const qc = useQueryClient();
+  const configured = isApiConfigured();
+  const settingQ = useQuery({
+    queryKey: ['app_setting', DEDUP_AUTO_KEY],
+    queryFn: () => getAppSetting(DEDUP_AUTO_KEY),
+    enabled: configured,
+    staleTime: 30_000,
+  });
+  const mut = useMutation({
+    mutationFn: (next: boolean) => updateAppSetting(DEDUP_AUTO_KEY, next),
+    onSuccess: (row) =>
+      qc.setQueryData(['app_setting', DEDUP_AUTO_KEY], row),
+  });
+
+  const raw = settingQ.data?.value;
+  const enabled = raw === true || raw === 'true';
+  const busy = settingQ.isLoading || mut.isPending;
+  const disabled = !configured || busy;
+
+  return (
+    <div className="mt-5 flex items-center justify-between gap-4 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-3">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-[var(--color-ink)]">Auto-dedup</p>
+        <p className="mt-0.5 text-[0.78rem] leading-snug text-[var(--color-ink-3)]">
+          {!configured
+            ? 'API not configured — toggle unavailable.'
+            : enabled
+              ? 'On — high-confidence matches (exact address, near-identical photos, High visual verdict) merge automatically.'
+              : 'Off — the engine still finds candidates but queues all of them here for manual review (no auto-merge, no forensic vision spend).'}
+          {mut.isError ? (
+            <span className="text-[var(--color-brick)]"> · couldn’t save, try again.</span>
+          ) : null}
+        </p>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={enabled}
+        aria-label="Toggle auto-dedup"
+        disabled={disabled}
+        onClick={() => mut.mutate(!enabled)}
+        className={[
+          'relative shrink-0 inline-flex items-center h-6 w-11 rounded-full transition-colors',
+          enabled ? 'bg-[var(--color-copper)]' : 'bg-[var(--color-rule-strong)]',
+          disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer',
+        ].join(' ')}
+      >
+        <span
+          className={[
+            'inline-block h-5 w-5 rounded-full bg-white shadow transition-transform',
+            enabled ? 'translate-x-[1.375rem]' : 'translate-x-0.5',
+          ].join(' ')}
+        />
+      </button>
+    </div>
   );
 }
 
