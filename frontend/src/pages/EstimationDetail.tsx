@@ -64,6 +64,7 @@ const ComparablesMap = lazy(
 const ComparableModal = lazy(
   () => import('@/components/estimation/ComparableModal'),
 );
+const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
 
 /* Shared by Header (image carousel) and YieldBlock (sale-price prefill).
  * Hoisted to the EstimationDetail body so both consumers read from one
@@ -163,6 +164,7 @@ function EstimationDetailBody({
 }) {
   const subjectQ = useSubjectListing(run);
   const imagesQ = useSubjectImages(run, subjectQ.data != null);
+  const [detailOpen, setDetailOpen] = useState(false);
 
   if (isInFlight) {
     return (
@@ -177,77 +179,251 @@ function EstimationDetailBody({
     );
   }
 
+  if (isFailed) {
+    // Failed runs keep the diagnostics inline — there's no estimate to lead
+    // with, so the error + inputs + trace are the whole story.
+    return (
+      <Page>
+        <Crumb />
+        <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
+        <SubjectFactsBlock subject={subjectQ.data ?? null} />
+        <SubjectMapBlock subject={subjectQ.data ?? null} spec={run.input_spec ?? null} />
+        <Hairline />
+        <FailedBlock run={run} />
+        <Hairline />
+        <InputRecap run={run} />
+        <Hairline />
+        <SectionLabel>Trace</SectionLabel>
+        <div className="mt-4">
+          <Timeline trace={run.trace} runId={run.id} />
+        </div>
+        <Hairline />
+        <RerunBlock
+          run={run}
+          onRerun={(overrides) => rerunMut.mutate({ run, overrides })}
+          pending={rerunMut.isPending}
+          error={rerunMut.error}
+        />
+      </Page>
+    );
+  }
+
   return (
     <Page>
       <Crumb />
+      {/* Subject — rendered like a listing (photo dossier + identity + facts
+          + map), unifying with the Listing-Detail surface. */}
       <Header run={run} subject={subjectQ.data ?? null} images={imagesQ.data ?? []} />
+      <SubjectFactsBlock subject={subjectQ.data ?? null} />
+      <SubjectMapBlock subject={subjectQ.data ?? null} spec={run.input_spec ?? null} />
 
-      {!isFailed && (
-        <>
-          <Hairline />
-          <YieldBlock run={run} subject={subjectQ.data ?? null} />
-        </>
-      )}
-
+      {/* Estimate run — the headline result + yield calculator. */}
       <Hairline />
-
-      {isFailed ? (
-        <FailedBlock run={run} />
-      ) : (
+      <YieldBlock run={run} subject={subjectQ.data ?? null} />
+      {run.reference_rent && (
         <>
-          <RentRange run={run} />
           <Hairline />
-          {run.reference_rent && (
-            <>
-              <ReferenceRentBlock run={run} />
-              <Hairline />
-            </>
-          )}
+          <ReferenceRentBlock run={run} />
         </>
       )}
 
-      {run.warnings && run.warnings.length > 0 && (
-        <>
-          <Warnings warnings={run.warnings} />
-          <Hairline />
-        </>
-      )}
-
-      <InputRecap run={run} />
-      <Hairline />
-
-      {(run.special_instructions || run.contextual_text) && (
-        <>
-          <OperatorInputsPanel run={run} />
-          <Hairline />
-        </>
-      )}
-
-      <SectionLabel>Trace</SectionLabel>
-      <div className="mt-4">
-        <Timeline trace={run.trace} runId={run.id} />
-      </div>
-
-      {!isFailed && (
-        <>
-          <Hairline />
-          <ComparablesSection run={run} />
-        </>
-      )}
-
+      {/* Actions — open the deep detail popup, re-run, or adjust inputs. */}
       <Hairline />
       <RerunBlock
         run={run}
         onRerun={(overrides) => rerunMut.mutate({ run, overrides })}
         pending={rerunMut.isPending}
         error={rerunMut.error}
+        onShowDetail={() => setDetailOpen(true)}
       />
 
-      <Hairline />
-      <FeedbackBlock runId={run.id} />
-
-      <FloatingFeedbackPanel runId={run.id} run={run} />
+      {detailOpen && (
+        <EstimationDetailModal run={run} onClose={() => setDetailOpen(false)} />
+      )}
     </Page>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Subject facts — the Listing-Detail facts grid, for a resolved subject row  */
+/* -------------------------------------------------------------------------- */
+
+function SubjectFactsBlock({ subject }: { subject: ListingPublic | null }) {
+  if (!subject) return null;
+  const cap = (s: string | null): string | null =>
+    s ? s.charAt(0).toUpperCase() + s.slice(1) : null;
+  const yesNo = (v: boolean | null): string | null =>
+    v == null ? null : v ? 'Yes' : 'No';
+  const facts: Array<{ label: string; value: string | null; mono?: boolean }> = [
+    { label: 'Building', value: cap(subject.building_type) },
+    { label: 'Condition', value: cap(subject.condition) },
+    { label: 'Energy class', value: subject.energy_rating, mono: true },
+    { label: 'Ownership', value: cap(subject.ownership) },
+    { label: 'Furnished', value: cap(subject.furnished) },
+    { label: 'Balcony', value: yesNo(subject.has_balcony) },
+    { label: 'Terrace', value: yesNo(subject.terrace) },
+    { label: 'Lift', value: yesNo(subject.has_lift) },
+    { label: 'Cellar', value: yesNo(subject.cellar) },
+    { label: 'Garage', value: yesNo(subject.garage) },
+    { label: 'Parking', value: yesNo(subject.has_parking) },
+  ].filter((f) => f.value != null);
+  if (facts.length === 0) return null;
+  return (
+    <div className="mt-7">
+      <SectionLabel>Subject</SectionLabel>
+      <dl className="mt-3 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
+        {facts.map((f) => (
+          <div key={f.label}>
+            <dt className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+              {f.label}
+            </dt>
+            <dd
+              className={[
+                'mt-1 text-sm text-[var(--color-ink)]',
+                f.mono ? 'font-mono tabular-nums' : '',
+              ].join(' ')}
+            >
+              {f.value}
+            </dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Subject map — compact, mirrors the Listing-Detail map for parity           */
+/* -------------------------------------------------------------------------- */
+
+function SubjectMapBlock({
+  subject,
+  spec,
+}: {
+  subject: ListingPublic | null;
+  spec: EstimationRun['input_spec'];
+}) {
+  const lat = subject?.lat ?? spec?.lat ?? null;
+  const lng = subject?.lng ?? spec?.lng ?? null;
+  if (lat == null || lng == null) return null;
+  return (
+    <div className="mt-6">
+      <SectionLabel>Location</SectionLabel>
+      <div className="mt-2">
+        <Suspense
+          fallback={
+            <div className="h-40 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+          }
+        >
+          <DetailMap lat={lat} lng={lng} isActive={subject?.is_active ?? true} />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* "Show estimation detail" popup — the deep analytics, off the main flow     */
+/* -------------------------------------------------------------------------- */
+
+function EstimationDetailModal({
+  run,
+  onClose,
+}: {
+  run: EstimationRun;
+  onClose: () => void;
+}) {
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handler);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    closeBtnRef.current?.focus();
+    return () => {
+      document.removeEventListener('keydown', handler);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Estimation detail"
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto px-4 py-10"
+      style={{ background: 'rgba(20, 22, 27, 0.6)' }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative w-full max-w-3xl bg-[var(--color-paper)] rounded-[var(--radius-md)] border border-[var(--color-rule)] shadow-[0_24px_60px_rgba(0,0,0,0.18)]"
+      >
+        <button
+          ref={closeBtnRef}
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="absolute top-3 right-3 z-10 w-9 h-9 flex items-center justify-center text-[var(--color-ink-3)] hover:text-[var(--color-ink)] rounded-[var(--radius-sm)] focus:outline-none focus-visible:border focus-visible:border-[var(--color-copper)]"
+        >
+          <CloseGlyph />
+        </button>
+
+        <div className="p-6">
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+            Estimation detail · run #{run.id}
+          </p>
+
+          <Hairline />
+          <RentRange run={run} />
+
+          {run.warnings && run.warnings.length > 0 && (
+            <>
+              <Hairline />
+              <Warnings warnings={run.warnings} />
+            </>
+          )}
+
+          <Hairline />
+          <InputRecap run={run} />
+
+          {(run.special_instructions || run.contextual_text) && (
+            <>
+              <Hairline />
+              <OperatorInputsPanel run={run} />
+            </>
+          )}
+
+          <Hairline />
+          <SectionLabel>Trace</SectionLabel>
+          <div className="mt-4">
+            <Timeline trace={run.trace} runId={run.id} />
+          </div>
+
+          <Hairline />
+          <ComparablesSection run={run} />
+
+          <Hairline />
+          <FeedbackBlock runId={run.id} />
+        </div>
+      </div>
+
+      {/* Feedback composer floats above the modal; mounted only while the
+          popup is open, so the "Provide feedback" affordance lives with it. */}
+      <div onClick={(e) => e.stopPropagation()}>
+        <FloatingFeedbackPanel runId={run.id} run={run} />
+      </div>
+    </div>
+  );
+}
+
+function CloseGlyph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+      <path d="M4 4 L12 12 M12 4 L4 12" />
+    </svg>
   );
 }
 
@@ -910,7 +1086,7 @@ function YieldBlock({
   return (
     <div>
       <div className="flex items-baseline justify-between gap-3">
-        <SectionLabel>Yield</SectionLabel>
+        <SectionLabel>Estimate run · yield</SectionLabel>
         <div className="flex items-baseline gap-3">
           {hasOverrides && (
             <button
@@ -1629,11 +1805,13 @@ function RerunBlock({
   onRerun,
   pending,
   error,
+  onShowDetail,
 }: {
   run: EstimationRun;
   onRerun: (overrides?: RerunOverrides) => void;
   pending: boolean;
   error: ApiError | null;
+  onShowDetail?: () => void;
 }) {
   const rerunnable = canRerun(run);
   const [expanded, setExpanded] = useState(false);
@@ -1668,13 +1846,16 @@ function RerunBlock({
 
   return (
     <div>
-      <SectionLabel>Re-run</SectionLabel>
-      <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)] leading-relaxed">
-        Re-runs link back via parent_run_id. The original record is immutable.
-        Adjust to fix a wrong scrape or try different agent settings.
-      </p>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        {onShowDetail && (
+          <button
+            type="button"
+            onClick={onShowDetail}
+            className="px-4 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
+          >
+            Show estimation detail
+          </button>
+        )}
         <button
           type="button"
           disabled={!rerunnable || pending}
@@ -1707,6 +1888,11 @@ function RerunBlock({
           </span>
         )}
       </div>
+
+      <p className="mt-2 text-[0.72rem] text-[var(--color-ink-4)] leading-relaxed">
+        Re-runs link back via parent_run_id; the original record is immutable.
+        Adjust inputs to fix a wrong scrape or try different agent settings.
+      </p>
 
       {expanded && run.input_spec && (
         <AdjustPanel
@@ -2194,7 +2380,7 @@ function FloatingFeedbackPanel({
   if (!open) {
     return (
       <div
-        className="fixed z-20"
+        className="fixed z-[60]"
         style={{ top: PANEL_TOP, left: PANEL_LEFT, right: PANEL_RIGHT }}
       >
         <button
@@ -2211,7 +2397,7 @@ function FloatingFeedbackPanel({
 
   return (
     <div
-      className="fixed z-20 flex flex-col gap-3 overflow-y-auto"
+      className="fixed z-[60] flex flex-col gap-3 overflow-y-auto"
       style={{
         top: PANEL_TOP,
         left: PANEL_LEFT,
