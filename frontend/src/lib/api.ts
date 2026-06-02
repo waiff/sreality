@@ -1088,3 +1088,23 @@ export const unmergeMergeGroup = (
     `/dedup/merges/${encodeURIComponent(mergeGroupId)}/unmerge`,
     { method: 'POST' },
   );
+
+/* ----- price-stats datasets ---------------------------------------------- */
+
+export interface PriceStatDatasetInput {
+  slug: string;
+  name: string;
+  description?: string | null;
+  category_main_cb?: number;
+  building_condition?: string | null;
+  building_type?: string | null;
+  ownership?: string | null;
+  usable_area_from?: number | null;
+  usable_area_to?: number | null;
+  distance?: number;
+}
+
+export const createPriceStatDataset = (
+  input: PriceStatDatasetInput,
+): Promise<import('./priceStats').PriceStatDataset> =>
+  apiPost('/price-stats/datasets', input);
