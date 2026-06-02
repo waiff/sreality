@@ -156,6 +156,29 @@ def test_write_detail_batch_skips_image_insert_when_no_images():
     assert _find(conn.executed, "INSERT INTO images") is None
 
 
+def test_sane_price_czk_clamps_overflow_to_none():
+    assert db.sane_price_czk(None) is None
+    assert db.sane_price_czk(5_000_000) == 5_000_000
+    assert db.sane_price_czk(db.MAX_PRICE_CZK) == db.MAX_PRICE_CZK
+    assert db.sane_price_czk(db.MAX_PRICE_CZK + 1) is None
+    assert db.sane_price_czk(2_147_483_647) is None  # int4 max; seller placeholder
+
+
+def test_write_detail_batch_nulls_overflow_price():
+    # A single >int4 price must not crash the jsonb_to_recordset cast of a ~100-row
+    # batch; it's clamped to NULL in BOTH the listings upsert and the snapshot.
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO listings (" in s, [(True,)]),
+        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,)]),
+        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
+    ])
+    db.write_detail_batch(conn, [_result(1, price=2_147_483_647, content_hash="h1")])
+    upsert = _find(conn.executed, "INSERT INTO listings (")
+    assert upsert[1][0].obj[0]["price_czk"] is None
+    snap = _find(conn.executed, "INSERT INTO listing_snapshots")
+    assert snap[1][0].obj[0]["price_czk"] is None
+
+
 # --- queue helpers ----------------------------------------------------------
 
 
@@ -180,6 +203,18 @@ def test_enqueue_detail_empty_noop():
     conn = _FakeConn([])
     assert db.enqueue_detail(conn, "sreality", []) == 0
     assert conn.executed == []
+
+
+def test_enqueue_detail_nulls_overflow_index_price():
+    # The index price feeds %(prices)s::int[]; an oversized value would crash the
+    # whole enqueue, so it's clamped to NULL (the listing still enqueues).
+    conn = _FakeConn([(lambda s: "INSERT INTO listing_detail_queue" in s, [(1,)])])
+    db.enqueue_detail(conn, "bazos", [
+        ("9", "/p", 9_999_999_999, db.QUEUE_PRIORITY_NEW),
+        ("10", "/q", 4_200_000, db.QUEUE_PRIORITY_NEW),
+    ])
+    _, params = _find(conn.executed, "INSERT INTO listing_detail_queue")
+    assert params["prices"] == [None, 4_200_000]
 
 
 def test_claim_detail_batch_skip_locked_priority_order():

@@ -110,6 +110,21 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
 )
 
+# No real Czech property is priced anywhere near a billion crowns; a value this
+# large is a data-entry placeholder (e.g. a seller typing 2147483647) or a parse
+# artifact. It also overflows the int4 price columns (listings.price_czk,
+# listing_snapshots.price_czk, listing_detail_queue.index_price_czk) — and in the
+# batched write a single oversized value fails the whole jsonb_to_recordset cast,
+# losing the entire batch. Clamp such values to NULL at every write boundary.
+MAX_PRICE_CZK = 2_000_000_000
+
+
+def sane_price_czk(price: int | None) -> int | None:
+    if price is not None and price > MAX_PRICE_CZK:
+        LOG.warning("PRICE dropped implausible value=%s (> %s)", price, MAX_PRICE_CZK)
+        return None
+    return price
+
 
 def database_url() -> str:
     url = os.environ.get("SUPABASE_DB_URL")
@@ -213,6 +228,7 @@ def upsert_listing(
     }
     for col in LISTING_COLUMNS:
         params[col] = row.get(col)
+    params["price_czk"] = sane_price_czk(params["price_czk"])
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(upsert_sql, params)
@@ -238,7 +254,7 @@ def upsert_listing(
                     (sreality_id, price_czk, content_hash, raw_json)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (sreality_id, row.get("price_czk"), content_hash, raw_jsonb),
+                (sreality_id, params["price_czk"], content_hash, raw_jsonb),
             )
 
     if inserted:
@@ -1277,7 +1293,9 @@ def write_detail_batch(
         row = r.row or {}
         sid = int(row["sreality_id"])
         ok_ids.append(sid)
+        price_czk = sane_price_czk(row.get("price_czk"))
         obj: dict[str, Any] = {c: row.get(c) for c in LISTING_COLUMNS}
+        obj["price_czk"] = price_czk
         obj["sreality_id"] = sid
         obj["lon"] = row.get("lon")
         obj["lat"] = row.get("lat")
@@ -1285,7 +1303,7 @@ def write_detail_batch(
         listing_objs.append(obj)
         snapshot_objs.append({
             "sreality_id": sid,
-            "price_czk": row.get("price_czk"),
+            "price_czk": price_czk,
             "content_hash": r.content_hash,
         })
         for img in r.images or []:
@@ -1362,7 +1380,7 @@ def enqueue_detail(
             chunk = rows[start : start + _QUEUE_ENQUEUE_CHUNK]
             native_ids = [str(nid) for nid, _, _, _ in chunk]
             refs = [r for _, r, _, _ in chunk]
-            prices = [p for _, _, p, _ in chunk]
+            prices = [sane_price_czk(p) for _, _, p, _ in chunk]
             prios = [int(pr) for _, _, _, pr in chunk]
             cur.execute(
                 """
