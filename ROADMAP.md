@@ -6,6 +6,39 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Fast city-proximity filters + Min Population fix
+
+- **Bug:** the Min Population filter returned **zero** results. It routed through
+  `listings_with_city_quality` (curated-city `ST_DWithin` on centroids →
+  `.in(ids)` allowlist), which exceeds the anon 3 s `statement_timeout` and falls
+  back to an empty list. Broad city-quality filters were impractical for the same
+  reason.
+- **Fix — precomputed columns (migration 142):** replaced the per-request spatial
+  RPC with indexed columns on `properties`, filtered as plain `>= value`:
+  `home_obec_pop` (the listing's OWN municipality population, nearest obec polygon,
+  country-wide — backs Min/Max Population for *every* listing) and
+  `near_{pop,jobs,youth,overall}_{5,15}km` (MAX metric within a FIXED 5/15 km,
+  **polygon-edge** distance; radius fixed, threshold dynamic; all AND-combinable).
+  Population proximity uses obce ≥ 10k; index proximity the 206 curated cities
+  (`pracovni_mista`/`stehovani_mladych`/`celkove_hodnoceni`).
+- **Recompute:** `recompute_city_proximity()` spatial-joins each property against a
+  ~215-row GiST-indexed anchor set (~2 ms/property); `recompute_city_proximity.yml`
+  hourly (incremental) + `--full` after a data load. Mirrors
+  `recompute_mf_gross_yields` (migration 133). Combined filter query: **~155 ms**
+  (BitmapAnd over partial indexes) vs the old timeout.
+- **Population for all obce (#317):** `admin_boundaries.population` now carries every
+  obec (ČSÚ DataStat OBY02AT02, `scripts/load_obec_population.py`), not just the 206
+  curated cities — what `home_obec_pop` + pop proximity need.
+- **Consistency (rule 16):** Browse Map/Table (registry auto-dispatch), Stats
+  (`browse_stats_properties`, migration 143), Watchdog
+  (`_city_quality_clauses` + spec) all share the definition. Verified: Praha 1.4M;
+  Kuřim sees Brno (404k) within 5 km via polygon edge; Jeseník isolated.
+
+#### Next
+
+- A radius toggle (5↔15 km) per proximity metric instead of two separate inputs,
+  if the operator finds the doubled controls noisy.
+
 ### 2026-06: Watchdog feed — rent estimate + MF-yield column
 - The per-row action is now **"Estimate rent"** and always runs a **rental**
   estimate, even for a sale listing — `kickoff_estimation_for_dispatch` forces
