@@ -1,0 +1,114 @@
+name: "Scraping: Sreality price stats (ceny-nemovitosti, weekly + manual)"
+
+# Ingests the aggregate market statistics sreality publishes at
+# /ceny-nemovitosti (NOT individual listings) into the price_stat_* tables.
+# For each active dataset (one named filter set) × tracked municipality ×
+# {prodej, pronájem} it fetches the per-month series from the login-gated
+# estate_prices JSON API, then recomputes the per-city derived metrics
+# (CAGR growth, gross yield) + refreshes the map choropleth. Design:
+# docs/design/price-stats-datasets.md.
+#
+# Auth: estate_prices needs a logged-in Seznam session. A headless Playwright
+# login mints the cookie (SREALITY_LOGIN_EMAIL/PASSWORD); a captured
+# SREALITY_SESSION_COOKIE bypasses the browser entirely. RUN mode=probe FIRST
+# to prove auth works before a full run.
+#
+# Cadence: weekly — the published series is monthly, so a full re-walk once a
+# week keeps it current with negligible request volume.
+#
+# Required GitHub secrets:
+#   SUPABASE_DB_URL          — same one every workflow uses
+#   SREALITY_LOGIN_EMAIL     — Seznam account email (read access to the stats)
+#   SREALITY_LOGIN_PASSWORD  — Seznam account password
+#   SREALITY_SESSION_COOKIE  — optional; a captured cookie string, skips login
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: probe (test auth) | resolve (refresh localities) | full
+        required: true
+        default: "full"
+        type: choice
+        options:
+          - "probe"
+          - "resolve"
+          - "full"
+      dataset_id:
+        description: Single dataset id to run (empty = all active datasets)
+        required: false
+        default: ""
+        type: string
+      start_year:
+        description: Earliest year to fetch
+        required: false
+        default: "2015"
+        type: string
+      window_years:
+        description: CAGR window (years) for the derived growth metrics
+        required: false
+        default: "5"
+        type: string
+      dry_run:
+        description: Fetch + log but write nothing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: price-stats
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SREALITY_LOGIN_EMAIL: ${{ secrets.SREALITY_LOGIN_EMAIL }}
+      SREALITY_LOGIN_PASSWORD: ${{ secrets.SREALITY_LOGIN_PASSWORD }}
+      SREALITY_SESSION_COOKIE: ${{ secrets.SREALITY_SESSION_COOKIE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2" "requests>=2.32" "playwright>=1.40"
+
+      - name: Install Chromium for Playwright
+        # Only needed when logging in via the browser (no SREALITY_SESSION_COOKIE).
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run price-stats ingestion
+        run: |
+          MODE='${{ inputs.mode }}'
+          if [ -z "$MODE" ]; then MODE="full"; fi   # scheduled run = full
+
+          if [ "$MODE" = "probe" ]; then
+            python -m scripts.price_stats_probe
+            exit $?
+          fi
+
+          ARGS=""
+          if [ "$MODE" = "resolve" ]; then ARGS="$ARGS --resolve-only"; fi
+          if [ -n "${{ inputs.dataset_id }}" ]; then ARGS="$ARGS --dataset-id ${{ inputs.dataset_id }}"; fi
+
+          SY='${{ inputs.start_year }}'; if [ -z "$SY" ]; then SY="2015"; fi
+          WY='${{ inputs.window_years }}'; if [ -z "$WY" ]; then WY="5"; fi
+          ARGS="$ARGS --start-year $SY --window-years $WY"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+
+          echo "Running with: $ARGS"
+          eval python -m scraper.price_stats_main $ARGS

@@ -8,6 +8,7 @@ type NavItem =
 
 const navItems: ReadonlyArray<NavItem> = [
   { kind: 'link', to: '/browse',      label: 'Browse' },
+  { kind: 'link', to: '/datasets',    label: 'Datasets' },
   { kind: 'link', to: '/watchdog',    label: 'Watchdog' },
   { kind: 'link', to: '/estimations', label: 'Estimations' },
   { kind: 'link', to: '/collections', label: 'Collections', disabled: true },

@@ -661,3 +661,33 @@ RefinementStatus = Literal["proposed", "applied", "dismissed"]
 class RefinementDecisionIn(BaseModel):
     """Operator decides what to do with a proposed skill refinement."""
     decision: Literal["apply", "dismiss"]
+
+
+# --- Price-stats datasets (ceny-nemovitosti) ------------------------------
+
+class PriceStatDatasetIn(BaseModel):
+    """Create a price-stats dataset (one named filter set)."""
+    slug:               str = Field(min_length=1, max_length=120)
+    name:               str = Field(min_length=1, max_length=200)
+    description:        str | None = None
+    category_main_cb:   int = 1
+    building_condition: str | None = None
+    building_type:      str | None = None
+    ownership:          str | None = None
+    usable_area_from:   int | None = Field(default=None, ge=0)
+    usable_area_to:     int | None = Field(default=None, ge=0)
+    distance:           int = Field(default=0, ge=0)
+
+
+class PriceStatDatasetUpdateIn(BaseModel):
+    """Patch a dataset; every field optional."""
+    name:               str | None = Field(default=None, min_length=1, max_length=200)
+    description:        str | None = None
+    category_main_cb:   int | None = None
+    building_condition: str | None = None
+    building_type:      str | None = None
+    ownership:          str | None = None
+    usable_area_from:   int | None = Field(default=None, ge=0)
+    usable_area_to:     int | None = Field(default=None, ge=0)
+    distance:           int | None = Field(default=None, ge=0)
+    is_active:          bool | None = None

@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api import curation
+from api import price_stats as price_stats_module
 from api import manual_estimates as me
 from api import dependencies as deps
 from api import maps
@@ -1116,6 +1117,75 @@ def delete_collection_listing(
     return curation.remove_listing_from_collection(
         conn, collection_id, sreality_id,
     )
+
+
+# --- price-stats datasets (ceny-nemovitosti) -------------------------------
+
+@app.post("/price-stats/datasets")
+def post_price_stat_dataset(
+    body: s.PriceStatDatasetIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.create_dataset(conn, body)
+
+
+@app.get("/price-stats/datasets")
+def get_price_stat_datasets(
+    include_inactive: bool = False,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.list_datasets(conn, include_inactive=include_inactive)
+
+
+@app.patch("/price-stats/datasets/{dataset_id}")
+def patch_price_stat_dataset(
+    dataset_id: int,
+    body: s.PriceStatDatasetUpdateIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.update_dataset(conn, dataset_id, body)
+
+
+@app.delete("/price-stats/datasets/{dataset_id}")
+def delete_price_stat_dataset(
+    dataset_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.deactivate_dataset(conn, dataset_id)
+
+
+@app.get("/price-stats/datasets/{dataset_id}/summary")
+def get_price_stat_summary(
+    dataset_id: int,
+    window_years: int = 5,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.dataset_summary(conn, dataset_id, window_years)
+
+
+@app.get("/price-stats/datasets/{dataset_id}/city-metrics")
+def get_price_stat_city_metrics(
+    dataset_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.dataset_city_metrics(conn, dataset_id)
+
+
+@app.get("/price-stats/datasets/{dataset_id}/cities/{entity_type}/{entity_id}/series")
+def get_price_stat_city_series(
+    dataset_id: int,
+    entity_type: str,
+    entity_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.dataset_city_series(conn, dataset_id, entity_type, entity_id)
 
 
 @app.get("/listings/{sreality_id}/notes")
