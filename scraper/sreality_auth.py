@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 LOG = logging.getLogger(__name__)
 
@@ -165,15 +166,29 @@ def login_via_browser(
                 ['form.login button[type="submit"]',
                  'button:has-text("Přihlásit")'],
             )
-            # Seznam redirects back to sreality (return_url) after login. Wait
-            # for THAT redirect, not networkidle — sreality is ad-heavy and
-            # never goes idle, which falsely times out a successful login.
+            # Seznam redirects (login.szn.cz/continue → sreality) after login.
+            # Wait until the page is actually ON the sreality HOST — a naive
+            # "sreality.cz in url" check matches the intermediate continue URL
+            # (it carries return_url=...sreality.cz... in its query), and racing
+            # an unconditional goto against the in-flight redirect aborts it
+            # (net::ERR_ABORTED). The session cookies live on the context, so we
+            # just read them once we've landed; goto only as a fallback.
             try:
-                page.wait_for_url(lambda u: "sreality.cz" in u, timeout=timeout_ms)
+                page.wait_for_url(
+                    lambda u: urlparse(u).netloc.endswith("sreality.cz"),
+                    timeout=timeout_ms,
+                )
             except Exception:
                 pass
-            page.goto("https://www.sreality.cz/", wait_until="domcontentloaded")
             cookies = _collect_cookies(context)
+            if not cookies:
+                try:
+                    page.goto(
+                        "https://www.sreality.cz/", wait_until="domcontentloaded"
+                    )
+                except Exception:
+                    pass
+                cookies = _collect_cookies(context)
             if not cookies:
                 raise AuthError("login produced no sreality session cookies")
             LOG.info("sreality login OK (%d cookies)", len(cookies))
