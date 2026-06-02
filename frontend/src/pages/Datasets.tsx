@@ -14,6 +14,7 @@ import {
 } from '@/lib/priceStats';
 import { createPriceStatDataset } from '@/lib/api';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
+import CityPicker from '@/components/CityPicker';
 
 const METRIC_ORDER: DatasetMetric[] = ['rent_cagr_pct', 'sale_cagr_pct', 'yield_change_pp_pa'];
 const MIN_ACTIVE = 3;
@@ -398,6 +399,12 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
   const [ownership, setOwnership] = useState('');
   const [areaFrom, setAreaFrom] = useState('');
   const [areaTo, setAreaTo] = useState('');
+  const [obecIds, setObecIds] = useState<number[]>([]);
+  const [minPop, setMinPop] = useState<number | null>(null);
+  const [maxPop, setMaxPop] = useState<number | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [startYm, setStartYm] = useState(`${FIRST_YEAR}-01`);
+  const [endYm, setEndYm] = useState(CUR_YM);
 
   const mutation = useMutation({
     mutationFn: () => createPriceStatDataset({
@@ -406,6 +413,9 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
       ownership: ownership || null,
       usable_area_from: areaFrom ? Number(areaFrom) : null,
       usable_area_to: areaTo ? Number(areaTo) : null,
+      obec_ids: obecIds.length ? obecIds : null,
+      min_population: minPop, max_population: maxPop,
+      start_ym: startYm, end_ym: endYm,
     }),
     onSuccess: (d) => onCreated(d as PriceStatDataset),
   });
@@ -425,6 +435,18 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         <Field label="Ownership (vlastnictví)"><SelectBox value={ownership} onChange={setOwnership} options={OWN_OPTS} /></Field>
         <Field label="Area from (m²)"><input type="number" min={0} value={areaFrom} onChange={(e) => setAreaFrom(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
         <Field label="Area to (m²)"><input type="number" min={0} value={areaTo} onChange={(e) => setAreaTo(e.target.value)} className={SELECT_CLS + ' w-full'} /></Field>
+        <Field label="Municipalities">
+          <button type="button" onClick={() => setPickerOpen(true)}
+            className={SELECT_CLS + ' w-full text-left ' + (obecIds.length ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-3)]')}>
+            {obecIds.length ? `${obecIds.length} selected` : 'All standard cities'}
+          </button>
+        </Field>
+        <Field label="Scrape from">
+          <YmPicker value={startYm} onChange={setStartYm} />
+        </Field>
+        <Field label="Scrape to">
+          <YmPicker value={endYm} onChange={setEndYm} />
+        </Field>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="submit" disabled={!canSubmit}
@@ -435,9 +457,17 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         {mutation.isError && <span className="text-sm text-[var(--color-brick)]">{(mutation.error as Error).message || 'Could not create dataset'}</span>}
       </div>
       <p className="mt-2 text-xs text-[var(--color-ink-3)]">
-        Covers both prodej &amp; pronájem. Blank fields = no filter. City selection + scrape window
-        coming next; for now it uses the standard municipality set. Populates on the next price-stats run.
+        Covers both prodej &amp; pronájem. Blank filter fields = no filter. Leave municipalities as
+        “All standard cities” to use the default set. Populates on the next price-stats run.
       </p>
+
+      {pickerOpen && (
+        <CityPicker
+          initialObecIds={obecIds} initialMin={minPop} initialMax={maxPop}
+          onClose={() => setPickerOpen(false)}
+          onApply={(ids, lo, hi) => { setObecIds(ids); setMinPop(lo); setMaxPop(hi); setPickerOpen(false); }}
+        />
+      )}
     </form>
   );
 }
