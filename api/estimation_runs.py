@@ -344,7 +344,6 @@ _RUN_COLUMNS: tuple[str, ...] = (
     "parent_run_id", "rerun_reason",
     "source_kind", "parse_confidence", "parse_confidence_per_field",
     "source_html",
-    "subject_summary",
     "special_instructions", "contextual_text",
     "skill_name", "skill_version",
     "scenario",
@@ -428,35 +427,6 @@ _EMPTY_RESOLUTION = _Resolution(
     parse_confidence_per_field=None, source_html=None,
     parse_warnings=[],
 )
-
-
-def _build_subject_summary(
-    conn: "psycopg.Connection",
-    llm_client: "LLMClient",
-    sreality_id: int | None,
-) -> dict[str, Any] | None:
-    """Run summarize_listing on the subject, best-effort.
-
-    Subject summary is informational; a failure (no listing in DB, LLM
-    refusal, missing API key) must not turn a successful estimation into
-    a failed one. Return None and let the caller persist that.
-    """
-    if sreality_id is None:
-        return None
-    try:
-        from toolkit.summaries import summarize_listing
-        result = summarize_listing(conn, llm_client, sreality_id=sreality_id)
-    except Exception as exc:  # noqa: BLE001 — see docstring
-        LOG.info("subject summary skipped for %s: %s", sreality_id, exc)
-        return None
-    data = result.get("data") or {}
-    summary = data.get("summary")
-    if not isinstance(summary, dict):
-        return None
-    return {
-        "snapshot_id": data.get("snapshot_id"),
-        "summary": summary,
-    }
 
 
 def create_estimation_run(
@@ -554,7 +524,6 @@ def create_estimation_run(
         parse_confidence=resolution.parse_confidence,
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
-        subject_summary=None,
         special_instructions=body.special_instructions,
         contextual_text=body.contextual_text,
         skill_name=skill_obj.name if skill_obj is not None else None,
@@ -700,9 +669,6 @@ def _execute_estimation_run(
     trace = recorder.to_dict(summary_text)
     merged_warnings = list(resolution.parse_warnings)
     merged_warnings.extend(d.get("warnings") or [])
-    subject_summary = _build_subject_summary(
-        conn, llm_client, resolution.input_sreality_id,
-    )
     _update_run_terminal(
         conn, run_id,
         status="success",
@@ -718,7 +684,6 @@ def _execute_estimation_run(
         comparables_used=d.get("comparables_used"),
         trace=trace,
         warnings=merged_warnings or None,
-        subject_summary=subject_summary,
     )
     flush_trace_payloads(conn, run_id, recorder)
 
@@ -1110,7 +1075,6 @@ def _persist_failed_run(
         parse_confidence=resolution.parse_confidence,
         parse_confidence_per_field=resolution.parse_confidence_per_field,
         source_html=resolution.source_html,
-        subject_summary=None,
         special_instructions=body.special_instructions,
         contextual_text=body.contextual_text,
         skill_name=None,
@@ -1415,12 +1379,6 @@ def _run_agent_path(
     if status == "failed":
         err = f"agent halted: {md.get('stop_reason')}"
 
-    subject_summary = (
-        _build_subject_summary(conn, llm_client, resolution.input_sreality_id)
-        if status == "success"
-        else None
-    )
-
     _update_run_terminal(
         conn, run_id,
         status=status,
@@ -1434,7 +1392,6 @@ def _run_agent_path(
         trace=trace,
         warnings=merged_warnings or None,
         error_message=err,
-        subject_summary=subject_summary,
         reference_rent=reference_rent,
     )
     flush_trace_payloads(conn, run_id, recorder)
@@ -1448,7 +1405,7 @@ def _update_run_terminal(
     """Parameterised UPDATE that writes only the supplied columns."""
     for k in (
         "comparables_used", "comparables_excluded",
-        "trace", "warnings", "subject_summary", "reference_rent",
+        "trace", "warnings", "reference_rent",
     ):
         if fields.get(k) is not None:
             fields[k] = Jsonb(fields[k])
@@ -1470,7 +1427,7 @@ def _insert_run(conn: "psycopg.Connection", **fields: Any) -> int:
     for k in (
         "input_spec", "comparables_used", "comparables_excluded",
         "trace", "warnings",
-        "parse_confidence_per_field", "subject_summary",
+        "parse_confidence_per_field",
         "scenario", "reference_rent",
     ):
         if fields.get(k) is not None:

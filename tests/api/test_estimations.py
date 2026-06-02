@@ -94,7 +94,6 @@ def _patch_persistence(monkeypatch) -> _State:
                     "error_message", "parent_run_id", "rerun_reason",
                     "source_kind", "parse_confidence",
                     "parse_confidence_per_field", "source_html",
-                    "subject_summary",
                     "skill_name", "skill_version",
                 )
             },
@@ -115,7 +114,6 @@ def _patch_persistence(monkeypatch) -> _State:
     monkeypatch.setattr(er, "_update_run_terminal", fake_update)
     monkeypatch.setattr(er, "flush_trace_payloads", fake_flush)
     monkeypatch.setattr(er, "_fetch_run", fake_fetch)
-    monkeypatch.setattr(er, "_build_subject_summary", lambda *a, **kw: None)
     monkeypatch.setattr(
         er, "_execute_estimation_run_background", fake_bg,
     )

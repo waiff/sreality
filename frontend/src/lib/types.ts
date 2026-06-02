@@ -395,14 +395,6 @@ export interface ListingSummaryBody {
   apartment_summary?: string | null;
 }
 
-/* Persisted on estimation_runs.subject_summary by the backend after a
- * successful run. Carries the snapshot id so the UI can deep-link to
- * the exact snapshot the summary was generated against. */
-export interface SubjectSummary {
-  snapshot_id: number | null;
-  summary: ListingSummaryBody;
-}
-
 /* POST /listings/summaries response shape — one row per requested
  * (sreality_id, snapshot_id) pair. Per-item failures surface as
  * `summary: null` + `error: <reason>`; a single bad id never fails
@@ -515,11 +507,6 @@ export interface EstimationRun {
    * references this run. Drives the "Feedback" button enable state
    * on the /estimations list. */
   has_feedback: boolean;
-  /* Migration 031 — structured Czech-real-estate summary of the
-   * subject listing, generated server-side at estimation time when
-   * input_sreality_id was set. Null on legacy runs and on runs
-   * where no listing was resolved (spec-only inputs, parse failures). */
-  subject_summary: SubjectSummary | null;
   /* Migration 042 — operator-supplied free-text inputs. Both null on
    * runs created before the column existed and on runs the operator
    * didn't fill in. Immutable on a terminal run — editing them is
@@ -890,7 +877,10 @@ export interface BuildingRun {
   parse_confidence: Confidence | null;
   parse_confidence_per_field: Record<string, Confidence> | null;
   source_html: string | null;
-  subject_summary: SubjectSummary | null;
+  /* Building-flow display payload ({ source_url, fields, building }) — a
+   * different shape from the (removed) estimation subject summary; the
+   * BuildingDetail SubjectBlock casts it to the fields it reads. */
+  subject_summary: Record<string, unknown> | null;
   units_proposal: BuildingUnitsProposal | null;
   units: BuildingUnit[] | null;
   total_rent_p25_czk: number | null;
