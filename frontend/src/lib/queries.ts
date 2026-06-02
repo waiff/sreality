@@ -905,18 +905,52 @@ export const fetchCityIndexDefinitions = async (): Promise<CityIndexDefinition[]
 };
 
 export const fetchCityIndexValues = async (): Promise<CityIndexValue[]> => {
-  /* `.range` bypasses PostgREST's default 1,000-row cap. The view
-   * has 205 cities × 33 indexes = 6,765 rows; without this override
-   * Supabase returns only the first 1,000, silently truncating to
-   * the first ~32 cities in PK order. That's the bug behind the
-   * "Dobříš popup shows em-dashes for every index" report — Dobříš
-   * (city_id=90) sits well past the truncation point. */
+  /* The view has 205 cities × 33 indexes = 6,765 rows, but PostgREST
+   * hard-caps every response at 1,000 rows on this project (db-max-rows)
+   * — `.range(0, 49999)` does NOT lift it: it's a server-side ceiling,
+   * not a page size. The old single-shot fetch therefore returned only
+   * the first ~32 cities (1,000 ÷ 33), so every city past that point
+   * (Dobříš included) showed em-dashes for every index in the popup and
+   * a grey, value-less pin in the choropleth. Page through with a stable
+   * order until a short page signals the end — the same fix
+   * fetchRentMapChoropleth already uses. Cached (staleTime: Infinity),
+   * so the ~7 round-trips only happen on first load. */
+  const PAGE = 1000;
+  const out: CityIndexValue[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await supabase
+      .from('city_index_values_public')
+      .select('city_id,index_name,value')
+      .order('city_id', { ascending: true })
+      .order('index_name', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    const rows = (data ?? []) as CityIndexValue[];
+    out.push(...rows);
+    if (rows.length < PAGE) break;
+  }
+  return out;
+};
+
+export interface CityPolygon {
+  city_id: number;
+  geojson: string;
+}
+
+export const fetchCuratedCityPolygons = async (): Promise<CityPolygon[]> => {
+  /* One simplified municipality boundary per curated city (205 rows,
+   * comfortably under the 1,000-row db-max-rows cap, so a single page
+   * suffices). `geojson` is the raw ST_AsGeoJSON string the map
+   * JSON.parses into a Feature geometry — the same contract as
+   * rent_map_choropleth_public. Fetched once and cached
+   * (staleTime: Infinity), and only when the map tab is active. */
   const { data, error } = await supabase
-    .from('city_index_values_public')
-    .select('city_id,index_name,value')
-    .range(0, 49999);
+    .from('curated_city_polygons_public')
+    .select('city_id,geojson')
+    .order('city_id', { ascending: true })
+    .range(0, 4999);
   if (error) throw error;
-  return (data ?? []) as CityIndexValue[];
+  return (data ?? []) as CityPolygon[];
 };
 
 /* -------------------------------------------------------------------------- */

@@ -730,12 +730,25 @@ overlay that can be heatmap-color-coded by any chosen index.
   (dropdown grouped by category × threshold input, repeatable) plus
   range inputs for min / max city population.
 - **Map overlay**: `ListingMap.tsx` renders the curated city set as
-  a separate `city-pins` GeoJSON layer above the listing dots, with
-  bottom-left controls for "Show cities" toggle + "Color by:"
-  dropdown + gradient legend. Heatmap paint expression
-  `red(0)→amber(5)→green(10)` matches the data's 0–10 index range.
-  Click pin → popup with city name, kraj, population, and every
-  index value (highlighted index pinned to the top).
+  a separate GeoJSON layer above the listing dots, with bottom-left
+  controls for "Show cities" toggle + "Color by:" dropdown + gradient
+  legend. Heatmap paint expression `red(0)→amber(5)→green(10)` matches
+  the data's 0–10 index range. Click → popup with city name, kraj,
+  population, and every index value (highlighted index pinned to the
+  top). **Cities draw as their real municipality boundary polygons**
+  (migration 139's `curated_city_polygons_public` — RÚIAN obec geometry
+  simplified to GeoJSON, anon-read), not fixed-radius circles: a
+  translucent same-tone fill + a thicker conditional-coloured border,
+  and **the selected index figure is labelled at each shape's
+  centroid** (`city-fill` / `city-outline` / `city-label` layers). A
+  city with no boundary falls back to a radius circle.
+- **Values fetch un-truncated**: `fetchCityIndexValues` now pages
+  through `city_index_values_public` in 1,000-row chunks. PostgREST
+  hard-caps responses at the project's `db-max-rows` (1,000), which the
+  old `.range(0, 49999)` could not lift — so only the first ~32 cities'
+  values reached the browser and every other city (Dobříš included)
+  showed em-dashes / a grey, value-less shape. Mirrors the same fix
+  `fetchRentMapChoropleth` already used.
 - **Tooling**: `scripts/seed_curated_cities.py` reads the operator
   CSV, geocodes each (Město, Kraj) pair via Mapy.cz, writes to the
   DB. Per-city radius is derived from the Mapy.cz bbox (clamped

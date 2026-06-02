@@ -44,6 +44,28 @@ const emptyCenterCircle: GeoJSON.Feature<GeoJSON.Polygon> = {
   geometry: { type: 'Polygon', coordinates: [[]] },
 };
 
+/* Fallback shape for a curated city that has no municipality boundary
+ * (every city has one today, but a future operator upload might add one
+ * before its admin_boundary link is backfilled). Same haversine ring as
+ * the centre+radius overlay, returned as a bare Polygon geometry. */
+const circlePolygonGeom = (
+  lat: number,
+  lng: number,
+  radiusM: number,
+): GeoJSON.Polygon => {
+  const latRad = (lat * Math.PI) / 180;
+  const coords: [number, number][] = [];
+  for (let i = 0; i <= CENTER_CIRCLE_POINTS; i++) {
+    const theta = (i / CENTER_CIRCLE_POINTS) * 2 * Math.PI;
+    const dx = radiusM * Math.cos(theta);
+    const dy = radiusM * Math.sin(theta);
+    const dLng = (dx / (EARTH_RADIUS_M * Math.cos(latRad))) * (180 / Math.PI);
+    const dLat = (dy / EARTH_RADIUS_M) * (180 / Math.PI);
+    coords.push([lng + dLng, lat + dLat]);
+  }
+  return { type: 'Polygon', coordinates: [coords] };
+};
+
 const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 9.5 };
 /* Below this zoom only the round point dot is shown; at and above it
@@ -93,23 +115,41 @@ export interface MapFlyToCommand {
   ts: number;
 }
 
-/* Phase QUAL — one city pin's GeoJSON feature properties. `value`
- * is the active color-by-index reading (or null when no index is
- * selected). `top_indexes` is a small precomputed string used in the
- * popup header. */
+/* Phase QUAL — one city's GeoJSON feature properties. The geometry is
+ * the municipality boundary polygon. `value` is the active color-by-index
+ * reading (or the -1 sentinel when no index is selected / the city has no
+ * reading). `value_label` is the pre-formatted figure drawn inside the
+ * shape (empty string → no label). `popup_html` backs the click popup. */
 type CityFeatureProps = {
   city_id: number;
   name: string;
   kraj_name: string;
   population: number | null;
   /* -1 sentinel for "no reading" (MapLibre paint expressions can't
-   * read literal null). The paint expression on `city-pins` gates
-   * on `< 0` to render a neutral grey. */
+   * read literal null). The fill/line paint expressions gate on `< 0`
+   * to render a neutral grey. */
   value: number;
+  value_label: string;
   popup_html: string;
 };
 
-type CityFC = GeoJSON.FeatureCollection<GeoJSON.Point, CityFeatureProps>;
+type CityFC = GeoJSON.FeatureCollection<
+  GeoJSON.Polygon | GeoJSON.MultiPolygon,
+  CityFeatureProps
+>;
+
+/* City choropleth ramp (red → yellow → green), shared by the fill and
+ * the outline so the two never drift; matches the legend gradient in
+ * CityMapControls and the popup highlight. Flattened inline into the
+ * MapLibre `interpolate` expressions below. */
+const CITY_INDEX_RAMP: ReadonlyArray<readonly [number, string]> = [
+  [0, '#c0392b'],
+  [5, '#f1c40f'],
+  [10, '#2ecc71'],
+];
+/* Neutral grey for a city with no reading for the selected index (or no
+ * index selected at all) — gated on the `< 0` value sentinel. */
+const CITY_NULL_COLOR = '#8c9196';
 
 /* -------------------------------------------------------------------------- */
 /* MF rent-price choropleth ("Cenová mapa nájemného"). One polygon per Czech  */
@@ -277,6 +317,10 @@ interface Props {
    * When `showCities` is false the layer is hidden but the source
    * stays loaded so toggling is instant. */
   cities?: CuratedCity[];
+  /* Municipality boundary per city, `city_id` → raw ST_AsGeoJSON string
+   * (JSON.parsed into the feature geometry). A city missing from the map
+   * falls back to a radius circle around its centroid. */
+  cityPolygons?: Map<number, string>;
   showCities?: boolean;
   /* If set, paint pins with a linear gradient between
    * `cityIndexDefinition.scale_min` (red) and `.scale_max` (green).
@@ -319,6 +363,7 @@ export default function ListingMap({
   centerCircle,
   flyTo,
   cities,
+  cityPolygons,
   showCities = true,
   colorByIndex,
   cityIndexValues,
@@ -467,45 +512,97 @@ export default function ListingMap({
           .addTo(map);
       });
 
-      /* Phase QUAL — curated city pins. Added FIRST so listing dots
-       * render above them. Initially empty; the cities-data effect
-       * below populates the GeoJSON when props arrive. The colour
-       * branch falls back to a neutral grey when no index is selected
-       * or the city is missing a value for the selected index. */
+      /* Phase QUAL — curated city overlay, drawn as municipality
+       * boundary polygons. Added FIRST (and the value label LAST, just
+       * after this block) so the listing dots render above the fill but
+       * the index figure stays readable. Initially empty; the
+       * cities-data effect below populates the GeoJSON when props arrive.
+       *
+       * `value` carries the selected index reading, or the -1 sentinel
+       * when the city has no reading / no index is selected (MapLibre
+       * paint can't compare against literal null). The shared
+       * `interpolate` expression colours the fill (translucent) and the
+       * outline (thicker, opaque) with the SAME tone, gating on `< 0`
+       * for the neutral grey. Inlined in both layers (rather than shared
+       * via a const) so each gets the layer's contextual paint typing —
+       * the proven rent-map-fill pattern. */
       map.addSource('cities', {
         type: 'geojson',
         data: { type: 'FeatureCollection', features: [] },
       });
+      /* Translucent same-tone fill. */
       map.addLayer({
-        id: 'city-pins',
-        type: 'circle',
+        id: 'city-fill',
+        type: 'fill',
         source: 'cities',
         paint: {
-          'circle-radius': [
-            'interpolate', ['linear'], ['zoom'],
-            5, 6,
-            10, 10,
-            14, 14,
-          ],
-          /* `value` is null when the city has no reading for the
-           * selected color-by-index OR no index is selected. MapLibre
-           * expressions can't compare against literal null, so we
-           * carry a sentinel out-of-range value (-1) for "no reading"
-           * and gate on that with a numeric test. */
-          'circle-color': [
+          'fill-color': [
             'case',
-            ['<', ['get', 'value'], 0], 'rgba(120, 120, 120, 0.55)',
+            ['<', ['get', 'value'], 0], CITY_NULL_COLOR,
             [
               'interpolate', ['linear'], ['get', 'value'],
-              0,  '#c0392b',
-              5,  '#f1c40f',
-              10, '#2ecc71',
+              ...CITY_INDEX_RAMP.flatMap(([stop, color]) => [stop, color]),
             ],
           ],
-          'circle-stroke-color': '#3a3a3a',
-          'circle-stroke-width': 1,
-          'circle-opacity': 0.55,
-          'circle-stroke-opacity': 0.7,
+          'fill-opacity': [
+            'case',
+            ['<', ['get', 'value'], 0], 0.12,
+            0.32,
+          ],
+        },
+      });
+      /* Thick conditional-coloured border so each municipality stands
+       * out; a touch thinner / softer when it has no index reading. */
+      map.addLayer({
+        id: 'city-outline',
+        type: 'line',
+        source: 'cities',
+        paint: {
+          'line-color': [
+            'case',
+            ['<', ['get', 'value'], 0], CITY_NULL_COLOR,
+            [
+              'interpolate', ['linear'], ['get', 'value'],
+              ...CITY_INDEX_RAMP.flatMap(([stop, color]) => [stop, color]),
+            ],
+          ],
+          'line-width': [
+            'interpolate', ['linear'], ['zoom'],
+            6, 1.6,
+            10, 2.4,
+            14, 3.2,
+          ],
+          'line-opacity': [
+            'case',
+            ['<', ['get', 'value'], 0], 0.5,
+            0.9,
+          ],
+        },
+      });
+      /* The selected index figure, drawn at each municipality's
+       * centroid. `value_label` is empty (→ no label) when no index is
+       * selected or the city has no reading. Added before the listing
+       * layers so it wins placement over the cluster counts; the white
+       * halo keeps it legible where a listing cluster sits on top. */
+      map.addLayer({
+        id: 'city-label',
+        type: 'symbol',
+        source: 'cities',
+        layout: {
+          'text-field': ['get', 'value_label'],
+          'text-font': ['Noto Sans Bold'],
+          'text-size': [
+            'interpolate', ['linear'], ['zoom'],
+            6, 11,
+            12, 14,
+          ],
+          'text-allow-overlap': false,
+        },
+        paint: {
+          'text-color': '#1f2a28',
+          'text-halo-color': '#ffffff',
+          'text-halo-width': 1.6,
+          'text-halo-blur': 0.3,
         },
       });
 
@@ -714,19 +811,20 @@ export default function ListingMap({
         },
       });
 
-      /* Phase QUAL — city pin interactions. Click pops up the city
-       * card with population + every active index value. Hover shows
+      /* Phase QUAL — city polygon interactions. Click pops up the city
+       * card with population + every active index value, anchored where
+       * the operator clicked (the fill is the hit target). Hover shows
        * pointer cursor; we do NOT push city hovers to onHover (which
        * is wired to the cross-source listing highlight). */
-      map.on('mouseenter', 'city-pins', () => {
+      map.on('mouseenter', 'city-fill', () => {
         map.getCanvas().style.cursor = 'pointer';
       });
-      map.on('mouseleave', 'city-pins', () => {
+      map.on('mouseleave', 'city-fill', () => {
         map.getCanvas().style.cursor = '';
       });
-      map.on('click', 'city-pins', (e) => {
+      map.on('click', 'city-fill', (e) => {
         const f = e.features?.[0];
-        if (!f || f.geometry.type !== 'Point') return;
+        if (!f) return;
         const props = f.properties as unknown as CityFeatureProps;
         popupRef.current?.remove();
         popupRef.current = new maplibregl.Popup({
@@ -735,7 +833,7 @@ export default function ListingMap({
           maxWidth: '320px',
           className: 'listing-popup city-popup',
         })
-          .setLngLat(f.geometry.coordinates as [number, number])
+          .setLngLat(e.lngLat)
           .setHTML(props.popup_html)
           .addTo(map);
       });
@@ -830,9 +928,12 @@ export default function ListingMap({
 
   /* Phase QUAL — push the filtered city set into the `cities` source
    * whenever the operator changes the city-quality filter, the color-
-   * by-index, or the underlying data. The MapLibre `interpolate` paint
-   * expression on `city-pins` reads `properties.value` so a change of
-   * colorByIndex is implemented as a fresh setData with new values. */
+   * by-index, the boundary polygons, or the underlying data. The shared
+   * `interpolate` paint expression reads `properties.value`, so a change
+   * of colorByIndex is implemented as a fresh setData with new values +
+   * labels. Geometry is the municipality boundary (JSON.parsed from the
+   * ST_AsGeoJSON string), falling back to a radius circle if a city has
+   * no boundary. */
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !ready) return;
@@ -842,24 +943,44 @@ export default function ListingMap({
     const idxVals = cityIndexValues ?? new Map<number, number>();
     const allDefs = cityIndexDefinitions ?? [];
     const allVals = cityIndexValuesAll ?? new Map<string, number>();
+    const polys = cityPolygons ?? new Map<number, string>();
     /* MapLibre paint expressions can't read literal null, so we use
-     * -1 as the "no reading" sentinel. The paint expression on
-     * `city-pins` checks `< 0` and switches to a neutral grey. */
+     * -1 as the "no reading" sentinel. The fill/line paint checks `< 0`
+     * and switches to a neutral grey; `value_label` is left blank in
+     * that case (or when no index is selected) so no figure is drawn. */
     const fc: CityFC = {
       type: 'FeatureCollection',
       features: list.map((c) => {
+        let geometry: GeoJSON.Polygon | GeoJSON.MultiPolygon | null = null;
+        const raw = polys.get(c.city_id);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw) as GeoJSON.Geometry;
+            if (parsed.type === 'Polygon' || parsed.type === 'MultiPolygon') {
+              geometry = parsed;
+            }
+          } catch {
+            geometry = null;
+          }
+        }
+        if (!geometry) {
+          geometry = circlePolygonGeom(c.lat, c.lng, c.default_radius_m);
+        }
         const v = idxVals.get(c.city_id);
-        const value = typeof v === 'number' && Number.isFinite(v) ? v : -1;
+        const hasReading = typeof v === 'number' && Number.isFinite(v);
+        const value = hasReading ? (v as number) : -1;
+        const valueLabel = colorByIndex && hasReading ? value.toFixed(1) : '';
         return {
           type: 'Feature',
           id: c.city_id,
-          geometry: { type: 'Point', coordinates: [c.lng, c.lat] },
+          geometry,
           properties: {
             city_id: c.city_id,
             name: c.name,
             kraj_name: c.kraj_name,
             population: c.population,
             value,
+            value_label: valueLabel,
             popup_html: cityPopupHtml(c, allDefs, allVals, colorByIndex ?? null),
           },
         };
@@ -871,15 +992,15 @@ export default function ListingMap({
      * `showCities` is instant. Also gate visibility on whether there
      * are any cities to show — avoids drawing a stale empty layer
      * during the initial load. */
-    if (map.getLayer('city-pins')) {
-      map.setLayoutProperty(
-        'city-pins',
-        'visibility',
-        showCities && list.length > 0 ? 'visible' : 'none',
-      );
+    const vis = showCities && list.length > 0 ? 'visible' : 'none';
+    for (const id of ['city-fill', 'city-outline', 'city-label']) {
+      if (map.getLayer(id)) {
+        map.setLayoutProperty(id, 'visibility', vis);
+      }
     }
   }, [
     cities,
+    cityPolygons,
     showCities,
     colorByIndex,
     cityIndexValues,

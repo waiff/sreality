@@ -27,6 +27,7 @@ import {
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
   fetchCuratedCities,
+  fetchCuratedCityPolygons,
   fetchListingsForCards,
   fetchListingsForMap,
   fetchListingsForTable,
@@ -40,6 +41,7 @@ import {
   type CardsResult,
   type CityIndexDefinition,
   type CityIndexValue,
+  type CityPolygon,
   type CuratedCity,
   type MapResult,
   type RentMapKraj,
@@ -285,6 +287,23 @@ export default function Browse() {
     gcTime: Infinity,
   });
 
+  /* Municipality boundary polygons for the city overlay (one simplified
+   * GeoJSON per curated city). ~600 KB, so gated on the map tab and
+   * cached forever — the map draws each city as its real shape instead
+   * of a fixed-radius circle. Static reference data, like the rent map. */
+  const cityPolygonsQuery = useQuery<CityPolygon[], Error>({
+    queryKey: ['curated_city_polygons'],
+    queryFn: fetchCuratedCityPolygons,
+    enabled: tabFromUrl === 'map',
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const cityPolygonsMap = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const p of cityPolygonsQuery.data ?? []) m.set(p.city_id, p.geojson);
+    return m;
+  }, [cityPolygonsQuery.data]);
+
   /* MF rent-price choropleth. The ~7.6K polygons + 14 kraj borders are
    * an operator-static reference dataset, so fetch once and cache forever
    * (`staleTime: Infinity`). Gated on the map tab being active AND the
@@ -519,6 +538,7 @@ export default function Browse() {
                     }
                     flyTo={mapFlyTo}
                     cities={cityOverlay.cities}
+                    cityPolygons={cityPolygonsMap}
                     showCities={showCities}
                     onToggleShowCities={setShowCities}
                     colorByIndex={cityOverlay.colorByIndex}
