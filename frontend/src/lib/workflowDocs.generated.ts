@@ -1168,7 +1168,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "refresh_population.yml",
     "name": "Data: refresh city populations (Wikidata)",
-    "description": "Pulls the latest population reading for every curated city from Wikidata's public SPARQL endpoint, writes data/csu_population_<year>.csv, and commits it back to the branch. The next run of `Seed curated cities` will pick the CSV up and upsert into `city_population`.",
+    "description": "FALLBACK SOURCE. The preferred population source is now the official ČSÚ DataStat export \"Počet obyvatel v obcích k 1. 1.\" — download the JSON from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02, commit it to data/csu_population.json, and run \"Data: seed curated cities\" (which ingests the JSON directly). Use this Wikidata fetcher only when you can't get the official file.",
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -1775,7 +1775,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "seed_curated_cities.yml",
     "name": "Data: seed curated cities",
-    "description": "One-shot workflow that geocodes the 206 cities in data/obce_v_datech_2025.csv via Mapy.cz, then writes them into curated_cities + city_index_definitions + city_index_revisions + city_index_values (+ city_population if the CSV is present).",
+    "description": "One-shot workflow that geocodes the cities in data/obce_v_datech_2025.csv via Mapy.cz, then writes them into curated_cities + city_index_definitions + city_index_revisions + city_index_values (+ city_population from data/csu_population.json when present).",
     "manual": true,
     "schedules": [],
     "onPush": false,
