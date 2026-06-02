@@ -1,5 +1,6 @@
 import { Suspense, lazy, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useNewEstimationModal } from '@/components/NewEstimationModal';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchListingById,
@@ -173,7 +174,10 @@ export default function ListingDetail() {
 
   return (
     <Page>
-      <Crumb />
+      <div className="flex items-center justify-between gap-3">
+        <Crumb />
+        <NewEstimationButton />
+      </div>
       {/* Merged top section: identity + price + property facts in one block,
           above the images. The MF rent estimate + description sit directly
           below it. */}
@@ -265,6 +269,20 @@ function Crumb() {
       <BackArrow />
       <span>Back to browse</span>
     </Link>
+  );
+}
+
+function NewEstimationButton() {
+  const { open } = useNewEstimationModal();
+  return (
+    <button
+      type="button"
+      onClick={open}
+      className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
+    >
+      <span className="text-[0.95em] leading-none">+</span>
+      <span>New estimation</span>
+    </button>
   );
 }
 

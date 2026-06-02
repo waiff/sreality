@@ -1,9 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import {
-  NewEstimationProvider,
-  useNewEstimationModal,
-} from './NewEstimationModal';
+import { NewEstimationProvider } from './NewEstimationModal';
 
 type NavItem =
   | { kind: 'link'; to: string; label: string; disabled?: boolean }
@@ -83,9 +80,6 @@ function TopBar() {
             );
           })}
         </nav>
-        <div className="ml-auto flex items-center gap-3">
-          <NewEstimationCta />
-        </div>
       </div>
     </header>
   );
@@ -102,33 +96,6 @@ function NavLabel({ active, children }: { active: boolean; children: ReactNode }
         }}
       />
     </span>
-  );
-}
-
-function NewEstimationCta() {
-  const { open } = useNewEstimationModal();
-  return (
-    <button
-      type="button"
-      onClick={open}
-      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors"
-    >
-      <PlusGlyph />
-      <span>New estimation</span>
-    </button>
-  );
-}
-
-function PlusGlyph() {
-  return (
-    <svg width="11" height="11" viewBox="0 0 11 11" aria-hidden>
-      <path
-        d="M5.5 1.5 L5.5 9.5 M1.5 5.5 L9.5 5.5"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 
