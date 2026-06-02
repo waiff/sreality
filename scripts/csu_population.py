@@ -51,9 +51,16 @@ DATASTAT_URL = "https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02"
 
 
 def slugify(s: str) -> str:
-    """Diacritics-stripped, lowercased form for fuzzy (name, kraj) joins."""
-    norm = unicodedata.normalize("NFD", s)
-    return "".join(c for c in norm if unicodedata.category(c) != "Mn").lower().strip()
+    """Diacritics-stripped, lowercased, whitespace-normalised join key.
+
+    NFKD (not NFD) so the non-breaking space the curated CSV uses in
+    multi-word names ("Kralupy nad\\xa0Vltavou") decomposes to a plain
+    space and joins the ČSÚ "Kralupy nad Vltavou". Combining marks are
+    dropped and all whitespace runs collapse to single spaces.
+    """
+    norm = unicodedata.normalize("NFKD", s)
+    stripped = "".join(c for c in norm if unicodedata.category(c) != "Mn")
+    return " ".join(stripped.lower().split())
 
 
 def _strides(sizes: list[int]) -> list[int]:

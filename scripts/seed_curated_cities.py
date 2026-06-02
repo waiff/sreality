@@ -445,6 +445,41 @@ def upsert_population(
     return written
 
 
+def relink_admin_boundaries(conn: psycopg.Connection) -> int:
+    """Link any curated city still missing an obec polygon to the one that
+    covers its centroid (migration 082 predicate, idempotent).
+
+    Inlined here — not imported from scripts.ingest_boundaries — so the seed
+    keeps its psycopg-only dependency footprint (ingest_boundaries pulls in
+    shapely/pyproj/shapefile). Runs after upsert_cities so a newly-curated
+    city (e.g. Praha) gets its polygon, which the city-quality containment
+    and proximity (polygon-edge) filters both rely on.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            update curated_cities c
+               set admin_boundary_id = (
+                 select b.id
+                   from admin_boundaries b
+                  where b.level = 'obec'
+                    and st_covers(b.geom, c.centroid)
+                  order by st_area(b.geom::geometry) asc
+                  limit 1
+               )
+             where c.admin_boundary_id is null
+            """
+        )
+        linked = cur.rowcount or 0
+        cur.execute(
+            "select count(*) from curated_cities where admin_boundary_id is null"
+        )
+        (unmatched,) = cur.fetchone()
+    LOG.info("Polygon-linked %d curated cities (%d still unmatched)",
+             linked, unmatched)
+    return linked
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="seed_curated_cities")
     p.add_argument("--csv", default=str(CSV_PATH),
@@ -527,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
         with conn.transaction():
             upsert_definitions(conn)
             city_ids = upsert_cities(conn, rows, geocodes)
+            relink_admin_boundaries(conn)
             insert_revision_and_values(
                 conn, rows, city_ids,
                 source_filename=args.source_filename or csv_path.name,

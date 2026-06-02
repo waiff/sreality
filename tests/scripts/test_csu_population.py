@@ -55,6 +55,25 @@ def test_match_to_curated_with_misses_and_diacritics() -> None:
     assert misses == [("Plzeň", "Plzeňský kraj")]
 
 
+def test_slugify_normalises_nbsp_and_diacritics() -> None:
+    # The curated CSV uses a non-breaking space in multi-word names
+    # ("Kralupy nad\xa0Vltavou"); ČSÚ uses a normal space. Both must slug
+    # to the same key, diacritics-insensitively.
+    assert csu_population.slugify("Kralupy nad\xa0Vltavou") == "kralupy nad vltavou"
+    assert csu_population.slugify("Plzeň") == csu_population.slugify("Plzen")
+    assert csu_population.slugify("  Brno   ") == "brno"
+
+
+def test_match_joins_across_nbsp() -> None:
+    parsed = {("Kralupy nad Vltavou", "Středočeský kraj"): (18000, 2026)}
+    # curated side carries the NBSP variant — must still match.
+    matched, misses = csu_population.match_to_curated(
+        parsed, [("Kralupy nad\xa0Vltavou", "Středočeský kraj")]
+    )
+    assert matched == {("Kralupy nad\xa0Vltavou", "Středočeský kraj"): (18000, 2026)}
+    assert misses == []
+
+
 def test_missing_child_map_raises() -> None:
     doc = _doc()
     doc["dimension"]["UZ25"]["category"].pop("child")
