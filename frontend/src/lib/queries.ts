@@ -582,7 +582,7 @@ export const fetchBrowseStats = async (
 };
 
 const DETAIL_COLS =
-  'sreality_id,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'sreality_id,first_seen_at,last_seen_at,is_active,source,tom_days,' +
   'category_main,category_type,price_czk,price_unit,' +
   'area_m2,disposition,locality,district,locality_district_id,locality_region_id,' +
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +

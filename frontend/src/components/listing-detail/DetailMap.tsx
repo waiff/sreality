@@ -57,7 +57,7 @@ export default function DetailMap({ lat, lng, isActive }: Props) {
   }, [lat, lng, isActive]);
 
   return (
-    <div className="relative h-60 rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
+    <div className="relative h-40 rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
       <div
         ref={containerRef}
         className="absolute inset-0"

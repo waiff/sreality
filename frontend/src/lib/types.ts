@@ -46,6 +46,8 @@ export interface ListingPublic {
   first_seen_at: string;
   last_seen_at: string;
   is_active: boolean;
+  /* Migration 091 — source portal (sreality, bazos, idnes, …). */
+  source: string;
   category_main: string | null;
   category_type: string | null;
   price_czk: number | null;
