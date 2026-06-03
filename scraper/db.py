@@ -702,7 +702,7 @@ def mark_inactive_native(
               AND source_id_native <> ALL(%s)
             RETURNING property_id
             """,
-            params,
+            tuple(params),
         )
         rows = cur.fetchall()
         pids = {int(r[0]) for r in rows if r[0] is not None}
@@ -861,7 +861,7 @@ def active_count(
               AND category_main = %s
               AND category_type = %s{sub_clause}
             """,
-            params,
+            tuple(params),
         )
         row = cur.fetchone()
         return int(row[0]) if row else 0
