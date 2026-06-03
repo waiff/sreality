@@ -5,8 +5,10 @@
 
 import type {
   ApiResult,
-  EstimationListResponse,
   EstimationRun,
+  PortalListing,
+  PortalLookupItem,
+  PortalLookupResponse,
   YieldScenarioUpdate,
 } from './types';
 
@@ -62,25 +64,20 @@ async function request<T>(
   return { ok: true, data: body as T };
 }
 
-/* GET /estimations?sreality_id=X — returns the latest successful run
- * for that listing, or null if none exists. We ignore failed / pending
- * runs since the panel can only render a usable yield from a terminal
- * success; a stuck pending run from the past shouldn't crowd the UI. */
-export async function findRunBySrealityId(
-  sreality_id: number,
-): Promise<ApiResult<EstimationRun | null>> {
-  const qs = new URLSearchParams({
-    sreality_id: String(sreality_id),
-    status: 'success',
-    limit: '1',
-    offset: '0',
+/* POST /listings/lookup — batch (source, native id) → our scraped facts +
+ * precomputed MF reference rent / "Výnos MF" yield + latest estimate. One
+ * request resolves every visible card on an index page; the detail panel
+ * sends a single item. Returns one entry per requested item, in order. */
+export async function lookupListings(
+  items: PortalLookupItem[],
+): Promise<ApiResult<PortalListing[]>> {
+  if (items.length === 0) return { ok: true, data: [] };
+  const res = await request<PortalLookupResponse>('/listings/lookup', {
+    method: 'POST',
+    body: JSON.stringify({ items }),
   });
-  const res = await request<EstimationListResponse>(
-    `/estimations?${qs.toString()}`,
-  );
   if (!res.ok) return res;
-  const [first] = res.data.data;
-  return { ok: true, data: first ?? null };
+  return { ok: true, data: res.data.data };
 }
 
 /* PATCH /estimations/:id/scenario — write the operator's yield

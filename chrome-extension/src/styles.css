@@ -208,3 +208,52 @@
   font-size: 0.78rem;
   margin: 0.5rem 0 0;
 }
+
+/* Deactivated panel (non-apartment / not-for-sale listing). */
+.panel--muted { opacity: 0.92; }
+.panel--muted .panel-header { background: var(--bg); }
+
+.muted-note {
+  color: var(--ink-3);
+  font-size: 0.8rem;
+  text-align: center;
+  margin: 0.35rem 0;
+}
+
+.subject-facts {
+  color: var(--ink-3);
+  font-size: 0.72rem;
+  text-align: center;
+  margin: 0.5rem 0 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Comparables-estimation section, below the MF headline. */
+.est-section {
+  margin-top: 0.85rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--rule);
+}
+
+.section-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--ink-4);
+  margin: 0 0 0.5rem;
+}
+
+.est-yield {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 0.6rem;
+  font-size: 0.78rem;
+  color: var(--ink-3);
+}
+
+.est-yield-value {
+  font-weight: 600;
+  color: var(--copper);
+  font-variant-numeric: tabular-nums;
+}

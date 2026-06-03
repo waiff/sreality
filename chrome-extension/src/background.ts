@@ -5,8 +5,8 @@
 
 import {
   createEstimation,
-  findRunBySrealityId,
   getEstimation,
+  lookupListings,
   patchScenario,
 } from './api';
 import type { ApiMessage, ApiResult } from './types';
@@ -39,8 +39,8 @@ async function handleMessage(
   message: ApiMessage,
 ): Promise<ApiResult<unknown>> {
   switch (message.type) {
-    case 'find_run_by_sreality_id':
-      return findRunBySrealityId(message.sreality_id);
+    case 'lookup_listings':
+      return lookupListings(message.items);
     case 'patch_scenario':
       return patchScenario(message.run_id, message.body);
     case 'create_estimation':

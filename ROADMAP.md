@@ -6,6 +6,23 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Chrome extension — MF rent/yield across all portals + index overlays
+- The extension grew from a sreality-detail-only yield panel into a multi-portal MF
+  overlay. **Detail pages** on every scraped portal (sreality, bazos, bezrealitky, idnes,
+  maxima, remax, +mmreality/ceskereality best-effort) show our precomputed
+  `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") for sale apartments, with the
+  comparables estimation as the deeper tool; the panel is visibly deactivated for
+  non-(byt+prodej). **Index/search pages** get per-card badges (Výnos MF, or a clickable
+  "Odhadnout výnos" fallback) via anchor-href scanning — no per-portal card selectors.
+- New bearer-gated backend read endpoint **`POST /listings/lookup`** (`api/portal_lookup.py`)
+  maps a card's on-page `(source, native id)` → our row + MF figures + latest estimate,
+  batched (≤50) for one request per index page. Closes the gap that the public views expose
+  only `(source, sreality_id)`. `chrome-extension/src/portals.ts` is the registry
+  (host→portal, detail-URL→native-id).
+- **Next:** verify mmreality/ceskereality URL→id extractors + index card selectors once those
+  portals carry data; consider badging not-in-DB sale-apartment cards (needs per-portal index
+  category detection); optional Path-3 public build still unbuilt.
+
 ### 2026-06: Saved filter presets on Browse
 - Named, reusable Browse filter presets, surfaced as buttons next to the Browse
   headline (`PresetBar`). Click a chip to restore *all* left-panel filters
