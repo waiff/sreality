@@ -33,6 +33,7 @@ from scraper.bazos_client import BazosClient, detail_url, index_url
 from scraper.bazos_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
+    SUBTYPE,
     Geocoder,
     _parse_price,
     parse_detail,
@@ -268,7 +269,13 @@ class BazosPortal:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return 0
-        n = db.mark_inactive_native(conn, SOURCE, cm, ct, seen)
+        # Scope the sweep to this scope's subtype: bazos walks fine sections that
+        # collapse onto one category_main (chata + dum -> dum), so an un-scoped
+        # per-section sweep would flip the sibling sections inactive.
+        sub = SUBTYPE.get(category.get("category"))
+        n = db.mark_inactive_native(
+            conn, SOURCE, cm, ct, seen, subtype=sub, scope_subtype=True
+        )
         if not self._sweep_stamped:
             db.record_portal_inactive_sweep(conn, SOURCE)
             self._sweep_stamped = True
@@ -278,7 +285,10 @@ class BazosPortal:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return None
-        return db.active_count(conn, cm, ct, source=SOURCE)
+        sub = SUBTYPE.get(category.get("category"))
+        return db.active_count(
+            conn, cm, ct, source=SOURCE, subtype=sub, scope_subtype=True
+        )
 
     # --- detail-drain seams ---
     def make_client(self, limiter: RateLimiter) -> BazosClient:

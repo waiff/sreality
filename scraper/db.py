@@ -665,6 +665,9 @@ def mark_inactive_native(
     category_main: str,
     category_type: str,
     seen_natives: set[str],
+    *,
+    subtype: str | None = None,
+    scope_subtype: bool = False,
 ) -> int:
     """Native-id analogue of `mark_inactive` for portals whose index knows only
     a portal-native string id (bazos), not the bigint PK.
@@ -673,22 +676,33 @@ def mark_inactive_native(
     `source_id_native` is absent from the walk to is_active=false. Scoped the
     same way as `mark_inactive` (rule #15). A brand-new listing seen in the index
     but not yet drained has no row, so it cannot be wrongly swept.
+
+    `scope_subtype=True` ALSO scopes the sweep to `subtype` (NULL-safe). bazos
+    walks fine sections that collapse onto one category_main (chata + dum -> dum;
+    kancelar/sklad/... -> komercni), so without this each section's per-scope
+    sweep would flip the other sections' rows inactive. The clause only NARROWS
+    the sweep, so the failure direction is over-retention, never over-deletion.
     """
     if not seen_natives:
         return 0
+    sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
+    params: list[Any] = [source, category_main, category_type]
+    if scope_subtype:
+        params.append(subtype)
+    params.append(list(seen_natives))
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             UPDATE listings
             SET is_active = false
             WHERE is_active = true
               AND source = %s
               AND category_main = %s
-              AND category_type = %s
+              AND category_type = %s{sub_clause}
               AND source_id_native <> ALL(%s)
             RETURNING property_id
             """,
-            (source, category_main, category_type, list(seen_natives)),
+            params,
         )
         rows = cur.fetchall()
         pids = {int(r[0]) for r in rows if r[0] is not None}
@@ -827,18 +841,27 @@ def active_count(
     category_type: str,
     *,
     source: str = "sreality",
+    subtype: str | None = None,
+    scope_subtype: bool = False,
 ) -> int:
-    """Current active-listing count for one (source, category_main, category_type)."""
+    """Current active-listing count for one (source, category_main, category_type).
+
+    `scope_subtype=True` narrows to `subtype` (NULL-safe) so the count matches a
+    subtype-scoped `mark_inactive_native` sweep (bazos fine sections)."""
+    sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
+    params: list[Any] = [source, category_main, category_type]
+    if scope_subtype:
+        params.append(subtype)
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT count(*) FROM listings
             WHERE is_active = true
               AND source = %s
               AND category_main = %s
-              AND category_type = %s
+              AND category_type = %s{sub_clause}
             """,
-            (source, category_main, category_type),
+            params,
         )
         row = cur.fetchone()
         return int(row[0]) if row else 0
