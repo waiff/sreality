@@ -966,6 +966,8 @@ export interface WatchdogFilterSpec {
   category_main: string | null;
   category_type: string | null;
   category_sub_cb: number | null;
+  // Portal-agnostic property sub-type (multi-select; matches any).
+  subtype: string[] | null;
   dispositions: string[] | null;
   lat: number | null;
   lng: number | null;
@@ -1061,6 +1063,7 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   category_main: 'byt',
   category_type: 'pronajem',
   category_sub_cb: null,
+  subtype: null,
   dispositions: null,
   lat: null,
   lng: null,

@@ -136,6 +136,9 @@ export interface ListingFilters {
   portals: string[];
   conditionMatch: string[];
   categorySubCb: number | null;
+  /* Portal-agnostic property sub-type (multi-select). Only surfaced for
+   * categoryMain in (dum, komercni); see SUBTYPE_LABELS_BY_MAIN. */
+  subtype: string[];
   buildingMaterial: BuildingMaterial[];
   estateAreaMin: number | null;
   estateAreaMax: number | null;
@@ -229,6 +232,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   portals: [],
   conditionMatch: [],
   categorySubCb: null,
+  subtype: [],
   buildingMaterial: [],
   estateAreaMin: null,
   estateAreaMax: null,
@@ -435,6 +439,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
       (c) => CONDITION_VALUES.includes(c),
     ),
     categorySubCb: parseIntOrNull(sp.get('subcat')),
+    subtype: splitCsv(sp.get('subtype')),
     buildingMaterial: splitCsv(sp.get('build')).filter((m): m is BuildingMaterial =>
       (BUILDING_MATERIAL_VALUES as ReadonlyArray<string>).includes(m),
     ),
@@ -620,6 +625,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.portals.length) sp.set('portal', f.portals.join(','));
   if (f.conditionMatch.length) sp.set('condition', f.conditionMatch.join(','));
   if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
+  if (f.subtype.length) sp.set('subtype', f.subtype.join(','));
   if (f.buildingMaterial.length) sp.set('build', f.buildingMaterial.join(','));
   if (f.estateAreaMin != null || f.estateAreaMax != null) {
     sp.set('estate', fmtRange(f.estateAreaMin, f.estateAreaMax));
@@ -809,6 +815,7 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.portals.length === 0 &&
   f.conditionMatch.length === 0 &&
   f.categorySubCb == null &&
+  f.subtype.length === 0 &&
   f.buildingMaterial.length === 0 &&
   f.estateAreaMin == null &&
   f.estateAreaMax == null &&
@@ -898,6 +905,7 @@ export const REGISTRY_KEY_MAP = {
   category_main: 'categoryMain',
   category_type: 'categoryType',
   category_sub_cb: 'categorySubCb',
+  subtype: 'subtype',
   dispositions: 'dispositions',
   districts: 'districts',
   status: 'status',
@@ -988,6 +996,7 @@ export function listingFiltersToRegistryView(
       || registryId === 'condition_match'
       || registryId === 'portals'
       || registryId === 'building_material'
+      || registryId === 'subtype'
     ) {
       const arr = v as unknown[];
       out[registryId] = arr.length === 0 ? null : arr;
@@ -1035,6 +1044,10 @@ export function applyRegistryUpdate(
   if (id === 'condition_match') {
     const next = value == null ? [] : (value as string[]);
     return { ...filters, conditionMatch: next };
+  }
+  if (id === 'subtype') {
+    const next = value == null ? [] : (value as string[]);
+    return { ...filters, subtype: next };
   }
   if (id === 'portals') {
     const next = value == null ? [] : (value as string[]);
@@ -1128,6 +1141,7 @@ export function filtersToWatchdogSpec(
     category_main: f.categoryMain,
     category_type: f.categoryType,
     category_sub_cb: f.categorySubCb,
+    subtype: arr(f.subtype),
     dispositions: arr(f.dispositions),
     districts: arr(f.districts),
     lat: cr ? cr.lat : null,

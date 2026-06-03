@@ -70,3 +70,50 @@ export function categorySubLabel(cb: number | null): string | null {
   if (cb == null) return null;
   return CATEGORY_SUB_LABELS[cb] ?? `kategorie #${cb}`;
 }
+
+/* Portal-agnostic `subtype` slugs (migration 152), grouped by the
+ * category_main they belong to and ordered by prevalence. Labels mirror
+ * toolkit/filter_registry.SUBTYPE_OPTIONS; the Browse sidebar renders the
+ * group matching the selected category_main. Unlike the legacy numeric
+ * CATEGORY_SUB_LABELS above, these are the live-verified labels. */
+export interface SubtypeOption {
+  slug: string;
+  label: string;
+}
+
+export const SUBTYPE_LABELS_BY_MAIN: Record<'dum' | 'komercni', SubtypeOption[]> = {
+  dum: [
+    { slug: 'rodinny_dum', label: 'Rodinný dům' },
+    { slug: 'chata', label: 'Chata' },
+    { slug: 'chalupa', label: 'Chalupa' },
+    { slug: 'vicegeneracni_dum', label: 'Vícegenerační dům' },
+    { slug: 'vila', label: 'Vila' },
+    { slug: 'zemedelska_usedlost', label: 'Zemědělská usedlost' },
+    { slug: 'na_klic', label: 'Na klíč' },
+    { slug: 'pamatka_jine', label: 'Památka/jiné' },
+  ],
+  komercni: [
+    { slug: 'kancelar', label: 'Kancelář' },
+    { slug: 'sklad', label: 'Sklad' },
+    { slug: 'obchodni_prostor', label: 'Obchodní prostor' },
+    { slug: 'vyroba', label: 'Výroba' },
+    { slug: 'ubytovani', label: 'Ubytování' },
+    { slug: 'cinzovni_dum', label: 'Činžovní dům' },
+    { slug: 'restaurace', label: 'Restaurace' },
+    { slug: 'apartmany', label: 'Apartmány' },
+    { slug: 'ordinace', label: 'Ordinace' },
+    { slug: 'zemedelsky', label: 'Zemědělský objekt' },
+    { slug: 'virtualni_kancelar', label: 'Virtuální kancelář' },
+    { slug: 'ostatni', label: 'Ostatní' },
+  ],
+};
+
+const SUBTYPE_LABEL_BY_SLUG: Record<string, string> = Object.fromEntries(
+  [...SUBTYPE_LABELS_BY_MAIN.dum, ...SUBTYPE_LABELS_BY_MAIN.komercni].map(
+    (o) => [o.slug, o.label],
+  ),
+);
+
+export function subtypeLabel(slug: string): string {
+  return SUBTYPE_LABEL_BY_SLUG[slug] ?? slug;
+}
