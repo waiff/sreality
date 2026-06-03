@@ -114,6 +114,11 @@ def resolve_obce(conn: psycopg.Connection, obec_ids: list[int]) -> int:
     localities/suggest call. The entity coordinate is the obec centroid; obec_id
     is set directly (no PIP). Obce without a sreality_id are skipped (not
     scrapeable).
+
+    Several RÚIAN obce can share one sreality_id (sreality's municipality grain
+    is coarser), which would make the INSERT touch the same (muni, sreality_id)
+    twice and raise CardinalityViolation. DISTINCT ON (sreality_id) collapses
+    those, keeping the largest-population obec as the representative obec_id.
     """
     if not obec_ids:
         return 0
@@ -127,8 +132,12 @@ def resolve_obce(conn: psycopg.Connection, obec_ids: list[int]) -> int:
                    ST_Y(ST_Centroid(b.geom::geometry)),
                    ST_X(ST_Centroid(b.geom::geometry)),
                    ST_Centroid(b.geom::geometry)::geography, b.id, now()
-              FROM admin_boundaries b
-             WHERE b.id = ANY(%s) AND b.level = 'obec' AND b.sreality_id IS NOT NULL
+              FROM (
+                SELECT DISTINCT ON (sreality_id) id, name, sreality_id, geom
+                  FROM admin_boundaries
+                 WHERE id = ANY(%s) AND level = 'obec' AND sreality_id IS NOT NULL
+                 ORDER BY sreality_id, population DESC NULLS LAST, id
+              ) b
             ON CONFLICT (entity_type, entity_id) DO UPDATE SET
                 name = EXCLUDED.name, obec_id = EXCLUDED.obec_id,
                 lat = EXCLUDED.lat, lon = EXCLUDED.lon, geom = EXCLUDED.geom,
