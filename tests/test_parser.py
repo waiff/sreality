@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from scraper.parser import parse_images, parse_listing
+from scraper.parser import SUBTYPE, parse_images, parse_listing
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -39,6 +39,41 @@ def test_category(sample):
     row = parse_listing(sample)
     assert row["category_main"] == "byt"
     assert row["category_type"] == "prodej"
+
+
+def test_subtype_map_values():
+    # disjoint house / commercial code ranges, no overlap with apartment codes
+    assert SUBTYPE[37] == "rodinny_dum"
+    assert SUBTYPE[39] == "vila"
+    assert SUBTYPE[25] == "kancelar"
+    assert SUBTYPE[26] == "sklad"
+    assert 6 not in SUBTYPE  # apartment disposition code, deliberately excluded
+
+
+def test_subtype_house():
+    row = parse_listing(_estate(
+        category_main_cb={"value": 2}, category_sub_cb={"name": "Rodinný", "value": 37}))
+    assert row["category_main"] == "dum"
+    assert row["subtype"] == "rodinny_dum"
+
+
+def test_subtype_commercial():
+    row = parse_listing(_estate(
+        category_main_cb={"value": 4}, category_sub_cb={"name": "Kanceláře", "value": 25}))
+    assert row["category_main"] == "komercni"
+    assert row["subtype"] == "kancelar"
+
+
+def test_subtype_apartment_is_none():
+    # an apartment disposition sub-code is not a property subtype
+    row = parse_listing(_estate(
+        category_main_cb={"value": 1}, category_sub_cb={"name": "3+kk", "value": 6}))
+    assert row["category_main"] == "byt"
+    assert row["subtype"] is None
+
+
+def test_subtype_missing_is_none():
+    assert parse_listing(_estate())["subtype"] is None
 
 
 def test_price_hidden_is_none(sample):

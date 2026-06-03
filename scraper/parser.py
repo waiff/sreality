@@ -50,6 +50,38 @@ OWNERSHIP: dict[int, str] = {
     3: "statni",      # státní/obecní
 }
 
+# Portal-agnostic property sub-type, normalized from sreality's category_sub_cb
+# code. House (dum) and commercial (komercni) codes occupy disjoint integer
+# ranges, so one flat map needs no category_main disambiguation. Apartment /
+# land sub-codes are deliberately omitted — `subtype` is only meaningful for
+# dum/komercni; everything else (and unknown codes) returns None. Slugs follow
+# the diacritics-free convention of category_main / category_type. Other portals
+# populate the same column from their own structured signal (see each parser).
+SUBTYPE: dict[int, str] = {
+    # dum (houses)
+    37: "rodinny_dum",          # Rodinný dům
+    33: "chata",                # Chata
+    43: "chalupa",              # Chalupa
+    54: "vicegeneracni_dum",    # Vícegenerační dům
+    39: "vila",                 # Vila
+    44: "zemedelska_usedlost",  # Zemědělská usedlost
+    40: "na_klic",              # Na klíč
+    35: "pamatka_jine",         # Památka/jiné
+    # komercni (commercial)
+    25: "kancelar",             # Kanceláře
+    26: "sklad",                # Sklady
+    28: "obchodni_prostor",     # Obchodní prostory
+    27: "vyroba",               # Výroba
+    29: "ubytovani",            # Ubytování
+    32: "ostatni",              # Ostatní
+    38: "cinzovni_dum",         # Činžovní dům
+    30: "restaurace",           # Restaurace
+    57: "apartmany",            # Apartmány
+    56: "ordinace",             # Ordinace
+    31: "zemedelsky",           # Zemědělský objekt
+    49: "virtualni_kancelar",   # Virtuální kancelář
+}
+
 # Canonical district labels keyed by sreality's locality_district_id.
 # IDs 1..77 are the 76 Czech okresy outside Prague (47 is the city of
 # Prague). 5001..5022 are Praha 1..22 — all collapsed to a single "Praha"
@@ -198,6 +230,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "usable_area": _numeric_or_none(raw.get("usable_area")),
         "garden_area": _numeric_or_none(raw.get("garden_area")),
         "category_sub_cb": _cb_value(raw.get("category_sub_cb")),
+        "subtype": SUBTYPE.get(_cb_value(raw.get("category_sub_cb"))),
         "furnished": FURNISHED.get(_cb_value(raw.get("furnished"))),
         "terrace": _bool_or_none(raw.get("terrace")),
         "cellar": _bool_or_none(raw.get("cellar")),
