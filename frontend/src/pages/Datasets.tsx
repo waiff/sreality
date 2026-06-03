@@ -642,7 +642,7 @@ function ExpandDatasetForm({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [startYm, setStartYm] = useState(dataset.start_ym || `${FIRST_YEAR}-01`);
   const [endYm, setEndYm] = useState(dataset.end_ym || CUR_YM);
-  const [periodicity, setPeriodicity] = useState(dataset.periodicity || 'monthly');
+  const [periodicity, setPeriodicity] = useState<string>(dataset.periodicity || 'monthly');
   const [dispatchError, setDispatchError] = useState<string | null>(null);
 
   const saveMut = useMutation({
