@@ -76,6 +76,8 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
     """
     known = {
         "category_main", "category_type", "category_sub_cb",
+        # Migration 152 — portal-agnostic normalized property sub-type.
+        "subtype",
         "disposition", "condition", "building_type", "energy_rating",
         "furnished", "ownership",
         "has_balcony", "has_lift", "has_parking",
