@@ -70,7 +70,7 @@ _ATTACH_INSERT_SQL = """
         repr_listing_id, category_main, category_type, disposition,
         area_m2, district, locality, geom, current_price_czk,
         has_balcony, has_parking, has_lift, building_type, condition,
-        ownership, furnished, terrace, cellar, garage, category_sub_cb,
+        ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
         estate_area, usable_area, garden_area, parking_lots,
         is_active, first_seen_at, last_seen_at,
         source_count, distinct_site_count
@@ -79,7 +79,7 @@ _ATTACH_INSERT_SQL = """
         l.sreality_id, l.category_main, l.category_type, l.disposition,
         l.area_m2, l.district, l.locality, l.geom, l.price_czk,
         l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
-        l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb,
+        l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
         l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
         l.is_active, l.first_seen_at, l.last_seen_at, 1, 1
     FROM listings l
@@ -116,7 +116,7 @@ _RECOMPUTE_BATCH_SQL = """
         l.disposition, l.area_m2, l.district, l.geom, l.price_czk,
         l.locality, l.has_balcony, l.has_parking, l.has_lift, l.building_type,
         l.condition, l.ownership, l.furnished, l.terrace, l.cellar, l.garage,
-        l.category_sub_cb, l.estate_area, l.usable_area, l.garden_area,
+        l.category_sub_cb, l.subtype, l.estate_area, l.usable_area, l.garden_area,
         l.parking_lots
       FROM listings l
       JOIN batch b ON b.id = l.property_id
@@ -177,6 +177,7 @@ _RECOMPUTE_BATCH_SQL = """
       cellar              = r.cellar,
       garage              = r.garage,
       category_sub_cb     = r.category_sub_cb,
+      subtype             = r.subtype,
       estate_area         = r.estate_area,
       usable_area         = r.usable_area,
       garden_area         = r.garden_area,

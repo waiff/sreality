@@ -211,6 +211,34 @@ DISPOSITION_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("5+1", "5+1", "5+1"),
 )
 
+# Portal-agnostic property sub-type, grouped by category_main. House and
+# commercial slugs are disjoint; the frontend renders the group matching the
+# selected category_main. Mirrors scraper.parser.SUBTYPE / data backfill.
+SUBTYPE_OPTIONS: tuple[EnumOption, ...] = (
+    # dum (houses)
+    EnumOption("rodinny_dum", "Rodinný dům", "Detached house"),
+    EnumOption("vila", "Vila", "Villa"),
+    EnumOption("chata", "Chata", "Cabin"),
+    EnumOption("chalupa", "Chalupa", "Cottage"),
+    EnumOption("vicegeneracni_dum", "Vícegenerační dům", "Multi-generational house"),
+    EnumOption("zemedelska_usedlost", "Zemědělská usedlost", "Farmstead"),
+    EnumOption("na_klic", "Na klíč", "Turnkey"),
+    EnumOption("pamatka_jine", "Památka/jiné", "Heritage/other"),
+    # komercni (commercial)
+    EnumOption("kancelar", "Kancelář", "Office"),
+    EnumOption("sklad", "Sklad", "Warehouse"),
+    EnumOption("obchodni_prostor", "Obchodní prostor", "Retail space"),
+    EnumOption("vyroba", "Výroba", "Manufacturing"),
+    EnumOption("ubytovani", "Ubytování", "Accommodation"),
+    EnumOption("restaurace", "Restaurace", "Restaurant"),
+    EnumOption("cinzovni_dum", "Činžovní dům", "Tenement house"),
+    EnumOption("apartmany", "Apartmány", "Apartments"),
+    EnumOption("ordinace", "Ordinace", "Medical office"),
+    EnumOption("zemedelsky", "Zemědělský objekt", "Agricultural"),
+    EnumOption("virtualni_kancelar", "Virtuální kancelář", "Virtual office"),
+    EnumOption("ostatni", "Ostatní", "Other"),
+)
+
 POPULATION_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("active", "Aktivní", "Active"),
     EnumOption("delisted", "Stažené", "Delisted"),
@@ -658,6 +686,28 @@ def _build_registry() -> dict[str, FilterDef]:
             ui_control=UiControl.MULTISELECT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             enum_values=DISPOSITION_OPTIONS,
+        ),
+        FilterDef(
+            id="subtype",
+            type=FilterType.STRING_LIST,
+            pg_column="subtype",
+            default=None,
+            description=(
+                "Portal-agnostic property sub-type (multi-select). Only "
+                "meaningful for category_main in (dum, komercni): houses "
+                "(rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, "
+                "zemedelska_usedlost, na_klic, pamatka_jine) and commercial "
+                "(kancelar, sklad, obchodni_prostor, vyroba, ubytovani, "
+                "restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, "
+                "virtualni_kancelar, ostatni). A listing matches if its "
+                "subtype is in the list. Normalized across portals — distinct "
+                "from the sreality-only numeric category_sub_cb. The Browse "
+                "agenda is added when the sidebar UI ships."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.MULTISELECT,
+            agendas=frozenset({Agenda.WATCHDOG}),
+            enum_values=SUBTYPE_OPTIONS,
         ),
         FilterDef(
             id="portals",

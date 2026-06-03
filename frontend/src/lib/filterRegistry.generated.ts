@@ -684,6 +684,123 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": []
     },
     {
+      "id": "subtype",
+      "type": "string_list",
+      "pg_column": "subtype",
+      "default": null,
+      "description": "Portal-agnostic property sub-type (multi-select). Only meaningful for category_main in (dum, komercni): houses (rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, zemedelska_usedlost, na_klic, pamatka_jine) and commercial (kancelar, sklad, obchodni_prostor, vyroba, ubytovani, restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, virtualni_kancelar, ostatni). A listing matches if its subtype is in the list. Normalized across portals — distinct from the sreality-only numeric category_sub_cb. The Browse agenda is added when the sidebar UI ships.",
+      "category": "Property",
+      "ui_control": "multiselect",
+      "agendas": [
+        "watchdog"
+      ],
+      "constraints": null,
+      "unit": null,
+      "enum_values": [
+        {
+          "value": "rodinny_dum",
+          "label_cs": "Rodinný dům",
+          "label_en": "Detached house"
+        },
+        {
+          "value": "vila",
+          "label_cs": "Vila",
+          "label_en": "Villa"
+        },
+        {
+          "value": "chata",
+          "label_cs": "Chata",
+          "label_en": "Cabin"
+        },
+        {
+          "value": "chalupa",
+          "label_cs": "Chalupa",
+          "label_en": "Cottage"
+        },
+        {
+          "value": "vicegeneracni_dum",
+          "label_cs": "Vícegenerační dům",
+          "label_en": "Multi-generational house"
+        },
+        {
+          "value": "zemedelska_usedlost",
+          "label_cs": "Zemědělská usedlost",
+          "label_en": "Farmstead"
+        },
+        {
+          "value": "na_klic",
+          "label_cs": "Na klíč",
+          "label_en": "Turnkey"
+        },
+        {
+          "value": "pamatka_jine",
+          "label_cs": "Památka/jiné",
+          "label_en": "Heritage/other"
+        },
+        {
+          "value": "kancelar",
+          "label_cs": "Kancelář",
+          "label_en": "Office"
+        },
+        {
+          "value": "sklad",
+          "label_cs": "Sklad",
+          "label_en": "Warehouse"
+        },
+        {
+          "value": "obchodni_prostor",
+          "label_cs": "Obchodní prostor",
+          "label_en": "Retail space"
+        },
+        {
+          "value": "vyroba",
+          "label_cs": "Výroba",
+          "label_en": "Manufacturing"
+        },
+        {
+          "value": "ubytovani",
+          "label_cs": "Ubytování",
+          "label_en": "Accommodation"
+        },
+        {
+          "value": "restaurace",
+          "label_cs": "Restaurace",
+          "label_en": "Restaurant"
+        },
+        {
+          "value": "cinzovni_dum",
+          "label_cs": "Činžovní dům",
+          "label_en": "Tenement house"
+        },
+        {
+          "value": "apartmany",
+          "label_cs": "Apartmány",
+          "label_en": "Apartments"
+        },
+        {
+          "value": "ordinace",
+          "label_cs": "Ordinace",
+          "label_en": "Medical office"
+        },
+        {
+          "value": "zemedelsky",
+          "label_cs": "Zemědělský objekt",
+          "label_en": "Agricultural"
+        },
+        {
+          "value": "virtualni_kancelar",
+          "label_cs": "Virtuální kancelář",
+          "label_en": "Virtual office"
+        },
+        {
+          "value": "ostatni",
+          "label_cs": "Ostatní",
+          "label_en": "Other"
+        }
+      ],
+      "aliases": []
+    },
+    {
       "id": "portals",
       "type": "string_list",
       "pg_column": "source",
