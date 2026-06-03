@@ -43,7 +43,7 @@ import type {
   DedupCandidatesResponse,
   MergesResponse,
 } from './types';
-import type { ListingFilters } from './filters';
+import type { PresetSpec } from './filters';
 
 /* Sources the backend allowlists for high-confidence parsing.
  * Anything else falls through to a best-effort parse. The order is
@@ -991,7 +991,7 @@ export const runWatchdogMatcher = (): Promise<{
     };
   }>('/notifications/matcher/run', { method: 'POST' });
 
-/* ----- Saved Browse filter presets (migration 150) ---------------------- */
+/* ----- Saved Browse filter presets (migration 151) ---------------------- */
 
 export const listFilterPresets = (): Promise<{
   data: FilterPreset[];
@@ -1001,13 +1001,13 @@ export const listFilterPresets = (): Promise<{
 
 export const createFilterPreset = (input: {
   name: string;
-  filter_spec: ListingFilters;
+  filter_spec: PresetSpec;
 }): Promise<FilterPreset> =>
   request<FilterPreset>('/filter-presets', { method: 'POST', json: input });
 
 export const updateFilterPreset = (
   id: string,
-  patch: { name?: string; filter_spec?: ListingFilters },
+  patch: { name?: string; filter_spec?: PresetSpec },
 ): Promise<FilterPreset> =>
   request<FilterPreset>(`/filter-presets/${encodeURIComponent(id)}`, {
     method: 'PUT',

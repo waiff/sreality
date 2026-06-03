@@ -53,11 +53,16 @@ source for active rules; ROADMAP is for sequencing.
   `filter_presets` table). The save dialog (`PresetSaveModal`) asks whether to
   include the current map area; dirty-detection ignores the viewport unless the
   preset stored one (`filtersEqualForPreset`).
-- **Deliberately decoupled from Watchdog**: a preset stores the *full native*
-  `ListingFilters` blob and is restored client-side only — it never matches
-  server-side, so it can't fire a notification and carries none of the watchdog
-  firing machinery (cursor / is_active / dispatches). Reuses the watchdog *CRUD
-  pattern* (route shape, `api.ts` client, react-query keys), not its table.
+- **Deliberately decoupled from Watchdog**: a preset stores the saved view
+  blob and is restored client-side only — it never matches server-side, so it
+  can't fire a notification and carries none of the watchdog firing machinery
+  (cursor / is_active / dispatches). Reuses the watchdog *CRUD pattern* (route
+  shape, `api.ts` client, react-query keys), not its table.
+- **Sort is captured too.** `filter_spec` is now an opaque `{ filters, sort }`
+  blob (`PresetSpec` + `readPresetSpec`); loading restores both filters and the
+  sort order, and changing either marks the preset dirty. Backwards-compatible —
+  presets saved before this read back with the default sort. No migration /
+  backend change (the API already treats `filter_spec` as an opaque blob).
 
 ### 2026-06: Watchdog feed — Portal column
 - New **Portal** column in the watchdog notification feed showing the portal the

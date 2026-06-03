@@ -22,6 +22,7 @@ import {
   applyRegistryUpdates,
   filtersEqualForPreset,
   filtersForPreset,
+  readPresetSpec,
   filtersToWatchdogSpec,
   fromSearchParams,
   isDefault,
@@ -549,5 +550,31 @@ describe('filter presets', () => {
     expect(
       filtersEqualForPreset(DEFAULT_FILTERS, saved as unknown as ListingFilters),
     ).toBe(true);
+  });
+
+  it('readPresetSpec parses the new { filters, sort } blob', () => {
+    const filters: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 7_000_000 };
+    const got = readPresetSpec({ filters, sort: '-price_czk' });
+    expect(got.filters.priceMax).toBe(7_000_000);
+    expect(got.sort).toBe('-price_czk');
+  });
+
+  it('readPresetSpec tolerates a legacy bare-ListingFilters preset (sort null)', () => {
+    const legacy: ListingFilters = { ...DEFAULT_FILTERS, areaMin: 50 };
+    const got = readPresetSpec(legacy);
+    expect(got.filters.areaMin).toBe(50);
+    expect(got.sort).toBeNull();
+    // And it still round-trips through the URL serializer.
+    expect(fromSearchParams(toSearchParams(got.filters)).areaMin).toBe(50);
+  });
+
+  it('readPresetSpec merges partial filters onto DEFAULT_FILTERS', () => {
+    const got = readPresetSpec({
+      filters: { priceMin: 1000 } as unknown as ListingFilters,
+    });
+    // Missing fields fall back to defaults, so toSearchParams won't throw.
+    expect(got.filters.categoryMain).toBe('byt');
+    expect(got.filters.priceMin).toBe(1000);
+    expect(got.sort).toBeNull();
   });
 });

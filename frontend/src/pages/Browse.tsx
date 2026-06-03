@@ -29,6 +29,7 @@ import {
   regionLabelFromFilters,
   filtersToWatchdogSpec,
   watchdogNameSuggestion,
+  readPresetSpec,
   DEFAULT_FILTERS,
   type ListingFilters,
   type MapBounds,
@@ -194,7 +195,13 @@ export default function Browse() {
    * still resolves cleanly) and mark the preset active. */
   const loadPreset = useCallback(
     (p: FilterPreset) => {
-      const sp = preserveExtras(toSearchParams({ ...DEFAULT_FILTERS, ...p.filter_spec }));
+      const { filters: pf, sort: ps } = readPresetSpec(p.filter_spec);
+      const sp = preserveExtras(toSearchParams(pf));
+      // Restore the preset's saved sort, overriding the carried-over current
+      // one (`preserveExtras` copies the existing `sort`). Omit when default.
+      const presetSort = ps ?? sortToParam(DEFAULT_SORT);
+      if (presetSort === sortToParam(DEFAULT_SORT)) sp.delete('sort');
+      else sp.set('sort', presetSort);
       sp.set('preset', p.id);
       setSearchParams(sp, { replace: false });
     },
@@ -646,6 +653,7 @@ export default function Browse() {
           <div className="mt-3">
             <PresetBar
               filters={filters}
+              sort={sort}
               activePresetId={activePresetId}
               onLoad={loadPreset}
               onActivePresetIdChange={setActivePresetId}
