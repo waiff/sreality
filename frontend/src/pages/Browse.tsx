@@ -8,8 +8,8 @@ import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
 import type { MapFlyToCommand, RentVk } from '@/components/ListingMap';
 import type { MapySuggestion } from '@/lib/maps';
-import { fetchDatasets, fetchGrowth, priceStatsKeys } from '@/lib/priceStats';
-import type { GrowthMetric } from '@/lib/growthChoropleth';
+import { fetchDatasets, fetchGrowth, fetchSeries, priceStatsKeys } from '@/lib/priceStats';
+import { buildHoverData, type GrowthMetric } from '@/lib/growthChoropleth';
 import {
   fromSearchParams,
   toSearchParams,
@@ -99,6 +99,7 @@ export default function Browse() {
   const [growthTo, setGrowthTo] = useState(
     () => `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`,
   );
+  const [growthChartOnHover, setGrowthChartOnHover] = useState(false);
 
   /* Copy URL keys that live outside `toSearchParams` (tab, sort, the
    * city-overlay knobs). Used by every URL rewriter on this page so
@@ -384,6 +385,16 @@ export default function Browse() {
     enabled: tabFromUrl === 'map' && showGrowth && psGrowthDatasetId != null,
     staleTime: 60_000,
   });
+  const psSeriesQuery = useQuery({
+    queryKey: priceStatsKeys.obecSeries(psGrowthDatasetId ?? -1, growthFrom, growthTo),
+    queryFn: () => fetchSeries(psGrowthDatasetId as number, growthFrom, growthTo),
+    enabled: tabFromUrl === 'map' && showGrowth && growthChartOnHover && psGrowthDatasetId != null,
+    staleTime: 60_000,
+  });
+  const psHoverData = useMemo(
+    () => (psSeriesQuery.data ? buildHoverData(psSeriesQuery.data, growthMetric) : null),
+    [psSeriesQuery.data, growthMetric],
+  );
 
   const cardsQuery = useQuery<CardsResult, Error>({
     queryKey: ['cards', filters, sort, page],
@@ -637,6 +648,9 @@ export default function Browse() {
                     onGrowthMetricChange={setGrowthMetric}
                     onGrowthFromChange={setGrowthFrom}
                     onGrowthToChange={setGrowthTo}
+                    growthChartOnHover={growthChartOnHover}
+                    growthHoverData={psHoverData}
+                    onToggleGrowthChartOnHover={setGrowthChartOnHover}
                   />
                 </Suspense>
               </div>

@@ -17,7 +17,9 @@ import {
   GROWTH_NO_DATA,
   growthToFeatureCollection,
   type GrowthMetric,
+  type HoverData,
 } from '@/lib/growthChoropleth';
+import HoverChart from '@/components/HoverChart';
 
 const psgLayerId = (m: GrowthMetric) => `psg-${m}`;
 
@@ -375,6 +377,9 @@ interface Props {
   onGrowthMetricChange?: (m: GrowthMetric) => void;
   onGrowthFromChange?: (ym: string) => void;
   onGrowthToChange?: (ym: string) => void;
+  growthChartOnHover?: boolean;
+  growthHoverData?: HoverData | null;
+  onToggleGrowthChartOnHover?: (next: boolean) => void;
 }
 
 export default function ListingMap({
@@ -417,11 +422,17 @@ export default function ListingMap({
   onGrowthMetricChange,
   onGrowthFromChange,
   onGrowthToChange,
+  growthChartOnHover = false,
+  growthHoverData = null,
+  onToggleGrowthChartOnHover,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
   const [ready, setReady] = useState(false);
+  const psgChartHoverRef = useRef(growthChartOnHover);
+  psgChartHoverRef.current = growthChartOnHover;
+  const [psgHover, setPsgHover] = useState<{ obecId: number; name: string; x: number; y: number } | null>(null);
   /* City-overlay min-value threshold. When set, cities whose selected
    * color-by-index reading is below it render grey ("off"). Purely a map
    * visual, so it lives here rather than in URL/Browse state. Resets when
@@ -569,6 +580,23 @@ export default function ListingMap({
         layout: { visibility: 'none' },
         paint: { 'line-color': 'rgba(26,28,34,0.16)', 'line-width': 0.4 },
       });
+      for (const gm of GROWTH_METRIC_ORDER) {
+        map.on('mousemove', psgLayerId(gm), (e) => {
+          if (!psgChartHoverRef.current) return;
+          const f = e.features?.[0];
+          if (!f) return;
+          map.getCanvas().style.cursor = 'pointer';
+          setPsgHover({
+            obecId: Number(f.id),
+            name: String((f.properties as Record<string, unknown>).obec_name),
+            x: e.point.x, y: e.point.y,
+          });
+        });
+        map.on('mouseleave', psgLayerId(gm), () => {
+          map.getCanvas().style.cursor = '';
+          setPsgHover(null);
+        });
+      }
 
       /* Hover popup for the choropleth. The fill is the hit target;
        * mirrors the city-pin popup approach. Only wired here — the layer
@@ -1213,6 +1241,24 @@ export default function ListingMap({
         className="absolute inset-0"
         style={{ position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, width: '100%', height: '100%' }}
       />
+      {growthChartOnHover && showGrowth && psgHover && growthHoverData?.byObec.get(psgHover.obecId) && (
+        <div
+          className="pointer-events-none absolute z-20"
+          style={{
+            left: psgHover.x + 270 > (containerRef.current?.clientWidth ?? 900) ? psgHover.x - 262 : psgHover.x + 14,
+            top: psgHover.y + 200 > (containerRef.current?.clientHeight ?? 560) ? psgHover.y - 190 : psgHover.y + 14,
+          }}
+        >
+          <HoverChart
+            title={psgHover.name}
+            points={growthHoverData.byObec.get(psgHover.obecId)!}
+            xMin={growthHoverData.xMin} xMax={growthHoverData.xMax}
+            yMin={growthHoverData.yMin} yMax={growthHoverData.yMax}
+            valueLabel={growthHoverData.valueLabel}
+            format={growthHoverData.format}
+          />
+        </div>
+      )}
       <div className="pointer-events-none absolute top-3 left-3 right-3 flex items-start justify-between gap-3">
         <Pill>
           {isLoading
@@ -1265,6 +1311,8 @@ export default function ListingMap({
           onMetricChange={onGrowthMetricChange}
           onFromChange={onGrowthFromChange}
           onToChange={onGrowthToChange}
+          chartOnHover={growthChartOnHover}
+          onToggleChartOnHover={onToggleGrowthChartOnHover}
         />
         <RentMapControls
           showRentMap={showRentMap}
@@ -1307,6 +1355,7 @@ function PsgYmPicker({ value, onChange }: { value: string; onChange?: (v: string
 function GrowthMapControls({
   showGrowth, datasets, datasetId, metric, from, to, rowCount,
   onToggle, onDatasetChange, onMetricChange, onFromChange, onToChange,
+  chartOnHover, onToggleChartOnHover,
 }: {
   showGrowth: boolean;
   datasets: PriceStatDataset[];
@@ -1320,6 +1369,8 @@ function GrowthMapControls({
   onMetricChange?: (m: GrowthMetric) => void;
   onFromChange?: (ym: string) => void;
   onToChange?: (ym: string) => void;
+  chartOnHover?: boolean;
+  onToggleChartOnHover?: (next: boolean) => void;
 }) {
   const cfg = GROWTH_METRICS[metric];
   const gradient = `linear-gradient(to right, ${cfg.ramp.map(([, c]) => c).join(', ')})`;
@@ -1357,6 +1408,10 @@ function GrowthMapControls({
             <span className="text-[var(--color-ink-3)]">→</span>
             <PsgYmPicker value={to} onChange={onToChange} />
           </div>
+          <label className="inline-flex items-center gap-1.5 text-[0.75rem] text-[var(--color-ink-2)] cursor-pointer border-t border-[var(--color-rule)] pt-1.5">
+            <input type="checkbox" checked={!!chartOnHover} onChange={(e) => onToggleChartOnHover?.(e.target.checked)} />
+            <span>Chart on hover</span>
+          </label>
           <div className="flex flex-col gap-1 border-t border-[var(--color-rule)] pt-1.5">
             <div className="h-1.5 rounded-sm" style={{ background: gradient }} />
             <div className="flex justify-between text-[0.65rem] text-[var(--color-ink-3)] tabular-nums">
