@@ -636,7 +636,11 @@ export default function Browse() {
         className="hidden lg:flex sticky top-14 self-start h-[calc(100dvh-3.5rem)] w-3 -mx-1.5"
       />
 
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div
+        className={`flex-1 min-w-0 flex flex-col${
+          tabFromUrl === 'map' ? ' h-[calc(100dvh-3.5rem)]' : ''
+        }`}
+      >
         <div className="px-6 pt-5">
           <FilterSummary
             filters={filters}
@@ -684,7 +688,7 @@ export default function Browse() {
               * column and the handle's `display:none` drops it out. */}
             <div
               ref={innerRef}
-              className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1rem_var(--map-w)] h-[calc(100dvh-12rem)] min-h-[560px]"
+              className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1rem_var(--map-w)] h-full min-h-[560px]"
               style={
                 { '--map-w': `${mapSplit.value * 100}%` } as CSSProperties
               }
