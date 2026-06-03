@@ -146,7 +146,11 @@ function seedFromRun(state: PanelState, run: EstimationRun): PanelState {
 // Panel mount + render
 // ----------------------------------------------------------------------
 
-function mountPanel(): { render: (state: PanelState) => void; destroy: () => void } {
+function mountPanel(): {
+  shadow: ShadowRoot;
+  render: (state: PanelState) => void;
+  destroy: () => void;
+} {
   const existing = document.getElementById(HOST_ELEMENT_ID);
   if (existing != null) existing.remove();
 
@@ -338,15 +342,18 @@ function mountPanel(): { render: (state: PanelState) => void; destroy: () => voi
     const actions = document.createElement('div');
     actions.className = 'actions';
     const status = document.createElement('span');
+    status.className = 'est-status';
     const hasOverrides = state.rentTouched || state.costTouched || state.priceTouched;
     status.textContent = hasOverrides ? 'upraveno · uloženo' : 'živý výpočet';
     actions.appendChild(status);
-    if (hasOverrides) {
-      const reset = document.createElement('a');
-      reset.textContent = 'Reset';
-      reset.onclick = (e) => { e.preventDefault(); onReset(); };
-      actions.appendChild(reset);
-    }
+    /* Reset is always present (toggled), so onEdit can reveal it in place
+     * without a full re-render — see onEdit / overridesChanged. */
+    const reset = document.createElement('a');
+    reset.className = 'est-reset';
+    reset.textContent = 'Reset';
+    reset.style.display = hasOverrides ? '' : 'none';
+    reset.onclick = (e) => { e.preventDefault(); onReset(); };
+    actions.appendChild(reset);
     sec.appendChild(actions);
     body.appendChild(sec);
   }
@@ -387,7 +394,7 @@ function mountPanel(): { render: (state: PanelState) => void; destroy: () => voi
     return wrap;
   }
 
-  return { render, destroy: () => host.remove() };
+  return { shadow, render, destroy: () => host.remove() };
 }
 
 // ----------------------------------------------------------------------
@@ -396,6 +403,7 @@ function mountPanel(): { render: (state: PanelState) => void; destroy: () => voi
 
 let state: PanelState;
 let render: (s: PanelState) => void;
+let panelShadow: ShadowRoot | null = null;
 let patchTimer: ReturnType<typeof setTimeout> | null = null;
 
 function setState(updater: (prev: PanelState) => PanelState): void {
@@ -415,18 +423,31 @@ function schedulePatch(): void {
       setState((prev) => ({ ...prev, errorMessage: `Uložení selhalo: ${res.detail}` }));
       return;
     }
-    setState((prev) => ({ ...prev, run: res.data, errorMessage: null }));
+    /* Save succeeded — nothing visible depends on the refreshed run, so update
+     * state silently. A full re-render here would destroy the <input> the
+     * operator is typing in and steal focus (the bug we're avoiding). */
+    state.run = res.data;
+    if (state.errorMessage != null) {
+      state.errorMessage = null;
+      render(state);
+    }
   }, PATCH_DEBOUNCE_MS);
 }
 
+/* Edits update state + the derived display IN PLACE — never a full re-render,
+ * which would rebuild the inputs and drop focus mid-keystroke. */
 function onEdit(axis: 'rent' | 'cost' | 'price', value: number | null): void {
-  setState((prev) => {
-    switch (axis) {
-      case 'rent': return { ...prev, rent: value, rentTouched: true };
-      case 'cost': return { ...prev, costPerM2: value, costTouched: true };
-      case 'price': return { ...prev, price: value, priceTouched: true };
-    }
-  });
+  switch (axis) {
+    case 'rent': state.rent = value; state.rentTouched = true; break;
+    case 'cost': state.costPerM2 = value; state.costTouched = true; break;
+    case 'price': state.price = value; state.priceTouched = true; break;
+  }
+  const yv = panelShadow?.querySelector<HTMLElement>('.est-yield-value');
+  if (yv != null) yv.textContent = fmtPct(computeYield(state));
+  const status = panelShadow?.querySelector<HTMLElement>('.est-status');
+  if (status != null) status.textContent = 'upraveno · uloženo';
+  const reset = panelShadow?.querySelector<HTMLElement>('.est-reset');
+  if (reset != null) reset.style.display = '';
   schedulePatch();
 }
 
@@ -476,6 +497,7 @@ async function bootDetail(): Promise<void> {
 
   const panel = mountPanel();
   render = panel.render;
+  panelShadow = panel.shadow;
   state = {
     phase: 'loading', listing: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
