@@ -157,6 +157,10 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.lastSeenMinDays != null) r = r.lte('last_seen_at', isoNDaysAgo(f.lastSeenMinDays));
   if (f.firstSeenMaxDays != null) r = r.gte('first_seen_at', isoNDaysAgo(f.firstSeenMaxDays));
   if (f.firstSeenMinDays != null) r = r.lte('first_seen_at', isoNDaysAgo(f.firstSeenMinDays));
+  /* Status-section recency presets. "added" = first seen within N days;
+   * "changed" = newest content snapshot (last_change_at) within N days. */
+  if (f.recentlyAddedDays != null) r = r.gte('first_seen_at', isoNDaysAgo(f.recentlyAddedDays));
+  if (f.recentlyChangedDays != null) r = r.gte('last_change_at', isoNDaysAgo(f.recentlyChangedDays));
   if (f.districts.length) {
     /* Each chip becomes:
      *   (district ilike *name* OR locality ilike *name*)
@@ -564,6 +568,10 @@ export const fetchBrowseStats = async (
     last_seen_max_days:      f.lastSeenMaxDays,
     first_seen_min_days:     f.firstSeenMinDays,
     first_seen_max_days:     f.firstSeenMaxDays,
+    /* Migration 159 — Status-section recency presets (first_seen_at /
+     * last_change_at within N days). */
+    recently_added_days:     f.recentlyAddedDays,
+    recently_changed_days:   f.recentlyChangedDays,
     tom_days_min:            f.tomDaysMin,
     tom_days_max:            f.tomDaysMax,
     has_balcony_filter:      triToBool(f.hasBalcony),

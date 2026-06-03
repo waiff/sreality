@@ -6,6 +6,26 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: "Recently added / changed" Browse filters (Status section)
+- Two preset "last N days" pickers (today / 3 / 7 / 14 / 30) in a new **Status**
+  ControlGroup on the Browse sidebar. **Recently added** filters on `first_seen_at`
+  (the preset twin of the existing `first_seen_max_days`); **recently changed**
+  filters on a new precomputed `properties.last_change_at` = the newest content
+  snapshot across a property's children (migration 158 — snapshots are inserted only
+  on a content-hash change, so it is the last *meaningful* edit, not a re-sighting).
+  A live `max(scraped_at)` would blow the anon 3 s timeout, so it is precomputed and
+  maintained by `recompute_property_stats` (dirty-set + daily sweep) alongside the
+  other rollups, and exposed on `properties_public`.
+- Registry-driven end to end: two `single_select` BROWSE-only filters in
+  `toolkit/filter_registry.py` → regenerated `filterRegistry.generated.ts` →
+  Map/Table/Cards hand-coded days-ago `.gte()` predicates in `queries.ts` →
+  Stats via two new `browse_stats_properties` params (migration 159). BROWSE-only,
+  consistent with the other first/last-seen date filters — the watchdog matcher
+  (which already fires on new/changed listings) reports them as unsupported, and the
+  estimation agent keeps its own freshness knobs.
+- **Next:** optionally surface "last changed N days ago" on the listing-detail header;
+  consider a watchdog "fire on any content change" channel if recency-on-alerts is wanted.
+
 ### 2026-06: Chrome extension — MF rent/yield across all portals + index overlays
 - The extension grew from a sreality-detail-only yield panel into a multi-portal MF
   overlay. **Detail pages** on every scraped portal (sreality, bazos, bezrealitky, idnes,

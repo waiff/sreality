@@ -41,7 +41,8 @@ interface SidebarProps {
  * from Essentials: the viewport bbox changes on every map pan, so counting
  * it would pin the dot permanently on. */
 const ESSENTIALS_KEYS = [
-  'categoryMain', 'categoryType', 'status', 'portals',
+  'categoryMain', 'categoryType', 'status',
+  'recentlyAddedDays', 'recentlyChangedDays', 'portals',
   'districts', 'locationMode', 'centerRadius',
   'dispositions', 'subtype',
   'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
@@ -168,11 +169,25 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['category_main', 'category_type', 'status']}
+              includeOnly={['category_main', 'category_type']}
               labels={{
                 category_main: 'Type',
                 category_type: 'Listing for',
+              }}
+              flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Status" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['status', 'recently_added_days', 'recently_changed_days']}
+              labels={{
                 status: 'Status',
+                recently_added_days: 'Recently added',
+                recently_changed_days: 'Recently changed',
               }}
               flat
             />

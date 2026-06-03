@@ -119,6 +119,12 @@ export interface ListingFilters {
   /* Days-ago range on first_seen_at — same semantics. */
   firstSeenMinDays: number | null;
   firstSeenMaxDays: number | null;
+  /* Status-section recency presets (one of 1/3/7/14/30, or null = any).
+   * `recentlyAddedDays` → first_seen_at >= now() - N days (the preset twin of
+   * firstSeenMaxDays). `recentlyChangedDays` → last_change_at >= now() - N days
+   * (properties.last_change_at = newest content snapshot). Browse-only. */
+  recentlyAddedDays: number | null;
+  recentlyChangedDays: number | null;
   /* Days on market (= last_seen_at - first_seen_at, or now() -
    * first_seen_at for active listings). Surfaced as tom_days on
    * listings_public via migration 052. */
@@ -219,6 +225,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   lastSeenMaxDays: null,
   firstSeenMinDays: null,
   firstSeenMaxDays: null,
+  recentlyAddedDays: null,
+  recentlyChangedDays: null,
   tomDaysMin: null,
   tomDaysMax: null,
   hasBalcony: 'any',
@@ -424,6 +432,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     lastSeenMaxDays: lastMax,
     firstSeenMinDays: firstMin,
     firstSeenMaxDays: firstMax,
+    recentlyAddedDays: parseIntOrNull(sp.get('added')),
+    recentlyChangedDays: parseIntOrNull(sp.get('changed')),
     tomDaysMin: tomMin,
     tomDaysMax: tomMax,
     hasBalcony: enumOr(sp.get('balcony'), TRI_VALUES, 'any'),
@@ -611,6 +621,8 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.firstSeenMinDays != null || f.firstSeenMaxDays != null) {
     sp.set('first', fmtRange(f.firstSeenMinDays, f.firstSeenMaxDays));
   }
+  if (f.recentlyAddedDays != null) sp.set('added', String(f.recentlyAddedDays));
+  if (f.recentlyChangedDays != null) sp.set('changed', String(f.recentlyChangedDays));
   if (f.tomDaysMin != null || f.tomDaysMax != null) {
     sp.set('tom', fmtRange(f.tomDaysMin, f.tomDaysMax));
   }
@@ -754,6 +766,8 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
   }
   const seenLabel = fmtDaysRange(f.lastSeenMinDays, f.lastSeenMaxDays);
   if (seenLabel) bits.push(`last seen ${seenLabel}`);
+  if (f.recentlyAddedDays != null) bits.push(`added ≤ ${f.recentlyAddedDays} d`);
+  if (f.recentlyChangedDays != null) bits.push(`changed ≤ ${f.recentlyChangedDays} d`);
   const tomLabel = fmtDaysRange(f.tomDaysMin, f.tomDaysMax);
   if (tomLabel) bits.push(`TOM ${tomLabel}`);
   if (f.bounds) bits.push('in this map area');
@@ -802,6 +816,8 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.lastSeenMaxDays == null &&
   f.firstSeenMinDays == null &&
   f.firstSeenMaxDays == null &&
+  f.recentlyAddedDays == null &&
+  f.recentlyChangedDays == null &&
   f.tomDaysMin == null &&
   f.tomDaysMax == null &&
   f.hasBalcony === 'any' &&
@@ -948,6 +964,8 @@ export const REGISTRY_KEY_MAP = {
   last_seen_max_days: 'lastSeenMaxDays',
   first_seen_min_days: 'firstSeenMinDays',
   first_seen_max_days: 'firstSeenMaxDays',
+  recently_added_days: 'recentlyAddedDays',
+  recently_changed_days: 'recentlyChangedDays',
   city_index_rules: 'cityIndexRules',
   min_city_population: 'minCityPopulation',
   max_city_population: 'maxCityPopulation',
@@ -1098,10 +1116,11 @@ export function applyRegistryUpdates(
  * min/max, near-city proximity). center+radius → lat/lng/radius_m.
  *
  * NOT honoured by the matcher (reported as unsupported when set): listing
- * `status`, the last-seen / first-seen / time-on-market day ranges (a watchdog
- * fires on brand-new listings, so "seen N days ago" is meaningless), the map
- * `bounds` viewport (use a district chip or center+radius instead),
- * `buildingMaterial`, `garden_area` bounds, and `tags`. */
+ * `status`, the last-seen / first-seen / time-on-market day ranges and the
+ * `recently added/changed` presets (a watchdog already fires on brand-new /
+ * changed listings, so a recency window is redundant there), the map `bounds`
+ * viewport (use a district chip or center+radius instead), `buildingMaterial`,
+ * `garden_area` bounds, and `tags`. */
 
 const UNSUPPORTED_LABELS: ReadonlyArray<{
   test: (f: ListingFilters) => boolean;
@@ -1114,6 +1133,10 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
       f.lastSeenMinDays != null || f.lastSeenMaxDays != null
       || f.firstSeenMinDays != null || f.firstSeenMaxDays != null,
     label: 'last/first-seen date range',
+  },
+  {
+    test: (f) => f.recentlyAddedDays != null || f.recentlyChangedDays != null,
+    label: 'recently added/changed',
   },
   { test: (f) => f.tomDaysMin != null || f.tomDaysMax != null, label: 'time on market' },
   { test: (f) => f.buildingMaterial.length > 0, label: 'building material' },

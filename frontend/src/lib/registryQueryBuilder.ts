@@ -41,6 +41,10 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   'last_seen_max_days',
   'first_seen_min_days',
   'first_seen_max_days',
+  // Status-section recency presets → days-ago ISO timestamp on
+  // first_seen_at / last_change_at.
+  'recently_added_days',
+  'recently_changed_days',
   // One enum → IN over multiple building_type values (cihla/panel/smisena/ostatni-bucket).
   'building_material',
   // Multi-chip → multi-column ILIKE OR predicate.
