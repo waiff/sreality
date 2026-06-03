@@ -15,7 +15,12 @@ import {
   type PriceStatGrowthRow,
   type PriceStatRun,
 } from '@/lib/priceStats';
-import { createPriceStatDataset, deletePriceStatDataset } from '@/lib/api';
+import {
+  createPriceStatDataset,
+  deletePriceStatDataset,
+  runPriceStatDataset,
+  updatePriceStatDataset,
+} from '@/lib/api';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
@@ -71,7 +76,9 @@ export default function Datasets() {
   const [from, setFrom] = useState(`${FIRST_YEAR}-01`);
   const [to, setTo] = useState(CUR_YM);
   const [showNew, setShowNew] = useState(false);
+  const [showExpand, setShowExpand] = useState(false);
   const [chartOnHover, setChartOnHover] = useState(false);
+  const [dispatchedAt, setDispatchedAt] = useState<number | null>(null);
   const [sort, setSort] = useState<{ col: SortKey; dir: 'asc' | 'desc' } | null>(null);
 
   const datasetsQ = useQuery<PriceStatDataset[], Error>({
@@ -96,7 +103,14 @@ export default function Datasets() {
     queryKey: priceStatsKeys.latestRun(activeId ?? -1),
     queryFn: () => fetchLatestRun(activeId as number),
     enabled: activeId != null,
-    refetchInterval: (q) => (q.state.data?.status === 'running' ? 3000 : false),
+    // Poll fast while running; after a dispatch keep polling (slower) for ~10
+    // min so we catch the run once CI spins it up.
+    refetchInterval: (q) =>
+      q.state.data?.status === 'running'
+        ? 3000
+        : dispatchedAt && Date.now() - dispatchedAt < 10 * 60_000
+          ? 8000
+          : false,
   });
   // When a run finishes, refetch the derived data so the map/table fill in.
   const prevStatus = useRef<string | undefined>(undefined);
@@ -105,9 +119,18 @@ export default function Datasets() {
     if (prevStatus.current === 'running' && st === 'success' && activeId != null) {
       qc.invalidateQueries({ queryKey: ['price_stat_growth'] });
       qc.invalidateQueries({ queryKey: ['price_stat_obec_series'] });
+      setDispatchedAt(null);
     }
     prevStatus.current = st;
   }, [runQ.data?.status, runQ.data?.run_id, activeId, qc]);
+
+  const runMutation = useMutation({
+    mutationFn: (id: number) => runPriceStatDataset(id),
+    onSuccess: () => {
+      setDispatchedAt(Date.now());
+      if (activeId != null) qc.invalidateQueries({ queryKey: priceStatsKeys.latestRun(activeId) });
+    },
+  });
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => deletePriceStatDataset(id),
@@ -173,21 +196,38 @@ export default function Datasets() {
             Rent &amp; sale-price growth and gross yield per municipality, for a chosen window.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <DatasetPicker datasets={datasets} value={activeId} onChange={setDatasetId} loading={datasetsQ.isLoading} />
           {active && (
-            <button
-              onClick={() => {
-                if (window.confirm(`Remove dataset “${active.name}”? It disappears from the app (data is kept in the database).`)) {
-                  deleteMutation.mutate(active.id);
-                }
-              }}
-              disabled={deleteMutation.isPending}
-              title="Remove this dataset"
-              className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-ink-3)] hover:text-[var(--color-brick)] hover:border-[var(--color-brick)] transition-colors disabled:opacity-50"
-            >
-              Remove
-            </button>
+            <>
+              <button
+                onClick={() => active && runMutation.mutate(active.id)}
+                disabled={runMutation.isPending || runQ.data?.status === 'running'}
+                title="Scrape this dataset now"
+                className="text-sm border border-[var(--color-copper)] rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)] transition-colors disabled:opacity-50"
+              >
+                {runMutation.isPending ? 'Starting…' : 'Run now'}
+              </button>
+              <button
+                onClick={() => setShowExpand((v) => !v)}
+                title="Add cities / months / finer periodicity to this dataset"
+                className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] transition-colors"
+              >
+                {showExpand ? 'Close' : 'Expand'}
+              </button>
+              <button
+                onClick={() => {
+                  if (window.confirm(`Remove dataset “${active.name}”? It disappears from the app (data is kept in the database).`)) {
+                    deleteMutation.mutate(active.id);
+                  }
+                }}
+                disabled={deleteMutation.isPending}
+                title="Remove this dataset"
+                className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-ink-3)] hover:text-[var(--color-brick)] hover:border-[var(--color-brick)] transition-colors disabled:opacity-50"
+              >
+                Remove
+              </button>
+            </>
           )}
           <button
             onClick={() => setShowNew((v) => !v)}
@@ -197,6 +237,12 @@ export default function Datasets() {
           </button>
         </div>
       </header>
+      {runMutation.isError && (
+        <p className="mt-2 text-xs text-[var(--color-brick)]">{(runMutation.error as Error).message}</p>
+      )}
+      {runMutation.isSuccess && dispatchedAt && runQ.data?.status !== 'running' && (
+        <p className="mt-2 text-xs text-[var(--color-ink-3)]">Run dispatched — progress will appear here once it starts (~1–2 min).</p>
+      )}
 
       {showNew && (
         <NewDatasetForm
@@ -205,6 +251,19 @@ export default function Datasets() {
             qc.invalidateQueries({ queryKey: priceStatsKeys.datasets });
             setDatasetId(d.id);
             setShowNew(false);
+          }}
+        />
+      )}
+
+      {showExpand && active && (
+        <ExpandDatasetForm
+          dataset={active}
+          onClose={() => setShowExpand(false)}
+          onSaved={(run) => {
+            qc.invalidateQueries({ queryKey: priceStatsKeys.datasets });
+            if (run) setDispatchedAt(Date.now());
+            if (run && activeId != null) qc.invalidateQueries({ queryKey: priceStatsKeys.latestRun(activeId) });
+            setShowExpand(false);
           }}
         />
       )}
@@ -563,6 +622,96 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         />
       )}
     </form>
+  );
+}
+
+/* Broaden a dataset's COVERAGE (cities / window / periodicity) — its
+ * definition (filters) is unchanged. Re-running accumulates: observations are
+ * upserted by (dataset, obec, category, year, month), never deleted, so adding
+ * cities / earlier months / finer periodicity only adds data points. */
+function ExpandDatasetForm({
+  dataset, onClose, onSaved,
+}: {
+  dataset: PriceStatDataset;
+  onClose: () => void;
+  onSaved: (dispatched: boolean) => void;
+}) {
+  const [obecIds, setObecIds] = useState<number[]>(dataset.obec_ids ?? []);
+  const [minPop, setMinPop] = useState<number | null>(dataset.min_population ?? null);
+  const [maxPop, setMaxPop] = useState<number | null>(dataset.max_population ?? null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [startYm, setStartYm] = useState(dataset.start_ym || `${FIRST_YEAR}-01`);
+  const [endYm, setEndYm] = useState(dataset.end_ym || CUR_YM);
+  const [periodicity, setPeriodicity] = useState(dataset.periodicity || 'monthly');
+  const [dispatchError, setDispatchError] = useState<string | null>(null);
+
+  const saveMut = useMutation({
+    mutationFn: async (run: boolean) => {
+      await updatePriceStatDataset(dataset.id, {
+        obec_ids: obecIds.length ? obecIds : null,
+        min_population: minPop, max_population: maxPop,
+        start_ym: startYm, end_ym: endYm,
+        periodicity: periodicity as 'monthly' | 'quarterly' | 'semiannual' | 'annual',
+      });
+      if (!run) return { dispatched: false, error: null as string | null };
+      try {
+        await runPriceStatDataset(dataset.id);
+        return { dispatched: true, error: null as string | null };
+      } catch (e) {
+        return { dispatched: false, error: (e as Error).message };
+      }
+    },
+    onSuccess: (res) => {
+      if (res.error) setDispatchError(res.error);
+      else onSaved(res.dispatched);
+    },
+  });
+
+  const cities = obecIds.length || DEFAULT_CITY_COUNT;
+  return (
+    <div className="mt-4 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] p-4">
+      <p className="text-sm text-[var(--color-ink)]">Expand “{dataset.name}”</p>
+      <p className="mt-0.5 text-xs text-[var(--color-ink-3)]">
+        Same definition, broader coverage. Re-running adds data points (it never removes any),
+        so you can start small/fast and grow — more cities, earlier months, or finer periodicity.
+      </p>
+      <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <Field label="Municipalities">
+          <button type="button" onClick={() => setPickerOpen(true)}
+            className={SELECT_CLS + ' w-full text-left ' + (obecIds.length ? 'text-[var(--color-ink)]' : 'text-[var(--color-ink-3)]')}>
+            {obecIds.length ? `${obecIds.length} selected` : 'All standard cities'}
+          </button>
+        </Field>
+        <Field label="Scrape from"><YmPicker value={startYm} onChange={setStartYm} /></Field>
+        <Field label="Scrape to"><YmPicker value={endYm} onChange={setEndYm} /></Field>
+        <Field label="Periodicity"><SelectBox value={periodicity} onChange={setPeriodicity} options={PERIOD_OPTS} /></Field>
+      </div>
+      <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-ink-3)]">
+        <span className="uppercase tracking-[0.14em]">Est. scrape time</span>
+        <span className="text-[var(--color-ink-2)] tabular-nums">{estimateScrapeText(cities, startYm, endYm)}</span>
+        <span>· {cities} municipalities</span>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <button type="button" disabled={saveMut.isPending} onClick={() => { setDispatchError(null); saveMut.mutate(true); }}
+          className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)] disabled:opacity-50">
+          {saveMut.isPending ? 'Saving…' : 'Save & run now'}
+        </button>
+        <button type="button" disabled={saveMut.isPending} onClick={() => { setDispatchError(null); saveMut.mutate(false); }}
+          className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]">
+          Save only
+        </button>
+        <button type="button" onClick={onClose} className="text-sm text-[var(--color-ink-3)] hover:text-[var(--color-ink)]">Cancel</button>
+        {dispatchError && <span className="text-xs text-[var(--color-brick)]">Saved, but couldn’t start the run: {dispatchError}</span>}
+        {saveMut.isError && <span className="text-xs text-[var(--color-brick)]">{(saveMut.error as Error).message}</span>}
+      </div>
+      {pickerOpen && (
+        <CityPicker
+          initialObecIds={obecIds} initialMin={minPop} initialMax={maxPop}
+          onClose={() => setPickerOpen(false)}
+          onApply={(ids, lo, hi) => { setObecIds(ids); setMinPop(lo); setMaxPop(hi); setPickerOpen(false); }}
+        />
+      )}
+    </div>
   );
 }
 
