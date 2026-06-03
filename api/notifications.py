@@ -91,6 +91,9 @@ class WatchdogFilterSpec(BaseModel):
     category_type: str | None = "pronajem"
     category_sub_cb: int | None = None
 
+    # Portal-agnostic property sub-type (multi-select; matches any).
+    subtype: list[str] | None = None
+
     # Disposition (multi-select; matches any).
     dispositions: list[str] | None = None
 
@@ -231,6 +234,10 @@ def _build_match_clauses(
     if spec.category_sub_cb is not None:
         where.append("l.category_sub_cb = %(category_sub_cb)s")
         params["category_sub_cb"] = spec.category_sub_cb
+
+    if spec.subtype:
+        where.append("l.subtype = ANY(%(subtype)s)")
+        params["subtype"] = list(spec.subtype)
 
     if spec.dispositions:
         where.append("l.disposition = ANY(%(dispositions)s)")

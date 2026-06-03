@@ -376,7 +376,7 @@ def _create_singleton_property(
                 repr_listing_id, category_main, category_type, disposition,
                 area_m2, district, locality, geom, current_price_czk,
                 has_balcony, has_parking, has_lift, building_type, condition,
-                ownership, furnished, terrace, cellar, garage, category_sub_cb,
+                ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
                 estate_area, usable_area, garden_area, parking_lots,
                 is_active, first_seen_at, last_seen_at,
                 source_count, distinct_site_count
@@ -385,7 +385,7 @@ def _create_singleton_property(
                 sreality_id, category_main, category_type, disposition,
                 area_m2, district, locality, geom, price_czk,
                 has_balcony, has_parking, has_lift, building_type, condition,
-                ownership, furnished, terrace, cellar, garage, category_sub_cb,
+                ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
                 estate_area, usable_area, garden_area, parking_lots,
                 is_active, first_seen_at, last_seen_at, 1, 1
             FROM listings WHERE sreality_id = %s
@@ -434,6 +434,7 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
                 cellar              = CASE WHEN agg.cnt = 1 THEN l.cellar          ELSE p.cellar END,
                 garage              = CASE WHEN agg.cnt = 1 THEN l.garage          ELSE p.garage END,
                 category_sub_cb     = CASE WHEN agg.cnt = 1 THEN l.category_sub_cb ELSE p.category_sub_cb END,
+                subtype             = CASE WHEN agg.cnt = 1 THEN l.subtype         ELSE p.subtype END,
                 estate_area         = CASE WHEN agg.cnt = 1 THEN l.estate_area     ELSE p.estate_area END,
                 usable_area         = CASE WHEN agg.cnt = 1 THEN l.usable_area     ELSE p.usable_area END,
                 garden_area         = CASE WHEN agg.cnt = 1 THEN l.garden_area     ELSE p.garden_area END,

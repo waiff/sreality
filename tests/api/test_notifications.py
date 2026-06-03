@@ -123,6 +123,21 @@ def test_build_clauses_dispositions_use_any() -> None:
     assert params["dispositions"] == ["2+kk", "2+1", "3+kk"]
 
 
+def test_build_clauses_subtype_use_any() -> None:
+    """Subtype is a portal-agnostic multi-select; ANY() against l.subtype."""
+    spec = WatchdogFilterSpec(subtype=["rodinny_dum", "vila"])
+    where, params = _build_match_clauses(spec)
+    assert "l.subtype = ANY(%(subtype)s)" in where
+    assert params["subtype"] == ["rodinny_dum", "vila"]
+
+
+def test_build_clauses_no_subtype_by_default() -> None:
+    """Default spec leaves subtype unset → no subtype clause emitted."""
+    where, params = _build_match_clauses(WatchdogFilterSpec())
+    assert "subtype" not in params
+    assert not any("l.subtype" in c for c in where)
+
+
 def test_build_clauses_district_chip_without_context() -> None:
     """A chip with `context=None` produces a single (district ILIKE name OR
     locality ILIKE name) clause — same shape as the migration 067
