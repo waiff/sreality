@@ -9,6 +9,7 @@ import {
   fetchDatasets,
   fetchGrowth,
   fetchLatestRun,
+  fetchObecTree,
   fetchSeries,
   priceStatsKeys,
   type PriceStatDataset,
@@ -21,6 +22,13 @@ import {
   runPriceStatDataset,
   updatePriceStatDataset,
 } from '@/lib/api';
+import {
+  fetchCuratedCities,
+  fetchCityIndexDefinitions,
+  fetchCityIndexValues,
+  type CityIndexDefinition,
+} from '@/lib/queries';
+import { PINNED_SLUGS, indexLabel } from '@/lib/cityIndexes';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
@@ -65,9 +73,62 @@ const median = (xs: number[]): number | null => {
 const isThin = (r: PriceStatGrowthRow): boolean =>
   (r.rent_min_active ?? 0) < MIN_ACTIVE || (r.sale_min_active ?? 0) < MIN_ACTIVE;
 
-type SortKey =
-  | 'locality_name' | 'sale_latest_price' | 'sale_cagr_pct'
-  | 'rent_latest_price' | 'rent_cagr_pct' | 'gross_yield_pct' | 'yield_change_pp_pa';
+const normName = (s: string): string => s.trim().toLocaleLowerCase('cs');
+
+/* The growth row enriched with the optional extra columns. */
+interface TableRow extends PriceStatGrowthRow {
+  population: number | null;
+  idx: Record<string, number | null>; // index_name → value (quality indexes)
+}
+
+interface ColSpec {
+  key: string;
+  label: string;
+  align: 'left' | 'right';
+  metric?: DatasetMetric;     // highlight when this metric is active
+  alwaysOn?: boolean;         // Municipality — not toggleable
+  defaultOn: boolean;
+  sortVal: (r: TableRow) => number | string | null;
+  render: (r: TableRow) => ReactNode;
+}
+
+const BASE_COLUMNS: ColSpec[] = [
+  { key: 'locality_name', label: 'Municipality', align: 'left', alwaysOn: true, defaultOn: true,
+    sortVal: (r) => r.locality_name, render: (r) => r.locality_name },
+  { key: 'sale_latest_price', label: 'Sale Kč/m²', align: 'right', defaultOn: true,
+    sortVal: (r) => r.sale_latest_price, render: (r) => fmtPerM2(r.sale_latest_price) },
+  { key: 'sale_cagr_pct', label: 'Sale growth', align: 'right', metric: 'sale_cagr_pct', defaultOn: true,
+    sortVal: (r) => r.sale_cagr_pct, render: (r) => <Delta n={r.sale_cagr_pct} fmt={fmtPct} /> },
+  { key: 'rent_latest_price', label: 'Rent Kč/m²/mo', align: 'right', defaultOn: true,
+    sortVal: (r) => r.rent_latest_price, render: (r) => fmtPerM2(r.rent_latest_price) },
+  { key: 'rent_cagr_pct', label: 'Rent growth', align: 'right', metric: 'rent_cagr_pct', defaultOn: true,
+    sortVal: (r) => r.rent_cagr_pct, render: (r) => <Delta n={r.rent_cagr_pct} fmt={fmtPct} /> },
+  { key: 'gross_yield_pct', label: 'Gross yield', align: 'right', defaultOn: true,
+    sortVal: (r) => r.gross_yield_pct, render: (r) => fmtPct(r.gross_yield_pct) },
+  { key: 'yield_change_pp_pa', label: 'Yield change', align: 'right', metric: 'yield_change_pp_pa', defaultOn: true,
+    sortVal: (r) => r.yield_change_pp_pa, render: (r) => <Delta n={r.yield_change_pp_pa} fmt={fmtPP} /> },
+  { key: 'population', label: 'Population', align: 'right', defaultOn: false,
+    sortVal: (r) => r.population,
+    render: (r) => (r.population != null ? r.population.toLocaleString('cs-CZ') : '—') },
+];
+
+function indexColumns(defs: CityIndexDefinition[]): ColSpec[] {
+  const byName = new Map(defs.map((d) => [d.index_name, d]));
+  return PINNED_SLUGS.filter((s) => byName.has(s)).map((slug) => {
+    const d = byName.get(slug)!;
+    return {
+      key: `idx:${slug}`,
+      label: indexLabel(d),
+      align: 'right' as const,
+      defaultOn: false,
+      sortVal: (r: TableRow) => r.idx[slug] ?? null,
+      render: (r: TableRow) => {
+        const v = r.idx[slug];
+        return v != null ? v.toFixed(0) : '—';
+      },
+    };
+  });
+}
 
 export default function Datasets() {
   const qc = useQueryClient();
@@ -79,7 +140,10 @@ export default function Datasets() {
   const [showExpand, setShowExpand] = useState(false);
   const [chartOnHover, setChartOnHover] = useState(false);
   const [dispatchedAt, setDispatchedAt] = useState<number | null>(null);
-  const [sort, setSort] = useState<{ col: SortKey; dir: 'asc' | 'desc' } | null>(null);
+  const [sort, setSort] = useState<{ col: string; dir: 'asc' | 'desc' } | null>(null);
+  const [visibleCols, setVisibleCols] = useState<Set<string>>(
+    () => new Set(BASE_COLUMNS.filter((c) => c.defaultOn).map((c) => c.key)),
+  );
 
   const datasetsQ = useQuery<PriceStatDataset[], Error>({
     queryKey: priceStatsKeys.datasets,
@@ -97,6 +161,63 @@ export default function Datasets() {
     staleTime: 60_000,
   });
   const rows = growthQ.data ?? [];
+
+  // Optional extra table columns: quality indexes (matched by city name) +
+  // population (by obec_id). Index defs are small + always loaded so the
+  // toggles can render; the heavier values/cities/obec-tree load only when a
+  // matching column is switched on. Query keys are shared with Browse's cache.
+  const indexDefsQ = useQuery<CityIndexDefinition[], Error>({
+    queryKey: ['city_index_definitions'],
+    queryFn: fetchCityIndexDefinitions,
+    staleTime: Infinity, gcTime: Infinity,
+  });
+  const idxCols = useMemo(() => indexColumns(indexDefsQ.data ?? []), [indexDefsQ.data]);
+  const allColumns = useMemo(() => [...BASE_COLUMNS, ...idxCols], [idxCols]);
+  const anyIndexVisible = idxCols.some((c) => visibleCols.has(c.key));
+  const popVisible = visibleCols.has('population');
+
+  const obecTreeQ = useQuery({
+    queryKey: priceStatsKeys.obecTree, queryFn: fetchObecTree,
+    enabled: popVisible, staleTime: Infinity, gcTime: Infinity,
+  });
+  const citiesQ = useQuery({
+    queryKey: ['curated_cities'], queryFn: fetchCuratedCities,
+    enabled: anyIndexVisible, staleTime: Infinity, gcTime: Infinity,
+  });
+  const idxValuesQ = useQuery({
+    queryKey: ['city_index_values'], queryFn: fetchCityIndexValues,
+    enabled: anyIndexVisible, staleTime: Infinity, gcTime: Infinity,
+  });
+
+  const popByObec = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const n of obecTreeQ.data ?? []) if (n.level === 'obec' && n.population != null) m.set(n.id, n.population);
+    return m;
+  }, [obecTreeQ.data]);
+  const nameToCityId = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const c of citiesQ.data ?? []) m.set(normName(c.name), c.city_id);
+    return m;
+  }, [citiesQ.data]);
+  const idxMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const v of idxValuesQ.data ?? []) m.set(`${v.city_id}:${v.index_name}`, v.value);
+    return m;
+  }, [idxValuesQ.data]);
+
+  const enrichedRows: TableRow[] = useMemo(() => rows.map((r) => {
+    const cityId = nameToCityId.get(normName(r.locality_name));
+    const idx: Record<string, number | null> = {};
+    for (const slug of PINNED_SLUGS) {
+      idx[slug] = cityId != null ? idxMap.get(`${cityId}:${slug}`) ?? null : null;
+    }
+    return { ...r, population: popByObec.get(r.obec_id) ?? null, idx };
+  }), [rows, nameToCityId, idxMap, popByObec]);
+
+  const visibleColumns = useMemo(
+    () => allColumns.filter((c) => c.alwaysOn || visibleCols.has(c.key)),
+    [allColumns, visibleCols],
+  );
 
   // Live scrape status for this dataset — polls while a run is in progress.
   const runQ = useQuery<PriceStatRun | null, Error>({
@@ -158,27 +279,25 @@ export default function Datasets() {
     count: rows.length,
   }), [rows]);
 
-  const activeSort: { col: SortKey; dir: 'asc' | 'desc' } =
-    sort ?? { col: metric === 'sale_cagr_pct' ? 'sale_cagr_pct' : metric === 'yield_change_pp_pa' ? 'yield_change_pp_pa' : 'rent_cagr_pct', dir: 'desc' };
+  const activeSort: { col: string; dir: 'asc' | 'desc' } = sort ?? { col: metric, dir: 'desc' };
 
   const sortedRows = useMemo(() => {
+    const colDef = allColumns.find((c) => c.key === activeSort.col) ?? allColumns[0];
     const dir = activeSort.dir === 'asc' ? 1 : -1;
-    return [...rows].sort((a, b) => {
-      const av = a[activeSort.col];
-      const bv = b[activeSort.col];
-      if (activeSort.col === 'locality_name') {
+    return [...enrichedRows].sort((a, b) => {
+      const av = colDef.sortVal(a);
+      const bv = colDef.sortVal(b);
+      if (typeof av === 'string' || typeof bv === 'string') {
         return String(av).localeCompare(String(bv), 'cs') * dir;
       }
-      const an = av == null ? null : Number(av);
-      const bn = bv == null ? null : Number(bv);
-      if (an == null && bn == null) return 0;
-      if (an == null) return 1;       // nulls last regardless of dir
-      if (bn == null) return -1;
-      return (an - bn) * dir;
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;       // nulls last regardless of dir
+      if (bv == null) return -1;
+      return (av - bv) * dir;
     });
-  }, [rows, activeSort.col, activeSort.dir]);
+  }, [enrichedRows, allColumns, activeSort.col, activeSort.dir]);
 
-  const onSort = (col: SortKey) =>
+  const onSort = (col: string) =>
     setSort((s) =>
       s && s.col === col
         ? { col, dir: s.dir === 'desc' ? 'asc' : 'desc' }
@@ -300,7 +419,18 @@ export default function Datasets() {
           </div>
 
           {rows.length > 0 && (
-            <CityTable rows={sortedRows} metric={metric} sort={activeSort} onSort={onSort} />
+            <>
+              <ColumnToggles
+                columns={allColumns}
+                visible={visibleCols}
+                onToggle={(key) => setVisibleCols((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(key)) next.delete(key); else next.add(key);
+                  return next;
+                })}
+              />
+              <CityTable rows={sortedRows} columns={visibleColumns} metric={metric} sort={activeSort} onSort={onSort} />
+            </>
           )}
         </>
       )}
@@ -417,47 +547,57 @@ function SummaryBand({
 
 /* ---- table -------------------------------------------------------------- */
 
-interface Col { key: SortKey; label: string; metric?: DatasetMetric; render: (r: PriceStatGrowthRow) => ReactNode; }
-
-const COLS: Col[] = [
-  { key: 'locality_name', label: 'Municipality', render: (r) => r.locality_name },
-  { key: 'sale_latest_price', label: 'Sale Kč/m²', render: (r) => fmtPerM2(r.sale_latest_price) },
-  { key: 'sale_cagr_pct', label: 'Sale growth', metric: 'sale_cagr_pct', render: (r) => <Delta n={r.sale_cagr_pct} fmt={fmtPct} /> },
-  { key: 'rent_latest_price', label: 'Rent Kč/m²/mo', render: (r) => fmtPerM2(r.rent_latest_price) },
-  { key: 'rent_cagr_pct', label: 'Rent growth', metric: 'rent_cagr_pct', render: (r) => <Delta n={r.rent_cagr_pct} fmt={fmtPct} /> },
-  { key: 'gross_yield_pct', label: 'Gross yield', render: (r) => fmtPct(r.gross_yield_pct) },
-  { key: 'yield_change_pp_pa', label: 'Yield change', metric: 'yield_change_pp_pa', render: (r) => <Delta n={r.yield_change_pp_pa} fmt={fmtPP} /> },
-];
-
 function Delta({ n, fmt }: { n: number | null; fmt: (n: number | null) => string }) {
   const cls = n == null ? '' : n < 0 ? 'text-[var(--color-brick)]' : '';
   return <span className={cls}>{fmt(n)}</span>;
 }
 
-function CityTable({
-  rows, metric, sort, onSort,
+function ColumnToggles({
+  columns, visible, onToggle,
 }: {
-  rows: PriceStatGrowthRow[];
+  columns: ColSpec[];
+  visible: Set<string>;
+  onToggle: (key: string) => void;
+}) {
+  const toggleable = columns.filter((c) => !c.alwaysOn);
+  return (
+    <div className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+      <span className="text-xs uppercase tracking-[0.14em] text-[var(--color-ink-3)]">Columns</span>
+      {toggleable.map((c) => (
+        <label key={c.key} className="inline-flex items-center gap-1.5 text-xs text-[var(--color-ink-2)] cursor-pointer">
+          <input type="checkbox" checked={visible.has(c.key)} onChange={() => onToggle(c.key)} />
+          {c.label}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function CityTable({
+  rows, columns, metric, sort, onSort,
+}: {
+  rows: TableRow[];
+  columns: ColSpec[];
   metric: DatasetMetric;
-  sort: { col: SortKey; dir: 'asc' | 'desc' };
-  onSort: (c: SortKey) => void;
+  sort: { col: string; dir: 'asc' | 'desc' };
+  onSort: (c: string) => void;
 }) {
   return (
-    <div className="mt-8 overflow-x-auto border border-[var(--color-rule)] rounded-[var(--radius-md)]">
+    <div className="mt-4 overflow-x-auto border border-[var(--color-rule)] rounded-[var(--radius-md)]">
       <table className="w-full text-sm border-collapse">
         <thead>
           <tr className="border-b border-[var(--color-rule)] bg-[var(--color-paper-2)]">
-            {COLS.map((c, i) => {
+            {columns.map((c) => {
               const isActiveMetric = c.metric === metric;
               const isSorted = sort.col === c.key;
               return (
                 <th key={c.key}
                   onClick={() => onSort(c.key)}
-                  className={`px-3 py-2 font-normal cursor-pointer select-none whitespace-nowrap text-[var(--color-ink-3)] hover:text-[var(--color-ink)] ${i === 0 ? 'text-left' : 'text-right'} ${isActiveMetric ? 'text-[var(--color-copper)] bg-[var(--color-copper-soft)]' : ''}`}>
+                  className={`px-3 py-2 font-normal cursor-pointer select-none whitespace-nowrap text-[var(--color-ink-3)] hover:text-[var(--color-ink)] ${c.align === 'left' ? 'text-left' : 'text-right'} ${isActiveMetric ? 'text-[var(--color-copper)] bg-[var(--color-copper-soft)]' : ''}`}>
                   <span className="inline-flex items-center gap-1">
-                    {i > 0 && <SortCaret active={isSorted} dir={sort.dir} />}
+                    {c.align === 'right' && <SortCaret active={isSorted} dir={sort.dir} />}
                     {c.label}
-                    {i === 0 && <SortCaret active={isSorted} dir={sort.dir} />}
+                    {c.align === 'left' && <SortCaret active={isSorted} dir={sort.dir} />}
                   </span>
                 </th>
               );
@@ -470,11 +610,11 @@ function CityTable({
             return (
               <tr key={r.obec_id}
                 className={`border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-paper-2)] ${thin ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-ink-2)]'}`}>
-                {COLS.map((c, i) => (
+                {columns.map((c) => (
                   <td key={c.key}
-                    className={`px-3 py-1.5 whitespace-nowrap ${i === 0 ? 'text-left font-[family-name:var(--font-sans)] text-[var(--color-ink)]' : 'text-right'} ${c.metric === metric ? 'bg-[var(--color-copper-soft)]' : ''}`}>
+                    className={`px-3 py-1.5 whitespace-nowrap ${c.align === 'left' ? 'text-left font-[family-name:var(--font-sans)] text-[var(--color-ink)]' : 'text-right'} ${c.metric === metric ? 'bg-[var(--color-copper-soft)]' : ''}`}>
                     {c.render(r)}
-                    {i === 0 && thin && <span title="thin market" className="text-[var(--color-ink-4)]"> ·</span>}
+                    {c.align === 'left' && thin && <span title="thin market" className="text-[var(--color-ink-4)]"> ·</span>}
                   </td>
                 ))}
               </tr>
