@@ -1,22 +1,23 @@
-/* sreality.cz/detail/* content script.
+/* Listing-page content script for every portal we scrape.
  *
- * Mounts a floating yield panel in a closed shadow root so sreality's
- * own CSS can't bleed in. The panel goes through three modes:
+ * Detail pages → a floating panel (closed shadow root) that shows our
+ * precomputed "Výnos MF" gross yield + MF reference rent for sale apartments,
+ * with the comparables estimation as the deeper tool / fallback. The panel is
+ * visibly deactivated for anything that isn't an apartment for sale.
  *
- *   1. loading            — placeholder while we ask the API.
- *   2. no_run             — listing not estimated yet → "Run estimation".
- *   3. has_run            — yield panel, three editable fields, debounced
- *                           PATCH /estimations/:id/scenario on each edit.
+ * Index/search pages → small per-card badges (see index_overlay.ts).
  *
- * All network calls go through chrome.runtime.sendMessage to the
- * background worker — see background.ts and api.ts. */
+ * All network calls go through chrome.runtime.sendMessage to the background
+ * worker (host_permissions + the portal's CORS don't apply there). */
 
 import styles from './styles.css?inline';
-import { extractSrealityId } from './sreality';
+import { detailRef, portalForHost, portalForUrl, isDetailPage } from './portals';
+import { runIndexOverlay } from './index_overlay';
 import type {
   ApiMessage,
   ApiResult,
   EstimationRun,
+  PortalListing,
   YieldScenarioUpdate,
 } from './types';
 
@@ -26,24 +27,27 @@ const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;
 const HOST_ELEMENT_ID = '__sreality_yield_panel_host__';
 
+type Phase = 'loading' | 'deactivated' | 'active' | 'error';
+
 interface PanelState {
-  mode: 'loading' | 'no_run' | 'has_run' | 'error';
+  phase: Phase;
+  /* Our scraped facts + MF rent/yield for the subject listing. */
+  listing: PortalListing | null;
+  /* Optional comparables estimation (full row) for the editable yield block. */
   run: EstimationRun | null;
-  /* Per-axis "touched" state — see SPA's YieldBlock. A null scenario
-   * value with touched=false means "follow the default"; touched=true
-   * means the operator owns this field. */
+  /* Per-axis "touched" — null + touched=false means "follow the default". */
   rentTouched: boolean;
   costTouched: boolean;
   priceTouched: boolean;
-  /* Live (possibly edited) values, ready to render. */
   rent: number | null;
   costPerM2: number | null;
   price: number | null;
-  /* Surfaced to the operator when something fails. */
+  /* True while an estimation is being created/polled. */
+  busy: boolean;
   errorMessage: string | null;
 }
 
-function call<T>(message: ApiMessage): Promise<ApiResult<T>> {
+export function call<T>(message: ApiMessage): Promise<ApiResult<T>> {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(message, (response: ApiResult<T>) => {
       if (chrome.runtime.lastError) {
@@ -59,39 +63,18 @@ function call<T>(message: ApiMessage): Promise<ApiResult<T>> {
   });
 }
 
-function defaultPrice(run: EstimationRun): number | null {
-  /* Mirrors the SPA's YieldBlock: prefer the input price the
-   * operator typed when creating the estimation, fall back to the
-   * estimated sale price for sale-kind runs. The chrome extension
-   * doesn't yet have access to the subject listing's price column,
-   * so the "subject listing sale price" shortcut from the SPA is
-   * skipped here. */
-  if (run.input_purchase_price_czk != null) {
-    return run.input_purchase_price_czk;
-  }
-  if (run.estimate_kind === 'sale' && run.estimated_sale_price_czk != null) {
-    return run.estimated_sale_price_czk;
-  }
-  return null;
+// ----------------------------------------------------------------------
+// Formatting
+// ----------------------------------------------------------------------
+
+function fmtCzk(n: number | null | undefined): string {
+  return n == null ? '—' : `${Math.round(n).toLocaleString('cs-CZ')} Kč`;
 }
 
-function defaultRent(run: EstimationRun): number | null {
-  return run.estimated_monthly_rent_czk;
-}
-
-function initialState(run: EstimationRun): PanelState {
-  const sc = run.scenario;
-  return {
-    mode: 'has_run',
-    run,
-    rentTouched: sc?.rent_czk != null,
-    costTouched: sc?.fond_per_m2_czk != null,
-    priceTouched: sc?.price_czk != null,
-    rent: sc?.rent_czk ?? defaultRent(run),
-    costPerM2: sc?.fond_per_m2_czk ?? DEFAULT_FOND_CZK_PER_M2,
-    price: sc?.price_czk ?? defaultPrice(run),
-    errorMessage: null,
-  };
+function fmtPct(n: number | null | undefined): string {
+  return n == null
+    ? '—'
+    : `${n.toLocaleString('cs-CZ', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} %`;
 }
 
 function formatNumber(n: number | null): string {
@@ -106,10 +89,31 @@ function parseNumber(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// ----------------------------------------------------------------------
+// Estimation-editor defaults (mirror the SPA's YieldBlock, but now seeded
+// with the subject listing's own price/area from our lookup).
+// ----------------------------------------------------------------------
+
+function subjectArea(state: PanelState): number | null {
+  return state.run?.input_spec?.area_m2 ?? state.listing?.area_m2 ?? null;
+}
+
+function defaultPrice(state: PanelState): number | null {
+  const run = state.run;
+  if (run?.input_purchase_price_czk != null) return run.input_purchase_price_czk;
+  if (run?.estimate_kind === 'sale' && run.estimated_sale_price_czk != null) {
+    return run.estimated_sale_price_czk;
+  }
+  return state.listing?.price_czk ?? null;
+}
+
+function defaultRent(state: PanelState): number | null {
+  return state.run?.estimated_monthly_rent_czk ?? null;
+}
+
 function computeYield(state: PanelState): number | null {
-  const { rent, costPerM2, price, run } = state;
-  if (run == null) return null;
-  const area = run.input_spec?.area_m2 ?? null;
+  const { rent, costPerM2, price } = state;
+  const area = subjectArea(state);
   const fond = costPerM2 != null && area != null ? costPerM2 * area : null;
   if (rent == null || fond == null || price == null || price <= 0) return null;
   return ((rent - fond) * 12) / price * 100;
@@ -123,16 +127,26 @@ function bodyFromState(state: PanelState): YieldScenarioUpdate {
   };
 }
 
-/* Mounts the panel once and exposes a typed `render(state)` that
- * re-paints the body without re-creating the host or its shadow root.
- * Wiring up oninput / onclick lives in render — the panel is small
- * enough that a full re-render per state change is fine, except for
- * input elements that we keep focused while the operator types. */
-function mountPanel(): {
-  shadow: ShadowRoot;
-  render: (state: PanelState) => void;
-  destroy: () => void;
-} {
+/* Load the editable scenario from a full estimation run. */
+function seedFromRun(state: PanelState, run: EstimationRun): PanelState {
+  const sc = run.scenario;
+  const next: PanelState = { ...state, run };
+  return {
+    ...next,
+    rentTouched: sc?.rent_czk != null,
+    costTouched: sc?.fond_per_m2_czk != null,
+    priceTouched: sc?.price_czk != null,
+    rent: sc?.rent_czk ?? defaultRent(next),
+    costPerM2: sc?.fond_per_m2_czk ?? DEFAULT_FOND_CZK_PER_M2,
+    price: sc?.price_czk ?? defaultPrice(next),
+  };
+}
+
+// ----------------------------------------------------------------------
+// Panel mount + render
+// ----------------------------------------------------------------------
+
+function mountPanel(): { render: (state: PanelState) => void; destroy: () => void } {
   const existing = document.getElementById(HOST_ELEMENT_ID);
   if (existing != null) existing.remove();
 
@@ -150,153 +164,51 @@ function mountPanel(): {
 
   let lastFocusedKey: 'rent' | 'cost' | 'price' | null = null;
 
-  const render = (state: PanelState): void => {
-    panel.innerHTML = '';
-
-    const header = document.createElement('div');
-    header.className = 'panel-header';
+  function header(text: string): HTMLElement {
+    const h = document.createElement('div');
+    h.className = 'panel-header';
     const title = document.createElement('p');
     title.className = 'panel-title';
-    title.textContent =
-      state.mode === 'has_run' ? 'Yield' :
-      state.mode === 'loading' ? 'Yield · loading' :
-      state.mode === 'error' ? 'Yield · error' :
-      'Yield · no estimation';
-    header.appendChild(title);
+    title.textContent = text;
+    h.appendChild(title);
     const close = document.createElement('button');
     close.className = 'close-btn';
     close.textContent = '×';
-    close.title = 'Hide panel';
+    close.title = 'Skrýt panel';
     close.onclick = () => host.remove();
-    header.appendChild(close);
-    panel.appendChild(header);
+    h.appendChild(close);
+    return h;
+  }
 
+  const render = (state: PanelState): void => {
+    panel.innerHTML = '';
+    panel.classList.toggle('panel--muted', state.phase === 'deactivated');
+
+    panel.appendChild(header('Výnos MF'));
     const body = document.createElement('div');
     body.className = 'panel-body';
     panel.appendChild(body);
 
-    if (state.mode === 'loading') {
-      const p = document.createElement('p');
-      p.style.color = 'var(--ink-4)';
-      p.style.textAlign = 'center';
-      p.style.padding = '0.5rem 0';
-      p.textContent = 'Checking for existing estimation…';
-      body.appendChild(p);
+    if (state.phase === 'loading') {
+      body.appendChild(note('Načítám data…'));
+      return;
+    }
+    if (state.phase === 'error') {
+      body.appendChild(errorLine(state.errorMessage ?? 'Něco se nepovedlo.'));
+      return;
+    }
+    if (state.phase === 'deactivated') {
+      body.appendChild(note('Výnos MF je k dispozici jen u bytů na prodej.'));
       return;
     }
 
-    if (state.mode === 'no_run') {
-      const empty = document.createElement('div');
-      empty.className = 'empty-state';
-      const p = document.createElement('p');
-      p.textContent = 'No estimation for this listing yet.';
-      empty.appendChild(p);
-      const btn = document.createElement('button');
-      btn.className = 'btn-primary';
-      btn.textContent = 'Run estimation';
-      btn.onclick = () => onCreateRun();
-      empty.appendChild(btn);
-      if (state.errorMessage != null) {
-        const err = document.createElement('p');
-        err.className = 'error';
-        err.textContent = state.errorMessage;
-        empty.appendChild(err);
-      }
-      body.appendChild(empty);
-      return;
-    }
+    /* active */
+    renderMfBlock(body, state);
+    renderSubjectFacts(body, state);
+    renderEstimation(body, state);
+    if (state.errorMessage != null) body.appendChild(errorLine(state.errorMessage));
 
-    if (state.mode === 'error') {
-      const p = document.createElement('p');
-      p.className = 'error';
-      p.textContent = state.errorMessage ?? 'Something went wrong.';
-      body.appendChild(p);
-      return;
-    }
-
-    /* has_run */
-    const ydisp = document.createElement('div');
-    ydisp.className = 'yield-display';
-    const ylabel = document.createElement('p');
-    ylabel.className = 'yield-label';
-    ylabel.textContent = 'Gross yield';
-    ydisp.appendChild(ylabel);
-    const yval = document.createElement('p');
-    const pct = computeYield(state);
-    yval.className = 'yield-value' + (pct == null ? ' muted' : '');
-    yval.textContent = pct != null ? `${pct.toFixed(2)} %` : '—';
-    ydisp.appendChild(yval);
-    body.appendChild(ydisp);
-
-    const ref = state.run?.reference_rent ?? null;
-    if (ref != null) {
-      const refRow = document.createElement('div');
-      refRow.className = 'ref-rent';
-      const rl = document.createElement('span');
-      rl.className = 'ref-rent-label';
-      rl.textContent = 'MF cenová mapa';
-      const rv = document.createElement('span');
-      rv.className = 'ref-rent-value';
-      rv.textContent = `${ref.monthly_rent_czk.toLocaleString('cs-CZ')} Kč`;
-      rv.title =
-        `${ref.total_per_m2} Kč/m² · ${ref.territory.name}` +
-        (ref.territory.kraj ? `, ${ref.territory.kraj}` : '') +
-        (ref.is_novostavba ? ' · novostavba' : '');
-      refRow.appendChild(rl);
-      refRow.appendChild(rv);
-      body.appendChild(refRow);
-    }
-
-    const fields = document.createElement('div');
-    fields.className = 'fields';
-    fields.appendChild(buildField({
-      key: 'rent',
-      label: 'Monthly rent',
-      suffix: 'Kč',
-      value: state.rent,
-      onInput: (v) => onEdit('rent', v),
-    }));
-    fields.appendChild(buildField({
-      key: 'cost',
-      label: 'Fond oprav + SVJ',
-      suffix: 'Kč/m²',
-      value: state.costPerM2,
-      onInput: (v) => onEdit('cost', v),
-    }));
-    fields.appendChild(buildField({
-      key: 'price',
-      label: 'Listing price',
-      suffix: 'Kč',
-      value: state.price,
-      onInput: (v) => onEdit('price', v),
-    }));
-    body.appendChild(fields);
-
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-    const status = document.createElement('span');
-    const hasOverrides =
-      state.rentTouched || state.costTouched || state.priceTouched;
-    status.textContent = hasOverrides ? 'edited · synced' : 'live calculation';
-    actions.appendChild(status);
-    if (hasOverrides) {
-      const reset = document.createElement('a');
-      reset.textContent = 'Reset';
-      reset.onclick = (e) => { e.preventDefault(); onReset(); };
-      actions.appendChild(reset);
-    }
-    body.appendChild(actions);
-
-    if (state.errorMessage != null) {
-      const err = document.createElement('p');
-      err.className = 'error';
-      err.textContent = state.errorMessage;
-      body.appendChild(err);
-    }
-
-    /* Restore focus to whichever input the operator was editing when
-     * the last render fired. Without this, every keystroke would blur
-     * the input because we wipe and re-create the elements. */
+    /* Restore focus after a full re-render so typing isn't interrupted. */
     if (lastFocusedKey != null) {
       const target = shadow.querySelector<HTMLInputElement>(
         `input[data-key="${lastFocusedKey}"]`,
@@ -308,6 +220,136 @@ function mountPanel(): {
       }
     }
   };
+
+  function note(text: string): HTMLElement {
+    const p = document.createElement('p');
+    p.className = 'muted-note';
+    p.textContent = text;
+    return p;
+  }
+
+  function errorLine(text: string): HTMLElement {
+    const p = document.createElement('p');
+    p.className = 'error';
+    p.textContent = text;
+    return p;
+  }
+
+  function renderMfBlock(body: HTMLElement, state: PanelState): void {
+    const l = state.listing;
+    const ydisp = document.createElement('div');
+    ydisp.className = 'yield-display';
+    const ylabel = document.createElement('p');
+    ylabel.className = 'yield-label';
+    ylabel.textContent = 'Výnos MF (hrubý)';
+    ylabel.title = 'Hrubý výnos dle cenové mapy nájemného MF (nájem ÷ cena)';
+    ydisp.appendChild(ylabel);
+    const yval = document.createElement('p');
+    const pct = l?.mf_gross_yield_pct ?? null;
+    yval.className = 'yield-value' + (pct == null ? ' muted' : '');
+    yval.textContent = fmtPct(pct);
+    ydisp.appendChild(yval);
+    body.appendChild(ydisp);
+
+    if (l?.mf_reference_rent_czk != null) {
+      const area = l.area_m2 ?? null;
+      const perM2 = area && area > 0 ? Math.round(l.mf_reference_rent_czk / area) : null;
+      const row = document.createElement('div');
+      row.className = 'ref-rent';
+      const rl = document.createElement('span');
+      rl.className = 'ref-rent-label';
+      rl.textContent = 'MF nájem';
+      const rv = document.createElement('span');
+      rv.className = 'ref-rent-value';
+      rv.textContent =
+        `${fmtCzk(l.mf_reference_rent_czk)}/měs` +
+        (perM2 != null ? ` · ${perM2.toLocaleString('cs-CZ')} Kč/m²` : '');
+      row.appendChild(rl);
+      row.appendChild(rv);
+      body.appendChild(row);
+    } else if (l?.found) {
+      body.appendChild(note('MF nájem nedostupný (chybí území nebo cena).'));
+    } else {
+      body.appendChild(note('Tato nemovitost není v naší databázi.'));
+    }
+  }
+
+  function renderSubjectFacts(body: HTMLElement, state: PanelState): void {
+    const l = state.listing;
+    if (l == null || !l.found) return;
+    const parts: string[] = [];
+    if (l.disposition) parts.push(l.disposition);
+    if (l.area_m2 != null) parts.push(`${Math.round(l.area_m2)} m²`);
+    if (l.price_czk != null) parts.push(fmtCzk(l.price_czk));
+    if (l.district || l.locality) parts.push((l.district ?? l.locality) as string);
+    if (parts.length === 0) return;
+    const p = document.createElement('p');
+    p.className = 'subject-facts';
+    p.textContent = parts.join(' · ');
+    body.appendChild(p);
+  }
+
+  function renderEstimation(body: HTMLElement, state: PanelState): void {
+    const sec = document.createElement('div');
+    sec.className = 'est-section';
+    const head = document.createElement('p');
+    head.className = 'section-label';
+    head.textContent = 'Odhad výnosu (komparativní)';
+    sec.appendChild(head);
+
+    if (state.run == null) {
+      const btn = document.createElement('button');
+      btn.className = 'btn-primary';
+      btn.textContent = state.busy ? 'Počítám…' : 'Spustit odhad';
+      btn.disabled = state.busy;
+      btn.onclick = () => onCreateRun();
+      sec.appendChild(btn);
+      body.appendChild(sec);
+      return;
+    }
+
+    const fields = document.createElement('div');
+    fields.className = 'fields';
+    fields.appendChild(buildField({
+      key: 'rent', label: 'Měsíční nájem', suffix: 'Kč',
+      value: state.rent, onInput: (v) => onEdit('rent', v),
+    }));
+    fields.appendChild(buildField({
+      key: 'cost', label: 'Fond oprav + SVJ', suffix: 'Kč/m²',
+      value: state.costPerM2, onInput: (v) => onEdit('cost', v),
+    }));
+    fields.appendChild(buildField({
+      key: 'price', label: 'Cena', suffix: 'Kč',
+      value: state.price, onInput: (v) => onEdit('price', v),
+    }));
+    sec.appendChild(fields);
+
+    const yieldRow = document.createElement('div');
+    yieldRow.className = 'est-yield';
+    const yl = document.createElement('span');
+    yl.textContent = 'Výnos z odhadu';
+    const yv = document.createElement('span');
+    yv.className = 'est-yield-value';
+    yv.textContent = fmtPct(computeYield(state));
+    yieldRow.appendChild(yl);
+    yieldRow.appendChild(yv);
+    sec.appendChild(yieldRow);
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+    const status = document.createElement('span');
+    const hasOverrides = state.rentTouched || state.costTouched || state.priceTouched;
+    status.textContent = hasOverrides ? 'upraveno · uloženo' : 'živý výpočet';
+    actions.appendChild(status);
+    if (hasOverrides) {
+      const reset = document.createElement('a');
+      reset.textContent = 'Reset';
+      reset.onclick = (e) => { e.preventDefault(); onReset(); };
+      actions.appendChild(reset);
+    }
+    sec.appendChild(actions);
+    body.appendChild(sec);
+  }
 
   function buildField(opts: {
     key: 'rent' | 'cost' | 'price';
@@ -345,15 +387,13 @@ function mountPanel(): {
     return wrap;
   }
 
-  return {
-    shadow,
-    render,
-    destroy: () => host.remove(),
-  };
+  return { render, destroy: () => host.remove() };
 }
 
-/* App-level state machine. Boot, mount, kick off the lookup, react to
- * messages. Closed over by the inner callbacks in mountPanel.render. */
+// ----------------------------------------------------------------------
+// App-level state machine
+// ----------------------------------------------------------------------
+
 let state: PanelState;
 let render: (s: PanelState) => void;
 let patchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -367,129 +407,146 @@ function schedulePatch(): void {
   if (patchTimer != null) clearTimeout(patchTimer);
   patchTimer = setTimeout(async () => {
     patchTimer = null;
-    if (state.mode !== 'has_run' || state.run == null) return;
+    if (state.run == null) return;
     const res = await call<EstimationRun>({
-      type: 'patch_scenario',
-      run_id: state.run.id,
-      body: bodyFromState(state),
+      type: 'patch_scenario', run_id: state.run.id, body: bodyFromState(state),
     });
     if (!res.ok) {
-      setState((prev) => ({
-        ...prev, errorMessage: `Save failed: ${res.detail}`,
-      }));
+      setState((prev) => ({ ...prev, errorMessage: `Uložení selhalo: ${res.detail}` }));
       return;
     }
-    setState((prev) => ({
-      ...prev,
-      run: res.data,
-      errorMessage: null,
-    }));
+    setState((prev) => ({ ...prev, run: res.data, errorMessage: null }));
   }, PATCH_DEBOUNCE_MS);
 }
 
 function onEdit(axis: 'rent' | 'cost' | 'price', value: number | null): void {
   setState((prev) => {
     switch (axis) {
-      case 'rent':
-        return { ...prev, rent: value, rentTouched: true };
-      case 'cost':
-        return { ...prev, costPerM2: value, costTouched: true };
-      case 'price':
-        return { ...prev, price: value, priceTouched: true };
+      case 'rent': return { ...prev, rent: value, rentTouched: true };
+      case 'cost': return { ...prev, costPerM2: value, costTouched: true };
+      case 'price': return { ...prev, price: value, priceTouched: true };
     }
   });
   schedulePatch();
 }
 
 function onReset(): void {
-  if (state.run == null) return;
   setState((prev) => ({
     ...prev,
-    rent: defaultRent(prev.run!),
+    rent: defaultRent(prev),
     costPerM2: DEFAULT_FOND_CZK_PER_M2,
-    price: defaultPrice(prev.run!),
-    rentTouched: false,
-    costTouched: false,
-    priceTouched: false,
+    price: defaultPrice(prev),
+    rentTouched: false, costTouched: false, priceTouched: false,
   }));
   schedulePatch();
 }
 
 async function onCreateRun(): Promise<void> {
-  setState((prev) => ({ ...prev, mode: 'loading', errorMessage: null }));
+  setState((prev) => ({ ...prev, busy: true, errorMessage: null }));
   const res = await call<EstimationRun>({
-    type: 'create_estimation',
-    url: window.location.href,
+    type: 'create_estimation', url: window.location.href,
   });
   if (!res.ok) {
     setState((prev) => ({
-      ...prev,
-      mode: 'no_run',
-      errorMessage: `Couldn't start estimation: ${res.detail}`,
+      ...prev, busy: false, errorMessage: `Odhad se nepodařilo spustit: ${res.detail}`,
     }));
     return;
   }
-  /* The POST may return a still-pending row when the backend has
-   * scheduled the heavy work as a BackgroundTask. Poll until terminal. */
   let row = res.data;
   for (let i = 0; i < POLL_MAX_ATTEMPTS; i++) {
     if (row.status === 'success' || row.status === 'failed') break;
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    const next = await call<EstimationRun>({
-      type: 'get_estimation', run_id: row.id,
-    });
+    const next = await call<EstimationRun>({ type: 'get_estimation', run_id: row.id });
     if (!next.ok) break;
     row = next.data;
   }
   if (row.status !== 'success') {
     setState((prev) => ({
-      ...prev,
-      mode: 'no_run',
-      errorMessage:
-        row.error_message ?? 'Estimation did not complete in time.',
+      ...prev, busy: false,
+      errorMessage: row.error_message ?? 'Odhad se nedokončil včas.',
     }));
     return;
   }
-  state = initialState(row);
-  render(state);
+  setState((prev) => seedFromRun({ ...prev, busy: false }, row));
 }
 
-async function boot(): Promise<void> {
-  const id = extractSrealityId(window.location.href);
-  if (id == null) return;
+async function bootDetail(): Promise<void> {
+  const ref = detailRef(window.location.href);
+  if (ref == null) return;
 
   const panel = mountPanel();
   render = panel.render;
   state = {
-    mode: 'loading', run: null,
+    phase: 'loading', listing: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
-    rent: null, costPerM2: null, price: null,
-    errorMessage: null,
+    rent: null, costPerM2: null, price: null, busy: false, errorMessage: null,
   };
   render(state);
 
-  const res = await call<EstimationRun | null>({
-    type: 'find_run_by_sreality_id', sreality_id: id,
+  const res = await call<PortalListing[]>({
+    type: 'lookup_listings',
+    items: [{ source: ref.source, source_id: ref.sourceId }],
   });
-
   if (!res.ok) {
-    setState((prev) => ({
-      ...prev, mode: 'error', errorMessage: res.detail,
-    }));
+    setState((prev) => ({ ...prev, phase: 'error', errorMessage: res.detail }));
+    return;
+  }
+  const listing = res.data[0] ?? null;
+
+  const saleApt =
+    listing?.found
+      ? listing.category_main === 'byt' && listing.category_type === 'prodej'
+      : urlSaleApartmentHint(window.location.href);
+
+  if (saleApt === false) {
+    setState((prev) => ({ ...prev, phase: 'deactivated', listing }));
     return;
   }
 
-  if (res.data == null) {
-    setState((prev) => ({ ...prev, mode: 'no_run' }));
-    return;
-  }
+  setState((prev) => ({ ...prev, phase: 'active', listing }));
 
-  state = initialState(res.data);
-  render(state);
+  /* Lazily load an existing estimation so the editable yield block appears
+   * without blocking the MF headline. */
+  const est = listing?.latest_estimation;
+  if (est != null) {
+    const full = await call<EstimationRun>({
+      type: 'get_estimation', run_id: est.estimation_id,
+    });
+    if (full.ok && full.data.status === 'success') {
+      setState((prev) => seedFromRun(prev, full.data));
+    }
+  }
 }
 
-boot().catch((err: unknown) => {
-  /* Last-ditch — the panel should never throw the page. Log so a
-   * developer can inspect via the page console. */
-  console.error('[sreality-ext] boot failed', err);
-});
+/* URL-only sale-apartment hint for the not-in-our-DB case. */
+function urlSaleApartmentHint(url: string): boolean | null {
+  const portal = portalForUrl(url);
+  if (portal?.saleApartmentHint == null) return null;
+  try {
+    return portal.saleApartmentHint(new URL(url).pathname);
+  } catch {
+    return null;
+  }
+}
+
+// ----------------------------------------------------------------------
+// Entry: detail pages get the panel; other pages on a known portal host
+// get the index-card overlay (a no-op if there are no listing cards).
+// ----------------------------------------------------------------------
+
+function main(): void {
+  const url = window.location.href;
+  if (isDetailPage(url)) {
+    bootDetail().catch((err: unknown) => {
+      console.error('[mf-ext] detail boot failed', err);
+    });
+    return;
+  }
+  if (portalForHost(window.location.hostname) != null) {
+    runIndexOverlay(call).catch((err: unknown) => {
+      console.error('[mf-ext] index overlay failed', err);
+    });
+  }
+}
+
+main();

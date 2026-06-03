@@ -201,15 +201,22 @@ rules. Identify which one a task belongs to before you start.
   inside `frontend/`.
 
 **Chrome-extension territory** (`chrome-extension/`):
-- Manifest v3 browser extension that overlays a yield/estimate panel on portal listing
-  pages. The content script today matches `sreality.cz/detail/*`; the **intent is to
-  cover every portal we scrape**, so the panel pops up on any listing page where the
-  extension has a workable feature — surfacing an estimate we've already produced, or
-  letting the operator trigger an on-demand run from the page. (`host_permissions` is
-  broad `https://*/*` for the background fetch; widen the content-script `matches` as
-  new portals come online.) Two-entry Vite build (`content.js` + `background.js`) plus a
-  copied-over `manifest.json` and `icon-128.png`; output lands in
-  `chrome-extension/dist/`.
+- Manifest v3 browser extension that overlays MF rent/yield + an estimate panel on portal
+  listing pages. The content script matches **every scraped portal's host** (sreality,
+  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality) — widen `matches`
+  (and the registry in `src/portals.ts`) as new portals come online; `host_permissions`
+  stays broad `https://*/*` for the background fetch. **Detail pages** get a floating
+  panel (closed shadow root) showing the precomputed `mf_reference_rent_czk` +
+  `mf_gross_yield_pct` ("Výnos MF") for sale apartments, with the comparables estimation
+  as the deeper tool/fallback; the panel is visibly deactivated for non-(byt+prodej).
+  **Index/search pages** get per-card badges via anchor-href scanning (no per-portal card
+  selectors — robust to markup changes). The default display is a **read** through
+  `POST /listings/lookup`, which maps a card's on-page `(source, native id)` to our row +
+  MF figures (the public views don't expose `source_id_native`, so the browser can't
+  resolve non-sreality listings directly). `src/portals.ts` is the single source of truth
+  for host→portal + detail-URL→native-id. Two-entry Vite build (`content.js` +
+  `background.js`, with `index_overlay.ts` bundled into `content.js`) plus a copied-over
+  `manifest.json` and `icon-128.png`; output lands in `chrome-extension/dist/`.
 - **Vanilla TypeScript only — no React, no Tailwind.** The panel lives inside a closed
   shadow root with its own scoped CSS in `src/styles.css?inline`. Palette mirrors the
   SPA's civic-archive tokens by hand-coded values (no `@theme` import). Keep the bundle

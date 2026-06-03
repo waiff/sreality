@@ -1,11 +1,30 @@
-# Sreality Yield Panel — Chrome extension
+# Realitní výnos (MF) — Chrome extension
 
-An inline yield-scenario panel that mounts on `sreality.cz` listing
-detail pages, talking to the project's FastAPI service. The panel
-shares its scenario state (rent / fond oprav / listing price) with
-the SPA's `/estimation/:id` page via the `scenario` JSONB column on
-`estimation_runs` — edit on either surface and the other sees it on
-next load.
+Overlays our **MF reference rent** (`mf_reference_rent_czk`) and the
+**"Výnos MF"** gross yield (`mf_gross_yield_pct`) — the same precomputed
+figures the SPA's Browse cards show for sale apartments — on listing pages
+across **every portal we scrape** (sreality, bazos, bezrealitky, idnes,
+maxima, remax, mmreality, ceskereality).
+
+- **Detail pages** get a floating panel (closed shadow root): the Výnos MF
+  headline + MF reference rent for the listing, with a comparables-based
+  estimation as the deeper tool / fallback. The panel is **visibly
+  deactivated** for anything that isn't an apartment for sale.
+- **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
+  we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
+  on-demand estimation by that card's own URL.
+
+The default display is a **read** of data we already have — no LLM call. It
+maps each portal listing to our row by `(source, native id)` through the
+FastAPI `POST /listings/lookup` endpoint (the public views don't expose the
+native id, so the browser can't resolve non-sreality listings on its own).
+The editable estimation block still shares its scenario state (rent / fond
+oprav / listing price) with the SPA's `/estimation/:id` page via the
+`scenario` JSONB column on `estimation_runs`.
+
+> **Backend dependency:** needs the `POST /listings/lookup` endpoint
+> (shipped in the `feature/portal-mf-lookup` PR). Make sure that's deployed
+> to the Railway API before loading this build.
 
 ## Distribution policy — read first
 
@@ -95,16 +114,39 @@ request will be blocked.
 
 ## Use
 
-1. Open any `https://www.sreality.cz/detail/...` page.
-2. A floating panel appears bottom-right.
-3. If the listing has an existing successful estimation, the panel
-   shows its yield + the editable scenario.
-4. If not, the panel shows a **Run estimation** button. Clicking it
-   `POST`s to `/estimations` and polls until the run completes.
+**On a listing detail page** (any supported portal):
 
-Edits to the three input fields debounce by 500ms and PATCH the
-scenario back to the API. The SPA's `/estimation/:id` page picks
-up the same state on next load.
+1. A floating panel appears bottom-right.
+2. For a **sale apartment** we have, it shows **Výnos MF X.X %** + the MF
+   reference rent (per month and per m²) and the subject facts.
+3. For anything that isn't an apartment for sale, the panel is **visibly
+   deactivated** with a short note.
+4. Below the MF headline, the **comparables estimation** block: if a
+   successful estimation exists it loads the editable yield scenario; if not,
+   a **Spustit odhad** button `POST`s to `/estimations` and polls until done.
+   Edits to the three fields debounce 500 ms and PATCH the scenario back —
+   the SPA's `/estimation/:id` page picks up the same state on next load.
+
+**On a search / index page** (any supported portal):
+
+1. Each sale-apartment card we recognise gets a small badge.
+2. `Výnos MF X.X %` when we have the yield (rent in the tooltip); otherwise a
+   clickable **Odhadnout výnos** badge that runs one estimation for that card
+   and swaps in the result.
+3. Cards aren't matched by portal-specific markup — the overlay scans each
+   card's detail link and resolves it through `/listings/lookup`, so it
+   survives the portals reshuffling their card HTML. Cards not in our DB (or
+   not sale apartments) get no badge.
+
+### Supported portals
+
+sreality, bazos, bezrealitky, idnes, maxima, remax — plus mmreality and
+ceskereality (URL→id extractors there are best-effort until those portals
+have data; a miss just shows no badge, never a wrong one).
+
+> **Note:** index pages on the React/Next.js portals (sreality, bezrealitky)
+> render cards client-side, so badges appear a moment after the results do and
+> re-attach as you scroll/paginate (a `MutationObserver` watches for new cards).
 
 ## Path 3 (publicly distributable build — not implemented)
 
