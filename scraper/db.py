@@ -11,17 +11,46 @@ sync for that listing.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Iterable, Sequence
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal, Protocol
 
 import psycopg
-from psycopg.types.json import Jsonb
+from psycopg.types.json import Jsonb, set_json_dumps
 
 from scraper.scraped_listing import ScrapedListing
 
 LOG = logging.getLogger(__name__)
+
+
+def _jsonb_default(obj: Any) -> Any:
+    """Coerce the DB-native types JSON can't represent so no jsonb write can
+    crash. `numeric` columns come back as Decimal and timestamps as datetime;
+    a payload that mixes a DB-read value into a jsonb column (an estimation
+    subject spec, a trace step) would otherwise raise 'not JSON serializable'.
+    JSON has no Decimal type — float matches what every other producer emits."""
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    raise TypeError(
+        f"Object of type {type(obj).__name__} is not JSON serializable"
+    )
+
+
+def _jsonb_dumps(obj: Any) -> str:
+    return json.dumps(obj, default=_jsonb_default)
+
+
+# Process-wide JSON serialization policy for every psycopg Jsonb/Json write.
+# Registered once so any code path that wraps a payload in Jsonb() — an
+# estimation subject spec, a trace step, a building proposal — survives a
+# DB-native Decimal/datetime sneaking in, instead of raising at write time.
+set_json_dumps(_jsonb_dumps)
 
 UpsertResult = Literal["new", "updated", "unchanged"]
 
