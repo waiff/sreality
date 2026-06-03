@@ -95,11 +95,22 @@ export function ControlGroup({
   children,
   className = '',
   bordered = true,
+  layout = 'stack',
 }: {
   title: string;
   children: ReactNode;
   className?: string;
   bordered?: boolean;
+  /* 'stack' (default) lays the rows out one-per-line. 'grid' flows them
+   * into an auto-fitting multi-column grid: each row gets a min width of
+   * 11rem and the browser packs as many columns as the group's width
+   * allows. Because the sidebar is operator-resizable, widening it
+   * directly turns a tall single column of rows into a short 2–3 column
+   * block — no viewport breakpoints, the layout tracks the actual
+   * container width. Only pass 'grid' for groups whose rows are all
+   * compact (range inputs / selects / tri-state toggles); pill grids and
+   * full-width widgets stay 'stack'. */
+  layout?: 'stack' | 'grid';
 }) {
   const headingId = useId();
   return (
@@ -122,7 +133,15 @@ export function ControlGroup({
       >
         {title}
       </p>
-      <div className="space-y-5">{children}</div>
+      <div
+        className={
+          layout === 'grid'
+            ? 'grid gap-x-4 gap-y-5 [grid-template-columns:repeat(auto-fit,minmax(11rem,1fr))]'
+            : 'space-y-5'
+        }
+      >
+        {children}
+      </div>
     </div>
   );
 }

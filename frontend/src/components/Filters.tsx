@@ -214,7 +214,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
-          <ControlGroup title="Size" bordered={false}>
+          <ControlGroup title="Size" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -229,7 +229,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
-          <ControlGroup title="Condition & material" bordered={false}>
+          <ControlGroup title="Condition & material" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -243,7 +243,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
-          <ControlGroup title="Price" bordered={false}>
+          <ControlGroup title="Price" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -280,7 +280,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
           title="Property"
           active={bandActive(filters, PROPERTY_KEYS)}
         >
-          <ControlGroup title="Building" bordered={false}>
+          <ControlGroup title="Building" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -299,7 +299,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
-          <ControlGroup title="Amenities" bordered={false}>
+          <ControlGroup title="Amenities" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -327,7 +327,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
           title="Market signals"
           active={bandActive(filters, SIGNALS_KEYS)}
         >
-          <ControlGroup title="Velocity" bordered={false}>
+          <ControlGroup title="Velocity" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -346,7 +346,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
-          <ControlGroup title="Price history & sources" bordered={false}>
+          <ControlGroup title="Price history & sources" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -384,7 +384,7 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
-          <ControlGroup title="City quality" bordered={false}>
+          <ControlGroup title="City quality" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
@@ -416,7 +416,11 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               customWidgets={customWidgets}
               flat
             />
-            <CityPopulationHint />
+            {/* Hint spans the full grid width so it never wedges into a
+                single narrow column beside the population inputs. */}
+            <div className="[grid-column:1/-1]">
+              <CityPopulationHint />
+            </div>
           </ControlGroup>
 
           {/* Legacy flexible filter — kept for the ~30 indexes the fast
