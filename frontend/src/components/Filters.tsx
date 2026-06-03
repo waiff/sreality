@@ -28,6 +28,9 @@ interface SidebarProps {
    * the map navigation. Optional so other consumers (Watchdog edit
    * form, etc.) can mount the sidebar without it. */
   onLocationPick?: (s: MapySuggestion) => void;
+  /* Operator-resizable width in px (Browse persists it). Optional so
+   * other consumers keep the default 320px sidebar. */
+  width?: number;
 }
 
 /* Which `ListingFilters` keys live in each collapsible band. Used only to
@@ -79,7 +82,7 @@ const bandActive = (
     return value !== def;
   });
 
-export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProps) {
+export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }: SidebarProps) {
   // <FilterForm> reads snake_case registry ids; Browse keeps the
   // camelCase `ListingFilters` shape its queries / URL serialisation
   // already use. The adapter in lib/filters bridges both directions
@@ -117,7 +120,10 @@ export function FilterSidebar({ filters, onChange, onLocationPick }: SidebarProp
   };
 
   return (
-    <aside className="w-[320px] shrink-0 border-r border-[var(--color-rule)] sticky top-14 self-start max-h-[calc(100dvh-3.5rem)] overflow-y-auto">
+    <aside
+      style={{ width }}
+      className="shrink-0 border-r border-[var(--color-rule)] sticky top-14 self-start max-h-[calc(100dvh-3.5rem)] overflow-y-auto"
+    >
       <div className="px-5 py-4 flex items-center justify-between border-b border-[var(--color-rule-soft)]">
         <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
           Filters
