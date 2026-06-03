@@ -435,6 +435,11 @@ def parse_detail(
         "params": params,
     }
 
+    # No `subtype` (migration 152): maxima exposes no property-subtype signal —
+    # the "typ domu" spec row is STRUCTURAL (Patrový / Přízemní), the native-id
+    # prefix is category-main level, and the operator opted to leave it NULL
+    # rather than infer from the free-text title. NULL still shows at the
+    # category level; it only drops out under a specific-subtype filter.
     return ScrapedListing(
         source="maxima",
         source_id_native=source_id,

@@ -211,6 +211,43 @@ def test_parse_detail_falls_back_when_breadcrumb_missing():
     assert (listing.category_main, listing.category_type) == ("byt", "prodej")
 
 
+# Verbatim breadcrumb shape captured live from reality.bazos.cz fine-section
+# detail pages (div.drobky, the section in the LAST link's href). The fine
+# section drives BOTH category_main and the portal-agnostic subtype.
+def _bazos_section_html(section: str) -> str:
+    return (
+        '<!DOCTYPE html><html><body>'
+        f'<div class="drobky"><a href="https://www.bazos.cz/">Hlavní stránka</a> > '
+        f'<a href="https://reality.bazos.cz/">Reality</a> > '
+        f'<a href="https://reality.bazos.cz/prodam/">Prodej</a> > '
+        f'<a href="https://reality.bazos.cz/prodam/{section}/">X</a> > '
+        '<b>Inzerát č. 1</b></div>'
+        '<h1 class="nadpisdetail">Detail</h1>'
+        '<table><tr><td>Cena:</td><td>1 000 000 Kč</td></tr></table>'
+        '<div class="popisdetail">Popis.</div></body></html>'
+    )
+
+
+def test_parse_detail_subtype_from_fine_section_breadcrumb():
+    cases = {
+        "chata": ("dum", "chata"),
+        "kancelar": ("komercni", "kancelar"),
+        "sklad": ("komercni", "sklad"),
+        "prostory": ("komercni", "obchodni_prostor"),
+        "restaurace": ("komercni", "restaurace"),
+        "dum": ("dum", None),          # generic house section — no subtype
+        "byt": ("byt", None),
+    }
+    for section, (cm, sub) in cases.items():
+        listing = parse_detail(
+            _bazos_section_html(section),
+            source_url=f"https://reality.bazos.cz/inzerat/1/{section}.php",
+            category_main=None, category_type=None,
+        )
+        assert listing.category_main == cm, section
+        assert listing.subtype == sub, section
+
+
 def test_parse_detail_coords_from_map_link_outside_lokalita_cell():
     """Live bazos renders the "show on map" link OUTSIDE the Lokalita table cell
     (the fixture above happens to have it inside). Coords must still be extracted

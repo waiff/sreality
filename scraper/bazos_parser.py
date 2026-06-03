@@ -40,11 +40,30 @@ SALE_TYPE: dict[str, str] = {
 CATEGORY_MAIN: dict[str, str] = {
     "byt": "byt",
     "dum": "dum",
+    "chata": "dum",          # bazoš "Chaty, Chalupy" section
     "pozemky": "pozemek",
     "pozemek": "pozemek",
+    "zahrada": "pozemek",
     "nebytove": "komercni",
     "komercni": "komercni",
+    "kancelar": "komercni",
+    "prostory": "komercni",  # "Obchodní prostory"
+    "sklad": "komercni",
+    "restaurace": "komercni",
+    "garaz": "ostatni",
     "ostatni": "ostatni",
+}
+
+# Portal-agnostic subtype (migration 152), keyed on the bazoš section slug that
+# appears in the detail breadcrumb / index URL. Only the sections that map onto
+# a single canonical dum/komercni subtype are listed; "dum" (generic houses,
+# bazoš doesn't split rodinný/vila) and land/garage sections carry no subtype.
+SUBTYPE: dict[str, str] = {
+    "chata": "chata",              # bazoš lumps chaty+chalupy; chata is the slug
+    "restaurace": "restaurace",
+    "kancelar": "kancelar",
+    "prostory": "obchodni_prostor",
+    "sklad": "sklad",
 }
 
 _ID_RE = re.compile(r"/inzerat/(\d+)/")
@@ -447,6 +466,20 @@ def _category_from_breadcrumb(tree: HTMLParser) -> tuple[str | None, str | None]
     return (cmain, ctype)
 
 
+def _subtype_from_breadcrumb(tree: HTMLParser) -> str | None:
+    """Portal-agnostic subtype from the detail breadcrumb's section segment, or
+    None. Same div.drobky href-segment signal as `_category_from_breadcrumb` —
+    e.g. ".../prodam/kancelar/" -> 'kancelar'."""
+    node = tree.css_first("div.drobky")
+    if node is None:
+        return None
+    for a in node.css("a"):
+        for seg in (a.attributes.get("href") or "").split("/"):
+            if seg in SUBTYPE:
+                return SUBTYPE[seg]
+    return None
+
+
 def parse_detail(
     html: str,
     *,
@@ -463,6 +496,7 @@ def parse_detail(
     bc_main, bc_type = _category_from_breadcrumb(tree)
     category_main = bc_main or category_main
     category_type = bc_type or category_type
+    subtype = _subtype_from_breadcrumb(tree)
 
     title = _text(tree.css_first("h1.nadpisdetail")) or ""
     description = _text(tree.css_first("div.popisdetail"))
@@ -514,6 +548,7 @@ def parse_detail(
         source_url=source_url,
         category_main=category_main,
         category_type=category_type,
+        subtype=subtype,
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=_parse_area(haystack),
