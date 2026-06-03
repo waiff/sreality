@@ -37,6 +37,7 @@ import {
   buildPriceSeries,
   summarizePriceHistory,
 } from '@/lib/priceHistory';
+import { portalListingUrl, srealityListingUrl, type SrealityCategory } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 
@@ -137,7 +138,11 @@ export default function ListingDetail() {
     const url =
       currentSource?.source_url
       ?? (listing.source === 'sreality'
-        ? `https://www.sreality.cz/detail/${listing.category_type ?? 'prodej'}/${listing.category_main ?? 'byt'}/x/x/${listing.sreality_id}`
+        ? (srealityListingUrl(listing.sreality_id, {
+            categoryType: listing.category_type,
+            categoryMain: listing.category_main,
+            categorySubCb: listing.category_sub_cb,
+          }) ?? undefined)
         : undefined);
     if (!url) return undefined;
     const categoryMain =
@@ -227,7 +232,15 @@ export default function ListingDetail() {
       <Hairline />
       <FreshnessBlock sreality_id={listing.sreality_id} checks={checks} />
       <Hairline />
-      <OutboundBlock sreality_id={listing.sreality_id} source={currentSource} />
+      <OutboundBlock
+        sreality_id={listing.sreality_id}
+        source={currentSource}
+        category={{
+          categoryType: listing.category_type,
+          categoryMain: listing.category_main,
+          categorySubCb: listing.category_sub_cb,
+        }}
+      />
     </Page>
   );
 }
@@ -666,24 +679,36 @@ function OutcomeChip({ outcome }: { outcome: string }) {
 function OutboundBlock({
   sreality_id,
   source,
+  category,
 }: {
   sreality_id: number;
   source?: PropertySource;
+  category: SrealityCategory;
 }) {
-  // Prefer the listing's real source URL (any portal); fall back to sreality
-  // for legacy rows where property_sources hasn't been populated.
-  const href =
-    source?.source_url
-    ?? `https://www.sreality.cz/detail/pronajem/byt/x/x/${sreality_id}`;
-  const label = source ? `Open on ${source.source}` : 'Open on sreality.cz';
+  // Prefer the listing's real source URL (any portal); for sreality (which
+  // stores none) reconstruct from the category triple. portalListingUrl returns
+  // null when it can't build a resolvable URL — link to the in-app view then,
+  // never to a sreality 404.
+  const portal = source?.source ?? 'sreality';
+  const href = portalListingUrl(
+    portal,
+    source?.source_url,
+    source?.source_id_native ?? sreality_id,
+    category,
+  );
+  const cls =
+    'inline-flex items-center gap-1.5 text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors capitalize';
+  if (!href) {
+    return (
+      <Link to={`/listing/${sreality_id}`} className={cls}>
+        View listing
+        <OutArrow />
+      </Link>
+    );
+  }
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="inline-flex items-center gap-1.5 text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors capitalize"
-    >
-      {label}
+    <a href={href} target="_blank" rel="noopener noreferrer" className={cls}>
+      {`Open on ${portal}`}
       <OutArrow />
     </a>
   );
