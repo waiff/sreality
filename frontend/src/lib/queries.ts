@@ -574,6 +574,7 @@ export const fetchBrowseStats = async (
     cellar_filter:           triToBool(f.cellar),
     garage_filter:           triToBool(f.garage),
     category_sub_cb_filter:  f.categorySubCb,
+    subtype_filter:          f.subtype.length ? f.subtype : null,
     building_type_filter:    buildingTypeArray,
     condition_match_filter:  f.conditionMatch.length ? f.conditionMatch : null,
     tag_ids:                 f.tags.length ? f.tags : null,

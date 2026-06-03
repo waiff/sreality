@@ -702,11 +702,12 @@ def _build_registry() -> dict[str, FilterDef]:
                 "virtualni_kancelar, ostatni). A listing matches if its "
                 "subtype is in the list. Normalized across portals — distinct "
                 "from the sreality-only numeric category_sub_cb. The Browse "
-                "agenda is added when the sidebar UI ships."
+                "sidebar renders the group matching the selected category_main "
+                "(dum / komercni) and hides it otherwise."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.MULTISELECT,
-            agendas=frozenset({Agenda.WATCHDOG}),
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             enum_values=SUBTYPE_OPTIONS,
         ),
         FilterDef(

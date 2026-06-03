@@ -688,10 +688,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string_list",
       "pg_column": "subtype",
       "default": null,
-      "description": "Portal-agnostic property sub-type (multi-select). Only meaningful for category_main in (dum, komercni): houses (rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, zemedelska_usedlost, na_klic, pamatka_jine) and commercial (kancelar, sklad, obchodni_prostor, vyroba, ubytovani, restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, virtualni_kancelar, ostatni). A listing matches if its subtype is in the list. Normalized across portals — distinct from the sreality-only numeric category_sub_cb. The Browse agenda is added when the sidebar UI ships.",
+      "description": "Portal-agnostic property sub-type (multi-select). Only meaningful for category_main in (dum, komercni): houses (rodinny_dum, vila, chata, chalupa, vicegeneracni_dum, zemedelska_usedlost, na_klic, pamatka_jine) and commercial (kancelar, sklad, obchodni_prostor, vyroba, ubytovani, restaurace, cinzovni_dum, apartmany, ordinace, zemedelsky, virtualni_kancelar, ostatni). A listing matches if its subtype is in the list. Normalized across portals — distinct from the sreality-only numeric category_sub_cb. The Browse sidebar renders the group matching the selected category_main (dum / komercni) and hides it otherwise.",
       "category": "Property",
       "ui_control": "multiselect",
       "agendas": [
+        "browse",
         "watchdog"
       ],
       "constraints": null,

@@ -16,8 +16,10 @@ import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import {
   LocationControl,
   LocationTypeahead,
+  MultiselectChips,
   TagPicker,
 } from '@/components/filter-controls';
+import { SUBTYPE_LABELS_BY_MAIN } from '@/lib/enums';
 
 interface SidebarProps {
   filters: ListingFilters;
@@ -41,7 +43,7 @@ interface SidebarProps {
 const ESSENTIALS_KEYS = [
   'categoryMain', 'categoryType', 'status', 'portals',
   'districts', 'locationMode', 'centerRadius',
-  'dispositions',
+  'dispositions', 'subtype',
   'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
   'usableAreaMin', 'usableAreaMax',
   'conditionMatch', 'buildingMaterial',
@@ -105,6 +107,14 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
       (next.mfGrossYieldPctMin != null || next.mfGrossYieldPctMax != null)
     ) {
       next = { ...next, mfGrossYieldPctMin: null, mfGrossYieldPctMax: null };
+    }
+    // Subtype only applies to houses / commercial; clear it when leaving so a
+    // hidden, still-active filter never silently empties the cohort.
+    if (
+      next.categoryMain !== 'dum' && next.categoryMain !== 'komercni' &&
+      next.subtype.length > 0
+    ) {
+      next = { ...next, subtype: [] };
     }
     onChange(next);
   };
@@ -200,6 +210,22 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               }
             />
           </ControlGroup>
+
+          {(filters.categoryMain === 'dum' || filters.categoryMain === 'komercni') && (
+            <ControlGroup title="Subtype" bordered={false}>
+              <MultiselectChips
+                value={filters.subtype}
+                options={SUBTYPE_LABELS_BY_MAIN[filters.categoryMain].map((o) => ({
+                  value: o.slug,
+                  label: o.label,
+                }))}
+                onChange={(next) =>
+                  handleRegistryChange([{ id: 'subtype', value: next }])
+                }
+                cols={2}
+              />
+            </ControlGroup>
+          )}
 
           <ControlGroup title="Disposition" bordered={false}>
             <FilterForm

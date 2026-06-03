@@ -75,6 +75,19 @@ describe('URL round-trip', () => {
     expect(fromSearchParams(dirty).conditionMatch).toEqual(['novostavba']);
   });
 
+  it('round-trips the subtype multi-select', () => {
+    const f: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      categoryMain: 'dum',
+      subtype: ['rodinny_dum', 'vila'],
+    };
+    const round = fromSearchParams(toSearchParams(f));
+    expect(round.subtype).toEqual(['rodinny_dum', 'vila']);
+    expect(toSearchParams(f).get('subtype')).toBe('rodinny_dum,vila');
+    // Empty subtype emits no param.
+    expect(toSearchParams(DEFAULT_FILTERS).has('subtype')).toBe(false);
+  });
+
   it('round-trips the centre+radius mode and coordinates', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,
