@@ -1186,6 +1186,10 @@ export const watchdogKeys = {
     ['watchdog', 'dispatches', params] as const,
 };
 
+export const filterPresetKeys = {
+  all: ['filter-presets'] as const,
+};
+
 const sortedIds = (ids: ReadonlyArray<number>): number[] =>
   [...ids].sort((a, b) => a - b);
 

@@ -52,6 +52,7 @@ from api.estimation_runs import (
 from api import notifications as nf_module
 from api.routes.admin import router as admin_router
 from api.routes.dedup import router as dedup_router
+from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
 from api.routes.notifications import router as notifications_router
 from scraper import image_storage
@@ -194,6 +195,9 @@ app.include_router(notifications_router)
 # /dedup/* (cross-source merge review: list candidates, merge/dismiss/unmerge)
 # — mutating operator actions, standard bearer gate.
 app.include_router(dedup_router)
+# /filter-presets/* (named Browse filter presets: CRUD) — operator content,
+# standard bearer gate. Decoupled from /notifications (a preset never fires).
+app.include_router(filter_presets_router)
 # /images/* redirects a listing-photo key to a presigned R2 URL. Public (like
 # /health) — an <img> tag can't send a bearer header and these are public
 # photos; the key regex keeps it scoped to listing images only.

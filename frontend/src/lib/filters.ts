@@ -842,6 +842,46 @@ export const isDefault = (f: ListingFilters): boolean =>
 
 
 /* -------------------------------------------------------------------------- */
+/* Saved filter presets                                                        */
+/*                                                                            */
+/* A preset stores the full ListingFilters. These helpers normalise what we   */
+/* persist and detect whether a loaded preset has since been edited. Equality  */
+/* is computed on the canonical URL form (`toSearchParams`) — the single       */
+/* source of truth for what a filter set "is" — rather than a hand-rolled      */
+/* deep-equal that would rot as fields are added.                              */
+/* -------------------------------------------------------------------------- */
+
+/** Build the spec to persist. The transient map viewport (`bounds`) is
+ *  dropped unless the operator opts to include the current map area, so a
+ *  criteria-only preset doesn't pin a stale bounding box. */
+export const filtersForPreset = (
+  f: ListingFilters,
+  includeMapArea: boolean,
+): ListingFilters => (includeMapArea ? f : { ...f, bounds: null });
+
+const canonicalParams = (sp: URLSearchParams): string =>
+  [...sp.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('&');
+
+/** True when `current` matches the `saved` preset. The map viewport is
+ *  ignored unless the preset deliberately stored one, so panning the map
+ *  after loading a criteria-only preset doesn't mark it dirty. Both sides
+ *  are merged onto DEFAULT_FILTERS first so a preset persisted under an
+ *  older schema (missing a newer field) still compares cleanly. */
+export const filtersEqualForPreset = (
+  current: ListingFilters,
+  saved: ListingFilters,
+): boolean => {
+  const a = toSearchParams({ ...DEFAULT_FILTERS, ...current });
+  const b = toSearchParams({ ...DEFAULT_FILTERS, ...saved });
+  if (!b.has('bbox')) a.delete('bbox');
+  return canonicalParams(a) === canonicalParams(b);
+};
+
+
+/* -------------------------------------------------------------------------- */
 /* Registry adapter                                                            */
 /*                                                                            */
 /* Browse keeps its camelCase `ListingFilters` shape; the unified              */

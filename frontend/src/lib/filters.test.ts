@@ -20,10 +20,13 @@ import {
   DEFAULT_FILTERS,
   applyRegistryUpdate,
   applyRegistryUpdates,
+  filtersEqualForPreset,
+  filtersForPreset,
   filtersToWatchdogSpec,
   fromSearchParams,
   isDefault,
   type ListingFilters,
+  type MapBounds,
   listingFiltersToRegistryView,
   toSearchParams,
   watchdogNameSuggestion,
@@ -486,5 +489,52 @@ describe('watchdogNameSuggestion', () => {
 
   it('falls back to just the category when nothing else is set', () => {
     expect(watchdogNameSuggestion(DEFAULT_FILTERS)).toBe('byt pronajem');
+  });
+});
+
+describe('filter presets', () => {
+  const BOUNDS: MapBounds = { west: 14.3, south: 50.0, east: 14.6, north: 50.2 };
+
+  it('filtersForPreset drops bounds unless the map area is included', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 6_000_000, bounds: BOUNDS };
+    expect(filtersForPreset(f, false).bounds).toBeNull();
+    expect(filtersForPreset(f, true).bounds).toEqual(BOUNDS);
+    // Non-viewport filters survive either way.
+    expect(filtersForPreset(f, false).priceMax).toBe(6_000_000);
+  });
+
+  it('matches identical filter sets', () => {
+    const f: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000, dispositions: ['2+kk'] };
+    expect(filtersEqualForPreset(f, { ...f })).toBe(true);
+  });
+
+  it('detects a changed filter as not matching', () => {
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000 };
+    const current: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 4_000_000 };
+    expect(filtersEqualForPreset(current, saved)).toBe(false);
+  });
+
+  it('ignores the map viewport when the preset stored none', () => {
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000, bounds: null };
+    const current: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000, bounds: BOUNDS };
+    // Panning the map after loading a criteria-only preset must NOT mark it dirty.
+    expect(filtersEqualForPreset(current, saved)).toBe(true);
+  });
+
+  it('honours the map viewport when the preset stored one', () => {
+    const saved: ListingFilters = { ...DEFAULT_FILTERS, bounds: BOUNDS };
+    const moved: MapBounds = { ...BOUNDS, north: 50.5 };
+    const current: ListingFilters = { ...DEFAULT_FILTERS, bounds: moved };
+    expect(filtersEqualForPreset(current, saved)).toBe(false);
+    expect(filtersEqualForPreset({ ...DEFAULT_FILTERS, bounds: BOUNDS }, saved)).toBe(true);
+  });
+
+  it('treats a preset persisted without a newer field as equal to current defaults', () => {
+    // Simulate an older spec missing a field added later.
+    const saved = { ...DEFAULT_FILTERS } as Record<string, unknown>;
+    delete saved.nearOverall15kmMin;
+    expect(
+      filtersEqualForPreset(DEFAULT_FILTERS, saved as unknown as ListingFilters),
+    ).toBe(true);
   });
 });
