@@ -359,8 +359,11 @@ export default function Datasets() {
       {runMutation.isError && (
         <p className="mt-2 text-xs text-[var(--color-brick)]">{(runMutation.error as Error).message}</p>
       )}
-      {runMutation.isSuccess && dispatchedAt && runQ.data?.status !== 'running' && (
-        <p className="mt-2 text-xs text-[var(--color-ink-3)]">Run dispatched — progress will appear here once it starts (~1–2 min).</p>
+      {dispatchedAt && runQ.data?.status !== 'running' && Date.now() - dispatchedAt < 10 * 60_000 && (
+        <p className="mt-2 text-xs text-[var(--color-copper)]">
+          ✓ Run dispatched — it starts when the scrape queue is free (one runs at a time);
+          progress appears here once it begins (~1–2 min, longer if another scrape is running).
+        </p>
       )}
 
       {showNew && (
@@ -642,6 +645,10 @@ const COND: Record<string, string> = {
 const CONSTR: Record<string, string> = { '5': 'panel', '2': 'cihla', '10': 'ostatní' };
 const OWN: Record<string, string> = { '1': 'osobní', '2': 'družstevní', '3': 'státní' };
 
+const PERIOD_LABEL: Record<string, string> = {
+  monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semiannual', annual: 'Annual',
+};
+
 function FilterChips({ dataset, count }: { dataset: PriceStatDataset; count: number }) {
   const chips: string[] = [];
   if (dataset.building_condition) chips.push(COND[dataset.building_condition] ?? `stav ${dataset.building_condition}`);
@@ -650,12 +657,28 @@ function FilterChips({ dataset, count }: { dataset: PriceStatDataset; count: num
   if (dataset.usable_area_from != null || dataset.usable_area_to != null)
     chips.push(`${dataset.usable_area_from ?? 0}–${dataset.usable_area_to ?? '∞'} m²`);
   if (dataset.distance) chips.push(`okolí ${dataset.distance} km`);
+
+  // Coverage (not part of the definition): the prevailing periodicity + window.
+  const period = PERIOD_LABEL[dataset.periodicity ?? 'monthly'] ?? dataset.periodicity;
+  const window = dataset.start_ym && dataset.end_ym ? `${dataset.start_ym} → ${dataset.end_ym}` : null;
+  const selected = dataset.obec_ids?.length ?? null;
+
   return (
     <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-[var(--color-ink-3)]">
       {chips.map((c) => (
         <span key={c} className="px-2 py-0.5 rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-2)]">{c}</span>
       ))}
-      {count > 0 && <span className="ml-1">· {count} municipalities</span>}
+      {period && (
+        <span className="px-2 py-0.5 rounded-[var(--radius-xs)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)]">{period}</span>
+      )}
+      {window && (
+        <span className="px-2 py-0.5 rounded-[var(--radius-xs)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)] tabular-nums">{window}</span>
+      )}
+      {count > 0 && (
+        <span className="ml-1 tabular-nums">
+          · {count}{selected && selected !== count ? ` of ${selected}` : ''} municipalities
+        </span>
+      )}
     </div>
   );
 }
