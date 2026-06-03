@@ -30,6 +30,13 @@ ESTATE_TYPE: dict[str, str] = {
     "GARAZ": "ostatni",
     "REKREACNI_OBJEKT": "ostatni",
 }
+# Portal-agnostic subtype (migration 152) where the estateType is specific
+# enough. Only KANCELAR carries a clean sub-type; the other commercial value
+# (NEBYTOVY_PROSTOR) is generic and DUM has no house granularity, so they stay
+# None.
+ESTATE_SUBTYPE: dict[str, str] = {
+    "KANCELAR": "kancelar",
+}
 CONSTRUCTION: dict[str, str] = {
     "BRICK": "cihla",
     "PANEL": "panel",
@@ -132,6 +139,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     uri = advert.get("uri") or native_id
     category_type = OFFER_TYPE.get(advert.get("offerType"))
     category_main = ESTATE_TYPE.get(advert.get("estateType"))
+    subtype = ESTATE_SUBTYPE.get(advert.get("estateType"))
 
     gps = advert.get("gps") or {}
     lat = _num(gps.get("lat"))
@@ -159,6 +167,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         source_url=detail_url(uri),
         category_main=category_main,
         category_type=category_type,
+        subtype=subtype,
         price_czk=_int(advert.get("price")),
         price_unit="měsíc" if category_type == "pronajem" else "celkem",
         area_m2=_num(advert.get("surface")),

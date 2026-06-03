@@ -88,6 +88,19 @@ def test_core_mapping():
     assert listing.total_floors == 8
     assert listing.has_lift is True
     assert listing.description == "Hezký byt."
+    assert listing.subtype is None  # BYT has no property sub-type
+
+
+def test_office_estate_type_maps_to_subtype():
+    listing = parse_advert(_advert(estateType="KANCELAR"))
+    assert listing.category_main == "komercni"
+    assert listing.subtype == "kancelar"
+
+
+def test_generic_commercial_has_no_subtype():
+    listing = parse_advert(_advert(estateType="NEBYTOVY_PROSTOR"))
+    assert listing.category_main == "komercni"
+    assert listing.subtype is None
 
 
 def test_wood_construction_canonicalises_to_drevo():

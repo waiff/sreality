@@ -15,6 +15,7 @@ from scraper.remax_parser import (
     index_price,
     parse_detail,
     parse_index,
+    subtype_of,
     type_of,
 )
 
@@ -135,6 +136,20 @@ def test_category_from_typ():
     assert category_from_typ("Kanceláře") == "komercni"
     assert category_from_typ("Malé objekty, garáže") == "ostatni"
     assert category_from_typ(None) is None
+
+
+def test_subtype_of():
+    # collision-free commercial / historic correspondences
+    assert subtype_of("Kanceláře") == "kancelar"
+    assert subtype_of("Obchodní") == "obchodni_prostor"
+    assert subtype_of("Sklady") == "sklad"
+    assert subtype_of("Výroba") == "vyroba"
+    assert subtype_of("Zemědělské objekty") == "zemedelsky"
+    assert subtype_of("Historické objekty") == "pamatka_jine"
+    # ambiguous combined house types are deliberately left without a subtype
+    assert subtype_of("Domy a vily") is None
+    assert subtype_of("Chaty a chalupy") is None
+    assert subtype_of(None) is None
 
 
 def test_category_of_title_fallback():
