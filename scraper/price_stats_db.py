@@ -160,6 +160,52 @@ def localities_for_obec_ids(
         return cur.fetchall()
 
 
+def localities_ordered(
+    conn: psycopg.Connection,
+    dataset_id: int,
+    obec_ids: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Localities for a dataset run, STALEST first.
+
+    Ordered by each locality's most-recent observation for THIS dataset
+    (never-scraped first, then oldest). A time-budgeted / partial run thus
+    always advances the cities that need it most, so full coverage is reached
+    across runs (and then refreshes oldest-first) rather than re-doing city 1
+    every run. `obec_ids` None = the global resolved set.
+    """
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT l.entity_type, l.entity_id, l.name, l.obec_id
+              FROM price_stat_localities l
+              LEFT JOIN (
+                SELECT entity_type, entity_id, max(fetched_at) AS mf
+                  FROM price_stat_observations
+                 WHERE dataset_id = %(did)s
+                 GROUP BY entity_type, entity_id
+              ) o USING (entity_type, entity_id)
+             WHERE (%(obec_ids)s IS NULL OR l.obec_id = ANY(%(obec_ids)s))
+             ORDER BY o.mf ASC NULLS FIRST, l.name
+            """,
+            {"did": dataset_id, "obec_ids": obec_ids},
+        )
+        return cur.fetchall()
+
+
+def sweep_stale_runs(conn: psycopg.Connection, *, older_than_min: int = 90) -> int:
+    """Mark price_stat_runs left 'running' (a hard-killed / timed-out job that
+    couldn't finish_run) as failed, so the UI banner doesn't poll forever."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE price_stat_runs SET status = 'failed', finished_at = now(), "
+            "error = COALESCE(error, 'run did not finish (timed out or killed)') "
+            "WHERE status = 'running' "
+            "AND started_at < now() - make_interval(mins => %s)",
+            (older_than_min,),
+        )
+        return cur.rowcount
+
+
 def locality_exists(conn: psycopg.Connection, entity_type: str, entity_id: int) -> bool:
     with conn.cursor() as cur:
         cur.execute(

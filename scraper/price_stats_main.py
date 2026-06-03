@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -88,18 +89,15 @@ def _dataset_window(
 def _dataset_localities(
     conn: Any,
     dataset: dict[str, Any],
-    global_localities: list[dict[str, Any]],
     *,
     dry_run: bool,
 ) -> list[dict[str, Any]]:
-    """Localities for a dataset: its selected obce, else the global list."""
+    """Localities for a dataset (its selected obce, else all), stalest first."""
     obec_ids = dataset.get("obec_ids")
-    if obec_ids:
-        ids = [int(x) for x in obec_ids]
-        if not dry_run:
-            db.resolve_obce(conn, ids)
-        return db.localities_for_obec_ids(conn, ids)
-    return global_localities
+    ids = [int(x) for x in obec_ids] if obec_ids else None
+    if ids and not dry_run:
+        db.resolve_obce(conn, ids)
+    return db.localities_ordered(conn, dataset["id"], ids)
 
 
 def resolve_localities(
@@ -134,13 +132,24 @@ def run_dataset(
     window_years: int,
     chunk_months: int,
     dry_run: bool,
-) -> None:
+    deadline: float | None = None,
+) -> bool:
+    """Scrape one dataset. Returns True if it stopped early on the time budget
+    (partial — the stalest cities were done; re-run to continue)."""
     run_id = 0 if dry_run else db.start_run(
         conn, dataset["id"], cities_total=len(localities)
     )
     total_obs = 0
+    budget_hit = False
     try:
         for i, loc in enumerate(localities, start=1):
+            if deadline is not None and time.monotonic() > deadline:
+                LOG.warning(
+                    "BUDGET reached dataset=%s stopped at city %d/%d",
+                    dataset["id"], i - 1, len(localities),
+                )
+                budget_hit = True
+                break
             for category_type_cb in CATEGORIES:
                 series = _fetch_with_auth_retry(
                     client, dataset, loc, category_type_cb,
@@ -176,13 +185,14 @@ def run_dataset(
                 localities=len(localities), observations=total_obs,
             )
             LOG.info(
-                "DATASET done id=%s observations=%d cities=%d metrics=%d",
-                dataset["id"], total_obs, len(localities), metrics,
+                "DATASET done id=%s observations=%d cities=%d metrics=%d partial=%s",
+                dataset["id"], total_obs, len(localities), metrics, budget_hit,
             )
     except Exception as exc:
         if not dry_run:
             db.finish_run(conn, run_id, status="failed", error=str(exc)[:2000])
         raise
+    return budget_hit
 
 
 def _fetch_with_auth_retry(
@@ -214,6 +224,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--window-years", type=int, default=5)
     parser.add_argument("--chunk-months", type=int, default=24)
     parser.add_argument("--rate", type=float, default=2.0, help="requests/sec")
+    # Stop fetching this many seconds into the run so finish_run + recompute +
+    # choropleth refresh complete inside the workflow's 60-min cap. A dataset
+    # bigger than one budget is scraped across runs (stalest cities first).
+    parser.add_argument("--max-seconds", type=int, default=2880)
     parser.add_argument("--resolve-only", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
@@ -223,8 +237,12 @@ def main(argv: list[str] | None = None) -> int:
     today = dt.date.today()
     start_ym = (args.start_year, 1)
     end_ym = (today.year, today.month)
+    deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
 
     conn = db.connect()
+    swept = db.sweep_stale_runs(conn)
+    if swept:
+        LOG.info("SWEEP marked %d stale 'running' runs as failed", swept)
     cookies = get_session_cookies()
     client = PriceStatsClient(cookies=cookies, limiter=RateLimiter(args.rate))
 
@@ -233,8 +251,6 @@ def main(argv: list[str] | None = None) -> int:
     LOG.info("RESOLVE added=%d total_cities=%d", added, len(city_names))
     if args.resolve_only:
         return 0
-
-    global_localities = db.list_localities(conn)
 
     if args.dataset_id is not None:
         ds = db.get_dataset(conn, args.dataset_id)
@@ -246,17 +262,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     for dataset in datasets:
-        locs = _dataset_localities(conn, dataset, global_localities, dry_run=args.dry_run)
+        locs = _dataset_localities(conn, dataset, dry_run=args.dry_run)
         if not locs:
             LOG.warning("dataset %s has no localities to fetch", dataset["id"])
             continue
         ds_start, ds_end = _dataset_window(dataset, start_ym, end_ym)
-        run_dataset(
+        budget_hit = run_dataset(
             conn, client, dataset, locs,
             start_ym=ds_start, end_ym=ds_end,
             window_years=args.window_years, chunk_months=args.chunk_months,
-            dry_run=args.dry_run,
+            dry_run=args.dry_run, deadline=deadline,
         )
+        if budget_hit:
+            LOG.warning("time budget exhausted; remaining datasets deferred to next run")
+            break
 
     if not args.dry_run:
         db.refresh_choropleth(conn)
