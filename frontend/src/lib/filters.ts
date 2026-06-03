@@ -874,6 +874,15 @@ export const isDefault = (f: ListingFilters): boolean =>
 /* deep-equal that would rot as fields are added.                              */
 /* -------------------------------------------------------------------------- */
 
+/** Persisted preset payload. The opaque `filter_spec` blob the API stores
+ *  verbatim. `sort` is the serialized sort param (`sortToParam` form, e.g.
+ *  "-price_czk") — kept as a plain string so this module needn't depend on
+ *  the queries sort types. `null`/absent means the default sort. */
+export interface PresetSpec {
+  filters: ListingFilters;
+  sort?: string | null;
+}
+
 /** Build the spec to persist. The transient map viewport (`bounds`) is
  *  dropped unless the operator opts to include the current map area, so a
  *  criteria-only preset doesn't pin a stale bounding box. */
@@ -881,6 +890,22 @@ export const filtersForPreset = (
   f: ListingFilters,
   includeMapArea: boolean,
 ): ListingFilters => (includeMapArea ? f : { ...f, bounds: null });
+
+/** Read a stored preset blob, tolerating the legacy bare-`ListingFilters`
+ *  shape (presets saved before sort was captured). Always returns a complete
+ *  filter set merged onto DEFAULT_FILTERS, plus the saved sort (or null for
+ *  the default). */
+export const readPresetSpec = (
+  spec: PresetSpec | ListingFilters,
+): { filters: ListingFilters; sort: string | null } => {
+  const wrapped =
+    spec != null && (spec as PresetSpec).filters != null;
+  const filters = wrapped
+    ? (spec as PresetSpec).filters
+    : (spec as ListingFilters);
+  const sort = wrapped ? (spec as PresetSpec).sort ?? null : null;
+  return { filters: { ...DEFAULT_FILTERS, ...filters }, sort };
+};
 
 const canonicalParams = (sp: URLSearchParams): string =>
   [...sp.entries()]

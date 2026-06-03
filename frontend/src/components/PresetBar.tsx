@@ -1,10 +1,10 @@
 /* Saved filter presets, surfaced as buttons next to the Browse headline.
  *
- * A preset is a named filter set. Clicking a chip restores its filters (Browse
- * owns the URL write via `onLoad`); the active chip is highlighted and, once
- * the operator edits a filter, an "Update" button appears. Save / rename /
- * delete go through the bearer-gated FastAPI service (migration 150) — a preset
- * never fires a notification, unlike a Watchdog.
+ * A preset is a named filter set + sort order. Clicking a chip restores both
+ * (Browse owns the URL write via `onLoad`); the active chip is highlighted and,
+ * once the operator edits a filter or the sort, an "Update" button appears.
+ * Save / rename / delete go through the bearer-gated FastAPI service
+ * (migration 151) — a preset never fires a notification, unlike a Watchdog.
  *
  * The whole bar hides when the API base URL isn't configured (presets need the
  * service to read or write). */
@@ -20,17 +20,25 @@ import {
   listFilterPresets,
   updateFilterPreset,
 } from '@/lib/api';
-import { filterPresetKeys } from '@/lib/queries';
+import {
+  filterPresetKeys,
+  DEFAULT_SORT,
+  sortToParam,
+  type SortSpec,
+} from '@/lib/queries';
 import {
   filtersEqualForPreset,
   filtersForPreset,
+  readPresetSpec,
   type ListingFilters,
+  type PresetSpec,
 } from '@/lib/filters';
 import type { FilterPreset } from '@/lib/types';
 import PresetSaveModal from '@/components/PresetSaveModal';
 
 export interface PresetBarProps {
   filters: ListingFilters;
+  sort: SortSpec;
   activePresetId: string | null;
   onLoad: (preset: FilterPreset) => void;
   onActivePresetIdChange: (id: string | null) => void;
@@ -43,6 +51,7 @@ type ModalState =
 
 export default function PresetBar({
   filters,
+  sort,
   activePresetId,
   onLoad,
   onActivePresetIdChange,
@@ -58,11 +67,19 @@ export default function PresetBar({
   });
   const presets = presetsQ.data?.data ?? [];
 
+  const sortParam = sortToParam(sort);
+  const defaultSortParam = sortToParam(DEFAULT_SORT);
+
   const active =
     activePresetId != null
       ? presets.find((p) => p.id === activePresetId) ?? null
       : null;
-  const dirty = active ? !filtersEqualForPreset(filters, active.filter_spec) : false;
+  const activeSpec = active ? readPresetSpec(active.filter_spec) : null;
+  /* Dirty when either the filters OR the sort drift from the loaded preset. */
+  const dirty = activeSpec
+    ? !filtersEqualForPreset(filters, activeSpec.filters) ||
+      (activeSpec.sort ?? defaultSortParam) !== sortParam
+    : false;
   const hasMapArea = filters.bounds != null;
 
   const [modal, setModal] = useState<ModalState | null>(null);
@@ -90,7 +107,7 @@ export default function PresetBar({
   const invalidate = () => qc.invalidateQueries({ queryKey: filterPresetKeys.all });
 
   const createMut = useMutation({
-    mutationFn: (input: { name: string; filter_spec: ListingFilters }) =>
+    mutationFn: (input: { name: string; filter_spec: PresetSpec }) =>
       createFilterPreset(input),
     onSuccess: (created) => {
       invalidate();
@@ -103,7 +120,7 @@ export default function PresetBar({
     mutationFn: (input: {
       id: string;
       name?: string;
-      filter_spec?: ListingFilters;
+      filter_spec?: PresetSpec;
     }) => updateFilterPreset(input.id, { name: input.name, filter_spec: input.filter_spec }),
     onSuccess: () => {
       invalidate();
@@ -127,14 +144,15 @@ export default function PresetBar({
 
   const handleSubmit = (name: string, includeMapArea: boolean) => {
     if (modal == null) return;
+    // Save / Update capture the current filters AND the current sort.
+    const spec: PresetSpec = {
+      filters: filtersForPreset(filters, includeMapArea),
+      sort: sortParam,
+    };
     if (modal.mode === 'save') {
-      createMut.mutate({ name, filter_spec: filtersForPreset(filters, includeMapArea) });
+      createMut.mutate({ name, filter_spec: spec });
     } else if (modal.mode === 'update') {
-      updateMut.mutate({
-        id: modal.preset.id,
-        name,
-        filter_spec: filtersForPreset(filters, includeMapArea),
-      });
+      updateMut.mutate({ id: modal.preset.id, name, filter_spec: spec });
     } else {
       updateMut.mutate({ id: modal.preset.id, name });
     }
@@ -276,7 +294,9 @@ export default function PresetBar({
           }
           showMapAreaToggle={modal.mode !== 'rename' && hasMapArea}
           initialIncludeMapArea={
-            modal.mode === 'update' ? modal.preset.filter_spec.bounds != null : false
+            modal.mode === 'update'
+              ? readPresetSpec(modal.preset.filter_spec).filters.bounds != null
+              : false
           }
           busy={createMut.isPending || updateMut.isPending}
           error={errMsg(createMut.error) ?? errMsg(updateMut.error)}
