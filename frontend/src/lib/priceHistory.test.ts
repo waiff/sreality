@@ -62,6 +62,20 @@ describe('listingUrlRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: 100, source: 'sreality', url: null });
   });
+
+  it('reconstructs a sreality source URL from the property category triple', () => {
+    const withCategory = {
+      ...listing,
+      category_type: 'prodej',
+      category_main: 'byt',
+      category_sub_cb: 5, // 2+1
+    } as unknown as ListingPublic;
+    const rows = listingUrlRows(
+      [source({ sreality_id: 100, source: 'sreality', source_url: null })],
+      withCategory,
+    );
+    expect(rows[0].url).toBe('https://www.sreality.cz/detail/prodej/byt/2+1/x/100');
+  });
 });
 
 describe('buildPriceSeries', () => {

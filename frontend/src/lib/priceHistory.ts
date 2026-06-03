@@ -3,6 +3,7 @@
  * summary stats. Kept side-effect-free (now injected, never Date.now()) so the
  * transforms are unit-testable. */
 import type { ListingSnapshotPublic, PropertySource, ListingPublic } from '@/lib/types';
+import { portalListingUrl } from '@/lib/portals';
 
 const DAY_MS = 86_400_000;
 
@@ -44,6 +45,14 @@ export function listingUrlRows(
   sources: PropertySource[],
   listing: ListingPublic,
 ): UrlRow[] {
+  // sreality stores no source_url; reconstruct it from the property's category
+  // triple (shared across its sources) so the per-source link resolves instead
+  // of pointing nowhere. Other portals keep their stored source_url.
+  const srealityCategory = {
+    categoryType: listing.category_type,
+    categoryMain: listing.category_main,
+    categorySubCb: listing.category_sub_cb,
+  };
   if (sources.length > 0) {
     return [...sources]
       .sort(
@@ -53,7 +62,7 @@ export function listingUrlRows(
       .map((s) => ({
         id: s.sreality_id,
         source: s.source,
-        url: s.source_url,
+        url: portalListingUrl(s.source, s.source_url, s.sreality_id, srealityCategory),
         isActive: s.is_active,
         price: s.price_czk,
         firstSeen: s.first_seen_at,
@@ -64,7 +73,12 @@ export function listingUrlRows(
     {
       id: listing.sreality_id,
       source: listing.source ?? 'sreality',
-      url: null,
+      url: portalListingUrl(
+        listing.source ?? 'sreality',
+        null,
+        listing.sreality_id,
+        srealityCategory,
+      ),
       isActive: listing.is_active,
       price: listing.price_czk,
       firstSeen: listing.first_seen_at,

@@ -9,6 +9,7 @@ import {
 } from '@/lib/format';
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
 import { imageSrc } from '@/lib/imageUrl';
+import { portalListingUrl, portalShort } from '@/lib/portals';
 
 interface Props {
   listing: ListingPublic;
@@ -78,7 +79,7 @@ export default function ComparableModal({
           <Hairline />
           <Facts listing={listing} />
           <Hairline />
-          <Footer sreality_id={listing.sreality_id} />
+          <Footer listing={listing} />
         </div>
       </div>
     </div>
@@ -340,24 +341,34 @@ function Facts({ listing }: { listing: ListingPublic }) {
   );
 }
 
-function Footer({ sreality_id }: { sreality_id: number }) {
+function Footer({ listing }: { listing: ListingPublic }) {
+  // Reconstruct the origin-portal link from the category triple (sreality stores
+  // no source_url); null → we can't reach a resolvable external page, so only the
+  // in-app "View in full" link shows rather than a sreality 404.
+  const external = portalListingUrl(listing.source, null, listing.sreality_id, {
+    categoryType: listing.category_type,
+    categoryMain: listing.category_main,
+    categorySubCb: listing.category_sub_cb,
+  });
   return (
     <div className="flex items-center justify-between">
       <Link
-        to={`/listing/${sreality_id}`}
+        to={`/listing/${listing.sreality_id}`}
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:text-[var(--color-copper-2)] hover:border-[var(--color-copper)] transition-colors"
       >
         View in full
         <OutArrow />
       </Link>
-      <a
-        href={`https://www.sreality.cz/detail/x/x/x/${sreality_id}`}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="text-[0.78rem] text-[var(--color-ink-3)] hover:text-[var(--color-copper)]"
-      >
-        Open on sreality.cz
-      </a>
+      {external && (
+        <a
+          href={external}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[0.78rem] text-[var(--color-ink-3)] hover:text-[var(--color-copper)]"
+        >
+          {`Open on ${portalShort(listing.source)}`}
+        </a>
+      )}
     </div>
   );
 }
