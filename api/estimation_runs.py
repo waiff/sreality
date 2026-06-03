@@ -960,7 +960,8 @@ def _match_listing_by_url(
     return {
         "sreality_id": int(row[0]),
         "spec": {
-            "lat": float(row[1]), "lng": float(row[2]), "area_m2": row[3],
+            "lat": float(row[1]), "lng": float(row[2]),
+            "area_m2": float(row[3]) if row[3] is not None else None,
             "disposition": row[4], "floor": row[5], "exclude_ids": [],
         },
         "price_czk": row[6],

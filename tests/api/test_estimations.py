@@ -1050,6 +1050,46 @@ def test_get_estimation_run_returns_none_when_missing():
 
 
 # ----------------------------------------------------------------------
+# _match_listing_by_url — numeric columns must not leak Decimal into the
+# subject spec, which is later stored as jsonb (Jsonb -> json.dumps).
+# Regression: estimating an in-DB non-sreality listing (remax/idnes/…)
+# 500'd with "Object of type Decimal is not JSON serializable".
+# ----------------------------------------------------------------------
+
+def test_match_listing_by_url_casts_numeric_area_to_float():
+    import json
+    from decimal import Decimal
+
+    # row: sreality_id, lat, lng, area_m2(numeric->Decimal), disposition,
+    #      floor, price_czk, category_type
+    row = (-70120, 50.4208, 14.9016, Decimal("108.0"), "2+kk", 3, 6299000, "prodej")
+    conn = _FakeConn(results=[row])
+
+    matched = er._match_listing_by_url(
+        conn, "https://www.remax-czech.cz/reality/detail/abc/123/",
+    )
+
+    assert matched is not None
+    area = matched["spec"]["area_m2"]
+    assert isinstance(area, float) and area == 108.0
+    # The whole spec must round-trip through json — this is what psycopg's
+    # Jsonb() does internally when _insert_run stores it as input_spec.
+    json.dumps(matched["spec"])
+
+
+def test_match_listing_by_url_null_area_stays_none():
+    row = (-70120, 50.4208, 14.9016, None, "2+kk", 3, 6299000, "prodej")
+    conn = _FakeConn(results=[row])
+
+    matched = er._match_listing_by_url(
+        conn, "https://www.remax-czech.cz/reality/detail/abc/123/",
+    )
+
+    assert matched is not None
+    assert matched["spec"]["area_m2"] is None
+
+
+# ----------------------------------------------------------------------
 # POST /estimations/preview
 # ----------------------------------------------------------------------
 
