@@ -512,12 +512,15 @@ function PillRow({
 }) {
   const opts = optionsFor(def);
   if (opts.length === 0) return null;
-  const cols = opts.length <= 3 ? opts.length : Math.min(opts.length, 4);
+  // Auto-fit grid instead of a fixed column count: each pill claims a
+  // ~4rem minimum and the browser packs as many per row as the group's
+  // current width allows, then stretches them to fill. So as the
+  // (resizable) sidebar widens, a trailing pill like "Ostatní" rejoins
+  // the row above instead of being stranded on its own line under a
+  // hardcoded 4-column cap. At the default narrow width this still lands
+  // ~4 across — unchanged from before.
   return (
-    <div
-      className="grid gap-1"
-      style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
-    >
+    <div className="grid gap-1 [grid-template-columns:repeat(auto-fit,minmax(4rem,1fr))]">
       {opts.map((opt) => (
         <PickButton
           key={String(opt.value)}
