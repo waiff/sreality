@@ -1,7 +1,17 @@
-import { Suspense, lazy, useCallback, useMemo, useState } from 'react';
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
+import ResizeHandle from '@/components/ResizeHandle';
+import { useSidebarWidth, useMapSplitFraction } from '@/lib/browseLayout';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
@@ -280,6 +290,33 @@ export default function Browse() {
     [],
   );
 
+  /* Operator-resizable columns. `sidebar` is column 1 (filters, all
+   * tabs); `mapSplit` is the cards|map divider on the Listings tab.
+   * Both persist to localStorage. We measure live against the relevant
+   * container's rect so the divider tracks the cursor exactly, then
+   * commit to storage once on pointer-up (persist) — not every move. */
+  const sidebar = useSidebarWidth();
+  const mapSplit = useMapSplitFraction();
+  const outerRef = useRef<HTMLDivElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const onSidebarDrag = useCallback(
+    (clientX: number) => {
+      const left = outerRef.current?.getBoundingClientRect().left ?? 0;
+      sidebar.set(clientX - left);
+    },
+    [sidebar],
+  );
+  const onMapSplitDrag = useCallback(
+    (clientX: number) => {
+      const r = innerRef.current?.getBoundingClientRect();
+      if (!r || r.width === 0) return;
+      // Map is the right column: its width is the distance from the
+      // cursor to the container's right edge, as a fraction of total.
+      mapSplit.set((r.right - clientX) / r.width);
+    },
+    [mapSplit],
+  );
+
   /* Bounds round-trip through the URL via the existing `filters` shape
    * (see lib/filters.ts:MapBounds). The map calls this on each
    * user-driven pan/zoom; we keep `replace: true` so a continuous
@@ -542,11 +579,24 @@ export default function Browse() {
     null;
 
   return (
-    <div className="flex">
+    <div className="flex" ref={outerRef}>
       <FilterSidebar
         filters={filters}
         onChange={setFilters}
         onLocationPick={handleLocationPick}
+        width={sidebar.value}
+      />
+
+      {/* Divider between the filter sidebar (col 1) and the content.
+          Desktop only — dragging is a pointer affordance. The 12px hit
+          strip overlaps nothing; the sidebar's border-r remains the
+          rest-state divider. */}
+      <ResizeHandle
+        ariaLabel="Resize the filters sidebar"
+        onMove={onSidebarDrag}
+        onEnd={sidebar.persist}
+        onReset={sidebar.reset}
+        className="hidden lg:flex sticky top-14 self-start h-[calc(100dvh-3.5rem)] w-3 -mx-1.5"
       />
 
       <div className="flex-1 min-w-0 flex flex-col">
@@ -582,8 +632,17 @@ export default function Browse() {
             {/* 3-column inner layout: cards (left) | map (right). The
               * outer FilterSidebar is column 1. Heights are pinned so
               * each column scrolls independently — the map stays put
-              * while the cards list scrolls. */}
-            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(360px,42%)] gap-5 h-[calc(100dvh-12rem)] min-h-[560px]">
+              * while the cards list scrolls. The middle 1rem track holds
+              * the drag handle; the map column width is the persisted
+              * fraction (`--map-w`). Below lg the grid collapses to one
+              * column and the handle's `display:none` drops it out. */}
+            <div
+              ref={innerRef}
+              className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1rem_var(--map-w)] h-[calc(100dvh-12rem)] min-h-[560px]"
+              style={
+                { '--map-w': `${mapSplit.value * 100}%` } as CSSProperties
+              }
+            >
               <ListingCards
                 rows={cardsQuery.data?.rows ?? null}
                 total={cardsQuery.data?.total ?? null}
@@ -601,6 +660,13 @@ export default function Browse() {
                 mergeMode={mergeMode}
                 selectedPropertyIds={selectedForMerge}
                 onToggleSelect={toggleSelectForMerge}
+              />
+              <ResizeHandle
+                ariaLabel="Resize the listings and map columns"
+                onMove={onMapSplitDrag}
+                onEnd={mapSplit.persist}
+                onReset={mapSplit.reset}
+                className="hidden lg:flex h-full"
               />
               <div className="min-h-0 h-full">
                 <Suspense fallback={<MapSkeleton />}>
