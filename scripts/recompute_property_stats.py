@@ -19,6 +19,7 @@ Two phases, both idempotent:
      price_drop_count     \\
      price_rise_count      } from the union of all children's snapshots,
      max_price_drop_pct   /  ordered by scraped_at (consecutive-step deltas)
+     last_change_at      = max(children snapshots.scraped_at) -- "recently changed"
      stats_computed_at   = now()
 
    For today's singleton properties this reproduces exactly what the
@@ -72,7 +73,7 @@ _ATTACH_INSERT_SQL = """
         has_balcony, has_parking, has_lift, building_type, condition,
         ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
         estate_area, usable_area, garden_area, parking_lots,
-        is_active, first_seen_at, last_seen_at,
+        is_active, first_seen_at, last_seen_at, last_change_at,
         source_count, distinct_site_count
     )
     SELECT
@@ -81,7 +82,7 @@ _ATTACH_INSERT_SQL = """
         l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
         l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
         l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
-        l.is_active, l.first_seen_at, l.last_seen_at, 1, 1
+        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1
     FROM listings l
     WHERE l.property_id IS NULL
 """
@@ -150,6 +151,18 @@ _RECOMPUTE_BATCH_SQL = """
                  THEN (prev - price_czk)::numeric / prev * 100 END)   AS max_drop_pct
       FROM steps
       GROUP BY pid
+    ),
+    -- Last content change = newest snapshot across all children. Snapshots are
+    -- inserted only on a content-hash change (rule #2), so this is the "recently
+    -- changed" timestamp the Browse filter reads (exposed via properties_public,
+    -- migration 158). Includes price-less snapshots (any field change), so it is
+    -- a separate CTE from `prices` above (which filters price_czk IS NOT NULL).
+    changes AS (
+      SELECT l.property_id AS pid, max(s.scraped_at) AS last_change_at
+      FROM listing_snapshots s
+      JOIN listings l ON l.sreality_id = s.sreality_id
+      JOIN batch b ON b.id = l.property_id
+      GROUP BY l.property_id
     )
     UPDATE properties p SET
       is_active           = ca.is_active,
@@ -185,10 +198,12 @@ _RECOMPUTE_BATCH_SQL = """
       price_drop_count    = coalesce(ph.drops, 0),
       price_rise_count    = coalesce(ph.rises, 0),
       max_price_drop_pct  = ph.max_drop_pct,
+      last_change_at      = coalesce(ch.last_change_at, ca.first_seen_at),
       stats_computed_at   = now()
     FROM child_agg ca
     JOIN repr r ON r.pid = ca.pid
     LEFT JOIN price_hist ph ON ph.pid = ca.pid
+    LEFT JOIN changes ch ON ch.pid = ca.pid
     WHERE p.id = ca.pid
 """
 

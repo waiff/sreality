@@ -257,6 +257,18 @@ STATUS_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("inactive", "Neaktivní", "Inactive"),
 )
 
+# Preset "last N days" buckets shared by the `recently_added_days` /
+# `recently_changed_days` Browse filters. Values are day counts; the empty
+# (unset) selection means "any time". Kept as a shared table so the two
+# filters can never drift in their option list.
+RECENCY_OPTIONS: tuple[EnumOption, ...] = (
+    EnumOption(1, "Dnes", "Today"),
+    EnumOption(3, "Poslední 3 dny", "Last 3 days"),
+    EnumOption(7, "Poslední týden", "Last 7 days"),
+    EnumOption(14, "Posledních 14 dní", "Last 14 days"),
+    EnumOption(30, "Poslední měsíc", "Last month"),
+)
+
 # Source portals — mirrors the scraper-kind rows of the `portals` registry
 # table (migration 100 onward). Values match `listings.source`; labels match
 # the portal display labels. Extend this when a new ingesting portal lands
@@ -517,6 +529,54 @@ def _build_registry() -> dict[str, FilterDef]:
             agendas=frozenset({Agenda.BROWSE}),
             constraints={"enum": ["any", "active", "inactive"]},
             enum_values=STATUS_OPTIONS,
+        ),
+
+        # --- recency presets (BROWSE Status section) ---------------------
+        # Friendly "last N days" pickers. `recently_added_days` is the
+        # preset twin of `first_seen_max_days` (first_seen_at >= now() - N);
+        # `recently_changed_days` filters on properties.last_change_at
+        # (migration 158 — newest content snapshot per property). BROWSE-only,
+        # matching the rest of the first/last-seen date filters: the watchdog
+        # matcher fires on new/changed listings already, and the estimation
+        # agent keeps its own deterministic freshness knobs (first_seen_max_days
+        # / max_age_days), so these never reach those agendas. Synthetic
+        # (pg_column=None): hand-coded to a days-ago timestamp predicate in
+        # the frontend + browse_stats RPC.
+        FilterDef(
+            id="recently_added_days",
+            type=FilterType.INT,
+            pg_column=None,
+            default=None,
+            description=(
+                "Restrict to properties first seen in the last N days "
+                "(`first_seen_at >= now() - N days`). Preset buckets: "
+                "1 (today), 3, 7, 14, 30. The friendly 'what's new' filter."
+            ),
+            category=CATEGORY_STATUS,
+            ui_control=UiControl.SINGLE_SELECT,
+            agendas=frozenset({Agenda.BROWSE}),
+            constraints={"enum": [1, 3, 7, 14, 30]},
+            unit="days",
+            enum_values=RECENCY_OPTIONS,
+        ),
+        FilterDef(
+            id="recently_changed_days",
+            type=FilterType.INT,
+            pg_column=None,
+            default=None,
+            description=(
+                "Restrict to properties whose content changed in the last N "
+                "days (`last_change_at >= now() - N days`, where last_change_at "
+                "is the newest content snapshot across the property's children "
+                "— a price / area / description / attribute change, not a mere "
+                "re-sighting). Preset buckets: 1 (today), 3, 7, 14, 30."
+            ),
+            category=CATEGORY_STATUS,
+            ui_control=UiControl.SINGLE_SELECT,
+            agendas=frozenset({Agenda.BROWSE}),
+            constraints={"enum": [1, 3, 7, 14, 30]},
+            unit="days",
+            enum_values=RECENCY_OPTIONS,
         ),
 
         # --- velocity bands ----------------------------------------------

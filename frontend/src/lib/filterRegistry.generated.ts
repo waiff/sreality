@@ -368,6 +368,106 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": []
     },
     {
+      "id": "recently_added_days",
+      "type": "int",
+      "pg_column": null,
+      "default": null,
+      "description": "Restrict to properties first seen in the last N days (`first_seen_at >= now() - N days`). Preset buckets: 1 (today), 3, 7, 14, 30. The friendly 'what's new' filter.",
+      "category": "Status",
+      "ui_control": "single_select",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": {
+        "enum": [
+          1,
+          3,
+          7,
+          14,
+          30
+        ]
+      },
+      "unit": "days",
+      "enum_values": [
+        {
+          "value": 1,
+          "label_cs": "Dnes",
+          "label_en": "Today"
+        },
+        {
+          "value": 3,
+          "label_cs": "Poslední 3 dny",
+          "label_en": "Last 3 days"
+        },
+        {
+          "value": 7,
+          "label_cs": "Poslední týden",
+          "label_en": "Last 7 days"
+        },
+        {
+          "value": 14,
+          "label_cs": "Posledních 14 dní",
+          "label_en": "Last 14 days"
+        },
+        {
+          "value": 30,
+          "label_cs": "Poslední měsíc",
+          "label_en": "Last month"
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "id": "recently_changed_days",
+      "type": "int",
+      "pg_column": null,
+      "default": null,
+      "description": "Restrict to properties whose content changed in the last N days (`last_change_at >= now() - N days`, where last_change_at is the newest content snapshot across the property's children — a price / area / description / attribute change, not a mere re-sighting). Preset buckets: 1 (today), 3, 7, 14, 30.",
+      "category": "Status",
+      "ui_control": "single_select",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": {
+        "enum": [
+          1,
+          3,
+          7,
+          14,
+          30
+        ]
+      },
+      "unit": "days",
+      "enum_values": [
+        {
+          "value": 1,
+          "label_cs": "Dnes",
+          "label_en": "Today"
+        },
+        {
+          "value": 3,
+          "label_cs": "Poslední 3 dny",
+          "label_en": "Last 3 days"
+        },
+        {
+          "value": 7,
+          "label_cs": "Poslední týden",
+          "label_en": "Last 7 days"
+        },
+        {
+          "value": 14,
+          "label_cs": "Posledních 14 dní",
+          "label_en": "Last 14 days"
+        },
+        {
+          "value": 30,
+          "label_cs": "Poslední měsíc",
+          "label_en": "Last month"
+        }
+      ],
+      "aliases": []
+    },
+    {
       "id": "tom_days_min",
       "type": "int",
       "pg_column": null,
