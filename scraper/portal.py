@@ -143,9 +143,15 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # provable-complete; the per-walk completeness guard + the 12h sweep
         # throttle (migration 113) keep delisting inference safe.
         supports_complete_walk=True,
+        # byt + houses (dum/chata) + commercial (restaurace/kancelar/prostory/
+        # sklad) × sale + rent. The fine sections collapse onto one category_main,
+        # so the sweep is subtype-scoped (BazosPortal.mark_inactive). Mirrors the
+        # DB registry (migration 158). pozemek / garaz / ostatni are one-line adds.
         categories=[
-            {"sale_type": "prodam", "category": "byt"},    # apartments for sale
-            {"sale_type": "pronajmu", "category": "byt"},  # apartments for rent
+            {"sale_type": st, "category": cat}
+            for st in ("prodam", "pronajmu")
+            for cat in ("byt", "dum", "chata", "restaurace",
+                        "kancelar", "prostory", "sklad")
         ],
         split_threshold=None,
         limits=PortalLimits(

@@ -30,6 +30,7 @@ class _Conn:
 
 _BYT_SALE = {"sale_type": "prodam", "category": "byt"}
 _BYT_RENT = {"sale_type": "pronajmu", "category": "byt"}
+_CHATA_SALE = {"sale_type": "prodam", "category": "chata"}
 
 
 def _portal(categories=None) -> BazosPortal:
@@ -110,8 +111,9 @@ def test_mark_inactive_runs_native_sweep_when_due(monkeypatch):
     swept: dict[str, Any] = {}
     monkeypatch.setattr(
         bazos_main.db, "mark_inactive_native",
-        lambda _c, src, cm, ct, seen: swept.update(
-            src=src, cm=cm, ct=ct, seen=seen) or 3,
+        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype: swept.update(
+            src=src, cm=cm, ct=ct, seen=seen, subtype=subtype,
+            scope_subtype=scope_subtype) or 3,
     )
     recorded = {"n": 0}
     monkeypatch.setattr(
@@ -120,8 +122,26 @@ def test_mark_inactive_runs_native_sweep_when_due(monkeypatch):
     )
     n = _portal().mark_inactive(object(), _BYT_RENT, {"a", "b"})
     assert n == 3
-    assert swept == {"src": "bazos", "cm": "byt", "ct": "pronajem", "seen": {"a", "b"}}
+    # byt carries no subtype, but the sweep is still subtype-scoped (to NULL) so
+    # the fine sections that share category_main can't sweep each other.
+    assert swept == {"src": "bazos", "cm": "byt", "ct": "pronajem",
+                     "seen": {"a", "b"}, "subtype": None, "scope_subtype": True}
     assert recorded["n"] == 1
+
+
+def test_mark_inactive_scopes_fine_section_to_its_subtype(monkeypatch):
+    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: True)
+    monkeypatch.setattr(bazos_main.db, "record_portal_inactive_sweep", lambda _c, _s: None)
+    swept: dict[str, Any] = {}
+    monkeypatch.setattr(
+        bazos_main.db, "mark_inactive_native",
+        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype: swept.update(
+            cm=cm, subtype=subtype) or 0,
+    )
+    _portal([_CHATA_SALE]).mark_inactive(object(), _CHATA_SALE, {"a"})
+    # chata collapses onto category_main=dum but is scoped to subtype=chata, so it
+    # never sweeps the generic-dum (subtype NULL) section's rows.
+    assert swept == {"cm": "dum", "subtype": "chata"}
 
 
 def test_mark_inactive_throttle_stamps_once_across_categories(monkeypatch):
@@ -152,10 +172,13 @@ def test_active_count_source_scoped(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         bazos_main.db, "active_count",
-        lambda _c, cm, ct, source: captured.update(cm=cm, ct=ct, source=source) or 42,
+        lambda _c, cm, ct, *, source, subtype, scope_subtype: captured.update(
+            cm=cm, ct=ct, source=source, subtype=subtype,
+            scope_subtype=scope_subtype) or 42,
     )
     assert _portal().active_count(object(), _BYT_RENT) == 42
-    assert captured == {"cm": "byt", "ct": "pronajem", "source": "bazos"}
+    assert captured == {"cm": "byt", "ct": "pronajem", "source": "bazos",
+                        "subtype": None, "scope_subtype": True}
 
 
 def test_mark_gone_flips_native_inactive(monkeypatch):

@@ -67,10 +67,13 @@ def test_default_config_bazos():
     assert cfg.supports_complete_walk is True
     assert cfg.split_threshold is None
     assert cfg.splits is False
-    assert cfg.categories == [
-        {"sale_type": "prodam", "category": "byt"},
-        {"sale_type": "pronajmu", "category": "byt"},
-    ]
+    # byt + houses (dum/chata) + commercial (restaurace/kancelar/prostory/sklad)
+    # × sale + rent. The fine sections carry the subtype; the sweep is
+    # subtype-scoped so same-category_main sections don't flip each other.
+    assert len(cfg.categories) == 14
+    assert {"sale_type": "prodam", "category": "byt"} in cfg.categories
+    assert {"sale_type": "prodam", "category": "chata"} in cfg.categories
+    assert {"sale_type": "pronajmu", "category": "kancelar"} in cfg.categories
 
 
 def test_default_config_idnes():
