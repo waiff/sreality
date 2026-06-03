@@ -12,7 +12,17 @@ import type {
   YieldScenarioUpdate,
 } from './types';
 
-const BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
+/* Tolerate an operator entering the API URL without a scheme (e.g. just
+ * `api.up.railway.app`) — fetch() needs an absolute URL, so default to https.
+ * Also strip any trailing slash so `BASE_URL + path` doesn't double up. */
+function normalizeBaseUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed === '') return '';
+  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  return withScheme.replace(/\/$/, '');
+}
+
+const BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL ?? '');
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? '';
 
 if (!BASE_URL) {
