@@ -17,7 +17,10 @@ const MAP_SPLIT_KEY = 'sreality.browse.mapSplitFraction';
 
 export const SIDEBAR_DEFAULT = 320;
 export const SIDEBAR_MIN = 240;
-export const SIDEBAR_MAX = 560;
+/* Wide enough that the grid-layout filter groups (see ControlGroup
+ * `layout="grid"`) can flow into ~3 columns when the operator drags the
+ * sidebar out — that's what turns the tall filter list short. */
+export const SIDEBAR_MAX = 720;
 
 export const MAP_SPLIT_DEFAULT = 0.42;
 export const MAP_SPLIT_MIN = 0.25;
