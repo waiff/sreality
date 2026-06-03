@@ -50,6 +50,7 @@ from api.estimation_runs import (
     update_scenario,
 )
 from api import notifications as nf_module
+from api.portal_lookup import lookup_portal_listings
 from api.routes.admin import router as admin_router
 from api.routes.dedup import router as dedup_router
 from api.routes.filter_presets import router as filter_presets_router
@@ -816,6 +817,17 @@ def list_estimations(
         limit=limit,
         offset=offset,
     )
+
+
+@app.post("/listings/lookup")
+def post_listings_lookup(
+    body: s.PortalLookupIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Batch (source, native id) → MF rent/yield + latest estimate, for the
+    Chrome extension's detail panel + index-card overlay across all portals."""
+    return lookup_portal_listings(conn, body.items)
 
 
 @app.post("/buildings")
