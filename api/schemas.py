@@ -704,3 +704,15 @@ class PriceStatDatasetUpdateIn(BaseModel):
     min_population:     int | None = Field(default=None, ge=0)
     max_population:     int | None = Field(default=None, ge=0)
     periodicity:        Literal['monthly', 'quarterly', 'semiannual', 'annual'] | None = None
+
+
+class PortalLookupItem(BaseModel):
+    """One portal listing keyed by its native id. For sreality, source_id is the
+    numeric id as a string (matches listings.source_id_native)."""
+    source: str = Field(min_length=1, max_length=40)
+    source_id: str = Field(min_length=1, max_length=128)
+
+
+class PortalLookupIn(BaseModel):
+    """Batch lookup for the Chrome extension's detail panel + index-card overlay."""
+    items: list[PortalLookupItem] = Field(min_length=1, max_length=50)
