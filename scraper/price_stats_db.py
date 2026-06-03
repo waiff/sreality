@@ -161,13 +161,28 @@ def locality_exists(conn: psycopg.Connection, entity_type: str, entity_id: int) 
         return cur.fetchone() is not None
 
 
-def start_run(conn: psycopg.Connection, dataset_id: int) -> int:
+def start_run(
+    conn: psycopg.Connection, dataset_id: int, *, cities_total: int = 0
+) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO price_stat_runs (dataset_id) VALUES (%s) RETURNING id",
-            (dataset_id,),
+            "INSERT INTO price_stat_runs (dataset_id, cities_total) "
+            "VALUES (%s, %s) RETURNING id",
+            (dataset_id, cities_total),
         )
         return cur.fetchone()[0]
+
+
+def update_run_progress(
+    conn: psycopg.Connection, run_id: int, *, cities_done: int, observations: int
+) -> None:
+    """Incremental progress for the live Datasets-page banner (every city)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE price_stat_runs SET cities_done = %s, observations = %s "
+            "WHERE id = %s",
+            (cities_done, observations, run_id),
+        )
 
 
 def finish_run(

@@ -68,8 +68,31 @@ export interface PriceStatObservation {
   deleted_count: number | null;
 }
 
+export interface PriceStatRun {
+  dataset_id: number;
+  run_id: number;
+  status: 'running' | 'success' | 'failed';
+  cities_total: number;
+  cities_done: number;
+  observations: number;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export const fetchLatestRun = async (datasetId: number): Promise<PriceStatRun | null> => {
+  const { data, error } = await supabase
+    .from('price_stat_runs_public')
+    .select('*')
+    .eq('dataset_id', datasetId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as PriceStatRun | null) ?? null;
+};
+
 export const priceStatsKeys = {
   datasets: ['price_stat_datasets'] as const,
+  latestRun: (id: number) => ['price_stat_latest_run', id] as const,
   cityMetrics: (id: number) => ['price_stat_city_metrics', id] as const,
   choropleth: (id: number) => ['price_stat_choropleth', id] as const,
   growth: (id: number, from: string | null, to: string | null) =>

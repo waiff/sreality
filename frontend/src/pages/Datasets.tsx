@@ -3,15 +3,17 @@
  * a per-obec choropleth, and a sortable per-city table. Growth is computed
  * live for the chosen window by the price_stat_growth RPC. Reads public
  * views/RPC only; dataset writes go through the API. Civic-archive tokens. */
-import { useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchDatasets,
   fetchGrowth,
+  fetchLatestRun,
   fetchSeries,
   priceStatsKeys,
   type PriceStatDataset,
   type PriceStatGrowthRow,
+  type PriceStatRun,
 } from '@/lib/priceStats';
 import { createPriceStatDataset } from '@/lib/api';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
@@ -71,6 +73,24 @@ export default function Datasets() {
     staleTime: 60_000,
   });
   const rows = growthQ.data ?? [];
+
+  // Live scrape status for this dataset — polls while a run is in progress.
+  const runQ = useQuery<PriceStatRun | null, Error>({
+    queryKey: priceStatsKeys.latestRun(activeId ?? -1),
+    queryFn: () => fetchLatestRun(activeId as number),
+    enabled: activeId != null,
+    refetchInterval: (q) => (q.state.data?.status === 'running' ? 3000 : false),
+  });
+  // When a run finishes, refetch the derived data so the map/table fill in.
+  const prevStatus = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const st = runQ.data?.status;
+    if (prevStatus.current === 'running' && st === 'success' && activeId != null) {
+      qc.invalidateQueries({ queryKey: ['price_stat_growth'] });
+      qc.invalidateQueries({ queryKey: ['price_stat_obec_series'] });
+    }
+    prevStatus.current = st;
+  }, [runQ.data?.status, runQ.data?.run_id, activeId, qc]);
 
   const seriesQ = useQuery({
     queryKey: priceStatsKeys.obecSeries(activeId ?? -1, from, to),
@@ -169,11 +189,13 @@ export default function Datasets() {
             </div>
           </div>
 
+          {runQ.data && <RunStatusBanner run={runQ.data} />}
+
           <SummaryBand summary={summary} metric={metric} loading={growthQ.isLoading} />
 
           <div className="mt-6">
             {rows.length === 0 && !growthQ.isLoading ? (
-              <EmptyData />
+              <EmptyData run={runQ.data ?? null} />
             ) : (
               <DatasetMap rows={rows} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
             )}
@@ -526,11 +548,51 @@ function EmptyDatasets() {
   );
 }
 
-function EmptyData() {
+function EmptyData({ run }: { run: PriceStatRun | null }) {
+  const running = run?.status === 'running';
+  const failed = run?.status === 'failed';
   return (
     <div className="border border-dashed border-[var(--color-rule-strong)] rounded-[var(--radius-md)] p-8 text-center">
-      <p className="text-sm text-[var(--color-ink-2)]">No data for this dataset / window yet.</p>
-      <p className="mt-1 text-xs text-[var(--color-ink-3)]">It populates on the next <code>scrape_price_stats</code> run.</p>
+      <p className="text-sm text-[var(--color-ink-2)]">
+        {running ? 'Scraping in progress — data will appear here when it lands.'
+          : failed ? 'No data — the last scrape failed (see above).'
+          : 'No data for this dataset / window yet.'}
+      </p>
+      {!running && !failed && (
+        <p className="mt-1 text-xs text-[var(--color-ink-3)]">
+          It populates on the next <code>scrape_price_stats</code> run.
+        </p>
+      )}
     </div>
   );
+}
+
+function RunStatusBanner({ run }: { run: PriceStatRun }) {
+  if (run.status === 'running') {
+    const pct = run.cities_total > 0 ? Math.round((run.cities_done / run.cities_total) * 100) : 0;
+    return (
+      <div className="mt-4 border border-[var(--color-copper)] bg-[var(--color-copper-soft)] rounded-[var(--radius-md)] px-4 py-3">
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-[var(--color-ink)]">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--color-copper)] mr-2 animate-pulse" />
+            Scraping… <span className="tabular-nums">{run.cities_done}</span> / <span className="tabular-nums">{run.cities_total || '?'}</span> municipalities
+          </span>
+          <span className="text-xs tabular-nums text-[var(--color-ink-3)]">
+            {run.observations.toLocaleString('cs-CZ')} data points
+          </span>
+        </div>
+        <div className="mt-2 h-1.5 rounded-full bg-[var(--color-paper-3)] overflow-hidden">
+          <div className="h-full bg-[var(--color-copper)] transition-[width] duration-500" style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    );
+  }
+  if (run.status === 'failed') {
+    return (
+      <div className="mt-4 border border-[var(--color-brick)] bg-[var(--color-brick-soft)] rounded-[var(--radius-md)] px-4 py-3 text-sm text-[var(--color-ink-2)]">
+        Last scrape failed{run.error ? `: ${run.error.slice(0, 200)}` : '.'}
+      </div>
+    );
+  }
+  return null;
 }
