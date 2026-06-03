@@ -11,10 +11,10 @@ two new map heat layers.
 
 ## Data source — it's a clean JSON API, not a DOM scrape
 
-The old uploaded scraper (`scraper/inspiration_sraper_del_me/`, to be deleted)
-drove a headless browser, clicking the date-picker month-by-month — ~3,770
-click-tasks over 25–35 h, fragile to CSS changes. The Next.js rebuild exposes the
-data directly:
+The old uploaded scraper (formerly `scraper/inspiration_sraper_del_me/`, kept
+only as inspiration and since removed) drove a headless browser, clicking the
+date-picker month-by-month — ~3,770 click-tasks over 25–35 h, fragile to CSS
+changes. The Next.js rebuild exposes the data directly:
 
 ```
 GET https://www.sreality.cz/api/v1/estate_prices
