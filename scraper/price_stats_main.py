@@ -135,10 +135,12 @@ def run_dataset(
     chunk_months: int,
     dry_run: bool,
 ) -> None:
-    run_id = 0 if dry_run else db.start_run(conn, dataset["id"])
+    run_id = 0 if dry_run else db.start_run(
+        conn, dataset["id"], cities_total=len(localities)
+    )
     total_obs = 0
     try:
-        for loc in localities:
+        for i, loc in enumerate(localities, start=1):
             for category_type_cb in CATEGORIES:
                 series = _fetch_with_auth_retry(
                     client, dataset, loc, category_type_cb,
@@ -161,6 +163,10 @@ def run_dataset(
                         months=months,
                         run_id=run_id,
                     )
+            if not dry_run:
+                db.update_run_progress(
+                    conn, run_id, cities_done=i, observations=total_obs
+                )
         if not dry_run:
             metrics = db.recompute_metrics(
                 conn, dataset["id"], window_years=window_years
