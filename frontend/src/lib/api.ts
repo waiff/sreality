@@ -1144,3 +1144,19 @@ export const createPriceStatDataset = (
   input: PriceStatDatasetInput,
 ): Promise<import('./priceStats').PriceStatDataset> =>
   apiPost('/price-stats/datasets', input);
+
+export const deletePriceStatDataset = (
+  id: number,
+): Promise<{ id: number; is_active: boolean }> =>
+  request(`/price-stats/datasets/${id}`, { method: 'DELETE' });
+
+export const updatePriceStatDataset = (
+  id: number,
+  patch: Partial<PriceStatDatasetInput> & { is_active?: boolean },
+): Promise<import('./priceStats').PriceStatDataset> =>
+  request(`/price-stats/datasets/${id}`, { method: 'PATCH', json: patch });
+
+export const runPriceStatDataset = (
+  id: number,
+): Promise<{ dispatched: boolean; run_url?: string; detail?: string }> =>
+  apiPost(`/price-stats/datasets/${id}/run`, {});

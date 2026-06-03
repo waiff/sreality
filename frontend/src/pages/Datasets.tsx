@@ -15,7 +15,7 @@ import {
   type PriceStatGrowthRow,
   type PriceStatRun,
 } from '@/lib/priceStats';
-import { createPriceStatDataset } from '@/lib/api';
+import { createPriceStatDataset, deletePriceStatDataset } from '@/lib/api';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
@@ -25,6 +25,23 @@ const MIN_ACTIVE = 3;
 const FIRST_YEAR = 2015;
 const now = new Date();
 const CUR_YM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+const DEFAULT_CITY_COUNT = 43; // the standard municipality set when none picked
+
+/* Rough scrape-time estimate, calibrated against real runs:
+ * time ≈ 120 s overhead + 1.2 s × cities × ceil(months/24-month chunks).
+ * Periodicity doesn't change FETCH time (the API is always monthly; it only
+ * changes what we store). Flags runs that won't fit the 60-min workflow cap. */
+function estimateScrapeText(cities: number, startYm: string, endYm: string): string {
+  const [sy, sm] = startYm.split('-').map(Number);
+  const [ey, em] = endYm.split('-').map(Number);
+  const months = Math.max(1, ey * 12 + em - (sy * 12 + sm) + 1);
+  const chunks = Math.max(1, Math.ceil(months / 24));
+  const secs = 120 + 1.2 * Math.max(1, cities) * chunks;
+  if (secs > 55 * 60) {
+    return `~${(secs / 3600).toFixed(1)} h — exceeds the 60-min run limit, split into smaller runs`;
+  }
+  return `~${Math.max(1, Math.round(secs / 60))} min`;
+}
 
 const fmtPct = (n: number | null | undefined): string =>
   n == null || !Number.isFinite(n) ? '—' : `${n.toFixed(1)}%`;
@@ -92,6 +109,14 @@ export default function Datasets() {
     prevStatus.current = st;
   }, [runQ.data?.status, runQ.data?.run_id, activeId, qc]);
 
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => deletePriceStatDataset(id),
+    onSuccess: () => {
+      setDatasetId(null);
+      qc.invalidateQueries({ queryKey: priceStatsKeys.datasets });
+    },
+  });
+
   const seriesQ = useQuery({
     queryKey: priceStatsKeys.obecSeries(activeId ?? -1, from, to),
     queryFn: () => fetchSeries(activeId as number, from, to),
@@ -150,6 +175,20 @@ export default function Datasets() {
         </div>
         <div className="flex items-center gap-2">
           <DatasetPicker datasets={datasets} value={activeId} onChange={setDatasetId} loading={datasetsQ.isLoading} />
+          {active && (
+            <button
+              onClick={() => {
+                if (window.confirm(`Remove dataset “${active.name}”? It disappears from the app (data is kept in the database).`)) {
+                  deleteMutation.mutate(active.id);
+                }
+              }}
+              disabled={deleteMutation.isPending}
+              title="Remove this dataset"
+              className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-ink-3)] hover:text-[var(--color-brick)] hover:border-[var(--color-brick)] transition-colors disabled:opacity-50"
+            >
+              Remove
+            </button>
+          )}
           <button
             onClick={() => setShowNew((v) => !v)}
             className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] transition-colors"
@@ -495,6 +534,13 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         <Field label="Periodicity">
           <SelectBox value={periodicity} onChange={setPeriodicity} options={PERIOD_OPTS} />
         </Field>
+      </div>
+      <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-ink-3)]">
+        <span className="uppercase tracking-[0.14em]">Est. scrape time</span>
+        <span className="text-[var(--color-ink-2)] tabular-nums">
+          {estimateScrapeText(obecIds.length || DEFAULT_CITY_COUNT, startYm, endYm)}
+        </span>
+        <span>· {obecIds.length || DEFAULT_CITY_COUNT} municipalities</span>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="submit" disabled={!canSubmit}
