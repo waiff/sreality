@@ -25,7 +25,7 @@ _HASH_FIELDS: tuple[str, ...] = (
     "disposition", "locality", "district", "lat", "lon", "floor",
     "total_floors", "has_balcony", "has_parking", "has_lift", "building_type",
     "condition", "energy_rating", "estate_area", "usable_area", "garden_area",
-    "category_sub_cb", "furnished", "terrace", "cellar", "garage",
+    "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
     "parking_lots", "ownership", "description",
 )
 
@@ -36,7 +36,7 @@ _LISTING_FIELDS: tuple[str, ...] = (
     "disposition", "locality", "district", "floor", "total_floors",
     "has_balcony", "has_parking", "has_lift", "building_type", "condition",
     "energy_rating", "estate_area", "usable_area", "garden_area",
-    "category_sub_cb", "furnished", "terrace", "cellar", "garage",
+    "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
     "parking_lots", "ownership", "description",
 )
 
@@ -68,6 +68,9 @@ class ScrapedListing:
     usable_area: float | None = None
     garden_area: float | None = None
     category_sub_cb: int | None = None
+    # Portal-agnostic normalized property sub-type (migration 152); per-portal
+    # parsers derive it from their own structured signal, else leave it None.
+    subtype: str | None = None
     furnished: str | None = None
     terrace: bool | None = None
     cellar: bool | None = None

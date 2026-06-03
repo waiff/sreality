@@ -65,6 +65,23 @@ TYP_TO_CATEGORY: tuple[tuple[str, str], ...] = (
     ("jine", "ostatni"),
 )
 
+# Detail "Typ nemovitosti" value -> canonical portal-agnostic subtype slug
+# (migration 152). Only the collision-free correspondences are mapped; remax's
+# combined house types ("domy a vily", "chaty a chalupy") are genuinely
+# ambiguous between two of our slugs, so houses are left without a subtype
+# rather than guessing. Needles are diacritics-stripped/lowercased substrings,
+# none a substring of another, so order is irrelevant.
+TYP_TO_SUBTYPE: tuple[tuple[str, str], ...] = (
+    ("kancelare", "kancelar"),
+    ("obchodni", "obchodni_prostor"),
+    ("restaurace", "restaurace"),
+    ("ubytovani", "ubytovani"),
+    ("vyroba", "vyroba"),
+    ("sklady", "sklad"),
+    ("zemedelske objekty", "zemedelsky"),
+    ("historicke objekty", "pamatka_jine"),
+)
+
 # Title-noun fallback (diacritics-stripped, lowercased), checked in order so a
 # specific category wins before the garage/ostatni catch-all.
 CATEGORY_BY_TITLE: tuple[tuple[str, str], ...] = (
@@ -204,6 +221,18 @@ def category_of(typ: str | None, title: str | None) -> str | None:
     the detail parser passes both so the two can't disagree (which would fragment
     the Health reconciliation)."""
     return category_from_typ(typ) or _category_from_title(title)
+
+
+def subtype_of(typ: str | None) -> str | None:
+    """Portal-agnostic subtype slug from the detail "Typ nemovitosti" value, for
+    the collision-free commercial / historic correspondences only (None else)."""
+    key = _norm_key(typ)
+    if not key:
+        return None
+    for needle, slug in TYP_TO_SUBTYPE:
+        if needle in key:
+            return slug
+    return None
 
 
 def type_of(title: str | None) -> str | None:
@@ -483,6 +512,7 @@ def parse_detail(
         source_url=source_url,
         category_main=category_main,
         category_type=category_type,
+        subtype=subtype_of(params.get("typ nemovitosti")),
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
