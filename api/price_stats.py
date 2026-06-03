@@ -10,9 +10,11 @@ consumers; the SPA reads the `*_public` views directly.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 import psycopg
+import requests
 from fastapi import HTTPException
 from psycopg.rows import dict_row
 
@@ -21,6 +23,9 @@ from toolkit import price_stats as analysis
 
 if TYPE_CHECKING:
     pass
+
+# Workflow we dispatch for an on-demand / expand scrape of one dataset.
+_DISPATCH_WORKFLOW = "scrape_price_stats.yml"
 
 _COLS = (
     "id, slug, name, description, category_main_cb, building_condition, "
@@ -107,3 +112,46 @@ def dataset_city_series(
     conn: "psycopg.Connection", dataset_id: int, entity_type: str, entity_id: int
 ) -> dict[str, Any]:
     return analysis.dataset_city_series(conn, dataset_id, entity_type, entity_id)
+
+
+def run_dataset_now(conn: "psycopg.Connection", dataset_id: int) -> dict[str, Any]:
+    """Dispatch the scrape_price_stats workflow for one dataset (on-demand /
+    expand). Needs a GitHub PAT (GH_DISPATCH_TOKEN, Actions: read+write) on the
+    API service; 503 if unset so the operator gets a clear setup hint."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM price_stat_datasets WHERE id = %s", (dataset_id,))
+        if cur.fetchone() is None:
+            raise HTTPException(404, f"dataset {dataset_id} not found")
+
+    token = os.environ.get("GH_DISPATCH_TOKEN")
+    if not token:
+        raise HTTPException(
+            503,
+            "GH_DISPATCH_TOKEN is not configured on the API service, so runs "
+            "can't be triggered from the UI. Set a fine-grained GitHub PAT "
+            "(repo Actions: read+write) as GH_DISPATCH_TOKEN; the dataset will "
+            "otherwise scrape on the next scheduled run.",
+        )
+    repo = os.environ.get("GH_REPO", "waiff/sreality")
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{_DISPATCH_WORKFLOW}/dispatches"
+    try:
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            json={"ref": "main", "inputs": {"mode": "full", "dataset_id": str(dataset_id)}},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(502, f"GitHub dispatch request failed: {exc}")
+    if resp.status_code not in (201, 204):
+        raise HTTPException(
+            502, f"GitHub dispatch rejected ({resp.status_code}): {resp.text[:300]}"
+        )
+    return {
+        "dispatched": True,
+        "run_url": f"https://github.com/{repo}/actions/workflows/{_DISPATCH_WORKFLOW}",
+    }

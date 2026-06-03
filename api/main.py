@@ -1162,6 +1162,15 @@ def delete_price_stat_dataset(
     return price_stats_module.deactivate_dataset(conn, dataset_id)
 
 
+@app.post("/price-stats/datasets/{dataset_id}/run")
+def post_price_stat_run(
+    dataset_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return price_stats_module.run_dataset_now(conn, dataset_id)
+
+
 @app.get("/price-stats/datasets/{dataset_id}/summary")
 def get_price_stat_summary(
     dataset_id: int,
