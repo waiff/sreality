@@ -77,6 +77,8 @@ export const priceStatsKeys = {
   obecTree: ['price_stat_obce_tree'] as const,
   series: (id: number, t: string, e: number) =>
     ['price_stat_series', id, t, e] as const,
+  obecSeries: (id: number, from: string | null, to: string | null) =>
+    ['price_stat_obec_series', id, from, to] as const,
 };
 
 export const fetchDatasets = async (): Promise<PriceStatDataset[]> => {
@@ -142,6 +144,30 @@ export const fetchGrowth = async (
   });
   if (error) throw error;
   return (data ?? []) as PriceStatGrowthRow[];
+};
+
+/* Per-obec monthly sale + rent price for the map hover-chart
+ * (price_stat_series RPC). The frontend derives the metric's variable. */
+export interface PriceStatSeriesRow {
+  obec_id: number;
+  year: number;
+  month: number;
+  sale_price: number | null;
+  rent_price: number | null;
+}
+
+export const fetchSeries = async (
+  datasetId: number,
+  from: string | null,
+  to: string | null,
+): Promise<PriceStatSeriesRow[]> => {
+  const { data, error } = await supabase.rpc('price_stat_series', {
+    p_dataset_id: datasetId,
+    p_from: from,
+    p_to: to,
+  });
+  if (error) throw error;
+  return (data ?? []) as PriceStatSeriesRow[];
 };
 
 /* The kraj→okres→obec tree for the city picker (no geometry). */

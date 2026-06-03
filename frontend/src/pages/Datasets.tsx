@@ -8,6 +8,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchDatasets,
   fetchGrowth,
+  fetchSeries,
   priceStatsKeys,
   type PriceStatDataset,
   type PriceStatGrowthRow,
@@ -15,6 +16,7 @@ import {
 import { createPriceStatDataset } from '@/lib/api';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import CityPicker from '@/components/CityPicker';
+import { buildHoverData } from '@/lib/growthChoropleth';
 
 const METRIC_ORDER: DatasetMetric[] = ['rent_cagr_pct', 'sale_cagr_pct', 'yield_change_pp_pa'];
 const MIN_ACTIVE = 3;
@@ -50,6 +52,7 @@ export default function Datasets() {
   const [from, setFrom] = useState(`${FIRST_YEAR}-01`);
   const [to, setTo] = useState(CUR_YM);
   const [showNew, setShowNew] = useState(false);
+  const [chartOnHover, setChartOnHover] = useState(false);
   const [sort, setSort] = useState<{ col: SortKey; dir: 'asc' | 'desc' } | null>(null);
 
   const datasetsQ = useQuery<PriceStatDataset[], Error>({
@@ -68,6 +71,17 @@ export default function Datasets() {
     staleTime: 60_000,
   });
   const rows = growthQ.data ?? [];
+
+  const seriesQ = useQuery({
+    queryKey: priceStatsKeys.obecSeries(activeId ?? -1, from, to),
+    queryFn: () => fetchSeries(activeId as number, from, to),
+    enabled: activeId != null && chartOnHover,
+    staleTime: 60_000,
+  });
+  const hoverData = useMemo(
+    () => (seriesQ.data ? buildHoverData(seriesQ.data, metric) : null),
+    [seriesQ.data, metric],
+  );
 
   const summary = useMemo(() => ({
     rent: median(rows.map((r) => r.rent_cagr_pct ?? NaN)),
@@ -146,7 +160,13 @@ export default function Datasets() {
         <>
           <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3">
             <WindowControl from={from} to={to} onFrom={setFrom} onTo={setTo} />
-            <MetricToggle metric={metric} onChange={setMetric} />
+            <div className="flex items-center gap-4">
+              <label className="inline-flex items-center gap-1.5 text-sm text-[var(--color-ink-2)] cursor-pointer">
+                <input type="checkbox" checked={chartOnHover} onChange={(e) => setChartOnHover(e.target.checked)} />
+                Chart on hover
+              </label>
+              <MetricToggle metric={metric} onChange={setMetric} />
+            </div>
           </div>
 
           <SummaryBand summary={summary} metric={metric} loading={growthQ.isLoading} />
@@ -155,7 +175,7 @@ export default function Datasets() {
             {rows.length === 0 && !growthQ.isLoading ? (
               <EmptyData />
             ) : (
-              <DatasetMap rows={rows} metric={metric} />
+              <DatasetMap rows={rows} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
             )}
           </div>
 

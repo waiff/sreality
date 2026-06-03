@@ -4,7 +4,7 @@
  * owns its source + layer ids and writes the (inline, contextually-typed) paint
  * expression itself; this module owns the ramps, the metric config, the
  * feature-collection builder, and the sparsity rule. */
-import type { PriceStatGrowthRow } from './priceStats';
+import type { PriceStatGrowthRow, PriceStatSeriesRow } from './priceStats';
 
 export type GrowthMetric = 'rent_cagr_pct' | 'sale_cagr_pct' | 'yield_change_pp_pa';
 
@@ -83,5 +83,54 @@ export function growthToFeatureCollection(rows: PriceStatGrowthRow[]): GrowthFC 
         },
       }];
     }),
+  };
+}
+
+/* ---- hover chart: per-obec time series of the metric's variable -------- */
+
+export interface HoverPoint { ymi: number; value: number; }
+export interface HoverData {
+  byObec: Map<number, HoverPoint[]>;
+  xMin: number; xMax: number; yMin: number; yMax: number;
+  valueLabel: string;
+  format: (v: number) => string;
+}
+
+/* The displayed variable per metric: rent growth → rent price, sale growth →
+ * sale price, yield change → gross yield level. Domains are GLOBAL across all
+ * obce so the hover line reads as one fixed chart as the cursor moves. */
+export function buildHoverData(rows: PriceStatSeriesRow[], metric: GrowthMetric): HoverData {
+  const valueOf = (r: PriceStatSeriesRow): number | null => {
+    if (metric === 'rent_cagr_pct') return r.rent_price ?? null;
+    if (metric === 'sale_cagr_pct') return r.sale_price ?? null;
+    if (r.sale_price && r.rent_price && r.sale_price > 0) {
+      return (12 * r.rent_price) / r.sale_price * 100;
+    }
+    return null;
+  };
+  const byObec = new Map<number, HoverPoint[]>();
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (const r of rows) {
+    const v = valueOf(r);
+    if (v == null || !Number.isFinite(v)) continue;
+    const ymi = r.year * 12 + (r.month - 1);
+    const pt = { ymi, value: v };
+    const arr = byObec.get(r.obec_id);
+    if (arr) arr.push(pt); else byObec.set(r.obec_id, [pt]);
+    xMin = Math.min(xMin, ymi); xMax = Math.max(xMax, ymi);
+    yMin = Math.min(yMin, v); yMax = Math.max(yMax, v);
+  }
+  for (const arr of byObec.values()) arr.sort((a, b) => a.ymi - b.ymi);
+  if (!Number.isFinite(xMin)) { xMin = 0; xMax = 1; }
+  if (!Number.isFinite(yMin)) { yMin = 0; yMax = 1; }
+  if (yMin === yMax) { yMin -= 1; yMax += 1; }
+  const isYield = metric === 'yield_change_pp_pa';
+  return {
+    byObec, xMin, xMax, yMin, yMax,
+    valueLabel:
+      metric === 'rent_cagr_pct' ? 'Nájem Kč/m²/měs'
+      : metric === 'sale_cagr_pct' ? 'Cena Kč/m²'
+      : 'Gross yield %',
+    format: isYield ? (v) => `${v.toFixed(1)} %` : (v) => Math.round(v).toLocaleString('cs-CZ'),
   };
 }

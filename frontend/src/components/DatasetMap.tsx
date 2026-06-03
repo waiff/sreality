@@ -11,7 +11,9 @@ import {
   GROWTH_NO_DATA,
   growthToFeatureCollection,
   type GrowthMetric,
+  type HoverData,
 } from '@/lib/growthChoropleth';
+import HoverChart from '@/components/HoverChart';
 
 export { GROWTH_METRICS as METRICS };
 export type DatasetMetric = GrowthMetric;
@@ -21,13 +23,18 @@ const layerId = (m: GrowthMetric) => `obce-${m}`;
 interface Props {
   rows: PriceStatGrowthRow[];
   metric: GrowthMetric;
+  chartOnHover?: boolean;
+  hoverData?: HoverData | null;
 }
 
-export default function DatasetMap({ rows, metric }: Props) {
+export default function DatasetMap({ rows, metric, chartOnHover = false, hoverData = null }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [ready, setReady] = useState(false);
   const popupRef = useRef<maplibregl.Popup | null>(null);
+  const chartOnHoverRef = useRef(chartOnHover);
+  chartOnHoverRef.current = chartOnHover;
+  const [hover, setHover] = useState<{ obecId: number; name: string; x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -65,17 +72,28 @@ export default function DatasetMap({ rows, metric }: Props) {
           if (!f) return;
           map.getCanvas().style.cursor = 'pointer';
           const pr = f.properties as Record<string, unknown>;
-          const has = Number(pr[cfg.hasProp]);
-          const v = Number(pr[cfg.vProp]);
-          const txt = has ? `${v.toFixed(cfg.digits)} ${cfg.suffix}` : 'thin / no data';
+          if (chartOnHoverRef.current) {
+            popupRef.current?.remove();
+            setHover({
+              obecId: Number(f.id), name: String(pr.obec_name),
+              x: e.point.x, y: e.point.y,
+            });
+            return;
+          }
+          setHover(null);
+          const cm = GROWTH_METRICS[m];
+          const has = Number(pr[cm.hasProp]);
+          const v = Number(pr[cm.vProp]);
+          const txt = has ? `${v.toFixed(cm.digits)} ${cm.suffix}` : 'thin / no data';
           popupRef.current!
             .setLngLat(e.lngLat)
-            .setHTML(`<strong>${String(pr.obec_name)}</strong><br/>${cfg.label}: ${txt}`)
+            .setHTML(`<strong>${String(pr.obec_name)}</strong><br/>${cm.label}: ${txt}`)
             .addTo(map);
         });
         map.on('mouseleave', layerId(m), () => {
           map.getCanvas().style.cursor = '';
           popupRef.current?.remove();
+          setHover(null);
         });
       }
       map.addLayer({
@@ -112,10 +130,27 @@ export default function DatasetMap({ rows, metric }: Props) {
     }
   }, [metric, ready]);
 
+  const hoverPoints = hover && hoverData ? hoverData.byObec.get(hover.obecId) : undefined;
+  const cw = containerRef.current?.clientWidth ?? 900;
+  const chartLeft = hover ? (hover.x + 270 > cw ? hover.x - 262 : hover.x + 14) : 0;
+  const chartTop = hover ? (hover.y + 200 > 560 ? hover.y - 190 : hover.y + 14) : 0;
+
   return (
     <div className="relative">
       <div ref={containerRef} className="h-[560px] w-full rounded-[var(--radius-md)] border border-[var(--color-rule)]" />
       <Legend metric={metric} />
+      {chartOnHover && hover && hoverPoints && (
+        <div className="pointer-events-none absolute z-10" style={{ left: chartLeft, top: chartTop }}>
+          <HoverChart
+            title={hover.name}
+            points={hoverPoints}
+            xMin={hoverData!.xMin} xMax={hoverData!.xMax}
+            yMin={hoverData!.yMin} yMax={hoverData!.yMax}
+            valueLabel={hoverData!.valueLabel}
+            format={hoverData!.format}
+          />
+        </div>
+      )}
     </div>
   );
 }
