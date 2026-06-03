@@ -587,7 +587,7 @@ function CityTable({
       <table className="w-full text-sm border-collapse">
         <thead>
           <tr className="border-b border-[var(--color-rule)] bg-[var(--color-paper-2)]">
-            {columns.map((c, i) => {
+            {columns.map((c) => {
               const isActiveMetric = c.metric === metric;
               const isSorted = sort.col === c.key;
               return (
