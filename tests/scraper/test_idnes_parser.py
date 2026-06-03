@@ -12,7 +12,26 @@ from scraper.idnes_parser import (
     index_price,
     parse_detail,
     parse_index,
+    subtype_from_title,
 )
+
+
+def test_subtype_from_title():
+    # houses (gated on category_main='dum')
+    assert subtype_from_title("Novostavba 2026, rodinný dům 6+kk", "dum") == "rodinny_dum"
+    assert subtype_from_title("Prodej vily s bazénem", "dum") == "vila"
+    assert subtype_from_title("Prodej chaty u lesa", "dum") == "chata"
+    assert subtype_from_title("Prodej chalupy", "dum") == "chalupa"
+    assert subtype_from_title("Zemědělská usedlost", "dum") == "zemedelska_usedlost"
+    # commercial (gated on category_main='komercni')
+    assert subtype_from_title("Pronájem kanceláře 40 m²", "komercni") == "kancelar"
+    assert subtype_from_title("Prodej skladovacích prostor", "komercni") == "sklad"
+    assert subtype_from_title("Restaurace k pronájmu", "komercni") == "restaurace"
+    # generic title → None; cross-category needles never fire
+    assert subtype_from_title("Prodej domu 280 m²", "dum") is None
+    assert subtype_from_title("Pronájem kanceláře", "dum") is None  # gated out
+    assert subtype_from_title("anything", "byt") is None
+    assert subtype_from_title(None, "dum") is None
 
 _DETAIL_URL = (
     "https://reality.idnes.cz/detail/prodej/byt/praha-8-cerneho/"

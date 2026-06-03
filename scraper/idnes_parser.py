@@ -72,6 +72,54 @@ OWNERSHIP: dict[str, str] = {
     "obecni": "statni",
 }
 
+# Portal-agnostic subtype (migration 152). idnes exposes NO structured subtype
+# field and its detail URL is only category-main level; the type appears solely
+# in the SEO title ("...rodinný dům 6+kk..."). So this is a BEST-EFFORT keyword
+# match over the og:title — diacritics-free substrings, gated by category_main so
+# a commercial needle can never fire on a house. A title that doesn't name the
+# type yields None (the listing still shows at the category level). Order: more
+# specific needles first.
+SUBTYPE_BY_TITLE: dict[str, tuple[tuple[str, str], ...]] = {
+    "dum": (
+        ("vicegenera", "vicegeneracni_dum"),
+        ("rodinn", "rodinny_dum"),
+        ("chalup", "chalupa"),
+        ("chata", "chata"),
+        ("chaty", "chata"),
+        ("usedlost", "zemedelska_usedlost"),
+        ("pamatk", "pamatka_jine"),
+        ("na klic", "na_klic"),
+        ("vila", "vila"),
+        ("vily", "vila"),
+    ),
+    "komercni": (
+        ("najemni dum", "cinzovni_dum"),
+        ("cinzov", "cinzovni_dum"),
+        ("kancelar", "kancelar"),
+        ("skladov", "sklad"),
+        ("sklad", "sklad"),
+        ("obchod", "obchodni_prostor"),
+        ("vyrob", "vyroba"),
+        ("restaurac", "restaurace"),
+        ("ubytov", "ubytovani"),
+        ("ordinac", "ordinace"),
+        ("zemedelsk", "zemedelsky"),
+    ),
+}
+
+
+def subtype_from_title(text: str | None, category_main: str | None) -> str | None:
+    """Best-effort subtype from the listing's SEO title (idnes has no structured
+    field). Only houses / commercial; the category gates which needle set runs."""
+    needles = SUBTYPE_BY_TITLE.get(category_main or "")
+    if not needles or not text:
+        return None
+    low = _strip_diacritics(text).lower()
+    for needle, slug in needles:
+        if needle in low:
+            return slug
+    return None
+
 # Czech-bbox guard: a coordinate (embedded pin OR geocode) outside it — a swapped
 # lat/lon or a geocode that landed abroad — is dropped rather than stored as geom.
 _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
@@ -406,6 +454,10 @@ def parse_detail(
     source_id = _id_from_href(source_url) or ""
 
     title = _text(tree.css_first("h1")) or ""
+    # The H1 is generic ("Prodej domu …"); the property type lives in the SEO
+    # og:title ("…rodinný dům 6+kk…"), so subtype keys off that.
+    og = tree.css_first('meta[property="og:title"]')
+    og_title = (og.attributes.get("content") if og else None) or ""
     description = _text(tree.css_first("div.b-desc")) or _text(tree.css_first(".b-detail__text"))
     params = _detail_params(tree)
 
@@ -455,6 +507,7 @@ def parse_detail(
         source_url=source_url,
         category_main=category_main,
         category_type=category_type,
+        subtype=subtype_from_title(f"{og_title} {title}", category_main),
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
