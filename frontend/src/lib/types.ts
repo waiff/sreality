@@ -1,7 +1,7 @@
 /* Wire shapes mirroring the public views from migration 008. Only the columns
  * the UI actually reads are typed here; expand as Parts B–E need more. */
 
-import type { DistrictChip } from './filters';
+import type { DistrictChip, ListingFilters } from './filters';
 
 export type Disposition =
   | '1+kk' | '1+1'
@@ -1123,6 +1123,18 @@ export interface WatchdogSubscription {
   created_at: string;
   updated_at: string;
   dispatch_count: number;
+}
+
+/* Saved Browse filter preset (filter_presets table, migration 150).
+ * Unlike a Watchdog, a preset never fires — it just restores filters
+ * client-side, so `filter_spec` is the *full native* ListingFilters
+ * object stored verbatim (an opaque blob to the API). */
+export interface FilterPreset {
+  id: string;
+  name: string;
+  filter_spec: ListingFilters;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface WatchdogDispatch {

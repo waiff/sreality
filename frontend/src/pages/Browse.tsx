@@ -34,6 +34,8 @@ import {
   type MapBounds,
 } from '@/lib/filters';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
+import PresetBar from '@/components/PresetBar';
+import type { FilterPreset } from '@/lib/types';
 import { fetchRegionDispositionAnnotations, isApiConfigured, mergeDedupPropertySet } from '@/lib/api';
 import {
   fetchCityIndexDefinitions,
@@ -99,6 +101,10 @@ export default function Browse() {
     ? rentVkParam
     : 1) as RentVk;
   const showKraje = searchParams.get('kraje') === '1';
+  /* Active saved-filter-preset id. Lives in the URL (carried by
+   * `preserveExtras`) so editing a filter keeps the preset "loaded"
+   * — the PresetBar then shows it as dirty and offers an Update. */
+  const activePresetId = searchParams.get('preset');
 
   /* Price-stats growth overlay control state — kept in component state (not
    * URL) since it's a transient map-exploration knob. */
@@ -118,7 +124,7 @@ export default function Browse() {
    * want to reset paging should not call `preserveExtras`. */
   const preserveExtras = useCallback(
     (sp: URLSearchParams): URLSearchParams => {
-      for (const key of ['tab', 'sort', 'cities', 'colorby', 'rentmap', 'rentvk', 'kraje']) {
+      for (const key of ['tab', 'sort', 'cities', 'colorby', 'rentmap', 'rentvk', 'kraje', 'preset']) {
         const v = searchParams.get(key);
         if (v != null) sp.set(key, v);
       }
@@ -181,6 +187,30 @@ export default function Browse() {
       setSearchParams(sp, { replace: false });
     },
     [preserveExtras, setSearchParams],
+  );
+
+  /* Load a saved preset: replace the whole filter set with the stored spec
+   * (merged onto DEFAULT_FILTERS so an older spec missing a newer field
+   * still resolves cleanly) and mark the preset active. */
+  const loadPreset = useCallback(
+    (p: FilterPreset) => {
+      const sp = preserveExtras(toSearchParams({ ...DEFAULT_FILTERS, ...p.filter_spec }));
+      sp.set('preset', p.id);
+      setSearchParams(sp, { replace: false });
+    },
+    [preserveExtras, setSearchParams],
+  );
+
+  /* Set / clear the active preset id WITHOUT touching the filters — used
+   * after creating a preset (mark it loaded) or deleting the active one. */
+  const setActivePresetId = useCallback(
+    (id: string | null) => {
+      const sp = new URLSearchParams(searchParams);
+      if (id) sp.set('preset', id);
+      else sp.delete('preset');
+      setSearchParams(sp, { replace: true });
+    },
+    [searchParams, setSearchParams],
   );
 
   const setTab = (next: TabKey) => {
@@ -613,6 +643,14 @@ export default function Browse() {
             onClearBounds={filters.bounds ? () => setBounds(null) : undefined}
             onCreateWatchdog={() => setWatchdogModalOpen(true)}
           />
+          <div className="mt-3">
+            <PresetBar
+              filters={filters}
+              activePresetId={activePresetId}
+              onLoad={loadPreset}
+              onActivePresetIdChange={setActivePresetId}
+            />
+          </div>
           <div className="mt-4 flex items-center justify-between gap-3">
             <Tabs tabs={tabs} active={tabFromUrl} onChange={setTab} />
             {tabFromUrl === 'map' && (

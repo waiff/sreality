@@ -39,9 +39,11 @@ import type {
   WatchdogFilterSpec,
   WatchdogSeenFilter,
   WatchdogSubscription,
+  FilterPreset,
   DedupCandidatesResponse,
   MergesResponse,
 } from './types';
+import type { ListingFilters } from './filters';
 
 /* Sources the backend allowlists for high-confidence parsing.
  * Anything else falls through to a best-effort parse. The order is
@@ -988,6 +990,34 @@ export const runWatchdogMatcher = (): Promise<{
       listings_in_window: number;
     };
   }>('/notifications/matcher/run', { method: 'POST' });
+
+/* ----- Saved Browse filter presets (migration 150) ---------------------- */
+
+export const listFilterPresets = (): Promise<{
+  data: FilterPreset[];
+  total: number;
+}> =>
+  request<{ data: FilterPreset[]; total: number }>('/filter-presets');
+
+export const createFilterPreset = (input: {
+  name: string;
+  filter_spec: ListingFilters;
+}): Promise<FilterPreset> =>
+  request<FilterPreset>('/filter-presets', { method: 'POST', json: input });
+
+export const updateFilterPreset = (
+  id: string,
+  patch: { name?: string; filter_spec?: ListingFilters },
+): Promise<FilterPreset> =>
+  request<FilterPreset>(`/filter-presets/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    json: patch,
+  });
+
+export const deleteFilterPreset = (id: string): Promise<{ deleted: true }> =>
+  request<{ deleted: true }>(`/filter-presets/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 
 /* ----- Cross-source dedup review (multi-portal PR3b) --------------------- */
 
