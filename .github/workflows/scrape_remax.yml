@@ -1,5 +1,6 @@
 name: "Scraping: RE/MAX scraper (pilot)"
 
+# portal: remax
 # Scheduled (every 6h) + manual scraper for remax-czech.cz on the shared portal
 # framework. RE/MAX is a national franchise catalogue (~7,900 listings) served as
 # a single server-rendered search index (no JSON API, no per-category URL) split

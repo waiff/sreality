@@ -1,5 +1,6 @@
 name: "Scraping: iDNES Reality index walk"
 
+# portal: idnes
 # The fast half of the iDNES cadence split (architectural rule #19, like sreality).
 # Walks the ENTIRE index of every configured category (no --max-pages),
 # touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted

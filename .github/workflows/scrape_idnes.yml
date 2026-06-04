@@ -1,5 +1,6 @@
 name: "Scraping: iDNES Reality combined walk (fallback)"
 
+# portal: idnes
 # DISPATCH-ONLY combined index+detail fallback for reality.idnes.cz, mirroring
 # sreality's scrape.yml. The scheduled pipeline is the cadence SPLIT — the fast
 # idnes_index_walk.yml (full walk + mark_inactive + enqueue) feeds the bounded

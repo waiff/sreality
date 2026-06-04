@@ -1,5 +1,6 @@
 name: "Scraping: M&M Reality scraper (pilot)"
 
+# portal: mmreality
 # Scheduled (every 6h) + manual scraper for mmreality.cz on the shared portal
 # framework. M&M Reality is a server-rendered HTML portal whose detail pages
 # embed a complete structured estate object (a Vue `:property` prop): the index

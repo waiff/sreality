@@ -1,5 +1,6 @@
 name: "Scraping: Bazos crawler (pilot)"
 
+# portal: bazos
 # Scheduled (hourly) + manual crawler for reality.bazos.cz. Runs the shared
 # portal framework (Phase 4): an index walk that stages raw pages, bumps
 # last_seen on still-listed ads (touch_listings), enqueues new + price-changed
