@@ -9,9 +9,11 @@ import {
   fetchDatasets,
   fetchGrowth,
   fetchLatestRun,
+  fetchNoData,
   fetchObecTree,
   fetchSeries,
   priceStatsKeys,
+  type NoDataObec,
   type PriceStatDataset,
   type PriceStatGrowthRow,
   type PriceStatRun,
@@ -79,6 +81,7 @@ const normName = (s: string): string => s.trim().toLocaleLowerCase('cs');
 interface TableRow extends PriceStatGrowthRow {
   population: number | null;
   idx: Record<string, number | null>; // index_name → value (quality indexes)
+  noData?: boolean; // scraper checked, insufficient data → greyed n/a row
 }
 
 interface ColSpec {
@@ -162,6 +165,15 @@ export default function Datasets() {
   });
   const rows = growthQ.data ?? [];
 
+  // Municipalities the scraper checked and found insufficient data for — shown
+  // as greyed n/a rows + counted in the infopanel completeness breakdown.
+  const noDataQ = useQuery<NoDataObec[], Error>({
+    queryKey: priceStatsKeys.noData(activeId ?? -1),
+    queryFn: () => fetchNoData(activeId as number),
+    enabled: activeId != null,
+    staleTime: 60_000,
+  });
+
   // Optional extra table columns: quality indexes (matched by city name) +
   // population (by obec_id). Index defs are small + always loaded so the
   // toggles can render; the heavier values/cities/obec-tree load only when a
@@ -205,14 +217,30 @@ export default function Datasets() {
     return m;
   }, [idxValuesQ.data]);
 
-  const enrichedRows: TableRow[] = useMemo(() => rows.map((r) => {
+  // Growth rows + the checked-but-empty municipalities (as null-valued rows),
+  // so the table lists "insufficient data" obce greyed out alongside real data.
+  const combinedRows = useMemo(() => {
+    const withData = rows.map((r) => ({ ...r, noData: false }));
+    const dataIds = new Set(rows.map((r) => r.obec_id));
+    const empties = (noDataQ.data ?? [])
+      .filter((n) => !dataIds.has(n.obec_id))
+      .map((n) => ({
+        obec_id: n.obec_id, locality_name: n.locality_name, geojson: '',
+        sale_latest_price: null, sale_cagr_pct: null, sale_min_active: null,
+        rent_latest_price: null, rent_cagr_pct: null, rent_min_active: null,
+        gross_yield_pct: null, yield_change_pp_pa: null, noData: true,
+      }));
+    return [...withData, ...empties];
+  }, [rows, noDataQ.data]);
+
+  const enrichedRows: TableRow[] = useMemo(() => combinedRows.map((r) => {
     const cityId = nameToCityId.get(normName(r.locality_name));
     const idx: Record<string, number | null> = {};
     for (const slug of PINNED_SLUGS) {
       idx[slug] = cityId != null ? idxMap.get(`${cityId}:${slug}`) ?? null : null;
     }
     return { ...r, population: popByObec.get(r.obec_id) ?? null, idx };
-  }), [rows, nameToCityId, idxMap, popByObec]);
+  }), [combinedRows, nameToCityId, idxMap, popByObec]);
 
   const visibleColumns = useMemo(
     () => allColumns.filter((c) => c.alwaysOn || visibleCols.has(c.key)),
@@ -390,7 +418,7 @@ export default function Datasets() {
         />
       )}
 
-      {active && <FilterChips dataset={active} count={summary.count} />}
+      {active && <FilterChips dataset={active} count={summary.count} noDataCount={noDataQ.data?.length ?? 0} />}
 
       {datasetsQ.isLoading ? (
         <p className="mt-10 text-sm text-[var(--color-ink-3)]">Loading datasets…</p>
@@ -610,14 +638,16 @@ function CityTable({
         </thead>
         <tbody className="tabular-nums font-[family-name:var(--font-mono)] text-[0.8rem]">
           {rows.map((r) => {
-            const thin = isThin(r);
+            const noData = r.noData === true;
+            const thin = !noData && isThin(r);
             return (
               <tr key={r.obec_id}
-                className={`border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-paper-2)] ${thin ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-ink-2)]'}`}>
+                className={`border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-paper-2)] ${noData ? 'text-[var(--color-ink-4)] italic' : thin ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-ink-2)]'}`}>
                 {columns.map((c) => (
                   <td key={c.key}
-                    className={`px-3 py-1.5 whitespace-nowrap ${c.align === 'left' ? 'text-left font-[family-name:var(--font-sans)] text-[var(--color-ink)]' : 'text-right'} ${c.metric === metric ? 'bg-[var(--color-copper-soft)]' : ''}`}>
+                    className={`px-3 py-1.5 whitespace-nowrap ${c.align === 'left' ? `text-left font-[family-name:var(--font-sans)] ${noData ? 'text-[var(--color-ink-3)]' : 'text-[var(--color-ink)]'}` : 'text-right'} ${!noData && c.metric === metric ? 'bg-[var(--color-copper-soft)]' : ''}`}>
                     {c.render(r)}
+                    {c.align === 'left' && noData && <span title="checked — insufficient data" className="text-[var(--color-ink-4)] not-italic"> · n/a</span>}
                     {c.align === 'left' && thin && <span title="thin market" className="text-[var(--color-ink-4)]"> ·</span>}
                   </td>
                 ))}
@@ -650,7 +680,7 @@ const PERIOD_LABEL: Record<string, string> = {
   monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semiannual', annual: 'Annual',
 };
 
-function FilterChips({ dataset, count }: { dataset: PriceStatDataset; count: number }) {
+function FilterChips({ dataset, count, noDataCount }: { dataset: PriceStatDataset; count: number; noDataCount: number }) {
   const chips: string[] = [];
   if (dataset.building_condition) chips.push(COND[dataset.building_condition] ?? `stav ${dataset.building_condition}`);
   if (dataset.building_type) chips.push(CONSTR[dataset.building_type] ?? `konstr. ${dataset.building_type}`);
@@ -677,7 +707,11 @@ function FilterChips({ dataset, count }: { dataset: PriceStatDataset; count: num
       )}
       {count > 0 && (
         <span className="ml-1 tabular-nums">
-          · {count}{selected && selected !== count ? ` of ${selected}` : ''} municipalities
+          {selected != null
+            ? `· ${count + noDataCount} of ${selected} scraped`
+            : `· ${count} municipalities`}
+          {' · '}{count} with data
+          {noDataCount > 0 ? ` · ${noDataCount} insufficient` : ''}
         </span>
       )}
     </div>

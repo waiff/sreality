@@ -98,6 +98,8 @@ export const priceStatsKeys = {
   growth: (id: number, from: string | null, to: string | null) =>
     ['price_stat_growth', id, from, to] as const,
   obecTree: ['price_stat_obce_tree'] as const,
+  noData: (id: number) => ['price_stat_no_data', id] as const,
+  noDataCount: (id: number) => ['price_stat_no_data_count', id] as const,
   series: (id: number, t: string, e: number) =>
     ['price_stat_series', id, t, e] as const,
   obecSeries: (id: number, from: string | null, to: string | null) =>
@@ -211,6 +213,34 @@ export const fetchObecTree = async (): Promise<ObecNode[]> => {
     .range(0, 9999);
   if (error) throw error;
   return (data ?? []) as unknown as ObecNode[];
+};
+
+/* Municipalities the scraper checked and found INSUFFICIENT data for (no
+ * prodej/pronájem series). Used for the Datasets infopanel completeness count,
+ * the greyed table rows, and the Browse market-growth note. */
+export interface NoDataObec {
+  obec_id: number;
+  locality_name: string;
+}
+
+export const fetchNoData = async (datasetId: number): Promise<NoDataObec[]> => {
+  const { data, error } = await supabase
+    .from('price_stat_no_data_public')
+    .select('obec_id,locality_name')
+    .eq('dataset_id', datasetId)
+    .range(0, 9999);
+  if (error) throw error;
+  return (data ?? []) as unknown as NoDataObec[];
+};
+
+/* Just the count (head request, no rows) — for the Browse market-growth note. */
+export const fetchNoDataCount = async (datasetId: number): Promise<number> => {
+  const { count, error } = await supabase
+    .from('price_stat_no_data_public')
+    .select('*', { count: 'exact', head: true })
+    .eq('dataset_id', datasetId);
+  if (error) throw error;
+  return count ?? 0;
 };
 
 export const fetchCitySeries = async (
