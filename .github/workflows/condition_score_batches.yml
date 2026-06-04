@@ -13,19 +13,25 @@ name: "Scraping: Sreality condition scoring (batch API)"
 #             50% batch-discounted cost (scripts.ingest_condition_batch).
 #             Idempotent and resumable.
 #
-# Typical lifecycle: run `submit` once, then run `ingest` periodically
-# until the batch flips to `ingested` (Anthropic batches usually finish
-# within an hour, 24h max).
+# Typical lifecycle: a `submit` run puts pending listings into one batch,
+# then `ingest` runs poll until the batch flips to `ingested` (Anthropic
+# batches usually finish within an hour, 24h max).
 #
-# DISPATCH-ONLY for now. Before enabling a schedule (e.g. an hourly
-# `ingest` poll), the operator must apply migration 098 and confirm a
-# manual submit→ingest round-trip. To schedule later, add an `on.schedule`
-# block; the run step below defaults the scheduled (empty-input) case to
-# `ingest`.
+# SCHEDULED steady-state condition-scoring driver — replaces the synchronous
+# condition_scores.yml cron (now dispatch-only). Two crons, told apart by
+# github.event.schedule in the run step:
+#   * submit every 3h — put the next slice of unscored listings in a batch.
+#   * ingest hourly   — poll in-flight batches and persist completed results.
+# Batch billing is 50% of synchronous, and submit resolves the model from
+# app_settings.llm_condition_model (Haiku today), so this is ~25% of the
+# original Sonnet-sync cost. workflow_dispatch still works for ad-hoc runs.
 #
 # Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY.
 
 on:
+  schedule:
+    - cron: "5 */3 * * *"   # submit: next slice of unscored listings
+    - cron: "35 * * * *"    # ingest: poll + persist completed batches
   workflow_dispatch:
     inputs:
       mode:
@@ -88,14 +94,20 @@ jobs:
 
       - name: Run batch step
         run: |
-          # Scheduled triggers (if added later) pass no inputs; default to ingest.
+          # Scheduled triggers pass no inputs; pick mode from which cron fired.
           MODE="${{ inputs.mode }}"
-          if [ -z "$MODE" ]; then MODE="ingest"; fi
+          if [ -z "$MODE" ]; then
+            if [ "${{ github.event.schedule }}" = "5 */3 * * *" ]; then
+              MODE="submit"
+            else
+              MODE="ingest"
+            fi
+          fi
 
           if [ "$MODE" = "submit" ]; then
             REGION='${{ inputs.region_ids }}'
             LIMIT='${{ inputs.limit }}'
-            if [ -z "$LIMIT" ]; then LIMIT="2000"; fi
+            if [ -z "$LIMIT" ]; then LIMIT="5000"; fi
             NIMG='${{ inputs.n_images }}'
             if [ -z "$NIMG" ]; then NIMG="0"; fi
             AGE='${{ inputs.max_age_days }}'

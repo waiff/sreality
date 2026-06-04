@@ -1028,8 +1028,15 @@ neexistuje" body, `ListingGoneError`) flips that single listing immediately. The
 failure-priority replaces the old per-walk priority retry: a failed fetch keeps its queue row at
 elevated priority.
 
-**Condition scoring** stays decoupled (`condition_scores.yml`, cron `30 * * * *`); both new
-workflows pass `--no-condition-scoring`. **Images** stay decoupled (`images.yml`, `--images-only`,
+**Condition scoring** stays decoupled and is **batch-driven**: `condition_score_batches.yml`
+is the scheduled steady-state driver (Anthropic Message Batches API, 50% cost) — `submit`
+every 3h (`5 */3 * * *`) puts the next slice of unscored listings in a batch, `ingest` hourly
+(`35 * * * *`) polls + persists; one workflow, mode chosen by `github.event.schedule`. The
+synchronous `condition_scores.yml` is now a **dispatch-only fallback** (its `30 * * * *` cron
+was removed) — don't schedule both, they select the same pending listings and the sync scorer
+doesn't skip in-flight batch rows. The scoring model is `app_settings.llm_condition_model`
+(Haiku today), so batch+Haiku ≈ 25% of the original Sonnet-sync cost. Both scrape workflows
+still pass `--no-condition-scoring`. **Images** stay decoupled (`images.yml`, `--images-only`,
 2-hourly); both new workflows pass `--no-image-downloads`. Neither `images.yml` nor the drain's
 write phase downloads bytes — the drain only writes image-URL rows.
 
