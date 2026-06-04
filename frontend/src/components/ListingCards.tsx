@@ -154,9 +154,21 @@ function Card({
         : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
   const titleColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
   const priceColor  = inactive ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink)]';
+  /* Status now reads off the card surface, so inactive photos desaturate
+   * a touch harder than before — the only signal left in the photo lane. */
   const imageFilter = inactive
-    ? 'saturate-[0.55] brightness-[0.95]'
+    ? 'saturate-[0.4] brightness-[0.97]'
     : '';
+
+  /* One lifespan badge replaces the old status / od / viděno / TOM stack.
+   * Active cards show the open run "od <date> · <N dní>"; inactive cards
+   * show the closed run "<from> – <to> · <N dní>". The day count — the
+   * operator's headline time-on-market metric — stays the copper accent,
+   * folded inline. The Aktivní/Neaktivní word survives in the title. */
+  const days = r.tom_days != null ? fmtTomDays(r.tom_days) : null;
+  const lifespanTitle = inactive
+    ? `Neaktivní${days ? ` · bylo na trhu ${days}` : ''} (${fmtShortDate(r.first_seen_at)} – ${fmtShortDate(r.last_seen_at)})`
+    : `Aktivní${days ? ` · na trhu ${days}` : ''} (od ${fmtShortDate(r.first_seen_at)})`;
 
   const wrapperClass = [
     'group block rounded-[var(--radius-sm)] border transition-colors overflow-hidden',
@@ -188,35 +200,35 @@ function Card({
             </span>
           </div>
         )}
-        {/* Metadata margin: four file-tab badges stacked down the
-          * right edge of the photo. Status leads (sage / brick), the
-          * two date badges sit muted in the middle, the copper TOM
-          * pill closes the run as the operator's headline metric.
-          * Borders-only, paper-3/85 + backdrop-blur over the photo. */}
+        {/* Metadata margin: two file-tab badges down the right edge of
+          * the photo — the lifespan run, then the source portal. Status
+          * is carried by the card surface, not a pill. Borders-only,
+          * paper-3/85 + backdrop-blur over the photo. */}
         <div className="absolute top-1 right-1 flex flex-col items-end gap-1">
-          <CardBadge tone={inactive ? 'inactive' : 'active'}>
-            {inactive ? 'Neaktivní' : 'Aktivní'}
-          </CardBadge>
-          <CardBadge tone="muted" title="První záznam v archivu">
-            <span className="opacity-60 mr-1">od</span>
-            {fmtShortDate(r.first_seen_at)}
-          </CardBadge>
-          <CardBadge
-            tone="muted"
-            title={`Naposled viděno na ${portalLabel(r.source) ?? 'portálu'}`}
-          >
-            <span className="opacity-60 mr-1">viděno</span>
-            {fmtShortDate(r.last_seen_at)}
+          <CardBadge title={lifespanTitle}>
+            {inactive ? (
+              <>
+                {fmtShortDate(r.first_seen_at)}
+                <span className="opacity-50 mx-1">–</span>
+                {fmtShortDate(r.last_seen_at)}
+              </>
+            ) : (
+              <>
+                <span className="opacity-60 mr-1">od</span>
+                {fmtShortDate(r.first_seen_at)}
+              </>
+            )}
+            {days && (
+              <>
+                <span className="opacity-40 mx-1">·</span>
+                <span className="text-[var(--color-copper)]">{days}</span>
+              </>
+            )}
           </CardBadge>
           {portalLabel(r.source) && (
-            <CardBadge tone="muted" title="Zdrojový portál">
+            <CardBadge title="Zdrojový portál">
               <span className="opacity-60 mr-1">portál</span>
               {portalLabel(r.source)}
-            </CardBadge>
-          )}
-          {r.tom_days != null && (
-            <CardBadge tone="copper" title="Na trhu (turned in)">
-              {fmtTomDays(r.tom_days)}
             </CardBadge>
           )}
         </div>
@@ -310,40 +322,19 @@ function formatTitle(r: CardRow): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* CardBadge — the building block of the vertical metadata stack on the right */
-/* margin of a listing card. Four tones, all sit on a near-opaque paper-3     */
-/* base with a coloured border + text for semantic signal — the *-soft tokens */
-/* are rgba(_, 0.10) and wash out over a busy photo, so the border carries    */
-/* the colour and the paper layer keeps the badge legible.                    */
-/*                                                                            */
-/*   active   — sage border + text (semantic "live")                          */
-/*   inactive — brick border + text (semantic "delisted")                     */
-/*   muted    — rule border + ink-2 text — for the date badges                */
-/*   copper   — the operator's headline TOM pill, accent token                */
-/*                                                                            */
-/* All four use the same 0.6rem uppercase tracking treatment as the original  */
-/* INACTIVE pill so the file-tab silhouette stays consistent across cards.    */
+/* CardBadge — the building block of the metadata stack on the right margin of */
+/* a listing card. One muted treatment: a near-opaque paper-3 base + rule      */
+/* border + ink-2 text, so it stays legible over any photo without shouting.   */
+/* Semantic colour (the copper time-on-market figure) is applied per-child by  */
+/* the caller, not via a tone prop — status itself now reads off the card      */
+/* surface rather than a coloured pill. 0.6rem uppercase tracking keeps the    */
+/* file-tab silhouette consistent across cards.                                */
 /* -------------------------------------------------------------------------- */
 
-type CardBadgeTone = 'active' | 'inactive' | 'muted' | 'copper';
-
-const CARD_BADGE_TONE: Record<CardBadgeTone, string> = {
-  active:
-    'bg-[var(--color-paper-3)]/90 border-[var(--color-sage)]/70 text-[var(--color-sage)]',
-  inactive:
-    'bg-[var(--color-paper-3)]/90 border-[var(--color-brick)]/70 text-[var(--color-brick)]',
-  muted:
-    'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-2)]',
-  copper:
-    'bg-[var(--color-paper-3)]/90 border-[var(--color-copper)]/70 text-[var(--color-copper)]',
-};
-
 function CardBadge({
-  tone,
   children,
   title,
 }: {
-  tone: CardBadgeTone;
   children: ReactNode;
   title?: string;
 }) {
@@ -354,7 +345,7 @@ function CardBadge({
         'inline-flex items-center px-1.5 py-0.5 text-[0.6rem] tracking-[0.12em]',
         'uppercase rounded-[var(--radius-xs)] border backdrop-blur-sm font-medium',
         'tabular-nums whitespace-nowrap',
-        CARD_BADGE_TONE[tone],
+        'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-2)]',
       ].join(' ')}
     >
       {children}
