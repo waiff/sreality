@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type MouseEvent, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery, useQueries } from '@tanstack/react-query';
 import {
@@ -668,10 +668,20 @@ function CategoryTable({
               <th className="text-right py-1.5 px-1.5 font-medium">new&nbsp;t&thinsp;/&thinsp;7d</th>
               <th className="text-right py-1.5 px-1.5 font-medium">flipped&nbsp;t&thinsp;/&thinsp;7d</th>
               <th className="text-right py-1.5 px-1.5 font-medium">failed</th>
-              <th className="text-left  py-1.5 px-1.5 font-medium">
+              <th className="text-left  py-1.5 px-1.5 font-medium align-top">
                 <div className="flex items-center justify-between gap-2">
                   <span>trend</span>
                   <GrainToggle grain={grain} onChange={setGrain} />
+                </div>
+                <div className="mt-1 flex items-center gap-2.5 normal-case tracking-normal text-[0.6rem] text-[var(--color-ink-3)]">
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block rounded-full" style={{ width: 12, height: 2, background: 'var(--color-copper)' }} />
+                    Portal
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <span className="inline-block rounded-full" style={{ width: 12, height: 2, background: 'var(--color-ink-2)' }} />
+                    In&nbsp;DB
+                  </span>
                 </div>
               </th>
             </tr>
@@ -805,24 +815,42 @@ function CategoryTableRow({
         )}
       </td>
       <td className="py-1.5 px-1.5">
-        <TrendChart points={trendPoints} />
+        <TrendChart points={trendPoints} grain={grain} />
       </td>
     </tr>
   );
 }
 
+// Tooltip date formats for the trend hover: full timestamp for the hourly
+// series, just the day for the daily one. Defined here (not reusing the later
+// CHART_TIME_FMT) so the trend feature is self-contained.
+const TREND_HOUR_FMT = new Intl.DateTimeFormat('cs-CZ', {
+  timeZone: 'Europe/Prague',
+  day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+});
+const TREND_DAY_FMT = new Intl.DateTimeFormat('cs-CZ', {
+  timeZone: 'Europe/Prague',
+  day: '2-digit', month: '2-digit',
+});
+
 // Two-line sparkline on a shared auto-fit scale: copper = active on portal,
 // ink = active in DB. Auto-fit (not zero-based) so the gap between the two —
 // the real drift — stays visible even when both sit near the same magnitude.
+// Hovering snaps to the nearest sample and shows both series' values + the gap
+// at that point; the tooltip is fixed-positioned so the narrow, horizontally
+// scrollable table cell can never clip it.
 function TrendChart({
   points,
+  grain,
   width = 116,
   height = 26,
 }: {
   points: CategoryTrendPoint[];
+  grain: 'hour' | 'day';
   width?: number;
   height?: number;
 }) {
+  const [hover, setHover] = useState<{ i: number; x: number; y: number } | null>(null);
   const pts = points.filter((p) => p.portal != null || p.db != null);
   if (pts.length === 0) {
     return <span className="text-[0.65rem] text-[var(--color-ink-4)]">no data</span>;
@@ -834,36 +862,99 @@ function TrendChart({
   const min = Math.min(...vals);
   const span = max - min || 1;
   const stepX = pts.length > 1 ? width / (pts.length - 1) : width;
+  const xFor = (i: number) => (pts.length > 1 ? i * stepX : width / 2);
+  const yFor = (v: number) => height - ((v - min) / span) * (height - 3) - 1.5;
   const lineFor = (key: 'portal' | 'db') =>
     pts
       .map((p, i) => {
         const v = p[key];
         if (v == null) return null;
-        const x = i * stepX;
-        const y = height - ((v - min) / span) * (height - 3) - 1.5;
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
+        return `${xFor(i).toFixed(1)},${yFor(v).toFixed(1)}`;
       })
       .filter((s): s is string => s != null)
       .join(' ');
+
+  const onMove = (e: MouseEvent<SVGSVGElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const localX = ((e.clientX - rect.left) / (rect.width || width)) * width;
+    const i = Math.min(pts.length - 1, Math.max(0, Math.round(localX / stepX)));
+    setHover({ i, x: e.clientX, y: e.clientY });
+  };
+
+  const hp = hover ? pts[hover.i] : null;
+  const hx = hover ? xFor(hover.i) : 0;
+
   return (
-    <svg width={width} height={height} className="flex-shrink-0 block" aria-hidden>
-      <polyline
-        fill="none"
-        stroke="var(--color-ink-2)"
-        strokeWidth="1.25"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        points={lineFor('db')}
-      />
-      <polyline
-        fill="none"
-        stroke="var(--color-copper)"
-        strokeWidth="1.25"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        points={lineFor('portal')}
-      />
-    </svg>
+    <span className="relative inline-block">
+      <svg
+        width={width}
+        height={height}
+        className="flex-shrink-0 block cursor-crosshair"
+        onMouseMove={onMove}
+        onMouseLeave={() => setHover(null)}
+      >
+        <polyline
+          fill="none"
+          stroke="var(--color-ink-2)"
+          strokeWidth="1.25"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          points={lineFor('db')}
+        />
+        <polyline
+          fill="none"
+          stroke="var(--color-copper)"
+          strokeWidth="1.25"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          points={lineFor('portal')}
+        />
+        {hp && (
+          <g>
+            <line
+              x1={hx} x2={hx} y1={0} y2={height}
+              stroke="var(--color-ink-3)" strokeWidth="0.75" strokeDasharray="2 2"
+            />
+            {hp.db != null && (
+              <circle cx={hx} cy={yFor(hp.db)} r="2.1" fill="var(--color-ink-2)" />
+            )}
+            {hp.portal != null && (
+              <circle cx={hx} cy={yFor(hp.portal)} r="2.1" fill="var(--color-copper)" />
+            )}
+          </g>
+        )}
+      </svg>
+      {hp && hover && (
+        <div
+          className="fixed z-50 pointer-events-none rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2 py-1 text-[0.65rem] leading-tight shadow-sm min-w-[7.5rem]"
+          style={{ left: hover.x + 12, top: hover.y + 12 }}
+        >
+          <div className="mb-0.5 tabular-nums text-[var(--color-ink-3)]">
+            {(grain === 'hour' ? TREND_HOUR_FMT : TREND_DAY_FMT).format(new Date(hp.t))}
+          </div>
+          <div className="flex items-center justify-between gap-3 tabular-nums">
+            <span style={{ color: 'var(--color-copper)' }}>Portal</span>
+            <span className="font-mono text-[var(--color-ink)]">
+              {hp.portal != null ? fmtCount(hp.portal) : '—'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between gap-3 tabular-nums">
+            <span style={{ color: 'var(--color-ink-2)' }}>In&nbsp;DB</span>
+            <span className="font-mono text-[var(--color-ink)]">
+              {hp.db != null ? fmtCount(hp.db) : '—'}
+            </span>
+          </div>
+          {hp.portal != null && hp.db != null && (
+            <div className="mt-0.5 flex items-center justify-between gap-3 border-t border-[var(--color-rule-soft)] pt-0.5 tabular-nums">
+              <span className="text-[var(--color-ink-3)]">gap</span>
+              <span className="font-mono text-[var(--color-ink-2)]">
+                {hp.db - hp.portal > 0 ? '+' : ''}{fmtCount(hp.db - hp.portal)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </span>
   );
 }
 
