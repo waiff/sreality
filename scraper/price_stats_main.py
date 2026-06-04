@@ -63,15 +63,26 @@ def _dataset_window(
 
 def _dataset_localities(
     conn: Any,
+    client: PriceStatsClient,
     dataset: dict[str, Any],
     *,
     dry_run: bool,
 ) -> list[dict[str, Any]]:
-    """Localities for a dataset (its selected obce, else all), stalest first."""
+    """Localities for a dataset (its selected obce, else all), stalest first.
+
+    Selected obce with a precomputed admin_boundaries.sreality_id map straight
+    through (resolve_obce). Any WITHOUT one are resolved on demand by name via
+    localities/suggest (then PIP-placed by upsert_locality), so a dataset can
+    target the full obec breakdown — not only the spatial-join-mapped subset.
+    """
     obec_ids = dataset.get("obec_ids")
     ids = [int(x) for x in obec_ids] if obec_ids else None
     if ids and not dry_run:
         db.resolve_obce(conn, ids)
+        names = db.unresolved_obec_names(conn, ids)
+        if names:
+            LOG.info("OBEC resolve-by-name: %d unmapped obce", len(names))
+            resolve_localities(conn, client, names, dry_run=dry_run)
     return db.localities_ordered(conn, dataset["id"], ids)
 
 
@@ -247,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     for dataset in datasets:
-        locs = _dataset_localities(conn, dataset, dry_run=args.dry_run)
+        locs = _dataset_localities(conn, client, dataset, dry_run=args.dry_run)
         if not locs:
             LOG.warning("dataset %s has no localities to fetch", dataset["id"])
             continue
