@@ -1,5 +1,6 @@
 name: "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)"
 
+# portal: sreality
 # DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live
 # pipeline is now the cadence split — index_walk.yml (fast, frequent, marks
 # delistings + enqueues) feeds detail_drain.yml (async, batched writes). This

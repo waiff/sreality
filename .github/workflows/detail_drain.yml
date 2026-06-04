@@ -1,5 +1,6 @@
 name: "Scraping: Sreality detail drain (Phase 2)"
 
+# portal: sreality
 # The slow half of the Phase-2 cadence split. Claims a bounded slice of
 # listing_detail_queue (enqueued by index_walk.yml), fetches each listing's
 # detail on a rate-limited worker pool, and writes them in batches via the

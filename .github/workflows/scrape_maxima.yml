@@ -1,5 +1,6 @@
 name: "Scraping: Maxima Reality scraper (pilot)"
 
+# portal: maxima
 # Scheduled (every 6h) + manual scraper for nemovitosti.maxima.cz on the shared
 # portal framework. Maxima is a single real-estate agency that publishes its whole
 # catalogue (~220 listings) as one server-rendered WordPress index (no JSON API,

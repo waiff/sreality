@@ -1,5 +1,6 @@
 name: "Scraping: Bezrealitky scraper (pilot)"
 
+# portal: bezrealitky
 # Scheduled (every 6h) + manual scraper for bezrealitky.cz on the shared portal
 # framework. Bezrealitky is a JSON-API portal (public GraphQL at
 # api.bezrealitky.cz) like sreality: the index walk pages listAdverts and
