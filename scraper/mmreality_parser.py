@@ -192,7 +192,9 @@ def _ownership(obj: dict[str, Any]) -> str | None:
     key = _norm_key((obj.get("ownership") or {}).get("name"))
     if not key:
         return None
-    return OWNERSHIP.get(key, key)
+    # Canonical set only ({osobni, druzstevni, statni}); unmapped labels → None
+    # rather than leaking a value no ownership filter option can match.
+    return OWNERSHIP.get(key)
 
 
 def _energy_rating(obj: dict[str, Any]) -> str | None:

@@ -13,7 +13,22 @@ import html as ihtml
 import json
 from typing import Any
 
-from scraper.mmreality_parser import index_price, parse_detail, parse_index
+from scraper.mmreality_parser import (
+    _ownership,
+    index_price,
+    parse_detail,
+    parse_index,
+)
+
+
+def test_ownership_canonical_only():
+    assert _ownership({"ownership": {"name": "Osobní"}}) == "osobni"
+    assert _ownership({"ownership": {"name": "Družstevní"}}) == "druzstevni"
+    assert _ownership({"ownership": {"name": "Obecní"}}) == "statni"
+    # Unmapped labels collapse to None, never leak a value no filter can match.
+    assert _ownership({"ownership": {"name": "Jiné"}}) is None
+    assert _ownership({"ownership": {"name": "Ostatní"}}) is None
+    assert _ownership({}) is None
 
 INDEX_HTML = """
 <!DOCTYPE html><html lang="cs"><head>
