@@ -11,7 +11,7 @@
  * worker (host_permissions + the portal's CORS don't apply there). */
 
 import styles from './styles.css?inline';
-import { detailRef, portalForHost, portalForUrl, isDetailPage } from './portals';
+import { detailRef, portalForHost, portalForUrl, type PortalRef } from './portals';
 import { runIndexOverlay } from './index_overlay';
 import type {
   ApiMessage,
@@ -404,6 +404,10 @@ function mountPanel(): {
 let state: PanelState;
 let render: (s: PanelState) => void;
 let panelShadow: ShadowRoot | null = null;
+/* The listing URL the panel currently represents — drives create_estimation.
+ * On a detail page it's location.href; opened from an index card it's that
+ * card's detail href (NOT the search page). */
+let panelUrl = '';
 let patchTimer: ReturnType<typeof setTimeout> | null = null;
 
 function setState(updater: (prev: PanelState) => PanelState): void {
@@ -465,7 +469,7 @@ function onReset(): void {
 async function onCreateRun(): Promise<void> {
   setState((prev) => ({ ...prev, busy: true, errorMessage: null }));
   const res = await call<EstimationRun>({
-    type: 'create_estimation', url: window.location.href,
+    type: 'create_estimation', url: panelUrl,
   });
   if (!res.ok) {
     setState((prev) => ({
@@ -491,10 +495,13 @@ async function onCreateRun(): Promise<void> {
   setState((prev) => seedFromRun({ ...prev, busy: false }, row));
 }
 
-async function bootDetail(): Promise<void> {
-  const ref = detailRef(window.location.href);
-  if (ref == null) return;
-
+/* Mounts/refreshes the floating panel for one listing. Used by the detail-page
+ * entry AND by index-card badges (which pass the card's ref + href + the
+ * already-fetched listing so no second lookup is needed). */
+export async function openPanel(
+  ref: PortalRef, url: string, prefetched?: PortalListing | null,
+): Promise<void> {
+  panelUrl = url;
   const panel = mountPanel();
   render = panel.render;
   panelShadow = panel.shadow;
@@ -505,20 +512,25 @@ async function bootDetail(): Promise<void> {
   };
   render(state);
 
-  const res = await call<PortalListing[]>({
-    type: 'lookup_listings',
-    items: [{ source: ref.source, source_id: ref.sourceId }],
-  });
-  if (!res.ok) {
-    setState((prev) => ({ ...prev, phase: 'error', errorMessage: res.detail }));
-    return;
+  let listing: PortalListing | null;
+  if (prefetched !== undefined) {
+    listing = prefetched;
+  } else {
+    const res = await call<PortalListing[]>({
+      type: 'lookup_listings',
+      items: [{ source: ref.source, source_id: ref.sourceId }],
+    });
+    if (!res.ok) {
+      setState((prev) => ({ ...prev, phase: 'error', errorMessage: res.detail }));
+      return;
+    }
+    listing = res.data[0] ?? null;
   }
-  const listing = res.data[0] ?? null;
 
   const saleApt =
     listing?.found
       ? listing.category_main === 'byt' && listing.category_type === 'prodej'
-      : urlSaleApartmentHint(window.location.href);
+      : urlSaleApartmentHint(url);
 
   if (saleApt === false) {
     setState((prev) => ({ ...prev, phase: 'deactivated', listing }));
@@ -558,14 +570,15 @@ function urlSaleApartmentHint(url: string): boolean | null {
 
 function main(): void {
   const url = window.location.href;
-  if (isDetailPage(url)) {
-    bootDetail().catch((err: unknown) => {
+  const ref = detailRef(url);
+  if (ref != null) {
+    openPanel(ref, url).catch((err: unknown) => {
       console.error('[mf-ext] detail boot failed', err);
     });
     return;
   }
   if (portalForHost(window.location.hostname) != null) {
-    runIndexOverlay(call).catch((err: unknown) => {
+    runIndexOverlay(call, openPanel).catch((err: unknown) => {
       console.error('[mf-ext] index overlay failed', err);
     });
   }
