@@ -53,9 +53,14 @@ row contract; `scraper/hashing.py` strips the volatile fields (`params.stats` vi
 counter, `note`/`rus`/`rusReply`).
 
 **Data source (bazos.cz).** A separate HTML crawler (`scraper/bazos_client.py`,
-`bazos_parser.py`, `bazos_main.py`, workflow `scrape_bazos.yml` — a scheduled pilot, every
-6h) lands bazos listings into the same `listings`/`listing_snapshots` contract,
-tagged `source='bazos'`. Raw HTML is staged in `portal_raw_pages` (migration 099) before
+`bazos_parser.py`, `bazos_main.py`) lands bazos listings into the same
+`listings`/`listing_snapshots` contract, tagged `source='bazos'`. It walks 14 nationwide
+scopes (byt/dum/chata/restaurace/kancelar/prostory/sklad × prodam/pronajmu), so — like
+sreality/idnes (rule #19) — it is **cadence-split**: `bazos_index_walk.yml` (every 6h, full
+walk + mark_inactive + enqueue) feeds the bounded `bazos_detail_drain.yml` (hourly,
+`--max-seconds` budget). A combined run can't do both inside one job (~1500 index pages ≈
+50 min eats the window, starving the drain); `scrape_bazos.yml` keeps that combined flow as a
+dispatch-only fallback for narrow ad-hoc runs. Raw HTML is staged in `portal_raw_pages` (migration 099) before
 parsing. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
 (page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
 sreality.
@@ -950,8 +955,13 @@ The sreality pipeline is **split by cadence (Phase 2)**: `index_walk.yml` ("Scra
 index walk", cron `*/15`) feeds `detail_drain.yml` ("Scraping: Sreality detail drain", cron
 `*/15`). `scrape.yml` ("Scraping: Sreality combined walk") is the **dispatch-only fallback** —
 the proven combined index+detail `_run_full`, kept for instant revert (re-add its `schedule:`
-cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is `scrape_bazos.yml`
-("Scraping: Bazos crawler (pilot)", every 6h + dispatch). The bezrealitky scrape is
+cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is **cadence-split**
+like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combined run starves the
+drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
+mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
+`45 * * * *`, bounded `--max-seconds`). `scrape_bazos.yml` ("Scraping: Bazos crawler combined
+walk (fallback)") is the **dispatch-only** combined entry point for narrow ad-hoc runs. The
+bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
 both index walk + detail drain in one job via `bezrealitky_main`). The mmreality scrape is
 `scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", every 6h + dispatch; runs
