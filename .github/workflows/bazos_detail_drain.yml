@@ -76,10 +76,15 @@ jobs:
           MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
           MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
           MAX_DETAIL: ${{ inputs.max_detail }}
-          WORKERS: ${{ inputs.workers || '2' }}
-          RATE: ${{ inputs.rate || '0.6' }}
+          WORKERS: ${{ inputs.workers }}
+          RATE: ${{ inputs.rate }}
         run: |
-          ARGS="--drain-only --max-seconds $MAX_SECONDS --workers $WORKERS --rate $RATE"
+          # workers / rate / max-detail default to the per-portal config
+          # (portals.operational_limits); a dispatch input overrides. Hardcoding
+          # --workers/--rate here used to pin them below the configured values.
+          ARGS="--drain-only --max-seconds $MAX_SECONDS"
           if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
+          if [ -n "$WORKERS" ]; then ARGS="$ARGS --workers $WORKERS"; fi
+          if [ -n "$RATE" ]; then ARGS="$ARGS --rate $RATE"; fi
           echo "python -m scraper.bazos_main $ARGS"
           eval "python -m scraper.bazos_main $ARGS"

@@ -154,8 +154,13 @@ _DEFAULTS: dict[str, PortalConfig] = {
                         "kancelar", "prostory", "sklad")
         ],
         split_threshold=None,
+        # detail_rate 0.6 is the politeness ceiling (req/s); 4 workers share that
+        # one limiter, so they only overlap per-listing geocode/DB latency, not
+        # raise the request rate. max_detail_per_run high so the drain's
+        # --max-seconds budget governs, not a tight claim cap (migration 168).
         limits=PortalLimits(
-            index_rate=0.5, detail_workers=1, detail_rate=0.5,
+            index_rate=0.5, detail_workers=4, detail_rate=0.6,
+            max_detail_per_run=1500,
         ),
     ),
     "idnes": PortalConfig(
