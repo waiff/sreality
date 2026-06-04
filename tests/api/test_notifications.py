@@ -268,12 +268,23 @@ def test_filter_spec_lifts_legacy_string_districts() -> None:
 
 
 def test_build_clauses_enumerated_columns() -> None:
-    spec = WatchdogFilterSpec(furnished="ano", ownership="osobni")
+    # A bare string still coerces to a single-element list (backward-compat).
+    spec = WatchdogFilterSpec(furnished="ano", ownership=["osobni", "druzstevni"])
+    assert spec.furnished == ["ano"]
     where, params = _build_match_clauses(spec)
-    assert "l.furnished = %(furnished)s" in where
-    assert "l.ownership = %(ownership)s" in where
-    assert params["furnished"] == "ano"
-    assert params["ownership"] == "osobni"
+    clauses = " ".join(where)
+    assert "l.furnished = ANY(%(furnished)s)" in clauses
+    assert "l.ownership = ANY(%(ownership)s)" in clauses
+    assert params["furnished"] == ["ano"]
+    assert params["ownership"] == ["osobni", "druzstevni"]
+
+
+def test_build_clauses_furnished_unknown_sentinel() -> None:
+    spec = WatchdogFilterSpec(furnished=["__unknown__"])
+    where, params = _build_match_clauses(spec)
+    clauses = " ".join(where)
+    assert "l.furnished IS NULL OR NOT (l.furnished = ANY(%(furnished_canon)s))" in clauses
+    assert params["furnished_canon"] == ["ano", "ne", "castecne"]
 
 
 def test_build_clauses_condition_match() -> None:

@@ -283,8 +283,10 @@ def _norm_condition(text: str | None) -> str | None:
 def _norm_ownership(text: str | None) -> str | None:
     if not text:
         return None
+    # Canonical set only ({osobni, druzstevni, statni}); unmapped labels → None
+    # rather than leaking a value no ownership filter option can match.
     key = _strip_diacritics(text).lower().strip()
-    return OWNERSHIP.get(key, key or None)
+    return OWNERSHIP.get(key)
 
 
 def _norm_building_type(text: str | None) -> str | None:

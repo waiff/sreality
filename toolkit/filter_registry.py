@@ -149,16 +149,29 @@ CATEGORY_TYPE_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("podil", "Podíl", "Fractional"),
 )
 
+# Sentinel multiselect value meaning "no value, or a value outside the
+# canonical option set" (e.g. a NULL furnished, or a rogue portal label the
+# parser didn't normalise). The WHERE builders translate it to
+# `col IS NULL OR col <> ALL(canonical)`. The canonical tuples below are the
+# single source of truth for "what counts as a known value".
+UNKNOWN_FILTER_VALUE = "__unknown__"
+_UNKNOWN_OPTION = EnumOption(UNKNOWN_FILTER_VALUE, "Neuvedeno", "Unknown / not specified")
+
+FURNISHED_CANONICAL: tuple[str, ...] = ("ano", "ne", "castecne")
+OWNERSHIP_CANONICAL: tuple[str, ...] = ("osobni", "druzstevni", "statni")
+
 FURNISHED_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("ano", "Vybaveno", "Furnished"),
     EnumOption("ne", "Nevybaveno", "Unfurnished"),
     EnumOption("castecne", "Částečně", "Partially furnished"),
+    _UNKNOWN_OPTION,
 )
 
 OWNERSHIP_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("osobni", "Osobní", "Personal"),
     EnumOption("druzstevni", "Družstevní", "Cooperative"),
     EnumOption("statni", "Státní/obecní", "State/Municipal"),
+    _UNKNOWN_OPTION,
 )
 
 BUILDING_MATERIAL_OPTIONS: tuple[EnumOption, ...] = (
@@ -895,35 +908,40 @@ def _build_registry() -> dict[str, FilterDef]:
         ),
         FilterDef(
             id="furnished",
-            type=FilterType.STRING,
+            type=FilterType.STRING_LIST,
             pg_column="furnished",
             default=None,
             description=(
-                "Furnishing status. `ano` = furnished, `ne` = "
-                "unfurnished, `castecne` = partially furnished. Null "
-                "drops the constraint."
+                "Multi-select furnishing status. `ano` = furnished, `ne` = "
+                "unfurnished, `castecne` = partially furnished. A listing "
+                "matches if its value is in the list. The special "
+                "`__unknown__` value matches listings whose furnishing is "
+                "not specified (NULL) or stored under a non-canonical label. "
+                "Empty list / null = no constraint."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.SINGLE_SELECT,
+            ui_control=UiControl.MULTISELECT,
             agendas=_ALL_AGENDAS,
-            constraints={"enum": [o.value for o in FURNISHED_OPTIONS]},
             enum_values=FURNISHED_OPTIONS,
         ),
         FilterDef(
             id="ownership",
-            type=FilterType.STRING,
+            type=FilterType.STRING_LIST,
             pg_column="ownership",
             default=None,
             description=(
-                "Ownership type. `osobni` = personal (full title), "
-                "`druzstevni` = cooperative (member share), `statni` "
-                "= state/municipal. Materially affects sale prices "
-                "(druzstevni typically 10–20% cheaper than osobni)."
+                "Multi-select ownership type. `osobni` = personal (full "
+                "title), `druzstevni` = cooperative (member share), `statni` "
+                "= state/municipal. A listing matches if its value is in the "
+                "list. The special `__unknown__` value matches listings whose "
+                "ownership is not specified (NULL) or stored under a "
+                "non-canonical label. Materially affects sale prices "
+                "(druzstevni typically 10–20% cheaper than osobni). Empty "
+                "list / null = no constraint."
             ),
             category=CATEGORY_PROPERTY,
-            ui_control=UiControl.SINGLE_SELECT,
+            ui_control=UiControl.MULTISELECT,
             agendas=_ALL_AGENDAS,
-            constraints={"enum": [o.value for o in OWNERSHIP_OPTIONS]},
             enum_values=OWNERSHIP_OPTIONS,
         ),
 
@@ -1819,6 +1837,9 @@ __all__ = [
     "CATEGORY_TYPE_OPTIONS",
     "FURNISHED_OPTIONS",
     "OWNERSHIP_OPTIONS",
+    "FURNISHED_CANONICAL",
+    "OWNERSHIP_CANONICAL",
+    "UNKNOWN_FILTER_VALUE",
     "BUILDING_MATERIAL_OPTIONS",
     "BUILDING_TYPE_OPTIONS",
     "CONDITION_OPTIONS",

@@ -7,6 +7,9 @@ import {
   type MapBounds,
   buildingMaterialToValues,
   isoNDaysAgo,
+  UNKNOWN_FILTER_VALUE,
+  FURNISHED_CANONICAL,
+  OWNERSHIP_CANONICAL,
 } from './filters';
 import { applyRegistryFilters } from './registryQueryBuilder';
 import { fetchGrowth } from './priceStats';
@@ -200,6 +203,28 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.buildingMaterial.length) {
     r = r.in('building_type', buildingMaterialToValues(f.buildingMaterial));
   }
+  /* Multi-select enums with the '__unknown__' sentinel. The sentinel matches a
+   * NULL or non-canonical value, which the plain `.in()` auto-dispatch can't
+   * express — so they're hand-coded here as an `.or(in.(…),is.null,not.in.(…))`
+   * clause. Mirrors browse_stats_properties + the watchdog matcher (the
+   * shared toolkit.comparables._enum_or_unknown_clause). */
+  const enumOrUnknown = (
+    col: string, values: string[], canonical: readonly string[],
+  ): string | null => {
+    if (!values.length) return null;
+    const reals = values.filter((v) => v !== UNKNOWN_FILTER_VALUE);
+    const parts: string[] = [];
+    if (reals.length) parts.push(`${col}.in.(${reals.join(',')})`);
+    if (values.includes(UNKNOWN_FILTER_VALUE)) {
+      parts.push(`${col}.is.null`);
+      parts.push(`${col}.not.in.(${canonical.join(',')})`);
+    }
+    return parts.length ? parts.join(',') : null;
+  };
+  const furnishedOr = enumOrUnknown('furnished', f.furnished, FURNISHED_CANONICAL);
+  if (furnishedOr) r = r.or(furnishedOr);
+  const ownershipOr = enumOrUnknown('ownership', f.ownership, OWNERSHIP_CANONICAL);
+  if (ownershipOr) r = r.or(ownershipOr);
   const bbox = effectiveBbox(f);
   if (bbox) {
     r = r.gte('lng', bbox.west)
@@ -627,7 +652,8 @@ export const fetchBrowseStats = async (
     has_balcony_filter:      triToBool(f.hasBalcony),
     has_lift_filter:         triToBool(f.hasLift),
     has_parking_filter:      triToBool(f.hasParking),
-    furnished_filter:        f.furnished,
+    furnished_filter:        f.furnished.length ? f.furnished : null,
+    ownership_filter:        f.ownership.length ? f.ownership : null,
     terrace_filter:          triToBool(f.terrace),
     cellar_filter:           triToBool(f.cellar),
     garage_filter:           triToBool(f.garage),

@@ -269,6 +269,14 @@ const FURNISHED_TEXT: Record<string, string> = {
   ano: 'furnished',
   ne: 'unfurnished',
   castecne: 'part-furnished',
+  __unknown__: 'furnishing unknown',
+};
+
+const OWNERSHIP_TEXT: Record<string, string> = {
+  osobni: 'personal',
+  druzstevni: 'cooperative',
+  statni: 'state/municipal',
+  __unknown__: 'ownership unknown',
 };
 
 function summariseFilter(spec: WatchdogFilterSpec): string {
@@ -318,8 +326,12 @@ function summariseFilter(spec: WatchdogFilterSpec): string {
   if (spec.terrace === true) bits.push('terrace');
   if (spec.cellar === true) bits.push('cellar');
   if (spec.garage === true) bits.push('garage');
-  if (spec.furnished) bits.push(FURNISHED_TEXT[spec.furnished] ?? spec.furnished);
-  if (spec.ownership) bits.push(spec.ownership);
+  if (spec.furnished?.length) {
+    bits.push(spec.furnished.map((v) => FURNISHED_TEXT[v] ?? v).join(', '));
+  }
+  if (spec.ownership?.length) {
+    bits.push(spec.ownership.map((v) => OWNERSHIP_TEXT[v] ?? v).join(', '));
+  }
   if (spec.min_parking_lots != null) bits.push(`≥${spec.min_parking_lots} parking`);
   if (spec.building_condition_level_min != null) bits.push(`bld≥${spec.building_condition_level_min}`);
   if (spec.apartment_condition_level_min != null) bits.push(`apt≥${spec.apartment_condition_level_min}`);

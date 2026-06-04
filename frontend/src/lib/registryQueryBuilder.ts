@@ -49,6 +49,10 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   'building_material',
   // Multi-chip → multi-column ILIKE OR predicate.
   'districts',
+  // Multi-select enums whose '__unknown__' sentinel needs an `.or(is.null,…)`
+  // predicate the plain `.in` auto-path can't express.
+  'furnished',
+  'ownership',
   // Operator tags — not yet translated to PostgREST (no public-view column).
   'tags',
 ]);
