@@ -1,0 +1,84 @@
+name: "Scraping: Bazos detail drain"
+
+# The slow half of the bazos cadence split (architectural rule #19, like
+# sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos',
+# enqueued by bazos_index_walk.yml), fetches each ad's detail page on a
+# rate-limited worker pool, parses it (the real category comes off the page
+# breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency +
+# Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain
+# records image-URL rows; the shared images.yml job downloads the bytes to R2.
+#
+# Bounded by a wall-clock budget (--max-seconds, default 2400 = 40 min, safely
+# under the 50-min job timeout) so the run always FINALIZES cleanly — it stops
+# claiming and records ended_at rather than being SIGKILLed mid-flight (which
+# would leave a "stuck" scrape_run on the Health dashboard and orphan its claims).
+# A SIGKILLed claim from a prior run is recovered by reclaim_stale_claims at the
+# start of the next drain. The queue persists across runs, so the initial
+# ~16k backfill (every house + commercial ad the index walk has enqueued) drains
+# over ~a day of hourly runs without losing work; then it idles when empty.
+#
+# Bazos is a classifieds site, so the fetch stays deliberately polite (2 workers,
+# 0.6 req/s) — and each detail also geocodes the locality via Mapy.cz (~3.4s/ad),
+# so ~40 min budgets ~700 ads/run. A gone detail (404/410 / gone-marker body)
+# flips that one ad inactive + dequeues it. Required secret: SUPABASE_DB_URL;
+# optional MAPY_CZ_API_KEY enables street-geocoded coordinates.
+
+on:
+  schedule:
+    - cron: "45 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_seconds:
+        description: wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)
+        required: false
+        default: ""
+        type: string
+      max_detail:
+        description: hard cap on ads claimed this run (blank = none; the time budget governs)
+        required: false
+        default: ""
+        type: string
+      workers:
+        description: concurrent detail-fetch workers (blank = 2)
+        required: false
+        default: ""
+        type: string
+      rate:
+        description: global detail-fetch rate cap, req/s (blank = 0.6)
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: bazos-detail-drain
+  cancel-in-progress: false
+
+jobs:
+  detail-drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run bazos detail drain
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
+          MAX_DETAIL: ${{ inputs.max_detail }}
+          WORKERS: ${{ inputs.workers || '2' }}
+          RATE: ${{ inputs.rate || '0.6' }}
+        run: |
+          ARGS="--drain-only --max-seconds $MAX_SECONDS --workers $WORKERS --rate $RATE"
+          if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
+          echo "python -m scraper.bazos_main $ARGS"
+          eval "python -m scraper.bazos_main $ARGS"

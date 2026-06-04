@@ -205,7 +205,7 @@ const PORTAL_WORKFLOWS: Record<string, string[]> = {
     'condition_scores.yml', 'condition_score_batches.yml',
     'property_maintenance.yml', 'recompute_property_stats.yml', 'dedup_sweep.yml',
   ],
-  bazos: ['scrape_bazos.yml'],
+  bazos: ['bazos_index_walk.yml', 'bazos_detail_drain.yml'],
   bezrealitky: ['scrape_bezrealitky.yml'],
   idnes: ['scrape_idnes.yml'],
 };

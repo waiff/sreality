@@ -6,6 +6,28 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Bazos cadence split (fix detail-drain starvation)
+- Bazos was running its index walk + detail drain in ONE GitHub-Actions job. After
+  its scope was expanded from 2 to 14 nationwide sections (byt/dum/chata/restaurace/
+  kancelar/prostory/sklad × prodam/pronajmu), the full index walk alone grew to
+  ~1500 pages / ~50 min and consumed the entire 50-min job timeout — every scheduled
+  run was **cancelled mid-flight**, so the detail drain never ran. Result: ~16k house +
+  commercial ads sat enqueued-but-never-fetched (0 active in DB despite the portal
+  listing thousands), orphaned queue claims never reclaimed, and "stuck" scrape_runs.
+  Apartment delisting inference also drifted (active counts above the portal total)
+  because the cancelled walks couldn't reliably re-fire the throttled mark_inactive.
+- Fixed by **mirroring the sreality/idnes cadence split (rule #19)** — no new pattern,
+  no patchwork. `bazos_main` gained `--index-only` / `--drain-only` / `--max-seconds`
+  (identical to idnes). `bazos_index_walk.yml` (every 6h, 75-min timeout) runs the full
+  walk + enqueue + mark_inactive; `bazos_detail_drain.yml` (hourly, `--max-seconds 2400`
+  budget so it finalizes cleanly) drains the queue across all categories. The combined
+  flow stays in `scrape_bazos.yml` as a dispatch-only fallback for narrow ad-hoc runs.
+  The persisted queue + 30-min `reclaim_stale_claims` mean the existing ~16k backlog
+  drains over ~a day of hourly runs with no data loss and no manual surgery.
+- **Next:** monitor the first ~24h of drains clearing the backlog; if bazos throughput
+  proves too slow (polite 0.6 req/s + per-ad geocoding), consider a second concurrent
+  drain shard or a faster rate once the portal tolerates it.
+
 ### 2026-06: "Recently added / changed" Browse filters (Status section)
 - Two preset "last N days" pickers (today / 3 / 7 / 14 / 30) in a new **Status**
   ControlGroup on the Browse sidebar. **Recently added** filters on `first_seen_at`

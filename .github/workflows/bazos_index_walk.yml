@@ -1,24 +1,28 @@
-name: "Scraping: Bazos crawler combined walk (fallback)"
+name: "Scraping: Bazos index walk"
 
-# DISPATCH-ONLY combined index+detail fallback for reality.bazos.cz, mirroring
-# sreality's scrape.yml and idnes's scrape_idnes.yml. The scheduled pipeline is
-# the cadence SPLIT — the full bazos_index_walk.yml (walk + mark_inactive +
-# enqueue) feeds the bounded bazos_detail_drain.yml — because bazos now walks 14
-# nationwide scopes (~1500 index pages, ~50 min) and a single combined run can't
-# do both inside one job (the full index eats the window, starving the drain).
+# The fast half of the bazos cadence split (architectural rule #19, like
+# sreality/idnes). Walks the ENTIRE index of every configured scope (no
+# --max-pages), touch_listings bumps last_seen on still-listed ads, mark_inactive
+# flips delisted ones under the completeness guard (source-scoped, throttled to
+# once per 12h), and new/price-changed ids are enqueued into listing_detail_queue
+# (source='bazos'). No detail fetch — the drain (bazos_detail_drain.yml) consumes
+# the queue. Records run_type='index'.
 #
-# This combined entry point stays for ad-hoc NARROW runs (e.g. -f sale_type=prodam
-# -f category=dum, or a localized -f locality=Praha -f radius_km=20) and small
-# validation passes (-f max_pages=2, which suppresses mark_inactive). For a full
-# nationwide run use the split workflows — a combined full walk would re-create
-# the timeout. One job runs the index walk then a bounded detail drain via
-# bazos_main. No schedule — re-add a `schedule:` cron here to revert to a combined
-# cadence if ever needed.
+# WHY split: bazos now walks 14 nationwide scopes (byt/dum/chata/restaurace/
+# kancelar/prostory/sklad × prodam/pronajmu ≈ 1500 index pages, ~50 min). A
+# combined index+detail run can't do both inside one job — the full index eats
+# the whole window, so the detail drain never runs and the queue grows unbounded.
+# Splitting lets the index complete every cycle (active counts + delistings stay
+# accurate) while the drain chips the backlog on its own bounded cadence.
 #
-# Writes 'index' + 'detail' scrape_runs rows under source='bazos'. Required secret:
-# SUPABASE_DB_URL; optional MAPY_CZ_API_KEY enables street-geocoded coordinates.
+# Scopes live in the `portals` registry row; coverage is tuned with a SQL update,
+# no workflow edit. The index walk needs no geocoding (that happens in the drain),
+# so no MAPY_CZ_API_KEY here. Required secret: SUPABASE_DB_URL. workflow_dispatch
+# can narrow to one scope (--sale-type + --category) or a region (locality+radius).
 
 on:
+  schedule:
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       sale_type:
@@ -44,24 +48,21 @@ on:
         default: ""
         type: string
       max_pages:
-        description: cap index pages per scope (blank = full walk)
+        description: cap index pages per scope (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
         required: false
         default: ""
         type: string
-      max_detail:
-        description: cap detail-drain claims this run (blank = drain the queue)
-        required: false
-        default: "400"
-        type: string
 
 concurrency:
-  group: bazos-scrape
+  group: bazos-index-walk
   cancel-in-progress: false
 
 jobs:
-  scrape:
+  index-walk:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    # The full 14-scope walk is ~1500 pages at the portal's index rate (~50 min
+    # observed); the headroom keeps it under the 90-min stuck-run cutoff.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -74,23 +75,22 @@ jobs:
       - name: Install
         run: pip install -e .
 
-      - name: Run bazos crawl
+      - name: Run bazos index walk
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+          # inputs.* are empty on a scheduled run → walk EVERY scope in the
+          # portal registry; a dispatch can narrow to one scope / region.
           SALE_TYPE: ${{ inputs.sale_type }}
           CATEGORY: ${{ inputs.category }}
           LOCALITY: ${{ inputs.locality }}
           RADIUS_KM: ${{ inputs.radius_km }}
           MAX_PAGES: ${{ inputs.max_pages }}
-          MAX_DETAIL: ${{ inputs.max_detail || '400' }}
         run: |
-          ARGS="--workers 2 --rate 0.6"
+          ARGS="--index-only"
           if [ -n "$SALE_TYPE" ]; then ARGS="$ARGS --sale-type $SALE_TYPE"; fi
           if [ -n "$CATEGORY" ]; then ARGS="$ARGS --category $CATEGORY"; fi
           if [ -n "$LOCALITY" ]; then ARGS="$ARGS --locality '$LOCALITY'"; fi
           if [ -n "$RADIUS_KM" ]; then ARGS="$ARGS --radius-km $RADIUS_KM"; fi
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
-          if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
           echo "python -m scraper.bazos_main $ARGS"
           eval "python -m scraper.bazos_main $ARGS"

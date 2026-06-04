@@ -87,6 +87,144 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/aggregate_condition_markers.yml"
   },
   {
+    "filename": "bazos_detail_drain.yml",
+    "name": "Scraping: Bazos detail drain",
+    "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "45 * * * *",
+        "human": "Every hour at :45"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "hard cap on ads claimed this run (blank = none; the time budget governs)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "concurrent detail-fetch workers (blank = 2)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "global detail-fetch rate cap, req/s (blank = 0.6)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "MAPY_CZ_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "bazos-detail-drain",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/bazos_detail_drain.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/bazos_detail_drain.yml"
+  },
+  {
+    "filename": "bazos_index_walk.yml",
+    "name": "Scraping: Bazos index walk",
+    "description": "The fast half of the bazos cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured scope (no --max-pages), touch_listings bumps last_seen on still-listed ads, mark_inactive flips delisted ones under the completeness guard (source-scoped, throttled to once per 12h), and new/price-changed ids are enqueued into listing_detail_queue (source='bazos'). No detail fetch — the drain (bazos_detail_drain.yml) consumes the queue. Records run_type='index'.",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 */6 * * *",
+        "human": "Every 6 hours"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "sale_type",
+        "description": "prodam (sale) or pronajmu (rent); blank = every configured scope",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "prodam",
+          "pronajmu"
+        ]
+      },
+      {
+        "name": "category",
+        "description": "bazos category segment; blank = every configured scope",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "byt",
+          "dum",
+          "chata",
+          "restaurace",
+          "kancelar",
+          "prostory",
+          "sklad"
+        ]
+      },
+      {
+        "name": "locality",
+        "description": "locality filter (e.g. Praha); blank = nationwide",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "radius_km",
+        "description": "radius around locality in km (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_pages",
+        "description": "cap index pages per scope (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "bazos-index-walk",
+    "cancelInProgress": false,
+    "timeoutMinutes": 75,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/bazos_index_walk.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/bazos_index_walk.yml"
+  },
+  {
     "filename": "build-extension.yml",
     "name": "CI: build Chrome extension",
     "description": "Builds the chrome-extension/ bundle and uploads dist/ as a workflow artifact you can download from the Actions tab. Keeps the build off the operator's laptop (no local Node install needed).",
@@ -1500,42 +1638,41 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   },
   {
     "filename": "scrape_bazos.yml",
-    "name": "Scraping: Bazos crawler (pilot)",
-    "description": "Scheduled (hourly) + manual crawler for reality.bazos.cz. Runs the shared portal framework (Phase 4): an index walk that stages raw pages, bumps last_seen on still-listed ads (touch_listings), enqueues new + price-changed ads into the shared listing_detail_queue, and — under the completeness guard (architectural rule #3) — marks delisted ads inactive. A detail drain then fetches a bounded slice of the queue, parses it, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "name": "Scraping: Bazos crawler combined walk (fallback)",
+    "description": "DISPATCH-ONLY combined index+detail fallback for reality.bazos.cz, mirroring sreality's scrape.yml and idnes's scrape_idnes.yml. The scheduled pipeline is the cadence SPLIT — the full bazos_index_walk.yml (walk + mark_inactive + enqueue) feeds the bounded bazos_detail_drain.yml — because bazos now walks 14 nationwide scopes (~1500 index pages, ~50 min) and a single combined run can't do both inside one job (the full index eats the window, starving the drain).",
     "manual": true,
-    "schedules": [
-      {
-        "cron": "0 * * * *",
-        "human": "Every hour (on the hour)"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
     "inputs": [
       {
         "name": "sale_type",
-        "description": "prodam (sale) or pronajmu (rent)",
+        "description": "prodam (sale) or pronajmu (rent); blank = every configured scope",
         "required": false,
         "type": "choice",
-        "default": "prodam",
+        "default": "",
         "options": [
+          "",
           "prodam",
           "pronajmu"
         ]
       },
       {
         "name": "category",
-        "description": "bazos category segment",
+        "description": "bazos category segment; blank = every configured scope",
         "required": false,
         "type": "choice",
-        "default": "byt",
+        "default": "",
         "options": [
+          "",
           "byt",
           "dum",
-          "pozemky",
-          "nebytove",
-          "ostatni"
+          "chata",
+          "restaurace",
+          "kancelar",
+          "prostory",
+          "sklad"
         ]
       },
       {
@@ -1556,7 +1693,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "max_pages",
-        "description": "cap index pages walked (blank = full walk)",
+        "description": "cap index pages per scope (blank = full walk)",
         "required": false,
         "type": "string",
         "default": "",
@@ -1567,7 +1704,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "cap detail-drain claims this run (blank = drain the queue)",
         "required": false,
         "type": "string",
-        "default": "",
+        "default": "400",
         "options": null
       }
     ],

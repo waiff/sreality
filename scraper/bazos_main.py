@@ -14,11 +14,17 @@ delisted ads inactive under the completeness guard (rule #3), throttled to once
 per window (migration 113) so a frequent walk surfaces new ads + freshness every
 run while delisting inference stays conservative.
 
-Scope: every category in the portal registry (`prodam/byt` + `pronajmu/byt` today),
-walked in one run. The source-generic queue carries no category, so the drain reads
-each ad's category off its detail-page breadcrumb (`parse_detail`) — the same
-"detail self-identifies" pattern idnes/bezrealitky use. A `--sale-type`/`--category`
-dispatch override narrows to a single scope.
+Scope: every category in the portal registry (14 nationwide sale+rent sections —
+byt/dum/chata/restaurace/kancelar/prostory/sklad). The source-generic queue carries
+no category, so the drain reads each ad's category off its detail-page breadcrumb
+(`parse_detail`) — the same "detail self-identifies" pattern idnes/bezrealitky use.
+A `--sale-type`/`--category` dispatch override narrows to a single scope.
+
+Cadence split, like sreality/idnes (rule #19): the full 14-scope index walk is
+~1500 pages (≈ 50 min), so it cannot share one job with the detail drain without
+starving it. `bazos_index_walk.yml` runs `--index-only` (every 6h); the bounded
+`bazos_detail_drain.yml` runs `--drain-only` (hourly, `--max-seconds` budget).
+Omitting both flags runs both phases — the dispatch-only `scrape_bazos.yml` fallback.
 """
 
 from __future__ import annotations
@@ -453,15 +459,21 @@ def main(argv: list[str] | None = None) -> int:
         args.max_detail if args.max_detail is not None else limits.max_detail_per_run
     )
 
-    # Index-walk (enqueue) then detail-drain (fetch + ingest), through the one
-    # shared runner. Two scrape_runs rows ('index' + 'detail'), like sreality.
-    rc = _run_phase(
-        portal, "index", portal_runner.run_index_walk, args.dry_run,
-    )
-    if rc == 0:
+    # Cadence split, like sreality/idnes (rule #19): --index-only walks +
+    # enqueues (and marks inactive under the completeness guard); --drain-only
+    # fetches + ingests a bounded slice of the queue. Bazos walks every scope in
+    # the registry (14 nationwide sale+rent sections, ~1500 index pages ≈ 50 min),
+    # so a combined run can't do both inside one job — the full index eats the
+    # window and starves the drain. Omitting both flags runs both phases (the
+    # dispatch-only combined fallback). Two scrape_runs rows ('index' + 'detail').
+    rc = 0
+    if not args.drain_only:
+        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+    if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,
             max_claims=max_detail, detail_workers=workers, detail_rate=rate,
+            max_seconds=args.max_seconds,
         )
     return rc
 
@@ -493,6 +505,19 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--rate", type=float, default=None,
         help="requests/second ceiling (default: per-portal config)",
+    )
+    p.add_argument(
+        "--max-seconds", type=float, default=None,
+        help="wall-clock budget for the detail drain; it stops claiming + "
+             "finalizes cleanly before the job timeout (no 'stuck' run)",
+    )
+    p.add_argument(
+        "--index-only", action="store_true",
+        help="walk the index + enqueue + mark_inactive only (no detail drain)",
+    )
+    p.add_argument(
+        "--drain-only", action="store_true",
+        help="drain the detail queue only (no index walk)",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")
