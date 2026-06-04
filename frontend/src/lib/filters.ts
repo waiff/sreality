@@ -91,6 +91,18 @@ export interface DistrictChip {
   excluded?: boolean;
 }
 
+/* One active price-stats growth filter: keep listings whose obec meets/exceeds
+ * the entered rent/sale growth p.a. (CAGR ≥), computed for the [fromYm, toYm]
+ * window of a chosen dataset by the price_stat_growth RPC. Multiple rules AND.
+ * BROWSE-only (window-dependent, live-computed). */
+export interface PriceGrowthRule {
+  datasetId: number;
+  fromYm: string | null;   // 'YYYY-MM' or null = dataset's full window
+  toYm: string | null;
+  rentMinPct: number | null;
+  saleMinPct: number | null;
+}
+
 export interface ListingFilters {
   categoryMain: CategoryMain;
   categoryType: CategoryType;
@@ -205,6 +217,7 @@ export interface ListingFilters {
   nearYouth15kmMin: number | null;
   nearOverall5kmMin: number | null;
   nearOverall15kmMin: number | null;
+  priceGrowthRules: PriceGrowthRule[];
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
@@ -271,6 +284,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   nearYouth15kmMin: null,
   nearOverall5kmMin: null,
   nearOverall15kmMin: null,
+  priceGrowthRules: [],
 };
 
 export const ESTATE_AREA_BOUNDS = { min: 0, max: 5000, step: 50 };
@@ -484,6 +498,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     nearYouth15kmMin: parseFloatOrNull(sp.get('ny15')),
     nearOverall5kmMin: parseFloatOrNull(sp.get('no5')),
     nearOverall15kmMin: parseFloatOrNull(sp.get('no15')),
+    priceGrowthRules: parsePriceGrowthRules(sp.get('pg')),
   };
 };
 
@@ -516,6 +531,40 @@ const fmtCityIndexRules = (rules: CityIndexRule[]): string =>
       return `${r.index_name}:${r.value}${op}`;
     })
     .join(',');
+
+/* `pg` URL shape: rules joined by `;`, each `datasetId:fromYm:toYm:rentMin:saleMin`.
+ * fromYm/toYm are 'YYYY-MM' (no colons) or empty; rent/sale min empty = no bound. */
+const _YM_RE = /^\d{4}-\d{2}$/;
+const parsePriceGrowthRules = (s: string | null): PriceGrowthRule[] => {
+  if (!s) return [];
+  const out: PriceGrowthRule[] = [];
+  for (const raw of s.split(';')) {
+    const parts = raw.split(':');
+    const datasetId = Number(parts[0]);
+    if (!Number.isInteger(datasetId)) continue;
+    const ym = (v: string | undefined): string | null => (v && _YM_RE.test(v) ? v : null);
+    const num = (v: string | undefined): number | null => {
+      if (v == null || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    out.push({
+      datasetId,
+      fromYm: ym(parts[1]),
+      toYm: ym(parts[2]),
+      rentMinPct: num(parts[3]),
+      saleMinPct: num(parts[4]),
+    });
+  }
+  return out;
+};
+
+const fmtPriceGrowthRules = (rules: PriceGrowthRule[]): string =>
+  rules
+    .map((r) =>
+      [r.datasetId, r.fromYm ?? '', r.toYm ?? '', r.rentMinPct ?? '', r.saleMinPct ?? ''].join(':'),
+    )
+    .join(';');
 
 /* `cq_prox` URL shape: `radius_km|index_name:value,...|pop_min`.
  * `pop_min` is empty when null. */
@@ -686,6 +735,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.nearYouth15kmMin != null) sp.set('ny15', String(f.nearYouth15kmMin));
   if (f.nearOverall5kmMin != null) sp.set('no5', String(f.nearOverall5kmMin));
   if (f.nearOverall15kmMin != null) sp.set('no15', String(f.nearOverall15kmMin));
+  if (f.priceGrowthRules.length) sp.set('pg', fmtPriceGrowthRules(f.priceGrowthRules));
   return sp;
 };
 
@@ -1167,6 +1217,7 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
   { test: (f) => f.buildingMaterial.length > 0, label: 'building material' },
   { test: (f) => f.gardenAreaMin != null || f.gardenAreaMax != null, label: 'garden area' },
   { test: (f) => f.tags.length > 0, label: 'tags' },
+  { test: (f) => f.priceGrowthRules.length > 0, label: 'market growth (datasets)' },
 ];
 
 export interface FiltersToWatchdogResult {

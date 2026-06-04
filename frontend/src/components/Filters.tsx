@@ -13,6 +13,7 @@ import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { FilterForm } from '@/components/FilterForm';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
+import MarketGrowthFilter from '@/components/MarketGrowthFilter';
 import {
   LocationControl,
   LocationTypeahead,
@@ -71,6 +72,7 @@ const CURATION_KEYS = [
   'nearCityProximity',
   'nearPop5kmMin', 'nearPop15kmMin', 'nearJobs5kmMin', 'nearJobs15kmMin',
   'nearYouth5kmMin', 'nearYouth15kmMin', 'nearOverall5kmMin', 'nearOverall15kmMin',
+  'priceGrowthRules',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const bandActive = (
@@ -480,6 +482,13 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               }}
               customWidgets={customWidgets}
               flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Market growth (datasets)" bordered={false}>
+            <MarketGrowthFilter
+              value={filters.priceGrowthRules}
+              onChange={(next) => onChange({ ...filters, priceGrowthRules: next })}
             />
           </ControlGroup>
         </CollapsibleGroup>
