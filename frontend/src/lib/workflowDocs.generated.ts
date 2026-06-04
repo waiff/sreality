@@ -1268,6 +1268,32 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ingest_boundaries.yml"
   },
   {
+    "filename": "llm_health.yml",
+    "name": "Monitoring: LLM pipeline liveness",
+    "description": "Goes red (→ GitHub notifies the operator on a failed scheduled run) when the LLM pipeline looks dead: no `llm_calls` rows for several hours while there is pending condition-scoring work. Catches the silent failure mode where the Anthropic account runs out of credits / the key breaks and the scorers swallow per-listing errors, staying green while scoring nothing (this went unnoticed for ~8h on 2026-06-04).",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "15 * * * *",
+        "human": "Every hour at :15"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "llm-health",
+    "cancelInProgress": false,
+    "timeoutMinutes": 5,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/llm_health.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/llm_health.yml"
+  },
+  {
     "filename": "load_obec_population.yml",
     "name": "Jobs: load obec population (manual)",
     "description": "Load ČSÚ municipality population into admin_boundaries.population for EVERY obec (not just the 206 curated cities). Reads the committed DataStat export data/csu_population.json (OBY02AT02 — download from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02). Idempotent: only changed rows are written. Dispatch this after committing a refreshed export. This is the population source the \"within X km of a municipality with population > N\" proximity filter reads.",
