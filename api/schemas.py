@@ -677,13 +677,12 @@ class PriceStatDatasetIn(BaseModel):
     usable_area_from:   int | None = Field(default=None, ge=0)
     usable_area_to:     int | None = Field(default=None, ge=0)
     distance:           int = Field(default=0, ge=0)
-    # scrape window (YYYY-MM) + city selection + sampling periodicity
+    # scrape window (YYYY-MM) + city selection
     start_ym:           str | None = None
     end_ym:             str | None = None
     obec_ids:           list[int] | None = None
     min_population:     int | None = Field(default=None, ge=0)
     max_population:     int | None = Field(default=None, ge=0)
-    periodicity:        Literal['monthly', 'quarterly', 'semiannual', 'annual'] = 'monthly'
 
 
 class PriceStatDatasetUpdateIn(BaseModel):
@@ -703,7 +702,6 @@ class PriceStatDatasetUpdateIn(BaseModel):
     obec_ids:           list[int] | None = None
     min_population:     int | None = Field(default=None, ge=0)
     max_population:     int | None = Field(default=None, ge=0)
-    periodicity:        Literal['monthly', 'quarterly', 'semiannual', 'annual'] | None = None
 
 
 class PortalLookupItem(BaseModel):
