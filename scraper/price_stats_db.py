@@ -164,6 +164,8 @@ def localities_ordered(
     conn: psycopg.Connection,
     dataset_id: int,
     obec_ids: list[int] | None = None,
+    *,
+    no_data_ttl_days: int = 60,
 ) -> list[dict[str, Any]]:
     """Localities for a dataset run, STALEST first.
 
@@ -172,6 +174,11 @@ def localities_ordered(
     always advances the cities that need it most, so full coverage is reached
     across runs (and then refreshes oldest-first) rather than re-doing city 1
     every run. `obec_ids` None = the global resolved set.
+
+    Localities the scraper recently checked and found EMPTY (a
+    price_stat_locality_no_data marker within `no_data_ttl_days`) are skipped,
+    so the budget isn't spent re-scanning the dataless tail every run; they fall
+    back in for re-verification once the marker ages past the TTL.
     """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -184,12 +191,47 @@ def localities_ordered(
                  WHERE dataset_id = %(did)s
                  GROUP BY entity_type, entity_id
               ) o USING (entity_type, entity_id)
+              LEFT JOIN price_stat_locality_no_data nd
+                     ON nd.dataset_id = %(did)s
+                    AND nd.entity_type = l.entity_type
+                    AND nd.entity_id = l.entity_id
              WHERE (%(obec_ids)s IS NULL OR l.obec_id = ANY(%(obec_ids)s))
+               AND (nd.checked_at IS NULL
+                    OR nd.checked_at < now() - make_interval(days => %(ttl)s))
              ORDER BY o.mf ASC NULLS FIRST, l.name
             """,
-            {"did": dataset_id, "obec_ids": obec_ids},
+            {"did": dataset_id, "obec_ids": obec_ids, "ttl": no_data_ttl_days},
         )
         return cur.fetchall()
+
+
+def record_no_data(
+    conn: psycopg.Connection, dataset_id: int, entity_type: str, entity_id: int
+) -> None:
+    """Mark a (dataset, locality) as checked-and-empty (no prodej/pronájem data)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO price_stat_locality_no_data
+                   (dataset_id, entity_type, entity_id, checked_at)
+            VALUES (%s, %s, %s, now())
+            ON CONFLICT (dataset_id, entity_type, entity_id)
+            DO UPDATE SET checked_at = excluded.checked_at
+            """,
+            (dataset_id, entity_type, entity_id),
+        )
+
+
+def clear_no_data(
+    conn: psycopg.Connection, dataset_id: int, entity_type: str, entity_id: int
+) -> None:
+    """Drop the empty-marker for a locality that now yields data."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM price_stat_locality_no_data"
+            " WHERE dataset_id = %s AND entity_type = %s AND entity_id = %s",
+            (dataset_id, entity_type, entity_id),
+        )
 
 
 def sweep_stale_runs(conn: psycopg.Connection, *, older_than_min: int = 90) -> int:

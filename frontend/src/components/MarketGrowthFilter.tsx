@@ -6,11 +6,29 @@
 import { useQuery } from '@tanstack/react-query';
 import {
   fetchDatasets,
+  fetchNoDataCount,
   priceStatsKeys,
   type PriceStatDataset,
 } from '@/lib/priceStats';
 import type { PriceGrowthRule } from '@/lib/filters';
 import { YmPicker, YM_CUR } from '@/components/YmPicker';
+
+/* "N of M municipalities have insufficient data" — the scraper checked them and
+ * found no prodej/pronájem series, so they can never satisfy a growth threshold
+ * and are excluded. Explains why a region drops out. */
+function InsufficientNote({ datasetId, selected }: { datasetId: number; selected: number | null }) {
+  const { data: count } = useQuery<number, Error>({
+    queryKey: priceStatsKeys.noDataCount(datasetId),
+    queryFn: () => fetchNoDataCount(datasetId),
+    staleTime: 60_000,
+  });
+  if (!count) return null;
+  return (
+    <p className="text-[0.62rem] leading-snug text-[var(--color-ink-3)]">
+      {count}{selected ? ` of ${selected}` : ''} municipalities have insufficient data — excluded.
+    </p>
+  );
+}
 
 interface Props {
   value: PriceGrowthRule[];
@@ -113,6 +131,7 @@ export default function MarketGrowthFilter({ value, onChange }: Props) {
                       onChange={(e) => setRule(d.id, { saleMinPct: numOrNull(e.target.value) })}
                     />
                   </label>
+                  <InsufficientNote datasetId={d.id} selected={d.obec_ids?.length ?? null} />
                 </div>
               )}
             </div>

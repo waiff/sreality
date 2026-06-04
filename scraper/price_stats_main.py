@@ -150,6 +150,7 @@ def run_dataset(
                 )
                 budget_hit = True
                 break
+            loc_obs = 0
             for category_type_cb in CATEGORIES:
                 series = _fetch_with_auth_retry(
                     client, dataset, loc, category_type_cb,
@@ -163,7 +164,7 @@ def run_dataset(
                     dataset.get("periodicity") or "monthly",
                 )
                 if not dry_run and months:
-                    total_obs += db.upsert_observations(
+                    loc_obs += db.upsert_observations(
                         conn,
                         dataset_id=dataset["id"],
                         entity_type=loc["entity_type"],
@@ -172,7 +173,18 @@ def run_dataset(
                         months=months,
                         run_id=run_id,
                     )
+            total_obs += loc_obs
             if not dry_run:
+                # No prodej AND no pronájem series → mark insufficient-data so
+                # future runs skip it (TTL); data → drop any stale marker.
+                if loc_obs > 0:
+                    db.clear_no_data(
+                        conn, dataset["id"], loc["entity_type"], loc["entity_id"]
+                    )
+                else:
+                    db.record_no_data(
+                        conn, dataset["id"], loc["entity_type"], loc["entity_id"]
+                    )
                 db.update_run_progress(
                     conn, run_id, cities_done=i, observations=total_obs
                 )
