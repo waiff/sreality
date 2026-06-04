@@ -384,7 +384,16 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "Phase 1.8b — async condition scoring via the Anthropic Message Batches API (50% cheaper than the synchronous condition_scores.yml job). Two modes, selected by the `mode` input:",
     "portal": null,
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "5 */3 * * *",
+        "human": "Every 3 hours at :05"
+      },
+      {
+        "cron": "35 * * * *",
+        "human": "Every hour at :35"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
@@ -450,12 +459,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "Decoupled condition-scoring job. Scores building/apartment condition (1..5) for active listings whose latest snapshot doesn't yet have a row in `listing_condition_scores`, writing both the cache row AND the two listings.*_condition_level columns in one transaction per listing (autocommit — every successful score commits independently, so a timeout or cancel preserves the rows already done). Resumable: scored listings drop out of the next selection.",
     "portal": null,
     "manual": true,
-    "schedules": [
-      {
-        "cron": "30 * * * *",
-        "human": "Every hour at :30"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,

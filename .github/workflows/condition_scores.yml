@@ -8,36 +8,31 @@ name: "Scraping: Sreality condition scoring (hourly + manual backfill)"
 # or cancel preserves the rows already done). Resumable: scored listings drop
 # out of the next selection.
 #
-# Runs on two triggers:
-#   * schedule (hourly, :30) — the steady-state driver, deliberately
-#     DECOUPLED from the scrape (scrape.yml runs the index walk at :00; this
-#     reads the freshly-committed snapshots 30 min later) so the LLM phase
-#     can never slow the scrape. Scheduled runs use NO region filter (score
-#     everywhere), limit 2000, cost cap $15.
-#   * workflow_dispatch — manual backfill. Defaults to the operator's four
-#     kraje (10 Praha · 11 Středočeský · 2 Plzeňský · 13 Vysočina), limit
-#     500, cost cap $10. Clear region_ids to score every region.
+# DISPATCH-ONLY FALLBACK. The synchronous hourly cron was removed: batch
+# scoring (condition_score_batches.yml) is now the scheduled steady-state
+# driver at 50% the cost. This workflow stays as the instant-revert path
+# (re-add `schedule: - cron: "30 * * * *"` below and pause the batch crons)
+# and for ad-hoc / region-scoped manual backfills. Do NOT run this on a
+# schedule alongside the batch path — both select the same pending listings,
+# and the sync scorer does not skip in-flight batch rows, so they'd
+# double-bill the same snapshot.
+#
+# Each successful score commits independently (autocommit), so a timeout or
+# cancel preserves rows already done; scored listings drop out of the next
+# selection. workflow_dispatch defaults to the operator's four kraje
+# (10 Praha · 11 Středočeský · 2 Plzeňský · 13 Vysočina), limit 500,
+# cost cap $10. Clear region_ids to score every region.
 #
 # The selection is portal-agnostic (a DB predicate over listings /
-# listing_snapshots), so any future scraper that lands rows in those tables
-# is scored by this same job.
-#
-# Cost-capped via max_cost_usd so a single run can't blow the budget. Reach
-# the cap mid-run and the script logs a SCORE cost cap reached line and exits
-# 0 with the rows scored so far preserved.
-#
-# Concurrency group condition-scoring, cancel-in-progress=false: a long run
-# is never killed mid-scoring; the next tick queues behind it.
+# listing_snapshots), so any scraper that lands rows in those tables is
+# scored by this same job. Cost-capped via max_cost_usd.
 #
 # Required GitHub secrets:
 #   SUPABASE_DB_URL    — same one used by every other workflow
-#   ANTHROPIC_API_KEY  — Sonnet 4.5 by default; see
-#                        app_settings.llm_condition_model
+#   ANTHROPIC_API_KEY  — model per app_settings.llm_condition_model (Haiku today)
 #   R2_*               — optional; only needed when `n_images > 0`.
 
 on:
-  schedule:
-    - cron: "30 * * * *"
   workflow_dispatch:
     inputs:
       region_ids:
