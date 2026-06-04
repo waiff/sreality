@@ -39,31 +39,6 @@ def _load_city_names(path: Path) -> list[str]:
     return [str(c).strip() for c in cities if str(c).strip()]
 
 
-_PERIOD_STEP = {"quarterly": 3, "semiannual": 6, "annual": 12}
-
-
-def _downsample(
-    months: list[dict[str, Any]], periodicity: str | None
-) -> list[dict[str, Any]]:
-    """Keep one month per period bucket (the last/period-end month present).
-
-    Buckets are calendar-aligned (Jan starts a quarter/half/year since
-    year*12 is divisible by 3/6/12). The growth RPC annualizes from the actual
-    (year, month) indices, so sampling at any spacing keeps CAGR correct.
-    """
-    step = _PERIOD_STEP.get(periodicity or "monthly")
-    if step is None:  # monthly (or unknown) → keep everything
-        return months
-    by_bucket: dict[int, dict[str, Any]] = {}
-    for m in months:
-        ymi = int(m["year"]) * 12 + (int(m["month"]) - 1)
-        bucket = ymi // step
-        cur = by_bucket.get(bucket)
-        if cur is None or ymi > int(cur["year"]) * 12 + (int(cur["month"]) - 1):
-            by_bucket[bucket] = m
-    return [by_bucket[b] for b in sorted(by_bucket)]
-
-
 def _parse_ym(s: str | None) -> tuple[int, int] | None:
     if not s:
         return None
@@ -156,12 +131,10 @@ def run_dataset(
                     client, dataset, loc, category_type_cb,
                     start_ym=start_ym, end_ym=end_ym, chunk_months=chunk_months,
                 )
-                months = _downsample(series["months"], dataset.get("periodicity"))
+                months = series["months"]
                 LOG.info(
-                    "SERIES dataset=%s city=%s ct=%d months=%d kept=%d period=%s",
-                    dataset["id"], loc["name"], category_type_cb,
-                    len(series["months"]), len(months),
-                    dataset.get("periodicity") or "monthly",
+                    "SERIES dataset=%s city=%s ct=%d months=%d",
+                    dataset["id"], loc["name"], category_type_cb, len(months),
                 )
                 if not dry_run and months:
                     loc_obs += db.upsert_observations(

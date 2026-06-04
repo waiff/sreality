@@ -44,8 +44,8 @@ const DEFAULT_CITY_COUNT = 43; // the standard municipality set when none picked
 
 /* Rough scrape-time estimate, calibrated against real runs:
  * time ≈ 120 s overhead + 1.2 s × cities × ceil(months/24-month chunks).
- * Periodicity doesn't change FETCH time (the API is always monthly; it only
- * changes what we store). Flags runs that won't fit the 60-min workflow cap. */
+ * Scrape time = API calls, which depend only on cities × window (sreality
+ * always returns the full monthly series). Flags runs over the 60-min cap. */
 function estimateScrapeText(cities: number, startYm: string, endYm: string): string {
   const [sy, sm] = startYm.split('-').map(Number);
   const [ey, em] = endYm.split('-').map(Number);
@@ -56,20 +56,6 @@ function estimateScrapeText(cities: number, startYm: string, endYm: string): str
     return `~${(secs / 3600).toFixed(1)} h — exceeds the 60-min run limit, split into smaller runs`;
   }
   return `~${Math.max(1, Math.round(secs / 60))} min`;
-}
-
-/* Why the estimate above is the same for Annual vs Monthly: sreality's
- * estate_prices API always returns the full monthly series; periodicity only
- * downsamples what we STORE, not what we fetch — so scrape time (= API calls)
- * is identical. Surfaced so the operator isn't surprised the estimate doesn't
- * move with the dropdown. */
-function PeriodicityScrapeHint() {
-  return (
-    <p className="mt-1 text-[0.65rem] leading-snug text-[var(--color-ink-3)]">
-      Periodicity sets storage granularity only — sreality always returns monthly data,
-      so it doesn’t change scrape time.
-    </p>
-  );
 }
 
 const fmtPct = (n: number | null | undefined): string =>
@@ -371,7 +357,7 @@ export default function Datasets() {
               </button>
               <button
                 onClick={() => setShowExpand((v) => !v)}
-                title="Add cities / months / finer periodicity to this dataset"
+                title="Add cities / months to this dataset"
                 className="text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] px-3 py-2 text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] transition-colors"
               >
                 {showExpand ? 'Close' : 'Expand'}
@@ -690,10 +676,6 @@ const COND: Record<string, string> = {
 const CONSTR: Record<string, string> = { '5': 'panel', '2': 'cihla', '10': 'ostatní' };
 const OWN: Record<string, string> = { '1': 'osobní', '2': 'družstevní', '3': 'státní' };
 
-const PERIOD_LABEL: Record<string, string> = {
-  monthly: 'Monthly', quarterly: 'Quarterly', semiannual: 'Semiannual', annual: 'Annual',
-};
-
 function FilterChips({ dataset, count, noDataCount }: { dataset: PriceStatDataset; count: number; noDataCount: number }) {
   const chips: string[] = [];
   if (dataset.building_condition) chips.push(COND[dataset.building_condition] ?? `stav ${dataset.building_condition}`);
@@ -703,8 +685,7 @@ function FilterChips({ dataset, count, noDataCount }: { dataset: PriceStatDatase
     chips.push(`${dataset.usable_area_from ?? 0}–${dataset.usable_area_to ?? '∞'} m²`);
   if (dataset.distance) chips.push(`okolí ${dataset.distance} km`);
 
-  // Coverage (not part of the definition): the prevailing periodicity + window.
-  const period = PERIOD_LABEL[dataset.periodicity ?? 'monthly'] ?? dataset.periodicity;
+  // Coverage (not part of the definition): the scrape window.
   const window = dataset.start_ym && dataset.end_ym ? `${dataset.start_ym} → ${dataset.end_ym}` : null;
   const selected = dataset.obec_ids?.length ?? null;
 
@@ -713,9 +694,6 @@ function FilterChips({ dataset, count, noDataCount }: { dataset: PriceStatDatase
       {chips.map((c) => (
         <span key={c} className="px-2 py-0.5 rounded-[var(--radius-xs)] border border-[var(--color-rule)] text-[var(--color-ink-2)]">{c}</span>
       ))}
-      {period && (
-        <span className="px-2 py-0.5 rounded-[var(--radius-xs)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)]">{period}</span>
-      )}
       {window && (
         <span className="px-2 py-0.5 rounded-[var(--radius-xs)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)] tabular-nums">{window}</span>
       )}
@@ -742,7 +720,6 @@ const TYPE_OPTS: Array<[string, string]> = [['1', 'Byty'], ['2', 'Domy']];
 const COND_OPTS: Array<[string, string]> = [['', 'Any condition'], ['1', 'Velmi dobrý'], ['6', 'Novostavba'], ['8', 'Před rekonstrukcí'], ['2', 'Dobrý'], ['9', 'Po rekonstrukci']];
 const CONSTR_OPTS: Array<[string, string]> = [['', 'Any construction'], ['5', 'Panel'], ['2', 'Cihla'], ['10', 'Ostatní']];
 const OWN_OPTS: Array<[string, string]> = [['', 'Any ownership'], ['1', 'Osobní'], ['2', 'Družstevní'], ['3', 'Státní']];
-const PERIOD_OPTS: Array<[string, string]> = [['monthly', 'Monthly'], ['quarterly', 'Quarterly'], ['semiannual', 'Semiannual'], ['annual', 'Annual']];
 
 function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated: (d: PriceStatDataset) => void }) {
   const [name, setName] = useState('');
@@ -758,7 +735,6 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
   const [pickerOpen, setPickerOpen] = useState(false);
   const [startYm, setStartYm] = useState(`${FIRST_YEAR}-01`);
   const [endYm, setEndYm] = useState(CUR_YM);
-  const [periodicity, setPeriodicity] = useState('monthly');
 
   const mutation = useMutation({
     mutationFn: () => createPriceStatDataset({
@@ -770,7 +746,6 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
       obec_ids: obecIds.length ? obecIds : null,
       min_population: minPop, max_population: maxPop,
       start_ym: startYm, end_ym: endYm,
-      periodicity: periodicity as 'monthly' | 'quarterly' | 'semiannual' | 'annual',
     }),
     onSuccess: (d) => onCreated(d as PriceStatDataset),
   });
@@ -802,9 +777,6 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         <Field label="Scrape to">
           <YmPicker value={endYm} onChange={setEndYm} />
         </Field>
-        <Field label="Periodicity">
-          <SelectBox value={periodicity} onChange={setPeriodicity} options={PERIOD_OPTS} />
-        </Field>
       </div>
       <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-ink-3)]">
         <span className="uppercase tracking-[0.14em]">Est. scrape time</span>
@@ -813,7 +785,6 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         </span>
         <span>· {obecIds.length || DEFAULT_CITY_COUNT} municipalities</span>
       </div>
-      <PeriodicityScrapeHint />
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="submit" disabled={!canSubmit}
           className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)] disabled:opacity-50">
@@ -838,10 +809,10 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
   );
 }
 
-/* Broaden a dataset's COVERAGE (cities / window / periodicity) — its
- * definition (filters) is unchanged. Re-running accumulates: observations are
- * upserted by (dataset, obec, category, year, month), never deleted, so adding
- * cities / earlier months / finer periodicity only adds data points. */
+/* Broaden a dataset's COVERAGE (cities / window) — its definition (filters) is
+ * unchanged. Re-running accumulates: observations are upserted by (dataset,
+ * obec, category, year, month), never deleted, so adding cities / earlier
+ * months only adds data points. */
 function ExpandDatasetForm({
   dataset, onClose, onSaved,
 }: {
@@ -855,7 +826,6 @@ function ExpandDatasetForm({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [startYm, setStartYm] = useState(dataset.start_ym || `${FIRST_YEAR}-01`);
   const [endYm, setEndYm] = useState(dataset.end_ym || CUR_YM);
-  const [periodicity, setPeriodicity] = useState<string>(dataset.periodicity || 'monthly');
   const [dispatchError, setDispatchError] = useState<string | null>(null);
 
   const saveMut = useMutation({
@@ -864,7 +834,6 @@ function ExpandDatasetForm({
         obec_ids: obecIds.length ? obecIds : null,
         min_population: minPop, max_population: maxPop,
         start_ym: startYm, end_ym: endYm,
-        periodicity: periodicity as 'monthly' | 'quarterly' | 'semiannual' | 'annual',
       });
       if (!run) return { dispatched: false, error: null as string | null };
       try {
@@ -886,7 +855,7 @@ function ExpandDatasetForm({
       <p className="text-sm text-[var(--color-ink)]">Expand “{dataset.name}”</p>
       <p className="mt-0.5 text-xs text-[var(--color-ink-3)]">
         Same definition, broader coverage. Re-running adds data points (it never removes any),
-        so you can start small/fast and grow — more cities, earlier months, or finer periodicity.
+        so you can start small/fast and grow — more cities or earlier months.
       </p>
       <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <Field label="Municipalities">
@@ -897,14 +866,12 @@ function ExpandDatasetForm({
         </Field>
         <Field label="Scrape from"><YmPicker value={startYm} onChange={setStartYm} /></Field>
         <Field label="Scrape to"><YmPicker value={endYm} onChange={setEndYm} /></Field>
-        <Field label="Periodicity"><SelectBox value={periodicity} onChange={setPeriodicity} options={PERIOD_OPTS} /></Field>
       </div>
       <div className="mt-3 flex items-center gap-2 text-xs text-[var(--color-ink-3)]">
         <span className="uppercase tracking-[0.14em]">Est. scrape time</span>
         <span className="text-[var(--color-ink-2)] tabular-nums">{estimateScrapeText(cities, startYm, endYm)}</span>
         <span>· {cities} municipalities</span>
       </div>
-      <PeriodicityScrapeHint />
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="button" disabled={saveMut.isPending} onClick={() => { setDispatchError(null); saveMut.mutate(true); }}
           className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)] disabled:opacity-50">
