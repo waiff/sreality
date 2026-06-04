@@ -148,6 +148,33 @@ def resolve_obce(conn: psycopg.Connection, obec_ids: list[int]) -> int:
         return cur.rowcount
 
 
+def unresolved_obec_names(conn: psycopg.Connection, obec_ids: list[int]) -> list[str]:
+    """Names of selected obce not yet mapped to a sreality entity.
+
+    These have no admin_boundaries.sreality_id (so resolve_obce skipped them)
+    and no price_stat_localities row keyed on their obec_id yet. The scraper
+    resolves them by NAME via localities/suggest; upsert_locality then
+    PIP-places each from the suggest coordinates. Biggest obce first so a
+    budget-bounded first pass prioritises the ones most likely to have data.
+    """
+    if not obec_ids:
+        return []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT b.name
+              FROM admin_boundaries b
+             WHERE b.id = ANY(%s) AND b.level = 'obec'
+               AND NOT EXISTS (
+                 SELECT 1 FROM price_stat_localities l WHERE l.obec_id = b.id
+               )
+             ORDER BY b.population DESC NULLS LAST
+            """,
+            (obec_ids,),
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
 def localities_for_obec_ids(
     conn: psycopg.Connection, obec_ids: list[int]
 ) -> list[dict[str, Any]]:
