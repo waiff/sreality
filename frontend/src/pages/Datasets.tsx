@@ -58,6 +58,20 @@ function estimateScrapeText(cities: number, startYm: string, endYm: string): str
   return `~${Math.max(1, Math.round(secs / 60))} min`;
 }
 
+/* Why the estimate above is the same for Annual vs Monthly: sreality's
+ * estate_prices API always returns the full monthly series; periodicity only
+ * downsamples what we STORE, not what we fetch — so scrape time (= API calls)
+ * is identical. Surfaced so the operator isn't surprised the estimate doesn't
+ * move with the dropdown. */
+function PeriodicityScrapeHint() {
+  return (
+    <p className="mt-1 text-[0.65rem] leading-snug text-[var(--color-ink-3)]">
+      Periodicity sets storage granularity only — sreality always returns monthly data,
+      so it doesn’t change scrape time.
+    </p>
+  );
+}
+
 const fmtPct = (n: number | null | undefined): string =>
   n == null || !Number.isFinite(n) ? '—' : `${n.toFixed(1)}%`;
 const fmtPP = (n: number | null | undefined): string =>
@@ -799,6 +813,7 @@ function NewDatasetForm({ onClose, onCreated }: { onClose: () => void; onCreated
         </span>
         <span>· {obecIds.length || DEFAULT_CITY_COUNT} municipalities</span>
       </div>
+      <PeriodicityScrapeHint />
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="submit" disabled={!canSubmit}
           className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)] disabled:opacity-50">
@@ -889,6 +904,7 @@ function ExpandDatasetForm({
         <span className="text-[var(--color-ink-2)] tabular-nums">{estimateScrapeText(cities, startYm, endYm)}</span>
         <span>· {cities} municipalities</span>
       </div>
+      <PeriodicityScrapeHint />
       <div className="mt-3 flex flex-wrap items-center gap-3">
         <button type="button" disabled={saveMut.isPending} onClick={() => { setDispatchError(null); saveMut.mutate(true); }}
           className="text-sm rounded-[var(--radius-sm)] px-3 py-1.5 border border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)] disabled:opacity-50">
