@@ -569,7 +569,14 @@ export default function ListingMap({
               ['interpolate', ['linear'], ['get', cfg.vProp],
                 ...cfg.ramp.flatMap(([stop, color]) => [stop, color])],
             ],
-            'fill-opacity': 0.7,
+            /* confident → full wash; thin (limited listings) → faded tint of
+             * the same hue; no-data grey carries its own low alpha. */
+            'fill-opacity': [
+              'case',
+              ['==', ['get', cfg.hasProp], 0], 0.7,
+              ['==', ['get', cfg.thinProp], 1], 0.26,
+              0.7,
+            ],
           },
         });
       }
@@ -1417,6 +1424,16 @@ function GrowthMapControls({
             <div className="flex justify-between text-[0.65rem] text-[var(--color-ink-3)] tabular-nums">
               <span>{cfg.ramp[0][0].toFixed(cfg.digits)}{cfg.suffix}</span>
               <span>+{cfg.ramp[cfg.ramp.length - 1][0].toFixed(cfg.digits)}{cfg.suffix}</span>
+            </div>
+            <div className="flex items-center gap-2 text-[0.62rem] text-[var(--color-ink-3)]">
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'rgba(94,122,74,0.3)' }} />
+                málo dat
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-2 w-2 rounded-[2px]" style={{ background: GROWTH_NO_DATA }} />
+                bez dat
+              </span>
             </div>
             {rowCount === 0 && <span className="text-[0.65rem] text-[var(--color-ink-3)]">Načítání…</span>}
           </div>

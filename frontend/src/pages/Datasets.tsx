@@ -542,7 +542,8 @@ function SummaryBand({
       })}
       <p className="sm:col-span-3 text-xs text-[var(--color-ink-3)]">
         Median across {summary.count} municipalities for the chosen window. Thin markets
-        (fewer than {MIN_ACTIVE} active offers) are excluded from the map and dimmed in the table.
+        (fewer than {MIN_ACTIVE} active offers at the window endpoints) render as a faded
+        tint on the map and are dimmed in the table.
       </p>
     </div>
   );
