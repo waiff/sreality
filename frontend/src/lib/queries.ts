@@ -9,6 +9,7 @@ import {
   isoNDaysAgo,
 } from './filters';
 import { applyRegistryFilters } from './registryQueryBuilder';
+import { fetchGrowth } from './priceStats';
 import type {
   CategoryTrend,
   HealthSummary,
@@ -294,6 +295,42 @@ async function resolveCityQualityPrefilter(
   );
 }
 
+/* Market-growth (price-stats datasets) prefilter. For each active rule the
+ * price_stat_growth RPC computes per-obec CAGR over [fromYm, toYm]; we keep
+ * obce meeting/exceeding the entered rent + sale growth thresholds (≥), then
+ * INTERSECT across rules (AND across datasets). Returns null when no rule has a
+ * threshold set, [] when no obec qualifies (caller short-circuits), else the
+ * obec_id allowlist — applied via .in('obec_id', ids) on the cohort queries and
+ * obec_ids_filter on browse_stats_properties. BROWSE-only (window-dependent). */
+async function resolvePriceGrowthPrefilter(
+  f: ListingFilters,
+): Promise<number[] | null> {
+  const rules = f.priceGrowthRules.filter(
+    (r) => r.rentMinPct != null || r.saleMinPct != null,
+  );
+  if (rules.length === 0) return null;
+  const perRule = await Promise.all(
+    rules.map(async (r) => {
+      const rentMin = r.rentMinPct;
+      const saleMin = r.saleMinPct;
+      const rows = await fetchGrowth(r.datasetId, r.fromYm, r.toYm);
+      return rows
+        .filter(
+          (g) =>
+            (rentMin == null || (g.rent_cagr_pct != null && g.rent_cagr_pct >= rentMin))
+            && (saleMin == null || (g.sale_cagr_pct != null && g.sale_cagr_pct >= saleMin)),
+        )
+        .map((g) => g.obec_id);
+    }),
+  );
+  let acc = perRule[0] ?? [];
+  for (let i = 1; i < perRule.length; i++) {
+    const set = new Set(perRule[i]);
+    acc = acc.filter((id) => set.has(id));
+  }
+  return acc;
+}
+
 /* Intersect two prefilter id sets (null = "no constraint"). Used so a
  * filter that combines tags + city-quality applies both prefilters
  * before paging the main query. */
@@ -323,12 +360,14 @@ const intersectPrefilters = (
 export const fetchListingsForMap = async (
   f: ListingFilters,
 ): Promise<MapResult> => {
-  const [tagIds, cityIds] = await Promise.all([
+  const [tagIds, cityIds, growthObec] = await Promise.all([
     resolveTagPrefilter(f),
     resolveCityQualityPrefilter(f),
+    resolvePriceGrowthPrefilter(f),
   ]);
   const prefilter = intersectPrefilters(tagIds, cityIds);
-  if (prefilter != null && prefilter.length === 0) {
+  if ((prefilter != null && prefilter.length === 0)
+      || (growthObec != null && growthObec.length === 0)) {
     return { rows: [], total: 0, capped: false };
   }
   const base = supabase
@@ -336,7 +375,8 @@ export const fetchListingsForMap = async (
     .select(MAP_COLS, { count: 'exact' })
     .not('lat', 'is', null)
     .not('lng', 'is', null);
-  const filtered = applyFilters(base, f);
+  const filtered0 = applyFilters(base, f);
+  const filtered = growthObec != null ? filtered0.in('obec_id', growthObec) : filtered0;
   const scoped = prefilter != null
     ? filtered.in('sreality_id', prefilter)
     : filtered;
@@ -379,12 +419,14 @@ export const fetchListingsForTable = async (
   sort: SortSpec,
   page: number,
 ): Promise<TableResult> => {
-  const [tagIds, cityIds] = await Promise.all([
+  const [tagIds, cityIds, growthObec] = await Promise.all([
     resolveTagPrefilter(f),
     resolveCityQualityPrefilter(f),
+    resolvePriceGrowthPrefilter(f),
   ]);
   const prefilter = intersectPrefilters(tagIds, cityIds);
-  if (prefilter != null && prefilter.length === 0) {
+  if ((prefilter != null && prefilter.length === 0)
+      || (growthObec != null && growthObec.length === 0)) {
     return { rows: [], total: 0 };
   }
   const from = (page - 1) * TABLE_PAGE_SIZE;
@@ -392,7 +434,8 @@ export const fetchListingsForTable = async (
   const base = supabase
     .from('properties_public')
     .select(TABLE_COLS, { count: 'exact' });
-  const filtered = applyFilters(base, f);
+  const filtered0 = applyFilters(base, f);
+  const filtered = growthObec != null ? filtered0.in('obec_id', growthObec) : filtered0;
   const scoped = prefilter != null
     ? filtered.in('sreality_id', prefilter)
     : filtered;
@@ -451,12 +494,14 @@ export const fetchListingsForCards = async (
   sort: SortSpec,
   page: number,
 ): Promise<CardsResult> => {
-  const [tagIds, cityIds] = await Promise.all([
+  const [tagIds, cityIds, growthObec] = await Promise.all([
     resolveTagPrefilter(f),
     resolveCityQualityPrefilter(f),
+    resolvePriceGrowthPrefilter(f),
   ]);
   const prefilter = intersectPrefilters(tagIds, cityIds);
-  if (prefilter != null && prefilter.length === 0) {
+  if ((prefilter != null && prefilter.length === 0)
+      || (growthObec != null && growthObec.length === 0)) {
     return { rows: [], total: 0 };
   }
   const from = (page - 1) * CARD_PAGE_SIZE;
@@ -464,7 +509,8 @@ export const fetchListingsForCards = async (
   const base = supabase
     .from('properties_public')
     .select(CARD_COLS, { count: 'exact' });
-  const filtered = applyFilters(base, f);
+  const filtered0 = applyFilters(base, f);
+  const filtered = growthObec != null ? filtered0.in('obec_id', growthObec) : filtered0;
   const scoped = prefilter != null
     ? filtered.in('sreality_id', prefilter)
     : filtered;
@@ -544,6 +590,10 @@ export const fetchBrowseStats = async (
     : null;
 
   const effBbox = effectiveBbox(f);
+  /* Market-growth allowlist (obec_ids); null = no active rule, [] = no obec
+   * qualifies (the RPC's `= any('{}')` then yields total 0). Keeps Stats
+   * aligned with Map/Table. */
+  const growthObec = await resolvePriceGrowthPrefilter(f);
 
   const { data, error } = await supabase.rpc('browse_stats_properties', {
     category_main_filter:    f.categoryMain,
@@ -622,6 +672,8 @@ export const fetchBrowseStats = async (
     max_price_drop_pct_min:  f.maxPriceDropPctMin,
     /* Migration 118 — filter the Stats cohort by source portal. */
     portal_filter:           f.portals.length ? f.portals : null,
+    /* Migration 162 — market-growth obec allowlist (price-stats datasets). */
+    obec_ids_filter:         growthObec,
   });
   if (error) throw error;
   return data as BrowseStats;
