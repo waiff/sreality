@@ -1,4 +1,4 @@
-import type { Disposition, Furnished, Ownership } from './types';
+import type { Disposition } from './types';
 import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
@@ -149,8 +149,11 @@ export interface ListingFilters {
   terrace: TriState;
   cellar: TriState;
   garage: TriState;
-  furnished: Furnished | null;
-  ownership: Ownership | null;
+  /* Multi-select enums. The special '__unknown__' value matches listings whose
+   * value is NULL or stored under a non-canonical label (see FURNISHED_VALUES /
+   * UNKNOWN_FILTER_VALUE and queries.ts:applyFilters). Empty = no constraint. */
+  furnished: string[];
+  ownership: string[];
   portals: string[];
   conditionMatch: string[];
   categorySubCb: number | null;
@@ -248,8 +251,8 @@ export const DEFAULT_FILTERS: ListingFilters = {
   terrace: 'any',
   cellar: 'any',
   garage: 'any',
-  furnished: null,
-  ownership: null,
+  furnished: [],
+  ownership: [],
   portals: [],
   conditionMatch: [],
   categorySubCb: null,
@@ -327,8 +330,14 @@ const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
 
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
-const FURNISHED_VALUES: ReadonlyArray<Furnished> = ['ano', 'ne', 'castecne'];
-const OWNERSHIP_VALUES: ReadonlyArray<Ownership> = ['osobni', 'druzstevni', 'statni'];
+/* Multi-select wire values incl. the '__unknown__' sentinel (NULL / non-canonical).
+ * The canonical sets mirror toolkit.filter_registry.{FURNISHED,OWNERSHIP}_CANONICAL
+ * and are what queries.ts:applyFilters uses for the `not.in.(…)` unknown predicate. */
+export const UNKNOWN_FILTER_VALUE = '__unknown__';
+export const FURNISHED_CANONICAL = ['ano', 'ne', 'castecne'] as const;
+export const OWNERSHIP_CANONICAL = ['osobni', 'druzstevni', 'statni'] as const;
+const FURNISHED_VALUES: ReadonlyArray<string> = [...FURNISHED_CANONICAL, UNKNOWN_FILTER_VALUE];
+const OWNERSHIP_VALUES: ReadonlyArray<string> = [...OWNERSHIP_CANONICAL, UNKNOWN_FILTER_VALUE];
 const CONDITION_VALUES: ReadonlyArray<string> = [
   'novostavba', 'po_rekonstrukci', 'velmi_dobry',
   'dobry', 'pred_rekonstrukci', 'k_demolici',
@@ -390,12 +399,6 @@ const enumOr = <T extends string>(
   fallback: T,
 ): T => (v != null && (values as ReadonlyArray<string>).includes(v) ? (v as T) : fallback);
 
-const enumOrNull = <T extends string>(
-  v: string | null,
-  values: ReadonlyArray<T>,
-): T | null =>
-  v != null && (values as ReadonlyArray<string>).includes(v) ? (v as T) : null;
-
 const parseIntOrNull = (s: string | null): number | null => {
   if (s == null || s === '') return null;
   const n = Number(s);
@@ -456,8 +459,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     terrace: enumOr(sp.get('terrace'), TRI_VALUES, 'any'),
     cellar: enumOr(sp.get('cellar'), TRI_VALUES, 'any'),
     garage: enumOr(sp.get('garage'), TRI_VALUES, 'any'),
-    furnished: enumOrNull(sp.get('furnished'), FURNISHED_VALUES),
-    ownership: enumOrNull(sp.get('ownership'), OWNERSHIP_VALUES),
+    furnished: splitCsv(sp.get('furnished')).filter((v) => FURNISHED_VALUES.includes(v)),
+    ownership: splitCsv(sp.get('ownership')).filter((v) => OWNERSHIP_VALUES.includes(v)),
     portals: splitCsv(sp.get('portal')),
     conditionMatch: splitCsv(sp.get('condition')).filter(
       (c) => CONDITION_VALUES.includes(c),
@@ -681,8 +684,8 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.terrace !== 'any') sp.set('terrace', f.terrace);
   if (f.cellar !== 'any') sp.set('cellar', f.cellar);
   if (f.garage !== 'any') sp.set('garage', f.garage);
-  if (f.furnished) sp.set('furnished', f.furnished);
-  if (f.ownership) sp.set('ownership', f.ownership);
+  if (f.furnished.length) sp.set('furnished', f.furnished.join(','));
+  if (f.ownership.length) sp.set('ownership', f.ownership.join(','));
   if (f.portals.length) sp.set('portal', f.portals.join(','));
   if (f.conditionMatch.length) sp.set('condition', f.conditionMatch.join(','));
   if (f.categorySubCb != null) sp.set('subcat', String(f.categorySubCb));
@@ -876,8 +879,8 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.terrace === 'any' &&
   f.cellar === 'any' &&
   f.garage === 'any' &&
-  f.furnished == null &&
-  f.ownership == null &&
+  f.furnished.length === 0 &&
+  f.ownership.length === 0 &&
   f.portals.length === 0 &&
   f.conditionMatch.length === 0 &&
   f.categorySubCb == null &&
@@ -1087,6 +1090,8 @@ export function listingFiltersToRegistryView(
       registryId === 'dispositions'
       || registryId === 'districts'
       || registryId === 'condition_match'
+      || registryId === 'furnished'
+      || registryId === 'ownership'
       || registryId === 'portals'
       || registryId === 'building_material'
       || registryId === 'subtype'
@@ -1137,6 +1142,14 @@ export function applyRegistryUpdate(
   if (id === 'condition_match') {
     const next = value == null ? [] : (value as string[]);
     return { ...filters, conditionMatch: next };
+  }
+  if (id === 'furnished') {
+    const next = value == null ? [] : (value as string[]);
+    return { ...filters, furnished: next };
+  }
+  if (id === 'ownership') {
+    const next = value == null ? [] : (value as string[]);
+    return { ...filters, ownership: next };
   }
   if (id === 'subtype') {
     const next = value == null ? [] : (value as string[]);
@@ -1264,8 +1277,8 @@ export function filtersToWatchdogSpec(
     terrace: triToBoolNullable(f.terrace),
     cellar: triToBoolNullable(f.cellar),
     garage: triToBoolNullable(f.garage),
-    furnished: f.furnished,
-    ownership: f.ownership,
+    furnished: arr(f.furnished),
+    ownership: arr(f.ownership),
     portals: arr(f.portals),
     condition_match: arr(f.conditionMatch),
     min_parking_lots: f.parkingLotsMin,

@@ -50,7 +50,8 @@ describe('URL round-trip', () => {
       dispositions: ['2+kk', '2+1'],
       hasBalcony: 'yes',
       terrace: 'no',
-      furnished: 'castecne',
+      furnished: ['castecne', '__unknown__'],
+      ownership: ['osobni'],
     };
     const round = fromSearchParams(toSearchParams(f));
     expect(round.priceMin).toBe(12_000);
@@ -60,7 +61,8 @@ describe('URL round-trip', () => {
     expect(round.dispositions).toEqual(['2+kk', '2+1']);
     expect(round.hasBalcony).toBe('yes');
     expect(round.terrace).toBe('no');
-    expect(round.furnished).toBe('castecne');
+    expect(round.furnished).toEqual(['castecne', '__unknown__']);
+    expect(round.ownership).toEqual(['osobni']);
   });
 
   it('round-trips conditionMatch and drops unknown values', () => {

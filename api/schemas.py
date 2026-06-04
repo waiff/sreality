@@ -8,9 +8,22 @@ out.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
+
+
+def _as_str_list(v: Any) -> Any:
+    """Coerce a bare string into a single-element list (backward-compat for
+    callers that still send `furnished="ano"` now that the filter is
+    multi-select). None and lists pass through unchanged."""
+    if isinstance(v, str):
+        return [v]
+    return v
+
+
+# Multi-select enum filter that also accepts a single bare string.
+EnumListFilter = Annotated[list[str] | None, BeforeValidator(_as_str_list)]
 
 
 class TargetIn(BaseModel):
@@ -51,11 +64,11 @@ class FindComparablesIn(BaseModel):
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
-    furnished: str | None = None
+    furnished: EnumListFilter = None
     terrace: bool | None = None
     cellar: bool | None = None
     garage: bool | None = None
-    ownership: str | None = None
+    ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
     min_usable_area: float | None = None
@@ -150,11 +163,11 @@ class ComputeMarketVelocityIn(BaseModel):
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
-    furnished: str | None = None
+    furnished: EnumListFilter = None
     terrace: bool | None = None
     cellar: bool | None = None
     garage: bool | None = None
-    ownership: str | None = None
+    ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
     min_usable_area: float | None = None
@@ -337,11 +350,11 @@ class CreateEstimationIn(BaseModel):
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
-    furnished: str | None = None
+    furnished: EnumListFilter = None
     terrace: bool | None = None
     cellar: bool | None = None
     garage: bool | None = None
-    ownership: str | None = None
+    ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
     min_usable_area: float | None = None
@@ -436,11 +449,11 @@ class EstimateYieldIn(BaseModel):
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
-    furnished: str | None = None
+    furnished: EnumListFilter = None
     terrace: bool | None = None
     cellar: bool | None = None
     garage: bool | None = None
-    ownership: str | None = None
+    ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
     min_usable_area: float | None = None

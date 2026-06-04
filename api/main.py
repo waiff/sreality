@@ -1049,7 +1049,7 @@ def post_estimate_yield(
             amenities={
                 "balcony": body.has_balcony is True,
                 "terrace": body.terrace is True,
-                "furnished": body.furnished == "ano",
+                "furnished": "ano" in (body.furnished or []),
                 "garage": body.garage is True,
                 "elevator": body.has_lift is True,
                 "other_material": False,

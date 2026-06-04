@@ -1224,12 +1224,12 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
     },
     {
       "id": "furnished",
-      "type": "string",
+      "type": "string_list",
       "pg_column": "furnished",
       "default": null,
-      "description": "Furnishing status. `ano` = furnished, `ne` = unfurnished, `castecne` = partially furnished. Null drops the constraint.",
+      "description": "Multi-select furnishing status. `ano` = furnished, `ne` = unfurnished, `castecne` = partially furnished. A listing matches if its value is in the list. The special `__unknown__` value matches listings whose furnishing is not specified (NULL) or stored under a non-canonical label. Empty list / null = no constraint.",
       "category": "Property",
-      "ui_control": "single_select",
+      "ui_control": "multiselect",
       "agendas": [
         "browse",
         "comparables",
@@ -1239,13 +1239,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "velocity",
         "watchdog"
       ],
-      "constraints": {
-        "enum": [
-          "ano",
-          "ne",
-          "castecne"
-        ]
-      },
+      "constraints": null,
       "unit": null,
       "enum_values": [
         {
@@ -1262,18 +1256,23 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "castecne",
           "label_cs": "Částečně",
           "label_en": "Partially furnished"
+        },
+        {
+          "value": "__unknown__",
+          "label_cs": "Neuvedeno",
+          "label_en": "Unknown / not specified"
         }
       ],
       "aliases": []
     },
     {
       "id": "ownership",
-      "type": "string",
+      "type": "string_list",
       "pg_column": "ownership",
       "default": null,
-      "description": "Ownership type. `osobni` = personal (full title), `druzstevni` = cooperative (member share), `statni` = state/municipal. Materially affects sale prices (druzstevni typically 10–20% cheaper than osobni).",
+      "description": "Multi-select ownership type. `osobni` = personal (full title), `druzstevni` = cooperative (member share), `statni` = state/municipal. A listing matches if its value is in the list. The special `__unknown__` value matches listings whose ownership is not specified (NULL) or stored under a non-canonical label. Materially affects sale prices (druzstevni typically 10–20% cheaper than osobni). Empty list / null = no constraint.",
       "category": "Property",
-      "ui_control": "single_select",
+      "ui_control": "multiselect",
       "agendas": [
         "browse",
         "comparables",
@@ -1283,13 +1282,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         "velocity",
         "watchdog"
       ],
-      "constraints": {
-        "enum": [
-          "osobni",
-          "druzstevni",
-          "statni"
-        ]
-      },
+      "constraints": null,
       "unit": null,
       "enum_values": [
         {
@@ -1306,6 +1299,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "value": "statni",
           "label_cs": "Státní/obecní",
           "label_en": "State/Municipal"
+        },
+        {
+          "value": "__unknown__",
+          "label_cs": "Neuvedeno",
+          "label_en": "Unknown / not specified"
         }
       ],
       "aliases": []

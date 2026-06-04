@@ -158,13 +158,9 @@ describe('auto-dispatch', () => {
     const r = new _Recorder();
     applyRegistryFilters(r, {
       ...DEFAULT_FILTERS,
-      furnished: 'ano',
-      ownership: 'osobni',
       categoryMain: 'dum',
     });
     const eqs = r.calls.filter((c) => c.op === 'eq');
-    expect(eqs).toContainEqual({ op: 'eq', col: 'furnished', value: 'ano' });
-    expect(eqs).toContainEqual({ op: 'eq', col: 'ownership', value: 'osobni' });
     expect(eqs).toContainEqual({ op: 'eq', col: 'category_main', value: 'dum' });
   });
 
@@ -196,6 +192,19 @@ describe('hand-coded skip set', () => {
     // building_material → IN over building_type values is handled in
     // queries.ts:applyFilters, NOT here.
     expect(r.calls.find((c) => c.col === 'building_type')).toBeUndefined();
+  });
+
+  it('does not auto-dispatch furnished / ownership (unknown-sentinel enums)', () => {
+    const r = new _Recorder();
+    applyRegistryFilters(r, {
+      ...DEFAULT_FILTERS,
+      furnished: ['ano', '__unknown__'],
+      ownership: ['osobni'],
+    });
+    // furnished / ownership → `.or(in.(…),is.null,not.in.(…))` is handled in
+    // queries.ts:applyFilters, NOT here.
+    expect(r.calls.find((c) => c.col === 'furnished')).toBeUndefined();
+    expect(r.calls.find((c) => c.col === 'ownership')).toBeUndefined();
   });
 
   it('does not auto-dispatch last_seen / first_seen days-ago filters', () => {

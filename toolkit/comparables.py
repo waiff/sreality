@@ -24,6 +24,12 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal
 
+from toolkit.filter_registry import (
+    FURNISHED_CANONICAL,
+    OWNERSHIP_CANONICAL,
+    UNKNOWN_FILTER_VALUE,
+)
+
 if TYPE_CHECKING:
     import psycopg
 
@@ -79,11 +85,13 @@ class ComparableFilters:
     locality_district_id: int | None = None
     locality_region_id: int | None = None
     include_unreliable: bool = False
-    furnished: str | None = None
+    # Multi-select enums. Each may carry the `__unknown__` sentinel meaning
+    # "NULL or a non-canonical value" — see _enum_or_unknown_clause.
+    furnished: list[str] | None = None
     terrace: bool | None = None
     cellar: bool | None = None
     garage: bool | None = None
-    ownership: str | None = None
+    ownership: list[str] | None = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
     min_usable_area: float | None = None
@@ -281,6 +289,29 @@ def _city_quality_clauses(
     return where, params
 
 
+def _enum_or_unknown_clause(
+    values: list[str],
+    col: str,
+    pname: str,
+    canonical: tuple[str, ...],
+    params: dict[str, Any],
+) -> str | None:
+    """WHERE fragment for a multi-select enum that may carry the `__unknown__`
+    sentinel. Real values match by `= ANY(...)`; `__unknown__` matches NULL or
+    any value outside the canonical set. Returns None when nothing to filter."""
+    reals = [v for v in values if v != UNKNOWN_FILTER_VALUE]
+    parts: list[str] = []
+    if reals:
+        parts.append(f"{col} = ANY(%({pname})s)")
+        params[pname] = reals
+    if UNKNOWN_FILTER_VALUE in values:
+        parts.append(f"({col} IS NULL OR NOT ({col} = ANY(%({pname}_canon)s)))")
+        params[f"{pname}_canon"] = list(canonical)
+    if not parts:
+        return None
+    return "(" + " OR ".join(parts) + ")"
+
+
 def _shared_filter_where(
     target: TargetSpec, filters: ComparableFilters
 ) -> tuple[list[str], dict[str, Any]]:
@@ -396,12 +427,20 @@ def _shared_filter_where(
         where.append("l.category_sub_cb = %(category_sub_cb)s")
         params["category_sub_cb"] = filters.category_sub_cb
 
-    if filters.furnished is not None:
-        where.append("l.furnished = %(furnished)s")
-        params["furnished"] = filters.furnished
-    if filters.ownership is not None:
-        where.append("l.ownership = %(ownership)s")
-        params["ownership"] = filters.ownership
+    if filters.furnished:
+        clause = _enum_or_unknown_clause(
+            list(filters.furnished), "l.furnished", "furnished",
+            FURNISHED_CANONICAL, params,
+        )
+        if clause:
+            where.append(clause)
+    if filters.ownership:
+        clause = _enum_or_unknown_clause(
+            list(filters.ownership), "l.ownership", "ownership",
+            OWNERSHIP_CANONICAL, params,
+        )
+        if clause:
+            where.append(clause)
 
     if filters.terrace is not None:
         where.append("l.terrace = %(terrace)s")
@@ -604,8 +643,8 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "locality_district_id": filters.locality_district_id,
         "locality_region_id": filters.locality_region_id,
         "include_unreliable": filters.include_unreliable,
-        "furnished": filters.furnished,
-        "ownership": filters.ownership,
+        "furnished": list(filters.furnished) if filters.furnished else None,
+        "ownership": list(filters.ownership) if filters.ownership else None,
         "terrace": filters.terrace,
         "cellar": filters.cellar,
         "garage": filters.garage,

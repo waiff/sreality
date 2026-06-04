@@ -337,16 +337,19 @@ def _norm_condition(text: str | None) -> str | None:
 
 
 def _norm_ownership(text: str | None) -> str | None:
+    # Map to the canonical sreality codes; drop anything unmapped (e.g.
+    # "ostatni") to NULL rather than leaking a non-canonical label through.
     key = _norm_key(text)
-    return OWNERSHIP.get(key, key or None) if key else None
+    return OWNERSHIP.get(key) if key else None
 
 
 def _norm_furnished(text: str | None) -> str | None:
+    # Canonical sreality codes (parser.FURNISHED): ano / ne / castecne.
     yn = _yes_no(text)
     if yn is True:
-        return "vybaveno"
+        return "ano"
     if yn is False:
-        return "nevybaveno"
+        return "ne"
     if "castec" in _norm_key(text):
         return "castecne"
     return None

@@ -10,6 +10,8 @@ full-resolution original).
 from __future__ import annotations
 
 from scraper.remax_parser import (
+    _norm_furnished,
+    _norm_ownership,
     category_from_typ,
     category_of,
     index_price,
@@ -18,6 +20,26 @@ from scraper.remax_parser import (
     subtype_of,
     type_of,
 )
+
+
+def test_norm_furnished_canonical_codes():
+    # The "Vybaveno" spec row carries a yes/no answer; we store the canonical
+    # sreality code (ano/ne/castecne), never the Czech label.
+    assert _norm_furnished("Ano") == "ano"
+    assert _norm_furnished("Ne") == "ne"
+    assert _norm_furnished("Nevybaveno") == "ne"
+    assert _norm_furnished("Částečně") == "castecne"
+    assert _norm_furnished(None) is None
+
+
+def test_norm_ownership_canonical_only():
+    assert _norm_ownership("Osobní") == "osobni"
+    assert _norm_ownership("Družstevní") == "druzstevni"
+    assert _norm_ownership("Státní") == "statni"
+    assert _norm_ownership("Obecní") == "statni"
+    # Unmapped labels collapse to None, never leak through (e.g. "ostatni").
+    assert _norm_ownership("Ostatní") is None
+    assert _norm_ownership(None) is None
 
 _DETAIL_URL = (
     "https://www.remax-czech.cz/reality/detail/440872/"
@@ -201,7 +223,7 @@ def test_parse_detail_full():
     assert listing.has_lift is True
     assert listing.cellar is False
     assert listing.terrace is None               # absent row -> unknown, not False
-    assert listing.furnished == "vybaveno"
+    assert listing.furnished == "ano"
     assert listing.description.startswith("K prodeji")
     assert listing.raw["remax_ref"] == "ID 259-NP01246"
     # Only this listing's images, full-resolution (no _th350), recommended excluded.

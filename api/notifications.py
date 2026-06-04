@@ -159,9 +159,10 @@ class WatchdogFilterSpec(BaseModel):
     cellar: bool | None = None
     garage: bool | None = None
 
-    # Enumerated columns.
-    furnished: str | None = None
-    ownership: str | None = None
+    # Enumerated columns. furnished/ownership are multi-select; each may carry
+    # the `__unknown__` sentinel (NULL or a non-canonical value).
+    furnished: list[str] | None = None
+    ownership: list[str] | None = None
     portals: list[str] | None = None
     condition_match: list[str] | None = None
 
@@ -200,6 +201,12 @@ class WatchdogFilterSpec(BaseModel):
     near_youth_15km_min: float | None = None
     near_overall_5km_min: float | None = None
     near_overall_15km_min: float | None = None
+
+    @field_validator("furnished", "ownership", mode="before")
+    @classmethod
+    def _wrap_bare_str(cls, v: Any) -> Any:
+        """Accept a bare string (legacy single-select callers) as [string]."""
+        return [v] if isinstance(v, str) else v
 
     @model_validator(mode="after")
     def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
@@ -372,12 +379,27 @@ def _build_match_clauses(
         where.append("l.garage = %(garage)s")
         params["garage"] = spec.garage
 
-    if spec.furnished is not None:
-        where.append("l.furnished = %(furnished)s")
-        params["furnished"] = spec.furnished
-    if spec.ownership is not None:
-        where.append("l.ownership = %(ownership)s")
-        params["ownership"] = spec.ownership
+    # furnished / ownership: multi-select with the `__unknown__` sentinel.
+    # Reuse the exact Browse helper so the two surfaces can't disagree.
+    from toolkit.comparables import _enum_or_unknown_clause
+    from toolkit.filter_registry import (
+        FURNISHED_CANONICAL,
+        OWNERSHIP_CANONICAL,
+    )
+    if spec.furnished:
+        clause = _enum_or_unknown_clause(
+            list(spec.furnished), "l.furnished", "furnished",
+            FURNISHED_CANONICAL, params,
+        )
+        if clause:
+            where.append(clause)
+    if spec.ownership:
+        clause = _enum_or_unknown_clause(
+            list(spec.ownership), "l.ownership", "ownership",
+            OWNERSHIP_CANONICAL, params,
+        )
+        if clause:
+            where.append(clause)
     if spec.portals:
         where.append("l.source = ANY(%(portals)s)")
         params["portals"] = list(spec.portals)
