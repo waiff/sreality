@@ -1329,7 +1329,11 @@ def _build_registry() -> dict[str, FilterDef]:
                 "country-wide — not just the 206 curated cities."
             ),
             category=CATEGORY_CITY_QUALITY,
-            ui_control=UiControl.NUMBER_INPUT,
+            # Plain paired number inputs, not a 0–1.5M slider: the range is
+            # too wide for a slider to be usable, the operator types exact
+            # populations. RANGE_INPUTS keeps the min/max pair but drops the
+            # dual-thumb track (see FilterForm's slider-vs-inputs branch).
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 0, "max": 1500000, "step": 1000},
             aliases=("minCityPopulation",),
@@ -1341,7 +1345,7 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description="Upper bound on the listing's own-municipality population (`home_obec_pop <= N`). See `min_city_population`.",
             category=CATEGORY_CITY_QUALITY,
-            ui_control=UiControl.NUMBER_INPUT,
+            ui_control=UiControl.RANGE_INPUTS,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 0, "max": 1500000, "step": 1000},
             aliases=("maxCityPopulation",),

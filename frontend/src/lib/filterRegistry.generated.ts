@@ -1930,7 +1930,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Lower bound on the population of the listing's OWN municipality (`home_obec_pop >= N`, ČSÚ population of the obec whose polygon contains the listing). Precomputed by recompute_city_proximity (migration 142) for every listing country-wide — not just the 206 curated cities.",
       "category": "City quality",
-      "ui_control": "number_input",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "watchdog"
@@ -1953,7 +1953,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "default": null,
       "description": "Upper bound on the listing's own-municipality population (`home_obec_pop <= N`). See `min_city_population`.",
       "category": "City quality",
-      "ui_control": "number_input",
+      "ui_control": "range_inputs",
       "agendas": [
         "browse",
         "watchdog"
