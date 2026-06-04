@@ -64,7 +64,13 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
               ['interpolate', ['linear'], ['get', cfg.vProp],
                 ...cfg.ramp.flatMap(([stop, color]) => [stop, color])],
             ],
-            'fill-opacity': 0.72,
+            /* thin (limited listings) → faded tint of the same hue. */
+            'fill-opacity': [
+              'case',
+              ['==', ['get', cfg.hasProp], 0], 0.72,
+              ['==', ['get', cfg.thinProp], 1], 0.26,
+              0.72,
+            ],
           },
         });
         map.on('mousemove', layerId(m), (e) => {
@@ -83,8 +89,11 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
           setHover(null);
           const cm = GROWTH_METRICS[m];
           const has = Number(pr[cm.hasProp]);
+          const thin = Number(pr[cm.thinProp]) === 1;
           const v = Number(pr[cm.vProp]);
-          const txt = has ? `${v.toFixed(cm.digits)} ${cm.suffix}` : 'thin / no data';
+          const txt = has
+            ? `${v.toFixed(cm.digits)} ${cm.suffix}${thin ? ' · málo dat' : ''}`
+            : 'bez dat';
           popupRef.current!
             .setLngLat(e.lngLat)
             .setHTML(`<strong>${String(pr.obec_name)}</strong><br/>${cm.label}: ${txt}`)
@@ -169,9 +178,15 @@ function Legend({ metric }: { metric: GrowthMetric }) {
         <span>0</span>
         <span>+{hi.toFixed(digits)}{suffix}</span>
       </div>
-      <div className="mt-1 flex items-center gap-1 text-[var(--color-ink-3)]">
-        <span className="inline-block h-2 w-2 rounded-[2px]" style={{ background: GROWTH_NO_DATA }} />
-        thin / no data
+      <div className="mt-1 flex flex-col gap-0.5 text-[var(--color-ink-3)]">
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-[2px]" style={{ background: 'rgba(94,122,74,0.3)' }} />
+          málo dat (limited listings)
+        </span>
+        <span className="flex items-center gap-1">
+          <span className="inline-block h-2 w-2 rounded-[2px]" style={{ background: GROWTH_NO_DATA }} />
+          bez dat
+        </span>
       </div>
     </div>
   );

@@ -17,43 +17,56 @@ const YIELD_RAMP: Ramp = [
   [-0.6, '#a04b3d'], [-0.2, '#c89a8e'], [0, '#dcd6c8'], [0.2, '#9aae84'], [0.6, '#5e7a4a'],
 ];
 export const GROWTH_NO_DATA = 'rgba(122, 125, 134, 0.28)';
-const MIN_ACTIVE = 3;
+/* Endpoint active-listing thresholds. Post-migration 161 the *_min_active
+ * columns measure the START+END points the CAGR is actually built from (not
+ * the whole-series minimum), so a single thin month no longer hides a solid
+ * multi-year trend. Tiers: >= CONFIDENT_MIN → full colour; CONFIDENT_MIN > n
+ * >= THIN_MIN → faded tint ("data exists but limited"); < THIN_MIN → no data. */
+export const CONFIDENT_MIN = 3;
+const THIN_MIN = 1;
 
 export interface GrowthMetricConfig {
   label: string;
   ramp: Ramp;
   suffix: string;
   digits: number;
-  vProp: string;   // feature property holding the value
-  hasProp: string; // feature property: 1 if value present, 0 if thin/missing
+  vProp: string;    // feature property holding the value
+  hasProp: string;  // 1 if value present (confident OR thin), else 0
+  thinProp: string; // 1 if present-but-thin (limited listings), else 0
 }
 
 export const GROWTH_METRICS: Record<GrowthMetric, GrowthMetricConfig> = {
-  rent_cagr_pct: { label: 'Rent growth p.a.', ramp: GROWTH_RAMP, suffix: '%', digits: 1, vProp: 'v_rent', hasProp: 'h_rent' },
-  sale_cagr_pct: { label: 'Sale-price growth p.a.', ramp: GROWTH_RAMP, suffix: '%', digits: 1, vProp: 'v_sale', hasProp: 'h_sale' },
-  yield_change_pp_pa: { label: 'Yield change p.a.', ramp: YIELD_RAMP, suffix: 'pp', digits: 2, vProp: 'v_yield', hasProp: 'h_yield' },
+  rent_cagr_pct: { label: 'Rent growth p.a.', ramp: GROWTH_RAMP, suffix: '%', digits: 1, vProp: 'v_rent', hasProp: 'h_rent', thinProp: 'tn_rent' },
+  sale_cagr_pct: { label: 'Sale-price growth p.a.', ramp: GROWTH_RAMP, suffix: '%', digits: 1, vProp: 'v_sale', hasProp: 'h_sale', thinProp: 'tn_sale' },
+  yield_change_pp_pa: { label: 'Yield change p.a.', ramp: YIELD_RAMP, suffix: 'pp', digits: 2, vProp: 'v_yield', hasProp: 'h_yield', thinProp: 'tn_yield' },
 };
 
 export const GROWTH_METRIC_ORDER: GrowthMetric[] = ['rent_cagr_pct', 'sale_cagr_pct', 'yield_change_pp_pa'];
 
-export function growthValue(p: PriceStatGrowthRow, metric: GrowthMetric): number | null {
+export type GrowthTier = 0 | 1 | 2; // 0 none (grey), 1 thin (faded), 2 confident (full)
+
+function endpointActive(p: PriceStatGrowthRow, metric: GrowthMetric): number {
+  if (metric === 'rent_cagr_pct') return p.rent_min_active ?? 0;
+  if (metric === 'sale_cagr_pct') return p.sale_min_active ?? 0;
+  return Math.min(p.sale_min_active ?? 0, p.rent_min_active ?? 0);
+}
+
+export function growthTier(
+  p: PriceStatGrowthRow,
+  metric: GrowthMetric,
+): { value: number; tier: GrowthTier } {
   const raw = p[metric];
-  if (raw == null || !Number.isFinite(raw)) return null;
-  const minActive =
-    metric === 'rent_cagr_pct'
-      ? p.rent_min_active
-      : metric === 'sale_cagr_pct'
-        ? p.sale_min_active
-        : Math.min(p.sale_min_active ?? 0, p.rent_min_active ?? 0);
-  if (minActive != null && minActive < MIN_ACTIVE) return null;
-  return raw;
+  if (raw == null || !Number.isFinite(raw)) return { value: 0, tier: 0 };
+  const active = endpointActive(p, metric);
+  if (active < THIN_MIN) return { value: 0, tier: 0 };
+  return { value: raw, tier: active < CONFIDENT_MIN ? 1 : 2 };
 }
 
 export interface GrowthFeatureProps {
   obec_name: string;
-  v_rent: number; h_rent: number;
-  v_sale: number; h_sale: number;
-  v_yield: number; h_yield: number;
+  v_rent: number; h_rent: number; tn_rent: number;
+  v_sale: number; h_sale: number; tn_sale: number;
+  v_yield: number; h_yield: number; tn_yield: number;
 }
 export type GrowthFC = GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon, GrowthFeatureProps>;
 
@@ -68,18 +81,18 @@ export function growthToFeatureCollection(rows: PriceStatGrowthRow[]): GrowthFC 
         return [];
       }
       if (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon') return [];
-      const r = growthValue(p, 'rent_cagr_pct');
-      const s = growthValue(p, 'sale_cagr_pct');
-      const y = growthValue(p, 'yield_change_pp_pa');
+      const r = growthTier(p, 'rent_cagr_pct');
+      const s = growthTier(p, 'sale_cagr_pct');
+      const y = growthTier(p, 'yield_change_pp_pa');
       return [{
         type: 'Feature' as const,
         id: p.obec_id,
         geometry,
         properties: {
           obec_name: p.locality_name,
-          v_rent: r ?? 0, h_rent: r == null ? 0 : 1,
-          v_sale: s ?? 0, h_sale: s == null ? 0 : 1,
-          v_yield: y ?? 0, h_yield: y == null ? 0 : 1,
+          v_rent: r.value, h_rent: r.tier === 0 ? 0 : 1, tn_rent: r.tier === 1 ? 1 : 0,
+          v_sale: s.value, h_sale: s.tier === 0 ? 0 : 1, tn_sale: s.tier === 1 ? 1 : 0,
+          v_yield: y.value, h_yield: y.tier === 0 ? 0 : 1, tn_yield: y.tier === 1 ? 1 : 0,
         },
       }];
     }),
