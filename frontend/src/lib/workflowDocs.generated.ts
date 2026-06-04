@@ -25,6 +25,7 @@ export interface WorkflowDoc {
   filename: string;
   name: string;
   description: string;
+  portal: string | null;
   manual: boolean;
   schedules: WorkflowSchedule[];
   onPush: boolean;
@@ -45,6 +46,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "aggregate_condition_markers.yml",
     "name": "Dev: aggregate condition markers (one-off Phase A bootstrap)",
     "description": "Runs scripts/aggregate_condition_markers.py against the live `listing_marker_extractions` rows to produce data/condition_markers_v1.json, then commits the JSON back to the running branch so the operator can review it in the PR diff.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -90,6 +92,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "bazos_detail_drain.yml",
     "name": "Scraping: Bazos detail drain",
     "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+    "portal": "bazos",
     "manual": true,
     "schedules": [
       {
@@ -149,6 +152,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "bazos_index_walk.yml",
     "name": "Scraping: Bazos index walk",
     "description": "The fast half of the bazos cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured scope (no --max-pages), touch_listings bumps last_seen on still-listed ads, mark_inactive flips delisted ones under the completeness guard (source-scoped, throttled to once per 12h), and new/price-changed ids are enqueued into listing_detail_queue (source='bazos'). No detail fetch — the drain (bazos_detail_drain.yml) consumes the queue. Records run_type='index'.",
+    "portal": "bazos",
     "manual": true,
     "schedules": [
       {
@@ -228,6 +232,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "build-extension.yml",
     "name": "CI: build Chrome extension",
     "description": "Builds the chrome-extension/ bundle and uploads dist/ as a workflow artifact you can download from the Actions tab. Keeps the build off the operator's laptop (no local Node install needed).",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": true,
@@ -252,6 +257,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "compare_condition_models.yml",
     "name": "Scoring: Condition model A/B (Haiku vs Sonnet)",
     "description": "Read-only validation harness for a cheaper condition-scoring model. For a sample of listings that already have a baseline-model score on their latest snapshot, it re-runs the SAME scoring request through a candidate model and reports per-axis agreement (exact / within-1 / mean abs diff / bias) plus the candidate vs baseline cost ratio.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -326,6 +332,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "compute_image_phash.yml",
     "name": "Compute image pHash (multi-portal dedup)",
     "description": "Backfills images.phash (a 64-bit perceptual dHash per stored image) for the Tier-2 dedup sweep's cheap image corroborator. Downloads stored bytes from R2, hashes them, writes images.phash. Idempotent + resumable; a no-op if R2 env vars are missing.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -375,6 +382,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "condition_score_batches.yml",
     "name": "Scraping: Sreality condition scoring (batch API)",
     "description": "Phase 1.8b — async condition scoring via the Anthropic Message Batches API (50% cheaper than the synchronous condition_scores.yml job). Two modes, selected by the `mode` input:",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -440,6 +448,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "condition_scores.yml",
     "name": "Scraping: Sreality condition scoring (hourly + manual backfill)",
     "description": "Decoupled condition-scoring job. Scores building/apartment condition (1..5) for active listings whose latest snapshot doesn't yet have a row in `listing_condition_scores`, writing both the cache row AND the two listings.*_condition_level columns in one transaction per listing (autocommit — every successful score commits independently, so a timeout or cancel preserves the rows already done). Resumable: scored listings drop out of the next selection.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -522,6 +531,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "dedup_engine.yml",
     "name": "Dedup engine (street + disposition)",
     "description": "Street + disposition keyed dedup engine. Groups listings that share a street and disposition into one real-world property, autonomously. Replaces the old geo-proximity Tier-2 sweep. Rules: (A) only listings with BOTH a street and a disposition are eligible; (B) same street + house number + disposition + floor auto-merges (with a 5% area guard); (C) same street + disposition with no contradicting floor/area/house-number becomes a visual candidate; (D) the visual layer confirms — >=2 near-identical interior photos (pHash), else a room-aware forensic comparison stopping at the first High verdict — and merges on confirmation; (E) everything else is queued for the operator's /dedup page.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -589,6 +599,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "detail_drain.yml",
     "name": "Scraping: Sreality detail drain (Phase 2)",
     "description": "The slow half of the Phase-2 cadence split. Claims a bounded slice of listing_detail_queue (enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool, and writes them in batches via the set-based write_detail_batch (one transaction per ~100 listings) — targeting ~0.1-0.2 s/listing versus the ~1.5 s of the legacy per-listing write. New listings land with property_id NULL; the Tier-1 matcher is deferred to the recompute_property_stats straggler-attach phase.",
+    "portal": "sreality",
     "manual": true,
     "schedules": [
       {
@@ -648,6 +659,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "discover_condition_markers.yml",
     "name": "Dev: discover condition markers (one-off Phase A bootstrap)",
     "description": "One-off Phase A driver for the building/apartment condition-scoring feature. Runs scripts/discover_condition_markers.py against the real Supabase DB and the Anthropic API to mine Czech condition markers from a stratified sample of listings.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -717,6 +729,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "enrich_bazos.yml",
     "name": "Scraping: Bazos description enrichment (LLM, every 6h + manual)",
     "description": "Decoupled enrichment job. bazos listings carry no structured floor / amenities / condition / building_type / energy — only price, area, disposition, coords, and the seller's free text. This reads the description of active listings whose latest snapshot isn't yet enriched, extracts those typed fields with a cheap model (Haiku 4.5), caches the extraction in listing_description_enrichments, and fills ONLY the currently-NULL listings columns (the deterministic HTML-parsed price/area/disposition are never overwritten). Resumable: enriched snapshots drop out of the next selection.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -787,6 +800,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "fetch-fixtures.yml",
     "name": "Fixtures: source HTML (anonymized)",
     "description": "Manual trigger only. Fetches each listing URL, runs the anonymization in scripts/fetch_and_anonymize_fixtures.py, and commits the resulting fixtures to the current branch. Operator runs this once per source refresh; tests then read the saved files instead of hitting the internet.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -846,6 +860,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "fetch_rent_map.yml",
     "name": "Jobs: fetch MF rent map (monthly)",
     "description": "Auto-grab the Ministry of Finance \"Cenová mapa nájemného\" (rent price map) from the MF infografika page, parse it, and append a new rent_map revision — unless the file's sha256 already exists (then it's a no-op). The MF data updates 4×/year (published within 45 days of each quarter end), so a monthly cron mostly no-ops and catches the new release within ~30 days. The same data also lands via manual upload from the Settings page; both share api.rent_map.ingest_bytes, so the latest revision always wins.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -891,6 +906,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "fetch_sreality_fixtures.yml",
     "name": "Fixtures: sreality v1 JSON",
     "description": "Manual trigger only. Fetches a real search response + one real detail response from a GitHub runner IP (this repo's dev sandbox is 403'd by sreality), scrubs emails/phone numbers, and commits the result as tests/fixtures/sample_search.json + sample_listing.json on the current branch. The live /api/v1/estates API is snake_case (id key `hash_id`, detail wrapped under `result`); these fixtures pin the true shape so the parser tests guard reality instead of the HAR-derived camelCase guess.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -934,6 +950,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "frontend-build.yml",
     "name": "CI: frontend build",
     "description": "Builds the frontend/ Vite SPA on every push or pull request that touches frontend code, to catch build/type errors before deploy. Type-checks, builds the production bundle, and reports gzipped chunk sizes (warning if the initial JS chunk exceeds the 500 kB budget). Does not deploy.",
+    "portal": null,
     "manual": false,
     "schedules": [],
     "onPush": true,
@@ -955,6 +972,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "idnes_detail_drain.yml",
     "name": "Scraping: iDNES Reality detail drain",
     "description": "The slow half of the iDNES cadence split (architectural rule #19, like sreality). Claims a bounded slice of listing_detail_queue (source='idnes', enqueued by idnes_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+    "portal": "idnes",
     "manual": true,
     "schedules": [
       {
@@ -1014,6 +1032,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "idnes_index_walk.yml",
     "name": "Scraping: iDNES Reality index walk",
     "description": "The fast half of the iDNES cadence split (architectural rule #19, like sreality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='idnes'). No detail fetch — the drain (idnes_detail_drain.yml) consumes the queue. Records run_type='index'.",
+    "portal": "idnes",
     "manual": true,
     "schedules": [
       {
@@ -1048,6 +1067,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "images.yml",
     "name": "Scraping: image backlog drain (sharded)",
     "description": "THE backlog image-download workflow. Images are fully decoupled from every portal's crawl (the crawls only record image-URL rows; this job uploads the bytes to R2), so this is the owner of the deep backlog across ALL portals (sreality, idnes, bazos, bezrealitky, maxima, mmreality). Source-agnostic.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -1102,6 +1122,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "images_fresh.yml",
     "name": "Scraping: fresh-listing image fast lane",
     "description": "Low-latency image fetch for the NEWEST active listings across ALL portals, so a freshly-scraped card renders a photo within minutes instead of waiting for the 2-hourly sharded backlog drain (images.yml). The frontend can only show an image once its bytes are in R2 (storage_path set) — original portal URLs are hotlink/expiry-protected — so racing those URLs on fresh listings is also what prevents the image loss we already saw (~43k+ sreality images lost to expiry).",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -1149,6 +1170,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "index_walk.yml",
     "name": "Scraping: Sreality index walk (Phase 2)",
     "description": "The fast half of the Phase-2 cadence split. Walks the COMPLETE index of all six category pairs, bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the completeness guard), and enqueues new + price-changed ids into listing_detail_queue for the asynchronous detail-drain. It does NO detail fetching, so it finishes in minutes and delistings surface fast — decoupled from the slow per-listing write that used to drag it.",
+    "portal": "sreality",
     "manual": true,
     "schedules": [
       {
@@ -1183,6 +1205,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "ingest_boundaries.yml",
     "name": "Data: ingest admin boundaries",
     "description": "Loads ČÚZK RÚIAN administrative-unit polygons (kraj / okres / obec / KÚ) into the admin_boundaries table. Manual-only; boundaries change rarely (a few municipal mergers / cadastral re-alignments per year), so there is no cron. Re-run when ČÚZK publishes a notable update or when the operator wants to bring in newly-created units.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -1244,6 +1267,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "load_obec_population.yml",
     "name": "Jobs: load obec population (manual)",
     "description": "Load ČSÚ municipality population into admin_boundaries.population for EVERY obec (not just the 206 curated cities). Reads the committed DataStat export data/csu_population.json (OBY02AT02 — download from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02). Idempotent: only changed rows are written. Dispatch this after committing a refreshed export. This is the population source the \"within X km of a municipality with population > N\" proximity filter reads.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -1264,6 +1288,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "migrations.yml",
     "name": "CI: migration smoke-test",
     "description": "Applies the full migrations/ chain (001 -> latest) to a throwaway Postgres + PostGIS container whenever anything under migrations/ changes, catching a migration that does not apply cleanly before it reaches the production Supabase database (there is no staging DB). It pre-creates the Supabase roles the migrations GRANT to (anon / authenticated / service_role) and the pg_trgm extension migrations 067 / 074 rely on, applies every *.sql in numeric order, then runs a small sanity query. Hermetic: no secrets, never touches production.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": true,
@@ -1286,6 +1311,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "property_maintenance.yml",
     "name": "Jobs: property maintenance (incremental)",
     "description": "Phase 3 of the scaling roadmap: real-time properties. This is the FAST, FREQUENT half of property maintenance — the dirty-set incremental pass. It runs scripts/recompute_property_stats --incremental, which:",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -1331,6 +1357,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "recompute_city_proximity.yml",
     "name": "Jobs: recompute city proximity (hourly)",
     "description": "Recompute properties.home_obec_pop + near_{pop,jobs,youth,overall}_{5,15}km (migration 142) so the Browse / Watchdog city-proximity + Min Population filters read precomputed indexed columns instead of a per-request spatial RPC. Incremental hourly run fills newly-ingested properties within the hour; the same function rebuilds everything after a population / city-index load.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -1365,6 +1392,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "recompute_mf_yields.yml",
     "name": "Jobs: recompute MF gross yields (hourly)",
     "description": "Recompute listings.mf_gross_yield_pct (MF Cenová mapa reference rent / asking price) for every sale apartment. The yield shifts when a listing's price changes (scrape) or the rent map updates (quarterly), so a cheap, idempotent set-based recompute runs hourly to keep new + re-priced listings filterable in Browse within the hour. The same function also runs after each rent-map ingest (scripts.fetch_rent_map). Only changed rows are written.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -1390,6 +1418,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "recompute_property_stats.yml",
     "name": "Jobs: recompute property stats (daily full reconcile)",
     "description": "DAILY FULL SWEEP for the canonical `properties` parent. Attaches any straggler unlinked listings (incl. the one-time native-id backfill), then recomputes EVERY property's is_active rollup, source / site counts, first/last-seen span, representative child, current price, and the price-history aggregates (drop / rise counts, max drop %) from the union of its children's snapshots. Finally it clears the dirty_properties queue (everything was just recomputed).",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -1435,6 +1464,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "refresh_population.yml",
     "name": "Data: refresh city populations (Wikidata)",
     "description": "FALLBACK SOURCE. The preferred population source is now the official ČSÚ DataStat export \"Počet obyvatel v obcích k 1. 1.\" — download the JSON from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02, commit it to data/csu_population.json, and run \"Data: seed curated cities\" (which ingests the JSON directly). Use this Wikidata fetcher only when you can't get the official file.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -1473,6 +1503,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "refresh_stale_images.yml",
     "name": "Jobs: refresh stale image URLs",
     "description": "Re-opens active listings whose photos aren't in R2 yet so their (possibly rotated) source image URLs get refreshed. Portals rotate image CDN URLs over weeks; a listing whose images the newest-first backfill never reached before its URLs rotated is stuck — the stored URL 404s, the frontend fallback can't load it, and the image downloader can't fetch it. This sweep (scripts.refresh_stale_image_urls) re-enqueues such listings into the source-generic listing_detail_queue; the detail drain re-fetches them, record_images repoints each not-yet-stored image's URL to the current one, and the image backfill (images.yml) then stores the bytes.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -1531,6 +1562,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape.yml",
     "name": "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)",
     "description": "DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live pipeline is now the cadence split — index_walk.yml (fast, frequent, marks delistings + enqueues) feeds detail_drain.yml (async, batched writes). This combined index+detail walk (_run_full) is kept intact as the instant revert: if the split misbehaves, re-add `schedule: - cron: \"0 * * * *\"` here and disable the two new crons — no code change, the proven pipeline is back. It also remains the way to run an ad-hoc full walk by hand.",
+    "portal": "sreality",
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -1640,6 +1672,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape_bazos.yml",
     "name": "Scraping: Bazos crawler combined walk (fallback)",
     "description": "DISPATCH-ONLY combined index+detail fallback for reality.bazos.cz, mirroring sreality's scrape.yml and idnes's scrape_idnes.yml. The scheduled pipeline is the cadence SPLIT — the full bazos_index_walk.yml (walk + mark_inactive + enqueue) feeds the bounded bazos_detail_drain.yml — because bazos now walks 14 nationwide scopes (~1500 index pages, ~50 min) and a single combined run can't do both inside one job (the full index eats the window, starving the drain).",
+    "portal": "bazos",
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -1723,6 +1756,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape_bezrealitky.yml",
     "name": "Scraping: Bezrealitky scraper (pilot)",
     "description": "Scheduled (every 6h) + manual scraper for bezrealitky.cz on the shared portal framework. Bezrealitky is a JSON-API portal (public GraphQL at api.bezrealitky.cz) like sreality: the index walk pages listAdverts and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches advert(id), parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "portal": "bezrealitky",
     "manual": true,
     "schedules": [
       {
@@ -1781,6 +1815,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape_idnes.yml",
     "name": "Scraping: iDNES Reality combined walk (fallback)",
     "description": "DISPATCH-ONLY combined index+detail fallback for reality.idnes.cz, mirroring sreality's scrape.yml. The scheduled pipeline is the cadence SPLIT — the fast idnes_index_walk.yml (full walk + mark_inactive + enqueue) feeds the bounded idnes_detail_drain.yml — because iDNES is large (~2400 index pages, ~60k listings) and a single combined run can't do both inside one job (the full index eats the window, starving the drain).",
+    "portal": "idnes",
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -1827,6 +1862,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape_maxima.yml",
     "name": "Scraping: Maxima Reality scraper (pilot)",
     "description": "Scheduled (every 6h) + manual scraper for nemovitosti.maxima.cz on the shared portal framework. Maxima is a single real-estate agency that publishes its whole catalogue (~220 listings) as one server-rendered WordPress index (no JSON API, no per-category URL): the index walk pages the catalogue and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /nemovitosti/{id}/ page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "portal": "maxima",
     "manual": true,
     "schedules": [
       {
@@ -1885,6 +1921,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape_mmreality.yml",
     "name": "Scraping: M&M Reality scraper (pilot)",
     "description": "Scheduled (every 6h) + manual scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price- changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "portal": "mmreality",
     "manual": true,
     "schedules": [
       {
@@ -1943,6 +1980,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape_price_stats.yml",
     "name": "Scraping: Sreality price stats (ceny-nemovitosti, weekly + manual)",
     "description": "Ingests the aggregate market statistics sreality publishes at /ceny-nemovitosti (NOT individual listings) into the price_stat_* tables. For each active dataset (one named filter set) × tracked municipality × {prodej, pronájem} it fetches the per-month series from the login-gated estate_prices JSON API, then recomputes the per-city derived metrics (CAGR growth, gross yield) + refreshes the map choropleth. Design: docs/design/price-stats-datasets.md.",
+    "portal": null,
     "manual": true,
     "schedules": [
       {
@@ -2019,6 +2057,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "scrape_remax.yml",
     "name": "Scraping: RE/MAX scraper (pilot)",
     "description": "Scheduled (every 6h) + manual scraper for remax-czech.cz on the shared portal framework. RE/MAX is a national franchise catalogue (~7,900 listings) served as a single server-rendered search index (no JSON API, no per-category URL) split only by an offer-type flag (sale=1 prodej / sale=2 pronájem): the index walk pages each agenda and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /reality/detail/{id}/ page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + singleton property).",
+    "portal": "remax",
     "manual": true,
     "schedules": [
       {
@@ -2085,6 +2124,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "seed_condition_settings.yml",
     "name": "Data: seed condition settings (rubric + markers)",
     "description": "One-shot workflow that populates the two large app_settings rows created by migration 072 — `llm_condition_rubric` and `llm_condition_marker_dictionary` — from the committed JSON files (data/condition_rubric_v1.json + data/condition_markers_curated.json).",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -2117,6 +2157,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "seed_curated_cities.yml",
     "name": "Data: seed curated cities",
     "description": "One-shot workflow that geocodes the cities in data/obce_v_datech_2025.csv via Mapy.cz, then writes them into curated_cities + city_index_definitions + city_index_revisions + city_index_values (+ city_population from data/csu_population.json when present).",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -2161,6 +2202,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "smoke_agent.yml",
     "name": "Dev: agent smoke test",
     "description": "Manual invocation only. Runs scripts/smoke_agent.py against the real Supabase DB and a real LLM provider. Picks a recent Prague 2+kk rental by default; --sreality-id overrides. Real LLM credits are spent — typically under $0.10 per run.",
+    "portal": null,
     "manual": true,
     "schedules": [],
     "onPush": false,
@@ -2211,6 +2253,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "filename": "test.yml",
     "name": "CI: tests",
     "description": "CI test suite, runs on every push and pull request. Two parallel jobs: a Python job (verifies the filter-registry and workflow-docs codegen are fresh, then runs pytest) and a frontend job (TypeScript type-check + vitest pure-function tests). This is the build gate for every branch.",
+    "portal": null,
     "manual": false,
     "schedules": [],
     "onPush": true,

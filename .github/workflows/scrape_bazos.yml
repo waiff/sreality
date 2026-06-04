@@ -1,5 +1,6 @@
 name: "Scraping: Bazos crawler combined walk (fallback)"
 
+# portal: bazos
 # DISPATCH-ONLY combined index+detail fallback for reality.bazos.cz, mirroring
 # sreality's scrape.yml and idnes's scrape_idnes.yml. The scheduled pipeline is
 # the cadence SPLIT — the full bazos_index_walk.yml (walk + mark_inactive +

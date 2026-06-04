@@ -1,5 +1,6 @@
 name: "Scraping: Bazos index walk"
 
+# portal: bazos
 # The fast half of the bazos cadence split (architectural rule #19, like
 # sreality/idnes). Walks the ENTIRE index of every configured scope (no
 # --max-pages), touch_listings bumps last_seen on still-listed ads, mark_inactive

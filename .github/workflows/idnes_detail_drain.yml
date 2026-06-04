@@ -1,5 +1,6 @@
 name: "Scraping: iDNES Reality detail drain"
 
+# portal: idnes
 # The slow half of the iDNES cadence split (architectural rule #19, like sreality).
 # Claims a bounded slice of listing_detail_queue (source='idnes', enqueued by
 # idnes_index_walk.yml), fetches each listing page on a rate-limited worker pool,

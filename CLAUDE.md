@@ -987,6 +987,18 @@ auto-merge; rule #15), and
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
   flags → **Run workflow**. (All sreality scraping workflows are prefixed `Scraping:`.)
 
+**Each scrape workflow self-declares its portal with a `# portal: <source>` tag.** A one-line
+comment near the top of a portal's index/drain/combined workflow (`<source>` = the
+`portals.source` key, e.g. `# portal: idnes`) is parsed by `scripts/generate_workflow_docs.py`
+into `WorkflowDoc.portal`, which is what the Health dashboard's per-portal "Pipeline schedule"
+panel groups on — so a new portal's cron lines surface there automatically, with **no hardcoded
+frontend map to keep in sync**. Tag only the actual ingest workflows (index walk / detail drain /
+combined fallback); shared, source-agnostic jobs (`images.yml`, `condition_scores.yml`,
+`recompute_property_stats.yml`, `dedup_engine.yml`, …) stay **untagged** (`portal: null`) and
+appear in the full Settings → Workflows list rather than any single portal's schedule. As with any
+workflow edit, regenerate `frontend/src/lib/workflowDocs.generated.ts` in the same commit
+(`python scripts/generate_workflow_docs.py`; CI's `--check` guards drift).
+
 **The split (architectural rule #19).** The cheap "which ads still exist" check is decoupled
 from the slow "download each ad" write:
 - **`index_walk.yml` (fast, frequent).** Walks the **entire** index of every category pair (no

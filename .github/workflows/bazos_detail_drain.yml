@@ -1,5 +1,6 @@
 name: "Scraping: Bazos detail drain"
 
+# portal: bazos
 # The slow half of the bazos cadence split (architectural rule #19, like
 # sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos',
 # enqueued by bazos_index_walk.yml), fetches each ad's detail page on a

@@ -196,20 +196,6 @@ const PORTAL_STAGE_LABEL: Record<PortalStage, string> = {
   planned: 'planned',
 };
 
-/* Workflows belonging to each scraper source's pipeline (drives the per-portal
- * schedule). Sreality owns the split scrape + its derived maintenance jobs;
- * bazos its crawl. Pilots with no scheduled workflow read "manual only". */
-const PORTAL_WORKFLOWS: Record<string, string[]> = {
-  sreality: [
-    'index_walk.yml', 'detail_drain.yml', 'images.yml', 'compute_image_phash.yml',
-    'condition_scores.yml', 'condition_score_batches.yml',
-    'property_maintenance.yml', 'recompute_property_stats.yml', 'dedup_sweep.yml',
-  ],
-  bazos: ['bazos_index_walk.yml', 'bazos_detail_drain.yml'],
-  bezrealitky: ['scrape_bezrealitky.yml'],
-  idnes: ['scrape_idnes.yml'],
-};
-
 type RollupStatus = HealthCheckStatus | 'idle' | 'loading';
 
 function worstStatus(checks: ScraperHealthCheck[]): HealthCheckStatus {
@@ -378,8 +364,6 @@ function PortalGroupCard({
           ? { value: scraper.listings_active, label: 'active listings', has: false }
           : { value: parser?.parses_total ?? 0, label: 'URLs parsed', has: (parser?.parses_total ?? 0) > 0 };
 
-  const portalWorkflows = scraper ? (PORTAL_WORKFLOWS[scraper.source] ?? []) : [];
-
   return (
     <section className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
       <button
@@ -470,7 +454,7 @@ function PortalGroupCard({
           )}
 
           <Disclosure label="Pipeline schedule">
-            <PortalSchedule files={portalWorkflows} />
+            <PortalSchedule source={scraper?.source ?? null} />
           </Disclosure>
         </div>
       )}
@@ -540,14 +524,14 @@ function ParserFacetDetail({ parser }: { parser: PortalHealth }) {
   );
 }
 
-function PortalSchedule({ files }: { files: string[] }) {
+function PortalSchedule({ source }: { source: string | null }) {
   const docs = WORKFLOW_DOCS
-    .filter((w) => files.includes(w.filename) && w.schedules.length > 0)
+    .filter((w) => w.portal === source && w.schedules.length > 0)
     .sort((a, b) => a.name.localeCompare(b.name));
   if (docs.length === 0) {
     return (
       <p className="text-sm text-[var(--color-ink-4)]">
-        No scheduled jobs — manual dispatch only, or this pilot isn&rsquo;t wired to a cron yet.
+        No scheduled jobs — manual dispatch only, or not wired to a cron yet.
       </p>
     );
   }
