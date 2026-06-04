@@ -291,15 +291,39 @@ def test_category_sub_cb_filter():
     assert params["category_sub_cb"] == 37
 
 
-def test_furnished_and_ownership_text_filters():
+def test_furnished_and_ownership_multiselect_filters():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(furnished="ano", ownership="osobni"),
+        ComparableFilters(furnished=["ano", "castecne"], ownership=["osobni"]),
     )
-    assert "l.furnished = %(furnished)s" in sql
-    assert "l.ownership = %(ownership)s" in sql
-    assert params["furnished"] == "ano"
-    assert params["ownership"] == "osobni"
+    assert "l.furnished = ANY(%(furnished)s)" in sql
+    assert "l.ownership = ANY(%(ownership)s)" in sql
+    assert params["furnished"] == ["ano", "castecne"]
+    assert params["ownership"] == ["osobni"]
+    # No __unknown__ selected -> no NULL/non-canonical branch.
+    assert "furnished_canon" not in params
+
+
+def test_furnished_unknown_sentinel_matches_null_or_noncanonical():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(furnished=["ano", "__unknown__"]),
+    )
+    assert "l.furnished = ANY(%(furnished)s)" in sql
+    assert "l.furnished IS NULL OR NOT (l.furnished = ANY(%(furnished_canon)s))" in sql
+    assert params["furnished"] == ["ano"]
+    assert params["furnished_canon"] == ["ano", "ne", "castecne"]
+
+
+def test_furnished_unknown_only_drops_real_in_clause():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(ownership=["__unknown__"]),
+    )
+    assert "l.ownership = ANY(%(ownership)s)" not in sql
+    assert "l.ownership IS NULL OR NOT (l.ownership = ANY(%(ownership_canon)s))" in sql
+    assert params["ownership_canon"] == ["osobni", "druzstevni", "statni"]
+    assert "ownership" not in params
 
 
 def test_terrace_cellar_garage_three_state():
