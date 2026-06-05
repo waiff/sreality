@@ -33,6 +33,7 @@ _HASH_FIELDS: tuple[str, ...] = (
 # scraper.db.LISTING_COLUMNS — sreality-only locality ids are left NULL).
 _LISTING_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
+    "area_basis",
     "disposition", "locality", "district", "floor", "total_floors",
     "has_balcony", "has_parking", "has_lift", "building_type", "condition",
     "energy_rating", "estate_area", "usable_area", "garden_area",
@@ -51,6 +52,10 @@ class ScrapedListing:
     price_czk: int | None = None
     price_unit: str | None = None
     area_m2: float | None = None
+    # Which physical measure area_m2 represents: 'usable' | 'floor' | 'total' |
+    # 'unknown'. None for land (pozemek) and rows with no dwelling area. Set by
+    # scraper.area.derive_headline_area, never per-parser.
+    area_basis: str | None = None
     disposition: str | None = None
     locality: str | None = None
     district: str | None = None
