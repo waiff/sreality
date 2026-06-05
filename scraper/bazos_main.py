@@ -397,6 +397,8 @@ def _run_phase(portal: BazosPortal, run_type: str, runner, dry_run: bool, **kw: 
     agg: dict[str, Any] = {}
     rc = 0
     try:
+        if runner is portal_runner.run_index_walk:
+            kw = {**kw, "run_id": run_id}
         rc, agg = runner(portal, dry_run=dry_run, **kw)
     finally:
         if not dry_run:

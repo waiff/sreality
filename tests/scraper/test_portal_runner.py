@@ -125,6 +125,30 @@ def test_index_walk_dry_run_uses_no_connection():
     assert p.calls["mark_inactive"] == []
 
 
+def test_index_walk_bumps_index_pages_per_committed_category(monkeypatch):
+    # With a run_id, each category's pages are committed immediately so Health
+    # liveness survives a SIGKILL before finalize.
+    p = _FakePortal(supports_complete_walk=True, complete=True)
+    bumps: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        portal_runner.db, "bump_index_pages",
+        lambda conn, run_id, n: bumps.append((run_id, n)),
+    )
+    portal_runner.run_index_walk(p, dry_run=False, run_id=42)
+    assert bumps == [(42, 1), (42, 1)]  # one bump per category (cat_pages=1)
+
+
+def test_index_walk_does_not_bump_without_run_id(monkeypatch):
+    p = _FakePortal()
+    bumps: list = []
+    monkeypatch.setattr(
+        portal_runner.db, "bump_index_pages",
+        lambda *a: bumps.append(a),
+    )
+    portal_runner.run_index_walk(p, dry_run=False)  # no run_id
+    assert bumps == []
+
+
 # --- run_detail_drain -------------------------------------------------------
 
 
