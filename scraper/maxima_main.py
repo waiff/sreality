@@ -35,7 +35,7 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.maxima_client import MaximaClient, detail_url, index_url
+from scraper.maxima_client import MaximaClient, detail_url
 from scraper.maxima_parser import category_of, index_price, parse_detail, parse_index
 from scraper.portal import PortalConfig, default_config, load_portal_config
 from scraper.portal_base import ListingGoneError
@@ -125,13 +125,6 @@ class MaximaPortal:
             pages += 1
             total = parsed.total if parsed.total is not None else total
             LOG.info("INDEX af=%d page=%d items=%d total=%s", af, page, len(parsed.items), total)
-            if conn is not None:
-                db.upsert_portal_raw_page(
-                    conn, source=SOURCE,
-                    source_id_native=f"index/af{af}/{page}",
-                    source_url=index_url(page, af=af),
-                    page_kind="index", html=html, http_status=status,
-                )
             new_on_page = 0
             for item in parsed.items:
                 nid = item.source_id_native
