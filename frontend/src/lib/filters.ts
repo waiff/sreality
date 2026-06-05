@@ -944,10 +944,31 @@ export const filtersForPreset = (
   includeMapArea: boolean,
 ): ListingFilters => (includeMapArea ? f : { ...f, bounds: null });
 
+/* Merge a stored (possibly stale-typed) filter blob onto DEFAULT_FILTERS,
+ * dropping any field whose CARDINALITY drifted since it was saved — e.g. a
+ * field that used to be a scalar (`furnished: null`) and later became a
+ * multi-select array (`furnished: []`). Without this guard, loading an old
+ * preset feeds `toSearchParams` a wrong-shaped value (`null.length`) and the
+ * whole load throws, so clicking the chip silently does nothing. Unknown /
+ * removed keys are dropped too. */
+const coerceStoredFilters = (stored: unknown): ListingFilters => {
+  const def = DEFAULT_FILTERS as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...def };
+  if (stored && typeof stored === 'object') {
+    for (const [k, v] of Object.entries(stored as Record<string, unknown>)) {
+      if (!(k in def)) continue;
+      // Array-vs-scalar mismatch ⇒ the field's type evolved; keep the default.
+      if (Array.isArray(def[k]) !== Array.isArray(v)) continue;
+      out[k] = v;
+    }
+  }
+  return out as unknown as ListingFilters;
+};
+
 /** Read a stored preset blob, tolerating the legacy bare-`ListingFilters`
- *  shape (presets saved before sort was captured). Always returns a complete
- *  filter set merged onto DEFAULT_FILTERS, plus the saved sort (or null for
- *  the default). */
+ *  shape (presets saved before sort was captured) and fields whose type drifted
+ *  after the preset was saved. Always returns a complete, shape-safe filter set
+ *  merged onto DEFAULT_FILTERS, plus the saved sort (or null for the default). */
 export const readPresetSpec = (
   spec: PresetSpec | ListingFilters,
 ): { filters: ListingFilters; sort: string | null } => {
@@ -957,7 +978,7 @@ export const readPresetSpec = (
     ? (spec as PresetSpec).filters
     : (spec as ListingFilters);
   const sort = wrapped ? (spec as PresetSpec).sort ?? null : null;
-  return { filters: { ...DEFAULT_FILTERS, ...filters }, sort };
+  return { filters: coerceStoredFilters(filters), sort };
 };
 
 const canonicalParams = (sp: URLSearchParams): string =>
