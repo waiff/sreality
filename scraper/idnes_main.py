@@ -352,7 +352,10 @@ def main(argv: list[str] | None = None) -> int:
     # (the dispatch-only combined fallback).
     rc = 0
     if not args.drain_only:
-        rc = _run_phase(portal, "index", portal_runner.run_index_walk, args.dry_run)
+        rc = _run_phase(
+            portal, "index", portal_runner.run_index_walk, args.dry_run,
+            max_seconds=args.max_seconds,
+        )
     if rc == 0 and not args.index_only:
         rc = _run_phase(
             portal, "detail", portal_runner.run_detail_drain, args.dry_run,

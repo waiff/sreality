@@ -149,6 +149,33 @@ def test_index_walk_does_not_bump_without_run_id(monkeypatch):
     assert bumps == []
 
 
+def test_index_walk_clean_stops_when_budget_already_blown(monkeypatch):
+    # max_seconds with a deadline in the past -> stop before any category, finalize
+    # cleanly (no SIGKILL). monotonic: first call sets the deadline, later calls
+    # are past it.
+    p = _FakePortal(supports_complete_walk=True, complete=True)
+    calls = {"n": 0}
+
+    def fake_monotonic():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 9999.0
+
+    monkeypatch.setattr(portal_runner.time, "monotonic", fake_monotonic)
+    rc, agg = portal_runner.run_index_walk(p, dry_run=False, max_seconds=10)
+    assert rc == 0
+    assert p.calls["walk"] == []            # budget blown -> no category walked
+    assert p.calls["mark_inactive"] == []   # nothing walked -> nothing flipped (rule #3)
+    assert agg["index_pages"] == 0
+
+
+def test_index_walk_runs_all_when_budget_not_reached(monkeypatch):
+    # A generous budget never trips the deadline -> full walk, same as no budget.
+    p = _FakePortal(supports_complete_walk=True, complete=True)
+    monkeypatch.setattr(portal_runner.time, "monotonic", lambda: 0.0)
+    portal_runner.run_index_walk(p, dry_run=False, max_seconds=10_000)
+    assert p.calls["walk"] == ["A", "B"]
+
+
 # --- run_detail_drain -------------------------------------------------------
 
 
