@@ -15,6 +15,8 @@ import re
 from typing import Any
 from unicodedata import combining, normalize
 
+from scraper.area import derive_headline_area
+
 CATEGORY_MAIN: dict[int, str] = {
     1: "byt",
     2: "dum",
@@ -201,13 +203,22 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
 
     loc = raw.get("locality") or {}
 
+    category_main = CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb")))
+    usable = _numeric_or_none(raw.get("usable_area"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=usable,
+        floor=_numeric_or_none(raw.get("floor_area")),
+    )
+
     return {
         "sreality_id": sreality_id,
-        "category_main": CATEGORY_MAIN.get(_cb_value(raw.get("category_main_cb"))),
+        "category_main": category_main,
         "category_type": CATEGORY_TYPE.get(_cb_value(raw.get("category_type_cb"))),
         "price_czk": _price_czk(raw),
         "price_unit": _price_unit(raw),
-        "area_m2": _numeric_or_none(raw.get("usable_area")),
+        "area_m2": area_m2,
+        "area_basis": area_basis,
         "disposition": _disposition(raw),
         "locality": _locality_value(loc),
         "district": _district(loc),
@@ -227,7 +238,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "condition": _condition(raw.get("building_condition")),
         "energy_rating": _energy_rating(raw.get("energy_efficiency_rating_cb")),
         "estate_area": _numeric_or_none(raw.get("estate_area")),
-        "usable_area": _numeric_or_none(raw.get("usable_area")),
+        "usable_area": usable,
         "garden_area": _numeric_or_none(raw.get("garden_area")),
         "category_sub_cb": _cb_value(raw.get("category_sub_cb")),
         "subtype": SUBTYPE.get(_cb_value(raw.get("category_sub_cb"))),

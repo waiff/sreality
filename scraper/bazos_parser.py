@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.scraped_listing import ScrapedListing
 
@@ -542,6 +543,12 @@ def parse_detail(
         "coords": coord_provenance,
     }
 
+    # Bazos is free-text: the lone "N m²" number has no labelled basis, so it
+    # feeds the headline as 'unknown' (and stays null for land via derive).
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main, usable=None, fallback=_parse_area(haystack)
+    )
+
     return ScrapedListing(
         source="bazos",
         source_id_native=source_id,
@@ -551,7 +558,8 @@ def parse_detail(
         subtype=subtype,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=_parse_area(haystack),
+        area_m2=area_m2,
+        area_basis=area_basis,
         disposition=_parse_disposition(haystack),
         locality=locality,
         district=None,

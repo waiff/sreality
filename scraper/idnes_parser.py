@@ -23,6 +23,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.scraped_listing import ScrapedListing
 
@@ -470,12 +471,17 @@ def parse_detail(
     locality = _text(tree.css_first(".b-detail__info"))
     lat, lon, coord_provenance = _resolve_coords(html, locality, geocoder)
 
-    area_text = (
-        _text(params.get("užitná plocha"))
-        or _text(params.get("podlahová plocha"))
-        or _text(params.get("plocha"))
+    uzitna = _parse_area(_text(params.get("užitná plocha")))
+    podlahova = _parse_area(_text(params.get("podlahová plocha")))
+    celkova = _parse_area(_text(params.get("celková plocha")))
+    generic_area = _parse_area(_text(params.get("plocha"))) or _parse_area(title)
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_clamp(uzitna, _AREA_M2_MAX),
+        floor=_clamp(podlahova, _AREA_M2_MAX),
+        total=_clamp(celkova, _AREA_M2_MAX),
+        fallback=_clamp(generic_area, _AREA_M2_MAX),
     )
-    area_m2 = _clamp(_parse_area(area_text) or _parse_area(title), _AREA_M2_MAX)
 
     image_urls: list[str] = []
     seen_img: set[str] = set()
@@ -511,7 +517,8 @@ def parse_detail(
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
-        usable_area=_clamp(_parse_area(area_text), _AREA_LARGE_MAX),
+        area_basis=area_basis,
+        usable_area=_clamp(uzitna, _AREA_LARGE_MAX),
         disposition=_parse_disposition(title) or _parse_disposition(_text(params.get("dispozice"))),
         locality=locality,
         district=None,

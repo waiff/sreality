@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from scraper.area import derive_headline_area
 from scraper.bezrealitky_client import detail_url
 from scraper.scraped_listing import ScrapedListing
 
@@ -161,6 +162,13 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
     raw = dict(advert)
     raw["image_urls"] = _image_urls(advert)
 
+    # Bezrealitky exposes a single building-area field (`surface`); treat it as
+    # usable. Land (pozemek) carries it as null and derive returns (None, None).
+    surface = _num(advert.get("surface"))
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main, usable=surface
+    )
+
     return ScrapedListing(
         source=SOURCE,
         source_id_native=native_id,
@@ -170,7 +178,8 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         subtype=subtype,
         price_czk=_int(advert.get("price")),
         price_unit="měsíc" if category_type == "pronajem" else "celkem",
-        area_m2=_num(advert.get("surface")),
+        area_m2=area_m2,
+        area_basis=area_basis,
         disposition=_disposition(advert.get("disposition")),
         locality=_locality(advert),
         district=None,
@@ -185,7 +194,7 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         condition=CONDITION.get(advert.get("condition")),
         energy_rating=_energy(advert.get("penb")),
         estate_area=_num(advert.get("surfaceLand")),
-        usable_area=_num(advert.get("surface")),
+        usable_area=surface,
         garden_area=_num(advert.get("frontGarden")),
         category_sub_cb=None,
         furnished=FURNISHED.get(advert.get("equipped")),
