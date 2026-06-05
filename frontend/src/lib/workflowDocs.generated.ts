@@ -1056,6 +1056,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "",
         "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
@@ -1063,7 +1071,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "idnes-index-walk",
     "cancelInProgress": false,
-    "timeoutMinutes": 75,
+    "timeoutMinutes": 180,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/idnes_index_walk.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/idnes_index_walk.yml"

@@ -77,13 +77,22 @@ class Portal(Protocol):
 
 
 def run_index_walk(
-    portal: Portal, dry_run: bool, run_id: int | None = None,
+    portal: Portal,
+    dry_run: bool,
+    run_id: int | None = None,
+    max_seconds: float | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Walk every category, touch + (optionally) mark_inactive, and enqueue
     new/price-changed ids. No detail fetch — the drain consumes the queue.
 
     When run_id is supplied, index_pages is committed per category (bump) so
-    Health liveness survives a SIGKILL before finalize."""
+    Health liveness survives a SIGKILL before finalize. When max_seconds is
+    supplied, the walk stops starting new categories past that wall-clock budget
+    and finalizes cleanly — so a slow or grown walk is never SIGKILLed by the
+    job timeout (no more 'stuck' runs). Already-walked categories are complete,
+    so mark_inactive stays safe (rule #3); the un-walked ones just aren't
+    refreshed this run and the next walk picks them up."""
+    deadline = (time.monotonic() + max_seconds) if max_seconds else None
     total_pages = 0
     total_index = 0
     total_enqueued = 0
@@ -93,6 +102,13 @@ def run_index_walk(
 
     try:
         for category in portal.categories():
+            if deadline is not None and time.monotonic() >= deadline:
+                LOG.info(
+                    "INDEX time budget %.0fs reached; stopping cleanly before the "
+                    "next category (%d walked so far)",
+                    max_seconds, len(category_aggregates),
+                )
+                break
             cm_text, ct_text = portal.category_labels(category)
             LOG.info("CATEGORY start cm=%s ct=%s", cm_text, ct_text)
             try:

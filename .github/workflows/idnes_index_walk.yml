@@ -28,6 +28,11 @@ on:
         required: false
         default: ""
         type: string
+      max_seconds:
+        description: wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: idnes-index-walk
@@ -36,9 +41,12 @@ concurrency:
 jobs:
   index-walk:
     runs-on: ubuntu-latest
-    # A full 4-category walk is ~2400 pages at the portal's index rate (~50 min
-    # observed); the headroom keeps it under the 90-min stuck-run cutoff.
-    timeout-minutes: 75
+    # The full walk normally completes well inside the --max-seconds budget
+    # (9000 = 150 min); the budget makes it finalize CLEANLY even on a slow/grown
+    # day instead of being SIGKILLed, and this timeout is just the generous outer
+    # backstop (budget + finalize headroom). Don't re-tune the timeout to the walk
+    # size — the --max-seconds clean-stop is what keeps it drift-proof.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -55,8 +63,9 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '9000' }}
         run: |
-          ARGS="--index-only"
+          ARGS="--index-only --max-seconds $MAX_SECONDS"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
           echo "python -m scraper.idnes_main $ARGS"
           eval "python -m scraper.idnes_main $ARGS"
