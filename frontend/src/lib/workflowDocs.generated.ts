@@ -2071,6 +2071,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "SCRAPE_CHAIN_TOKEN",
       "SREALITY_LOGIN_EMAIL",
       "SREALITY_LOGIN_PASSWORD",
       "SREALITY_SESSION_COOKIE",

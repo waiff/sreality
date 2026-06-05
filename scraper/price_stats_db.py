@@ -175,6 +175,34 @@ def unresolved_obec_names(conn: psycopg.Connection, obec_ids: list[int]) -> list
         return [r[0] for r in cur.fetchall()]
 
 
+def coverage_remaining(
+    conn: psycopg.Connection, dataset_id: int, obec_ids: list[int] | None
+) -> int:
+    """Localities (selected, or all) the dataset hasn't scraped yet — those with
+    NEITHER an observation NOR a no-data marker. > 0 means a coverage pass is
+    still incomplete; the self-chaining workflow keeps re-dispatching until this
+    reaches 0 (then leaves periodic refresh to the weekly cron, so it never
+    loops forever re-scraping already-covered obce)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*)
+              FROM price_stat_localities l
+             WHERE (%(ids)s IS NULL OR l.obec_id = ANY(%(ids)s))
+               AND NOT EXISTS (
+                 SELECT 1 FROM price_stat_observations o
+                  WHERE o.dataset_id = %(did)s
+                    AND o.entity_type = l.entity_type AND o.entity_id = l.entity_id)
+               AND NOT EXISTS (
+                 SELECT 1 FROM price_stat_locality_no_data nd
+                  WHERE nd.dataset_id = %(did)s
+                    AND nd.entity_type = l.entity_type AND nd.entity_id = l.entity_id)
+            """,
+            {"did": dataset_id, "ids": obec_ids},
+        )
+        return cur.fetchone()[0]
+
+
 def localities_for_obec_ids(
     conn: psycopg.Connection, obec_ids: list[int]
 ) -> list[dict[str, Any]]:

@@ -18,6 +18,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -276,7 +277,28 @@ def main(argv: list[str] | None = None) -> int:
     if not args.dry_run:
         db.refresh_choropleth(conn)
         LOG.info("CHOROPLETH refreshed")
+        # Self-chaining signal: a coverage pass is incomplete while any selected
+        # obec still has neither data nor a no-data marker. The workflow re-runs
+        # until this is clear, then stops (refresh is the weekly cron's job).
+        incomplete = any(
+            db.coverage_remaining(
+                conn, ds["id"],
+                [int(x) for x in ds["obec_ids"]] if ds.get("obec_ids") else None,
+            ) > 0
+            for ds in datasets
+        )
+        _emit_deferred(incomplete)
     return 0
+
+
+def _emit_deferred(deferred: bool) -> None:
+    """Expose whether more scraping is needed to the GitHub Actions step (the
+    `deferred` output drives the optional self-chaining re-dispatch)."""
+    LOG.info("DEFERRED=%s", "1" if deferred else "0")
+    out = os.environ.get("GITHUB_OUTPUT")
+    if out:
+        with open(out, "a", encoding="utf-8") as f:
+            f.write(f"deferred={'1' if deferred else '0'}\n")
 
 
 if __name__ == "__main__":
