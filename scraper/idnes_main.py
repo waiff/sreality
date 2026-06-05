@@ -32,7 +32,7 @@ from typing import Any
 
 from scraper import db, portal_runner
 from scraper.geocoding import geocode
-from scraper.idnes_client import IdnesClient, detail_url, index_url
+from scraper.idnes_client import IdnesClient, detail_url
 from scraper.idnes_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
@@ -141,13 +141,6 @@ class IdnesPortal:
             pages += 1
             total = parsed.total if parsed.total is not None else total
             LOG.info("INDEX page=%s items=%d total=%s", page, len(parsed.items), total)
-            if conn is not None:
-                db.upsert_portal_raw_page(
-                    conn, source=SOURCE,
-                    source_id_native=f"{sale_type}/{cat}/{page if page is not None else 0}",
-                    source_url=index_url(sale_type, cat, page),
-                    page_kind="index", html=html, http_status=status,
-                )
             new_on_page = 0
             for item in parsed.items:
                 nid = item.source_id_native

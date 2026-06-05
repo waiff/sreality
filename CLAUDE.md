@@ -60,8 +60,11 @@ sreality/idnes (rule #19) — it is **cadence-split**: `bazos_index_walk.yml` (e
 walk + mark_inactive + enqueue) feeds the bounded `bazos_detail_drain.yml` (hourly,
 `--max-seconds` budget). A combined run can't do both inside one job (~1500 index pages ≈
 50 min eats the window, starving the drain); `scrape_bazos.yml` keeps that combined flow as a
-dispatch-only fallback for narrow ad-hoc runs. Raw HTML is staged in `portal_raw_pages` (migration 099) before
-parsing. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
+dispatch-only fallback for narrow ad-hoc runs. **Detail-page** raw HTML is staged in `portal_raw_pages`
+(migration 099) before parsing (the parsed-state ledger + reparse-without-refetch capability); INDEX/search-page
+HTML is NOT staged — it was write-only dead weight (nothing reads `page_kind='index'`) and the per-page TOAST
+write was the dominant cost on slow HTML index walks, so all HTML portals (bazos/idnes/mmreality/remax/maxima)
+skip it. Coordinates come from the detail page's embedded Google-Maps/Mapy.cz link
 (page-wide, CZ-bbox-guarded); they are what lets cross-source dedup match bazos against
 sreality.
 

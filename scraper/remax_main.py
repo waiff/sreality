@@ -40,7 +40,7 @@ from scraper.portal import PortalConfig, default_config, load_portal_config
 from scraper.portal_base import ListingGoneError
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
-from scraper.remax_client import RemaxClient, detail_url, index_url
+from scraper.remax_client import RemaxClient, detail_url
 from scraper.remax_parser import category_of, index_price, parse_detail, parse_index
 
 LOG = logging.getLogger(__name__)
@@ -118,13 +118,6 @@ class RemaxPortal:
             pages += 1
             total = parsed.total if parsed.total is not None else total
             LOG.info("INDEX sale=%d page=%d items=%d total=%s", sale, page, len(parsed.items), total)
-            if conn is not None:
-                db.upsert_portal_raw_page(
-                    conn, source=SOURCE,
-                    source_id_native=f"index/sale{sale}/{page}",
-                    source_url=index_url(sale, page),
-                    page_kind="index", html=html, http_status=status,
-                )
             new_on_page = 0
             for item in parsed.items:
                 nid = item.source_id_native

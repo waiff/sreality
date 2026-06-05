@@ -35,7 +35,7 @@ import os
 from typing import Any
 
 from scraper import db, geocoding, portal_runner
-from scraper.bazos_client import BazosClient, detail_url, index_url
+from scraper.bazos_client import BazosClient, detail_url
 from scraper.bazos_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
@@ -186,16 +186,6 @@ class BazosPortal:
             LOG.info(
                 "INDEX offset=%d items=%d total=%s", offset, len(page.items), page.total
             )
-            if conn is not None:
-                db.upsert_portal_raw_page(
-                    conn, source=SOURCE,
-                    source_id_native=f"{sale_type}/{cat}/{offset}",
-                    source_url=index_url(
-                        sale_type, cat, offset,
-                        locality=self._locality, radius_km=self._radius_km,
-                    ),
-                    page_kind="index", html=html, http_status=status,
-                )
             for item in page.items:
                 if item.source_id_native not in seen:
                     seen.add(item.source_id_native)

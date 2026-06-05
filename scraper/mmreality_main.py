@@ -28,7 +28,7 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.mmreality_client import MmRealityClient, detail_url, index_url
+from scraper.mmreality_client import MmRealityClient, detail_url
 from scraper.mmreality_parser import index_price, parse_detail, parse_index
 from scraper.portal import PortalConfig, default_config, load_portal_config
 from scraper.portal_base import ListingGoneError
@@ -86,13 +86,6 @@ class MmRealityPortal:
             parsed = parse_index(html)
             pages += 1
             LOG.info("INDEX page=%s items=%d", page or 1, len(parsed.items))
-            if conn is not None:
-                db.upsert_portal_raw_page(
-                    conn, source=SOURCE,
-                    source_id_native=f"index/{page or 1}",
-                    source_url=index_url(page),
-                    page_kind="index", html=html, http_status=status,
-                )
             new_on_page = 0
             for item in parsed.items:
                 nid = item.source_id_native
