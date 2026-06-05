@@ -579,4 +579,33 @@ describe('filter presets', () => {
     expect(got.filters.priceMin).toBe(1000);
     expect(got.sort).toBeNull();
   });
+
+  it('readPresetSpec coerces stale scalar fields that became arrays (the load crash)', () => {
+    // A preset saved when `furnished` / `ownership` were scalars (stored null);
+    // they later became multi-select arrays. The raw blob would feed
+    // toSearchParams a `null` where it now does `.length`/`.join`, throwing and
+    // making the whole load silently no-op. readPresetSpec must repair the shape.
+    const stale = {
+      ...DEFAULT_FILTERS,
+      furnished: null,
+      ownership: null,
+      categoryType: 'prodej',
+      areaMin: 35,
+    } as unknown as ListingFilters;
+    const got = readPresetSpec({ filters: stale, sort: '-mf_gross_yield_pct' });
+    expect(Array.isArray(got.filters.furnished)).toBe(true);
+    expect(Array.isArray(got.filters.ownership)).toBe(true);
+    expect(got.filters.categoryType).toBe('prodej');
+    expect(got.filters.areaMin).toBe(35);
+    // The actual symptom: serializing the loaded filters must NOT throw.
+    expect(() => toSearchParams(got.filters)).not.toThrow();
+    expect(got.sort).toBe('-mf_gross_yield_pct');
+  });
+
+  it('readPresetSpec drops a stale array value where the field is now scalar', () => {
+    const stale = { ...DEFAULT_FILTERS, categoryMain: ['byt'] } as unknown as ListingFilters;
+    const got = readPresetSpec(stale);
+    // categoryMain is scalar; an array drifted-in value falls back to default.
+    expect(got.filters.categoryMain).toBe('byt');
+  });
 });
