@@ -54,7 +54,7 @@ def test_main_records_index_and_detail_runs(monkeypatch):
     )
     monkeypatch.setattr(
         bazos_main.portal_runner, "run_index_walk",
-        lambda portal, dry_run: (0, {"index_pages": 3, "listings_found_new": 5,
+        lambda portal, dry_run, **kw: (0, {"index_pages": 3, "listings_found_new": 5,
                                       "by_category": [{"category_main": "byt"}]}),
     )
     monkeypatch.setattr(
@@ -78,7 +78,7 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
     )
     monkeypatch.setattr(bazos_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        bazos_main.portal_runner, "run_index_walk", lambda portal, dry_run: (0, {})
+        bazos_main.portal_runner, "run_index_walk", lambda portal, dry_run, **kw: (0, {})
     )
     monkeypatch.setattr(
         bazos_main.portal_runner, "run_detail_drain", lambda portal, dry_run, **kw: (0, {})

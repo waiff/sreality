@@ -1177,7 +1177,7 @@ def scrape_run_finalize(
             """
             UPDATE scrape_runs
             SET ended_at             = now(),
-                index_pages          = %s,
+                index_pages          = GREATEST(index_pages, %s),
                 listings_found_new   = %s,
                 listings_scraped_new = %s,
                 listings_updated     = %s,
@@ -1201,6 +1201,28 @@ def scrape_run_finalize(
                 run_id,
             ),
         )
+
+
+def bump_index_pages(conn: psycopg.Connection, run_id: int, n: int) -> None:
+    """Add n to a scrape_runs row's index_pages immediately, best-effort.
+
+    The index walk calls this after each category commits so Health liveness
+    (which keys off scrape_runs.index_pages > 0) reflects real progress even
+    when a long walk is SIGKILLed by its job timeout before it can finalize.
+    The walk connection is autocommit, so each bump persists on its own.
+    Finalize uses GREATEST(index_pages, ...), so the final reconcile never
+    clobbers an accumulated total. Audit bookkeeping must never break a walk.
+    """
+    if n <= 0:
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE scrape_runs SET index_pages = index_pages + %s WHERE id = %s",
+                (int(n), run_id),
+            )
+    except Exception:  # noqa: BLE001 - never let bookkeeping abort a walk
+        LOG.warning("bump_index_pages failed for run %s", run_id, exc_info=True)
 
 
 def active_failure_ids(

@@ -72,7 +72,7 @@ def test_main_records_index_and_detail_runs(monkeypatch):
     )
     monkeypatch.setattr(
         maxima_main.portal_runner, "run_index_walk",
-        lambda portal, dry_run: (0, {"index_pages": 16, "listings_found_new": 9}),
+        lambda portal, dry_run, **kw: (0, {"index_pages": 16, "listings_found_new": 9}),
     )
     monkeypatch.setattr(
         maxima_main.portal_runner, "run_detail_drain",
@@ -94,7 +94,7 @@ def _stub_phases(monkeypatch, calls):
     )
     monkeypatch.setattr(maxima_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        maxima_main.portal_runner, "run_index_walk", lambda portal, dry_run: (0, {}))
+        maxima_main.portal_runner, "run_index_walk", lambda portal, dry_run, **kw: (0, {}))
     monkeypatch.setattr(
         maxima_main.portal_runner, "run_detail_drain", lambda portal, dry_run, **kw: (0, {}))
 
@@ -122,7 +122,7 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
     )
     monkeypatch.setattr(maxima_main.db, "scrape_run_finalize", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        maxima_main.portal_runner, "run_index_walk", lambda portal, dry_run: (0, {}))
+        maxima_main.portal_runner, "run_index_walk", lambda portal, dry_run, **kw: (0, {}))
     monkeypatch.setattr(
         maxima_main.portal_runner, "run_detail_drain", lambda portal, dry_run, **kw: (0, {}))
     assert maxima_main.main(["--dry-run"]) == 0

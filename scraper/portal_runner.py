@@ -76,9 +76,14 @@ class Portal(Protocol):
     def claimable_count(self, conn: Any) -> int: ...
 
 
-def run_index_walk(portal: Portal, dry_run: bool) -> tuple[int, dict[str, Any]]:
+def run_index_walk(
+    portal: Portal, dry_run: bool, run_id: int | None = None,
+) -> tuple[int, dict[str, Any]]:
     """Walk every category, touch + (optionally) mark_inactive, and enqueue
-    new/price-changed ids. No detail fetch — the drain consumes the queue."""
+    new/price-changed ids. No detail fetch — the drain consumes the queue.
+
+    When run_id is supplied, index_pages is committed per category (bump) so
+    Health liveness survives a SIGKILL before finalize."""
     total_pages = 0
     total_index = 0
     total_enqueued = 0
@@ -103,6 +108,8 @@ def run_index_walk(portal: Portal, dry_run: bool) -> tuple[int, dict[str, Any]]:
                     set(), {}, None, 0, False,
                 )
             total_pages += cat_pages
+            if conn is not None and run_id is not None:
+                db.bump_index_pages(conn, run_id, cat_pages)
             total_index += len(seen_ids)
             total_enqueued += cat_counts.get("enqueued", 0)
 

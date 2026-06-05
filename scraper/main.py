@@ -227,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
             rc = 0
         elif args.index_only:
             rc, scrape_agg = _run_index_walk(
-                dry_run=args.dry_run, index_rate=limits.index_rate,
+                dry_run=args.dry_run, index_rate=limits.index_rate, run_id=run_id,
             )
         elif args.drain_only:
             rc, scrape_agg = _run_detail_drain(
@@ -880,11 +880,13 @@ class SrealityPortal:
 
 
 def _run_index_walk(
-    dry_run: bool, index_rate: float = DEFAULT_DETAIL_RATE,
+    dry_run: bool,
+    index_rate: float = DEFAULT_DETAIL_RATE,
+    run_id: int | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Sreality index-walk via the generic portal_runner (Phase 4). Records
     run_type='index' with index_pages>0 so Health liveness keys off it."""
-    return portal_runner.run_index_walk(SrealityPortal(index_rate), dry_run)
+    return portal_runner.run_index_walk(SrealityPortal(index_rate), dry_run, run_id)
 
 
 def _run_detail_drain(
