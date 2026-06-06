@@ -864,6 +864,20 @@ def index_summary_native(
         }
 
 
+def native_ids_with_geom(conn: psycopg.Connection, source: str) -> set[str]:
+    """source_id_native of `source` rows that already carry coordinates.
+
+    Lets a detail drain skip re-geocoding a listing we've already placed, so a
+    refetch never re-spends a geocode credit on a stable coordinate."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_id_native FROM listings "
+            "WHERE source = %s AND geom IS NOT NULL AND source_id_native IS NOT NULL",
+            (source,),
+        )
+        return {row[0] for row in cur.fetchall()}
+
+
 def active_count(
     conn: psycopg.Connection,
     category_main: str,

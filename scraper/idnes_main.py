@@ -104,6 +104,9 @@ class IdnesPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
+        # native ids that already carry coordinates at drain start; a refetch of
+        # one of them must NOT re-spend a Mapy geocode credit on stable coords.
+        self._have_geom: set[str] | None = None
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -121,7 +124,25 @@ class IdnesPortal:
     def connect_drain(self) -> Any:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
         # so the transaction pooler is fine — no session pooler needed.
-        return db.connect()
+        conn = db.connect()
+        # Preload (once, on the main thread) the native ids that already have a
+        # geom, so the worker-pool fetch_detail can skip re-geocoding them. Without
+        # this, every coords-less iDNES page re-geocodes on EVERY refetch — the
+        # runaway that exhausted the Mapy key (2026-06). Genuinely-new and
+        # still-missing rows still geocode; the cross-run persistent geocode cache
+        # (ROADMAP) is what collapses the still-missing tail.
+        if self._have_geom is None:
+            self._have_geom = db.native_ids_with_geom(conn, SOURCE)
+            LOG.info(
+                "GEOCODE preload have_geom=%d (skip re-geocode on refetch)",
+                len(self._have_geom),
+            )
+        return conn
+
+    def _should_geocode(self, native_id: str) -> bool:
+        """Geocode only rows we have not already placed. When the have-geom set
+        was never preloaded (None), fall back to the old always-geocode behaviour."""
+        return self._have_geom is None or native_id not in self._have_geom
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -228,7 +249,8 @@ class IdnesPortal:
             )
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
-        listing = _geocode_fallback(listing)
+        if self._should_geocode(native_id):
+            listing = _geocode_fallback(listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},
