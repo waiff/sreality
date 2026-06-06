@@ -34,6 +34,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.scraped_listing import ScrapedListing
 
 # Detail "Typ nemovitosti" value (diacritics-stripped, lowercased) -> canonical
@@ -495,7 +496,12 @@ def parse_detail(
 
     usable_text = params.get("uzitna plocha")
     total_text = params.get("celkova plocha") or params.get("plocha")
-    area_m2 = _parse_area(usable_text) or _parse_area(total_text) or _parse_area(title)
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_parse_area(usable_text),
+        total=_parse_area(total_text),
+        fallback=_parse_area(title),
+    )
 
     image_urls = _detail_images(html, source_id)
 
@@ -519,6 +525,7 @@ def parse_detail(
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=_parse_area(usable_text),
         disposition=_parse_disposition(params.get("dispozice")) or _parse_disposition(title),
         locality=locality,
@@ -541,7 +548,9 @@ def parse_detail(
         garage=_yes_no(params.get("garaz")),
         has_parking=_yes_no(params.get("parkovani")) or _yes_no(params.get("garaz")),
         furnished=_norm_furnished(params.get("vybaveno")),
-        estate_area=_parse_area(params.get("plocha pozemku")),
+        # remax labels the parcel "plocha parcely" (not "plocha pozemku" like the
+        # other portals) — keying on the wrong label left estate_area 0% populated.
+        estate_area=_parse_area(params.get("plocha parcely")) or _parse_area(params.get("plocha pozemku")),
         garden_area=_parse_area(params.get("plocha zahrady")),
         description=_text(tree.css_first(".pd-detail-text")) or _text(tree.css_first("#popis")),
         raw=raw,

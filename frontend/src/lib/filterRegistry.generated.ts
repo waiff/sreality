@@ -1642,7 +1642,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "float",
       "pg_column": "area_m2",
       "default": null,
-      "description": "Absolute floor on `area_m2` (square metres). Distinct from the target-relative `area_band_pct` used by the analytical surfaces; this is for Browse / Watchdog where there is no target to band around.",
+      "description": "Absolute floor on `area_m2` (square metres) — the basis-aware interior dwelling area (usable, else floor or total; see `area_basis`), NULL for land. Use `min_estate_area` for plot size. Distinct from the target-relative `area_band_pct` used by the analytical surfaces; this is for Browse / Watchdog.",
       "category": "Property",
       "ui_control": "range_inputs",
       "agendas": [
@@ -1739,62 +1739,6 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "enum_values": null,
       "aliases": [
         "estate_max"
-      ]
-    },
-    {
-      "id": "min_usable_area",
-      "type": "float",
-      "pg_column": "usable_area",
-      "default": null,
-      "description": "Lower bound on usable_area in m². Distinct from `area_m2` (the headline) — usable area excludes balconies, cellars, parking. Often smaller than `area_m2` for the same listing.",
-      "category": "Property",
-      "ui_control": "range_inputs",
-      "agendas": [
-        "browse",
-        "comparables",
-        "defaults",
-        "estimation",
-        "neighborhood",
-        "velocity",
-        "watchdog"
-      ],
-      "constraints": {
-        "min": 0,
-        "max": 500,
-        "step": 5
-      },
-      "unit": "m²",
-      "enum_values": null,
-      "aliases": [
-        "usable_min"
-      ]
-    },
-    {
-      "id": "max_usable_area",
-      "type": "float",
-      "pg_column": "usable_area",
-      "default": null,
-      "description": "Upper bound on usable_area in m². See `min_usable_area`.",
-      "category": "Property",
-      "ui_control": "range_inputs",
-      "agendas": [
-        "browse",
-        "comparables",
-        "defaults",
-        "estimation",
-        "neighborhood",
-        "velocity",
-        "watchdog"
-      ],
-      "constraints": {
-        "min": 0,
-        "max": 500,
-        "step": 5
-      },
-      "unit": "m²",
-      "enum_values": null,
-      "aliases": [
-        "usable_max"
       ]
     },
     {

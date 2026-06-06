@@ -77,8 +77,6 @@ interface SelectionRoundFilters {
   ownership?: string | null;
   min_estate_area?: number | null;
   max_estate_area?: number | null;
-  min_usable_area?: number | null;
-  max_usable_area?: number | null;
   min_parking_lots?: number | null;
   building_condition_level_min?: number | null;
   apartment_condition_level_min?: number | null;
@@ -355,8 +353,6 @@ const FILTER_ROWS: Array<{
   { key: 'ownership', label: 'Ownership', fmt: fmtString },
   { key: 'min_estate_area', label: 'Min estate area', fmt: (v) => fmtNumberUnit(v, 'm²') },
   { key: 'max_estate_area', label: 'Max estate area', fmt: (v) => fmtNumberUnit(v, 'm²') },
-  { key: 'min_usable_area', label: 'Min usable area', fmt: (v) => fmtNumberUnit(v, 'm²') },
-  { key: 'max_usable_area', label: 'Max usable area', fmt: (v) => fmtNumberUnit(v, 'm²') },
   { key: 'min_parking_lots', label: 'Min parking lots', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
   { key: 'building_condition_level_min', label: 'Min building condition', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
   { key: 'apartment_condition_level_min', label: 'Min apartment condition', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },

@@ -163,8 +163,6 @@ export interface ListingFilters {
   buildingMaterial: BuildingMaterial[];
   estateAreaMin: number | null;
   estateAreaMax: number | null;
-  usableAreaMin: number | null;
-  usableAreaMax: number | null;
   parkingLotsMin: number | null;
   /* Migration 022 — house listings carry a separate garden area
    * (`garden_area`) distinct from the lot area (`estate_area`). Wired
@@ -260,8 +258,6 @@ export const DEFAULT_FILTERS: ListingFilters = {
   buildingMaterial: [],
   estateAreaMin: null,
   estateAreaMax: null,
-  usableAreaMin: null,
-  usableAreaMax: null,
   parkingLotsMin: null,
   gardenAreaMin: null,
   gardenAreaMax: null,
@@ -421,7 +417,6 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const [yieldMin, yieldMax] = parseRange(sp.get('yield'));
   const [areaMin, areaMax] = parseRange(sp.get('area'));
   const [estateMin, estateMax] = parseRange(sp.get('estate'));
-  const [usableMin, usableMax] = parseRange(sp.get('usable'));
   const [lastMin, lastMax] = parseRange(sp.get('seen'));
   const [firstMin, firstMax] = parseRange(sp.get('first'));
   const [tomMin, tomMax] = parseRange(sp.get('tom'));
@@ -472,8 +467,6 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     ),
     estateAreaMin: estateMin,
     estateAreaMax: estateMax,
-    usableAreaMin: usableMin,
-    usableAreaMax: usableMax,
     parkingLotsMin: parseIntOrNull(sp.get('parking_min')),
     gardenAreaMin: parseIntOrNull(sp.get('garden_min')),
     gardenAreaMax: parseIntOrNull(sp.get('garden_max')),
@@ -694,9 +687,6 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.estateAreaMin != null || f.estateAreaMax != null) {
     sp.set('estate', fmtRange(f.estateAreaMin, f.estateAreaMax));
   }
-  if (f.usableAreaMin != null || f.usableAreaMax != null) {
-    sp.set('usable', fmtRange(f.usableAreaMin, f.usableAreaMax));
-  }
   if (f.parkingLotsMin != null) sp.set('parking_min', String(f.parkingLotsMin));
   if (f.gardenAreaMin != null) sp.set('garden_min', String(f.gardenAreaMin));
   if (f.gardenAreaMax != null) sp.set('garden_max', String(f.gardenAreaMax));
@@ -888,8 +878,6 @@ export const isDefault = (f: ListingFilters): boolean =>
   f.buildingMaterial.length === 0 &&
   f.estateAreaMin == null &&
   f.estateAreaMax == null &&
-  f.usableAreaMin == null &&
-  f.usableAreaMax == null &&
   f.parkingLotsMin == null &&
   f.gardenAreaMin == null &&
   f.gardenAreaMax == null &&
@@ -1034,8 +1022,6 @@ export const REGISTRY_KEY_MAP = {
   max_area_m2: 'areaMax',
   min_estate_area: 'estateAreaMin',
   max_estate_area: 'estateAreaMax',
-  min_usable_area: 'usableAreaMin',
-  max_usable_area: 'usableAreaMax',
   has_balcony: 'hasBalcony',
   has_lift: 'hasLift',
   has_parking: 'hasParking',
@@ -1288,8 +1274,6 @@ export function filtersToWatchdogSpec(
     max_mf_gross_yield_pct: f.mfGrossYieldPctMax,
     min_area_m2: f.areaMin,
     max_area_m2: f.areaMax,
-    min_usable_area: f.usableAreaMin,
-    max_usable_area: f.usableAreaMax,
     min_estate_area: f.estateAreaMin,
     max_estate_area: f.estateAreaMax,
     has_balcony: triToBoolNullable(f.hasBalcony),

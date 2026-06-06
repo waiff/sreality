@@ -28,6 +28,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.scraped_listing import ScrapedListing
 
 # Native-id leading letter -> our canonical category_main (mirrors the sreality
@@ -408,10 +409,11 @@ def parse_detail(
 
     usable_text = params.get("plocha užitná") or params.get("užitná plocha")
     floor_text = params.get("plocha podlahová") or params.get("podlahová plocha")
-    area_m2 = (
-        _parse_area(usable_text)
-        or _parse_area(floor_text)
-        or _parse_area(title)
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_parse_area(usable_text),
+        floor=_parse_area(floor_text),
+        fallback=_parse_area(title),
     )
     floor, total_floors = _parse_floors(params.get("podlaží"))
 
@@ -451,6 +453,7 @@ def parse_detail(
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=_parse_area(usable_text),
         disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
         locality=locality,

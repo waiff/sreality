@@ -1370,8 +1370,6 @@ def _build_filters(
         ownership=body.ownership,
         min_estate_area=body.min_estate_area,
         max_estate_area=body.max_estate_area,
-        min_usable_area=body.min_usable_area,
-        max_usable_area=body.max_usable_area,
         min_parking_lots=body.min_parking_lots,
         building_condition_level_min=body.building_condition_level_min,
         apartment_condition_level_min=body.apartment_condition_level_min,

@@ -71,8 +71,6 @@ class FindComparablesIn(BaseModel):
     ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
-    min_usable_area: float | None = None
-    max_usable_area: float | None = None
     min_parking_lots: int | None = None
     building_condition_level_min: int | None = None
     apartment_condition_level_min: int | None = None
@@ -170,8 +168,6 @@ class ComputeMarketVelocityIn(BaseModel):
     ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
-    min_usable_area: float | None = None
-    max_usable_area: float | None = None
     min_parking_lots: int | None = None
     building_condition_level_min: int | None = None
     apartment_condition_level_min: int | None = None
@@ -357,8 +353,6 @@ class CreateEstimationIn(BaseModel):
     ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
-    min_usable_area: float | None = None
-    max_usable_area: float | None = None
     min_parking_lots: int | None = None
     building_condition_level_min: int | None = None
     apartment_condition_level_min: int | None = None
@@ -456,8 +450,6 @@ class EstimateYieldIn(BaseModel):
     ownership: EnumListFilter = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
-    min_usable_area: float | None = None
-    max_usable_area: float | None = None
     min_parking_lots: int | None = None
     building_condition_level_min: int | None = None
     apartment_condition_level_min: int | None = None

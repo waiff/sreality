@@ -29,6 +29,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.area import derive_headline_area
 from scraper.scraped_listing import ScrapedListing
 
 SOURCE = "mmreality"
@@ -354,15 +355,23 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     raw["image_urls"] = image_urls
     raw["source_url"] = source_url
 
+    category_main = _category_main(obj)
+    area_m2, area_basis = derive_headline_area(
+        category_main=category_main,
+        usable=_to_float(obj.get("usableArea")),
+        total=_to_float(obj.get("totalArea")),
+    )
+
     return ScrapedListing(
         source=SOURCE,
         source_id_native=source_id,
         source_url=source_url,
-        category_main=_category_main(obj),
+        category_main=category_main,
         category_type=category_type,
         price_czk=price_czk,
         price_unit=price_unit,
-        area_m2=_to_float(obj.get("totalArea")) or _to_float(obj.get("usableArea")),
+        area_m2=area_m2,
+        area_basis=area_basis,
         usable_area=_to_float(obj.get("usableArea")),
         disposition=_disposition((obj.get("type") or {}).get("name"), obj.get("title")),
         locality=_locality(obj),

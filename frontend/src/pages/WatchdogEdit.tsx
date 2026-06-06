@@ -162,7 +162,6 @@ export default function WatchdogEdit() {
             locality_region_id: 'Region id',
             min_price_czk: 'Price Kč',
             min_area_m2: 'Area m²',
-            min_usable_area: 'Usable area m²',
             min_estate_area: 'Estate area m²',
             min_garden_area: 'Garden area m²',
             min_parking_lots: 'Min parking lots',

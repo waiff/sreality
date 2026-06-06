@@ -347,26 +347,20 @@ def test_terrace_cellar_garage_three_state():
     assert params["garage"] is True
 
 
-def test_estate_and_usable_area_bands_and_min_parking_lots():
+def test_estate_area_bands_and_min_parking_lots():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),
         ComparableFilters(
             min_estate_area=200,
             max_estate_area=500,
-            min_usable_area=80,
-            max_usable_area=120,
             min_parking_lots=2,
         ),
     )
     assert "l.estate_area >= %(min_estate_area)s" in sql
     assert "l.estate_area <= %(max_estate_area)s" in sql
-    assert "l.usable_area >= %(min_usable_area)s" in sql
-    assert "l.usable_area <= %(max_usable_area)s" in sql
     assert "l.parking_lots >= %(min_parking_lots)s" in sql
     assert params["min_estate_area"] == 200
     assert params["max_estate_area"] == 500
-    assert params["min_usable_area"] == 80
-    assert params["max_usable_area"] == 120
     assert params["min_parking_lots"] == 2
 
 
