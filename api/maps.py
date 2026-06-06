@@ -10,12 +10,15 @@ deploys.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any
 
 import requests
 from fastapi import HTTPException
+
+LOG = logging.getLogger(__name__)
 
 # Mapy.cz suggestion `type` strings → (admin level if applicable, default radius in metres)
 # for the point_with_radius fallback. Levels match `admin_boundaries.level`
@@ -69,10 +72,21 @@ def suggest(query: str, *, limit: int = 10, lang: str = "cs") -> dict[str, Any]:
     if hit is not None and hit[0] > now:
         return hit[1]
     _cache_evict_expired(now)
-    raw = _http_get_json(
-        MAPY_SUGGEST_URL,
-        {"query": query, "limit": limit, "lang": lang, "apikey": key},
-    )
+    try:
+        raw = _http_get_json(
+            MAPY_SUGGEST_URL,
+            {"query": query, "limit": limit, "lang": lang, "apikey": key},
+        )
+    except (requests.RequestException, ValueError) as exc:
+        # A rejected key / throttle / outage from Mapy must NOT surface as a raw
+        # 500 — the frontend only degrades gracefully (fallback district pickers)
+        # on 503, so a 500 leaves a silent empty dropdown. Log the real upstream
+        # status for diagnosis and return 503.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        LOG.warning("Mapy suggest upstream failure status=%s: %s", status, exc)
+        raise HTTPException(
+            status_code=503, detail="geocoding temporarily unavailable",
+        ) from exc
     items = raw.get("items") or []
     payload = {"items": items}
     if len(_suggest_cache) >= _SUGGEST_CACHE_MAX:
