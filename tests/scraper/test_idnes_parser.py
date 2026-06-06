@@ -148,6 +148,7 @@ def test_parse_detail_full():
     assert listing.price_czk == 9_790_000
     assert listing.price_unit == "za nemovitost"
     assert listing.area_m2 == 69.0
+    assert listing.area_basis == "usable"
     assert listing.usable_area == 69.0
     assert listing.disposition == "3+1"
     assert listing.lat == 50.130427866

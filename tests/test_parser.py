@@ -97,6 +97,30 @@ def test_price_unit_monthly():
     assert row["price_unit"] == "měsíc"
 
 
+def test_area_basis_usable_for_apartment():
+    row = parse_listing(_estate(category_main_cb={"value": 1}, usable_area=70.0))
+    assert row["area_m2"] == 70.0
+    assert row["area_basis"] == "usable"
+    assert row["usable_area"] == 70.0
+
+
+def test_area_basis_floor_when_no_usable():
+    row = parse_listing(_estate(category_main_cb={"value": 1}, floor_area=72.0))
+    assert row["area_m2"] == 72.0
+    assert row["area_basis"] == "floor"
+    assert row["usable_area"] is None
+
+
+def test_land_has_no_headline_area():
+    # pozemek: the plot lives in estate_area, never area_m2.
+    row = parse_listing(_estate(
+        category_main_cb={"value": 3}, usable_area=400.0, estate_area=400.0))
+    assert row["category_main"] == "pozemek"
+    assert row["area_m2"] is None
+    assert row["area_basis"] is None
+    assert row["estate_area"] == 400.0
+
+
 def test_area(sample):
     assert parse_listing(sample)["area_m2"] == 85.0
 
