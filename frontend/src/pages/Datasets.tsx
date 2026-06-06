@@ -82,6 +82,7 @@ interface TableRow extends PriceStatGrowthRow {
   population: number | null;
   idx: Record<string, number | null>; // index_name → value (quality indexes)
   noData?: boolean; // scraper checked, insufficient data → greyed n/a row
+  okres?: string | null; // set only for same-name obce, to disambiguate them
 }
 
 interface ColSpec {
@@ -97,7 +98,10 @@ interface ColSpec {
 
 const BASE_COLUMNS: ColSpec[] = [
   { key: 'locality_name', label: 'Municipality', align: 'left', alwaysOn: true, defaultOn: true,
-    sortVal: (r) => r.locality_name, render: (r) => r.locality_name },
+    sortVal: (r) => r.locality_name,
+    render: (r) => r.okres
+      ? <>{r.locality_name} <span className="text-[var(--color-ink-4)]">· {r.okres}</span></>
+      : r.locality_name },
   { key: 'sale_latest_price', label: 'Sale Kč/m²', align: 'right', defaultOn: true,
     sortVal: (r) => r.sale_latest_price, render: (r) => fmtPerM2(r.sale_latest_price) },
   { key: 'sale_cagr_pct', label: 'Sale growth', align: 'right', metric: 'sale_cagr_pct', defaultOn: true,
@@ -186,11 +190,13 @@ export default function Datasets() {
   const idxCols = useMemo(() => indexColumns(indexDefsQ.data ?? []), [indexDefsQ.data]);
   const allColumns = useMemo(() => [...BASE_COLUMNS, ...idxCols], [idxCols]);
   const anyIndexVisible = idxCols.some((c) => visibleCols.has(c.key));
-  const popVisible = visibleCols.has('population');
 
+  // Loaded whenever a dataset is open (not just for the Population column): it
+  // also drives the obec→okres map that disambiguates same-name municipalities.
+  // Cached forever + shared with the city picker, so it's one fetch per session.
   const obecTreeQ = useQuery({
     queryKey: priceStatsKeys.obecTree, queryFn: fetchObecTree,
-    enabled: popVisible, staleTime: Infinity, gcTime: Infinity,
+    enabled: activeId != null, staleTime: Infinity, gcTime: Infinity,
   });
   const citiesQ = useQuery({
     queryKey: ['curated_cities'], queryFn: fetchCuratedCities,
@@ -204,6 +210,20 @@ export default function Datasets() {
   const popByObec = useMemo(() => {
     const m = new Map<number, number>();
     for (const n of obecTreeQ.data ?? []) if (n.level === 'obec' && n.population != null) m.set(n.id, n.population);
+    return m;
+  }, [obecTreeQ.data]);
+  // obec_id → okres name, via the picker tree's parent_id walk. Used to label
+  // same-name municipalities (Říčany, Nová Ves, …) so they aren't read as dupes.
+  const okresByObec = useMemo(() => {
+    const nodes = obecTreeQ.data ?? [];
+    const byId = new Map(nodes.map((n) => [n.id, n] as const));
+    const m = new Map<number, string>();
+    for (const n of nodes) {
+      if (n.level === 'obec' && n.parent_id != null) {
+        const parent = byId.get(n.parent_id);
+        if (parent?.level === 'okres') m.set(n.id, parent.name);
+      }
+    }
     return m;
   }, [obecTreeQ.data]);
   const nameToCityId = useMemo(() => {
@@ -233,14 +253,23 @@ export default function Datasets() {
     return [...withData, ...empties];
   }, [rows, noDataQ.data]);
 
-  const enrichedRows: TableRow[] = useMemo(() => combinedRows.map((r) => {
-    const cityId = nameToCityId.get(normName(r.locality_name));
-    const idx: Record<string, number | null> = {};
-    for (const slug of PINNED_SLUGS) {
-      idx[slug] = cityId != null ? idxMap.get(`${cityId}:${slug}`) ?? null : null;
+  const enrichedRows: TableRow[] = useMemo(() => {
+    const nameCount = new Map<string, number>();
+    for (const r of combinedRows) {
+      nameCount.set(r.locality_name, (nameCount.get(r.locality_name) ?? 0) + 1);
     }
-    return { ...r, population: popByObec.get(r.obec_id) ?? null, idx };
-  }), [combinedRows, nameToCityId, idxMap, popByObec]);
+    return combinedRows.map((r) => {
+      const cityId = nameToCityId.get(normName(r.locality_name));
+      const idx: Record<string, number | null> = {};
+      for (const slug of PINNED_SLUGS) {
+        idx[slug] = cityId != null ? idxMap.get(`${cityId}:${slug}`) ?? null : null;
+      }
+      const okres = (nameCount.get(r.locality_name) ?? 0) > 1
+        ? okresByObec.get(r.obec_id) ?? null
+        : null;
+      return { ...r, population: popByObec.get(r.obec_id) ?? null, idx, okres };
+    });
+  }, [combinedRows, nameToCityId, idxMap, popByObec, okresByObec]);
 
   const visibleColumns = useMemo(
     () => allColumns.filter((c) => c.alwaysOn || visibleCols.has(c.key)),
