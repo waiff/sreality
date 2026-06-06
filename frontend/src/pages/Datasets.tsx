@@ -190,7 +190,6 @@ export default function Datasets() {
   const idxCols = useMemo(() => indexColumns(indexDefsQ.data ?? []), [indexDefsQ.data]);
   const allColumns = useMemo(() => [...BASE_COLUMNS, ...idxCols], [idxCols]);
   const anyIndexVisible = idxCols.some((c) => visibleCols.has(c.key));
-  const popVisible = visibleCols.has('population');
 
   // Loaded whenever a dataset is open (not just for the Population column): it
   // also drives the obec→okres map that disambiguates same-name municipalities.
