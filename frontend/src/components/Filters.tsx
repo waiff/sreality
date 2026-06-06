@@ -47,7 +47,6 @@ const ESSENTIALS_KEYS = [
   'districts', 'locationMode', 'centerRadius',
   'dispositions', 'subtype',
   'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
-  'usableAreaMin', 'usableAreaMax',
   'conditionMatch', 'buildingMaterial',
   'priceMin', 'priceMax', 'pricePerM2Min', 'pricePerM2Max',
   'mfGrossYieldPctMin', 'mfGrossYieldPctMax',
@@ -262,11 +261,10 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['min_area_m2', 'min_estate_area', 'min_usable_area']}
+              includeOnly={['min_area_m2', 'min_estate_area']}
               labels={{
                 min_area_m2: 'Area',
                 min_estate_area: 'Lot area',
-                min_usable_area: 'Usable area',
               }}
               flat
             />

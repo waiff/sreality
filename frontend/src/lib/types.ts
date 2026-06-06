@@ -632,8 +632,6 @@ export interface EstimationFilters {
   ownership: Ownership | null;
   min_estate_area: number | null;
   max_estate_area: number | null;
-  min_usable_area: number | null;
-  max_usable_area: number | null;
   min_parking_lots: number | null;
   building_condition_level_min: number | null;
   apartment_condition_level_min: number | null;
@@ -991,8 +989,6 @@ export interface WatchdogFilterSpec {
   max_mf_gross_yield_pct: number | null;
   min_area_m2: number | null;
   max_area_m2: number | null;
-  min_usable_area: number | null;
-  max_usable_area: number | null;
   min_estate_area: number | null;
   max_estate_area: number | null;
   has_balcony: boolean | null;
@@ -1080,8 +1076,6 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   max_mf_gross_yield_pct: null,
   min_area_m2: null,
   max_area_m2: null,
-  min_usable_area: null,
-  max_usable_area: null,
   min_estate_area: null,
   max_estate_area: null,
   has_balcony: null,

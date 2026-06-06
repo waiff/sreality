@@ -146,8 +146,6 @@ class WatchdogFilterSpec(BaseModel):
     max_mf_gross_yield_pct: float | None = None
     min_area_m2: float | None = None
     max_area_m2: float | None = None
-    min_usable_area: float | None = None
-    max_usable_area: float | None = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
 
@@ -347,12 +345,6 @@ def _build_match_clauses(
     if spec.max_area_m2 is not None:
         where.append("l.area_m2 <= %(max_area_m2)s")
         params["max_area_m2"] = spec.max_area_m2
-    if spec.min_usable_area is not None:
-        where.append("l.usable_area >= %(min_usable_area)s")
-        params["min_usable_area"] = spec.min_usable_area
-    if spec.max_usable_area is not None:
-        where.append("l.usable_area <= %(max_usable_area)s")
-        params["max_usable_area"] = spec.max_usable_area
     if spec.min_estate_area is not None:
         where.append("l.estate_area >= %(min_estate_area)s")
         params["min_estate_area"] = spec.min_estate_area

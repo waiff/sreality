@@ -1145,10 +1145,12 @@ def _build_registry() -> dict[str, FilterDef]:
             pg_column="area_m2",
             default=None,
             description=(
-                "Absolute floor on `area_m2` (square metres). Distinct "
-                "from the target-relative `area_band_pct` used by the "
-                "analytical surfaces; this is for Browse / Watchdog "
-                "where there is no target to band around."
+                "Absolute floor on `area_m2` (square metres) — the "
+                "basis-aware interior dwelling area (usable, else floor "
+                "or total; see `area_basis`), NULL for land. Use "
+                "`min_estate_area` for plot size. Distinct from the "
+                "target-relative `area_band_pct` used by the analytical "
+                "surfaces; this is for Browse / Watchdog."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.RANGE_INPUTS,
@@ -1202,37 +1204,6 @@ def _build_registry() -> dict[str, FilterDef]:
             constraints={"min": 0, "max": 5000, "step": 50},
             unit="m²",
             aliases=("estate_max",),
-        ),
-        FilterDef(
-            id="min_usable_area",
-            type=FilterType.FLOAT,
-            pg_column="usable_area",
-            default=None,
-            description=(
-                "Lower bound on usable_area in m². Distinct from "
-                "`area_m2` (the headline) — usable area excludes "
-                "balconies, cellars, parking. Often smaller than "
-                "`area_m2` for the same listing."
-            ),
-            category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_INPUTS,
-            agendas=_ALL_AGENDAS,
-            constraints={"min": 0, "max": 500, "step": 5},
-            unit="m²",
-            aliases=("usable_min",),
-        ),
-        FilterDef(
-            id="max_usable_area",
-            type=FilterType.FLOAT,
-            pg_column="usable_area",
-            default=None,
-            description="Upper bound on usable_area in m². See `min_usable_area`.",
-            category=CATEGORY_PROPERTY,
-            ui_control=UiControl.RANGE_INPUTS,
-            agendas=_ALL_AGENDAS,
-            constraints={"min": 0, "max": 500, "step": 5},
-            unit="m²",
-            aliases=("usable_max",),
         ),
         FilterDef(
             id="min_garden_area",

@@ -94,8 +94,6 @@ class ComparableFilters:
     ownership: list[str] | None = None
     min_estate_area: float | None = None
     max_estate_area: float | None = None
-    min_usable_area: float | None = None
-    max_usable_area: float | None = None
     min_parking_lots: int | None = None
     # Derived condition scores (migrations 072/073). NULL rows are filtered
     # out by the `>= N` comparison — that's intentional: "show me 4+" means
@@ -458,12 +456,6 @@ def _shared_filter_where(
     if filters.max_estate_area is not None:
         where.append("l.estate_area <= %(max_estate_area)s")
         params["max_estate_area"] = filters.max_estate_area
-    if filters.min_usable_area is not None:
-        where.append("l.usable_area >= %(min_usable_area)s")
-        params["min_usable_area"] = filters.min_usable_area
-    if filters.max_usable_area is not None:
-        where.append("l.usable_area <= %(max_usable_area)s")
-        params["max_usable_area"] = filters.max_usable_area
     if filters.min_parking_lots is not None:
         where.append("l.parking_lots >= %(min_parking_lots)s")
         params["min_parking_lots"] = filters.min_parking_lots
@@ -650,8 +642,6 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "garage": filters.garage,
         "min_estate_area": filters.min_estate_area,
         "max_estate_area": filters.max_estate_area,
-        "min_usable_area": filters.min_usable_area,
-        "max_usable_area": filters.max_usable_area,
         "min_parking_lots": filters.min_parking_lots,
         "building_condition_level_min": filters.building_condition_level_min,
         "apartment_condition_level_min": filters.apartment_condition_level_min,
