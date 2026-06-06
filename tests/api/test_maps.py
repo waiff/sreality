@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+import requests
 
 fastapi = pytest.importorskip("fastapi")
 TestClient = pytest.importorskip("fastapi.testclient").TestClient
@@ -79,6 +80,31 @@ def test_suggest_503_when_key_unset(client, monkeypatch):
     res = client.get("/maps/suggest", params={"query": "Vinohrady"})
     assert res.status_code == 503
     assert "geocoding not configured" in res.json()["detail"]
+
+
+def test_suggest_503_when_mapy_rejects_key(client, monkeypatch):
+    # A suspended / invalid key makes Mapy reject the call (e.g. 403). The proxy
+    # must return 503 (graceful frontend fallback), not a raw 500 (silent empty
+    # dropdown).
+    resp = requests.Response()
+    resp.status_code = 403
+
+    def _reject(url: str, params: dict[str, Any]) -> dict[str, Any]:
+        raise requests.HTTPError("403 Forbidden", response=resp)
+
+    monkeypatch.setattr(maps, "_http_get_json", _reject)
+    res = client.get("/maps/suggest", params={"query": "Vinohrady"})
+    assert res.status_code == 503
+    assert "unavailable" in res.json()["detail"]
+
+
+def test_suggest_503_when_mapy_unreachable(client, monkeypatch):
+    def _down(url: str, params: dict[str, Any]) -> dict[str, Any]:
+        raise requests.ConnectionError("connection refused")
+
+    monkeypatch.setattr(maps, "_http_get_json", _down)
+    res = client.get("/maps/suggest", params={"query": "Vinohrady"})
+    assert res.status_code == 503
 
 
 def test_suggest_caches_within_ttl(client, monkeypatch):
