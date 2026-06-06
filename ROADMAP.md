@@ -6,6 +6,30 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: iDNES geocode — skip re-geocode on refetch (stop Mapy credit burn)
+- Our Mapy.cz API key was **suspended for hitting 250k credits**. Investigation traced
+  the burn to `idnes_main._geocode_fallback`: ~25% of iDNES listings are "page-less"
+  (no embedded `"center":[lon,lat]`) and fall back to geocoding the locality via Mapy.
+  The fallback had **no cache and no "already-placed" guard**, so every coords-less page
+  re-geocoded on EVERY detail refetch — and the iDNES drain runs near-continuously. The
+  price-stats dataset scraper was wrongly suspected; it uses sreality's own free
+  `localities/suggest`, not Mapy. (Bazos barely geocodes — it reads coords off the page
+  maps link — and already had a per-run cache; sreality never geocodes.)
+- **Cheap + highest-impact fix (this PR):** `IdnesPortal.connect_drain` preloads, once on
+  the main thread, the set of native ids that already have a `geom`
+  (`db.native_ids_with_geom`); the worker-pool `fetch_detail` skips `_geocode_fallback`
+  for any id in that set. Only genuinely-new and still-missing rows geocode, so a refetch
+  never re-spends a credit on a stable coordinate. Cuts the dominant ~80% of iDNES geocode
+  volume (the ~82k already-placed rows) at near-zero risk — coordinates are latest-wins and
+  the locality string is stable.
+- **Next (the better/reusable solution, parked):** a **persistent cross-portal locality→coords
+  geocode cache** (a small table keyed on a normalized locality string, with negative/miss
+  caching + TTL). It collapses the residual still-missing tail (the ~7.5k iDNES rows that
+  never resolve still re-geocode every refetch under the cheap fix) AND dedups across runs
+  and across listings/portals — replacing bazos's per-run `_CachingGeocoder` and serving the
+  on-demand `source_dispatcher`/`scraper.geocoding` path too. Until then, the cheap guard is
+  the safeguard against re-suspending the new key.
+
 ### 2026-06: Bazos cadence split (fix detail-drain starvation)
 - Bazos was running its index walk + detail drain in ONE GitHub-Actions job. After
   its scope was expanded from 2 to 14 nationwide sections (byt/dum/chata/restaurace/
