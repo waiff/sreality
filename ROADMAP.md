@@ -6,6 +6,32 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Basis-aware `area_m2` + clean plot axis (cross-portal area model)
+- `area_m2` was overloaded: a different physical measurement per portal (usable on
+  sreality/bezrealitky, **total** on mmreality, a usable→floor→total→title fallback on
+  idnes/maxima/remax, free-text regex on bazos) and, for **land** (`pozemek`), it held
+  the *plot* size on idnes/maxima/remax — so the Browse "Area" filter silently compared
+  apartment interiors against parcels (verified live: ~24.8k land listings, plot leaking
+  into area_m2 on three portals). `usable_area` was a near-duplicate of `area_m2`.
+- Fixed with one shared `scraper/area.py:derive_headline_area` — the usable→floor→total
+  precedence and the **NULL-for-land** rule now live in ONE place; every parser just maps
+  its source labels onto usable/floor/total + estate/garden and calls it. New
+  `listings.area_basis ∈ {usable,floor,total,unknown}` records what the headline is
+  (migration 169 + backfill: land `area_m2` nulled, `usable`/`unknown` backfilled; mirrored
+  onto `properties`). Fixes mmreality's total-first inversion and the **remax `estate_area`
+  label bug** (parcel is `plocha parcely`, not `plocha pozemku` → was 0% populated).
+- The redundant **Usable-area filter** is removed end-to-end (registry + estimation
+  ComparableFilters + watchdog matcher + agent inventory + API models + frontend); Browse
+  SIZE is now two boxes (Area + Lot area). No behaviour change — `area_m2` == usable area
+  for apartments. The `usable_area` column stays (display + future retirement).
+- **Next / parked:** (1) capture `zastavěná plocha` (built-up) as a new descriptive column
+  on sreality (`raw_json.building_area`), idnes (`zastavěná plocha`), remax (`zastavena
+  plocha`) — the only sources that expose it; also `floor_area` is available on sreality.
+  (2) garden source-gaps — bezrealitky `frontGarden` is ~0% populated and maxima omits the
+  label (source limitations, not parser bugs). (3) physically **drop the `usable_area`
+  column** (destructive; consumed by estimation/agent/building/price-stats + display) once
+  the basis model has bedded in.
+
 ### 2026-06: Bazos cadence split (fix detail-drain starvation)
 - Bazos was running its index walk + detail drain in ONE GitHub-Actions job. After
   its scope was expanded from 2 to 14 nationwide sections (byt/dum/chata/restaurace/
