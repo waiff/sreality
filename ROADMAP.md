@@ -6,6 +6,27 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: On-card "Estimate" action in Browse (run + show yield in place)
+- Every **apartment** card in Browse > Map now carries a small bottom-right control.
+  No run yet → an **`Odhad`** button that kicks off the standard **agent rental**
+  estimate for that listing. While it runs the corner shows a spinner (`Odhaduji…`);
+  once it finishes it shows the run's result **in place** — **`Výnos ~ X,X %`** when the
+  asking price is known, else **`Nájem ~ X Kč/měs`** — clickable through to
+  `/estimation/{id}`. Distinct (copper) from the muted statistical `Výnos MF` line,
+  which is a price-map reference, not an actual estimate.
+- **Backend:** `POST /estimations` gained a third target input `sreality_id` (exactly one
+  of `url` / `spec` / `sreality_id`) — `_match_listing_by_id` builds the target straight
+  off the scraped `listings` row, no URL parse / LLM. New batch read
+  `GET /estimations/latest-by-listing?sreality_ids=…` returns the latest rent run per id
+  (`latest_rent_estimations_by_listing`, `DISTINCT ON`), declared before
+  `/estimations/{run_id}` so the literal path isn't captured by the int route.
+- **Frontend:** Browse fetches latest estimates for the visible card ids
+  (`latestEstimationsByListing`), polling every 4s while any run is pending/running; the
+  trigger is an agent rent estimate via `createEstimation({ sreality_id, mode:'agent' })`
+  with an optimistic running state. `EstimateCorner` in `ListingCards.tsx` renders the
+  four states; handlers `stopPropagation` so they don't navigate the card `<Link>` /
+  toggle merge selection.
+
 ### 2026-06: iDNES geocode — skip re-geocode on refetch (stop Mapy credit burn)
 - Our Mapy.cz API key was **suspended for hitting 250k credits**. Investigation traced
   the burn to `idnes_main._geocode_fallback`: ~25% of iDNES listings are "page-less"

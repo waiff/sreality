@@ -36,8 +36,14 @@ import {
 } from '@/lib/filters';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import PresetBar from '@/components/PresetBar';
-import type { FilterPreset } from '@/lib/types';
-import { fetchRegionDispositionAnnotations, isApiConfigured, mergeDedupPropertySet } from '@/lib/api';
+import type { FilterPreset, ListingEstimate } from '@/lib/types';
+import {
+  createEstimation,
+  fetchRegionDispositionAnnotations,
+  isApiConfigured,
+  latestEstimationsByListing,
+  mergeDedupPropertySet,
+} from '@/lib/api';
 import {
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
@@ -477,6 +483,74 @@ export default function Browse() {
     enabled: tabFromUrl === 'map',
   });
 
+  /* On-card estimate: latest rent estimate per visible listing, plus a
+   * trigger that runs the standard (agent) rental estimate for one card.
+   * Distinct from the card's statistical mf_gross_yield_pct — this is an
+   * actual estimation_runs result. */
+  const cardIds = useMemo(
+    () => (cardsQuery.data?.rows ?? []).map((r) => r.sreality_id),
+    [cardsQuery.data],
+  );
+  const [estimatingIds, setEstimatingIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const estimatesQuery = useQuery<Record<number, ListingEstimate>, Error>({
+    queryKey: ['card-estimates', cardIds],
+    queryFn: () => latestEstimationsByListing(cardIds),
+    enabled: tabFromUrl === 'map' && isApiConfigured() && cardIds.length > 0,
+    placeholderData: (prev) => prev,
+    refetchInterval: (query) => {
+      const data = query.state.data as
+        | Record<number, ListingEstimate>
+        | undefined;
+      const anyRunning =
+        estimatingIds.size > 0 ||
+        (data != null &&
+          Object.values(data).some(
+            (e) => e.status === 'pending' || e.status === 'running',
+          ));
+      return anyRunning ? 4000 : false;
+    },
+  });
+  const estimateMut = useMutation({
+    mutationFn: (srealityId: number) =>
+      createEstimation({
+        sreality_id: srealityId,
+        source: 'ui',
+        mode: 'agent',
+        provider: 'anthropic',
+        estimate_kind: 'rent',
+        population: 'active',
+      }),
+    onMutate: (srealityId) => {
+      setEstimatingIds((prev) => new Set(prev).add(srealityId));
+    },
+    onSuccess: (run, srealityId) => {
+      queryClient.setQueriesData<Record<number, ListingEstimate>>(
+        { queryKey: ['card-estimates'] },
+        (prev) => ({
+          ...(prev ?? {}),
+          [srealityId]: {
+            sreality_id: srealityId,
+            run_id: run.id,
+            status: run.status,
+            estimate_kind: run.estimate_kind,
+            gross_yield_pct: run.gross_yield_pct,
+            estimated_monthly_rent_czk: run.estimated_monthly_rent_czk,
+            created_at: run.created_at,
+          },
+        }),
+      );
+    },
+    onSettled: (_run, _err, srealityId) => {
+      setEstimatingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(srealityId);
+        return next;
+      });
+    },
+  });
+
   const tableQuery = useQuery<TableResult, Error>({
     queryKey: ['table', filters, sort, page],
     queryFn: () => fetchListingsForTable(filters, sort, page),
@@ -710,6 +784,9 @@ export default function Browse() {
                 mergeMode={mergeMode}
                 selectedPropertyIds={selectedForMerge}
                 onToggleSelect={toggleSelectForMerge}
+                estimates={estimatesQuery.data}
+                estimatingIds={estimatingIds}
+                onEstimate={(srealityId) => estimateMut.mutate(srealityId)}
               />
               <ResizeHandle
                 ariaLabel="Resize the listings and map columns"

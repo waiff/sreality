@@ -23,6 +23,7 @@ import type {
   EstimationListParams,
   EstimationListResponse,
   EstimationRun,
+  ListingEstimate,
   ListingSummaryBatchRow,
   Ppm2Box,
   ManualRentalEstimate,
@@ -287,6 +288,20 @@ export const listEstimations = (
   request<EstimationListResponse>('/estimations', {
     query: params as Record<string, QueryValue>,
   });
+
+/* GET /estimations/latest-by-listing — latest rent estimate per listing id,
+ * for the Browse cards' on-card estimate chip. Returns a map keyed by
+ * sreality_id (string keys after JSON); ids with no rent run are absent. */
+export const latestEstimationsByListing = (
+  ids: ReadonlyArray<number>,
+  signal?: AbortSignal,
+): Promise<Record<number, ListingEstimate>> =>
+  ids.length === 0
+    ? Promise.resolve({})
+    : request<{ estimates: Record<number, ListingEstimate> }>(
+        '/estimations/latest-by-listing',
+        { query: { sreality_ids: ids.join(',') }, signal },
+      ).then((r) => r.estimates);
 
 /* POST /listings/summaries — batch wrapper around the
  * summarize_listing toolkit function. The backend cache means

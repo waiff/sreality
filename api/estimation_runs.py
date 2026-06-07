@@ -969,6 +969,70 @@ def _match_listing_by_url(
     }
 
 
+def _match_listing_by_id(
+    conn: "psycopg.Connection", sreality_id: int,
+) -> dict[str, Any] | None:
+    """Build a target spec from an already-scraped `listings` row by internal id,
+    so a Browse card can estimate a known listing with no URL parse / LLM.
+    Mirrors `_match_listing_by_url`; coordinates are required (the comparables
+    search is spatial). Returns None when the row is missing or has no geom."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT sreality_id, "
+            "ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng, "
+            "area_m2, disposition, floor, price_czk, category_type "
+            "FROM listings WHERE sreality_id = %(id)s LIMIT 1",
+            {"id": int(sreality_id)},
+        )
+        row = cur.fetchone()
+    if row is None or row[1] is None or row[2] is None:
+        return None
+    return {
+        "sreality_id": int(row[0]),
+        "spec": {
+            "lat": float(row[1]), "lng": float(row[2]),
+            "area_m2": float(row[3]) if row[3] is not None else None,
+            "disposition": row[4], "floor": row[5], "exclude_ids": [],
+        },
+        "price_czk": row[6],
+        "category_type": row[7],
+    }
+
+
+def latest_rent_estimations_by_listing(
+    conn: "psycopg.Connection", sreality_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    """Latest RENT estimation_runs row per listing id (any status), for the
+    Browse cards' on-card estimate chip. Returns {sreality_id: {...}}; ids with
+    no rent run are absent."""
+    if not sreality_ids:
+        return {}
+    ids = [int(x) for x in sreality_ids]
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT ON (input_sreality_id) "
+            "input_sreality_id, id, status, estimate_kind, "
+            "gross_yield_pct, estimated_monthly_rent_czk, created_at "
+            "FROM estimation_runs "
+            "WHERE input_sreality_id = ANY(%(ids)s) AND estimate_kind = 'rent' "
+            "ORDER BY input_sreality_id, created_at DESC",
+            {"ids": ids},
+        )
+        rows = cur.fetchall()
+    out: dict[int, dict[str, Any]] = {}
+    for r in rows:
+        out[int(r[0])] = {
+            "sreality_id": int(r[0]),
+            "run_id": int(r[1]),
+            "status": r[2],
+            "estimate_kind": r[3],
+            "gross_yield_pct": float(r[4]) if r[4] is not None else None,
+            "estimated_monthly_rent_czk": int(r[5]) if r[5] is not None else None,
+            "created_at": r[6].isoformat() if r[6] is not None else None,
+        }
+    return out
+
+
 def _subject_attributes_from_result(
     result: "source_dispatcher.ParseResult",
 ) -> dict[str, Any] | None:
@@ -1010,8 +1074,31 @@ def _resolve_input(
     dispatch through scraper.source_dispatcher (sreality → deterministic flow;
     any other domain → LLM-driven per-source parser), capturing the parsed
     attributes so the subject can still render like a listing. Spec path: pass
-    through with all parse-* fields None.
+    through with all parse-* fields None. sreality_id path: build the target
+    from the scraped `listings` row by id (no parse, no LLM).
     """
+    if body.sreality_id is not None:
+        matched = _match_listing_by_id(conn, body.sreality_id)
+        if matched is None:
+            raise ValueError(
+                f"listing {body.sreality_id} not found or missing coordinates"
+            )
+        spec = dict(matched["spec"])
+        if body.spec_overrides:
+            spec = {**spec, **body.spec_overrides}
+        return _Resolution(
+            input_url=None,
+            input_sreality_id=matched["sreality_id"],
+            target_spec=spec,
+            source_kind=None,
+            parse_confidence=None,
+            parse_confidence_per_field=None,
+            source_html=None,
+            parse_warnings=[],
+            subject_listing_price_czk=_coerce_int(matched.get("price_czk")),
+            subject_listing_category_type=matched.get("category_type"),
+            subject_attributes=None,
+        )
     if body.url is not None:
         # Non-sreality portals don't resolve to a listings row through the
         # dispatcher, but we scrape them — so try the already-scraped row first.
