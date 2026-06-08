@@ -1528,3 +1528,84 @@ def test_sweep_stuck_runs_marks_old_pending_rows_failed():
     assert "status IN ('pending', 'running')" in captured["sql"]
     assert "interrupted by server restart" in captured["sql"]
     assert captured["params"] == (15,)
+
+
+# ----------------------------------------------------------------------
+# POST /estimations with sreality_id (Browse card on-card estimate) +
+# GET /estimations/latest-by-listing
+# ----------------------------------------------------------------------
+
+def test_post_with_sreality_id_resolves_listing_row(client, monkeypatch):
+    """A Browse card posts just {sreality_id}; the target is built from the
+    scraped listings row by id (no URL parse, no LLM)."""
+    state = _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    monkeypatch.setattr(
+        er, "_match_listing_by_id",
+        lambda conn, sid: {
+            "sreality_id": int(sid),
+            "spec": {
+                "lat": 50.05, "lng": 14.40, "area_m2": 43.0,
+                "disposition": "1+1", "floor": 2, "exclude_ids": [],
+            },
+            "price_czk": 3_898_000,
+            "category_type": "prodej",
+        },
+    )
+
+    res = client.post("/estimations", json={"sreality_id": 12345})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "success"
+    assert body["input_sreality_id"] == 12345
+    assert body["input_url"] is None
+    assert body["input_spec"]["lat"] == 50.05
+    assert body["estimate_kind"] == "rent"
+    # rent estimate on a 'prodej' listing derives purchase price from the
+    # asking price so gross_yield_pct can be computed.
+    assert body["input_purchase_price_czk"] == 3_898_000
+    assert state.inserts[1]["input_sreality_id"] == 12345
+
+
+def test_post_with_unknown_sreality_id_persists_failed(client, monkeypatch):
+    _patch_persistence(monkeypatch)
+    _patch_estimate(monkeypatch)
+    monkeypatch.setattr(er, "_match_listing_by_id", lambda conn, sid: None)
+
+    res = client.post("/estimations", json={"sreality_id": 999})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "failed"
+    assert "999" in (body["error_message"] or "")
+
+
+def test_post_with_sreality_id_and_url_returns_422(client):
+    res = client.post(
+        "/estimations",
+        json={"sreality_id": 1, "url": "https://www.sreality.cz/detail/x/1"},
+    )
+    assert res.status_code == 422
+
+
+def test_latest_by_listing_route_parses_csv(client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake(conn, ids):
+        captured["ids"] = list(ids)
+        return {
+            1: {
+                "sreality_id": 1, "run_id": 7, "status": "success",
+                "estimate_kind": "rent", "gross_yield_pct": 4.2,
+                "estimated_monthly_rent_czk": 18000,
+                "created_at": "2026-05-04T10:00:00+00:00",
+            },
+        }
+
+    monkeypatch.setattr(api_main, "latest_rent_estimations_by_listing", fake)
+    res = client.get("/estimations/latest-by-listing?sreality_ids=1,2,abc,3")
+    assert res.status_code == 200
+    body = res.json()
+    assert captured["ids"] == [1, 2, 3]
+    # JSON object keys are strings
+    assert body["estimates"]["1"]["gross_yield_pct"] == 4.2
+    assert body["estimates"]["1"]["run_id"] == 7

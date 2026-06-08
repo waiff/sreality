@@ -1,5 +1,5 @@
 import { type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import ImageCarousel from '@/components/ImageCarousel';
 import {
   CARD_PAGE_SIZE,
@@ -12,6 +12,7 @@ import {
   fmtShortDate, fmtTomDays,
 } from '@/lib/format';
 import { portalLabel } from '@/lib/portals';
+import type { ListingEstimate } from '@/lib/types';
 
 interface Props {
   rows: CardRow[] | null;
@@ -39,6 +40,13 @@ interface Props {
   mergeMode: boolean;
   selectedPropertyIds: ReadonlySet<number>;
   onToggleSelect: (propertyId: number) => void;
+  /* On-card estimate: latest rent estimate per listing id (keyed by
+   * sreality_id), the set of ids whose run is being kicked off right now
+   * (optimistic spinner), and the trigger. Estimate runs on apartment cards
+   * only. estimates is undefined until the lookup resolves. */
+  estimates: Record<number, ListingEstimate> | undefined;
+  estimatingIds: ReadonlySet<number>;
+  onEstimate: (srealityId: number) => void;
 }
 
 export default function ListingCards({
@@ -58,6 +66,9 @@ export default function ListingCards({
   mergeMode,
   selectedPropertyIds,
   onToggleSelect,
+  estimates,
+  estimatingIds,
+  onEstimate,
 }: Props) {
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && rows != null && rows.length === 0;
@@ -106,6 +117,9 @@ export default function ListingCards({
                   mergeMode={mergeMode}
                   selected={selectedPropertyIds.has(r.property_id)}
                   onToggleSelect={onToggleSelect}
+                  estimate={estimates?.[r.sreality_id]}
+                  estimating={estimatingIds.has(r.sreality_id)}
+                  onEstimate={onEstimate}
                 />
               </li>
             ))}
@@ -127,6 +141,9 @@ function Card({
   mergeMode,
   selected,
   onToggleSelect,
+  estimate,
+  estimating,
+  onEstimate,
 }: {
   r: CardRow;
   hovered: boolean;
@@ -134,6 +151,9 @@ function Card({
   mergeMode: boolean;
   selected: boolean;
   onToggleSelect: (propertyId: number) => void;
+  estimate: ListingEstimate | undefined;
+  estimating: boolean;
+  onEstimate: (srealityId: number) => void;
 }) {
   const title = formatTitle(r);
   const place = [r.locality, r.district].filter(Boolean).join(', ');
@@ -271,6 +291,16 @@ function Card({
             </span>
           </p>
         )}
+        {r.category_main === 'byt' && (
+          <div className="mt-1 flex justify-end">
+            <EstimateCorner
+              srealityId={r.sreality_id}
+              estimate={estimate}
+              estimating={estimating}
+              onEstimate={onEstimate}
+            />
+          </div>
+        )}
       </div>
     </>
   );
@@ -319,6 +349,115 @@ function formatTitle(r: CardRow): string {
   if (r.disposition) parts.push(r.disposition);
   if (r.area_m2 != null) parts.push(fmtArea(r.area_m2));
   return parts.join(' · ');
+}
+
+/* -------------------------------------------------------------------------- */
+/* EstimateCorner — bottom-right control on apartment cards. Runs the standard */
+/* (agent) rental estimate on click; once a run exists it shows that run's     */
+/* result IN PLACE of the button: the gross yield when the asking price is     */
+/* known, otherwise the estimated monthly rent. Distinct from the muted        */
+/* "Výnos MF" line above (a statistical reference) — copper accent marks it as */
+/* our own estimate. Lives inside the card <Link> / merge toggle, so every     */
+/* handler stops propagation to avoid navigating / toggling selection.         */
+/* -------------------------------------------------------------------------- */
+
+function EstimateCorner({
+  srealityId,
+  estimate,
+  estimating,
+  onEstimate,
+}: {
+  srealityId: number;
+  estimate: ListingEstimate | undefined;
+  estimating: boolean;
+  onEstimate: (srealityId: number) => void;
+}) {
+  const navigate = useNavigate();
+  const stop = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const running =
+    estimating ||
+    estimate?.status === 'pending' ||
+    estimate?.status === 'running';
+
+  if (running) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[0.62rem] text-[var(--color-ink-3)] tabular-nums"
+        title="Odhad nájmu probíhá…"
+      >
+        <Spinner />
+        Odhaduji…
+      </span>
+    );
+  }
+
+  if (estimate && estimate.status === 'success') {
+    const label =
+      estimate.gross_yield_pct != null
+        ? `Výnos ~ ${estimate.gross_yield_pct.toLocaleString('cs-CZ', {
+            minimumFractionDigits: 1,
+            maximumFractionDigits: 1,
+          })} %`
+        : estimate.estimated_monthly_rent_czk != null
+          ? `Nájem ~ ${fmtCzk(estimate.estimated_monthly_rent_czk)}/měs`
+          : null;
+    if (label != null) {
+      return (
+        <button
+          type="button"
+          onClick={(e) => {
+            stop(e);
+            navigate(`/estimation/${estimate.run_id}`);
+          }}
+          title="Náš odhad nájmu — otevřít detail odhadu"
+          className="inline-flex items-center rounded-[var(--radius-xs)] border border-[var(--color-copper)] px-1.5 py-0.5 text-[0.62rem] font-medium tabular-nums text-[var(--color-copper)] hover:bg-[var(--color-copper)]/10 transition-colors"
+        >
+          {label}
+        </button>
+      );
+    }
+  }
+
+  const failed = estimate?.status === 'failed';
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        stop(e);
+        onEstimate(srealityId);
+      }}
+      title={failed ? 'Odhad selhal — zkusit znovu' : 'Spustit odhad nájmu a výnosu'}
+      className="inline-flex items-center gap-1 rounded-[var(--radius-xs)] border border-[var(--color-rule)] px-1.5 py-0.5 text-[0.62rem] font-medium text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"
+    >
+      {failed ? 'Odhad ↻' : 'Odhad'}
+    </button>
+  );
+}
+
+function Spinner() {
+  return (
+    <svg
+      className="animate-spin"
+      width="11"
+      height="11"
+      viewBox="0 0 24 24"
+      fill="none"
+      aria-hidden
+    >
+      <circle
+        cx="12" cy="12" r="9"
+        stroke="currentColor" strokeWidth="3" strokeOpacity="0.25"
+      />
+      <path
+        d="M21 12a9 9 0 0 0-9-9"
+        stroke="currentColor" strokeWidth="3" strokeLinecap="round"
+      />
+    </svg>
+  );
 }
 
 /* -------------------------------------------------------------------------- */

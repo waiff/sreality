@@ -44,6 +44,7 @@ from api.estimation_runs import (
     create_estimation_run,
     get_estimation_run,
     get_trace_payload,
+    latest_rent_estimations_by_listing,
     list_estimation_runs,
     preview_estimation,
     sweep_stuck_runs,
@@ -684,6 +685,29 @@ def get_estimation_preview(
             "image_count":          len(parsed.get("images") or []),
         },
     }
+
+
+@app.get("/estimations/latest-by-listing")
+def get_latest_estimations_by_listing(
+    sreality_ids: str = Query(..., description="CSV of listing ids"),
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Latest rent estimate per listing id, for the Browse cards' estimate chip.
+
+    Declared before `/estimations/{run_id}` so the literal path isn't captured
+    by the int run-id route.
+    """
+    ids: list[int] = []
+    for part in sreality_ids.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            continue
+    return {"estimates": latest_rent_estimations_by_listing(conn, ids[:200])}
 
 
 @app.get("/estimations/{run_id}")

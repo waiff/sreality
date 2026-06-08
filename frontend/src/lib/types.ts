@@ -537,6 +537,20 @@ export interface EstimationRun {
   locality_display?: string | null;
 }
 
+/* Compact latest-rent-estimate summary per listing, served by
+ * GET /estimations/latest-by-listing for the Browse cards' on-card estimate
+ * chip. Distinct from the card's statistical mf_gross_yield_pct — this is the
+ * result of an actual estimation run. */
+export interface ListingEstimate {
+  sreality_id: number;
+  run_id: number;
+  status: EstimationStatus;
+  estimate_kind: 'rent' | 'sale' | null;
+  gross_yield_pct: number | null;
+  estimated_monthly_rent_czk: number | null;
+  created_at: string | null;
+}
+
 /* Migration 131 — the MF Cenová mapa secondary rent reference breakdown
  * stored on estimation_runs.reference_rent. */
 export interface ReferenceRentAdjustment {
@@ -648,6 +662,9 @@ export interface CreateEstimationIn extends Partial<EstimationFilters> {
   estimate_kind?: 'rent' | 'sale';
   url?: string;
   spec?: TargetSpecIn;
+  /* Estimate an already-scraped listing by internal id (the Browse cards'
+   * on-card estimate). Exactly one of url / spec / sreality_id is set. */
+  sreality_id?: number;
   spec_overrides?: Partial<TargetSpecIn>;
   purchase_price_czk?: number | null;
   expected_monthly_rent_czk?: number | null;

@@ -292,11 +292,13 @@ class PreviewEstimationIn(BaseModel):
 class CreateEstimationIn(BaseModel):
     """POST /estimations request body.
 
-    Either `url` or `spec` must be set, not both. When `url` is set,
-    the URL is parsed via scraper.url_parser and the resulting spec is
-    used as the target; `spec_overrides` (a partial dict) is merged on
+    Exactly one of `url`, `spec`, or `sreality_id` must be set. When `url`
+    is set, the URL is parsed via scraper.url_parser and the resulting spec
+    is used as the target; `spec_overrides` (a partial dict) is merged on
     top to let the caller adjust individual fields. When `spec` is set
-    directly, it is used verbatim.
+    directly, it is used verbatim. When `sreality_id` is set, the target is
+    built from the already-scraped `listings` row by id (no URL parse, no
+    LLM) — the path the Browse cards' on-card estimate uses.
 
     `estimate_kind` selects rent vs sale. When omitted, defaults to
     'rent' for backwards compatibility with callers built before
@@ -329,6 +331,7 @@ class CreateEstimationIn(BaseModel):
 
     url: str | None = None
     spec: TargetIn | None = None
+    sreality_id: int | None = None
     spec_overrides: dict[str, Any] | None = None
 
     purchase_price_czk: int | None = None
@@ -377,9 +380,10 @@ class CreateEstimationIn(BaseModel):
 
     @model_validator(mode="after")
     def _apply_kind_defaults(self) -> "CreateEstimationIn":
-        if (self.url is None) == (self.spec is None):
+        targets = (self.url, self.spec, self.sreality_id)
+        if sum(t is not None for t in targets) != 1:
             raise ValueError(
-                "Provide exactly one of 'url' or 'spec'"
+                "Provide exactly one of 'url', 'spec', or 'sreality_id'"
             )
         if self.category_type is None:
             self.category_type = (
