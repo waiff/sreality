@@ -181,8 +181,8 @@ def test_write_detail_batch_nulls_overflow_price():
 
 def test_sane_listing_numerics_clamps_int4_and_numeric_overflow():
     obj = {
-        "locality_municipality_id": 1_281_819_603,  # foreign synthetic id > int4 max
-        "street_id": 1_248_927_013,  # > int4 max
+        "locality_municipality_id": 3_000_000_000,  # foreign synthetic id > int4 max
+        "street_id": 2_500_000_000,  # > int4 max
         "locality_region_id": 10,  # in range
         "floor": 3,  # in range
         "area_m2": 120.5,  # numeric(7,1), in range
@@ -233,8 +233,8 @@ def test_write_detail_batch_nulls_overflow_locality_id():
     row = {
         "sreality_id": 1,
         "price_czk": 100,
-        "locality_municipality_id": 1_281_819_603,
-        "street_id": 1_248_927_013,
+        "locality_municipality_id": 3_000_000_000,
+        "street_id": 2_500_000_000,
     }
     res = SimpleNamespace(row=row, raw={"id": 1}, content_hash="h1", images=[])
     db.write_detail_batch(conn, [res])
