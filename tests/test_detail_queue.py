@@ -179,6 +179,70 @@ def test_write_detail_batch_nulls_overflow_price():
     assert snap[1][0].obj[0]["price_czk"] is None
 
 
+def test_sane_listing_numerics_clamps_int4_and_numeric_overflow():
+    obj = {
+        "locality_municipality_id": 1_281_819_603,  # foreign synthetic id > int4 max
+        "street_id": 1_248_927_013,  # > int4 max
+        "locality_region_id": 10,  # in range
+        "floor": 3,  # in range
+        "area_m2": 120.5,  # numeric(7,1), in range
+        "estate_area": 100_000_000.0,  # numeric(9,1) overflow
+        "usable_area": 99_999_999.0,  # numeric(9,1), in range
+        "price_czk": 5_000_000,  # in range
+    }
+    db.sane_listing_numerics(obj)
+    assert obj["locality_municipality_id"] is None
+    assert obj["street_id"] is None
+    assert obj["estate_area"] is None
+    assert obj["locality_region_id"] == 10
+    assert obj["floor"] == 3
+    assert obj["area_m2"] == 120.5
+    assert obj["usable_area"] == 99_999_999.0
+    assert obj["price_czk"] == 5_000_000
+
+
+def test_sane_listing_numerics_leaves_text_bool_and_none_untouched():
+    obj = {
+        "locality": "Praha",
+        "condition": "po_rekonstrukci",
+        "has_balcony": True,
+        "locality_municipality_id": None,
+    }
+    db.sane_listing_numerics(obj)
+    assert obj == {
+        "locality": "Praha",
+        "condition": "po_rekonstrukci",
+        "has_balcony": True,
+        "locality_municipality_id": None,
+    }
+
+
+def test_numeric_abs_max_covers_every_numeric_column():
+    numeric_cols = {c for c, t in db._LISTING_COLUMN_PGTYPE.items() if t == "numeric"}
+    assert set(db._NUMERIC_ABS_MAX) == numeric_cols
+
+
+def test_write_detail_batch_nulls_overflow_locality_id():
+    # A foreign listing's >int4 municipality_id / street_id must not crash the
+    # batch's jsonb_to_recordset ::integer cast; both clamp to NULL in the upsert.
+    conn = _FakeConn([
+        (lambda s: "INSERT INTO listings (" in s, [(True,)]),
+        (lambda s: "INSERT INTO listing_snapshots" in s, [(0,)]),
+        (lambda s: "DELETE FROM listing_fetch_failures" in s, []),
+    ])
+    row = {
+        "sreality_id": 1,
+        "price_czk": 100,
+        "locality_municipality_id": 1_281_819_603,
+        "street_id": 1_248_927_013,
+    }
+    res = SimpleNamespace(row=row, raw={"id": 1}, content_hash="h1", images=[])
+    db.write_detail_batch(conn, [res])
+    obj = _find(conn.executed, "INSERT INTO listings (")[1][0].obj[0]
+    assert obj["locality_municipality_id"] is None
+    assert obj["street_id"] is None
+
+
 # --- queue helpers ----------------------------------------------------------
 
 

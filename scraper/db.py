@@ -157,6 +157,45 @@ def sane_price_czk(price: int | None) -> int | None:
     return price
 
 
+# A foreign listing's synthetic ids (sreality assigns Spain/Bali/etc. localities
+# municipality_ids in a 1.28-billion-and-rising space) can exceed int4 on the
+# locality_*_id / street_id columns; an unbounded numeric column can likewise
+# overflow numeric(p,s). Either fails the jsonb_to_recordset cast and aborts the
+# whole ~100-listing detail batch. Like sane_price_czk, clamp out-of-range values
+# to NULL at the write boundary — driven off _LISTING_COLUMN_PGTYPE so a future
+# int4/numeric column is covered automatically with no hand-list to drift.
+INT4_MIN, INT4_MAX = -2_147_483_648, 2_147_483_647
+# Max abs value a numeric(p,s) column accepts is 10^(p-s). Every 'numeric'
+# LISTING_COLUMN must have an entry here (asserted below).
+_NUMERIC_ABS_MAX: dict[str, int] = {
+    "area_m2": 10**6,  # numeric(7,1)
+    "estate_area": 10**8,  # numeric(9,1)
+    "usable_area": 10**8,  # numeric(9,1)
+    "garden_area": 10**8,  # numeric(9,1)
+}
+assert set(_NUMERIC_ABS_MAX) == {
+    c for c, t in _LISTING_COLUMN_PGTYPE.items() if t == "numeric"
+}, "_NUMERIC_ABS_MAX drifted from the numeric LISTING_COLUMNS"
+
+
+def sane_listing_numerics(obj: dict[str, Any]) -> None:
+    """Clamp out-of-range int4/numeric LISTING_COLUMN values to NULL, in place.
+
+    price_czk keeps its stricter business cap (sane_price_czk, applied first);
+    this is the column-range backstop for every other numeric column.
+    """
+    for col, pgtype in _LISTING_COLUMN_PGTYPE.items():
+        v = obj.get(col)
+        if v is None:
+            continue
+        if pgtype == "integer" and not (INT4_MIN <= v <= INT4_MAX):
+            LOG.warning("NUMERIC dropped col=%s value=%s (int4 range)", col, v)
+            obj[col] = None
+        elif pgtype == "numeric" and abs(v) >= _NUMERIC_ABS_MAX[col]:
+            LOG.warning("NUMERIC dropped col=%s value=%s (numeric range)", col, v)
+            obj[col] = None
+
+
 def database_url() -> str:
     url = os.environ.get("SUPABASE_DB_URL")
     if not url:
@@ -260,6 +299,7 @@ def upsert_listing(
     for col in LISTING_COLUMNS:
         params[col] = row.get(col)
     params["price_czk"] = sane_price_czk(params["price_czk"])
+    sane_listing_numerics(params)
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(upsert_sql, params)
@@ -1409,6 +1449,7 @@ def write_detail_batch(
         price_czk = sane_price_czk(row.get("price_czk"))
         obj: dict[str, Any] = {c: row.get(c) for c in LISTING_COLUMNS}
         obj["price_czk"] = price_czk
+        sane_listing_numerics(obj)
         obj["sreality_id"] = sid
         obj["lon"] = row.get("lon")
         obj["lat"] = row.get("lat")
