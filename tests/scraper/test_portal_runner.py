@@ -241,6 +241,42 @@ def test_detail_drain_dry_run_does_not_claim(monkeypatch):
     assert cap["claim_n"] == []   # dry-run never claims
 
 
+def test_detail_drain_bumps_counts_per_chunk_without_double_count(monkeypatch):
+    # With a run_id the counts are persisted per chunk (crash/SIGKILL-survivable);
+    # the SUM of bumps must equal the final agg, NOT 2x (finalize won't re-write
+    # them). A small batch size forces both in-loop and post-loop flushes.
+    monkeypatch.setattr(portal_runner, "DETAIL_BATCH_SIZE", 2)
+    cap = _patch_queue(monkeypatch, [
+        [("1", None, None), ("2", None, None), ("3", None, None)],
+        [("4", None, None), ("5", None, None)],
+    ])
+    bumps: list[dict[str, int]] = []
+    monkeypatch.setattr(
+        portal_runner.db, "bump_scrape_run_counts",
+        lambda conn, run_id, **kw: bumps.append({"run_id": run_id, **kw}),
+    )
+    p = _FakePortal()
+    rc, agg = portal_runner.run_detail_drain(
+        p, None, False, detail_workers=1, detail_rate=1.0, run_id=7)
+    assert rc == 0
+    assert bumps and all(b["run_id"] == 7 for b in bumps)
+    assert sum(b["scraped_new"] for b in bumps) == agg["listings_scraped_new"] == 5
+    assert sum(b["found_new"] for b in bumps) == 5
+    assert sum(b["updated"] for b in bumps) == agg["listings_updated"] == 0
+
+
+def test_detail_drain_does_not_bump_without_run_id(monkeypatch):
+    _patch_queue(monkeypatch, [[("1", None, None)]])
+    bumps: list = []
+    monkeypatch.setattr(
+        portal_runner.db, "bump_scrape_run_counts",
+        lambda *a, **k: bumps.append((a, k)),
+    )
+    p = _FakePortal()
+    portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert bumps == []   # no run_id -> never bumps
+
+
 def test_detail_drain_time_budget_finalizes_cleanly(monkeypatch):
     # A wall-clock budget makes the drain stop + finalize rather than overrun the
     # job timeout (which would leave a 'stuck' scrape_run). monotonic() jumps far
