@@ -1175,8 +1175,10 @@ def sweep_stuck_scrape_runs(
     A GitHub-Actions job killed at the job timeout (SIGKILL) can't write
     ended_at, so the row stays orphaned and the Health 'runs finishing
     cleanly' check counts it 'stuck'. Stamp ended_at so a hard-kill self-heals
-    on the next API boot. Counters stay as-is (zeros) — the row correctly
-    reflects that it never reported aggregates. The cutoff must stay above the
+    on the next API boot. Counters are left as-is on purpose: the index walk
+    (bump_index_pages) and the detail-drain (bump_scrape_run_counts) persist their
+    counts incrementally as they go, so a swept row already carries the real
+    totals of whatever committed before the kill. The cutoff must stay above the
     scrape job timeout so a still-running walk is never finalized.
     """
     with conn.transaction(), conn.cursor() as cur:
@@ -1224,9 +1226,32 @@ def scrape_run_finalize(
     images_stored: int = 0,
     errors: int = 0,
     by_category: list[dict[str, Any]] | None = None,
+    bump_already_applied: bool = False,
 ) -> None:
-    """Close out the scrape_runs row with aggregate counters."""
+    """Close out the scrape_runs row with aggregate counters.
+
+    bump_already_applied: the detail-drain persists its five row counters
+    incrementally via bump_scrape_run_counts (crash/SIGKILL-survivable), so for a
+    drain run finalize must NOT re-write them — overwriting would double-count on
+    the happy path, or (on a crash, where the aggregate is empty) zero the counts
+    that were already committed. It then only stamps ended_at + index_pages +
+    images_stored + by_category. Index/full/delta runs (default False) keep writing
+    their aggregate exactly as before.
+    """
     with conn.transaction(), conn.cursor() as cur:
+        if bump_already_applied:
+            cur.execute(
+                """
+                UPDATE scrape_runs
+                SET ended_at      = now(),
+                    index_pages   = GREATEST(index_pages, %s),
+                    images_stored = %s,
+                    by_category   = %s
+                WHERE id = %s
+                """,
+                (index_pages, images_stored, Jsonb(by_category or []), run_id),
+            )
+            return
         cur.execute(
             """
             UPDATE scrape_runs
@@ -1277,6 +1302,52 @@ def bump_index_pages(conn: psycopg.Connection, run_id: int, n: int) -> None:
             )
     except Exception:  # noqa: BLE001 - never let bookkeeping abort a walk
         LOG.warning("bump_index_pages failed for run %s", run_id, exc_info=True)
+
+
+def bump_scrape_run_counts(
+    conn: psycopg.Connection,
+    run_id: int | None,
+    *,
+    found_new: int = 0,
+    scraped_new: int = 0,
+    updated: int = 0,
+    inactive: int = 0,
+    errors: int = 0,
+    images_discovered: int = 0,
+) -> None:
+    """Additively persist drain counters as batches flush, best-effort.
+
+    The detail-drain commits each batch in its own transaction, but its in-memory
+    counts used to surface only via the runner's terminal return — so a mid-run
+    crash (or a SIGKILL) left the scrape_runs row reading 0 despite committed
+    writes. Bumping per chunk (like bump_index_pages does for index_pages) keeps
+    the counts on the row regardless of how the run ends. The drain connection is
+    autocommit, so each bump persists on its own; finalize for a drain run is told
+    NOT to re-write these columns (bump_already_applied), so the happy path counts
+    exactly once. Audit bookkeeping must never abort a drain.
+    """
+    if run_id is None:
+        return
+    if not (found_new or scraped_new or updated or inactive or errors or images_discovered):
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE scrape_runs SET
+                  listings_found_new   = listings_found_new   + %s,
+                  listings_scraped_new = listings_scraped_new + %s,
+                  listings_updated     = listings_updated     + %s,
+                  listings_inactive    = listings_inactive    + %s,
+                  errors               = errors               + %s,
+                  images_discovered    = images_discovered    + %s
+                WHERE id = %s
+                """,
+                (found_new, scraped_new, updated, inactive, errors,
+                 images_discovered, run_id),
+            )
+    except Exception:  # noqa: BLE001 - never let bookkeeping abort a drain
+        LOG.warning("bump_scrape_run_counts failed for run %s", run_id, exc_info=True)
 
 
 def active_failure_ids(

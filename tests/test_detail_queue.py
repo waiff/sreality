@@ -243,6 +243,49 @@ def test_write_detail_batch_nulls_overflow_locality_id():
     assert obj["street_id"] is None
 
 
+# --- scrape_run counters (crash-survivable) ---------------------------------
+
+
+def test_bump_scrape_run_counts_additive_update():
+    conn = _FakeConn([(lambda s: "UPDATE scrape_runs SET" in s, [])])
+    db.bump_scrape_run_counts(
+        conn, 7, found_new=3, scraped_new=3, updated=1, inactive=2,
+        errors=1, images_discovered=4,
+    )
+    sql, params = _find(conn.executed, "UPDATE scrape_runs SET")
+    assert "listings_scraped_new = listings_scraped_new + %s" in sql
+    assert "errors = errors + %s" in sql
+    assert params == (3, 3, 1, 2, 1, 4, 7)
+
+
+def test_bump_scrape_run_counts_noop_on_zero_delta_and_null_run():
+    conn = _FakeConn([])
+    db.bump_scrape_run_counts(conn, 7)  # all-zero delta -> no UPDATE
+    db.bump_scrape_run_counts(conn, None, found_new=5)  # no run_id -> no UPDATE
+    assert conn.executed == []
+
+
+def test_scrape_run_finalize_drain_does_not_rewrite_bumped_counters():
+    conn = _FakeConn([(lambda s: "UPDATE scrape_runs" in s, [])])
+    db.scrape_run_finalize(
+        conn, 9, listings_scraped_new=999, listings_updated=999,
+        index_pages=0, images_stored=2, by_category=[], bump_already_applied=True,
+    )
+    sql, _ = _find(conn.executed, "UPDATE scrape_runs")
+    # The drain bumped these incrementally; finalize must leave them alone.
+    assert "listings_scraped_new" not in sql
+    assert "listings_updated" not in sql
+    assert "ended_at = now()" in sql and "images_stored = %s" in sql
+
+
+def test_scrape_run_finalize_default_writes_all_counters():
+    conn = _FakeConn([(lambda s: "UPDATE scrape_runs" in s, [])])
+    db.scrape_run_finalize(conn, 9, listings_scraped_new=5, listings_updated=3)
+    sql, _ = _find(conn.executed, "UPDATE scrape_runs")
+    assert "listings_scraped_new = %s" in sql
+    assert "listings_updated = %s" in sql
+
+
 # --- queue helpers ----------------------------------------------------------
 
 

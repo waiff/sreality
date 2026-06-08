@@ -235,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 detail_workers=detail_workers,
                 detail_rate=detail_rate,
+                run_id=run_id,
             )
         elif args.detail_only is not None:
             rc, scrape_agg = _run_detail_only(
@@ -289,6 +290,11 @@ def main(argv: list[str] | None = None) -> int:
                     db.scrape_run_finalize(
                         conn, run_id,
                         **_combine_aggregates(scrape_agg, image_agg),
+                        # The drain persists its counters per chunk (crash-survivable);
+                        # finalize must not re-write them. Keyed off the flag that
+                        # actually ran the drain, so it holds even on a crash (where
+                        # scrape_agg is empty), not off a value inside scrape_agg.
+                        bump_already_applied=args.drain_only,
                     )
             except Exception as exc:
                 LOG.warning("scrape_run_finalize failed: %s", exc)
@@ -894,12 +900,14 @@ def _run_detail_drain(
     dry_run: bool,
     detail_workers: int = DEFAULT_DETAIL_WORKERS,
     detail_rate: float = DEFAULT_DETAIL_RATE,
+    run_id: int | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Sreality detail-drain via the generic portal_runner (Phase 4): claim from
     listing_detail_queue, fetch on a worker pool, write batched via
     write_detail_batch. Records run_type='detail' with index_pages=0."""
     return portal_runner.run_detail_drain(
         SrealityPortal(), max_claims, dry_run, detail_workers, detail_rate,
+        run_id=run_id,
     )
 
 

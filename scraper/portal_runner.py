@@ -229,6 +229,7 @@ def run_detail_drain(
     detail_workers: int,
     detail_rate: float,
     max_seconds: float | None = None,
+    run_id: int | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Claim queue rows for this source, fetch on a worker pool, write batched.
 
@@ -237,6 +238,11 @@ def run_detail_drain(
     write-bound portal can never overrun its GitHub-Actions timeout and leave a
     'stuck' scrape_run. When set, claims use a smaller chunk so the budget is
     checked often enough; the queue persists, so deferred work drains next run.
+
+    When `run_id` is supplied the counts are persisted onto the scrape_runs row
+    per chunk (bump_scrape_run_counts), so a mid-run crash or SIGKILL keeps the
+    committed work's counts instead of finalize zeroing them (caller passes
+    bump_already_applied=True so the happy path counts exactly once).
     """
     counts: dict[str, int] = {
         "new": 0, "updated": 0, "unchanged": 0, "gone": 0, "errors": 0,
@@ -256,6 +262,28 @@ def run_detail_drain(
     conn = portal.connect_drain()
     total_claimed = 0
     buffer: list[DrainItem] = []
+
+    # Persist the counts delta since the last bump onto the scrape_runs row, so a
+    # crash/SIGKILL keeps what committed. Single accumulator (counts) + delta means
+    # no double-count and the straddling residual buffer is caught by the final
+    # bump. O(chunks), like bump_index_pages — never per-row.
+    last_bumped = dict.fromkeys(counts, 0)
+
+    def _persist_counts() -> None:
+        if run_id is None:
+            return
+        new_d = counts["new"] - last_bumped["new"]
+        db.bump_scrape_run_counts(
+            conn, run_id,
+            found_new=new_d,
+            scraped_new=new_d,
+            updated=counts["updated"] - last_bumped["updated"],
+            inactive=counts["gone"] - last_bumped["gone"],
+            errors=counts["errors"] - last_bumped["errors"],
+            images_discovered=counts["images_discovered"] - last_bumped["images_discovered"],
+        )
+        last_bumped.update(counts)
+
     try:
         reclaimed = db.reclaim_stale_claims(conn, portal.source)
         if reclaimed:
@@ -311,7 +339,9 @@ def run_detail_drain(
                 total_claimed, counts["new"], counts["updated"],
                 counts["unchanged"], counts["gone"], counts["errors"], len(buffer),
             )
+            _persist_counts()
         _flush_drain_batch(portal, conn, buffer, counts, dry_run)
+        _persist_counts()
     finally:
         conn.close()
 

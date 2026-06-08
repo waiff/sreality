@@ -242,8 +242,8 @@ def _load_config(dry_run: bool) -> PortalConfig:
         return default_config(SOURCE)
 
 
-def _finalize(run_id: int | None, agg: dict[str, Any]) -> None:
-    if run_id is None or not agg:
+def _finalize(run_id: int | None, agg: dict[str, Any], *, drain: bool = False) -> None:
+    if run_id is None or (not agg and not drain):
         return
     try:
         with db.connect() as conn:
@@ -258,6 +258,7 @@ def _finalize(run_id: int | None, agg: dict[str, Any]) -> None:
                 images_stored=0,  # crawl records image-URL rows only; bytes uploaded async by images.yml
                 errors=agg.get("errors", 0),
                 by_category=agg.get("by_category", []),
+                bump_already_applied=drain,
             )
     except Exception as exc:
         LOG.warning("scrape_run_finalize failed: %s", exc)
@@ -276,12 +277,11 @@ def _run_phase(
     agg: dict[str, Any] = {}
     rc = 0
     try:
-        if runner is portal_runner.run_index_walk:
-            kw = {**kw, "run_id": run_id}
+        kw = {**kw, "run_id": run_id}
         rc, agg = runner(portal, dry_run=dry_run, **kw)
     finally:
         if not dry_run:
-            _finalize(run_id, agg)
+            _finalize(run_id, agg, drain=runner is portal_runner.run_detail_drain)
     return rc
 
 
