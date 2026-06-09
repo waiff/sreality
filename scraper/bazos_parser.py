@@ -531,11 +531,15 @@ def parse_detail(
         street=street, locality=locality, psc=psc, geocoder=geocoder,
     )
 
+    # The listing's own photos carry its ad id in the URL (/img/N/sub/<id>.jpg); the
+    # "podobné inzeráty" footer shows OTHER ads' cover thumbnails — scope to this id.
     image_urls: list[str] = []
     seen: set[str] = set()
     for img in tree.css("img"):
         src = img.attributes.get("src")
         if not src or "bazos.cz/img/" not in src:
+            continue
+        if source_id and source_id not in src:
             continue
         full = _full_size_image_url(src)
         if full not in seen:
