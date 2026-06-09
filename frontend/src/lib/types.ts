@@ -56,6 +56,9 @@ export interface ListingPublic {
   disposition: Disposition | null;
   locality: string | null;
   district: string | null;
+  obec: string | null;
+  okres: string | null;
+  street: string | null;
   locality_district_id: number | null;
   locality_region_id: number | null;
   lat: number | null;

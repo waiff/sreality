@@ -10,6 +10,7 @@ import {
   fmtFurnished, fmtOwnership, fmtParkingLots,
 } from '@/lib/format';
 import type { Furnished, Ownership } from '@/lib/types';
+import { placePrimary } from '@/lib/placeLabel';
 
 interface Column {
   field: SortField | 'furnished' | 'ownership';
@@ -20,7 +21,7 @@ interface Column {
 
 const COLUMNS: ReadonlyArray<Column> = [
   { field: 'sreality_id',   label: 'ID',          align: 'left',  sortable: true  },
-  { field: 'district',      label: 'District',    align: 'left',  sortable: true  },
+  { field: 'district',      label: 'Location',    align: 'left',  sortable: true  },
   { field: 'disposition',   label: 'Type',        align: 'left',  sortable: true  },
   { field: 'area_m2',       label: 'Area',        align: 'right', sortable: true  },
   { field: 'estate_area',   label: 'Lot',         align: 'right', sortable: true  },
@@ -204,7 +205,7 @@ function Row({
         </Link>
       </td>
       <td className="px-4 py-2.5 align-middle text-[var(--color-ink)] truncate max-w-[260px]">
-        {row.district ?? <span className="text-[var(--color-ink-4)]">—</span>}
+        {placePrimary(row) ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-4 py-2.5 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
         {row.disposition ?? <span className="text-[var(--color-ink-4)]">—</span>}

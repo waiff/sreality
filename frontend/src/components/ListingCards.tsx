@@ -12,6 +12,7 @@ import {
   fmtShortDate, fmtTomDays,
 } from '@/lib/format';
 import { portalLabel } from '@/lib/portals';
+import { placePrimary } from '@/lib/placeLabel';
 import type { ListingEstimate } from '@/lib/types';
 
 interface Props {
@@ -156,7 +157,10 @@ function Card({
   onEstimate: (srealityId: number) => void;
 }) {
   const title = formatTitle(r);
-  const place = [r.locality, r.district].filter(Boolean).join(', ');
+  /* Precise place first (geo town when the free-text locality is just the okres
+   * — the Bazoš "Jihlava"-for-Telč case), then the district/okres for context,
+   * de-duped so we never render "Telč, Telč". */
+  const place = [...new Set([placePrimary(r), r.district].filter(Boolean) as string[])].join(', ');
   const isRent = r.category_type === 'pronajem';
   const priceSuffix = isRent && r.price_czk != null ? ' /měs' : '';
   const inactive = !r.is_active;
