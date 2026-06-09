@@ -36,15 +36,21 @@ _CALLED_FOR = "classify_listing_images"
 
 ROOM_TYPES = (
     "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
-    "exterior_facade", "balcony_terrace", "garden", "floor_plan", "other",
+    "exterior_facade", "balcony_terrace", "garden", "floor_plan", "site_plan",
+    "other",
 )
 
 # Interior types carry the strongest same-flat signal; the pHash fast-path uses
-# this set to exclude facade / floor-plan shots (whole developments reuse one
-# such image across distinct units).
+# this set to exclude facade / floor-plan / site-plan shots (whole developments
+# reuse one such image across distinct units).
 INTERIOR_ROOM_TYPES = frozenset({
     "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
 })
+
+# Site/situation plans: a development masterplan or a unit highlighted within a
+# building layout. The development guard compares these across two listings to
+# tell same-unit from different-unit-in-one-project (dedup_engine rule).
+SITE_PLAN_ROOM_TYPE = "site_plan"
 
 
 class ClassifyError(RuntimeError):

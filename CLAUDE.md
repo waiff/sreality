@@ -508,14 +508,26 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     number + disposition + floor → auto-merge, with a 5% area guard that demotes
     mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
     a hard floor / >20%-area / house-number contradiction rejects it; nothing is ever compared
-    that doesn't share street + disposition. **(D)** layered visual confirmation: ≥2
-    near-identical INTERIOR photos (pHash; facade/floor-plan excluded) auto-merge, else a
-    room-aware forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on
-    like rooms in priority order, stop at the first **High** verdict → auto-merge. **(E)**
-    everything else queues on the operator's `/dedup` review page. The visual layer's two cached
-    LLM tools — `classify_listing_images` (migration 128) and `compare_listings_visually`
-    (migration 129) — are write-allowed exceptions (toolkit rule #5). A `dedup_engine_runs` row
-    (migration 130) per run powers the `/dedup` automation dashboard. Merges are **reversible**:
+    that doesn't share street + disposition, AND no **same-development guard** fires.
+    Two development guards keep near-identical units of one project from auto-merging:
+    a TEXT one (rule C `unit_marker_contradiction` — the descriptions name the same
+    keyword with different unit tokens: `pozemek č.3` vs `č.4`, `dům 3A` vs `5C`,
+    `byt 42` vs `45`, and container/letter labels `budova/blok/vchod/sekce/etapa/objekt`
+    `A` vs `B`; letter labels matched case-sensitively so the Czech conjunction "a" isn't
+    one) → hard reject; and a VISUAL one (the `site_plan` image category, migration 171):
+    when both listings carry a site/situation plan, `compare_listing_site_plans` checks
+    whether they highlight the SAME unit — a `different_unit` verdict **queues** the pair
+    for the operator (never auto-merges, never auto-rejects — the conservative choice).
+    **(D)** layered visual confirmation: ≥2 near-identical INTERIOR photos (pHash;
+    facade/floor-plan/site-plan excluded) auto-merge, else a room-aware forensic comparison
+    (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in priority
+    order, stop at the first **High** verdict → auto-merge. **(E)**
+    everything else queues on the operator's `/dedup` review page. The visual layer's cached
+    LLM tools — `classify_listing_images` (migration 128), `compare_listings_visually`
+    (migration 129), and `compare_listing_site_plans` (migration 171,
+    `listing_site_plan_matches`) — are write-allowed exceptions (toolkit rule #5). A
+    `dedup_engine_runs` row (migration 130) per run powers the `/dedup` automation dashboard.
+    Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so
     `unmerge_group` is a deterministic replay. Because matching keys on street, a listing needs a

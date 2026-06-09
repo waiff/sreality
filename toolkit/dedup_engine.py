@@ -69,33 +69,63 @@ class ListingKey:
 # Unit markers in the description that identify a SPECIFIC unit within one
 # development (developer projects list near-identical plots/houses/flats with
 # only the unit number differing — "pozemek č. 3" vs "č. 4", "dům 3A" vs "5C",
-# "byt 42" vs "45"). When two listings name DIFFERENT units under the same
-# keyword they are distinct properties, even though street/disposition/photos
-# (shared marketing renders) all match.
+# "byt 42" vs "45", "budova A" vs "budova B"). When two listings name DIFFERENT
+# units under the same keyword they are distinct properties, even though
+# street/disposition/photos (shared marketing renders) all match.
 #
-# "<keyword> [č./č/no/number] <token>" where the token is a number optionally
-# followed by a letter or /number (3, 3A, 12/4). Diacritics are stripped first
-# so "dům"→"dum" matches.
-_UNIT_RE = re.compile(
-    r"\b(pozemek|dum|byt|jednotka|parcela|chata|rd)\b"
+# Two token shapes:
+#  - NUMERIC: "<keyword> [č./č/no/number] <token>" where the token is a number
+#    optionally followed by a letter or /number (3, 3A, 12/4). Case-insensitive
+#    (run on diacritics-stripped lowercase text).
+#  - LETTER: "<keyword> [A-H]" — a single UPPERCASE building/section letter
+#    ("Budova A" vs "Budova B"). Matched CASE-SENSITIVELY against the original
+#    text so the Czech conjunction "a"/"i" and stray lowercase letters don't
+#    masquerade as unit labels. Restricted to A–H (real projects don't label
+#    blocks past a handful) to further cut false positives.
+#
+# Keyword sets are kept apart: numeric keywords (a flat/plot number can follow)
+# vs. container keywords that take a letter label (building/block/entrance/…).
+_NUMERIC_KEYWORDS = "pozemek|dum|byt|jednotka|parcela|chata|rd|objekt|sekce|vchod"
+_CONTAINER_KEYWORDS = "budova|blok|sekce|vchod|etapa|objekt|dum|dom"
+
+_UNIT_NUM_RE = re.compile(
+    r"\b(" + _NUMERIC_KEYWORDS + r")\b"
     r"(?:\s*(?:c|cislo|no|number)\.?)?\s*"
     r"(\d+[a-z]?(?:/\d+)?)\b"
 )
+# Letter labels: keyword must keep its diacritics-stripped form, but the LETTER
+# is read from the original text so case is preserved. Built case-insensitively
+# on the keyword, case-sensitively on the [A-H] group via an inline flag.
+_UNIT_LETTER_RE = re.compile(
+    r"(?i:\b(" + _CONTAINER_KEYWORDS + r")\b)\s*"
+    r"(?-i:([A-H]))(?![\w])"
+)
+
+
+def _strip_diacritics(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
 
 
 def _unit_markers(description: str | None) -> dict[str, set[str]]:
     """Map each unit keyword → the set of unit tokens it names in the text.
 
-    e.g. "...dům, pozemek č.4 o velikosti..." → {'pozemek': {'4'}}. Diacritics
-    stripped + lowercased so 'dům'→'dum'. Empty when nothing matches.
+    e.g. "...dům, pozemek č.4..." → {'pozemek': {'4'}}; "Budova A" → {'budova':
+    {'A'}}. Numeric tokens come from diacritics-stripped lowercase text; letter
+    labels from the original text (case preserved) so 'A'/'B' are unit labels but
+    the conjunction 'a' is not. Empty when nothing matches.
     """
     if not description:
         return {}
-    decomposed = unicodedata.normalize("NFKD", description.lower())
-    ascii_text = "".join(c for c in decomposed if not unicodedata.combining(c))
     out: dict[str, set[str]] = {}
-    for kw, token in _UNIT_RE.findall(ascii_text):
+    ascii_lower = _strip_diacritics(description).lower()
+    for kw, token in _UNIT_NUM_RE.findall(ascii_lower):
         out.setdefault(kw, set()).add(token)
+    # Letter labels: run on the diacritics-stripped (but case-preserved) text so
+    # 'dům'→'dum' for the keyword while 'A' stays uppercase.
+    ascii_cased = _strip_diacritics(description)
+    for kw, letter in _UNIT_LETTER_RE.findall(ascii_cased):
+        out.setdefault(kw.lower(), set()).add(letter)
     return out
 
 
