@@ -71,6 +71,13 @@ _PSC_RE = re.compile(r"\b(\d{3})\s?(\d{2})\b")
 _COORD_RE = re.compile(r"(-?\d{1,3}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})")
 _AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:2|²)\b", re.IGNORECASE)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
+# bazos serves /img/N/ (full ~1200px) and /img/Nt/ (thumbnail ~340px) for the same
+# photo; a detail page shows the full cover plus the whole thumbnail strip.
+_BAZOS_THUMB_RE = re.compile(r"/img/(\d+)t/")
+
+
+def _full_size_image_url(src: str) -> str:
+    return _BAZOS_THUMB_RE.sub(r"/img/\1/", src, count=1)
 
 # Czech-bbox guard applied to every coordinate candidate (link OR geocode) so a
 # stray decimal pair, a swapped lat/lon, or a geocode that landed abroad can
@@ -524,11 +531,16 @@ def parse_detail(
         street=street, locality=locality, psc=psc, geocoder=geocoder,
     )
 
-    image_urls = [
-        src
-        for img in tree.css("img")
-        if (src := img.attributes.get("src")) and "bazos.cz/img/" in src
-    ]
+    image_urls: list[str] = []
+    seen: set[str] = set()
+    for img in tree.css("img"):
+        src = img.attributes.get("src")
+        if not src or "bazos.cz/img/" not in src:
+            continue
+        full = _full_size_image_url(src)
+        if full not in seen:
+            seen.add(full)
+            image_urls.append(full)
 
     raw = {
         "id": source_id,
