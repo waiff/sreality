@@ -3,6 +3,7 @@ import { imageSrc } from './imageUrl';
 import type { ListingDetailLite } from './dedupDiff';
 import {
   type CenterRadius,
+  type DistrictChip,
   type ListingFilters,
   type MapBounds,
   buildingMaterialToValues,
@@ -166,26 +167,35 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (f.recentlyAddedDays != null) r = r.gte('first_seen_at', isoNDaysAgo(f.recentlyAddedDays));
   if (f.recentlyChangedDays != null) r = r.gte('last_change_at', isoNDaysAgo(f.recentlyChangedDays));
   if (f.districts.length) {
-    /* Each chip becomes:
-     *   (district ilike *name* OR locality ilike *name*)
-     *   AND (no context, OR district/locality ilike *context*)
-     * Mapy.cz suggests at every granularity (kraj, okres, obec, část obce,
-     * street, POI); listings carry the geo-derived `okres` / `region`
-     * (kraj) + the canonical `district`, and the part-of-municipality /
-     * street / POI name appears in the `locality` free-text — so matching
-     * all four lets a pick at any level resolve (migration 141). The
-     * context half (parent municipality from `regionalStructure`) is what
-     * stops a "Edvarda Beneše" pick in Plzeň from also matching the streets
-     * of the same name in Olomouc / Hradec Králové.
+    /* Each chip resolves to a STABLE ADMIN ID at the level the user picked
+     * (migration 171/172): an obec pick matches `obec_id`, an okres pick
+     * `okres_id`, a kraj pick `region_id` — so picking obec "Jihlava" can't
+     * collide with its same-named okres. A `locality` pick (street / POI /
+     * address) matches its containing `obec_id` AND a `locality` ILIKE on the
+     * place name, so a street narrows to its municipality without dragging in
+     * same-named streets elsewhere. A legacy / unresolved chip (no level/id —
+     * a pre-resolution saved filter, or a point that matched no admin unit)
+     * falls back to the old name ILIKE across district/locality/okres/region
+     * with an optional parent-municipality context narrow.
      *
      * Chips split by `excluded`: INCLUDE chips are OR'd (match any), then
      * AND'd with NOT-(OR of the EXCLUDE chips) so an excluded locality is
      * subtracted from the cohort. Combined into a single `and(...)` tree so
      * PostgREST AND's the two groups. Kept in lockstep with the watchdog
-     * matcher (`_build_match_clauses`) and browse_stats (migration 146),
-     * which apply the same include/exclude split. */
-    const chipClause = (d: { name: string; context: string | null }): string => {
+     * matcher (`_build_match_clauses`) and browse_stats (migration 172),
+     * which apply the same per-chip predicate + include/exclude split. */
+    const ID_COL: Record<string, string> = {
+      obec: 'obec_id', okres: 'okres_id', kraj: 'region_id',
+    };
+    const chipClause = (d: DistrictChip): string => {
+      if (d.id != null && d.level != null && d.level in ID_COL) {
+        return `${ID_COL[d.level]}.eq.${d.id}`;
+      }
       const namePat = escapeIlikePattern(d.name);
+      if (d.level === 'locality') {
+        const loc = `locality.ilike.${namePat}`;
+        return d.id != null ? `and(obec_id.eq.${d.id},${loc})` : loc;
+      }
       const cols = (pat: string): string =>
         `district.ilike.${pat},locality.ilike.${pat},okres.ilike.${pat},region.ilike.${pat}`;
       const nameHalf = `or(${cols(namePat)})`;
@@ -638,6 +648,15 @@ export const fetchBrowseStats = async (
      * unnest stays aligned with names; absent excluded => include. */
     districts_excluded_filter: f.districts.length
       ? f.districts.map((d) => d.excluded === true)
+      : null,
+    /* Migration 172 — resolved admin level + id parallel to the names, so the
+     * Stats cohort matches by stable id (obec_id/okres_id/region_id) exactly
+     * like Map/Table. NULL entries = legacy/unresolved chips → name fallback. */
+    districts_levels: f.districts.length
+      ? f.districts.map((d) => d.level ?? null)
+      : null,
+    districts_ids: f.districts.length
+      ? f.districts.map((d) => (d.id == null ? null : d.id))
       : null,
     dispositions_filter:     f.dispositions.length ? f.dispositions : null,
     price_min_filter:        f.priceMin,

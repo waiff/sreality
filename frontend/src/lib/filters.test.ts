@@ -217,6 +217,42 @@ describe('URL round-trip', () => {
     expect(sp.get('districts_excl')).toBe('1,0');
     expect(fromSearchParams(sp).districts).toEqual(f.districts);
   });
+
+  it('round-trips a resolved admin chip (level + id)', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [{ name: 'Jihlava', context: null, level: 'obec' as const, id: 586846 }],
+    };
+    const sp = toSearchParams(f);
+    expect(sp.get('districts_lvl')).toBe('obec');
+    expect(sp.get('districts_id')).toBe('586846');
+    expect(fromSearchParams(sp).districts).toEqual(f.districts);
+  });
+
+  it('round-trips a mix of resolved + legacy chips with aligned parallel CSVs', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [
+        { name: 'Jihlava', context: null, level: 'okres' as const, id: 3707 },
+        { name: 'Brno', context: null },
+      ],
+    };
+    const sp = toSearchParams(f);
+    // Full-length parallel arrays — the legacy chip has empty level/id slots.
+    expect(sp.get('districts_lvl')).toBe('okres,');
+    expect(sp.get('districts_id')).toBe('3707,');
+    expect(fromSearchParams(sp).districts).toEqual(f.districts);
+  });
+
+  it('omits districts_lvl/id entirely for a pre-resolution (legacy) filter', () => {
+    const f = {
+      ...DEFAULT_FILTERS,
+      districts: [{ name: 'Praha', context: null }],
+    };
+    const sp = toSearchParams(f);
+    expect(sp.has('districts_lvl')).toBe(false);
+    expect(sp.has('districts_id')).toBe(false);
+  });
 });
 
 describe('isDefault', () => {

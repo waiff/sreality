@@ -26,11 +26,26 @@ export interface MapySuggestion {
   [extra: string]: unknown;
 }
 
+/* The resolution of a picked suggestion to a stable admin identity. `admin`
+ * (obec/okres/kraj) carries the admin_boundaries id matched by `/maps/resolve`'s
+ * point-in-polygon; `locality` (street / POI / address / část obce) carries its
+ * containing `obecId` so a street narrows to its municipality + a locality-text
+ * match. `point_with_radius` / `unresolved` are the fallbacks for points that
+ * resolve to no admin unit (foreign points). */
 export type LocationResolution =
   | {
-      kind: 'admin_polygon';
-      level: 'obec' | 'okres' | 'kraj' | 'ku';
+      kind: 'admin';
+      level: 'obec' | 'okres' | 'kraj';
       id: number;
+      name: string;
+      label: string;
+      lat: number;
+      lng: number;
+      default_radius_m: number;
+    }
+  | {
+      kind: 'locality';
+      obecId: number | null;
       label: string;
       lat: number;
       lng: number;
@@ -50,11 +65,14 @@ interface SuggestResponse {
 }
 
 interface ResolveResponse {
-  kind: 'admin_polygon' | 'point_with_radius' | 'unresolved';
+  kind: 'admin' | 'locality' | 'point_with_radius' | 'unresolved';
+  level: 'obec' | 'okres' | 'kraj' | 'locality' | null;
+  id: number | null;
+  obec_id: number | null;
+  name: string | null;
   label: string;
   lat: number | null;
   lng: number | null;
-  polygon: { level: 'obec' | 'okres' | 'kraj' | 'ku'; id: number; name: string } | null;
   default_radius_m: number;
   raw: Record<string, unknown>;
 }
@@ -93,14 +111,29 @@ export const resolveSuggestion = async (
   };
   const res = await apiPost<ResolveResponse>('/maps/resolve', body);
 
-  if (res.kind === 'unresolved' || res.lat == null || res.lng == null) {
+  if (res.lat == null || res.lng == null) {
     return { kind: 'unresolved', label: res.label };
   }
-  if (res.kind === 'admin_polygon' && res.polygon) {
+  if (
+    res.kind === 'admin'
+    && res.id != null
+    && (res.level === 'obec' || res.level === 'okres' || res.level === 'kraj')
+  ) {
     return {
-      kind: 'admin_polygon',
-      level: res.polygon.level,
-      id: res.polygon.id,
+      kind: 'admin',
+      level: res.level,
+      id: res.id,
+      name: res.name ?? pick.name,
+      label: res.label,
+      lat: res.lat,
+      lng: res.lng,
+      default_radius_m: res.default_radius_m,
+    };
+  }
+  if (res.kind === 'locality') {
+    return {
+      kind: 'locality',
+      obecId: res.obec_id,
       label: res.label,
       lat: res.lat,
       lng: res.lng,
@@ -123,6 +156,7 @@ export const typeBadge = (type: string): string => {
   if (type === 'regional.street') return 'Ulice';
   if (type === 'regional.municipality_part') return 'Část obce';
   if (type === 'regional.municipality') return 'Obec';
+  if (type === 'regional.region.district') return 'Okres';
   if (type === 'regional.region') return 'Kraj';
   if (type === 'regional.country') return 'Stát';
   if (type === 'poi') return 'POI';

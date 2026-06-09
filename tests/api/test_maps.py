@@ -173,15 +173,23 @@ def _override_conn(scripted: list[Any]) -> None:
     api_main.app.dependency_overrides[deps.get_db_conn] = lambda: _FakeConn(scripted)
 
 
-_CITY_SUGGESTION = {
-    "label": "Praha 2, Praha",
-    "lat": 50.077,
-    "lng": 14.441,
+# Resolve now PIPs the picked point into admin_boundaries at the obec level and
+# walks parent_id to okres/kraj — one row: (obec_id, obec_name, okres_id,
+# okres_name, kraj_id, kraj_name). The id at the PICKED level is what matches.
+_PIP_JIHLAVA = (586846, "Jihlava", 3707, "Jihlava", 108, "Kraj Vysočina")
+
+_OBEC_SUGGESTION = {
+    "label": "Jihlava, okres Jihlava",
+    "lat": 49.3961,
+    "lng": 15.5912,
     "type": "regional.municipality",
-    "regional_structure": [
-        {"name": "Praha 2", "type": "regional.municipality"},
-        {"name": "Hlavní město Praha", "type": "regional.region"},
-    ],
+}
+
+_OKRES_SUGGESTION = {
+    "label": "Okres Jihlava",
+    "lat": 49.40,
+    "lng": 15.60,
+    "type": "regional.region.district",
 }
 
 _STREET_SUGGESTION = {
@@ -189,52 +197,67 @@ _STREET_SUGGESTION = {
     "lat": 50.078,
     "lng": 14.444,
     "type": "regional.street",
-    "regional_structure": [],
 }
 
 
-def test_resolve_city_falls_back_to_point_when_admin_boundaries_absent(client):
-    # to_regclass returns None → table doesn't exist → fallback path
-    _override_conn(scripted=[(None,)])
-    res = client.post("/maps/resolve", json=_CITY_SUGGESTION)
+def test_resolve_obec_matches_obec_id(client):
+    # to_regclass → True; EXISTS → True; obec-level PIP → the Jihlava row.
+    _override_conn(scripted=[(True,), (True,), _PIP_JIHLAVA])
+    res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
     assert res.status_code == 200
     body = res.json()
-    assert body["kind"] == "point_with_radius"
-    assert body["polygon"] is None
-    assert body["default_radius_m"] == 5000  # municipality default
-    assert body["lat"] == 50.077
-    assert body["label"] == "Praha 2, Praha"
+    # An obec pick resolves to the obec id — NOT the same-named okres.
+    assert body["kind"] == "admin"
+    assert body["level"] == "obec"
+    assert body["id"] == 586846
+    assert body["obec_id"] == 586846
+    assert body["name"] == "Jihlava"
 
 
-def test_resolve_city_returns_admin_polygon_when_table_populated(client):
-    # to_regclass → True; EXISTS → True; first match for "Praha 2"/obec → (554782, "Praha 2")
-    _override_conn(scripted=[(True,), (True,), (554782, "Praha 2")])
-    res = client.post("/maps/resolve", json=_CITY_SUGGESTION)
-    assert res.status_code == 200
+def test_resolve_okres_matches_okres_id(client):
+    # Same point, but an okres-level pick resolves to the okres id (3707), so
+    # picking "Okres Jihlava" and obec "Jihlava" are distinct admin units.
+    _override_conn(scripted=[(True,), (True,), _PIP_JIHLAVA])
+    res = client.post("/maps/resolve", json=_OKRES_SUGGESTION)
     body = res.json()
-    assert body["kind"] == "admin_polygon"
-    assert body["polygon"] == {"level": "obec", "id": 554782, "name": "Praha 2"}
+    assert body["kind"] == "admin"
+    assert body["level"] == "okres"
+    assert body["id"] == 3707
+    assert body["obec_id"] == 586846
 
 
-def test_resolve_walks_to_region_when_obec_unmatched(client):
-    # to_regclass → True; EXISTS → True; obec "Praha 2" miss → kraj "Hlavní město Praha" hit
-    _override_conn(
-        scripted=[(True,), (True,), None, (19, "Hlavní město Praha")]
-    )
-    res = client.post("/maps/resolve", json=_CITY_SUGGESTION)
-    body = res.json()
-    assert body["kind"] == "admin_polygon"
-    assert body["polygon"] == {"level": "kraj", "id": 19, "name": "Hlavní město Praha"}
-
-
-def test_resolve_street_always_point_with_radius(client):
-    # Even with admin_boundaries populated, regional.street has no level mapping
-    _override_conn(scripted=[(True,), (True,)])
+def test_resolve_street_is_locality_with_containing_obec(client):
+    # A street resolves to its CONTAINING obec (for a locality-text narrow), not
+    # a circle — so it's scoped to that municipality, no cross-city collisions.
+    _override_conn(scripted=[(True,), (True,), _PIP_JIHLAVA])
     res = client.post("/maps/resolve", json=_STREET_SUGGESTION)
     body = res.json()
+    assert body["kind"] == "locality"
+    assert body["level"] == "locality"
+    assert body["id"] is None
+    assert body["obec_id"] == 586846
+
+
+def test_resolve_falls_back_to_point_when_admin_boundaries_absent(client):
+    # to_regclass returns None → table doesn't exist → point + radius fallback.
+    _override_conn(scripted=[(None,)])
+    res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
+    assert res.status_code == 200
+    body = res.json()
     assert body["kind"] == "point_with_radius"
-    assert body["polygon"] is None
-    assert body["default_radius_m"] == 500
+    assert body["level"] is None
+    assert body["default_radius_m"] == 5000  # municipality default
+    assert body["lat"] == 49.3961
+    assert body["label"] == "Jihlava, okres Jihlava"
+
+
+def test_resolve_foreign_point_falls_back_to_point(client):
+    # In-bounds query but the point matches no obec polygon (foreign / gap).
+    _override_conn(scripted=[(True,), (True,), None])
+    res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
+    body = res.json()
+    assert body["kind"] == "point_with_radius"
+    assert body["id"] is None
 
 
 def test_resolve_unresolved_when_no_coords(client):
@@ -246,19 +269,21 @@ def test_resolve_unresolved_when_no_coords(client):
     body = res.json()
     assert body["kind"] == "unresolved"
     assert body["lat"] is None
-    assert body["polygon"] is None
+    assert body["id"] is None
 
 
 def test_resolve_table_empty_falls_back(client):
     # table exists but has no rows → fallback
     _override_conn(scripted=[(True,), (False,)])
-    res = client.post("/maps/resolve", json=_CITY_SUGGESTION)
+    res = client.post("/maps/resolve", json=_OBEC_SUGGESTION)
     body = res.json()
     assert body["kind"] == "point_with_radius"
 
 
-def test_resolve_unknown_type_uses_default_radius(client):
-    _override_conn(scripted=[(None,)])
+def test_resolve_unknown_type_is_unresolved(client):
+    # A type with no admin-level mapping (e.g. country / unknown) narrows
+    # nothing — no PIP is attempted.
+    _override_conn(scripted=[])
     res = client.post(
         "/maps/resolve",
         json={
@@ -269,5 +294,5 @@ def test_resolve_unknown_type_uses_default_radius(client):
         },
     )
     body = res.json()
-    assert body["kind"] == "point_with_radius"
-    assert body["default_radius_m"] == 1500
+    assert body["kind"] == "unresolved"
+    assert body["level"] is None
