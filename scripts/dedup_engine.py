@@ -47,7 +47,7 @@ from toolkit.dedup_engine import (
     rooms_in_priority,
     verdict_is_merge,
 )
-from toolkit.image_classification import INTERIOR_ROOM_TYPES
+from toolkit.image_classification import INTERIOR_ROOM_TYPES, SITE_PLAN_ROOM_TYPE
 from toolkit.property_identity import MergeError, merge_properties
 
 LOG = logging.getLogger("dedup_engine")
@@ -211,6 +211,7 @@ def _resolve_visual(
     *,
     classify_fn: Any,
     compare_fn: Any,
+    site_plan_fn: Any,
     vision_budget: list[int],
     max_room_attempts: int,
 ) -> dict[str, Any]:
@@ -223,6 +224,23 @@ def _resolve_visual(
     imgs_b = _classify_or_none(classify_fn, b.sreality_id)
     if imgs_a is None or imgs_b is None:
         return {"action": "queue", "reason": "no_images", "phash_pairs": 0}
+
+    # Development guard (runs FIRST): if both listings carry a site/situation
+    # plan, check whether they highlight the same unit. A 'different_unit'
+    # verdict is the strongest "same project, distinct property" signal — QUEUE
+    # for the operator, never auto-merge. (Never auto-rejects: same_unit /
+    # inconclusive fall through to the normal confirmation below.)
+    site_a = [i["image_id"] for i in imgs_a if i["room_type"] == SITE_PLAN_ROOM_TYPE]
+    site_b = [i["image_id"] for i in imgs_b if i["room_type"] == SITE_PLAN_ROOM_TYPE]
+    if site_a and site_b and site_plan_fn is not None and vision_budget[0] > 0:
+        vision_budget[0] -= 1
+        sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b)
+        if sp is not None and sp.get("verdict") == "different_unit":
+            return {
+                "action": "queue", "reason": "site_plan_different_unit",
+                "verdict": sp["verdict"], "rationale": sp.get("rationale"),
+                "phash_pairs": 0,
+            }
 
     # Layer 1: interior pHash fast-path.
     interior_a = [i["image_id"] for i in imgs_a if i["room_type"] in INTERIOR_ROOM_TYPES]
@@ -297,6 +315,7 @@ def run_engine(
     *,
     classify_fn: Any = None,
     compare_fn: Any = None,
+    site_plan_fn: Any = None,
     max_pairs: int = 2000,
     max_vision_calls: int = 200,
     max_room_attempts: int = 4,
@@ -306,6 +325,8 @@ def run_engine(
 
     classify_fn(sreality_id) -> classify_listing_images envelope.
     compare_fn(a, b, room_type, ids_a, ids_b) -> {verdict, rationale} | None.
+    site_plan_fn(a, b, ids_a, ids_b) -> {verdict, rationale} | None (development
+    guard: verdict ∈ same_unit|different_unit|inconclusive).
 
     When auto_merge_enabled is False (the operator's /dedup toggle), the engine
     still finds candidates but queues every one for manual review instead of
@@ -376,6 +397,7 @@ def run_engine(
                     continue
                 outcome = _resolve_visual(
                     conn, a, b, classify_fn=classify_fn, compare_fn=compare_fn,
+                    site_plan_fn=site_plan_fn,
                     vision_budget=vision_budget, max_room_attempts=max_room_attempts,
                 )
                 markers = {
@@ -429,6 +451,25 @@ def _build_compare_fn(conn: Any) -> Any:
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
             LOG.warning("visual compare %s/%s room=%s failed: %s", a, b, room_type, exc)
+            return None
+    return _fn
+
+
+def _build_site_plan_fn(conn: Any) -> Any:
+    from api.dependencies import get_providers
+    from api.llm_client import LLMClient
+    from toolkit.visual_match import compare_listing_site_plans
+    llm = LLMClient(conn, providers=get_providers())
+
+    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        try:
+            res = compare_listing_site_plans(
+                conn, llm, sreality_id_a=a, sreality_id_b=b,
+                image_ids_a=ids_a, image_ids_b=ids_b,
+            )
+            return res["data"]
+        except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
+            LOG.warning("site-plan compare %s/%s failed: %s", a, b, exc)
             return None
     return _fn
 
@@ -493,9 +534,11 @@ def main() -> int:
 
         classify_fn = None
         compare_fn = None
+        site_plan_fn = None
         if auto_merge_enabled and args.max_vision_calls > 0:
             classify_fn = _build_classify_fn(conn)
             compare_fn = _build_compare_fn(conn)
+            site_plan_fn = _build_site_plan_fn(conn)
         elif auto_merge_enabled:
             # pHash fast-path still needs room labels to gate on interior shots.
             classify_fn = _build_classify_fn(conn)
@@ -504,6 +547,7 @@ def main() -> int:
 
         stats = run_engine(
             conn, classify_fn=classify_fn, compare_fn=compare_fn,
+            site_plan_fn=site_plan_fn,
             max_pairs=args.max_pairs, max_vision_calls=args.max_vision_calls,
             max_room_attempts=args.max_room_attempts,
             auto_merge_enabled=auto_merge_enabled,

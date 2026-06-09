@@ -144,6 +144,31 @@ def test_same_unit_marker_does_not_block() -> None:
     assert classify_pair(c, e).action == "candidate"
 
 
+def test_unit_marker_building_letter_labels_reject() -> None:
+    # "Budova A" vs "Budova B" etc. — the development-container letter labels.
+    for kw in ("Budova", "Blok", "Vchod", "Etapa"):
+        d = classify_pair(
+            _key(1, hn=None, description=f"{kw} A, pěkný byt 2+kk"),
+            _key(2, hn=None, description=f"{kw} B, pěkný byt 2+kk"),
+        )
+        assert d.detail == "unit_marker_contradiction", kw
+
+
+def test_unit_marker_numeric_containers_reject() -> None:
+    assert classify_pair(
+        _key(1, hn=None, description="objekt č. 3 v rezidenci"),
+        _key(2, hn=None, description="objekt č. 5 v rezidenci"),
+    ).detail == "unit_marker_contradiction"
+
+
+def test_unit_marker_lowercase_conjunction_not_a_label() -> None:
+    # The Czech conjunction "a"/"i" must never read as a building letter label.
+    assert classify_pair(
+        _key(1, hn=None, description="prodej domu a pozemku, byt 2+kk"),
+        _key(2, hn=None, description="prodej domu i zahrady, byt 2+kk"),
+    ).action == "candidate"
+
+
 def test_street_mismatch_rejects() -> None:
     d = classify_pair(_key(1, street="id:1"), _key(2, street="id:2"))
     assert d.action == "reject"
@@ -333,6 +358,67 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
     assert stats2["auto_visual"] == 0
     assert stats2["queued"] == 1
     assert merges == []
+
+
+def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
+    """Both listings carry a site plan; the guard says 'different_unit' → QUEUE,
+    never auto-merge — even though interiors would otherwise confirm."""
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+    )
+    # If the interior pHash / forensic path were reached it WOULD merge — prove
+    # the site-plan gate short-circuits before that.
+    monkeypatch.setattr(eng, "_phash_interior_identical_pairs", lambda *a, **k: 5)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "site_plan"},
+            {"image_id": sid * 10 + 2, "room_type": "kitchen"},
+        ]}}
+
+    def site_plan(a: int, b: int, ids_a: list, ids_b: list) -> dict:
+        return {"verdict": "different_unit", "rationale": "plot 3 vs plot 4"}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=lambda *a, **k: {"verdict": "High"},
+        site_plan_fn=site_plan, max_vision_calls=10,
+    )
+    assert stats["queued"] == 1
+    assert stats["auto_visual"] == 0 and stats["auto_phash"] == 0
+    assert merges == []  # the development guard blocked the otherwise-certain merge
+
+
+def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any) -> None:
+    """A 'same_unit' (or inconclusive) site-plan verdict does NOT block — the
+    normal interior confirmation still runs and can merge."""
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+    )
+    monkeypatch.setattr(eng, "_phash_interior_identical_pairs", lambda *a, **k: 5)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "site_plan"},
+            {"image_id": sid * 10 + 2, "room_type": "kitchen"},
+        ]}}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=lambda *a, **k: None,
+        site_plan_fn=lambda *a, **k: {"verdict": "same_unit", "rationale": "both plot 3"},
+        max_vision_calls=10,
+    )
+    assert stats["auto_phash"] == 1
+    assert merges == ["image_phash"]
 
 
 def test_run_engine_rejects_floor_contradiction(monkeypatch: Any) -> None:
