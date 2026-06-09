@@ -41,25 +41,31 @@ from scraper.bazos_parser import parse_detail
 LOG = logging.getLogger("backfill_bazos_coords")
 
 # Active, link-pinned, street-bearing bazos listings that we haven't re-parsed
-# yet, each joined to its most recent staged detail page.
+# yet AND that still have a staged detail page. Metadata only — the (large) HTML
+# is fetched per row in `_FETCH_HTML_SQL` so memory stays flat over ~13k rows.
 _SELECT_SQL = """
     SELECT l.sreality_id, l.source_id_native, l.source_url,
            l.category_main, l.category_type, l.property_id,
-           ST_AsText(l.geom) AS geom_wkt, p.html
+           ST_AsText(l.geom) AS geom_wkt
     FROM listings l
-    JOIN LATERAL (
-        SELECT html FROM portal_raw_pages pr
-        WHERE pr.source = 'bazos' AND pr.source_id_native = l.source_id_native
-          AND pr.page_kind = 'detail'
-        ORDER BY pr.fetched_at DESC NULLS LAST
-        LIMIT 1
-    ) p ON true
     WHERE l.source = 'bazos' AND l.is_active
       AND l.raw_json->'coords'->>'source' = 'link'
       AND l.raw_json->'coords'->>'street' IS NOT NULL
       AND l.raw_json->'coords'->>'reparsed' IS NULL
+      AND EXISTS (
+          SELECT 1 FROM portal_raw_pages pr
+          WHERE pr.source = 'bazos' AND pr.source_id_native = l.source_id_native
+            AND pr.page_kind = 'detail'
+      )
     ORDER BY l.sreality_id
     LIMIT %(limit)s
+"""
+
+_FETCH_HTML_SQL = """
+    SELECT html FROM portal_raw_pages
+    WHERE source = 'bazos' AND source_id_native = %(native)s AND page_kind = 'detail'
+    ORDER BY fetched_at DESC NULLS LAST
+    LIMIT 1
 """
 
 _COUNT_SQL = """
@@ -143,10 +149,19 @@ def main() -> int:
 
         moved = stamped = errors = 0
         dirty: list[int] = []
-        for i, (sid, native, url, cmain, ctype, prop_id, geom_wkt, html) in enumerate(rows):
+        for i, (sid, native, url, cmain, ctype, prop_id, geom_wkt) in enumerate(rows):
             if args.max_seconds and time.monotonic() - start > args.max_seconds:
                 LOG.info("BACKFILL stopping: --max-seconds reached")
                 break
+            with conn.cursor() as cur:
+                cur.execute(_FETCH_HTML_SQL, {"native": native})
+                html_row = cur.fetchone()
+            if html_row is None:
+                with conn.cursor() as cur:
+                    cur.execute(_STAMP_SQL, {"id": sid})
+                stamped += 1
+                continue
+            html = html_row[0]
             try:
                 listing = parse_detail(
                     html, source_url=url,
