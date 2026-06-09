@@ -101,6 +101,13 @@ _CENTER_RE = re.compile(
 # "3./6." -> floor 3 of 6.
 _FLOOR_RE = re.compile(r"(-?\d+)\s*\.\s*/\s*(\d+)\s*\.")
 _PENB_RE = re.compile(r"PENB\s*:?\s*([A-G])\b")
+# maxima serves /resize/w-{width}-...; a detail page mixes a w-800 cover with w-300
+# thumbnails. Request the largest — the CDN caps at the original (~1799x1200).
+_MAXIMA_RESIZE_RE = re.compile(r"/resize/w-\d+-")
+
+
+def _full_size_image_url(src: str) -> str:
+    return _MAXIMA_RESIZE_RE.sub("/resize/w-2400-", src, count=1)
 
 
 @dataclass(frozen=True)
@@ -422,9 +429,10 @@ def parse_detail(
         src = img.attributes.get("src")
         if not src or "/resize/" not in src or source_id_upper not in src:
             continue
-        if src not in seen_img:
-            seen_img.add(src)
-            image_urls.append(src)
+        full = _full_size_image_url(src)
+        if full not in seen_img:
+            seen_img.add(full)
+            image_urls.append(full)
 
     raw: dict[str, Any] = {
         "id": source_id,

@@ -8,6 +8,8 @@ gallery, the embedded OpenLayers map config (`"center":[lon,lat]`), and the
 
 from __future__ import annotations
 
+import re
+
 from scraper.maxima_parser import (
     category_from_id,
     category_of,
@@ -189,6 +191,9 @@ def test_parse_detail_full():
     # Only this listing's images (by upper id), not the OTHER9999 recommendation.
     assert len(listing.raw["image_urls"]) == 2
     assert all("B50087758" in u for u in listing.raw["image_urls"])
+    # Widths normalized to the largest variant (w-300/w-640 thumbnails upscaled-request).
+    assert all("/resize/w-2400-" in u for u in listing.raw["image_urls"])
+    assert not any(re.search(r"/resize/w-(?!2400-)\d+-", u) for u in listing.raw["image_urls"])
 
 
 def test_parse_detail_content_hash_stable_and_bridges_to_ingest():
