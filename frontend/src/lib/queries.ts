@@ -70,10 +70,10 @@ export const CARD_PAGE_SIZE = 24;
 
 const MAP_COLS = 'sreality_id,lat,lng,price_czk,disposition,area_m2,district,last_seen_at,is_active,tom_days';
 const TABLE_COLS =
-  'sreality_id,district,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'sreality_id,district,locality,obec,okres,street,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'estate_area,usable_area,parking_lots,furnished,ownership,category_sub_cb,building_type';
 const CARD_COLS =
-  'property_id,sreality_id,district,locality,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
+  'property_id,sreality_id,district,locality,obec,okres,street,disposition,area_m2,price_czk,first_seen_at,last_seen_at,is_active,tom_days,' +
   'category_main,category_type,source,mf_gross_yield_pct';
 
 export type SortField =
@@ -418,6 +418,10 @@ export const fetchListingsForMap = async (
 export interface TableRow {
   sreality_id: number;
   district: string | null;
+  locality: string | null;
+  obec: string | null;
+  okres: string | null;
+  street: string | null;
   disposition: string | null;
   area_m2: number | null;
   price_czk: number | null;
@@ -490,6 +494,9 @@ export interface CardRow {
   sreality_id: number;
   district: string | null;
   locality: string | null;
+  obec: string | null;
+  okres: string | null;
+  street: string | null;
   disposition: string | null;
   area_m2: number | null;
   price_czk: number | null;
@@ -708,7 +715,7 @@ export const fetchBrowseStats = async (
 const DETAIL_COLS =
   'sreality_id,first_seen_at,last_seen_at,is_active,source,tom_days,' +
   'category_main,category_type,price_czk,price_unit,' +
-  'area_m2,disposition,locality,district,locality_district_id,locality_region_id,' +
+  'area_m2,disposition,locality,district,obec,okres,street,locality_district_id,locality_region_id,' +
   'lat,lng,floor,total_floors,has_balcony,has_parking,has_lift,' +
   'building_type,condition,energy_rating,' +
   'estate_area,usable_area,garden_area,category_sub_cb,' +

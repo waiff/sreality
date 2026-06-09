@@ -15,6 +15,7 @@ import {
   fmtCategorySub,
 } from '@/lib/format';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
+import { placePrimary } from '@/lib/placeLabel';
 
 const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
 const Gallery = lazy(() => import('@/components/listing-detail/Gallery'));
@@ -106,7 +107,7 @@ function Header({
           </span>
         </h1>
         <p className="mt-2 text-sm text-[var(--color-ink-2)]">
-          {listing.locality ?? listing.district ?? '—'}
+          {placePrimary(listing) ?? '—'}
         </p>
         {(hasId || ppm !== '—') && (
           <p className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mt-2">
