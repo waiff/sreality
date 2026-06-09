@@ -90,8 +90,11 @@ DETAIL_HTML = """
   <tr><td>Jméno:</td><td>agent@example.cz</td></tr>
 </table>
 <div class="popisdetail">Pěkný byt 2+kk o celkové výměře 65 m² v klidné lokalitě.</div>
-<img src="https://www.bazos.cz/img/1/219/219122924.jpg">
-<img src="https://www.bazos.cz/img/1/219/219122924_2.jpg">
+<img src="https://www.bazos.cz/img/1/924/219122924.jpg">
+<img src="https://www.bazos.cz/img/1t/924/219122924.jpg">
+<img src="https://www.bazos.cz/img/2t/924/219122924.jpg">
+<img src="https://www.bazos.cz/img/3t/924/219122924.jpg">
+<div class="podobne"><img src="https://www.bazos.cz/img/1t/777/219777777.jpg"></div>
 </body></html>
 """
 
@@ -163,7 +166,27 @@ def test_parse_detail_full():
     assert listing.locality == "Letovice"
     assert listing.description.startswith("Pěkný byt")
     assert listing.raw["psc"] == "679 61"
-    assert len(listing.raw["image_urls"]) == 2
+    # cover (/img/1/) + thumbnail strip (/img/1t/,2t,3t) → 3 full-size, deduped;
+    # the "podobné inzeráty" thumbnail (a different ad id) is excluded.
+    assert listing.raw["image_urls"] == [
+        "https://www.bazos.cz/img/1/924/219122924.jpg",
+        "https://www.bazos.cz/img/2/924/219122924.jpg",
+        "https://www.bazos.cz/img/3/924/219122924.jpg",
+    ]
+
+
+def test_parse_detail_images_are_fullsize_deduped_and_own():
+    # bazos detail pages carry the full cover + a thumbnail strip + a "similar ads"
+    # footer; store the full-size variant of every OWN photo, never a thumbnail,
+    # never the same photo twice, and never another ad's image.
+    url = "https://reality.bazos.cz/inzerat/219122924/prodam-byt-2-kk-letovice.php"
+    urls = parse_detail(
+        DETAIL_HTML, source_url=url, category_main="byt", category_type="prodej"
+    ).raw["image_urls"]
+    assert all("/img/" in u and "t/" not in u.split("/img/")[1] for u in urls)
+    assert len(urls) == len(set(urls))
+    assert all("219122924" in u for u in urls)
+    assert not any("219777777" in u for u in urls)
 
 
 def test_parse_detail_category_from_breadcrumb_overrides_fallback():
