@@ -68,6 +68,7 @@ SUBTYPE: dict[str, str] = {
 
 _ID_RE = re.compile(r"/inzerat/(\d+)/")
 _PSC_RE = re.compile(r"\b(\d{3})\s?(\d{2})\b")
+_MAP_LABEL_RE = re.compile(r"(?i)\bzobrazit na map[ěe]\b")
 _COORD_RE = re.compile(r"(-?\d{1,3}\.\d{3,}),\s*(-?\d{1,3}\.\d{3,})")
 _AREA_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*m(?:2|²)\b", re.IGNORECASE)
 _DISPOSITION_RE = re.compile(r"\b(\d)\s*\+\s*(kk|\d)\b", re.IGNORECASE)
@@ -96,7 +97,10 @@ LINK_DISTRUST_RADIUS_KM = 5.0
 # reliable signal; the bare "<Name> <house-no>" form is gated by a street-like
 # suffix + a stopword list because a wrong street is worse than none.
 _CZ_UPPER = "A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
-_STREET_NAME = rf"[{_CZ_UPPER}]\w+(?:\s+[{_CZ_UPPER}]\w+){{0,2}}"
+# Inter-word whitespace is horizontal only ([^\S\r\n]): the street name must not
+# span the title->description line break, or a description's opening word leaks in
+# ("ul. Koterovská" + "\nNabízíme k pronájmu…" -> "ul. Koterovská Nabízíme").
+_STREET_NAME = rf"[{_CZ_UPPER}]\w+(?:[^\S\r\n]+[{_CZ_UPPER}]\w+){{0,2}}"
 # Optional trailing house number — a street + number geocodes to a precise
 # address (high confidence); the lookahead rejects a PSČ ("679 61").
 _HOUSE_NO = r"(?:\s+\d{1,4}(?:/\d{1,4})?(?!\s*\d))?"
@@ -421,25 +425,35 @@ def _next_offset(tree: HTMLParser) -> int | None:
 
 
 def _locality(cell_text: str | None) -> tuple[str | None, str | None]:
-    """Return (locality, psc) from a 'Town  PSČ' blob.
+    """Return (locality, psc) from the Lokalita cell text.
 
-    The town is taken as the text BEFORE the PSČ so a trailing map-link label
-    in the same cell doesn't leak into the town name.
+    bazos renders the cell two ways: "Town PSČ" (older fixtures) and "PSČ Town"
+    (live — the PSČ is the maps-link anchor, the town a separate town-listings
+    anchor). Prefer the text before the PSČ; fall back to the text after it when
+    nothing precedes it. A trailing "Zobrazit na mapě" map label is stripped first
+    so it never leaks into the town name.
     """
     if not cell_text:
         return None, None
-    psc_match = _PSC_RE.search(cell_text)
-    if psc_match:
-        psc = f"{psc_match.group(1)} {psc_match.group(2)}"
-        town = cell_text[: psc_match.start()].strip(" ,\n\t") or None
-    else:
-        psc = None
-        town = cell_text.strip(" ,\n\t") or None
-    return town, psc
+    text = _MAP_LABEL_RE.sub(" ", cell_text)
+    psc_match = _PSC_RE.search(text)
+    if not psc_match:
+        return text.strip(" ,\n\t") or None, None
+    psc = f"{psc_match.group(1)} {psc_match.group(2)}"
+    before = text[: psc_match.start()].strip(" ,\n\t")
+    after = text[psc_match.end():].strip(" ,\n\t")
+    return (before or after or None), psc
 
 
 def _detail_table(tree: HTMLParser) -> dict[str, Node]:
-    """Map the left details-table row labels to their value cells."""
+    """Map the left details-table row labels to their value cells.
+
+    The value is the LAST cell, not cells[1]: live bazos renders the Lokalita row
+    as three cells — label, a map-icon cell, then the cell holding the PSČ/town
+    (and the maps link). Reading cells[1] there grabbed the icon cell (no text),
+    which left `locality` NULL for every listing and disabled street geocoding.
+    For the ordinary two-cell rows (Cena, Vidělo) cells[-1] is still the value.
+    """
     rows: dict[str, Node] = {}
     for tr in tree.css("table tr"):
         cells = tr.css("td")
@@ -447,7 +461,7 @@ def _detail_table(tree: HTMLParser) -> dict[str, Node]:
             continue
         label = (cells[0].text(strip=True) or "").rstrip(":").lower()
         if label:
-            rows[label] = cells[1]
+            rows[label] = cells[-1]
     return rows
 
 

@@ -109,6 +109,53 @@ DOHODOU_DETAIL_HTML = """
 </body></html>
 """
 
+# Verbatim Lokalita row captured live from reality.bazos.cz (2026): a THREE-cell
+# layout — label, a map-icon cell, then a cell holding the maps link (PSČ as its
+# anchor text) followed by a separate town-listings anchor, i.e. "PSČ Town" order.
+# The hand-authored 2-cell "Town PSČ" fixtures above had diverged from this and
+# hid a 100%-NULL-locality bug that disabled street geocoding for every bazos
+# listing (it always fell back to the page-wide maps-link pin, collapsing whole
+# towns onto one map dot). Note the street ("ul. Koterovská") is at the END of the
+# title and the description opens with "Nabízíme" — the regression that produced
+# "ul. Koterovská Nabízíme" as the street, polluting the geocode query.
+LIVE_LOKALITA_DETAIL_HTML = """
+<!DOCTYPE html><html><body>
+<div class="drobky"><a href="https://www.bazos.cz/">Hlavní stránka</a> > <a href="https://reality.bazos.cz/">Reality</a> > <a href="https://reality.bazos.cz/pronajmu/">Pronájem</a> > <a href="https://reality.bazos.cz/pronajmu/byt/">Byty</a> > <b>Inzerát č. 219722150</b></div>
+<h1 class="nadpisdetail">Pronájem bytu 2+1, 82 m², Plzeň, ul. Koterovská</h1>
+<table class="listadvalues">
+  <tr><td height="22px" width="25%">Lokalita:</td><td width="9%"><img src="https://www.bazos.cz/obrazky/map.svg" alt="Mapa" height="17"></td><td><a href="https://www.google.com/maps/place/49.720928,13.421173/@49.720928,13.421173,12z/data=!4m2!3m1!1s0x0:0x0" title="Přibližná lokalita" rel="nofollow">326 00</a> <a href="https://reality.bazos.cz/inzeraty/plzen-26/32600/">Plzeň</a></td></tr>
+  <tr><td height="22px" width="25%">Cena:</td><td colspan=2>15 900 Kč</td></tr>
+</table>
+<div class="popisdetail">Nabízíme k pronájmu prostorný a světlý byt 2+1.</div>
+<img src="https://www.bazos.cz/img/1/150/219722150.jpg">
+</body></html>
+"""
+
+
+def test_parse_detail_live_three_cell_lokalita_enables_street_geocode():
+    """Regression for the production bug: the live 3-cell Lokalita layout must
+    yield a real locality (so the street geocode fires) and a clean street name
+    (no description-word bleed across the title/description newline)."""
+    geocoder = _stub_geocoder({
+        "Koterovská": _gr(49.738, 13.410, "high", "regional.address"),
+        "Plzeň": _gr(49.747, 13.377, "low", "regional.municipality"),
+    })
+    listing = parse_detail(
+        LIVE_LOKALITA_DETAIL_HTML,
+        source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
+        category_main="byt", category_type="prodej", geocoder=geocoder,
+    )
+    # Locality + PSČ now parse from the third cell, in "PSČ Town" order.
+    assert listing.locality == "Plzeň"
+    assert listing.raw["psc"] == "326 00"
+    # Breadcrumb is authoritative for the category.
+    assert (listing.category_main, listing.category_type) == ("byt", "pronajem")
+    # The street name stops at the title's end — no "Nabízíme" from the next line.
+    assert listing.raw["coords"]["street"] == "ul. Koterovská"
+    # With a real locality available, the street geocode wins over the link pin.
+    assert listing.raw["coords"]["source"] == "street"
+    assert (listing.lat, listing.lon) == (49.738, 13.410)
+
 
 def test_parse_index_total_and_items():
     page = parse_index(INDEX_HTML)
