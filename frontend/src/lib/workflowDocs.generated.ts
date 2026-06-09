@@ -89,6 +89,56 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/aggregate_condition_markers.yml"
   },
   {
+    "filename": "backfill_bazos_coords.yml",
+    "name": "Backfill bazos coordinates (street geocode)",
+    "description": "One-off, dispatch-only backfill. Re-places active bazos listings that are stuck on the shared maps-link pin (coords.source='link') and carry an extractable street: re-parses each from its already-staged detail HTML (portal_raw_pages, NO re-fetch of bazos) with the migration-406 parser fix + a cached Mapy.cz geocoder, and updates geom + locality in place where the street geocode is precise. Idempotent + resumable (each row stamped coords.reparsed); rerun until \"pending=0\". NOT a portal ingest workflow, so it carries no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max listings processed per run",
+        "required": false,
+        "type": "string",
+        "default": "20000",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget in seconds (blank = no budget)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the pending count and exit without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "MAPY_CZ_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "backfill-bazos-coords",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_bazos_coords.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_coords.yml"
+  },
+  {
     "filename": "bazos_detail_drain.yml",
     "name": "Scraping: Bazos detail drain",
     "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",

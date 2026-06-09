@@ -1,0 +1,65 @@
+name: Backfill bazos coordinates (street geocode)
+
+# One-off, dispatch-only backfill. Re-places active bazos listings that are stuck
+# on the shared maps-link pin (coords.source='link') and carry an extractable
+# street: re-parses each from its already-staged detail HTML (portal_raw_pages, NO
+# re-fetch of bazos) with the migration-406 parser fix + a cached Mapy.cz
+# geocoder, and updates geom + locality in place where the street geocode is
+# precise. Idempotent + resumable (each row stamped coords.reparsed); rerun until
+# "pending=0". NOT a portal ingest workflow, so it carries no `# portal:` tag.
+#
+# Required GitHub secrets: SUPABASE_DB_URL + MAPY_CZ_API_KEY (no MAPY key -> no-op).
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Max listings processed per run
+        required: false
+        default: "20000"
+        type: string
+      max_seconds:
+        description: Wall-clock budget in seconds (blank = no budget)
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: Report the pending count and exit without writing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: backfill-bazos-coords
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Backfill coordinates
+        run: |
+          ARGS="--limit ${{ inputs.limit || '20000' }}"
+          if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.backfill_bazos_coords $ARGS
