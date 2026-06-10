@@ -40,6 +40,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import {
   fetchSuggest,
+  resolveSuggestion,
   type MapySuggestion,
   SUGGEST_NOT_CONFIGURED,
   typeBadge,
@@ -131,13 +132,36 @@ export function LocationTypeahead({
   const emit = (next: DistrictChip[]) =>
     onChange(next.length === 0 ? null : next);
 
-  const add = (s: MapySuggestion) => {
+  /* Resolve the pick to its stable admin identity (level + id) via
+   * `/maps/resolve` — the SAME point-in-polygon that stamped every listing's
+   * obec_id, so `id = id` matching is exact (picking obec "Jihlava" can't drag
+   * in okres "Jihlava"). A street/POI/address resolves to its containing obec
+   * for a locality-text narrow. If resolve is unavailable (503 / offline), fall
+   * back to the legacy name-match chip so the pick still works. */
+  const resolveChip = async (
+    s: MapySuggestion,
+    base: DistrictChip,
+  ): Promise<DistrictChip> => {
+    try {
+      const res = await resolveSuggestion(s);
+      if (res.kind === 'admin') return { ...base, level: res.level, id: res.id };
+      if (res.kind === 'locality') {
+        return { ...base, level: 'locality', id: res.obecId };
+      }
+      return base;
+    } catch {
+      return base;
+    }
+  };
+
+  const add = async (s: MapySuggestion) => {
     onPick?.(s);
-    const chip: DistrictChip = { name: s.name, context: deriveContext(s) };
-    if (selected.some((c) => sameChip(c, chip))) return;
-    emit([...selected, chip]);
+    const base: DistrictChip = { name: s.name, context: deriveContext(s) };
+    if (selected.some((c) => sameChip(c, base))) return;
     setQuery('');
     setDebounced('');
+    const chip = await resolveChip(s, base);
+    emit([...selected, chip]);
   };
 
   const remove = (chip: DistrictChip) => {

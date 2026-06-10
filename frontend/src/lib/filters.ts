@@ -85,10 +85,18 @@ export interface NearCityProximity {
  * sent to the watchdog matcher
  * (`api/notifications.WatchdogFilterSpec.districts`) so Browse and
  * Watchdog stay aligned via the shared filter registry. */
+export type LocationLevel = 'obec' | 'okres' | 'kraj' | 'locality';
+
 export interface DistrictChip {
   name: string;
   context: string | null;
   excluded?: boolean;
+  /* Resolved admin level of the pick (from `/maps/resolve`). Absent = a legacy
+   * or unresolved chip, matched by name ILIKE (the pre-resolution behaviour). */
+  level?: LocationLevel;
+  /* admin_boundaries.id for an admin level, or the containing obec_id for a
+   * 'locality' chip. Null/absent = unresolved → legacy name match. */
+  id?: number | null;
 }
 
 /* One active price-stats growth filter: keep listings whose obec meets/exceeds
@@ -353,23 +361,34 @@ const splitCsv = (s: string | null): string[] =>
 
 const joinCsv = (xs: string[]): string => xs.map(encodeURIComponent).join(',');
 
+const _LOCATION_LEVELS: ReadonlyArray<LocationLevel> = [
+  'obec', 'okres', 'kraj', 'locality',
+];
+
 /* Parse the parallel `districts` (names) + `districts_ctx` (contexts) +
- * `districts_excl` (exclude flags) query params into a `DistrictChip[]`.
+ * `districts_excl` (exclude flags) + `districts_lvl` (admin level) +
+ * `districts_id` (admin id) query params into a `DistrictChip[]`.
  * Empty-string entries in the contexts CSV stand for "no context for
  * this chip" — that's how we keep the URL clean when only some chips
  * carry a parent. Missing `districts_ctx` entirely means every chip has
  * `context: null`, matching the legacy URL shape (`?districts=Praha`).
  * `districts_excl` is a parallel CSV of `1`/`0`; absent means every chip
- * is an include (legacy), so the flag only widens the schema. */
+ * is an include (legacy). `districts_lvl` / `districts_id` are absent for
+ * legacy / unresolved chips, which then fall back to name matching — so the
+ * schema only ever widens. */
 const parseDistrictChips = (
   namesRaw: string | null,
   ctxRaw: string | null,
   exclRaw: string | null,
+  lvlRaw: string | null,
+  idRaw: string | null,
 ): DistrictChip[] => {
   const names = splitCsv(namesRaw);
   if (names.length === 0) return [];
   const ctxs = splitCsv(ctxRaw);
   const excls = splitCsv(exclRaw);
+  const lvls = splitCsv(lvlRaw);
+  const ids = splitCsv(idRaw);
   return names.map((name, i) => {
     const ctx = ctxs[i];
     const chip: DistrictChip = {
@@ -377,6 +396,13 @@ const parseDistrictChips = (
       context: ctx == null || ctx === '' ? null : ctx,
     };
     if (excls[i] === '1') chip.excluded = true;
+    const lvl = lvls[i];
+    if (lvl != null && (_LOCATION_LEVELS as ReadonlyArray<string>).includes(lvl)) {
+      chip.level = lvl as LocationLevel;
+      const rawId = ids[i];
+      const n = rawId == null || rawId === '' ? null : Number(rawId);
+      chip.id = n != null && Number.isFinite(n) ? n : null;
+    }
     return chip;
   });
 };
@@ -434,6 +460,8 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
       sp.get('districts'),
       sp.get('districts_ctx'),
       sp.get('districts_excl'),
+      sp.get('districts_lvl'),
+      sp.get('districts_id'),
     ),
     dispositions,
     priceMin,
@@ -650,6 +678,16 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
       sp.set(
         'districts_excl',
         joinCsv(f.districts.map((d) => (d.excluded ? '1' : '0'))),
+      );
+    }
+    /* Resolved admin level + id (the precise match path). Emit both as
+     * full-length parallel CSVs only when at least one chip is resolved, so a
+     * pre-resolution / legacy filter's URL stays byte-identical to before. */
+    if (f.districts.some((d) => d.level != null)) {
+      sp.set('districts_lvl', joinCsv(f.districts.map((d) => d.level ?? '')));
+      sp.set(
+        'districts_id',
+        joinCsv(f.districts.map((d) => (d.id == null ? '' : String(d.id)))),
       );
     }
   }

@@ -56,17 +56,22 @@ LOG = logging.getLogger(__name__)
 class DistrictChip(BaseModel):
     """One entry in `WatchdogFilterSpec.districts`.
 
-    Mirrors the frontend's `DistrictChip` (`frontend/src/lib/filters.ts`).
-    `name` is the primary phrase to match (ILIKE substring across
-    `district` / `locality` / `okres` / `region`); `context` is the parent
-    municipality from Mapy.cz's `regionalStructure` that narrows the match
-    when set; `excluded` flips the chip from an INCLUDE to an EXCLUDE filter
-    (NOT-ed in the matcher WHERE) so an alert can subtract a locality.
+    Mirrors the frontend's `DistrictChip` (`frontend/src/lib/filters.ts`). A
+    resolved pick carries `level` ('obec' | 'okres' | 'kraj' | 'locality') and
+    the admin `id` (admin_boundaries.id for an admin level, or the containing
+    obec_id for a 'locality' chip) and is matched by STABLE ID -- so an obec
+    pick can't collide with its same-named okres. A chip with no level/id (a
+    legacy saved filter) falls back to ILIKE-by-name across
+    `district` / `locality` / `okres` / `region`. `context` is the parent
+    municipality (display + legacy narrow); `excluded` flips the chip from an
+    INCLUDE to an EXCLUDE filter (NOT-ed in the matcher WHERE).
     """
 
     name: str
     context: str | None = None
     excluded: bool = False
+    level: str | None = None
+    id: int | None = None
 
 
 class WatchdogFilterSpec(BaseModel):
@@ -277,42 +282,56 @@ def _build_match_clauses(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
-        # Same per-chip predicate as `browse_stats` (migration 146):
-        #   (district/locality/okres/region ILIKE *name*)
-        #   AND (no context, OR district/locality/okres/region ILIKE *context*)
-        # Matching the geo-derived okres/region too lets a kraj/okres pick
-        # resolve. INCLUDE chips are OR'd (match any); EXCLUDE chips are NOT-ed
-        # (subtract their matches). Keeps Browse and Watchdog in lockstep on
-        # what a District chip means.
+        # Per-chip predicate kept in lockstep with browse_stats (migration 172)
+        # and Browse (queries.ts): a resolved pick matches by STABLE ADMIN ID at
+        # its level (obec_id / okres_id / region_id) so an obec pick can't
+        # collide with its same-named okres; a 'locality' pick narrows to its
+        # containing obec + a locality-text match; a legacy chip with no level/id
+        # falls back to the name ILIKE across district/locality/okres/region.
+        # INCLUDE chips are OR'd (match any); EXCLUDE chips are NOT-ed (subtract).
+        _ID_COL = {"obec": "obec_id", "okres": "okres_id", "kraj": "region_id"}
         inc_clauses: list[str] = []
         exc_clauses: list[str] = []
         for i, chip in enumerate(spec.districts):
-            # Wildcards live in the parameter VALUE, not as inline SQL '%'
-            # literals: psycopg parses the query string for placeholders and
-            # treats a bare '%' as a malformed one (it must be %%), so an
-            # inline "ILIKE '%' || %(name)s || '%'" raises ProgrammingError at
-            # execute time — which silently killed every matcher pass for any
-            # watchdog with district chips.
-            n_key = f"district_name_{i}"
-            params[n_key] = f"%{chip.name}%"
-            name_half = (
-                f"(l.district ILIKE %({n_key})s "
-                f"OR l.locality ILIKE %({n_key})s "
-                f"OR l.okres ILIKE %({n_key})s "
-                f"OR l.region ILIKE %({n_key})s)"
-            )
-            if chip.context:
-                c_key = f"district_ctx_{i}"
-                params[c_key] = f"%{chip.context}%"
-                ctx_half = (
-                    f"(l.district ILIKE %({c_key})s "
-                    f"OR l.locality ILIKE %({c_key})s "
-                    f"OR l.okres ILIKE %({c_key})s "
-                    f"OR l.region ILIKE %({c_key})s)"
-                )
-                clause = f"({name_half} AND {ctx_half})"
+            if chip.level in _ID_COL and chip.id is not None:
+                id_key = f"district_id_{i}"
+                params[id_key] = chip.id
+                clause = f"l.{_ID_COL[chip.level]} = %({id_key})s"
+            elif chip.level == "locality":
+                # Wildcards live in the parameter VALUE, not as inline SQL '%'
+                # literals (psycopg treats a bare '%' as a malformed placeholder).
+                n_key = f"district_name_{i}"
+                params[n_key] = f"%{chip.name}%"
+                locality_match = f"l.locality ILIKE %({n_key})s"
+                if chip.id is not None:
+                    id_key = f"district_id_{i}"
+                    params[id_key] = chip.id
+                    clause = f"(l.obec_id = %({id_key})s AND {locality_match})"
+                else:
+                    clause = locality_match
             else:
-                clause = name_half
+                # Legacy / unresolved chip: name ILIKE across all name columns,
+                # AND'd with an optional parent-municipality context narrow.
+                n_key = f"district_name_{i}"
+                params[n_key] = f"%{chip.name}%"
+                name_half = (
+                    f"(l.district ILIKE %({n_key})s "
+                    f"OR l.locality ILIKE %({n_key})s "
+                    f"OR l.okres ILIKE %({n_key})s "
+                    f"OR l.region ILIKE %({n_key})s)"
+                )
+                if chip.context:
+                    c_key = f"district_ctx_{i}"
+                    params[c_key] = f"%{chip.context}%"
+                    ctx_half = (
+                        f"(l.district ILIKE %({c_key})s "
+                        f"OR l.locality ILIKE %({c_key})s "
+                        f"OR l.okres ILIKE %({c_key})s "
+                        f"OR l.region ILIKE %({c_key})s)"
+                    )
+                    clause = f"({name_half} AND {ctx_half})"
+                else:
+                    clause = name_half
             (exc_clauses if chip.excluded else inc_clauses).append(clause)
         if inc_clauses:
             where.append("(" + " OR ".join(inc_clauses) + ")")

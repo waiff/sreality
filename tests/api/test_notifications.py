@@ -252,6 +252,61 @@ def test_build_clauses_district_mixed_include_exclude() -> None:
     assert params["district_name_1"] == "%Modřany%"
 
 
+def test_build_clauses_obec_chip_matches_obec_id() -> None:
+    """A resolved obec pick matches by stable obec_id — NOT a name ILIKE — so
+    picking obec 'Jihlava' can't drag in its same-named okres."""
+    spec = WatchdogFilterSpec(
+        districts=[{"name": "Jihlava", "level": "obec", "id": 586846}],
+    )
+    where, params = _build_match_clauses(spec)
+    clause = next(w for w in where if "district_id_0" in w)
+    assert clause == "(l.obec_id = %(district_id_0)s)"
+    assert params["district_id_0"] == 586846
+    assert "district_name_0" not in params  # no name ILIKE for a resolved chip
+
+
+def test_build_clauses_okres_and_kraj_chips_match_their_id_columns() -> None:
+    spec = WatchdogFilterSpec(
+        districts=[
+            {"name": "okres Jihlava", "level": "okres", "id": 3707},
+            {"name": "Kraj Vysočina", "level": "kraj", "id": 108},
+        ],
+    )
+    where, params = _build_match_clauses(spec)
+    inc = next(w for w in where if "district_id_0" in w)
+    assert "l.okres_id = %(district_id_0)s" in inc
+    assert "l.region_id = %(district_id_1)s" in inc
+    assert params["district_id_0"] == 3707
+    assert params["district_id_1"] == 108
+
+
+def test_build_clauses_locality_chip_narrows_to_containing_obec() -> None:
+    """A street/POI pick matches its containing obec_id AND a locality-text
+    ILIKE — scoped to the municipality, no cross-city street collisions."""
+    spec = WatchdogFilterSpec(
+        districts=[
+            {"name": "Edvarda Beneše", "level": "locality", "id": 554791},
+        ],
+    )
+    where, params = _build_match_clauses(spec)
+    clause = next(w for w in where if "district_id_0" in w)
+    assert "l.obec_id = %(district_id_0)s" in clause
+    assert "l.locality ILIKE %(district_name_0)s" in clause
+    assert params["district_id_0"] == 554791
+    assert params["district_name_0"] == "%Edvarda Beneše%"
+    assert "'%'" not in clause  # wildcards stay in the bound value
+
+
+def test_build_clauses_unresolved_chip_falls_back_to_name_match() -> None:
+    """A chip with no level/id (legacy saved filter) keeps the name-ILIKE
+    predicate across district/locality/okres/region — never breaks."""
+    spec = WatchdogFilterSpec(districts=[{"name": "Brno", "context": None}])
+    where, params = _build_match_clauses(spec)
+    clause = next(w for w in where if "district_name_0" in w)
+    assert "l.okres ILIKE %(district_name_0)s" in clause
+    assert "district_id_0" not in params
+
+
 def test_filter_spec_lifts_legacy_string_districts() -> None:
     """Pre-migration-070 request bodies passing `districts: ["Praha"]`
     still validate — the field_validator lifts each string to a

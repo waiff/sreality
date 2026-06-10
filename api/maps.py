@@ -20,17 +20,30 @@ from fastapi import HTTPException
 
 LOG = logging.getLogger(__name__)
 
-# Mapy.cz suggestion `type` strings → (admin level if applicable, default radius in metres)
-# for the point_with_radius fallback. Levels match `admin_boundaries.level`
-# values planned for `map-1` (obec / okres / kraj / ku).
-_TYPE_RULES: dict[str, tuple[str | None, int]] = {
-    "regional.country": (None, 50000),
-    "regional.region": ("kraj", 25000),
-    "regional.municipality": ("obec", 5000),
-    "regional.municipality_part": ("ku", 2000),
-    "regional.street": (None, 500),
-    "regional.address": (None, 300),
-    "poi": (None, 500),
+# Mapy.cz suggestion `type` → the admin level we resolve the pick to. obec /
+# okres / kraj resolve to that admin id; everything sub-municipal (street /
+# address / POI / část obce) resolves to its CONTAINING obec and keeps the place
+# name for a locality-text narrow. regional.country narrows nothing.
+_TYPE_LEVEL: dict[str, str] = {
+    "regional.region": "kraj",
+    "regional.region.district": "okres",
+    "regional.municipality": "obec",
+    "regional.municipality_part": "locality",
+    "regional.street": "locality",
+    "regional.address": "locality",
+    "poi": "locality",
+}
+# Default circle radius (metres) per type — only the point_with_radius fallback
+# used when a point resolves to no admin polygon (foreign / off-grid points).
+_TYPE_RADIUS: dict[str, int] = {
+    "regional.country": 50000,
+    "regional.region": 25000,
+    "regional.region.district": 15000,
+    "regional.municipality": 5000,
+    "regional.municipality_part": 2000,
+    "regional.street": 500,
+    "regional.address": 300,
+    "poi": 500,
 }
 _DEFAULT_RADIUS_M = 1500
 
@@ -117,34 +130,48 @@ def _admin_boundaries_present(conn: Any) -> bool:
         return False
 
 
-def _match_polygon(
-    conn: Any, regional_structure: list[dict[str, Any]] | None
+def _resolve_admin(
+    conn: Any, *, lat: float, lng: float, level: str
 ) -> dict[str, Any] | None:
-    """Walk regionalStructure most-specific → least-specific, return first hit."""
-    if not regional_structure:
-        return None
+    """Resolve a picked point to its admin id at `level`.
+
+    One st_covers PIP into admin_boundaries at the obec level + a parent_id walk
+    to okres / kraj -- the SAME derivation the listings admin-geo trigger uses
+    (migration 140), so the chip's id equals what a listing at this point gets
+    and `id = id` matching is exact. obec polygons tile the country, so any CZ
+    point resolves; a foreign point matches no obec and returns None.
+    """
     with conn.cursor() as cur:
-        for item in regional_structure:
-            type_ = item.get("type")
-            name = item.get("name")
-            if not type_ or not name:
-                continue
-            level = _TYPE_RULES.get(type_, (None, 0))[0]
-            if level is None:
-                continue
-            cur.execute(
-                "SELECT id, name FROM admin_boundaries "
-                "WHERE level = %s AND name = %s LIMIT 1",
-                (level, name),
-            )
-            row = cur.fetchone()
-            if row:
-                return {"level": level, "id": int(row[0]), "name": row[1]}
-    return None
+        cur.execute(
+            "SELECT ob.id, ob.name, ok.id, ok.name, kr.id, kr.name "
+            "FROM admin_boundaries ob "
+            "LEFT JOIN admin_boundaries ok ON ok.id = ob.parent_id AND ok.level = 'okres' "
+            "LEFT JOIN admin_boundaries kr ON kr.id = ok.parent_id AND kr.level = 'kraj' "
+            "WHERE ob.level = 'obec' "
+            "AND st_covers(ob.geom, st_setsrid(st_makepoint(%s, %s), 4326)) "
+            "LIMIT 1",
+            (lng, lat),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    obec_id, obec_name, okres_id, okres_name, kraj_id, kraj_name = row
+    obec_id_i = int(obec_id) if obec_id is not None else None
+    if level == "okres":
+        if okres_id is None:
+            return None
+        return {"level": "okres", "id": int(okres_id), "obec_id": obec_id_i, "name": okres_name}
+    if level == "kraj":
+        if kraj_id is None:
+            return None
+        return {"level": "kraj", "id": int(kraj_id), "obec_id": obec_id_i, "name": kraj_name}
+    if level == "locality":
+        return {"level": "locality", "id": None, "obec_id": obec_id_i, "name": None}
+    return {"level": "obec", "id": obec_id_i, "obec_id": obec_id_i, "name": obec_name}
 
 
 def _radius_for_type(type_: str | None) -> int:
-    return _TYPE_RULES.get(type_ or "", (None, _DEFAULT_RADIUS_M))[1]
+    return _TYPE_RADIUS.get(type_ or "", _DEFAULT_RADIUS_M)
 
 
 def resolve(
@@ -157,29 +184,43 @@ def resolve(
     regional_structure: list[dict[str, Any]] | None = None,
     raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve a picked Mapy.cz suggestion to an admin polygon or a point+radius."""
-    if lat is None or lng is None:
-        return {
-            "kind": "unresolved",
-            "label": label,
-            "lat": None,
-            "lng": None,
-            "polygon": None,
-            "default_radius_m": _DEFAULT_RADIUS_M,
-            "raw": raw or {},
-        }
+    """Resolve a picked Mapy.cz suggestion to a stable admin id at the picked level.
 
-    polygon = None
-    if _admin_boundaries_present(conn):
-        polygon = _match_polygon(conn, regional_structure)
-
-    default_radius = _radius_for_type(type_)
-    return {
-        "kind": "admin_polygon" if polygon else "point_with_radius",
+    `regional_structure` is accepted for request back-compat but unused -- the
+    point + type are sufficient, and the PIP is more robust than name-walking
+    (it can't confuse an obec with its same-named okres).
+    """
+    base = {
         "label": label,
-        "lat": float(lat),
-        "lng": float(lng),
-        "polygon": polygon,
-        "default_radius_m": default_radius,
+        "lat": float(lat) if lat is not None else None,
+        "lng": float(lng) if lng is not None else None,
+        "level": None,
+        "id": None,
+        "obec_id": None,
+        "name": None,
+        "default_radius_m": _radius_for_type(type_),
         "raw": raw or {},
+    }
+
+    level = _TYPE_LEVEL.get(type_ or "")
+    if lat is None or lng is None or level is None:
+        # No position, or a country-level / unknown pick -> no admin narrowing.
+        return {**base, "kind": "unresolved"}
+
+    admin = None
+    if _admin_boundaries_present(conn):
+        admin = _resolve_admin(conn, lat=lat, lng=lng, level=level)
+
+    if admin is None:
+        # In-CZ point that matched no obec polygon (foreign / boundary gap):
+        # fall back to a point + radius so the map can still focus the area.
+        return {**base, "kind": "point_with_radius"}
+
+    return {
+        **base,
+        "kind": "locality" if admin["level"] == "locality" else "admin",
+        "level": admin["level"],
+        "id": admin["id"],
+        "obec_id": admin["obec_id"],
+        "name": admin["name"],
     }
