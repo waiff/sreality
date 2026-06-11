@@ -48,11 +48,22 @@ source for active rules; ROADMAP is for sequencing.
   refetch forever. Enum hygiene (status overlay, drevo, ownership) verified already
   shipped in PR #273 + backfilled — production counts are 0.
 
+- **idnes amenity parser + remax/bezrealitky subtype** (Sprint C): idnes amenity rows are
+  check-icon OR free-text ("Balkon: jih , 4 m 2"; the garage signal lives inside the
+  "Parkování" value + the icon-only "Dvojgaráž" row) — every amenity field now goes
+  through the truthy-field path, plus `parking_lots`, a "Stav budovy" condition fallback
+  and a "Vybavení domu" furnished fallback (houses were 0% on both). remax's 2026 coarse
+  "Typ nemovitosti" (7 marketing groups) erased the fine vocabulary `TYP_TO_SUBTYPE` was
+  built for — subtype now derives from the detail-URL noun
+  (`prodej-ubytovaciho-zarizeni` → ubytovani, …) and "Nájemní domy" lands as komercni +
+  cinzovni_dum for cross-portal agreement. bezrealitky's mapping verified correct against
+  live GraphQL introspection (estateType is the finest enum exposed; houseType is
+  access-denied) — its remaining NULL gap is upsert lag, a raw_json backfill, not code.
+
 #### Next
 
 - Sprint C (data value, remainder): bazos dedup match-rate follow-up (street_key
-  normalization vs the "ul. …"/house-number forms), pHash throughput, idnes amenity
-  parser, remax/bezrealitky subtype, remax drain investigation.
+  normalization vs the "ul. …"/house-number forms), pHash throughput, remax drain investigation.
 - Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
   deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
 
