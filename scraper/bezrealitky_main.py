@@ -53,9 +53,10 @@ INDEX_PAGE_SIZE = 100
 INDEX_MIN_COMPLETENESS = 0.995
 
 # Only flip rows unseen for 24h+ — several full walk cadences. last_seen_at is
-# bumped whenever a row is index-seen (touch_listings for unchanged rows, drain
-# upsert for changed ones), so a live row inside the 0.5% tolerance window
-# cannot be flipped — only rows missed by multiple consecutive walks can.
+# bumped for unchanged rows each walk (touch_listings) and for changed rows on
+# a successful drain fetch — so a churn-missed live row is protected unless its
+# detail fetches have ALSO failed for 24h+; even then the flip self-heals on
+# the next index sighting (touch_listings reactivates).
 INACTIVE_MIN_UNSEEN_HOURS = 24
 
 
