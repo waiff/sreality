@@ -34,6 +34,20 @@ source for active rules; ROADMAP is for sequencing.
   check vs 6-hourly `data_quality_snapshots` captures; composed end-to-end latency check;
   image-failure breakdown matview + Health card; Health-matview staleness stamp + banner;
   failed-workflow-run recorder (30-min poller) + Health card.
+- **Bazos street persistence + locality backfill** (Sprint C): `ScrapedListing.street`
+  (un-hashed, like lat/lon) now rides `to_row` into `listings.street`, and the bazos
+  parser surfaces its extracted street on the contract — bazos rows become eligible
+  for the street+disposition dedup engine. One-off
+  `backfill_bazos_street_locality.yml` re-parses staged `portal_raw_pages` HTML
+  (no portal re-fetch, no geocode spend, no snapshots) to fill the ~30k active rows
+  missing `street`/`locality`.
+- **Price/area placeholder guards** (Sprint C "enum hygiene, price/area guards"):
+  `sane_price_czk` nulls `< 2` ("1 Kč dohodou" placeholders) alongside the overflow
+  cap; `sane_listing_numerics` nulls 0 m² areas; every portal main sanitizes its
+  index-price compare through the same clamp so placeholder-priced listings don't
+  refetch forever. Enum hygiene (status overlay, drevo, ownership) verified already
+  shipped in PR #273 + backfilled — production counts are 0.
+
 - **idnes amenity parser + remax/bezrealitky subtype** (Sprint C): idnes amenity rows are
   check-icon OR free-text ("Balkon: jih , 4 m 2"; the garage signal lives inside the
   "Parkování" value + the icon-only "Dvojgaráž" row) — every amenity field now goes
@@ -48,9 +62,8 @@ source for active rules; ROADMAP is for sequencing.
 
 #### Next
 
-- Sprint C (data value, remaining): bazos locality backfill, street persistence + bazos
-  dedup revival, pHash throughput, enum hygiene, price/area guards, remax drain
-  investigation.
+- Sprint C (data value, remainder): bazos dedup match-rate follow-up (street_key
+  normalization vs the "ul. …"/house-number forms), pHash throughput, remax drain investigation.
 - Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
   deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
 
