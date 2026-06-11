@@ -151,6 +151,113 @@ def merge_properties(
     }
 
 
+# One scoped singleton insert, mirroring scripts.recompute_property_stats
+# _ATTACH_INSERT_SQL's column contract (the path every new listing takes to get
+# its own property). Scoped to one sreality_id + RETURNING so the split links
+# unambiguously, rather than relying on the global repr_listing_id join.
+_SPLIT_INSERT_ONE_SQL = """
+    INSERT INTO properties (
+        repr_listing_id, category_main, category_type, disposition,
+        area_m2, district, locality, geom, current_price_czk,
+        has_balcony, has_parking, has_lift, building_type, condition,
+        ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
+        estate_area, usable_area, garden_area, parking_lots,
+        is_active, first_seen_at, last_seen_at, last_change_at,
+        source_count, distinct_site_count
+    )
+    SELECT
+        l.sreality_id, l.category_main, l.category_type, l.disposition,
+        l.area_m2, l.district, l.locality, l.geom, l.price_czk,
+        l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
+        l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
+        l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
+        l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1
+    FROM listings l
+    WHERE l.sreality_id = %(sid)s
+    RETURNING id
+"""
+
+
+def split_property_to_singletons(
+    conn: psycopg.Connection,
+    *,
+    property_id: int,
+) -> dict[str, Any]:
+    """Dissolve a wrongly-grouped property back into singletons. One transaction.
+
+    Keeps the representative child on the property (the same row recompute_one
+    would pick) and detaches every other child onto its own fresh singleton
+    property (mirroring how a brand-new listing gets one). Nothing is deleted;
+    the survivor and each new singleton end up as valid, single-child properties.
+    Corrects legacy geo-matcher groupings the street+disposition engine would
+    never make — a flat merged with a house, a sale with a rental, a flat with a
+    commercial unit (rule #15). The dedup engine re-merges any legitimate
+    same-category pairs on its next run.
+    """
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, status FROM properties WHERE id = %s FOR UPDATE",
+                (property_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise MergeError(f"property {property_id} not found")
+            if row[1] != "active":
+                raise MergeError(f"property {property_id} is not active")
+
+            # Same ordering recompute_one's representative pick uses, so the child
+            # that stays on this property is the one it would choose anyway.
+            cur.execute(
+                """
+                SELECT sreality_id FROM listings WHERE property_id = %s
+                ORDER BY is_active DESC, last_seen_at DESC NULLS LAST, sreality_id DESC
+                FOR UPDATE
+                """,
+                (property_id,),
+            )
+            child_ids = [int(r[0]) for r in cur.fetchall()]
+            if len(child_ids) <= 1:
+                return {
+                    "data": {
+                        "property_id": property_id,
+                        "anchor_listing_id": child_ids[0] if child_ids else None,
+                        "detached_listing_ids": [],
+                        "new_property_ids": [],
+                    },
+                    "metadata": {
+                        "tool": "split_property_to_singletons",
+                        "queried_at": _now_iso(),
+                    },
+                }
+
+            anchor, detach = child_ids[0], child_ids[1:]
+            new_ids: list[int] = []
+            for sid in detach:
+                cur.execute(_SPLIT_INSERT_ONE_SQL, {"sid": sid})
+                new_id = int(cur.fetchone()[0])
+                cur.execute(
+                    "UPDATE listings SET property_id = %s WHERE sreality_id = %s",
+                    (new_id, sid),
+                )
+                new_ids.append(new_id)
+
+        recompute_one(conn, property_id)
+
+    return {
+        "data": {
+            "property_id": property_id,
+            "anchor_listing_id": anchor,
+            "detached_listing_ids": detach,
+            "new_property_ids": new_ids,
+        },
+        "metadata": {
+            "tool": "split_property_to_singletons",
+            "queried_at": _now_iso(),
+        },
+    }
+
+
 def unmerge_group(
     conn: psycopg.Connection,
     *,

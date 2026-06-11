@@ -1,0 +1,63 @@
+name: Re-split mixed-category properties (one-shot corrective)
+
+# One-shot corrective for legacy mixed-category property groupings. The old
+# geo-proximity matcher (replaced by the street+disposition dedup engine, rule
+# #15) sometimes merged categorically-different listings at the same coordinates
+# — a flat with a house, a sale with a rental, a flat with a commercial unit.
+# The dedup engine + the merge_properties chokepoint guard now refuse such
+# merges (PR #412), but pre-guard groupings persist. This re-singletonizes every
+# active property whose child listings span more than one category_type or
+# category_main: the representative child stays, every other child detaches onto
+# its own fresh singleton property. Nothing is deleted (rule #3); the dedup
+# engine re-merges any legitimate same-category pairs on its next daily run.
+#
+# Dispatch-only. Defaults to a DRY RUN (reports what it would split, writes
+# nothing); set apply=true to mutate. Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Actually re-singletonize (false = dry-run report only)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      limit:
+        description: Cap properties processed (0 = no cap)
+        required: false
+        default: "0"
+        type: string
+
+concurrency:
+  group: sreality-property-maintenance
+  cancel-in-progress: false
+
+jobs:
+  resplit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[api]"
+
+      - name: Re-split mixed-category properties
+        run: |
+          ARGS="--limit ${{ inputs.limit || '0' }}"
+          if [ "${{ inputs.apply }}" = "true" ]; then ARGS="$ARGS --apply"; fi
+          echo "python -m scripts.resplit_mixed_properties $ARGS"
+          python -m scripts.resplit_mixed_properties $ARGS
