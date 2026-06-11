@@ -75,6 +75,10 @@ class UpdatePortalLimitsIn(BaseModel):
     suspicious_stop_threshold: float | None = None
 
 
+class UpdateConditionRegionsIn(BaseModel):
+    enabled_region_ids: list[int]
+
+
 # --- skills ---------------------------------------------------------------
 
 @router.get("/skills")
@@ -418,6 +422,108 @@ def post_rent_map_fetch(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --- condition scoring: per-kraj enablement ---------------------------------
+
+_CONDITION_REGIONS_SETTING = "condition_scoring_enabled_region_ids"
+
+# Mirrors the toolkit's "functionally active" definition (rule #4) plus the
+# not-yet-scored condition, so the counts here equal what the batch submit
+# job would pick up for that kraj.
+_UNSCORED_ACTIVE_PREDICATE = (
+    "is_active AND last_seen_at > now() - interval '30 days' "
+    "AND building_condition_level IS NULL "
+    "AND apartment_condition_level IS NULL"
+)
+
+
+@router.get("/condition-scoring/regions")
+def get_condition_scoring_regions(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Per-kraj condition-scoring switchboard: every kraj with its enabled
+    flag + the count of active listings still awaiting a condition score.
+    The batch submit job reads the same app_settings key, so toggling a
+    kraj on here is all it takes for the next scheduled run to drain it."""
+    return {"data": _condition_regions_payload(conn)}
+
+
+@router.put("/condition-scoring/regions")
+def put_condition_scoring_regions(
+    body: UpdateConditionRegionsIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    import json
+    known = {kid for kid, _name in _fetch_kraje(conn)}
+    unknown = sorted(set(body.enabled_region_ids) - known)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown kraj ids: {unknown}",
+        )
+    enabled = sorted(set(body.enabled_region_ids))
+    # INSERT, not bare UPDATE: the key may not be seeded yet — first toggle
+    # creates it, treating the absent key as the empty list it stands for.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_settings "
+            "  (key, value, description, updated_at, updated_by) "
+            "VALUES (%s, %s::jsonb, %s, now(), %s) "
+            "ON CONFLICT (key) DO UPDATE "
+            "  SET value = excluded.value, "
+            "      updated_at = now(), "
+            "      updated_by = excluded.updated_by",
+            (
+                _CONDITION_REGIONS_SETTING,
+                json.dumps(enabled),
+                "admin_boundaries ids (level=kraj) the scheduled "
+                "condition-scoring batch job drains automatically",
+                "settings_ui",
+            ),
+        )
+    return {"data": _condition_regions_payload(conn)}
+
+
+def _fetch_kraje(conn: "psycopg.Connection") -> list[tuple[int, str]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, name FROM admin_boundaries "
+            "WHERE level = 'kraj' ORDER BY name"
+        )
+        return [(r[0], r[1]) for r in cur.fetchall()]
+
+
+def _condition_regions_payload(conn: "psycopg.Connection") -> dict[str, Any]:
+    kraje = _fetch_kraje(conn)
+    setting = _fetch_app_setting(conn, _CONDITION_REGIONS_SETTING)
+    raw = setting["value"] if setting is not None else []
+    enabled_ids = (
+        sorted({int(v) for v in raw}) if isinstance(raw, list) else []
+    )
+    with conn.cursor() as cur:
+        # One GROUP BY covers both the per-kraj counts and the NULL-region
+        # bucket (listings with no usable coordinates, parked for scoring).
+        cur.execute(
+            "SELECT region_id, count(*) FROM listings "
+            f"WHERE {_UNSCORED_ACTIVE_PREDICATE} "
+            "GROUP BY region_id"
+        )
+        counts = {r[0]: r[1] for r in cur.fetchall()}
+    enabled = set(enabled_ids)
+    return {
+        "regions": [
+            {
+                "id": kid,
+                "name": name,
+                "enabled": kid in enabled,
+                "unscored_active": counts.get(kid, 0),
+            }
+            for kid, name in kraje
+        ],
+        "parked_no_geo": counts.get(None, 0),
+        "enabled_region_ids": enabled_ids,
+    }
 
 
 # --- helpers --------------------------------------------------------------

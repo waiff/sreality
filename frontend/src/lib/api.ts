@@ -726,6 +726,40 @@ export async function uploadRentMapFile(
   return body as RentMapIngestResult;
 }
 
+/* ----- condition scoring: per-kraj enablement ------------------------------
+ * GET returns every kraj (admin_boundaries level='kraj') with its enabled
+ * flag + count of unscored active listings; PUT replaces the full enabled
+ * list (app_settings.condition_scoring_enabled_region_ids) and returns the
+ * same payload. The scheduled batch job reads the same key. */
+
+export interface ConditionScoringRegion {
+  id: number;
+  name: string;
+  enabled: boolean;
+  unscored_active: number;
+}
+
+export interface ConditionScoringRegionsPayload {
+  regions: ConditionScoringRegion[];
+  parked_no_geo: number;
+  enabled_region_ids: number[];
+}
+
+export const getConditionScoringRegions = (): Promise<{
+  data: ConditionScoringRegionsPayload;
+}> =>
+  request<{ data: ConditionScoringRegionsPayload }>(
+    '/admin/condition-scoring/regions',
+  );
+
+export const updateConditionScoringRegions = (
+  enabledRegionIds: number[],
+): Promise<{ data: ConditionScoringRegionsPayload }> =>
+  request<{ data: ConditionScoringRegionsPayload }>(
+    '/admin/condition-scoring/regions',
+    { method: 'PUT', json: { enabled_region_ids: enabledRegionIds } },
+  );
+
 /* ----- filter registry + visibility (PR 1 / migration 059) ----------------
  * The canonical filter list lives in toolkit/filter_registry.py. `getFilterSchema`
  * returns the live registry plus the agenda × filter visibility matrix.
