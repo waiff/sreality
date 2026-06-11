@@ -1194,6 +1194,8 @@ export const estimationKeys = {
   all: ['estimations'] as const,
   list: (params: EstimationListParams) =>
     ['estimations', 'list', params] as const,
+  byListing: (ids: ReadonlyArray<number>) =>
+    ['estimations', 'by-listing', ids] as const,
   detail: (id: number) =>
     ['estimations', 'detail', id] as const,
   preview: (url: string) =>
@@ -1217,6 +1219,13 @@ export const useTracePayload = (
   });
 export const fetchEstimationsList = (params: EstimationListParams) =>
   listEstimations(params);
+
+/* Property-grain run fetch for the Listing Detail estimations section:
+ * every run on any of the property's child listings, newest first. List
+ * rows carry the full run projection (minus source_html), so the section
+ * renders the selected run without a second per-run request. */
+export const fetchEstimationsForListings = (ids: ReadonlyArray<number>) =>
+  listEstimations({ sreality_ids: ids.join(','), limit: 100 });
 export const submitEstimation = (input: CreateEstimationIn) =>
   createEstimation(input);
 

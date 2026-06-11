@@ -6,6 +6,33 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Listing page is the primary estimation surface
+- **The listing/property page now owns estimations** — the "← back to estimations" /
+  "view full listing" ping-pong is gone. A new **Estimates** section renders the two
+  authorities side by side: the MF Cenová-mapa reference card and **our** selected run
+  (estimate, range, yield chip, confidence), then the selected run's full body (yield
+  calculator, re-run / adjust, the deep-detail popup with trace + comparables +
+  feedback), then an **All runs** ledger of every run on any of the property's child
+  listings (`?run=ID` selects; latest is default; in-flight runs poll in place).
+- **`/estimation/:id` is a fallback, not a page.** Linked runs (subject in our DB)
+  redirect to `runSurfaceUrl` → the listing page's section, so old links keep working;
+  the standalone page renders only **orphan runs** (pasted URLs of unscraped listings)
+  through the same shared `RunBody`. The run UI itself moved from the 2 600-line
+  `EstimationDetail.tsx` into `components/estimation/RunPanel.tsx` +
+  `MfReferenceCard.tsx` (one MF card for listing- and run-stored breakdowns).
+- **Portal links moved to the top of the listing page** — one chip per portal
+  observation (active dot, price + date-range tooltip), replacing the bottom
+  "Open on …" block. The MF card moved out of `ListingOverview` into the Estimates
+  section. Manual estimates now sit directly below it.
+- **Backend:** `GET /estimations` gained `sreality_ids` (CSV — property-grain fetch);
+  list rows drop the heavyweight `source_html` (detail endpoint still returns it).
+  Estimations-list rows, Browse estimate corners, the new-estimation modal, and re-run
+  flows all navigate via the shared `runSurfaceUrl` helper.
+- **Architecture decision recorded:** the listing stays the URL-addressable object
+  (immutable id; `property_id` regroups under the dedup engine), the page carries the
+  property context. No stub listings for orphan runs — the listings table stays
+  scrape-only.
+
 ### 2026-06: On-card "Estimate" action in Browse (run + show yield in place)
 - Every **apartment** card in Browse > Map now carries a small bottom-right control.
   No run yet → an **`Odhad`** button that kicks off the standard **agent rental**

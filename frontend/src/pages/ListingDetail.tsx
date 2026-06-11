@@ -37,7 +37,7 @@ import {
   buildPriceSeries,
   summarizePriceHistory,
 } from '@/lib/priceHistory';
-import { portalListingUrl, srealityListingUrl, type SrealityCategory } from '@/lib/portals';
+import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
 
@@ -49,6 +49,9 @@ const CurationBlock = lazy(
 );
 const ManualEstimatesBlock = lazy(
   () => import('@/components/listing-detail/ManualEstimatesBlock'),
+);
+const EstimationsBlock = lazy(
+  () => import('@/components/listing-detail/EstimationsBlock'),
 );
 
 export default function ListingDetail() {
@@ -202,7 +205,6 @@ export default function ListingDetail() {
   const checks = checksQ.data ?? [];
   const images = imagesQ.data ?? [];
   const sources = sourcesQ.data?.sources ?? [];
-  const currentSource = sources.find((s) => s.sreality_id === listing.sreality_id);
 
   return (
     <Page>
@@ -210,38 +212,85 @@ export default function ListingDetail() {
         <Crumb />
         <NewEstimationButton prefill={newEstimationPrefill} />
       </div>
-      {/* Merged top section: identity + price + property facts in one block,
-          above the images. The MF rent estimate + description sit directly
-          below it. */}
+      {/* Portal links live at the top — jumping out to the source listing is
+          a first-class action, not something to scroll for. One chip per
+          portal observation of this property. */}
+      <PortalLinksRow listing={listing} sources={sources} />
       <LatestActiveLink listing={listing} sources={sources} />
       <ListingOverview
         listing={listing}
         images={images}
         imagesLoading={imagesQ.isLoading}
       />
-      <Hairline />
+      {/* The estimation chapter: MF reference + our runs, side by side.
+          Renders nothing for listings with no estimable data. */}
       <Suspense fallback={null}>
-        <CurationBlock sreality_id={listing.sreality_id} />
+        <EstimationsBlock
+          listing={listing}
+          listingIds={childIds.length > 0 ? childIds : [listing.sreality_id]}
+          prefill={newEstimationPrefill}
+        />
       </Suspense>
       <Hairline />
       <Suspense fallback={null}>
         <ManualEstimatesBlock sreality_id={listing.sreality_id} />
       </Suspense>
       <Hairline />
+      <Suspense fallback={null}>
+        <CurationBlock sreality_id={listing.sreality_id} />
+      </Suspense>
+      <Hairline />
       <ListingHistoryBlock listing={listing} sources={sources} snapshots={snapshots} />
       <Hairline />
       <FreshnessBlock sreality_id={listing.sreality_id} checks={checks} />
-      <Hairline />
-      <OutboundBlock
-        sreality_id={listing.sreality_id}
-        source={currentSource}
-        category={{
-          categoryType: listing.category_type,
-          categoryMain: listing.category_main,
-          categorySubCb: listing.category_sub_cb,
-        }}
-      />
     </Page>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Portal links — one chip per portal observation, at the top of the page     */
+/* -------------------------------------------------------------------------- */
+
+function PortalLinksRow({
+  listing,
+  sources,
+}: {
+  listing: ListingPublic;
+  sources: PropertySource[];
+}) {
+  const urls = useMemo(() => listingUrlRows(sources, listing), [sources, listing]);
+  const linkable = urls.filter((u) => u.url != null);
+  if (linkable.length === 0) return null;
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-2">
+      {linkable.map((u) => (
+        <a
+          key={u.id}
+          href={u.url as string}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`${fmtCzk(u.price)} · ${fmtShortDate(u.firstSeen)} – ${
+            u.isActive ? 'now' : fmtShortDate(u.lastSeen)
+          }`}
+          className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-1.5 text-[0.8rem] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"
+        >
+          <span
+            className={[
+              'w-1.5 h-1.5 rounded-full',
+              u.isActive ? 'bg-[var(--color-sage)]' : 'bg-[var(--color-ink-4)]',
+            ].join(' ')}
+            aria-hidden
+          />
+          <span>{portalShort(u.source)}</span>
+          {linkable.length > 1 && u.id === listing.sreality_id && (
+            <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+              this
+            </span>
+          )}
+          <OutArrow />
+        </a>
+      ))}
+    </div>
   );
 }
 
@@ -669,48 +718,6 @@ function OutcomeChip({ outcome }: { outcome: string }) {
     >
       {outcome}
     </span>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Outbound link                                                              */
-/* -------------------------------------------------------------------------- */
-
-function OutboundBlock({
-  sreality_id,
-  source,
-  category,
-}: {
-  sreality_id: number;
-  source?: PropertySource;
-  category: SrealityCategory;
-}) {
-  // Prefer the listing's real source URL (any portal); for sreality (which
-  // stores none) reconstruct from the category triple. portalListingUrl returns
-  // null when it can't build a resolvable URL — link to the in-app view then,
-  // never to a sreality 404.
-  const portal = source?.source ?? 'sreality';
-  const href = portalListingUrl(
-    portal,
-    source?.source_url,
-    source?.source_id_native ?? sreality_id,
-    category,
-  );
-  const cls =
-    'inline-flex items-center gap-1.5 text-sm text-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors capitalize';
-  if (!href) {
-    return (
-      <Link to={`/listing/${sreality_id}`} className={cls}>
-        View listing
-        <OutArrow />
-      </Link>
-    );
-  }
-  return (
-    <a href={href} target="_blank" rel="noopener noreferrer" className={cls}>
-      {`Open on ${portal}`}
-      <OutArrow />
-    </a>
   );
 }
 

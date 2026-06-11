@@ -415,7 +415,9 @@ function EstimateCorner({
           type="button"
           onClick={(e) => {
             stop(e);
-            navigate(`/estimation/${estimate.run_id}`);
+            navigate(
+              `/listing/${estimate.sreality_id}?run=${estimate.run_id}#estimations`,
+            );
           }}
           title="Náš odhad nájmu — otevřít detail odhadu"
           className="inline-flex items-center rounded-[var(--radius-xs)] border border-[var(--color-copper)] px-1.5 py-0.5 text-[0.62rem] font-medium tabular-nums text-[var(--color-copper)] hover:bg-[var(--color-copper)]/10 transition-colors"

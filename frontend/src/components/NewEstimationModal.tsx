@@ -7,7 +7,9 @@
  *
  * Apartment kind (default):
  *   Paste a listing URL → POST /estimations/preview to extract spec →
- *   POST /estimations to enqueue the run → navigate to /estimation/:id.
+ *   POST /estimations to enqueue the run → navigate to the run's surface
+ *   (runSurfaceUrl: the listing page's estimations section when the
+ *   subject is in our DB, /estimation/:id only for orphan-URL runs).
  *
  * Building kind (Phase B1):
  *   Paste a `dum` / `komercni` URL → POST /buildings/from_url enqueues
@@ -34,7 +36,7 @@ import {
   type ReactNode,
 } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError,
   createBuildingFromUrl,
@@ -43,7 +45,8 @@ import {
   reExtractBuilding,
   uploadBuildingAttachment,
 } from '@/lib/api';
-import { submitEstimation } from '@/lib/queries';
+import { estimationKeys, submitEstimation } from '@/lib/queries';
+import { runSurfaceUrl } from '@/lib/runLinks';
 import type {
   BuildingRun,
   CreateEstimationIn,
@@ -157,6 +160,7 @@ function NewEstimationModal({
     { done: number; total: number } | null
   >(null);
   const navigate = useNavigate();
+  const qc = useQueryClient();
 
   const previewMut = useMutation<ParseResult, ApiError, string>({
     mutationFn: (url) => previewListingUrl(url),
@@ -170,8 +174,11 @@ function NewEstimationModal({
         ),
       ),
     onSuccess: (run) => {
+      // The new run must show up immediately in any mounted run list (the
+      // listing page's estimations section we may be navigating to).
+      qc.invalidateQueries({ queryKey: estimationKeys.all });
       onClose();
-      navigate(`/estimation/${run.id}`);
+      navigate(runSurfaceUrl(run));
     },
   });
   const buildingMut = useMutation<BuildingRun, ApiError, string>({
