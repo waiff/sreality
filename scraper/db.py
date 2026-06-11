@@ -284,6 +284,7 @@ def upsert_listing(
         ON CONFLICT (sreality_id) DO UPDATE SET
           last_seen_at = now(),
           is_active = true,
+          inactive_at = NULL,
           {update_set},
           geom = EXCLUDED.geom,
           raw_json = EXCLUDED.raw_json
@@ -631,7 +632,7 @@ def touch_listings(
                 """
                 WITH react AS (
                     UPDATE listings
-                    SET is_active = true, last_seen_at = now()
+                    SET is_active = true, inactive_at = NULL, last_seen_at = now()
                     FROM unnest(%s::bigint[]) AS u(sreality_id)
                     WHERE listings.sreality_id = u.sreality_id
                       AND listings.is_active = false
@@ -647,7 +648,8 @@ def touch_listings(
                 """
                 UPDATE listings
                 SET last_seen_at = now(),
-                    is_active = true
+                    is_active = true,
+                    inactive_at = NULL
                 FROM unnest(%s::bigint[]) AS u(sreality_id)
                 WHERE listings.sreality_id = u.sreality_id
                 """,
@@ -692,7 +694,7 @@ def mark_inactive(
         cur.execute(
             f"""
             UPDATE listings
-            SET is_active = false
+            SET is_active = false, inactive_at = now()
             WHERE is_active = true
               AND source = %s
               AND category_main = %s
@@ -728,8 +730,8 @@ def mark_listing_inactive(
     """
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "UPDATE listings SET is_active = false WHERE sreality_id = %s "
-            "RETURNING property_id",
+            "UPDATE listings SET is_active = false, inactive_at = now() "
+            "WHERE sreality_id = %s RETURNING property_id",
             (sreality_id,),
         )
         row = cur.fetchone()
@@ -787,7 +789,7 @@ def mark_inactive_native(
         cur.execute(
             f"""
             UPDATE listings
-            SET is_active = false
+            SET is_active = false, inactive_at = now()
             WHERE is_active = true
               AND source = %s
               AND category_main = %s
@@ -821,7 +823,7 @@ def mark_listing_inactive_native(
     definitive per-listing signal, independent of the index-absence sweep."""
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "UPDATE listings SET is_active = false "
+            "UPDATE listings SET is_active = false, inactive_at = now() "
             "WHERE source = %s AND source_id_native = %s RETURNING property_id",
             (source, native_id),
         )
@@ -1466,6 +1468,7 @@ _BATCH_UPSERT_SQL = f"""
     ON CONFLICT (sreality_id) DO UPDATE SET
       last_seen_at = now(),
       is_active = true,
+      inactive_at = NULL,
       {_BATCH_UPDATE_SET},
       geom = EXCLUDED.geom,
       raw_json = EXCLUDED.raw_json

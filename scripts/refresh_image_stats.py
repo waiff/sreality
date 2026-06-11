@@ -1,8 +1,10 @@
-"""Refresh image_storage_overview_mv, the matview behind the Health "Image mirror" tile.
+"""Refresh the image-stat matviews behind the Health dashboard tiles.
 
-The tile's RPC reads this precomputed per-category rollup instead of scanning the
-full images table on every browser load (migration 115). Run after the image drain
-in images.yml; safe to run manually. CONCURRENTLY so anon readers never block.
+image_storage_overview_mv backs the "Image mirror" tile (migration 115);
+images_failure_overview_mv backs the "Image failures" card (migration 177).
+Both are precomputed per-rollup so the browser never scans the full images
+table. Run after the image drain in images.yml; safe to run manually.
+CONCURRENTLY so anon readers never block.
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import psycopg
 
 LOG = logging.getLogger("refresh_image_stats")
 
-_MV = "image_storage_overview_mv"
+_MVS = ("image_storage_overview_mv", "images_failure_overview_mv")
 
 _CONNECT_ATTEMPTS = 3
 _CONNECT_RETRY_SLEEP_S = 10.0
@@ -51,9 +53,17 @@ def main() -> int:
         return 2
 
     with _connect(db_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(f"refresh materialized view concurrently {_MV}")
-    LOG.info("REFRESH done mv=%s", _MV)
+        for mv in _MVS:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"refresh materialized view concurrently {mv}")
+            except psycopg.errors.UndefinedTable:
+                # Deploy/migration race: the script can run before a newly
+                # added matview's migration is applied. Skip, don't fail the
+                # whole job — the next 2-hourly run picks it up.
+                LOG.warning("REFRESH skipped mv=%s (does not exist yet)", mv)
+                continue
+            LOG.info("REFRESH done mv=%s", mv)
     return 0
 
 

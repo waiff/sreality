@@ -202,6 +202,9 @@ export interface HealthCategoryBlock {
 }
 
 export interface HealthSummary {
+  // When the pg_cron loop last refreshed the Health matviews (migration 176).
+  // Absent on payloads generated before that migration.
+  generated_at?: string | null;
   last_scrape_at: string | null;
   active_now: number;
   active_7d_ago: number;
@@ -326,6 +329,19 @@ export interface ImageStorageOverview {
   total_active_images: number;
   stored_active_images: number;
   by_category: ImageStorageCategory[];
+}
+
+/* Image-download failure rollup (migration 177): one row per
+ * (source, bucket, detail). `detail` is the unavailable_reason or coarse
+ * last_error class ('HTTP 404', 'other'); '' when not applicable. */
+
+export type ImageFailureBucket = 'stored' | 'unavailable' | 'exhausted' | 'pending';
+
+export interface ImageFailureRow {
+  source: string;
+  bucket: ImageFailureBucket;
+  detail: string;
+  n: number;
 }
 
 /* -------------------------------------------------------------------------- */

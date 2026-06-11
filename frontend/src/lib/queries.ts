@@ -18,6 +18,7 @@ import { fetchGrowth } from './priceStats';
 import type {
   CategoryTrend,
   HealthSummary,
+  ImageFailureRow,
   ImagePublic,
   ImageStorageOverview,
   ListingFreshnessCheckPublic,
@@ -1013,6 +1014,12 @@ export const fetchImageStorageOverview = async (): Promise<ImageStorageOverview>
   const { data, error } = await supabase.rpc('image_storage_overview');
   if (error) throw error;
   return data as ImageStorageOverview;
+};
+
+export const fetchImagesFailureOverview = async (): Promise<ImageFailureRow[]> => {
+  const { data, error } = await supabase.rpc('images_failure_overview');
+  if (error) throw error;
+  return (data ?? []) as ImageFailureRow[];
 };
 
 export const fetchPortalHealth = async (): Promise<PortalHealth[]> => {
