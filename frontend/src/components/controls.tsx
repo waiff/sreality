@@ -228,7 +228,9 @@ export function NumberCell({
   onBlur,
   ariaLabel,
 }: {
-  value: number | null;
+  /* A string value lets callers that buffer raw text (FilterForm's
+   * BufferedNumberInput) keep mid-typing intermediates like '-' alive. */
+  value: number | string | null;
   placeholder: string;
   onChange: (e: ChangeEvent<HTMLInputElement>) => void;
   onBlur?: () => void;

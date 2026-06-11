@@ -24,6 +24,7 @@
  * lands in a follow-up commit once the map mode toggle is built.
  */
 
+import { useState } from 'react';
 import {
   FILTER_REGISTRY,
   type Agenda,
@@ -419,19 +420,12 @@ function FilterRow({
       // min-only field. Paired ranges are caught above.
       return (
         <Section label={label}>
-          <NumberCell
+          <BufferedNumberInput
             value={(value as number | null) ?? null}
+            coerce={def.type === 'int' ? 'int' : 'float'}
             placeholder={def.unit ? `value ${def.unit}` : 'value'}
-            onChange={(e) => {
-              const raw = e.target.value.trim();
-              if (raw === '') {
-                onChange(null);
-                return;
-              }
-              const n = Number(raw);
-              if (!Number.isFinite(n)) return;
-              onChange(def.type === 'int' ? Math.trunc(n) : n);
-            }}
+            onChange={onChange}
+            ariaLabel={label}
           />
         </Section>
       );
@@ -439,19 +433,12 @@ function FilterRow({
     case 'number_input':
       return (
         <Section label={label}>
-          <NumberCell
+          <BufferedNumberInput
             value={(value as number | null) ?? null}
+            coerce={def.type === 'int' ? 'int' : 'float'}
             placeholder="—"
-            onChange={(e) => {
-              const raw = e.target.value.trim();
-              if (raw === '') {
-                onChange(null);
-                return;
-              }
-              const n = Number(raw);
-              if (!Number.isFinite(n)) return;
-              onChange(def.type === 'int' ? Math.trunc(n) : n);
-            }}
+            onChange={onChange}
+            ariaLabel={label}
           />
           {def.unit ? <UnitHint unit={def.unit} /> : null}
         </Section>
@@ -485,6 +472,68 @@ function FilterRow({
     default:
       return null;
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* BufferedNumberInput                                                        */
+/*                                                                            */
+/* Single-number widget with a local text buffer. The old handler parsed     */
+/* every keystroke and silently dropped unparseable intermediates — with a   */
+/* controlled input that WIPED the character, so typing "-10" into the       */
+/* signed total-price-change filter stored +10 (the opposite cohort) and     */
+/* "7.5" became 75. The buffer keeps the raw text; only complete parses      */
+/* emit. `buf.value` tracks the last emitted/adopted value so an external    */
+/* change (preset load, URL navigation, Reset) resyncs the text, while       */
+/* mid-typing intermediates (which emit nothing) keep it.                    */
+/* -------------------------------------------------------------------------- */
+
+function BufferedNumberInput({
+  value,
+  coerce,
+  placeholder,
+  onChange,
+  ariaLabel,
+}: {
+  value: number | null;
+  coerce: 'int' | 'float';
+  placeholder: string;
+  onChange: (v: number | null) => void;
+  ariaLabel?: string;
+}) {
+  const [buf, setBuf] = useState<{ text: string; value: number | null }>({
+    text: value == null ? '' : String(value),
+    value,
+  });
+  if (buf.value !== value) {
+    // Adjust-state-during-render (the documented derived-state pattern):
+    // the parent changed the value out from under us — adopt it.
+    setBuf({ text: value == null ? '' : String(value), value });
+  }
+  return (
+    <NumberCell
+      value={buf.text}
+      placeholder={placeholder}
+      ariaLabel={ariaLabel}
+      onChange={(e) => {
+        const raw = e.target.value;
+        const trimmed = raw.trim();
+        if (trimmed === '') {
+          setBuf({ text: raw, value: null });
+          if (value !== null) onChange(null);
+          return;
+        }
+        const n = Number(trimmed);
+        if (!Number.isFinite(n)) {
+          // Intermediate ('-', '.', '1e') — keep the text, emit nothing.
+          setBuf({ text: raw, value });
+          return;
+        }
+        const v = coerce === 'int' ? Math.trunc(n) : n;
+        setBuf({ text: raw, value: v });
+        if (v !== value) onChange(v);
+      }}
+    />
+  );
 }
 
 /* -------------------------------------------------------------------------- */

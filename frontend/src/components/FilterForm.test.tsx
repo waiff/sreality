@@ -15,6 +15,7 @@
  * dispatch logic anyway.
  */
 
+import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 
@@ -191,5 +192,50 @@ describe('<FilterForm>', () => {
       />,
     );
     expect(screen.queryByRole('button', { name: 'Byty' })).not.toBeInTheDocument();
+  });
+
+  /* Stateful harness mirroring how Browse / WatchdogEdit feed updates
+   * back into `state` — required to expose controlled-input round trips. */
+  function StatefulNumberHarness({ id }: { id: string }) {
+    const [state, setState] = useState<Record<string, unknown>>({ [id]: null });
+    return (
+      <FilterForm
+        scope="browse"
+        state={state}
+        onChange={(updates) => {
+          setState((prev) => {
+            const next = { ...prev };
+            for (const u of updates) next[u.id] = u.value;
+            return next;
+          });
+        }}
+        includeOnly={[id]}
+        labels={{ [id]: 'signed' }}
+        flat
+      />
+    );
+  }
+
+  it('keeps a typed leading minus alive in signed number inputs', () => {
+    // Regression: the old parse-or-drop handler wiped the '-' keystroke
+    // (controlled input restores prior value on a no-emit), so typing
+    // "-10" into total_price_change_pct stored +10 — the opposite cohort.
+    render(<StatefulNumberHarness id="total_price_change_pct" />);
+    const input = screen.getByRole('textbox', { name: 'signed' });
+    fireEvent.change(input, { target: { value: '-' } });
+    expect(input).toHaveValue('-');
+    fireEvent.change(input, { target: { value: '-1' } });
+    fireEvent.change(input, { target: { value: '-10' } });
+    expect(input).toHaveValue('-10');
+  });
+
+  it('keeps a mid-typing decimal point alive in float number inputs', () => {
+    render(<StatefulNumberHarness id="total_price_change_pct" />);
+    const input = screen.getByRole('textbox', { name: 'signed' });
+    fireEvent.change(input, { target: { value: '7' } });
+    fireEvent.change(input, { target: { value: '7.' } });
+    expect(input).toHaveValue('7.');
+    fireEvent.change(input, { target: { value: '7.5' } });
+    expect(input).toHaveValue('7.5');
   });
 });
