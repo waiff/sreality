@@ -27,7 +27,11 @@ import {
   fmtTime24,
 } from '@/lib/format';
 import { MfReferenceCard } from '@/components/estimation/MfReferenceCard';
-import { ConfidencePill, RunBody } from '@/components/estimation/RunPanel';
+import {
+  ConfidencePill,
+  RunBody,
+  RunStatusChip,
+} from '@/components/estimation/RunPanel';
 import {
   useNewEstimationModal,
   type NewEstimationPrefill,
@@ -35,7 +39,6 @@ import {
 import type {
   EstimationListResponse,
   EstimationRun,
-  EstimationStatus,
   ListingPublic,
 } from '@/lib/types';
 
@@ -210,7 +213,7 @@ function RunSummaryCard({ run }: { run: EstimationRun }) {
         <p className="text-[0.6rem] tracking-[0.16em] uppercase text-[var(--color-ink-4)]">
           Náš odhad · {run.mode === 'agent' ? 'agentní analýza' : 'komparativní'}
         </p>
-        {run.status !== 'success' && <StatusChip status={run.status} />}
+        {run.status !== 'success' && <RunStatusChip status={run.status} />}
       </div>
       <div className="mt-1 flex items-baseline justify-between gap-3">
         <span className="text-lg font-medium tabular-nums">
@@ -395,7 +398,7 @@ function RunHistory({
                       : '—'}
                   </td>
                   <td className="px-3 py-2">
-                    <StatusChip status={r.status} />
+                    <RunStatusChip status={r.status} />
                   </td>
                 </tr>
               );
@@ -407,24 +410,6 @@ function RunHistory({
   );
 }
 
-function StatusChip({ status }: { status: EstimationStatus }) {
-  const tone =
-    status === 'success'
-      ? 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
-      : status === 'failed'
-        ? 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
-        : 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]';
-  return (
-    <span
-      className={[
-        'inline-block px-2 py-0.5 text-[0.65rem] tracking-wide uppercase rounded-[var(--radius-xs)] font-medium',
-        tone,
-      ].join(' ')}
-    >
-      {status}
-    </span>
-  );
-}
 
 /* -------------------------------------------------------------------------- */
 /* Layout primitives                                                          */

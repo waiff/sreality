@@ -6,7 +6,13 @@
  * the deep analytics live in RunDetailModal behind "Show estimation detail".
  *
  * `embedded` drops the big headline + the run-level MF reference card —
- * the estimations section renders both itself, side by side. */
+ * the estimations section renders both itself, side by side.
+ *
+ * Call sites MUST key RunBody by run.id: YieldBlock and RerunBlock seed
+ * their editable state from the run at mount, so switching runs without a
+ * remount would show the previous run's edits. (A background refetch of
+ * the SAME run deliberately does not reset them — that would wipe the
+ * operator's in-progress edits.) */
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -339,6 +345,25 @@ export function SourceBadge({ source }: { source: EstimationSource }) {
   return (
     <span className="inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.16em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border border-[var(--color-rule)]">
       {source}
+    </span>
+  );
+}
+
+export function RunStatusChip({ status }: { status: EstimationRun['status'] }) {
+  const tone =
+    status === 'success'
+      ? 'bg-[var(--color-sage-soft)] text-[var(--color-sage)]'
+      : status === 'failed'
+        ? 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
+        : 'bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]';
+  return (
+    <span
+      className={[
+        'inline-block px-2 py-0.5 text-[0.65rem] tracking-wide uppercase rounded-[var(--radius-xs)] font-medium',
+        tone,
+      ].join(' ')}
+    >
+      {status}
     </span>
   );
 }
