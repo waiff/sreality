@@ -386,10 +386,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
    the content hash and inserting into `listing_snapshots` if it differs from the most
    recent snapshot for that listing.
 3. **Never delete listings.** Listings that disappear get `is_active=false`. History is
-   sacred. The `is_active=false` inference is only valid after a **complete index walk** —
-   a partial walk (`--limit N`, `--detail-only`) cannot determine which listings are gone.
-   The scraper enforces this: `mark_inactive` is skipped when `--limit` is set, and
-   `--detail-only` never reaches the index phase.
+   sacred. The `is_active=false` inference is only valid after a **~complete index walk** —
+   a partial walk (`--limit N`, `--detail-only`, `--max-pages`) cannot determine which
+   listings are gone. The scraper enforces this: `mark_inactive` is skipped when `--limit`
+   is set, and `--detail-only` never reaches the index phase. "Complete" is ≥99.5%
+   (`INDEX_MIN_COMPLETENESS = 0.995`) for the framework portals, NOT 100% — portal counts
+   jitter mid-walk, and a strict 1.0 gate proved statistically unreachable for large bazos
+   categories (delistings then accumulated for 11 days). The second rail: framework sweeps
+   only flip rows additionally unseen for 24h+ (`min_unseen_hours` on `db.mark_inactive` /
+   `mark_inactive_native`), so a tolerated walk-miss can never flip a freshly-seen listing,
+   and a false flip self-heals on the next index sighting (`touch_listings` reactivates).
+   Every flip stamps `listings.inactive_at` (cleared on reactivation) — the delisting-latency
+   health check reads it.
 4. **`last_seen_at` is driven by index sightings and successful detail fetches; failed
    fetches never touch it.** Every existing listing whose id appears in the run's index
    gets its `last_seen_at` bumped before any detail fetches happen. A successful detail
@@ -1054,7 +1062,13 @@ synchronous `condition_scores.yml` is now a **dispatch-only fallback** (its `30 
 was removed) — don't schedule both, they select the same pending listings and the sync scorer
 doesn't skip in-flight batch rows. The scoring model is `app_settings.llm_condition_model`
 (Haiku today), so batch+Haiku ≈ 25% of the original Sonnet-sync cost. Both scrape workflows
-still pass `--no-condition-scoring`. **Images** stay decoupled (`images.yml`, `--images-only`,
+still pass `--no-condition-scoring`. Scoring is **kraj-scoped and reuse-first** (migration 174):
+the selector targets only listings whose geo-derived `region_id` is in
+`app_settings.condition_scoring_enabled_region_ids` (operator-edited via the Settings page
+"Hodnocení stavu — kraje" toggles; empty = paused; `region_id` NULL = parked), and
+`propagate_condition_levels` copies a property's genuine score to its cross-portal siblings
+(`listings.condition_levels_propagated_from` records provenance) before every submit/backfill,
+so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope. **Images** stay decoupled (`images.yml`, `--images-only`,
 2-hourly); both new workflows pass `--no-image-downloads`. Neither `images.yml` nor the drain's
 write phase downloads bytes — the drain only writes image-URL rows.
 

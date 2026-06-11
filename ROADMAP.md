@@ -6,6 +6,44 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Scraper P0 sprint + kraj-scoped condition scoring + observability (Sprint A/B)
+
+- **Delisting fixed** (PR #418): completeness gate 0.995 + 24h staleness rail on
+  bazos/idnes/bezrealitky; bazos 12h sweep throttle removed (it starved the big
+  categories). First walk flipped 6,831 stale bazos rows; stale-actives >24h: 3.
+- **Snapshot churn killed** (PR #419): sreality hash strips `labels`/`labels_extended`/
+  `user.image` (56% of pairs were pure volatile churn); idnes coordinate carry-forward
+  ends the geocode-skip/geom-wipe oscillation (and the residual Mapy spend).
+- **Image red-loop ended** (PR #415): `fl=rot,…|` prefix chains completed (rot preserved),
+  400/415 classified permanent (403 stays transient), 526 + 8,505 stuck rows re-queued —
+  image workflows green with errors=0.
+- **mmreality retired, silent-green fixed** (PR #416 + mig 173): Cloudflare blocks GH
+  runner IPs (code verified correct); cron removed, registry rows disabled
+  (incl. orphaned `ceskereality`); `portal_runner` now reds the run when every category
+  fails and reports walk failures as errors.
+- **Condition batches unbroken** (PR #420): size-aware chunked submission under the 256MB
+  Batches cap (the 5,000×61.5KB submits 413'd since Jun 4), static prompt context hoisted
+  (build 50min → ~8min), condition-specific LLM liveness.
+- **Kraj-scoped scoring + cross-portal reuse** (PRs #427/#425, mig 174): selector reads
+  `condition_scoring_enabled_region_ids` (seeded: Středočeský, Plzeňský, Královéhradecký,
+  Pardubický, Vysočina); Settings-page per-kraj toggles with unscored counts;
+  `propagate_condition_levels` copies genuine scores to property siblings (3,828 reused
+  on first run) with provenance + selection exclusion.
+- **Observability** (PRs #428/#426/#429/#430/#431, migs 175–180): `listings.inactive_at`
+  + delisting-latency check; snapshot-churn check (10-min matview); per-field NULL-drift
+  check vs 6-hourly `data_quality_snapshots` captures; composed end-to-end latency check;
+  image-failure breakdown matview + Health card; Health-matview staleness stamp + banner;
+  failed-workflow-run recorder (30-min poller) + Health card.
+
+#### Next
+
+- Sprint C (data value): bazos locality backfill, street persistence + bazos dedup
+  revival, pHash throughput, idnes amenity parser, remax/bezrealitky subtype, enum
+  hygiene, price/area guards, remax drain investigation.
+- Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
+  deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
+
+
 ### 2026-06: Browse filter restructure (price-change merge, condition ranges, Other band)
 - **Sidebar reorganised, no band grew taller.** The "Property" band is gone — its
   filters were listing-level anyway (furnished / ownership / amenities live on
