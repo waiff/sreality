@@ -64,6 +64,12 @@ class ListingKey:
     floor: int | None
     area_m2: float | None
     description: str | None = None
+    # Offering category: category_type is prodej/pronajem/drazba/podil,
+    # category_main is byt/dum/… A sale and a rental (or a flat and a house) at
+    # one address are categorically different offerings — never the same
+    # property — so a mismatch is a hard reject in classify_pair.
+    category_type: str | None = None
+    category_main: str | None = None
 
 
 # Unit markers in the description that identify a SPECIFIC unit within one
@@ -196,6 +202,20 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
         return PairDecision("reject", None, "already_merged")
     if a.street_key != b.street_key:
         return PairDecision("reject", None, "street_mismatch")
+    # Offering category is fundamental: a sale and a rental (prodej vs pronajem),
+    # or a flat and a house (byt vs dum), at one address are different offerings,
+    # never the same property — reject before anything else. NULLs don't
+    # contradict (a missing category is unknown, not a conflict).
+    if (
+        a.category_type is not None and b.category_type is not None
+        and a.category_type != b.category_type
+    ):
+        return PairDecision("reject", None, "category_type_contradiction")
+    if (
+        a.category_main is not None and b.category_main is not None
+        and a.category_main != b.category_main
+    ):
+        return PairDecision("reject", None, "category_main_contradiction")
     if not disposition_compatible(a.disposition, b.disposition):
         return PairDecision("reject", None, "disposition_mismatch")
 
