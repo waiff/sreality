@@ -96,6 +96,7 @@ def run_index_walk(
     total_pages = 0
     total_index = 0
     total_enqueued = 0
+    failed_categories = 0
     category_aggregates: list[dict[str, Any]] = []
     limiter = RateLimiter(portal.index_rate)
     conn = None if dry_run else portal.connect_index()
@@ -120,6 +121,7 @@ def run_index_walk(
                     "CATEGORY walk failed cm=%s ct=%s: %s — skipping sweep",
                     cm_text, ct_text, exc,
                 )
+                failed_categories += 1
                 seen_ids, cat_counts, cat_result_size, cat_pages, complete = (
                     set(), {}, None, 0, False,
                 )
@@ -181,9 +183,10 @@ def run_index_walk(
             conn.close()
 
     LOG.info(
-        "RUN done pages=%d enqueued=%d inactive=%d",
+        "RUN done pages=%d enqueued=%d inactive=%d errors=%d",
         total_pages, total_enqueued,
         sum(c["listings_inactive"] for c in category_aggregates),
+        failed_categories,
     )
     scrape_agg: dict[str, Any] = {
         "index_pages":          total_pages,
@@ -192,10 +195,20 @@ def run_index_walk(
         "listings_updated":     0,
         "listings_inactive":    sum(c["listings_inactive"] for c in category_aggregates),
         "images_discovered":    0,
-        "errors":               0,
+        "errors":               failed_categories,
         "by_category":          category_aggregates,
     }
-    return (0, scrape_agg)
+    # Every category this run attempted failed -> the portal is fully blocked
+    # (e.g. a WAF 403s the runner's egress). Fail loudly so the workflow goes
+    # red instead of recording a green zero-listing run; a partial failure
+    # stays rc=0 with errors>0 in the aggregate.
+    rc = 1 if category_aggregates and failed_categories == len(category_aggregates) else 0
+    if rc != 0:
+        LOG.error(
+            "INDEX every category failed (%d/%d); failing the run",
+            failed_categories, len(category_aggregates),
+        )
+    return (rc, scrape_agg)
 
 
 def _flush_drain_batch(

@@ -1,7 +1,7 @@
 name: "Scraping: M&M Reality scraper (pilot)"
 
 # portal: mmreality
-# Scheduled (every 6h) + manual scraper for mmreality.cz on the shared portal
+# Manual (dispatch-only) scraper for mmreality.cz on the shared portal
 # framework. M&M Reality is a server-rendered HTML portal whose detail pages
 # embed a complete structured estate object (a Vue `:property` prop): the index
 # walk pages the mixed-category /nemovitosti/ results and enqueues new/price-
@@ -22,14 +22,15 @@ name: "Scraping: M&M Reality scraper (pilot)"
 #
 # Required secret: SUPABASE_DB_URL.
 #
-# Cadence: every 6h, offset off the other scrapers. The index is large, so a
-# scheduled run is bounded by --max-pages; the detail drain is bounded by
-# --max-detail and the queue persists across runs, so a bounded run never loses
-# work — the first few runs drain the initial backlog.
+# The index is large, so a run is bounded by --max-pages; the detail drain is
+# bounded by --max-detail and the queue persists across runs, so a bounded run
+# never loses work.
 
+# Cron removed: Cloudflare 403-blocks GitHub-hosted runner IPs (datacenter
+# egress), so every scheduled run produced zero listings while staying green.
+# workflow_dispatch is kept for a future retry; re-enable the schedule only
+# with non-datacenter egress (self-hosted runner / proxy).
 on:
-  schedule:
-    - cron: "50 */6 * * *"
   workflow_dispatch:
     inputs:
       max_pages:
