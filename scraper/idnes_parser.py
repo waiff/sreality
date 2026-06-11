@@ -374,14 +374,25 @@ def _has_check(dd: Node | None) -> bool | None:
 
 
 def _truthy_field(dd: Node | None) -> bool | None:
-    """For a row whose presence is signalled by a check icon OR by free text
-    (e.g. "Parkování" -> "parkování na ulici")."""
+    """For a row whose presence is signalled by a check icon OR by free text.
+    idnes renders the SAME amenity row both ways depending on what the lister
+    filled in: "Balkon" is a bare check icon on some pages and a size /
+    orientation text ("4 m 2", "jih , 4 m 2") on others — both mean the
+    amenity exists. Verified against live pages + the stored raw params."""
     if dd is None:
         return None
     checked = _has_check(dd)
     if checked is not None:
         return checked
     return True if _text(dd) else None
+
+
+def _any_true(*vals: bool | None) -> bool | None:
+    """Combine related amenity signals the way parser._has_balcony does for
+    sreality: None only when every signal is unknown, else any-True."""
+    if all(v is None for v in vals):
+        return None
+    return any(v is True for v in vals)
 
 
 def parse_index(html: str) -> IndexPage:
@@ -477,6 +488,22 @@ def parse_detail(
     )
     area_m2 = _clamp(_parse_area(area_text) or _parse_area(title), _AREA_M2_MAX)
 
+    # Amenities: each row is a check icon OR free text (size / orientation /
+    # parking kind), so everything goes through _truthy_field. idnes has no
+    # standalone "Garáž" row — the garage signal lives in the "Parkování"
+    # value ("garáž , parkování na ulici") and the icon-only "Dvojgaráž" row.
+    balcony = _truthy_field(params.get("balkon"))
+    loggia = _truthy_field(params.get("lodžie"))
+    terrace = _truthy_field(params.get("terasa"))
+    parking_field = _truthy_field(params.get("parkování"))
+    parking_text = _text(params.get("parkování"))
+    parking_lots = _parse_int(_text(params.get("počet parkovacích míst")))
+    garage = _any_true(
+        _truthy_field(params.get("garáž")),
+        _truthy_field(params.get("dvojgaráž")),
+        ("garaz" in _strip_diacritics(parking_text).lower()) if parking_text else None,
+    )
+
     image_urls: list[str] = []
     seen_img: set[str] = set()
     for a in tree.css('a[data-fancybox="images"]'):
@@ -524,16 +551,28 @@ def parse_detail(
             _text(params.get("stav bytu"))
             or _text(params.get("stav domu"))
             or _text(params.get("stav objektu"))
+            # houses / commercial label their condition row "Stav budovy"
+            or _text(params.get("stav budovy"))
         ),
         ownership=_norm_ownership(_text(params.get("vlastnictví"))),
-        furnished=_norm_furnished(_text(params.get("vybavení"))),
+        furnished=_norm_furnished(
+            _text(params.get("vybavení")) or _text(params.get("vybavení domu"))
+        ),
         energy_rating=_energy_rating(_text(params.get("penb")) or _text(params.get("energetická náročnost"))),
-        has_balcony=_has_check(params.get("balkon")),
-        has_lift=_has_check(params.get("výtah")),
-        cellar=_has_check(params.get("sklep")),
-        terrace=_has_check(params.get("terasa")),
-        garage=_has_check(params.get("garáž")),
-        has_parking=_truthy_field(params.get("parkování")),
+        # Legacy combined boolean — balcony|terrace|loggia, mirroring
+        # parser._has_balcony so the cross-portal filter agrees with sreality.
+        has_balcony=_any_true(balcony, terrace, loggia),
+        has_lift=_truthy_field(params.get("výtah")),
+        cellar=_truthy_field(params.get("sklep")),
+        terrace=terrace,
+        garage=garage,
+        # Legacy combined boolean — parking|garage|lots, mirroring parser._has_parking.
+        has_parking=_any_true(
+            parking_field,
+            garage,
+            (parking_lots > 0) if parking_lots is not None else None,
+        ),
+        parking_lots=parking_lots,
         estate_area=_clamp(_parse_area(_text(params.get("plocha pozemku"))), _AREA_LARGE_MAX),
         garden_area=_clamp(_parse_area(_text(params.get("plocha zahrady"))), _AREA_LARGE_MAX),
         description=description,

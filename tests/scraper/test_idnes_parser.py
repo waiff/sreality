@@ -112,6 +112,50 @@ RENT_DOHODOU_HTML = """
 </body></html>
 """
 
+# Mirrors the live text-variant amenity rows: when the lister fills a size /
+# orientation, the <dd> carries TEXT ("jih , 4 m 2"), not a check icon, and
+# the garage signal lives inside the "Parkování" multi-select value.
+TEXT_AMENITIES_HTML = """
+<!DOCTYPE html><html><body>
+<h1>Prodej bytu 2+kk 54 m²</h1>
+<p class="b-detail__price"><strong>8&zwj;&nbsp;500&zwj;&nbsp;000 Kč</strong></p>
+<p class="b-detail__info">Vzorová, Praha 9 - Letňany</p>
+<dl>
+  <dt>Konstrukce budovy</dt><dd>cihlová</dd>
+  <dt>Stav budovy</dt><dd>po rekonstrukci</dd>
+  <dt>Stav bytu</dt><dd>velmi dobrý stav</dd>
+  <dt>Užitná plocha</dt><dd>54 m<sup>2</sup></dd>
+  <dt><a href="/s/x?vybaveni=balkon">Balkon</a></dt><dd>jih , 4 m 2</dd>
+  <dt>Terasa</dt><dd>20 m 2</dd>
+  <dt><a href="/s/x?vybaveni=parkovani">Parkování</a></dt><dd>garáž , parkování na ulici</dd>
+  <dt>Vybavení</dt><dd>nezařízený</dd>
+</dl>
+</body></html>
+"""
+
+# Mirrors a live house page: condition under "Stav budovy", furnishing under
+# "Vybavení domu", an icon-only "Lodžie" / "Dvojgaráž" row, and a parking-lot
+# count row — none of which carry a check icon for their value.
+HOUSE_DETAIL_HTML = """
+<!DOCTYPE html><html><body>
+<h1>Prodej rodinného domu 142 m²</h1>
+<p class="b-detail__price"><strong>3&zwj;&nbsp;990&zwj;&nbsp;000 Kč</strong></p>
+<p class="b-detail__info">Vzorová, Horní Lhota</p>
+<dl>
+  <dt>Konstrukce budovy</dt><dd>smíšená</dd>
+  <dt>Stav budovy</dt><dd>velmi dobrý stav</dd>
+  <dt>Plocha pozemku</dt><dd>1033 m<sup>2</sup></dd>
+  <dt>Užitná plocha</dt><dd>142 m<sup>2</sup></dd>
+  <dt>Terasa</dt><dd><span class="icon icon--check"></span></dd>
+  <dt>Lodžie</dt><dd><span class="icon icon--check"></span></dd>
+  <dt>Dvojgaráž</dt><dd><span class="icon icon--check"></span></dd>
+  <dt>Parkování</dt><dd>parkování na pozemku</dd>
+  <dt>Počet parkovacích míst</dt><dd>2</dd>
+  <dt>Vybavení domu</dt><dd>částečně zařízený</dd>
+</dl>
+</body></html>
+"""
+
 
 def test_parse_index_total_items_and_next_page():
     page = parse_index(INDEX_HTML)
@@ -165,6 +209,10 @@ def test_parse_detail_full():
     assert listing.cellar is True
     assert listing.has_parking is True
     assert listing.terrace is None      # absent row -> unknown, not guessed False
+    # "Parkování: parkování na ulici" is a filled multi-select WITHOUT garáž —
+    # that is evidence of no garage, not unknown.
+    assert listing.garage is False
+    assert listing.parking_lots is None
     assert listing.description.startswith("Nabízíme")
     assert listing.raw["idnes_ref"] == "IDNES-943453"
     assert len(listing.raw["image_urls"]) == 2
@@ -256,6 +304,43 @@ def test_parse_detail_price_on_request_is_none_for_rent():
     assert listing.area_m2 == 48.0
     assert listing.disposition == "2+kk"
     assert listing.lat is None and listing.lon is None   # no map config, no geocoder
+
+
+def test_parse_detail_text_variant_amenities():
+    # The amenity <dd> carries free text (size / orientation / parking kind)
+    # whenever the lister filled it in — the icon-only check used to drop ALL
+    # of these to NULL (production: balcony 7%, garage 0% on idnes).
+    listing = parse_detail(
+        TEXT_AMENITIES_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/byt/praha/6a18deadbeefdeadbeef0010/",
+        category_main="byt", category_type="prodej",
+    )
+    assert listing.has_balcony is True       # "Balkon: jih , 4 m 2"
+    assert listing.terrace is True           # "Terasa: 20 m 2"
+    assert listing.garage is True            # "Parkování: garáž , parkování na ulici"
+    assert listing.has_parking is True
+    assert listing.has_lift is None          # absent row stays unknown
+    assert listing.furnished == "ne"
+    # "Stav bytu" keeps precedence over the building-level "Stav budovy".
+    assert listing.condition == "velmi_dobry"
+
+
+def test_parse_detail_house_labels_and_amenities():
+    listing = parse_detail(
+        HOUSE_DETAIL_HTML,
+        source_url="https://reality.idnes.cz/detail/prodej/dum/horni-lhota/6a18deadbeefdeadbeef0011/",
+        category_main="dum", category_type="prodej",
+    )
+    # Houses label their rows "Stav budovy" / "Vybavení domu" — both used to
+    # fall through to NULL (production: condition 0% on idnes houses).
+    assert listing.condition == "velmi_dobry"
+    assert listing.furnished == "castecne"
+    assert listing.terrace is True
+    assert listing.has_balcony is True       # terasa/lodžie fold into the legacy combined bool
+    assert listing.garage is True            # icon-only "Dvojgaráž" row
+    assert listing.parking_lots == 2
+    assert listing.has_parking is True
+    assert listing.estate_area == 1033.0
 
 
 def test_norm_ownership_canonical_only():

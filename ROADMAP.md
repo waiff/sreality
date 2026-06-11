@@ -34,12 +34,23 @@ source for active rules; ROADMAP is for sequencing.
   check vs 6-hourly `data_quality_snapshots` captures; composed end-to-end latency check;
   image-failure breakdown matview + Health card; Health-matview staleness stamp + banner;
   failed-workflow-run recorder (30-min poller) + Health card.
+- **idnes amenity parser + remax/bezrealitky subtype** (Sprint C): idnes amenity rows are
+  check-icon OR free-text ("Balkon: jih , 4 m 2"; the garage signal lives inside the
+  "Parkování" value + the icon-only "Dvojgaráž" row) — every amenity field now goes
+  through the truthy-field path, plus `parking_lots`, a "Stav budovy" condition fallback
+  and a "Vybavení domu" furnished fallback (houses were 0% on both). remax's 2026 coarse
+  "Typ nemovitosti" (7 marketing groups) erased the fine vocabulary `TYP_TO_SUBTYPE` was
+  built for — subtype now derives from the detail-URL noun
+  (`prodej-ubytovaciho-zarizeni` → ubytovani, …) and "Nájemní domy" lands as komercni +
+  cinzovni_dum for cross-portal agreement. bezrealitky's mapping verified correct against
+  live GraphQL introspection (estateType is the finest enum exposed; houseType is
+  access-denied) — its remaining NULL gap is upsert lag, a raw_json backfill, not code.
 
 #### Next
 
-- Sprint C (data value): bazos locality backfill, street persistence + bazos dedup
-  revival, pHash throughput, idnes amenity parser, remax/bezrealitky subtype, enum
-  hygiene, price/area guards, remax drain investigation.
+- Sprint C (data value, remaining): bazos locality backfill, street persistence + bazos
+  dedup revival, pHash throughput, enum hygiene, price/area guards, remax drain
+  investigation.
 - Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
   deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
 

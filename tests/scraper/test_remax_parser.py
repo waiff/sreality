@@ -127,6 +127,19 @@ RENT_HTML = """
 </body></html>
 """
 
+NAJEMNI_DUM_HTML = """
+<!DOCTYPE html><html>
+<head><title>Prodej nájemního domu 1 250 m², Brno | RE/MAX</title></head>
+<body>
+<h1 class="pd-header__title">Prodej nájemního domu 1 250 m², Brno (ID 100-ND001)</h1>
+<div class="pd-price-box"><span class="pd-price" data-advert-price="32500000">32 500 000 Kč</span></div>
+<div class="pd-detail-info">
+  <div class="pd-detail-info__row"><div class="pd-detail-info__label">Typ nemovitosti:</div><div class="pd-detail-info__value">Nájemní domy</div></div>
+  <div class="pd-detail-info__row"><div class="pd-detail-info__label">Celková plocha:</div><div class="pd-detail-info__value">1250 m²</div></div>
+</div>
+</body></html>
+"""
+
 
 def test_parse_index_total_and_cards():
     page = parse_index(INDEX_HTML)
@@ -158,20 +171,61 @@ def test_category_from_typ():
     assert category_from_typ("Kanceláře") == "komercni"
     assert category_from_typ("Malé objekty, garáže") == "ostatni"
     assert category_from_typ(None) is None
+    # The live 2026 coarse vocabulary (verified against the full active walk).
+    assert category_from_typ("Chaty a rekreační objekty") == "dum"
+    assert category_from_typ("Hotely, penziony a restaurace") == "komercni"
+    # Nájemní domy land under komercni — every portal keys cinzovni_dum there.
+    assert category_from_typ("Nájemní domy") == "komercni"
 
 
 def test_subtype_of():
-    # collision-free commercial / historic correspondences
+    # legacy fine-vocabulary correspondences (typ only)
     assert subtype_of("Kanceláře") == "kancelar"
     assert subtype_of("Obchodní") == "obchodni_prostor"
     assert subtype_of("Sklady") == "sklad"
     assert subtype_of("Výroba") == "vyroba"
     assert subtype_of("Zemědělské objekty") == "zemedelsky"
     assert subtype_of("Historické objekty") == "pamatka_jine"
-    # ambiguous combined house types are deliberately left without a subtype
+    # live coarse vocabulary: "Nájemní domy" is specific enough to map
+    assert subtype_of("Nájemní domy") == "cinzovni_dum"
+    # ambiguous combined groups are deliberately left without a subtype —
+    # including "Hotely, penziony a restaurace", whose "restaurace" tail must
+    # NOT mis-label a hotel as a restaurant
     assert subtype_of("Domy a vily") is None
     assert subtype_of("Chaty a chalupy") is None
+    assert subtype_of("Chaty a rekreační objekty") is None
+    assert subtype_of("Hotely, penziony a restaurace") is None
     assert subtype_of(None) is None
+
+
+def test_subtype_of_url_noun():
+    # The detail-URL noun is the per-listing type signal the coarse typ lost
+    # (real production URLs).
+    assert subtype_of(
+        "Hotely, penziony a restaurace",
+        "https://www.remax-czech.cz/reality/detail/430672/prodej-ubytovaciho-zarizeni-48-m2-praha-4-chodov",
+    ) == "ubytovani"
+    assert subtype_of(
+        "Hotely, penziony a restaurace",
+        "https://www.remax-czech.cz/reality/detail/440891/prodej-restaurace-70-m2-volyne",
+    ) == "restaurace"
+    assert subtype_of(
+        "Nájemní domy",
+        "https://www.remax-czech.cz/reality/detail/1/prodej-najemniho-cinzovniho-domu-450-m2-brno",
+    ) == "cinzovni_dum"
+    assert subtype_of(
+        "Komerční prostory",
+        "https://www.remax-czech.cz/reality/detail/2/pronajem-kancelarskych-prostor-120-m2-ostrava",
+    ) == "kancelar"
+    # generic nouns stay unmapped
+    assert subtype_of(
+        "Domy a vily",
+        "https://www.remax-czech.cz/reality/detail/434384/prodej-domu-135-m2-zapy",
+    ) is None
+    assert subtype_of(
+        "Chaty a rekreační objekty",
+        "https://www.remax-czech.cz/reality/detail/439916/prodej-chaty-chalupy-38-m2-novy-malin",
+    ) is None
 
 
 def test_category_of_title_fallback():
@@ -179,6 +233,10 @@ def test_category_of_title_fallback():
     assert category_of(None, "Prodej chaty / chalupy 108 m², Roztoky") == "dum"
     assert category_of(None, "Pronájem obchodních prostor Ostrava") == "komercni"
     assert category_of(None, "Pronájem garážového stání") == "ostatni"
+    # The index walk slices nájemní domy into komercni from the title alone,
+    # so the index slice and the detail parse can't disagree.
+    assert category_of(None, "Prodej nájemního domu 1 250 m², Brno") == "komercni"
+    assert category_of(None, "Prodej rodinného domu 135 m², Zápy") == "dum"
     # Detail "Typ nemovitosti" wins over the title noun.
     assert category_of("Byty", "Prodej domu s garáží") == "byt"
 
@@ -244,6 +302,21 @@ def test_parse_detail_content_hash_and_to_row():
     assert row["category_main"] == "byt"
     assert row["price_czk"] == 9_962_000
     assert row["lat"] == a.lat and row["lon"] == a.lon
+
+
+def test_parse_detail_najemni_dum_subtype():
+    # remax's coarse "Nájemní domy" group is the one live typ value specific
+    # enough for a subtype; the row lands where every other portal keys
+    # cinzovni_dum — category komercni.
+    listing = parse_detail(
+        NAJEMNI_DUM_HTML,
+        source_url="https://www.remax-czech.cz/reality/detail/100/prodej-najemniho-domu-1250-m2-brno",
+    )
+    assert listing.category_main == "komercni"
+    assert listing.category_type == "prodej"
+    assert listing.subtype == "cinzovni_dum"
+    assert listing.price_czk == 32_500_000
+    assert listing.area_m2 == 1250.0
 
 
 def test_parse_detail_rent_and_category_from_typ():
