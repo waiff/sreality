@@ -1668,9 +1668,10 @@ def _is_gone_image_error(error: Exception) -> bool:
 
 
 def _is_dead_url_image_error(error: Exception) -> bool:
-    """True iff the exception is an HTTP 400/401/415 from sreality's CDN — a
-    dead URL (bare, rotated path, or malformed transform chain). 403 is NOT
-    here: that's the CDN throttling us, so it must stay transient."""
+    """True iff the exception is an HTTP 400/401/415 on an image GET — a dead
+    URL (bare, rotated path, malformed transform chain, unsupported format),
+    treated as permanent on any portal's CDN. 403 is NOT here: sreality
+    throttles with 403, so it must stay transient."""
     import requests
 
     if isinstance(error, requests.HTTPError):

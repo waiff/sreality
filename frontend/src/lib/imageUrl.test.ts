@@ -21,6 +21,15 @@ describe('imageSrc — CDN fallback (storage_path null)', () => {
     expect(imageSrc({ sreality_url: u, storage_path: null })).toBe(u);
   });
 
+  it('completes a prefix transform chain, preserving the rot op', () => {
+    expect(
+      imageSrc({
+        sreality_url: 'https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,180,0|',
+        storage_path: null,
+      }),
+    ).toBe('https://d18-a.sdn.cz/d_18/x/sw6Lvw.mpo?fl=rot,180,0|res,749,562,3|shr,,20|jpg,90');
+  });
+
   it('leaves non-sreality URLs (bazos/idnes/bezrealitky) untouched', () => {
     const u = 'https://www.bazos.cz/img/1t/835/218425835.jpg';
     expect(imageSrc({ sreality_url: u, storage_path: null })).toBe(u);
