@@ -9,12 +9,35 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 
 import psycopg
 
 LOG = logging.getLogger("refresh_image_stats")
 
 _MV = "image_storage_overview_mv"
+
+_CONNECT_ATTEMPTS = 3
+_CONNECT_RETRY_SLEEP_S = 10.0
+
+
+def _connect(db_url: str) -> psycopg.Connection:
+    # The pooler occasionally times out the handshake; one retry round-trip is
+    # all it takes, so a small bounded retry beats failing the whole job.
+    for attempt in range(1, _CONNECT_ATTEMPTS + 1):
+        try:
+            # autocommit: REFRESH ... CONCURRENTLY cannot run inside a
+            # transaction block.
+            return psycopg.connect(db_url, autocommit=True, prepare_threshold=None)
+        except psycopg.OperationalError as exc:
+            if attempt == _CONNECT_ATTEMPTS:
+                raise
+            LOG.warning(
+                "CONNECT attempt=%d/%d failed: %s — retrying in %.0fs",
+                attempt, _CONNECT_ATTEMPTS, exc, _CONNECT_RETRY_SLEEP_S,
+            )
+            time.sleep(_CONNECT_RETRY_SLEEP_S)
+    raise AssertionError("unreachable")
 
 
 def main() -> int:
@@ -27,8 +50,7 @@ def main() -> int:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
-    # autocommit: REFRESH ... CONCURRENTLY cannot run inside a transaction block.
-    with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+    with _connect(db_url) as conn:
         with conn.cursor() as cur:
             cur.execute(f"refresh materialized view concurrently {_MV}")
     LOG.info("REFRESH done mv=%s", _MV)

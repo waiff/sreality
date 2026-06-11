@@ -81,6 +81,37 @@ def test_download_image_idempotent_on_existing_fl(monkeypatch):
     assert captured == [existing]
 
 
+def test_with_transform_completes_rot_prefix_chain():
+    """sreality now ships some URLs with a prefix chain '?fl=rot,<deg>,0|'
+    (trailing pipe). The CDN 400s it as-is AND with the pipe stripped; only the
+    completed chain returns bytes. The rot op must be preserved — completing
+    without it returns 200 but stores the photo unrotated (curl-verified)."""
+    from scraper.image_storage import IMAGE_TRANSFORM_OPS, _with_transform
+
+    url = "https://d18-a.sdn.cz/d_18/c_img_a/x.jpeg?fl=rot,180,0|"
+    assert _with_transform(url) == (
+        "https://d18-a.sdn.cz/d_18/c_img_a/x.jpeg?fl=rot,180,0|"
+        + IMAGE_TRANSFORM_OPS
+    )
+
+
+def test_with_transform_completes_rot_chain_without_trailing_pipe():
+    """A rot prefix without the trailing pipe gets exactly one pipe separator."""
+    from scraper.image_storage import IMAGE_TRANSFORM_OPS, _with_transform
+
+    url = "https://d18-a.sdn.cz/d_18/c_img_a/x.jpeg?fl=rot,90,0"
+    assert _with_transform(url) == url + "|" + IMAGE_TRANSFORM_OPS
+
+
+def test_with_transform_leaves_legacy_complete_chain_untouched():
+    """Pre-rebuild stored URLs carry a complete 'res,'-bearing chain — the
+    823k-row legacy cohort must download verbatim."""
+    from scraper.image_storage import _with_transform
+
+    legacy = "https://d18-a.sdn.cz/x/y.jpeg?fl=res,749,562,3|shr,,20|jpg,90"
+    assert _with_transform(legacy) == legacy
+
+
 def test_download_image_leaves_non_sreality_url_untouched(monkeypatch):
     """The render-transform is sreality-CDN-only; bazos (and other portals')
     image URLs must download verbatim (they 404 on the sreality query)."""
