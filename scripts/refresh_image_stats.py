@@ -63,6 +63,14 @@ def main() -> int:
                 # whole job — the next 2-hourly run picks it up.
                 LOG.warning("REFRESH skipped mv=%s (does not exist yet)", mv)
                 continue
+            except psycopg.errors.ObjectNotInPrerequisiteState:
+                # A matview created WITH NO DATA (e.g. when its initial
+                # population exceeds the migration-runner's statement timeout)
+                # cannot be refreshed CONCURRENTLY until populated once.
+                with conn.cursor() as cur:
+                    cur.execute(f"refresh materialized view {mv}")
+                LOG.info("REFRESH done mv=%s (first populate, non-concurrent)", mv)
+                continue
             LOG.info("REFRESH done mv=%s", mv)
     return 0
 
