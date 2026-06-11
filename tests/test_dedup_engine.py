@@ -28,11 +28,13 @@ def _key(
     street: str = "id:42", disp: str = "2+kk", hn: str | None = "10",
     floor: int | None = 3, area: float | None = 60.0,
     description: str | None = None,
+    category_type: str | None = "prodej", category_main: str | None = "byt",
 ) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid if pid is not None else sid,
         source=source, street_key=street, disposition=disp,
         house_number=hn, floor=floor, area_m2=area, description=description,
+        category_type=category_type, category_main=category_main,
     )
 
 
@@ -181,6 +183,39 @@ def test_disposition_mismatch_rejects() -> None:
     assert d.detail == "disposition_mismatch"
 
 
+def test_category_type_contradiction_rejects_sale_vs_rent() -> None:
+    # The reported bug: a sale and a rental on the same street + disposition.
+    d = classify_pair(
+        _key(1, category_type="prodej"),
+        _key(2, category_type="pronajem"),
+    )
+    assert d.action == "reject"
+    assert d.detail == "category_type_contradiction"
+
+
+def test_category_type_contradiction_drazba_vs_prodej() -> None:
+    # Distinct offerings even though both are sale-like.
+    assert classify_pair(
+        _key(1, category_type="drazba"),
+        _key(2, category_type="prodej"),
+    ).detail == "category_type_contradiction"
+
+
+def test_category_main_contradiction_byt_vs_dum() -> None:
+    assert classify_pair(
+        _key(1, category_main="byt"),
+        _key(2, category_main="dum"),
+    ).detail == "category_main_contradiction"
+
+
+def test_category_null_does_not_contradict() -> None:
+    # A missing category is unknown, not a conflict — falls through to merge.
+    assert classify_pair(
+        _key(1, category_type=None),
+        _key(2, category_type="pronajem"),
+    ).action == "auto_merge"
+
+
 def test_already_same_property_rejects() -> None:
     d = classify_pair(_key(1, pid=99), _key(2, pid=99))
     assert d.action == "reject"
@@ -272,11 +307,13 @@ class _FakeConn:
 
 def _row(sid: int, pid: int, *, street_id: int = 42, disp: str = "2+kk",
          hn: str | None = "10", floor: int | None = 3, area: float | None = 60.0,
-         source: str = "sreality", description: str | None = None) -> tuple[Any, ...]:
+         source: str = "sreality", description: str | None = None,
+         category_type: str | None = "prodej", category_main: str | None = "byt") -> tuple[Any, ...]:
     # matches _ELIGIBLE_SQL column order:
     # sreality_id, property_id, source, street, street_id, disposition,
-    # house_number, floor, area_m2, description
-    return (sid, pid, source, "Nádražní", street_id, disp, hn, floor, area, description)
+    # house_number, floor, area_m2, description, category_type, category_main
+    return (sid, pid, source, "Nádražní", street_id, disp, hn, floor, area,
+            description, category_type, category_main)
 
 
 def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
@@ -429,6 +466,25 @@ def test_run_engine_rejects_floor_contradiction(monkeypatch: Any) -> None:
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
     assert stats["rejected"] == 1
     assert stats["auto_address"] == 0 and stats["queued"] == 0
+
+
+def test_run_engine_rejects_sale_vs_rent(monkeypatch: Any) -> None:
+    """End-to-end: a sale and a rental on one street+disposition never merge and
+    never queue — the reported /dedup bug."""
+    import scripts.dedup_engine as eng
+    merges: list[Any] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, **kw: merges.append(kw) or {"data": {}},
+    )
+    conn = _FakeConn([
+        _row(1, 101, category_type="prodej"),
+        _row(2, 102, category_type="pronajem"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+    assert stats["rejected"] == 1
+    assert stats["auto_address"] == 0 and stats["queued"] == 0
+    assert merges == []
 
 
 def test_run_engine_auto_merge_off_queues_exact_address(monkeypatch: Any) -> None:

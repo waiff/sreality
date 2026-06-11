@@ -74,8 +74,8 @@ def _find(executions, needle: str) -> tuple[str, Any] | None:
 
 def test_merge_repoints_retires_logs_and_recomputes():
     conn = _FakeConn([
-        (lambda s: "SELECT id, status FROM properties WHERE id IN" in s,
-         [(10, "active"), (20, "active")]),
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
         (lambda s: "INSERT INTO property_merge_events" in s, [(1,), (2,)]),
     ])
 
@@ -101,8 +101,8 @@ def test_merge_repoints_retires_logs_and_recomputes():
 
 def test_merge_rejects_when_retired_not_active():
     conn = _FakeConn([
-        (lambda s: "SELECT id, status FROM properties WHERE id IN" in s,
-         [(10, "active"), (20, "merged_away")]),
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "merged_away", "prodej", "byt")]),
     ])
     with pytest.raises(MergeError):
         merge_properties(
@@ -110,6 +110,31 @@ def test_merge_rejects_when_retired_not_active():
         )
     # never re-pointed anything
     assert _find(conn.executed, "UPDATE listings SET property_id =") is None
+
+
+def test_merge_rejects_sale_vs_rent_at_chokepoint():
+    # The operator/cluster merge paths call merge_properties directly (bypassing
+    # classify_pair); this final guard must refuse a sale↔rental merge.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "pronajem", "byt")]),
+    ])
+    with pytest.raises(MergeError):
+        merge_properties(
+            conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+        )
+    assert _find(conn.executed, "UPDATE listings SET property_id =") is None
+
+
+def test_merge_rejects_byt_vs_dum_at_chokepoint():
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "dum")]),
+    ])
+    with pytest.raises(MergeError):
+        merge_properties(
+            conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+        )
 
 
 def test_merge_rejects_self_merge():
