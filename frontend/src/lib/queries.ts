@@ -912,7 +912,7 @@ export const fetchPropertySourcesByPropertyIds = async (
  * doesn't carry (migration 122 exposes street + house_number on
  * listings_public). Batched over the on-screen sides' sreality_ids. */
 const DEDUP_DETAIL_COLS =
-  'sreality_id,street,house_number,floor,disposition,district,price_czk,area_m2';
+  'sreality_id,street,house_number,floor,disposition,district,price_czk,area_m2,category_type,category_main,category_sub_cb';
 
 export const fetchListingDetailByIds = async (
   ids: ReadonlyArray<number>,
