@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 
-const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
+import { TILE_STYLE } from '@/lib/basemap';
 
 interface Props {
   lat: number;

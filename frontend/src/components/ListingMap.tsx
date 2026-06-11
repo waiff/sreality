@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
+import { TILE_STYLE } from '@/lib/basemap';
 import type {
   CityIndexDefinition,
   CuratedCity,
@@ -78,7 +79,6 @@ const circlePolygonGeom = (
   return { type: 'Polygon', coordinates: [coords] };
 };
 
-const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 9.5 };
 /* Below this zoom only the round point dot is shown; at and above it
  * each listing's price label is also drawn. Tuned so the labels appear
