@@ -1,9 +1,10 @@
 """Tests for /admin/portals — per-portal operational limits (migration 114).
 
-The /admin prefix is bearer-gate-exempt (CLAUDE.md rule #8); the TestClient
-sends no token, so a 200 here also confirms the exemption. We monkeypatch the
-config readers (load_portal_config / default_config) so the fake conn only has
-to serve the portal-list SELECT and the PUT select/update.
+The /admin prefix is bearer-gated (CLAUDE.md rule #8), but these tests leave
+API_TOKEN unset so the gate no-ops (the dedicated gate assertions live in
+test_admin_routes.py). We monkeypatch the config readers (load_portal_config /
+default_config) so the fake conn only has to serve the portal-list SELECT and
+the PUT select/update.
 """
 
 from __future__ import annotations
@@ -119,7 +120,7 @@ def client(monkeypatch):
 
 def test_get_portals_lists_all_with_effective_and_baked(client):
     res = client.get("/admin/portals")
-    assert res.status_code == 200  # also confirms /admin bearer-gate exemption
+    assert res.status_code == 200  # API_TOKEN unset -> gate no-ops
     data = {p["source"]: p for p in res.json()["data"]}
     assert set(data) == {"sreality", "remax"}
     assert data["sreality"]["overrides"] == {"detail_workers": 8, "detail_rate": 6.0}

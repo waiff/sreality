@@ -187,9 +187,11 @@ async def _unhandled_exception_handler(request: "Request", exc: Exception) -> "J
 skills_module.AGENT_TOOL_NAMES = set(AGENT_TOOLS.keys())
 skills_module.PROVIDER_NAMES = set(deps.get_providers().keys())
 
-# /admin/* is exempted from the API_TOKEN bearer gate per the slice-1
-# Settings-page design (CLAUDE.md "Auth and secrets" + rule #8). The
-# private Railway URL is the security perimeter for these routes.
+# /admin/* is bearer-gated like every other write surface — the router
+# itself carries Depends(require_token) (see api/routes/admin.py). The old
+# "private Railway URL is the perimeter" exemption gave no real protection:
+# that URL ships inside the public SPA bundle. The Settings page already
+# sends the token on every /admin call, so the gate is transparent there.
 app.include_router(admin_router)
 # /notifications/* (Watchdog feed + subscription CRUD) goes through
 # the standard bearer gate — operator content, not configuration.

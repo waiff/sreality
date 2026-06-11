@@ -805,9 +805,10 @@ Trace records `kind='reasoning'` per LLM turn.
   `find_distribution_outliers`, `describe_neighborhood`,
   `verify_listing_freshness` + `record_estimate` terminator.
 - **Settings page** (`/settings`) edits skills and `app_settings`.
-  `/admin/*` routes are exempted from the `API_TOKEN` bearer gate
-  per operator decision (private Railway URL is the security
-  perimeter; same exemption category as `/health`).
+  `/admin/*` routes are bearer-gated like every other write surface
+  (the SPA already sends the token). They were briefly exempt on the
+  "private Railway URL is the perimeter" theory, but that URL ships in
+  the public SPA bundle, so the gate was restored.
 - **Loop guards:** `max_iterations`, `max_cost_usd`,
   `wall_clock_timeout_s` — all sourced from the skill row, all
   short-circuit to `status='failed'` with `error_message`.

@@ -542,9 +542,10 @@ export const fetchBuildingAttachmentBlob = async (
 
 /* ----- admin / Settings page --------------------------------------------
  *
- * The /admin/* prefix is exempted from the API_TOKEN bearer gate per
- * CLAUDE.md rule #8 (same exemption category as /health). The private
- * Railway URL is the security perimeter for these routes.
+ * The /admin/* prefix is bearer-gated like every other write surface per
+ * CLAUDE.md rule #8. These calls go through `request()`, which already
+ * attaches `Authorization: Bearer <VITE_API_TOKEN>`, so no extra wiring is
+ * needed here.
  */
 
 export interface AgentTool {
@@ -669,7 +670,7 @@ export const updatePortalLimits = (
   });
 
 /* ----- rent map: MF Cenová mapa nájemného (migration 132) ------------------
- * Revision history + manual upload + on-demand fetch, all on the bearer-exempt
+ * Revision history + manual upload + on-demand fetch, all on the bearer-gated
  * /admin/* surface. The same data also auto-grabs monthly via fetch_rent_map.yml. */
 
 export interface RentMapRevision {

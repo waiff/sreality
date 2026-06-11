@@ -1,9 +1,7 @@
 """FastAPI routes for the Watchdog (new-listing notification) surface.
 
 Mounted under `/notifications/*`. Bearer-gated by the standard
-`require_token` dependency — there are no `/admin/*`-style exemptions
-here, because the watchdog feed is operator content, not a
-configuration surface.
+`require_token` dependency, like every other write surface.
 
 Two flavours of writes touch this router:
 
