@@ -1007,7 +1007,7 @@ singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
 property + clears the dirty queue), `dedup_engine.yml` (daily street+disposition dedup engine +
 auto-merge; rule #15), and
-`compute_image_phash.yml` (6-hourly pHash backfill). Run any directly:
+`compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Run any directly:
 - CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
   Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional

@@ -60,10 +60,15 @@ source for active rules; ROADMAP is for sequencing.
   live GraphQL introspection (estateType is the finest enum exposed; houseType is
   access-denied) — its remaining NULL gap is upsert lag, a raw_json backfill, not code.
 
+- **pHash throughput unstarved**: hourly cadence (was 6-hourly, every run cancelled at
+  the 30-min timeout at a measured 1.5 img/s serial), 8-worker R2 downloads with per-row
+  autocommit writes kept, cap 20,000/run, active-listing images hash first so the dedup
+  corroborator sees relevant photos ahead of the historical backlog.
+
 #### Next
 
 - Sprint C (data value, remainder): bazos dedup match-rate follow-up (street_key
-  normalization vs the "ul. …"/house-number forms), pHash throughput, remax drain investigation.
+  normalization vs the "ul. …"/house-number forms), remax drain follow-up (timeout fix).
 - Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
   deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
 

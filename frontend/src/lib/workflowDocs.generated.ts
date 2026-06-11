@@ -430,13 +430,13 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "compute_image_phash.yml",
     "name": "Compute image pHash (multi-portal dedup)",
-    "description": "Backfills images.phash (a 64-bit perceptual dHash per stored image) for the Tier-2 dedup sweep's cheap image corroborator. Downloads stored bytes from R2, hashes them, writes images.phash. Idempotent + resumable; a no-op if R2 env vars are missing.",
+    "description": "Backfills images.phash (a 64-bit perceptual dHash per stored image) for the Tier-2 dedup sweep's cheap image corroborator. Downloads stored bytes from R2 on a small worker pool, hashes them, writes images.phash per row (autocommit, so a timeout/cancel preserves completed work). Idempotent + resumable; a no-op if R2 env vars are missing. ACTIVE-listing images are selected first, so dedup-relevant photos hash ahead of the historical backlog.",
     "portal": null,
     "manual": true,
     "schedules": [
       {
-        "cron": "20 */6 * * *",
-        "human": "Every 6 hours at :20"
+        "cron": "20 * * * *",
+        "human": "Every hour at :20"
       }
     ],
     "onPush": false,
@@ -448,7 +448,15 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "Max images hashed per run",
         "required": false,
         "type": "string",
-        "default": "5000",
+        "default": "20000",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "Parallel R2 downloads (DB writes stay serial per row)",
+        "required": false,
+        "type": "string",
+        "default": "8",
         "options": null
       },
       {
@@ -472,7 +480,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "compute-image-phash",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 55,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/compute_image_phash.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/compute_image_phash.yml"
