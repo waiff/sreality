@@ -100,6 +100,7 @@ describe('diffCandidate', () => {
     const left: ListingDetailLite = {
       sreality_id: 1, street: 'Hlavní', house_number: '12/3', floor: 2,
       disposition: '2+kk', district: 'Praha', price_czk: 1, area_m2: 1,
+      category_type: 'prodej', category_main: 'byt', category_sub_cb: 4,
     };
     const right: ListingDetailLite = { ...left, sreality_id: 2 };
     const rows = diffCandidate(c, left, right);
@@ -113,6 +114,7 @@ describe('diffCandidate', () => {
     const left: ListingDetailLite = {
       sreality_id: 1, street: null, house_number: null, floor: 2,
       disposition: null, district: null, price_czk: null, area_m2: null,
+      category_type: null, category_main: null, category_sub_cb: null,
     };
     const right: ListingDetailLite = { ...left, sreality_id: 2, floor: 5 };
     expect(row(diffCandidate(c, left, right), 'floor').verdict).toBe('mismatch');

@@ -537,6 +537,7 @@ function ClusterCard({
                     side={side}
                     urls={urlsFor(side, imagesMap)}
                     sources={sourcesMap.get(side.property_id) ?? []}
+                    detailMap={detailMap}
                     checked={checked.has(side.property_id)}
                     onToggle={() => toggle(side.property_id)}
                   />
@@ -611,12 +612,14 @@ function PropertyPanel({
   side,
   urls,
   sources,
+  detailMap,
   checked,
   onToggle,
 }: {
   side: DedupPropertySide;
   urls: string[];
   sources: PropertySource[];
+  detailMap: DetailMap;
   checked: boolean;
   onToggle: () => void;
 }) {
@@ -655,7 +658,7 @@ function PropertyPanel({
       <div className="mt-0.5 text-[0.8rem] text-[var(--color-ink-3)] truncate">
         {side.district ?? '—'}
       </div>
-      <PortalChips sources={sources} />
+      <PortalChips sources={sources} detailMap={detailMap} />
       {/* Secondary link to the listing's detail page in our own DB. */}
       {side.sreality_id != null ? (
         <Link
@@ -673,20 +676,36 @@ function PropertyPanel({
  * count. Chip links to the portal's own page (source_url) in a new tab when
  * known, else to our internal listing view. Active source = sage tint,
  * inactive = muted, mirroring the Browse CardBadge tones. */
-function PortalChips({ sources }: { sources: PropertySource[] }) {
+function PortalChips({
+  sources,
+  detailMap,
+}: {
+  sources: PropertySource[];
+  detailMap: DetailMap;
+}) {
   // The panel's "view in database →" link covers the no-sources case, so here we
   // only render the portal chips when we actually have per-source rows.
   if (sources.length === 0) return null;
   return (
     <div className="mt-2 flex flex-wrap gap-1">
       {sources.map((s) => (
-        <PortalChip key={`${s.source}-${s.sreality_id}`} source={s} />
+        <PortalChip
+          key={`${s.source}-${s.sreality_id}`}
+          source={s}
+          detail={detailMap.get(s.sreality_id) ?? null}
+        />
       ))}
     </div>
   );
 }
 
-function PortalChip({ source }: { source: PropertySource }) {
+function PortalChip({
+  source,
+  detail,
+}: {
+  source: PropertySource;
+  detail: ListingDetailLite | null;
+}) {
   const tone = source.is_active
     ? 'bg-[var(--color-paper-3)]/90 border-[var(--color-sage)]/70 text-[var(--color-sage)]'
     : 'bg-[var(--color-paper)] border-[var(--color-rule)] text-[var(--color-ink-3)]';
@@ -698,12 +717,20 @@ function PortalChip({ source }: { source: PropertySource }) {
   ].join(' ');
   const label = portalShort(source.source);
   // sreality's scraper stores no source_url; rebuild the portal URL from the
-  // native id (= sreality_id for sreality rows). Only fall back to the in-app
-  // view when we genuinely can't reach the origin portal.
+  // native id (= sreality_id for sreality rows) plus the category triple from
+  // the listing detail (a sreality /detail/ path 404s without the real slug).
+  // Only fall back to the in-app view when we genuinely can't reach the portal.
   const external = portalListingUrl(
     source.source,
     source.source_url,
     source.source_id_native ?? source.sreality_id,
+    detail
+      ? {
+          categoryType: detail.category_type,
+          categoryMain: detail.category_main,
+          categorySubCb: detail.category_sub_cb,
+        }
+      : undefined,
   );
   if (external) {
     return (

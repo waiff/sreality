@@ -53,6 +53,12 @@ export interface ListingDetailLite {
   district: string | null;
   price_czk: number | null;
   area_m2: number | null;
+  /* Sreality category triple — needed to build a real portal detail URL for
+   * the source chip (a sreality /detail/ path 404s without the slug). NULL for
+   * non-sreality sources. */
+  category_type: string | null;
+  category_main: string | null;
+  category_sub_cb: number | null;
 }
 
 const EM_DASH = '—';
