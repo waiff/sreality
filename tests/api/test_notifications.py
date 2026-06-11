@@ -65,23 +65,50 @@ def test_build_clauses_emits_spatial_when_set() -> None:
 
 
 def test_build_clauses_property_grain_derived_predicates() -> None:
-    """Slice 2b derived filters render as `>= N` predicates against the
-    property-grain columns properties_public exposes."""
-    spec = WatchdogFilterSpec(
-        distinct_site_count_min=2,
-        price_drop_count_min=3,
-        price_rise_count_min=1,
-        max_price_drop_pct_min=10.0,
-    )
+    """The merged price-change filters (migration 173) render against the
+    property-grain columns properties_public exposes; the window picks the
+    precomputed count column."""
+    spec = WatchdogFilterSpec(price_change_count_min=2)
     where, params = _build_match_clauses(spec)
-    assert "l.distinct_site_count >= %(distinct_site_count_min)s" in where
-    assert "l.price_drop_count >= %(price_drop_count_min)s" in where
-    assert "l.price_rise_count >= %(price_rise_count_min)s" in where
-    assert "l.max_price_drop_pct >= %(max_price_drop_pct_min)s" in where
-    assert params["distinct_site_count_min"] == 2
-    assert params["price_drop_count_min"] == 3
-    assert params["price_rise_count_min"] == 1
-    assert params["max_price_drop_pct_min"] == 10.0
+    assert "l.price_change_count >= %(price_change_count_min)s" in where
+    assert params["price_change_count_min"] == 2
+
+    spec = WatchdogFilterSpec(price_change_count_min=3, price_change_window_days=90)
+    where, params = _build_match_clauses(spec)
+    assert "l.price_change_count_90d >= %(price_change_count_min)s" in where
+    assert params["price_change_count_min"] == 3
+
+
+def test_build_clauses_total_price_change_sign_flips_direction() -> None:
+    """Negative threshold = 'dropped at least', positive = 'rose at least';
+    zero is treated as unset."""
+    spec = WatchdogFilterSpec(total_price_change_pct=-10.0)
+    where, params = _build_match_clauses(spec)
+    assert "l.total_price_change_pct <= %(total_price_change_pct)s" in where
+    assert params["total_price_change_pct"] == -10.0
+
+    spec = WatchdogFilterSpec(total_price_change_pct=5.0)
+    where, params = _build_match_clauses(spec)
+    assert "l.total_price_change_pct >= %(total_price_change_pct)s" in where
+
+    spec = WatchdogFilterSpec(total_price_change_pct=0.0)
+    where, params = _build_match_clauses(spec)
+    assert not any("total_price_change_pct" in w for w in where)
+
+
+def test_spec_ignores_retired_price_history_keys() -> None:
+    """Stored specs predating migration 173 carry the per-direction keys;
+    pydantic's extra='ignore' default must drop them without raising."""
+    spec = WatchdogFilterSpec(**{
+        "distinct_site_count_min": 2,
+        "price_drop_count_min": 3,
+        "price_rise_count_min": 1,
+        "max_price_drop_pct_min": 10.0,
+    })
+    where, params = _build_match_clauses(spec)
+    assert not any("distinct_site_count" in w for w in where)
+    assert not any("price_drop_count" in w for w in where)
+    assert "distinct_site_count_min" not in params
 
 
 def test_build_clauses_handles_price_and_area_bounds() -> None:
@@ -373,6 +400,18 @@ def test_build_clauses_categoryless_spec() -> None:
     assert not any("l.category_type" in w for w in where)
     assert "category_main" not in params
     assert "category_type" not in params
+
+
+def test_build_clauses_condition_level_maximums() -> None:
+    spec = WatchdogFilterSpec(
+        building_condition_level_max=3,
+        apartment_condition_level_max=2,
+    )
+    where, params = _build_match_clauses(spec)
+    assert any("building_condition_level <= %(building_condition_level_max)s" in w for w in where)
+    assert any("apartment_condition_level <= %(apartment_condition_level_max)s" in w for w in where)
+    assert params["building_condition_level_max"] == 3
+    assert params["apartment_condition_level_max"] == 2
 
 
 def test_build_clauses_condition_level_minimums() -> None:

@@ -174,20 +174,27 @@ class WatchdogFilterSpec(BaseModel):
     # Parking lots minimum.
     min_parking_lots: int | None = None
 
-    # Derived condition scores (migrations 072 / 073). Minimum-threshold,
-    # NULL rows excluded by the `>= N` comparison — same semantics as
-    # the Browse filter.
+    # Derived condition scores (migrations 072 / 073). NULL rows excluded
+    # by the `>= N` / `<= N` comparison — same semantics as the Browse
+    # filter.
     building_condition_level_min: int | None = None
+    building_condition_level_max: int | None = None
     apartment_condition_level_min: int | None = None
+    apartment_condition_level_max: int | None = None
 
-    # Multi-portal / price-history aggregates (migrations 091 / 093 / 095).
+    # Price-history aggregates (migrations 091 / 093 / 095 / 173).
     # Property-grain columns maintained by the recompute job; the matcher
-    # reads them off properties_public. Min-threshold, same `>= N`
-    # semantics as the Browse filter (and registry ids match 1:1).
-    distinct_site_count_min: int | None = None
-    price_drop_count_min: int | None = None
-    price_rise_count_min: int | None = None
-    max_price_drop_pct_min: float | None = None
+    # reads them off properties_public, and registry ids match 1:1.
+    # `price_change_window_days` (30 / 90 / 365, None = all time) picks
+    # which precomputed count column `price_change_count_min` reads.
+    # `total_price_change_pct` is signed: negative = total drop of at
+    # least that much, positive = total rise. Stored specs predating
+    # migration 173 may carry the retired per-direction keys
+    # (price_drop_count_min etc.) — Pydantic's extra='ignore' default
+    # drops them on load.
+    price_change_count_min: int | None = None
+    price_change_window_days: Literal[30, 90, 365] | None = None
+    total_price_change_pct: float | None = None
 
     # Phase QUAL — curated-city quality predicates. Browse + Watchdog
     # only; not exposed to the estimation agent.
@@ -404,6 +411,7 @@ def _build_match_clauses(
     from toolkit.filter_registry import (
         FURNISHED_CANONICAL,
         OWNERSHIP_CANONICAL,
+        PRICE_CHANGE_COUNT_COLUMNS,
     )
     if spec.furnished:
         clause = _enum_or_unknown_clause(
@@ -433,24 +441,28 @@ def _build_match_clauses(
     if spec.building_condition_level_min is not None:
         where.append("l.building_condition_level >= %(building_condition_level_min)s")
         params["building_condition_level_min"] = spec.building_condition_level_min
+    if spec.building_condition_level_max is not None:
+        where.append("l.building_condition_level <= %(building_condition_level_max)s")
+        params["building_condition_level_max"] = spec.building_condition_level_max
     if spec.apartment_condition_level_min is not None:
         where.append("l.apartment_condition_level >= %(apartment_condition_level_min)s")
         params["apartment_condition_level_min"] = spec.apartment_condition_level_min
+    if spec.apartment_condition_level_max is not None:
+        where.append("l.apartment_condition_level <= %(apartment_condition_level_max)s")
+        params["apartment_condition_level_max"] = spec.apartment_condition_level_max
 
     # Property-grain derived aggregates (only meaningful against
-    # properties_public, which the matcher reads). NULL rows excluded by `>=`.
-    if spec.distinct_site_count_min is not None:
-        where.append("l.distinct_site_count >= %(distinct_site_count_min)s")
-        params["distinct_site_count_min"] = spec.distinct_site_count_min
-    if spec.price_drop_count_min is not None:
-        where.append("l.price_drop_count >= %(price_drop_count_min)s")
-        params["price_drop_count_min"] = spec.price_drop_count_min
-    if spec.price_rise_count_min is not None:
-        where.append("l.price_rise_count >= %(price_rise_count_min)s")
-        params["price_rise_count_min"] = spec.price_rise_count_min
-    if spec.max_price_drop_pct_min is not None:
-        where.append("l.max_price_drop_pct >= %(max_price_drop_pct_min)s")
-        params["max_price_drop_pct_min"] = spec.max_price_drop_pct_min
+    # properties_public, which the matcher reads). NULL rows excluded by the
+    # comparison. The window picks the precomputed count column; the column
+    # name comes from the registry's canonical dict, never from the spec.
+    if spec.price_change_count_min is not None:
+        count_col = PRICE_CHANGE_COUNT_COLUMNS[spec.price_change_window_days]
+        where.append(f"l.{count_col} >= %(price_change_count_min)s")
+        params["price_change_count_min"] = spec.price_change_count_min
+    if spec.total_price_change_pct is not None and spec.total_price_change_pct != 0:
+        op = "<=" if spec.total_price_change_pct < 0 else ">="
+        where.append(f"l.total_price_change_pct {op} %(total_price_change_pct)s")
+        params["total_price_change_pct"] = spec.total_price_change_pct
 
     # Phase QUAL — city quality predicates. Delegated to the same helper
     # `_shared_filter_where` calls so Browse and Watchdog stay in lockstep.

@@ -98,10 +98,13 @@ class ComparableFilters:
     max_usable_area: float | None = None
     min_parking_lots: int | None = None
     # Derived condition scores (migrations 072/073). NULL rows are filtered
-    # out by the `>= N` comparison — that's intentional: "show me 4+" means
-    # "I want scored listings at level 4 or above", not "scored OR unscored".
+    # out by the `>= N` / `<= N` comparison — that's intentional: "show me
+    # 4+" means "I want scored listings at level 4 or above", not "scored
+    # OR unscored".
     building_condition_level_min: int | None = None
+    building_condition_level_max: int | None = None
     apartment_condition_level_min: int | None = None
+    apartment_condition_level_max: int | None = None
     # TOM ("turned in") = time on market in days. Mirrors migration 052's
     # listings_public.tom_days: now() - first_seen_at for active rows,
     # last_seen_at - first_seen_at for delisted. Inclusive bounds.
@@ -470,9 +473,15 @@ def _shared_filter_where(
     if filters.building_condition_level_min is not None:
         where.append("l.building_condition_level >= %(building_condition_level_min)s")
         params["building_condition_level_min"] = filters.building_condition_level_min
+    if filters.building_condition_level_max is not None:
+        where.append("l.building_condition_level <= %(building_condition_level_max)s")
+        params["building_condition_level_max"] = filters.building_condition_level_max
     if filters.apartment_condition_level_min is not None:
         where.append("l.apartment_condition_level >= %(apartment_condition_level_min)s")
         params["apartment_condition_level_min"] = filters.apartment_condition_level_min
+    if filters.apartment_condition_level_max is not None:
+        where.append("l.apartment_condition_level <= %(apartment_condition_level_max)s")
+        params["apartment_condition_level_max"] = filters.apartment_condition_level_max
 
     # TOM bounds. The expression mirrors migration 052's
     # listings_public.tom_days computation so SQL and Python agree on
@@ -654,7 +663,9 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "max_usable_area": filters.max_usable_area,
         "min_parking_lots": filters.min_parking_lots,
         "building_condition_level_min": filters.building_condition_level_min,
+        "building_condition_level_max": filters.building_condition_level_max,
         "apartment_condition_level_min": filters.apartment_condition_level_min,
+        "apartment_condition_level_max": filters.apartment_condition_level_max,
         "tom_days_min": filters.tom_days_min,
         "tom_days_max": filters.tom_days_max,
         "last_seen_min_days": filters.last_seen_min_days,

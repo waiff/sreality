@@ -43,36 +43,38 @@ interface SidebarProps {
  * it would pin the dot permanently on. */
 const ESSENTIALS_KEYS = [
   'categoryMain', 'categoryType', 'status',
-  'recentlyAddedDays', 'recentlyChangedDays', 'portals',
-  'districts', 'locationMode', 'centerRadius',
+  'recentlyAddedDays', 'recentlyChangedDays',
+  'districts',
   'dispositions', 'subtype',
   'areaMin', 'areaMax', 'estateAreaMin', 'estateAreaMax',
   'usableAreaMin', 'usableAreaMax',
   'conditionMatch', 'buildingMaterial',
+  'buildingConditionLevelMin', 'buildingConditionLevelMax',
+  'apartmentConditionLevelMin', 'apartmentConditionLevelMax',
   'priceMin', 'priceMax', 'pricePerM2Min', 'pricePerM2Max',
+  'priceChangeCountMin', 'priceChangeWindowDays', 'totalPriceChangePct',
   'mfGrossYieldPctMin', 'mfGrossYieldPctMax',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
-const PROPERTY_KEYS = [
+const FEATURES_KEYS = [
   'furnished', 'ownership',
-  'buildingConditionLevelMin', 'apartmentConditionLevelMin',
   'hasBalcony', 'hasLift', 'hasParking', 'terrace', 'cellar', 'garage',
   'parkingLotsMin',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
-const SIGNALS_KEYS = [
-  'firstSeenMinDays', 'firstSeenMaxDays',
-  'lastSeenMinDays', 'lastSeenMaxDays', 'tomDaysMin', 'tomDaysMax',
-  'distinctSiteCountMin', 'priceDropCountMin', 'priceRiseCountMin',
-  'maxPriceDropPctMin',
-] as const satisfies ReadonlyArray<keyof ListingFilters>;
-
 const CURATION_KEYS = [
-  'tags', 'cityIndexRules', 'minCityPopulation', 'maxCityPopulation',
+  'tags', 'withEstimates',
+  'cityIndexRules', 'minCityPopulation', 'maxCityPopulation',
   'nearCityProximity',
   'nearPop5kmMin', 'nearPop15kmMin', 'nearJobs5kmMin', 'nearJobs15kmMin',
   'nearYouth5kmMin', 'nearYouth15kmMin', 'nearOverall5kmMin', 'nearOverall15kmMin',
   'priceGrowthRules',
+] as const satisfies ReadonlyArray<keyof ListingFilters>;
+
+const OTHER_KEYS = [
+  'portals', 'locationMode', 'centerRadius',
+  'firstSeenMinDays', 'firstSeenMaxDays',
+  'lastSeenMinDays', 'lastSeenMaxDays', 'tomDaysMin', 'tomDaysMax',
 ] as const satisfies ReadonlyArray<keyof ListingFilters>;
 
 const bandActive = (
@@ -195,17 +197,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
-          <ControlGroup title="Source portal" bordered={false}>
-            <FilterForm
-              scope="browse"
-              state={registryView}
-              onChange={handleRegistryChange}
-              includeOnly={['portals']}
-              labels={{ portals: 'Portal' }}
-              flat
-            />
-          </ControlGroup>
-
           <ControlGroup title="Location" bordered={false}>
             <Section label="District">
               <LocationTypeahead
@@ -216,16 +207,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
                 onPick={onLocationPick}
               />
             </Section>
-            <LocationModeSection
-              mode={filters.locationMode}
-              centerRadius={filters.centerRadius}
-              onModeChange={(mode) =>
-                onChange({ ...filters, locationMode: mode })
-              }
-              onCenterRadiusChange={(cr) =>
-                onChange({ ...filters, centerRadius: cr })
-              }
-            />
           </ControlGroup>
 
           {(filters.categoryMain === 'dum' || filters.categoryMain === 'komercni') && (
@@ -277,10 +258,15 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['condition_match', 'building_material']}
+              includeOnly={[
+                'condition_match', 'building_material',
+                'building_condition_level_min', 'apartment_condition_level_min',
+              ]}
               labels={{
                 condition_match: 'Condition (Stav objektu)',
                 building_material: 'Building material',
+                building_condition_level_min: 'Building condition (1–5)',
+                apartment_condition_level_min: 'Apartment condition (1–5)',
               }}
               flat
             />
@@ -291,10 +277,17 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['min_price_czk', 'min_price_per_m2']}
+              includeOnly={[
+                'min_price_czk', 'min_price_per_m2',
+                'price_change_count_min', 'price_change_window_days',
+                'total_price_change_pct',
+              ]}
               labels={{
                 min_price_czk: 'Price',
                 min_price_per_m2: 'Price / m²',
+                price_change_count_min: 'Price changed N+ times',
+                price_change_window_days: 'Price change window',
+                total_price_change_pct: 'Total price change % (− = drop)',
               }}
               flat
             />
@@ -319,24 +312,24 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
           )}
         </CollapsibleGroup>
 
+        {/* Listing-level features. Deliberately NOT headed "Property": these
+            columns live on `listings` (per-listing portal attributes, mirrored
+            onto the property display row) and apply to an apartment as much as
+            to a house — furnished / ownership / amenities describe the unit,
+            not a building entity (the schema has none). */}
         <CollapsibleGroup
-          title="Property"
-          active={bandActive(filters, PROPERTY_KEYS)}
+          title="Features"
+          active={bandActive(filters, FEATURES_KEYS)}
         >
-          <ControlGroup title="Building" bordered={false} layout="grid">
+          <ControlGroup title="Unit" bordered={false} layout="grid">
             <FilterForm
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={[
-                'furnished', 'ownership',
-                'building_condition_level_min', 'apartment_condition_level_min',
-              ]}
+              includeOnly={['furnished', 'ownership']}
               labels={{
                 furnished: 'Furnished',
                 ownership: 'Ownership',
-                building_condition_level_min: 'Min building condition (1–5)',
-                apartment_condition_level_min: 'Min apartment condition (1–5)',
               }}
               flat
             />
@@ -367,51 +360,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
         </CollapsibleGroup>
 
         <CollapsibleGroup
-          title="Market signals"
-          active={bandActive(filters, SIGNALS_KEYS)}
-        >
-          <ControlGroup title="Velocity" bordered={false} layout="grid">
-            <FilterForm
-              scope="browse"
-              state={registryView}
-              onChange={handleRegistryChange}
-              includeOnly={[
-                'first_seen_min_days',
-                'last_seen_min_days',
-                'tom_days_min',
-              ]}
-              labels={{
-                first_seen_min_days: 'First seen (days ago)',
-                last_seen_min_days: 'Last seen (days ago)',
-                tom_days_min: 'Turned in (days)',
-              }}
-              flat
-            />
-          </ControlGroup>
-
-          <ControlGroup title="Price history & sources" bordered={false} layout="grid">
-            <FilterForm
-              scope="browse"
-              state={registryView}
-              onChange={handleRegistryChange}
-              includeOnly={[
-                'distinct_site_count_min',
-                'price_drop_count_min',
-                'price_rise_count_min',
-                'max_price_drop_pct_min',
-              ]}
-              labels={{
-                distinct_site_count_min: 'Listed on N+ sites',
-                price_drop_count_min: 'Price cut N+ times',
-                price_rise_count_min: 'Price raised N+ times',
-                max_price_drop_pct_min: 'Biggest price drop ≥ %',
-              }}
-              flat
-            />
-          </ControlGroup>
-        </CollapsibleGroup>
-
-        <CollapsibleGroup
           title="Curation & quality"
           active={bandActive(filters, CURATION_KEYS)}
         >
@@ -420,8 +368,8 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['tags']}
-              labels={{ tags: 'Tags' }}
+              includeOnly={['tags', 'with_estimates']}
+              labels={{ tags: 'Tags', with_estimates: 'With estimates' }}
               customWidgets={customWidgets}
               flat
             />
@@ -489,6 +437,57 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             <MarketGrowthFilter
               value={filters.priceGrowthRules}
               onChange={(next) => onChange({ ...filters, priceGrowthRules: next })}
+            />
+          </ControlGroup>
+        </CollapsibleGroup>
+
+        {/* Rarely-touched knobs, parked at the bottom by design: the source
+            portal, the viewport-vs-centre spatial mode, and the velocity
+            (seen / time-on-market) day ranges. */}
+        <CollapsibleGroup
+          title="Other"
+          active={bandActive(filters, OTHER_KEYS)}
+        >
+          <ControlGroup title="Source portal" bordered={false}>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={['portals']}
+              labels={{ portals: 'Portal' }}
+              flat
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Map filter" bordered={false}>
+            <LocationModeSection
+              mode={filters.locationMode}
+              centerRadius={filters.centerRadius}
+              onModeChange={(mode) =>
+                onChange({ ...filters, locationMode: mode })
+              }
+              onCenterRadiusChange={(cr) =>
+                onChange({ ...filters, centerRadius: cr })
+              }
+            />
+          </ControlGroup>
+
+          <ControlGroup title="Velocity" bordered={false} layout="grid">
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
+              includeOnly={[
+                'first_seen_min_days',
+                'last_seen_min_days',
+                'tom_days_min',
+              ]}
+              labels={{
+                first_seen_min_days: 'First seen (days ago)',
+                last_seen_min_days: 'Last seen (days ago)',
+                tom_days_min: 'Turned in (days)',
+              }}
+              flat
             />
           </ControlGroup>
         </CollapsibleGroup>
@@ -579,7 +578,7 @@ function LocationModeSection({
   onCenterRadiusChange: (next: CenterRadius | null) => void;
 }) {
   return (
-    <Section label="Map filter">
+    <Section label="Mode">
       <div className="inline-flex items-center gap-0.5 p-0.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)]">
         {(['viewport', 'center_radius'] as const).map((m) => {
           const on = mode === m;

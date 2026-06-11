@@ -289,6 +289,16 @@ RECENCY_OPTIONS: tuple[EnumOption, ...] = (
 # `idnes_reality` never produces `listings` rows, so it is not offered as a
 # filter option. (`remax` IS offered: as of migration 135 it is a scraper that
 # ingests `listings` rows, distinct from its same-named on-demand URL parser.)
+# Time windows for the merged `price_change_count_min` filter. Values are
+# day counts matching the precomputed `properties` columns
+# (price_change_count_30d / _90d / _365d, migration 173); the empty (unset)
+# selection means "all time" and reads the unwindowed price_change_count.
+PRICE_CHANGE_WINDOW_OPTIONS: tuple[EnumOption, ...] = (
+    EnumOption(30, "Posledních 30 dní", "Last 30 days"),
+    EnumOption(90, "Posledních 90 dní", "Last 90 days"),
+    EnumOption(365, "Poslední rok", "Last year"),
+)
+
 PORTAL_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("sreality", "Sreality", "Sreality"),
     EnumOption("bazos", "Bazoš", "Bazoš"),
@@ -907,6 +917,40 @@ def _build_registry() -> dict[str, FilterDef]:
             aliases=("apartmentConditionLevelMin",),
         ),
         FilterDef(
+            id="building_condition_level_max",
+            type=FilterType.INT,
+            pg_column="building_condition_level",
+            default=None,
+            description=(
+                "Maximum building condition score (`building_condition_level "
+                "<= N`, 1..5). Companion upper bound to "
+                "building_condition_level_min; same scorer and rubric. "
+                "NULL rows (not yet scored) are excluded from the result."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=_ALL_AGENDAS,
+            constraints={"min": 1, "max": 5},
+            aliases=("buildingConditionLevelMax",),
+        ),
+        FilterDef(
+            id="apartment_condition_level_max",
+            type=FilterType.INT,
+            pg_column="apartment_condition_level",
+            default=None,
+            description=(
+                "Maximum apartment condition score (`apartment_condition_level "
+                "<= N`, 1..5). Companion upper bound to "
+                "apartment_condition_level_min; same scorer and rubric. "
+                "NULL rows (not yet scored) are excluded from the result."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.NUMBER_INPUT,
+            agendas=_ALL_AGENDAS,
+            constraints={"min": 1, "max": 5},
+            aliases=("apartmentConditionLevelMax",),
+        ),
+        FilterDef(
             id="furnished",
             type=FilterType.STRING_LIST,
             pg_column="furnished",
@@ -1311,6 +1355,23 @@ def _build_registry() -> dict[str, FilterDef]:
             ui_control=UiControl.MULTISELECT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
         ),
+        FilterDef(
+            id="with_estimates",
+            type=FilterType.BOOL,
+            pg_column=None,  # prefilter via property_estimates_public (mig 173)
+            default=False,
+            description=(
+                "When true, restrict to properties with at least one "
+                "successful estimation run (any child listing's sreality_id "
+                "appears in estimation_runs.input_sreality_id with "
+                "status='success'). BROWSE-only: estimates are "
+                "operator-triggered, so watching for them makes no sense."
+            ),
+            category=CATEGORY_CURATION,
+            ui_control=UiControl.BOOLEAN,
+            agendas=frozenset({Agenda.BROWSE}),
+            aliases=("withEstimates",),
+        ),
 
         # --- city quality (BROWSE / WATCHDOG only — by design, the
         # --- estimation agent / comparables tool do not see these) -------
@@ -1518,76 +1579,71 @@ def _build_registry() -> dict[str, FilterDef]:
             aliases=("nearOverall15kmMin",),
         ),
 
-        # --- multi-portal / price-history signals (Slice 2a/2b) ---------
+        # --- price-history signals (migration 173) -----------------------
         # Derived columns on `properties`, maintained by the recompute job
-        # (scripts/recompute_property_stats.py). BROWSE (2a) + WATCHDOG (2b):
-        # the property-grain matcher reads them off properties_public.
+        # (scripts/recompute_property_stats.py). BROWSE + WATCHDOG: the
+        # property-grain matcher reads them off properties_public. These
+        # replaced the per-direction price_drop_count_min /
+        # price_rise_count_min / max_price_drop_pct_min /
+        # distinct_site_count_min quartet — old keys in stored watchdog
+        # specs and Browse presets are dropped silently on load.
         FilterDef(
-            id="distinct_site_count_min",
+            id="price_change_count_min",
             type=FilterType.INT,
-            pg_column="distinct_site_count",
+            pg_column=None,  # synthetic: window picks among 4 count columns
             default=None,
             description=(
-                "Minimum number of distinct source sites a property is "
-                "listed on (`distinct_site_count >= N`). 1 today for every "
-                "property (sreality-only); lights up once multi-portal "
-                "ingestion lands. Use 2+ for 'listed on multiple sites'."
+                "Minimum number of price changes (cuts AND raises) across "
+                "the property's combined snapshot history, counted inside "
+                "the `price_change_window_days` window (all time when the "
+                "window is unset). One count per consecutive snapshot pair "
+                "where the asking price moved. Use 2+ for repeatedly "
+                "repriced listings."
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             constraints={"min": 1},
-            aliases=("distinctSiteCountMin",),
+            aliases=("priceChangeCountMin",),
         ),
         FilterDef(
-            id="price_drop_count_min",
+            id="price_change_window_days",
             type=FilterType.INT,
-            pg_column="price_drop_count",
+            pg_column=None,  # modifier for price_change_count_min, no own clause
             default=None,
             description=(
-                "Minimum number of price decreases across the property's "
-                "combined snapshot history (`price_drop_count >= N`). One "
-                "count per consecutive snapshot pair where the asking price "
-                "fell. Use 2+ for repeatedly-cut listings."
+                "Time window, in days, for `price_change_count_min`: 30 / "
+                "90 / 365, or unset for all time. Selects which precomputed "
+                "price_change_count column the count filter reads; has no "
+                "effect on its own."
             ),
             category=CATEGORY_VELOCITY,
-            ui_control=UiControl.NUMBER_INPUT,
+            ui_control=UiControl.SINGLE_SELECT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
-            constraints={"min": 1},
-            aliases=("priceDropCountMin",),
+            constraints={"enum": [o.value for o in PRICE_CHANGE_WINDOW_OPTIONS]},
+            unit="days",
+            enum_values=PRICE_CHANGE_WINDOW_OPTIONS,
+            aliases=("priceChangeWindowDays",),
         ),
         FilterDef(
-            id="price_rise_count_min",
-            type=FilterType.INT,
-            pg_column="price_rise_count",
-            default=None,
-            description=(
-                "Minimum number of price increases across the property's "
-                "combined snapshot history (`price_rise_count >= N`)."
-            ),
-            category=CATEGORY_VELOCITY,
-            ui_control=UiControl.NUMBER_INPUT,
-            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
-            constraints={"min": 1},
-            aliases=("priceRiseCountMin",),
-        ),
-        FilterDef(
-            id="max_price_drop_pct_min",
+            id="total_price_change_pct",
             type=FilterType.FLOAT,
-            pg_column="max_price_drop_pct",
+            pg_column=None,  # synthetic: predicate direction flips on sign
             default=None,
             description=(
-                "Minimum largest single-step price drop, as a percent "
-                "(`max_price_drop_pct >= X`). The biggest one-change cut in "
-                "the property's combined snapshot history. Use 10 for "
-                "'price dropped 10%+ at some point'."
+                "Signed total price change threshold, as a percent of the "
+                "first observed price across the property's combined "
+                "snapshot history. Negative = total drop of at least that "
+                "much (`total_price_change_pct <= X`, e.g. -10 for 'down "
+                "10%+ overall'); positive = total rise of at least that "
+                "much (`>= X`). Zero is treated as unset. Properties with "
+                "fewer than two price points are excluded when set."
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,
             agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
-            constraints={"min": 0},
             unit="%",
-            aliases=("maxPriceDropPctMin",),
+            aliases=("totalPriceChangePct",),
         ),
 
         # --- reliability flag --------------------------------------------
@@ -1659,6 +1715,19 @@ def visibility_map(
     except Exception:
         return {}
     return {(r[0], r[1]): bool(r[2]) for r in rows}
+
+
+# Canonical window → precomputed-count-column mapping for the merged
+# `price_change_count_min` filter (migration 173). The watchdog matcher
+# reads this dict; the browse_stats_properties RPC and the frontend's
+# PostgREST clause mirror it (kept in lockstep by the registry's
+# `price_change_window_days` enum constraint).
+PRICE_CHANGE_COUNT_COLUMNS: dict[int | None, str] = {
+    None: "price_change_count",
+    30: "price_change_count_30d",
+    90: "price_change_count_90d",
+    365: "price_change_count_365d",
+}
 
 
 def effective_for(

@@ -1037,15 +1037,19 @@ export interface WatchdogFilterSpec {
   portals: string[] | null;
   min_parking_lots: number | null;
   // Derived condition scores (migrations 072 / 073). Same NULL-excluding
-  // `>= N` semantics as the Browse filter.
+  // `>= N` / `<= N` semantics as the Browse filter.
   building_condition_level_min: number | null;
+  building_condition_level_max: number | null;
   apartment_condition_level_min: number | null;
-  // Multi-portal / price-history aggregates (migrations 091 / 093 / 095).
-  // Property grain; the matcher reads them off properties_public.
-  distinct_site_count_min: number | null;
-  price_drop_count_min: number | null;
-  price_rise_count_min: number | null;
-  max_price_drop_pct_min: number | null;
+  apartment_condition_level_max: number | null;
+  // Price-history aggregates (migration 173). Property grain; the matcher
+  // reads them off properties_public. The window (30/90/365, null = all
+  // time) picks which precomputed count column the count min reads;
+  // total_price_change_pct is signed (negative = total drop of at least
+  // that much, positive = total rise).
+  price_change_count_min: number | null;
+  price_change_window_days: 30 | 90 | 365 | null;
+  total_price_change_pct: number | null;
   // Added with migration 060 / PR 2: backend now honours these,
   // matching the Browse sidebar filter set. The Watchdog form
   // surfaces them in a later PR — until then, API callers can set
@@ -1121,11 +1125,12 @@ export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
   portals: null,
   min_parking_lots: null,
   building_condition_level_min: null,
+  building_condition_level_max: null,
   apartment_condition_level_min: null,
-  distinct_site_count_min: null,
-  price_drop_count_min: null,
-  price_rise_count_min: null,
-  max_price_drop_pct_min: null,
+  apartment_condition_level_max: null,
+  price_change_count_min: null,
+  price_change_window_days: null,
+  total_price_change_pct: null,
   building_material: [],
   min_garden_area: null,
   max_garden_area: null,
