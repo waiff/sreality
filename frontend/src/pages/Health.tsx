@@ -15,6 +15,7 @@ import {
   fetchCategoryTrends,
   fetchHealthSummary,
   fetchImageStorageOverview,
+  fetchImagesFailureOverview,
   fetchPortalHealth,
   fetchRecentScrapeRuns,
   fetchScraperHealthChecks,
@@ -27,6 +28,7 @@ import type {
   HealthFreshnessRow,
   HealthFailureRow,
   HealthCheckStatus,
+  ImageFailureRow,
   ImageStorageCategory,
   ImageStorageOverview,
   PortalHealth,
@@ -42,6 +44,9 @@ import { portalShort } from '@/lib/portals';
 import { WORKFLOW_DOCS } from '@/lib/workflowDocs.generated';
 
 const STALE_HOURS_WARN = 36;
+// The pg_cron loop refreshes the Health matviews every 10 min; 25 min of
+// silence means it has missed two cycles — likely dead, not just slow.
+const HEALTH_DATA_STALE_MIN = 25;
 
 const CATEGORY_LABELS: Record<string, string> = {
   byt: 'Byty',
@@ -92,6 +97,7 @@ export default function Health() {
         </div>
       )}
 
+      {data && <StaleHealthDataBanner generatedAt={data.generated_at ?? null} />}
       {data && <StaleScrapeBanner lastScrapeAt={data.last_scrape_at} />}
 
       {isLoading && !data ? (
@@ -115,6 +121,12 @@ function Body({ data }: { data: HealthSummary }) {
   const imageOverviewQuery = useQuery<ImageStorageOverview, Error>({
     queryKey: ['image-storage-overview'],
     queryFn: fetchImageStorageOverview,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  const imageFailuresQuery = useQuery<ImageFailureRow[], Error>({
+    queryKey: ['images-failure-overview'],
+    queryFn: fetchImagesFailureOverview,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
@@ -148,9 +160,19 @@ function Body({ data }: { data: HealthSummary }) {
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card label="Image failures">
+              <ImageFailuresPanel
+                rows={imageFailuresQuery.data}
+                isLoading={imageFailuresQuery.isLoading}
+                error={imageFailuresQuery.error}
+              />
+            </Card>
             <Card label="Freshness checks · last 24 h">
               <FreshnessRows rows={data.freshness_24h} />
             </Card>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <Card label="Fetch failures · top 10 by attempts">
               <FailuresPanel
                 given_up={data.failures_given_up}
@@ -572,6 +594,30 @@ function PortalStat({
       >
         {value}
       </p>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Stale health-data warning (migration 176 refresh stamp)                    */
+/*                                                                            */
+/* The dashboard's numbers come from pg_cron-refreshed matviews. If the cron  */
+/* loop dies, the page keeps serving old numbers that LOOK fresh — this is    */
+/* the only signal that the data itself has stopped moving. Absent            */
+/* generated_at (pre-176 payload) renders nothing.                            */
+/* -------------------------------------------------------------------------- */
+
+function StaleHealthDataBanner({ generatedAt }: { generatedAt: string | null }) {
+  if (!generatedAt) return null;
+  const ageMin = (Date.now() - new Date(generatedAt).getTime()) / 60_000;
+  if (ageMin < HEALTH_DATA_STALE_MIN) return null;
+  return (
+    <div className="mt-4 p-3 rounded-[var(--radius-sm)] border border-[var(--color-ochre)]/40 bg-[var(--color-ochre-soft)] text-sm text-[var(--color-ochre)] flex items-baseline gap-2">
+      <span className="text-[0.7rem] tracking-[0.18em] uppercase font-medium">stale</span>
+      <span>
+        Health data je zastaralá (pg_cron refresh možná stojí) — poslední refresh před{' '}
+        <span className="font-mono tabular-nums">{Math.round(ageMin)}&thinsp;min</span>.
+      </span>
     </div>
   );
 }
@@ -1762,6 +1808,116 @@ function ImageStorageRow({ row }: { row: ImageStorageCategory }) {
         {fmtCount(row.total)}
       </td>
     </tr>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Image-download failures (images_failure_overview RPC, migration 177)        */
+/*                                                                            */
+/* The Image mirror shows stored-vs-total; this card shows WHY the gap exists  */
+/* — terminally-classified URLs (unavailable_reason), silently-exhausted       */
+/* retries, and the coarse HTTP-error class of what is still pending.          */
+/* -------------------------------------------------------------------------- */
+
+const FAILURE_BUCKET_COLOUR: Record<string, string> = {
+  pending: 'var(--color-ink-2)',
+  exhausted: 'var(--color-brick)',
+  unavailable: 'var(--color-ochre)',
+};
+
+function ImageFailuresPanel({
+  rows,
+  isLoading,
+  error,
+}: {
+  rows: ImageFailureRow[] | undefined;
+  isLoading: boolean;
+  error: Error | null;
+}) {
+  if (error) {
+    return (
+      <p className="text-sm text-[var(--color-brick)]">
+        images_failure_overview failed: {error.message}
+      </p>
+    );
+  }
+  if (isLoading && !rows) {
+    return <p className="text-sm text-[var(--color-ink-4)]">Loading…</p>;
+  }
+  if (!rows || rows.length === 0) {
+    return (
+      <p className="text-sm text-[var(--color-ink-4)]">
+        No data yet — the rollup refreshes with the 2-hourly image drain.
+      </p>
+    );
+  }
+
+  const totals = rows.reduce(
+    (acc, r) => {
+      if (r.bucket !== 'stored') acc[r.bucket] = (acc[r.bucket] ?? 0) + r.n;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+  // Breakdown: rows carrying a reason or error class (detail '') are the
+  // never-attempted pending backlog — the Image mirror already covers those.
+  const breakdown = rows
+    .filter((r) => r.bucket !== 'stored' && r.detail !== '')
+    .sort((a, b) => b.n - a.n)
+    .slice(0, 12);
+
+  return (
+    <div>
+      <div className="flex items-center gap-4 text-xs text-[var(--color-ink-2)]">
+        {(['pending', 'exhausted', 'unavailable'] as const).map((bucket) => (
+          <span key={bucket} className="inline-flex items-baseline gap-1.5">
+            <span
+              className="text-[0.62rem] tracking-[0.16em] uppercase"
+              style={{ color: FAILURE_BUCKET_COLOUR[bucket] }}
+            >
+              {bucket}
+            </span>
+            <span className="font-mono tabular-nums text-[var(--color-ink)]">
+              {fmtCount(totals[bucket] ?? 0)}
+            </span>
+          </span>
+        ))}
+      </div>
+
+      {breakdown.length === 0 ? (
+        <p className="mt-3 text-sm text-[var(--color-ink-4)]">
+          No failure reasons recorded — the pending backlog has not been attempted yet.
+        </p>
+      ) : (
+        <table className="w-full text-xs mt-3">
+          <thead className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
+            <tr>
+              <th className="text-left  py-1.5 px-1.5 font-medium">Portal</th>
+              <th className="text-left  py-1.5 px-1.5 font-medium">State</th>
+              <th className="text-left  py-1.5 px-1.5 font-medium">Reason</th>
+              <th className="text-right py-1.5 px-1.5 font-medium">Images</th>
+            </tr>
+          </thead>
+          <tbody>
+            {breakdown.map((r) => (
+              <tr
+                key={`${r.source}-${r.bucket}-${r.detail}`}
+                className="border-t border-[var(--color-rule-soft)]"
+              >
+                <td className="py-1.5 px-1.5 text-[var(--color-ink)]">{portalShort(r.source)}</td>
+                <td className="py-1.5 px-1.5" style={{ color: FAILURE_BUCKET_COLOUR[r.bucket] }}>
+                  {r.bucket}
+                </td>
+                <td className="py-1.5 px-1.5 font-mono text-[var(--color-ink-2)]">{r.detail}</td>
+                <td className="py-1.5 px-1.5 text-right font-mono tabular-nums text-[var(--color-ink)]">
+                  {fmtCount(r.n)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
   );
 }
 

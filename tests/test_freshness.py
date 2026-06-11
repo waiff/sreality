@@ -180,6 +180,8 @@ def test_404_marks_inactive_and_logs_gone(monkeypatch):
     assert calls["images"] == []
     assert any("UPDATE listings" in sql for sql, _ in conn.executions)
     assert any("is_active = false" in sql for sql, _ in conn.executions)
+    # the flip stamps the delisting moment (migration 175)
+    assert any("inactive_at = now()" in sql for sql, _ in conn.executions)
     assert calls["log"][0]["outcome"] == "gone"
 
 

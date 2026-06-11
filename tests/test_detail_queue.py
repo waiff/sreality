@@ -423,10 +423,12 @@ def test_mark_properties_dirty_empty_noop():
     assert conn.executed == []
 
 
+_FLIP_SQL = "UPDATE listings SET is_active = false, inactive_at = now() WHERE is_active = true"
+
+
 def test_mark_inactive_enqueues_flipped_properties_and_returns_count():
     conn = _FakeConn([
-        (lambda s: "UPDATE listings SET is_active = false WHERE is_active = true" in s,
-         [(5,), (5,), (None,)]),
+        (lambda s: _FLIP_SQL in s, [(5,), (5,), (None,)]),
         (lambda s: "INSERT INTO dirty_properties" in s, []),
     ])
     n = db.mark_inactive(conn, "byt", "prodej", {1, 2})
@@ -438,7 +440,7 @@ def test_mark_inactive_enqueues_flipped_properties_and_returns_count():
 
 def test_mark_inactive_no_dirty_when_no_flips():
     conn = _FakeConn([
-        (lambda s: "UPDATE listings SET is_active = false WHERE is_active = true" in s, []),
+        (lambda s: _FLIP_SQL in s, []),
     ])
     assert db.mark_inactive(conn, "byt", "prodej", {1}) == 0
     assert _find(conn.executed, "INSERT INTO dirty_properties") is None
@@ -449,7 +451,7 @@ def test_mark_inactive_is_source_scoped():
     # carry the same canon categories but are never in sreality's seen_ids, so
     # without the source clause every sreality walk would sweep them inactive.
     conn = _FakeConn([
-        (lambda s: "UPDATE listings SET is_active = false WHERE is_active = true" in s, []),
+        (lambda s: _FLIP_SQL in s, []),
     ])
     db.mark_inactive(conn, "byt", "prodej", {1, 2}, source="sreality")
     sql, params = conn.executed[0]
@@ -499,3 +501,7 @@ def test_touch_listings_enqueues_reactivated_properties():
     # only listings currently inactive are captured for re-activation dirtying
     assert "listings.is_active = false" in react[0]
     assert "INSERT INTO dirty_properties" in react[0]
+    # both statements clear the delisting stamp on reactivation (migration 175)
+    assert "inactive_at = NULL" in react[0]
+    bulk = _find(conn.executed, "SET last_seen_at = now(), is_active = true")
+    assert bulk is not None and "inactive_at = NULL" in bulk[0]

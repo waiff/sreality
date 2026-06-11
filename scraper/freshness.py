@@ -202,7 +202,8 @@ def _record_gone(
 ) -> FreshnessResult:
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            "UPDATE listings SET is_active = false WHERE sreality_id = %s",
+            "UPDATE listings SET is_active = false, inactive_at = now() "
+            "WHERE sreality_id = %s",
             (sreality_id,),
         )
     prev_hash = prev["content_hash"] if prev else None
