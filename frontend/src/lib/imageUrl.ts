@@ -23,15 +23,22 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
 const IMG_CACHE_BUST = '2';
 
 // sreality's CDN 401s a BARE image URL — it only serves bytes with the render-transform
-// query present (mirrors scraper/image_storage.py `_with_transform`). Many stored
-// `sreality_url`s are bare, so the fallback below must append it or every not-yet-in-R2
-// sreality photo 401s. Gated on the sdn.cz host + absence of an existing `fl=`.
+// query present (mirrors scraper/image_storage.py `_with_transform`, including completing
+// a prefix chain like `?fl=rot,180,0|`, which 400s as-is). Many stored `sreality_url`s
+// are bare, so the fallback below must append it or every not-yet-in-R2 sreality photo
+// 401s. Gated on the sdn.cz host; complete chains (containing `res,`) pass untouched.
 const SREALITY_IMG_HOST = 'sdn.cz';
-const SREALITY_TRANSFORM = 'fl=res,749,562,3|shr,,20|jpg,90';
+const SREALITY_TRANSFORM_OPS = 'res,749,562,3|shr,,20|jpg,90';
+const SREALITY_TRANSFORM = `fl=${SREALITY_TRANSFORM_OPS}`;
 
 const withSrealityTransform = (url: string): string => {
-  if (!url.includes(SREALITY_IMG_HOST) || url.includes('fl=')) return url;
-  return `${url}${url.includes('?') ? '&' : '?'}${SREALITY_TRANSFORM}`;
+  if (!url.includes(SREALITY_IMG_HOST)) return url;
+  if (!url.includes('fl=')) {
+    return `${url}${url.includes('?') ? '&' : '?'}${SREALITY_TRANSFORM}`;
+  }
+  if (url.includes('res,')) return url;
+  // Prefix chain (e.g. `?fl=rot,180,0|`): complete it, preserving the rot op.
+  return `${url.replace(/\|+$/, '')}|${SREALITY_TRANSFORM_OPS}`;
 };
 
 export interface ImageRef {

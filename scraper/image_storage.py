@@ -36,8 +36,9 @@ def image_key(sreality_id: int, sequence: int | None) -> str:
 
 # sreality's v1 rebuild serves bare image URLs; the CDN 401s a bare URL and
 # only returns bytes when the render-transform query is present. Pre-rebuild
-# stored URLs already carry it, so appending is gated on its absence.
-IMAGE_TRANSFORM = "fl=res,749,562,3|shr,,20|jpg,90"
+# stored URLs already carry the complete chain.
+IMAGE_TRANSFORM_OPS = "res,749,562,3|shr,,20|jpg,90"
+IMAGE_TRANSFORM = "fl=" + IMAGE_TRANSFORM_OPS
 
 # The render-transform is a sreality CDN (*.sdn.cz / Seznam) feature. Other
 # portals (bazos and onward) serve plain image URLs and would 404/ignore the
@@ -47,9 +48,18 @@ _SREALITY_IMAGE_HOST = "sdn.cz"
 
 
 def _with_transform(url: str) -> str:
-    if "fl=" in url or _SREALITY_IMAGE_HOST not in url:
+    if _SREALITY_IMAGE_HOST not in url:
         return url
-    return f"{url}{'&' if '?' in url else '?'}{IMAGE_TRANSFORM}"
+    if "fl=" not in url:
+        return f"{url}{'&' if '?' in url else '?'}{IMAGE_TRANSFORM}"
+    if "res," in url:
+        # Legacy stored URL with a complete chain — already renderable.
+        return url
+    # Prefix chain like '?fl=rot,180,0|' (trailing pipe): the CDN 400s it as-is
+    # AND with the pipe stripped; only completing the chain returns bytes. The
+    # rot op MUST be preserved — completing without it returns 200 but stores
+    # the photo unrotated (curl-verified).
+    return url.rstrip("|") + "|" + IMAGE_TRANSFORM_OPS
 
 
 def download_image(url: str, timeout: float = 15.0) -> bytes:

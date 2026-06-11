@@ -75,6 +75,47 @@ def test_classify_401_is_source_unavailable(monkeypatch):
     assert gone == set() and alive == set()  # not a listing-liveness verdict
 
 
+@pytest.mark.parametrize("status", [400, 415])
+def test_classify_400_and_415_are_source_unavailable(monkeypatch, status):
+    """400 (malformed prefix transform chain, e.g. '?fl=rot,180,0|') and 415
+    are URL-level rejections — permanently dead, never transient. Classifying
+    them transient is what red-looped the image workflows on the breaker."""
+    called = []
+    monkeypatch.setattr(
+        scraper_main, "client_freshness_check",
+        lambda *_a, **_kw: (called.append(1), "should_not_be_called")[1],
+    )
+    gone: set[int] = set()
+    alive: set[int] = set()
+
+    kind = scraper_main._classify_image_failure(
+        conn=None, client=None, sreality_id=42,
+        error=_http_error(status),
+        gone_listings=gone, alive_listings=alive,
+    )
+    assert kind == "source_unavailable"
+    assert called == []  # no freshness check fired
+    assert gone == set() and alive == set()  # not a listing-liveness verdict
+
+
+def test_classify_403_stays_transient(monkeypatch):
+    """403 is sreality throttling us, not a dead URL. It MUST stay transient:
+    a row parked on an inactive listing is never un-parked (record_images only
+    resets unavailable_reason on a parent detail refetch)."""
+    called = []
+    monkeypatch.setattr(
+        scraper_main, "client_freshness_check",
+        lambda *_a, **_kw: (called.append(1), "should_not_be_called")[1],
+    )
+    kind = scraper_main._classify_image_failure(
+        conn=None, client=None, sreality_id=42,
+        error=_http_error(403),
+        gone_listings=set(), alive_listings=set(),
+    )
+    assert kind == "transient"
+    assert called == []  # no freshness check fired
+
+
 def test_suspicious_stop_source_unavailable_does_not_count():
     """A window of all-401 (source_unavailable) outcomes must not fire the
     breaker — dead URLs are not sreality blocking us."""

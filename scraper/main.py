@@ -1625,11 +1625,15 @@ def _classify_image_failure(
     reset, R2 failures) are 'transient'. Per-run caches keep each liveness
     verdict to at most one freshness_check.
     """
-    if _is_unauthorized_image_error(error):
-        # A 401 on the image URL is the bare-URL/rotated-path signature, not a
-        # rate-limit block — the URL itself is dead. Park it like an expired CDN
-        # URL on a live listing so it leaves the queue and never counts toward
-        # the suspicious-stop ratio. No freshness_check: we know it's the URL.
+    if _is_dead_url_image_error(error):
+        # A 400/401/415 on the image URL is a URL-level rejection (bare URL,
+        # rotated path, malformed/unsupported transform chain), not a rate-limit
+        # block — the URL itself is dead. Park it like an expired CDN URL on a
+        # live listing so it leaves the queue and never counts toward the
+        # suspicious-stop ratio. No freshness_check: we know it's the URL.
+        # 403 deliberately stays transient: sreality throttles with 403, and a
+        # row parked on an inactive listing is never un-parked (record_images
+        # only resets unavailable_reason on a parent detail refetch).
         return "source_unavailable"
     if not _is_gone_image_error(error):
         return "transient"
@@ -1663,13 +1667,16 @@ def _is_gone_image_error(error: Exception) -> bool:
     return False
 
 
-def _is_unauthorized_image_error(error: Exception) -> bool:
-    """True iff the exception is an HTTP 401 from sreality's CDN — a dead URL."""
+def _is_dead_url_image_error(error: Exception) -> bool:
+    """True iff the exception is an HTTP 400/401/415 on an image GET — a dead
+    URL (bare, rotated path, malformed transform chain, unsupported format),
+    treated as permanent on any portal's CDN. 403 is NOT here: sreality
+    throttles with 403, so it must stay transient."""
     import requests
 
     if isinstance(error, requests.HTTPError):
         resp = getattr(error, "response", None)
-        if resp is not None and resp.status_code == 401:
+        if resp is not None and resp.status_code in (400, 401, 415):
             return True
     return False
 
