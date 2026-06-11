@@ -31,11 +31,12 @@ class _FakePortal:
     index_rate = 1.0
 
     def __init__(self, *, supports_complete_walk=True, categories=None, complete=True,
-                 fetch_kinds=None) -> None:
+                 fetch_kinds=None, walk_fails=None) -> None:
         self.supports_complete_walk = supports_complete_walk
         self._categories = categories if categories is not None else ["A", "B"]
         self._complete = complete
         self._fetch_kinds = fetch_kinds or {}
+        self._walk_fails = walk_fails or set()
         self.conn = _Conn()
         self.calls: dict[str, list] = {
             "walk": [], "mark_inactive": [], "active_count": [],
@@ -56,6 +57,8 @@ class _FakePortal:
 
     def walk_category(self, c, conn, dry_run, limiter):
         self.calls["walk"].append(c)
+        if c in self._walk_fails:
+            raise RuntimeError(f"blocked {c}")
         return ({1, 2}, {"found_new": 2, "enqueued": 2}, 2, 1, self._complete)
 
     def mark_inactive(self, conn, c, seen):
@@ -174,6 +177,31 @@ def test_index_walk_runs_all_when_budget_not_reached(monkeypatch):
     monkeypatch.setattr(portal_runner.time, "monotonic", lambda: 0.0)
     portal_runner.run_index_walk(p, dry_run=False, max_seconds=10_000)
     assert p.calls["walk"] == ["A", "B"]
+
+
+def test_index_walk_one_failed_category_stays_green_with_error_recorded():
+    # One category's walk raises -> the run stays rc=0 (partial failure is
+    # tolerated) but the failure is COUNTED in the aggregate, and the other
+    # category is still walked + swept.
+    p = _FakePortal(supports_complete_walk=True, complete=True, walk_fails={"A"})
+    rc, agg = portal_runner.run_index_walk(p, dry_run=False)
+    assert rc == 0
+    assert agg["errors"] == 1
+    assert p.calls["walk"] == ["A", "B"]
+    assert [c for c, _ in p.calls["mark_inactive"]] == ["B"]  # failed cat skips sweep
+    assert agg["index_pages"] == 1          # only B contributed pages
+    assert agg["listings_inactive"] == 2    # B's sweep still happened
+
+
+def test_index_walk_all_categories_failed_returns_nonzero_rc():
+    # EVERY category failed -> the portal is fully blocked (e.g. WAF 403s the
+    # runner egress); the run must go red, not record a green zero-listing walk.
+    p = _FakePortal(supports_complete_walk=True, complete=True, walk_fails={"A", "B"})
+    rc, agg = portal_runner.run_index_walk(p, dry_run=False)
+    assert rc != 0
+    assert agg["errors"] == 2
+    assert p.calls["mark_inactive"] == []
+    assert agg["index_pages"] == 0
 
 
 # --- run_detail_drain -------------------------------------------------------

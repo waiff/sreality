@@ -2009,15 +2009,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "scrape_mmreality.yml",
     "name": "Scraping: M&M Reality scraper (pilot)",
-    "description": "Scheduled (every 6h) + manual scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price- changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "description": "Manual (dispatch-only) scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price- changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
     "portal": "mmreality",
     "manual": true,
-    "schedules": [
-      {
-        "cron": "50 */6 * * *",
-        "human": "Every 6 hours at :50"
-      }
-    ],
+    "schedules": [],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
