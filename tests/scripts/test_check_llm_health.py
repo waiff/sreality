@@ -1,11 +1,14 @@
 """Hermetic tests for the assess() decision logic in check_llm_health.
 
 No DB — psycopg import lives inside main(), so importing assess is clean.
+The _pending_unscored tests use a scripted cursor, no connection.
 """
 
 from __future__ import annotations
 
-from scripts.check_llm_health import assess
+from typing import Any
+
+from scripts.check_llm_health import _pending_unscored, assess
 
 
 def _stalled(condition_call_age_hours: float | None = 1.0, **kw):
@@ -82,3 +85,57 @@ def test_condition_stall_message_names_the_pipeline():
         max_idle_hours=4.0, condition_max_idle_hours=8.0, min_pending=50,
     )
     assert "score_listing_condition" in msg
+
+
+# ---- _pending_unscored: kraj scoping mirrors the scorer ---------------------
+
+
+def test_pending_unscored_zero_when_scoring_paused():
+    # No enabled regions (settings row missing) -> nothing is pending, so
+    # parked work never reads as a stall — and the count query never runs.
+    conn = _ScriptedConn([("fetchone", None)])
+    assert _pending_unscored(conn) == 0
+    assert len(conn.cursor_obj.executed) == 1
+
+
+def test_pending_unscored_scopes_count_to_enabled_regions():
+    conn = _ScriptedConn([
+        ("fetchone", ([27, 43],)),  # app_settings enabled-regions lookup
+        ("fetchone", (123,)),       # scoped count
+    ])
+    assert _pending_unscored(conn) == 123
+    sql, params = conn.cursor_obj.executed[-1]
+    assert "region_id = ANY(%s::bigint[])" in sql
+    assert "building_condition_level IS NULL" in sql
+    assert params == ([27, 43],)
+
+
+class _ScriptedCursor:
+    def __init__(self, plan: list[tuple[str, Any]]) -> None:
+        self._plan = plan
+        self._idx = 0
+        self.executed: list[tuple[str, Any]] = []
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        if self._idx >= len(self._plan):
+            raise AssertionError(f"execute past plan end (sql={sql[:80]!r})")
+        self.executed.append((sql, params))
+
+    def fetchone(self) -> Any:
+        out = self._plan[self._idx][1]
+        self._idx += 1
+        return out
+
+    def __enter__(self) -> "_ScriptedCursor":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+class _ScriptedConn:
+    def __init__(self, plan: list[tuple[str, Any]]) -> None:
+        self.cursor_obj = _ScriptedCursor(plan)
+
+    def cursor(self) -> _ScriptedCursor:
+        return self.cursor_obj

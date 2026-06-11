@@ -44,7 +44,7 @@ on:
           - "ingest"
           - "submit"
       region_ids:
-        description: "[submit] Comma-separated locality_region_id list (empty = no filter)"
+        description: "[submit] Comma-separated admin_boundaries kraj ids (empty = the Settings-page enabled list)"
         required: false
         default: ""
         type: string

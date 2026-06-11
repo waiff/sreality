@@ -11,7 +11,9 @@ provider reports as `ended`, streams the results and, per request:
 
 Idempotent: only `pending` request rows are processed; the
 (sreality_id, snapshot_id) cache key + latest-wins guard make re-writes
-safe, so a re-run after a partial ingest finishes the rest.
+safe, so a re-run after a partial ingest finishes the rest. When any
+result was persisted, toolkit.condition_scoring.propagate_condition_levels
+copies the fresh scores to cross-portal siblings of the same property.
 
 Usage (typically via .github/workflows/condition_score_batches.yml):
 
@@ -70,8 +72,15 @@ def main() -> int:
             LOG.info("INGEST nothing to do; done")
             return 0
 
+        total_scored = 0
         for batch in batches:
-            _process_batch(conn, provider, llm_client, batch)
+            total_scored += _process_batch(conn, provider, llm_client, batch)
+
+        if total_scored > 0:
+            from toolkit.condition_scoring import propagate_condition_levels
+
+            reused = propagate_condition_levels(conn)
+            LOG.info("PROPAGATE reused=%d", reused)
     return 0
 
 
@@ -95,7 +104,8 @@ def _process_batch(
     provider: Any,
     llm_client: Any,
     batch: dict[str, Any],
-) -> None:
+) -> int:
+    """Returns the number of results persisted (drives sibling propagation)."""
     from api.providers import compute_cost_usd
 
     batch_id = int(batch["id"])
@@ -109,14 +119,14 @@ def _process_batch(
     )
     if not status.ended:
         _update_batch_counts(conn, batch_id, status)
-        return
+        return 0
 
     _mark_batch_ended(conn, batch_id, status)
     mapping = _pending_requests(conn, batch_id)
     if not mapping:
         LOG.info("INGEST batch_id=%d no pending requests; marking ingested", batch_id)
         _finalize_batch(conn, batch_id, scored=0, errored=0, cost=0.0)
-        return
+        return 0
 
     price = provider.price_for(model)
     scored = 0
@@ -151,6 +161,7 @@ def _process_batch(
         "INGEST batch_id=%d done scored=%d errored=%d cost=$%.4f",
         batch_id, scored, errored, cost_total,
     )
+    return scored
 
 
 def _ingest_one(

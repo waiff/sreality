@@ -8,8 +8,9 @@ an outage can stay silent for hours (it did: ~8h on 2026-06-04).
 
 This job makes that loud: it exits non-zero when there have been NO
 `llm_calls` for `--max-idle-hours` AND there is pending condition-scoring
-work (active listings without a condition level) — i.e. the pipeline should
-be producing calls but isn't. A failed scheduled run notifies the operator.
+work (active listings in the operator-enabled kraje without a condition
+level) — i.e. the pipeline should be producing calls but isn't. A failed
+scheduled run notifies the operator.
 
 A second, condition-specific probe guards against green-masking: unrelated
 agent/summarize traffic keeps the global max(called_at) fresh while the
@@ -160,13 +161,26 @@ def _pending_unscored(conn: Any) -> int:
 
     Uses the derived `listings.building_condition_level` column (NULL = not
     scored) so it's a single-table count, not a join over listing_snapshots.
+
+    Mirrors the scorer's kraj scope (app_settings.
+    condition_scoring_enabled_region_ids): listings outside the enabled
+    kraje — or with region_id NULL — are parked, not pending, so they must
+    never read as a stall. Empty list = scoring paused = nothing pending.
+    Propagated siblings drop out via the levels-NULL predicate.
     """
+    from scripts.backfill_condition_scores import _enabled_region_ids
+
+    region_ids = _enabled_region_ids(conn)
+    if not region_ids:
+        return 0
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM listings "
             "WHERE is_active = true "
             "  AND last_seen_at > now() - interval '7 days' "
-            "  AND building_condition_level IS NULL"
+            "  AND building_condition_level IS NULL "
+            "  AND region_id = ANY(%s::bigint[])",
+            (region_ids,),
         )
         return int(cur.fetchone()[0])
 

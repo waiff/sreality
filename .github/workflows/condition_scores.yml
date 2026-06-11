@@ -19,9 +19,9 @@ name: "Scraping: Sreality condition scoring (hourly + manual backfill)"
 #
 # Each successful score commits independently (autocommit), so a timeout or
 # cancel preserves rows already done; scored listings drop out of the next
-# selection. workflow_dispatch defaults to the operator's four kraje
-# (10 Praha · 11 Středočeský · 2 Plzeňský · 13 Vysočina), limit 500,
-# cost cap $10. Clear region_ids to score every region.
+# selection. workflow_dispatch defaults region_ids to empty = the
+# Settings-page enabled kraje (app_settings.condition_scoring_enabled_region_ids,
+# admin_boundaries ids), limit 500, cost cap $10.
 #
 # The selection is portal-agnostic (a DB predicate over listings /
 # listing_snapshots), so any scraper that lands rows in those tables is
@@ -36,9 +36,9 @@ on:
   workflow_dispatch:
     inputs:
       region_ids:
-        description: Comma-separated locality_region_id list (empty = no region filter)
+        description: Comma-separated admin_boundaries kraj ids (empty = the Settings-page enabled list)
         required: false
-        default: "10,11,2,13"
+        default: ""
         type: string
       limit:
         description: Maximum number of listings to score in this run
@@ -109,8 +109,9 @@ jobs:
       - name: Run condition scoring
         run: |
           # Scheduled runs pass no inputs (inputs.* are empty): fall back to
-          # the hourly defaults — no region filter, larger limit, higher cost
-          # cap. Manual dispatch carries the form's own defaults/overrides.
+          # the hourly defaults — Settings-page enabled regions, larger limit,
+          # higher cost cap. Manual dispatch carries the form's own
+          # defaults/overrides.
           REGION='${{ inputs.region_ids }}'
           LIMIT='${{ inputs.limit }}'
           if [ -z "$LIMIT" ]; then LIMIT="500"; fi

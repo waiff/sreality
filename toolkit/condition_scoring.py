@@ -294,6 +294,55 @@ def persist_scoring_result(
     )
 
 
+def propagate_condition_levels(conn: "psycopg.Connection") -> int:
+    """Copy genuine condition levels across same-property siblings.
+
+    One set-based, idempotent statement. Source per property = the
+    genuinely-scored listing (levels set, `condition_levels_propagated_from`
+    IS NULL — i.e. it paid the LLM), preferring the most recent
+    `listing_condition_scores.created_at`. Targets = siblings whose levels
+    are still NULL or were themselves propagated — a genuine own-score is
+    never clobbered — and whose current levels differ from the source's.
+    Returns the number of listings updated.
+    """
+    sql = (
+        "WITH source AS ( "
+        "  SELECT DISTINCT ON (l.property_id) "
+        "         l.property_id, l.sreality_id, "
+        "         l.building_condition_level, l.apartment_condition_level "
+        "  FROM listings l "
+        "  WHERE l.property_id IS NOT NULL "
+        "    AND l.condition_levels_propagated_from IS NULL "
+        "    AND (l.building_condition_level IS NOT NULL "
+        "         OR l.apartment_condition_level IS NOT NULL) "
+        "  ORDER BY l.property_id, "
+        "           (SELECT MAX(cs.created_at) "
+        "            FROM listing_condition_scores cs "
+        "            WHERE cs.sreality_id = l.sreality_id) DESC NULLS LAST, "
+        "           l.sreality_id "
+        ") "
+        "UPDATE listings t "
+        "SET building_condition_level = s.building_condition_level, "
+        "    apartment_condition_level = s.apartment_condition_level, "
+        "    condition_levels_propagated_from = s.sreality_id "
+        "FROM source s "
+        "WHERE t.property_id = s.property_id "
+        "  AND t.sreality_id <> s.sreality_id "
+        "  AND ( "
+        "    (t.building_condition_level IS NULL "
+        "     AND t.apartment_condition_level IS NULL) "
+        "    OR t.condition_levels_propagated_from IS NOT NULL "
+        "  ) "
+        "  AND ( "
+        "    t.building_condition_level IS DISTINCT FROM s.building_condition_level "
+        "    OR t.apartment_condition_level IS DISTINCT FROM s.apartment_condition_level "
+        "  )"
+    )
+    with conn.cursor() as cur:
+        cur.execute(sql)
+        return cur.rowcount
+
+
 def _produce_score(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
@@ -685,6 +734,9 @@ def _cache_store_and_update_listings(
     started scoring and when we go to UPDATE, leave listings.* alone
     — that fresher snapshot's score will eventually overwrite ours
     when its own scoring run lands.
+
+    An own score also clears `condition_levels_propagated_from`: a
+    genuine score supersedes any sibling-propagated copy.
     """
     insert_sql = (
         "INSERT INTO listing_condition_scores "
@@ -711,7 +763,8 @@ def _cache_store_and_update_listings(
     update_sql = (
         "UPDATE listings "
         "SET building_condition_level = %s, "
-        "    apartment_condition_level = %s "
+        "    apartment_condition_level = %s, "
+        "    condition_levels_propagated_from = NULL "
         "WHERE sreality_id = %s "
         "  AND (SELECT scraped_at FROM listing_snapshots "
         "       WHERE id = %s) "

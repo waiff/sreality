@@ -12,15 +12,17 @@ score). Cost-capped via `--max-cost-usd` — when the per-run accumulated
 LLM spend crosses the cap, the loop exits cleanly with the in-flight
 listings preserved.
 
-Region filter: `--region-ids` is optional and accepts a comma-separated
-list of `locality_region_id` integers (e.g. "10,11,2,13" = Praha,
-Středočeský, Plzeňský, Vysočina). Empty list = no region filter =
-score every active listing in the corpus.
+Region scope: scoring targets the operator-enabled kraje stored in
+`app_settings.condition_scoring_enabled_region_ids` (admin_boundaries
+kraj ids, edited from the Settings page). `--region-ids` overrides that
+list for a one-off run; listings outside the effective list — or with
+`region_id` NULL — are parked, not selected. An empty effective list
+pauses scoring.
 
 Usage (typically via .github/workflows/backfill_condition_scores.yml):
 
     python -m scripts.backfill_condition_scores \\
-        --region-ids 10,11,2,13 \\
+        --region-ids 27,43,108 \\
         --limit 500 \\
         --max-cost-usd 10
 
@@ -46,8 +48,9 @@ def main() -> int:
     parser.add_argument(
         "--region-ids", default="",
         help=(
-            "Comma-separated list of locality_region_id integers to "
-            "include. Empty = no region filter."
+            "Comma-separated list of admin_boundaries kraj ids to "
+            "include. Empty = the Settings-page enabled list "
+            "(app_settings.condition_scoring_enabled_region_ids)."
         ),
     )
     parser.add_argument(
@@ -95,7 +98,7 @@ def main() -> int:
     LOG.info(
         "SCORE config region_ids=%s limit=%d n_images=%d "
         "max_cost_usd=%.2f max_age_days=%d dry_run=%s",
-        region_ids or "ALL", args.limit, args.n_images,
+        region_ids or "from-settings", args.limit, args.n_images,
         args.max_cost_usd, args.max_age_days, args.dry_run,
     )
 
@@ -199,6 +202,25 @@ def _parse_region_ids(raw: str) -> list[int]:
     return out
 
 
+_ENABLED_REGIONS_KEY = "condition_scoring_enabled_region_ids"
+
+
+def _enabled_region_ids(conn: Any) -> list[int]:
+    """Operator-enabled admin_boundaries kraj ids from app_settings.
+
+    Missing row or empty array -> [] (scoring paused).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = %s",
+            (_ENABLED_REGIONS_KEY,),
+        )
+        row = cur.fetchone()
+    if row is None or not row[0]:
+        return []
+    return [int(v) for v in row[0]]
+
+
 def _select_pending(
     conn: Any,
     *,
@@ -214,13 +236,20 @@ def _select_pending(
     by last_seen_at DESC scores the freshest listings first — most
     user-facing relevance per dollar spent.
 
-    The region filter passes the list as int[] and gates on
-    cardinality so the empty-list case (no filter) compiles to no
-    additional restriction. `locality_region_id` is a sreality-only
-    column, so listings from the other portals (idnes/bezrealitky/bazos/
-    mmreality — region_id NULL) are ALWAYS included even when a region
-    filter is active; otherwise a region-filtered run would silently
-    score only sreality and never the other portals.
+    Region scope: `region_ids` (the CLI override) wins when non-empty;
+    otherwise the Settings-page enabled list
+    (app_settings.condition_scoring_enabled_region_ids). The clause gates
+    on `l.region_id` — the geo-derived admin_boundaries kraj id, present
+    for every portal — with NO null passthrough: a listing outside the
+    enabled kraje, or without a region yet, is parked, not scored. An
+    empty effective list pauses scoring entirely.
+
+    Sibling reuse: a listing is skipped while a same-property sibling
+    already holds a GENUINE score (condition_levels_propagated_from IS
+    NULL) — propagate_condition_levels copies that score over instead of
+    paying the LLM twice. The latest-snapshot/cache-row predicate is
+    per-listing, so the scored sibling itself still re-scores when its
+    own snapshot changes.
 
     `max_age_days <= 0` drops the freshness clause entirely — score
     every active listing regardless of when it was last seen. The
@@ -228,6 +257,11 @@ def _select_pending(
     backfills that want to reach older listings the scraper hasn't
     walked recently.
     """
+    effective_region_ids = region_ids or _enabled_region_ids(conn)
+    if not effective_region_ids:
+        LOG.info("condition scoring paused: no enabled regions")
+        return []
+
     freshness_clause = (
         " AND l.last_seen_at > now() - %s::interval"
         if max_age_days > 0 else ""
@@ -246,19 +280,23 @@ def _select_pending(
         "WHERE l.is_active = true "
         + freshness_clause +
         "  AND cs.id IS NULL "
-        "  AND ( "
-        "    cardinality(%s::int[]) = 0 "
-        "    OR l.locality_region_id = ANY(%s::int[]) "
-        "    OR l.locality_region_id IS NULL "
-        "  ) "
+        "  AND l.region_id = ANY(%s::bigint[]) "
+        "  AND (l.property_id IS NULL OR NOT EXISTS ( "
+        "    SELECT 1 FROM listings sib "
+        "    WHERE sib.property_id = l.property_id "
+        "      AND sib.sreality_id <> l.sreality_id "
+        "      AND sib.condition_levels_propagated_from IS NULL "
+        "      AND (sib.building_condition_level IS NOT NULL "
+        "           OR sib.apartment_condition_level IS NOT NULL) "
+        "  )) "
         "ORDER BY l.last_seen_at DESC "
         "LIMIT %s"
     )
     params: tuple[Any, ...]
     if max_age_days > 0:
-        params = (f"{max_age_days} days", region_ids, region_ids, limit)
+        params = (f"{max_age_days} days", effective_region_ids, limit)
     else:
-        params = (region_ids, region_ids, limit)
+        params = (effective_region_ids, limit)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return [int(r[0]) for r in cur.fetchall()]
