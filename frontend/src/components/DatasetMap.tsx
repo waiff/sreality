@@ -4,6 +4,7 @@
  * Each metric is its own fill layer toggled by visibility. */
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
+import { TILE_STYLE } from '@/lib/basemap';
 import type { PriceStatGrowthRow } from '@/lib/priceStats';
 import {
   GROWTH_METRICS,
@@ -40,7 +41,7 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
     if (!containerRef.current || mapRef.current) return;
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: 'https://tiles.openfreemap.org/styles/positron',
+      style: TILE_STYLE,
       center: [15.47, 49.82],
       zoom: 6.6,
       attributionControl: { compact: true },

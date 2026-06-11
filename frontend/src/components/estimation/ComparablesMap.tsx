@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
+import { TILE_STYLE } from '@/lib/basemap';
 import { fmtArea, fmtCzk } from '@/lib/format';
-
-const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 
 export interface ComparablePoint {
   sreality_id: number;

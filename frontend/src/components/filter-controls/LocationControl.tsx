@@ -25,8 +25,8 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 
 import { NumberCell } from '@/components/controls';
+import { TILE_STYLE } from '@/lib/basemap';
 
-const TILE_STYLE = 'https://tiles.openfreemap.org/styles/positron';
 const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 11 };
 const EARTH_RADIUS_M = 6_371_000;
 const CIRCLE_POINTS = 96;
