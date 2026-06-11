@@ -23,6 +23,7 @@ import type {
   EstimationStatus,
 } from '@/lib/types';
 import { ApiError } from '@/lib/api';
+import { runSurfaceUrl } from '@/lib/runLinks';
 import { buildRerunPayload, canRerun } from '@/lib/rerun';
 import { ControlGroup } from '@/components/controls';
 import { useNewEstimationModal } from '@/components/NewEstimationModal';
@@ -334,7 +335,7 @@ function WhenCell({ run }: { run: EstimationRun }) {
       title={`${fmtAbsolute(run.created_at)} · ${fmtRelative(run.created_at)}`}
     >
       <Link
-        to={`/estimation/${run.id}`}
+        to={runSurfaceUrl(run)}
         className="block leading-tight hover:text-[var(--color-copper)]"
       >
         <div className="text-[var(--color-ink-2)]">{fmtDateSlash(run.created_at)}</div>
@@ -396,7 +397,7 @@ function FeedbackCell({ run }: { run: EstimationRun }) {
   }
   return (
     <Link
-      to={`/estimation/${run.id}#feedback`}
+      to={runSurfaceUrl(run, '#feedback')}
       className="inline-flex items-center px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-xs)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:bg-[var(--color-copper)] hover:text-white transition-colors"
     >
       view
@@ -405,6 +406,31 @@ function FeedbackCell({ run }: { run: EstimationRun }) {
 }
 
 function ListingLinkCell({ run }: { run: EstimationRun }) {
+  // In-app listing page first — it's the primary surface for the run.
+  // The external portal URL stays reachable as a secondary ↗.
+  if (run.input_sreality_id != null) {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <Link
+          to={`/listing/${run.input_sreality_id}`}
+          className="text-[var(--color-copper)] hover:underline underline-offset-2"
+        >
+          Listing
+        </Link>
+        {run.input_url && (
+          <a
+            href={run.input_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[var(--color-ink-3)] hover:text-[var(--color-copper)]"
+            title={run.input_url}
+          >
+            ↗
+          </a>
+        )}
+      </span>
+    );
+  }
   if (run.input_url) {
     return (
       <a
@@ -414,18 +440,8 @@ function ListingLinkCell({ run }: { run: EstimationRun }) {
         className="text-[var(--color-copper)] hover:underline underline-offset-2"
         title={run.input_url}
       >
-        Link
+        Link ↗
       </a>
-    );
-  }
-  if (run.input_sreality_id != null) {
-    return (
-      <Link
-        to={`/listing/${run.input_sreality_id}`}
-        className="text-[var(--color-copper)] hover:underline underline-offset-2"
-      >
-        Link
-      </Link>
     );
   }
   return <span className="text-[0.78rem] text-[var(--color-ink-3)]">spec only</span>;
@@ -486,7 +502,7 @@ function RerunInlineButton({ run }: { run: EstimationRun }) {
   const navigate = useNavigate();
   const mut = useMutation<EstimationRun, ApiError, void>({
     mutationFn: () => submitEstimation(buildRerunPayload(run)),
-    onSuccess: (next) => navigate(`/estimation/${next.id}`),
+    onSuccess: (next) => navigate(runSurfaceUrl(next)),
   });
   return (
     <>

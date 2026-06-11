@@ -388,7 +388,17 @@ _RUN_PROJECTION = (
     + ", " + _COST_TOTAL_SUBSELECT
     + ", " + _HAS_FEEDBACK_SUBSELECT
 )
-_LIST_PROJECTION = _RUN_PROJECTION + ", " + _LOCALITY_DISPLAY_EXPR
+# List rows omit source_html (raw page bytes, LLM path only — large and never
+# rendered in a list context; the detail endpoint still returns it).
+_LIST_COLUMNS: tuple[str, ...] = tuple(
+    c for c in _RUN_COLUMNS if c != "source_html"
+)
+_LIST_PROJECTION = (
+    ", ".join(f"er.{c}" for c in _LIST_COLUMNS)
+    + ", " + _COST_TOTAL_SUBSELECT
+    + ", " + _HAS_FEEDBACK_SUBSELECT
+    + ", " + _LOCALITY_DISPLAY_EXPR
+)
 _LIST_FROM = (
     "estimation_runs er "
     "LEFT JOIN listings l ON l.sreality_id = er.input_sreality_id"
@@ -396,7 +406,9 @@ _LIST_FROM = (
 _RUN_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS + (
     "cost_usd_total", "has_feedback",
 )
-_LIST_COLUMNS_OUT: tuple[str, ...] = _RUN_COLUMNS_OUT + ("locality_display",)
+_LIST_COLUMNS_OUT: tuple[str, ...] = _LIST_COLUMNS + (
+    "cost_usd_total", "has_feedback", "locality_display",
+)
 
 
 @dataclass
@@ -805,6 +817,7 @@ def list_estimation_runs(
     source: str | None = None,
     status: str | None = None,
     sreality_id: int | None = None,
+    sreality_ids: list[int] | None = None,
     source_kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
@@ -820,6 +833,11 @@ def list_estimation_runs(
     if sreality_id is not None:
         where.append("er.input_sreality_id = %(sreality_id)s")
         params["sreality_id"] = sreality_id
+    if sreality_ids:
+        # Property-grain fetch: every run on any of the property's child
+        # listings (the Listing Detail estimations section).
+        where.append("er.input_sreality_id = ANY(%(sreality_ids)s)")
+        params["sreality_ids"] = sreality_ids
     if source_kind is not None:
         where.append("er.source_kind = %(source_kind)s")
         params["source_kind"] = source_kind

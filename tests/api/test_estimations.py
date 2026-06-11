@@ -931,6 +931,25 @@ def test_list_passes_filters_and_pagination(client, monkeypatch):
     assert captured["offset"] == 20
 
 
+def test_list_sreality_ids_csv_parsed(client, monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_list(conn, **kw):
+        captured.update(kw)
+        return {"data": [], "total": 0, "limit": kw["limit"],
+                "offset": kw["offset"]}
+
+    monkeypatch.setattr(api_main, "list_estimation_runs", fake_list)
+
+    res = client.get("/estimations?sreality_ids=11,%2022,x,33,")
+    assert res.status_code == 200
+    assert captured["sreality_ids"] == [11, 22, 33]
+
+    res = client.get("/estimations")
+    assert res.status_code == 200
+    assert captured["sreality_ids"] is None
+
+
 def test_list_default_limit_50_offset_0(client, monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(

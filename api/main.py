@@ -824,6 +824,9 @@ def list_estimations(
     source: str | None = None,
     status: Literal["pending", "running", "success", "failed"] | None = None,
     sreality_id: int | None = None,
+    sreality_ids: str | None = Query(
+        default=None, description="CSV of listing ids (property-grain fetch)",
+    ),
     source_kind: Literal[
         "sreality", "bezrealitky", "idnes_reality", "remax", "unsupported"
     ] | None = None,
@@ -832,11 +835,22 @@ def list_estimations(
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
+    ids: list[int] = []
+    if sreality_ids:
+        for part in sreality_ids.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                ids.append(int(part))
+            except ValueError:
+                continue
     return list_estimation_runs(
         conn,
         source=source,
         status=status,
         sreality_id=sreality_id,
+        sreality_ids=ids[:50] or None,
         source_kind=source_kind,
         limit=limit,
         offset=offset,

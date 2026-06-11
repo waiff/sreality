@@ -490,11 +490,12 @@ export interface EstimationRun {
    * runs (no URL parse happened), and parse_confidence_per_field is
    * also null for sreality runs (the deterministic parser doesn't
    * track per-field confidences). source_html is the raw page bytes
-   * (LLM path only) and is large — only fetched on the detail page. */
+   * (LLM path only) and is large — GET /estimations list rows omit it;
+   * only GET /estimations/:id returns it. */
   source_kind: SourceKind | null;
   parse_confidence: Confidence | null;
   parse_confidence_per_field: Record<string, Confidence> | null;
-  source_html: string | null;
+  source_html?: string | null;
   /* Migration 138 — typed subject attributes (mirroring listings_public field
    * names) for a parsed subject with no resolved listings row, so the UI can
    * render its facts grid. NULL when input_sreality_id is set (read the
@@ -684,6 +685,10 @@ export interface EstimationListParams {
   source?: EstimationSource;
   status?: EstimationStatus;
   sreality_id?: number;
+  /* CSV of listing ids — the property-grain fetch the Listing Detail
+   * estimations section uses (every run on any of the property's
+   * child listings). */
+  sreality_ids?: string;
   source_kind?: SourceKind;
   limit?: number;
   offset?: number;
