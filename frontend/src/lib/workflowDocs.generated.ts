@@ -1397,6 +1397,33 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/migrations.yml"
   },
   {
+    "filename": "monitor_workflow_failures.yml",
+    "name": "Monitoring: workflow failures",
+    "description": "Polls the GitHub Actions API every 30 minutes and records failed runs (failure / timed_out / startup_failure, last ~40 min, excluding itself) into `workflow_failures`, so the Health page can list them — GitHub only emails about failed SCHEDULED runs, leaving every other red run invisible unless the operator opens the Actions tab.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/30 * * * *",
+        "human": "Every 30 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "GITHUB_TOKEN",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "monitor-workflow-failures",
+    "cancelInProgress": false,
+    "timeoutMinutes": 5,
+    "permissions": "contents: read, actions: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/monitor_workflow_failures.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/monitor_workflow_failures.yml"
+  },
+  {
     "filename": "property_maintenance.yml",
     "name": "Jobs: property maintenance (incremental)",
     "description": "Phase 3 of the scaling roadmap: real-time properties. This is the FAST, FREQUENT half of property maintenance — the dirty-set incremental pass. It runs scripts/recompute_property_stats --incremental, which:",
