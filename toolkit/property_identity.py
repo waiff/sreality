@@ -59,16 +59,34 @@ def merge_properties(
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT id, status FROM properties WHERE id IN (%s, %s) FOR UPDATE",
+                "SELECT id, status, category_type, category_main "
+                "FROM properties WHERE id IN (%s, %s) FOR UPDATE",
                 (survivor_id, retired_id),
             )
-            status = {row[0]: row[1] for row in cur.fetchall()}
-            if survivor_id not in status or retired_id not in status:
+            rows = {row[0]: row for row in cur.fetchall()}
+            if survivor_id not in rows or retired_id not in rows:
                 raise MergeError("survivor or retired property not found")
-            if status[survivor_id] != "active":
+            if rows[survivor_id][1] != "active":
                 raise MergeError(f"survivor {survivor_id} is not active")
-            if status[retired_id] != "active":
+            if rows[retired_id][1] != "active":
                 raise MergeError(f"retired {retired_id} is not active")
+            # Final category guard at THE chokepoint every merge path funnels
+            # through (engine, cluster, operator one-click, Browse merge-mode).
+            # A sale and a rental — or a flat and a house — are never the same
+            # property; refuse even an operator-initiated merge. NULL = unknown,
+            # not a conflict. The engine's classify_pair also gates earlier; this
+            # backstops the manual merge surface (api.property_dedup) that calls
+            # merge_properties directly without classify_pair.
+            s_ct, s_cm = rows[survivor_id][2], rows[survivor_id][3]
+            r_ct, r_cm = rows[retired_id][2], rows[retired_id][3]
+            if s_ct is not None and r_ct is not None and s_ct != r_ct:
+                raise MergeError(
+                    f"category_type mismatch ({s_ct} vs {r_ct}); refusing to merge"
+                )
+            if s_cm is not None and r_cm is not None and s_cm != r_cm:
+                raise MergeError(
+                    f"category_main mismatch ({s_cm} vs {r_cm}); refusing to merge"
+                )
 
             cur.execute(
                 """
