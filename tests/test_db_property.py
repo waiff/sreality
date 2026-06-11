@@ -174,8 +174,12 @@ def test_scraped_listing_content_hash_is_stable_and_price_sensitive():
     a = _listing()
     assert a.content_hash() == _listing().content_hash()
     assert a.content_hash() != _listing(price_czk=21000).content_hash()
+    assert a.content_hash() != _listing(description="nový popis").content_hash()
     # source identity is NOT part of the content hash
     assert a.content_hash() == _listing(source_url="https://bazos.cz/other").content_hash()
+    # lat/lon are derived/geocoded, oscillation-prone, and geom updates on
+    # every upsert anyway — a coords-only change must NOT spawn a snapshot
+    assert a.content_hash() == _listing(lat=50.0, lon=14.4).content_hash()
 
 
 def test_scraped_listing_to_row_maps_fields():

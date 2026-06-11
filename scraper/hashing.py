@@ -17,6 +17,10 @@ VOLATILE_TOP_KEYS: frozenset[str] = frozenset({
     "is_topped",
     "is_topped_today",
     "logged_in",
+    # sreality-computed nearby-POI enrichment — churns per-request, not
+    # listing content
+    "labels",
+    "labels_extended",
     # per-session / per-user / recommendation state, not listing content
     "note",
     "rus",
@@ -35,6 +39,14 @@ VOLATILE_PARAM_KEYS: frozenset[str] = frozenset({
 VOLATILE_EMBEDDED_KEYS: frozenset[str] = frozenset({
     "favourite",
     "note",
+})
+
+# Keys inside the `user` block (broker contact card) that change without the
+# listing changing.
+VOLATILE_USER_KEYS: frozenset[str] = frozenset({
+    # re-signed avatar CDN URL — rotates per request; verified the sole
+    # changing subkey. Broker name/phone stay hashed.
+    "image",
 })
 
 VOLATILE_ITEM_NAMES: frozenset[str] = frozenset({
@@ -61,6 +73,10 @@ def _strip_volatile(raw: dict[str, Any]) -> dict[str, Any]:
     if isinstance(embedded, dict):
         for key in VOLATILE_EMBEDDED_KEYS:
             embedded.pop(key, None)
+    user = out.get("user")
+    if isinstance(user, dict):
+        for key in VOLATILE_USER_KEYS:
+            user.pop(key, None)
     items = out.get("items")
     if isinstance(items, list):
         out["items"] = [

@@ -18,9 +18,10 @@ carries the category (`/detail/{sale}/{cat}/…`), so the drain derives each
 listing's category from its own URL — one config walks many categories without
 the queue-encodes-category limitation that constrains bazos. Coordinates come
 straight from the page's embedded map config when present; when the page omits
-it (~a third of listings) the drain falls back to geocoding the locality via
-Mapy.cz (`_geocode_fallback`) so those listings still appear on the map and in
-radius/location filters instead of being silently dropped.
+it (~a third of listings) the drain carries an already-stored coordinate
+forward, and only a never-placed listing falls back to geocoding the locality
+via Mapy.cz (`_geocode_fallback`) so those listings still appear on the map and
+in radius/location filters instead of being silently dropped.
 """
 
 from __future__ import annotations
@@ -104,9 +105,10 @@ class IdnesPortal:
         self._categories = config.categories
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
-        # native ids that already carry coordinates at drain start; a refetch of
-        # one of them must NOT re-spend a Mapy geocode credit on stable coords.
-        self._have_geom: set[str] | None = None
+        # stored (lat, lon) per native id at drain start; a refetch whose page
+        # carries no coords gets them carried forward instead of re-geocoded —
+        # geom is never wiped and a Mapy credit is only ever spent once.
+        self._have_geom: dict[str, tuple[float, float]] | None = None
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -125,24 +127,33 @@ class IdnesPortal:
         # Single-row ingest (ingest_scraped_listing), not batched prepared writes,
         # so the transaction pooler is fine — no session pooler needed.
         conn = db.connect()
-        # Preload (once, on the main thread) the native ids that already have a
-        # geom, so the worker-pool fetch_detail can skip re-geocoding them. Without
-        # this, every coords-less iDNES page re-geocodes on EVERY refetch — the
-        # runaway that exhausted the Mapy key (2026-06). Genuinely-new and
-        # still-missing rows still geocode; the cross-run persistent geocode cache
-        # (ROADMAP) is what collapses the still-missing tail.
+        # Preload (once, on the main thread) the stored coords of already-placed
+        # rows, so the worker-pool fetch_detail can carry them forward instead of
+        # re-geocoding. Without this, every coords-less iDNES page re-geocodes on
+        # EVERY refetch — the runaway that exhausted the Mapy key (2026-06). A
+        # bare skip isn't enough either: ingesting lat=None wipes the stored geom
+        # ("geom = EXCLUDED.geom") and flips the content hash, so each refetch
+        # oscillated between the geocoded and the wiped state, churning snapshots.
+        # Genuinely-new and still-missing rows still geocode.
         if self._have_geom is None:
             self._have_geom = db.native_ids_with_geom(conn, SOURCE)
             LOG.info(
-                "GEOCODE preload have_geom=%d (skip re-geocode on refetch)",
+                "GEOCODE preload have_geom=%d (carry stored coords forward on refetch)",
                 len(self._have_geom),
             )
         return conn
 
-    def _should_geocode(self, native_id: str) -> bool:
-        """Geocode only rows we have not already placed. When the have-geom set
-        was never preloaded (None), fall back to the old always-geocode behaviour."""
-        return self._have_geom is None or native_id not in self._have_geom
+    def _fill_coords(self, native_id: str, listing: Any) -> Any:
+        """Page-provided coords win; else carry the stored coordinate forward;
+        geocode only when neither the page nor the DB has one. When the
+        have-geom map was never preloaded (None), every coords-less listing
+        falls through to the geocoder — the old always-geocode behaviour."""
+        if listing.lat is not None and listing.lon is not None:
+            return listing
+        stored = (self._have_geom or {}).get(native_id)
+        if stored is not None:
+            return replace(listing, lat=stored[0], lon=stored[1])
+        return _geocode_fallback(listing)
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -249,8 +260,7 @@ class IdnesPortal:
             )
         except Exception as exc:  # noqa: BLE001
             return DrainItem(native_id=native_id, kind="error", error=str(exc))
-        if self._should_geocode(native_id):
-            listing = _geocode_fallback(listing)
+        listing = self._fill_coords(native_id, listing)
         return DrainItem(
             native_id=native_id, kind="ok",
             payload={"listing": listing, "html": html, "status": status, "url": url},
