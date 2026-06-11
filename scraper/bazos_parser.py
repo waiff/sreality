@@ -585,6 +585,7 @@ def parse_detail(
         disposition=_parse_disposition(haystack),
         locality=locality,
         district=None,
+        street=street,
         lat=lat,
         lon=lon,
         description=description,
