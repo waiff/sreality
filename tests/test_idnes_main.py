@@ -191,11 +191,13 @@ def test_walk_category_classifies_new_changed_unchanged(monkeypatch):
     assert c not in refs                          # unchanged is not enqueued
 
 
-def test_walk_complete_requires_full_walk():
-    # mark_inactive only after a 100% walk (architectural rule #3); the bar is
-    # hardcoded (INDEX_MIN_COMPLETENESS=1.0), not operator-tunable, so anything
-    # short of the full reported total must read incomplete and skip the sweep.
+def test_walk_complete_requires_near_full_walk():
+    # mark_inactive only after a ~complete walk (architectural rule #3); the bar
+    # is hardcoded (INDEX_MIN_COMPLETENESS=0.995, tolerating mid-walk churn), not
+    # operator-tunable — a genuinely truncated walk still reads incomplete.
     assert idnes_main._walk_complete(100, 100) is True
+    assert idnes_main._walk_complete(996, 1000) is True   # 0.4% deficit = churn
+    assert idnes_main._walk_complete(994, 1000) is False  # 0.6% deficit = truncated
     assert idnes_main._walk_complete(99, 100) is False
     assert idnes_main._walk_complete(90, 100) is False
     assert idnes_main._walk_complete(0, None) is True   # unknown total → trust the walk
@@ -230,12 +232,15 @@ def test_mark_inactive_source_scoped(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         idnes_main.db, "mark_inactive",
-        lambda _c, cm, ct, pks, source: (captured.update(cm=cm, ct=ct, pks=set(pks), source=source) or 7),
+        lambda _c, cm, ct, pks, source, min_unseen_hours: (captured.update(
+            cm=cm, ct=ct, pks=set(pks), source=source,
+            min_unseen_hours=min_unseen_hours) or 7),
     )
     n = _portal().mark_inactive(object(), {"sale_type": "prodej", "category": "byty"}, {"x", "y"})
     assert n == 7
     assert captured["cm"] == "byt" and captured["ct"] == "prodej"
     assert captured["source"] == "idnes"
+    assert captured["min_unseen_hours"] == 24   # staleness rail rides on every sweep
 
 
 def test_active_count_source_scoped(monkeypatch):

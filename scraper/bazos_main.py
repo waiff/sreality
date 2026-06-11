@@ -10,9 +10,9 @@ config differ from sreality.
 
 The index reports a total ("z N inzerátů"), so a full walk of the configured
 scope is provable-complete: `supports_complete_walk=True` and the runner marks
-delisted ads inactive under the completeness guard (rule #3), throttled to once
-per window (migration 113) so a frequent walk surfaces new ads + freshness every
-run while delisting inference stays conservative.
+delisted ads inactive under the completeness guard (rule #3), restricted to rows
+unseen for 24h+ (INACTIVE_MIN_UNSEEN_HOURS) so a frequent walk surfaces new ads
++ freshness every run while delisting inference stays conservative.
 
 Scope: every category in the portal registry (14 nationwide sale+rent sections —
 byt/dum/chata/restaurace/kancelar/prostory/sklad). The source-generic queue carries
@@ -54,10 +54,21 @@ from scraper.rate_limit import RateLimiter
 LOG = logging.getLogger(__name__)
 SOURCE = "bazos"
 
-# A walk must collect the FULL portal-reported total before its index-absence
-# sweep is trusted to mark_inactive (architectural rule #3); anything short of
-# 100% means the walk truncated and the sweep is skipped. Not operator-tunable.
-INDEX_MIN_COMPLETENESS = 1.0
+# A walk must collect ~the FULL portal-reported total before its index-absence
+# sweep is trusted to mark_inactive (architectural rule #3). 100% is
+# statistically unreachable on large categories: ads churn mid-walk (a byt/prodej
+# section walk takes ~12 min) with observed real-walk deficits up to 0.24%, so a
+# 1.0 bar suppressed every healthy sweep. 99.5% passes every healthy walk with
+# 2x margin while a genuinely truncated walk (e.g. rate-limited 1,029/7,000)
+# still reads incomplete; the INACTIVE_MIN_UNSEEN_HOURS staleness rail below is
+# the second, stronger guard. Not operator-tunable.
+INDEX_MIN_COMPLETENESS = 0.995
+
+# Only flip rows unseen for 24h+ — ~3.5x the 6-7h walk cadence. Combined with
+# touch_listings bumping last_seen_at for every index-seen row BEFORE the sweep,
+# a live row inside the 0.5% tolerance window cannot be flipped — only rows
+# missed by 4+ consecutive walks can.
+INACTIVE_MIN_UNSEEN_HOURS = 24
 
 
 class _CachingGeocoder:
@@ -104,10 +115,10 @@ class BazosPortal:
 
     Complete-walk capable: the index reports a total ("z N inzerátů"), so a
     full walk of the configured scope is provable-complete and drives
-    mark_inactive under the completeness guard (rule #3). The delisting sweep
-    is additionally throttled to once per `inactive_sweep_min_interval_hours`
-    (migration 113) so a frequent index walk surfaces new ads + freshness every
-    run while delisting inference stays conservative."""
+    mark_inactive under the completeness guard (rule #3). The sweep only flips
+    rows unseen for INACTIVE_MIN_UNSEEN_HOURS+ — the staleness rail that keeps
+    delisting inference conservative on every walk, with no sweep-window
+    throttle (small categories no longer burn the window for big ones)."""
 
     source = SOURCE
     supports_complete_walk = True
@@ -130,12 +141,6 @@ class BazosPortal:
         self._locality = locality
         self._radius_km = radius_km
         self._max_pages = max_pages
-        # The 12h delisting-sweep throttle is one clock per portal, but the
-        # runner calls mark_inactive once per category — so decide due-ness once
-        # per run and stamp once, else the first category's sweep would throttle
-        # the rest within the same run.
-        self._sweep_due: bool | None = None
-        self._sweep_stamped = False
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, str]]:
@@ -252,16 +257,6 @@ class BazosPortal:
         )
 
     def mark_inactive(self, conn: Any, category: dict[str, str], seen: set[str]) -> int:
-        # Throttled delisting sweep: the index walk runs frequently, but the
-        # index-absence inference runs at most once per configured window so a
-        # single rate-limited/truncated walk can't mass-delist (migration 113).
-        # The runner already gated this on walk completeness (rule #3). Due-ness
-        # is decided once per run (all categories sweep together) and stamped once.
-        if self._sweep_due is None:
-            self._sweep_due = db.portal_inactive_sweep_due(conn, SOURCE)
-        if not self._sweep_due:
-            LOG.info("INACTIVE throttled source=bazos (within sweep interval)")
-            return 0
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return 0
@@ -269,13 +264,10 @@ class BazosPortal:
         # collapse onto one category_main (chata + dum -> dum), so an un-scoped
         # per-section sweep would flip the sibling sections inactive.
         sub = SUBTYPE.get(category.get("category"))
-        n = db.mark_inactive_native(
-            conn, SOURCE, cm, ct, seen, subtype=sub, scope_subtype=True
+        return db.mark_inactive_native(
+            conn, SOURCE, cm, ct, seen, subtype=sub, scope_subtype=True,
+            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
         )
-        if not self._sweep_stamped:
-            db.record_portal_inactive_sweep(conn, SOURCE)
-            self._sweep_stamped = True
-        return n
 
     def active_count(self, conn: Any, category: dict[str, str]) -> int | None:
         cm, ct = self.category_labels(category)

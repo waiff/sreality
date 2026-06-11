@@ -664,6 +664,7 @@ def mark_inactive(
     seen_ids: set[int],
     *,
     source: str = "sreality",
+    min_unseen_hours: int | None = None,
 ) -> int:
     """Mark listings of this category not in seen_ids as is_active=false.
 
@@ -672,22 +673,34 @@ def mark_inactive(
     would clobber sales `is_active`; without the source scope, a sreality walk
     would sweep other portals' rows (which carry the same canon categories but
     are never in sreality's seen_ids) — see architectural rule #15.
+
+    `min_unseen_hours` additionally restricts the flip to rows whose
+    last_seen_at is older than that many hours — the staleness rail that keeps
+    a single walk's index hiccup from delisting a row touched by a recent walk.
     """
     if not seen_ids:
         return 0
+    stale_clause = (
+        "\n              AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    params: list[Any] = [source, category_main, category_type]
+    if min_unseen_hours is not None:
+        params.append(min_unseen_hours)
+    params.append(list(seen_ids))
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             UPDATE listings
             SET is_active = false
             WHERE is_active = true
               AND source = %s
               AND category_main = %s
-              AND category_type = %s
+              AND category_type = %s{stale_clause}
               AND sreality_id <> ALL(%s)
             RETURNING property_id
             """,
-            (source, category_main, category_type, list(seen_ids)),
+            tuple(params),
         )
         rows = cur.fetchall()
         pids = {int(r[0]) for r in rows if r[0] is not None}
@@ -737,6 +750,7 @@ def mark_inactive_native(
     *,
     subtype: str | None = None,
     scope_subtype: bool = False,
+    min_unseen_hours: int | None = None,
 ) -> int:
     """Native-id analogue of `mark_inactive` for portals whose index knows only
     a portal-native string id (bazos), not the bigint PK.
@@ -751,13 +765,23 @@ def mark_inactive_native(
     kancelar/sklad/... -> komercni), so without this each section's per-scope
     sweep would flip the other sections' rows inactive. The clause only NARROWS
     the sweep, so the failure direction is over-retention, never over-deletion.
+
+    `min_unseen_hours` additionally restricts the flip to rows whose
+    last_seen_at is older than that many hours — the staleness rail that keeps
+    a single walk's index hiccup from delisting a row touched by a recent walk.
     """
     if not seen_natives:
         return 0
     sub_clause = "\n              AND subtype IS NOT DISTINCT FROM %s" if scope_subtype else ""
+    stale_clause = (
+        "\n              AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
     params: list[Any] = [source, category_main, category_type]
     if scope_subtype:
         params.append(subtype)
+    if min_unseen_hours is not None:
+        params.append(min_unseen_hours)
     params.append(list(seen_natives))
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(
@@ -767,7 +791,7 @@ def mark_inactive_native(
             WHERE is_active = true
               AND source = %s
               AND category_main = %s
-              AND category_type = %s{sub_clause}
+              AND category_type = %s{sub_clause}{stale_clause}
               AND source_id_native <> ALL(%s)
             RETURNING property_id
             """,

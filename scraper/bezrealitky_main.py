@@ -42,11 +42,22 @@ LOG = logging.getLogger(__name__)
 
 INDEX_PAGE_SIZE = 100
 
-# An index walk must collect the FULL API-reported totalCount before it drives
-# mark_inactive; anything short of 100% means the walk truncated and flipping
-# unseen listings inactive would falsely delist live ones. Not operator-tunable.
-# Mirrors scraper.main.INDEX_MIN_COMPLETENESS.
-INDEX_MIN_COMPLETENESS = 1.0
+# An index walk must collect ~the FULL API-reported totalCount before it drives
+# mark_inactive (rule #3). 100% is statistically unreachable on large
+# categories — listings churn mid-walk, with observed real-walk deficits up to
+# 0.24% — so a 1.0 bar suppressed every healthy sweep. 99.5% passes every
+# healthy walk with 2x margin while a genuinely truncated walk (e.g.
+# rate-limited 1,029/7,000) still reads incomplete; the
+# INACTIVE_MIN_UNSEEN_HOURS staleness rail is the second, stronger guard.
+# Not operator-tunable. Mirrors bazos_main / idnes_main.
+INDEX_MIN_COMPLETENESS = 0.995
+
+# Only flip rows unseen for 24h+ — several full walk cadences. last_seen_at is
+# bumped for unchanged rows each walk (touch_listings) and for changed rows on
+# a successful drain fetch — so a churn-missed live row is protected unless its
+# detail fetches have ALSO failed for 24h+; even then the flip self-heals on
+# the next index sighting (touch_listings reactivates).
+INACTIVE_MIN_UNSEEN_HOURS = 24
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
@@ -169,7 +180,10 @@ class BezrealitkyPortal:
             return 0
         existing = db.index_summary_native(conn, SOURCE, list(seen))
         pks = {v["sreality_id"] for v in existing.values()}
-        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
+        return db.mark_inactive(
+            conn, cm, ct, pks, source=SOURCE,
+            min_unseen_hours=INACTIVE_MIN_UNSEEN_HOURS,
+        )
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)
