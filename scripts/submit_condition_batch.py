@@ -1,11 +1,15 @@
-"""Phase 1.8b — submit a condition-scoring batch to the Anthropic Message
+"""Phase 1.8b — submit condition-scoring batches to the Anthropic Message
 Batches API (50% cheaper than synchronous scoring, async).
 
 Selects active listings whose latest snapshot has no condition-score row
 (same predicate as scripts.backfill_condition_scores), builds one request
-per listing, submits a single batch, and records the batch + its
+per listing, submits them in size-bounded chunks (every request embeds the
+~61KB shared system prompt, so a large unchunked submit blows past the
+API's 256MB request cap — HTTP 413), and records each batch + its
 custom_id → (sreality_id, snapshot_id) map in
-condition_score_batches / condition_score_batch_requests.
+condition_score_batches / condition_score_batch_requests. Multiple chunks
+per run mean multiple condition_score_batches rows; the ingester already
+walks every in-flight row.
 
 Listings already in an in-flight batch (a `pending` request row on a
 non-terminal batch) are skipped, so overlapping submit runs don't
@@ -26,12 +30,32 @@ not --dry-run).
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
 from typing import Any
 
 LOG = logging.getLogger("submit_condition_batch")
+
+# The Message Batches API rejects request bodies over 256MB; flush with a
+# wide safety margin so the per-request system prompt can't sum past it.
+MAX_BATCH_BYTES = 150 * 1024 * 1024
+MAX_BATCH_REQUESTS = 2000
+
+
+def should_flush(
+    *,
+    n_items: int,
+    chunk_bytes: int,
+    next_item_bytes: int,
+    max_requests: int = MAX_BATCH_REQUESTS,
+    max_bytes: int = MAX_BATCH_BYTES,
+) -> bool:
+    """True when the next request must start a new batch (count or byte cap)."""
+    if n_items == 0:
+        return False
+    return n_items >= max_requests or chunk_bytes + next_item_bytes > max_bytes
 
 
 def main() -> int:
@@ -65,7 +89,11 @@ def main() -> int:
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
     from scripts.backfill_condition_scores import _parse_region_ids, _select_pending
-    from toolkit.condition_scoring import build_scoring_request, resolve_snapshot
+    from toolkit.condition_scoring import (
+        build_scoring_context,
+        build_scoring_request,
+        resolve_snapshot,
+    )
 
     region_ids = _parse_region_ids(args.region_ids)
     LOG.info(
@@ -95,9 +123,14 @@ def main() -> int:
             LOG.info("BATCH nothing to submit; done")
             return 0
 
+        context = build_scoring_context(conn, llm_client)
+        model = context["model"]
+
         items: list[tuple[str, dict[str, Any]]] = []
         mapping: list[tuple[str, int, int]] = []
-        model = ""
+        chunk_bytes = 0
+        chunks = 0
+        built = 0
         for sid in candidates:
             snap = resolve_snapshot(conn, sid, None)
             if snap is None:
@@ -105,9 +138,8 @@ def main() -> int:
                 continue
             req = build_scoring_request(
                 conn, llm_client, sreality_id=sid, snapshot=snap,
-                n_images=args.n_images,
+                n_images=args.n_images, context=context,
             )
-            model = req["model"]
             custom_id = f"s{sid}-snap{snap['id']}"
             params = provider.build_batch_request_params(
                 system=req["system"],
@@ -115,33 +147,76 @@ def main() -> int:
                 tools=req["tools"],
                 model=req["model"],
             )
+            item_bytes = len(json.dumps(params, separators=(",", ":")))
+            if should_flush(
+                n_items=len(items), chunk_bytes=chunk_bytes,
+                next_item_bytes=item_bytes,
+            ):
+                _submit_chunk(
+                    conn, provider, items=items, mapping=mapping,
+                    chunk_bytes=chunk_bytes, model=model,
+                    n_images=args.n_images, dry_run=args.dry_run,
+                )
+                chunks += 1
+                items, mapping, chunk_bytes = [], [], 0
             items.append((custom_id, params))
             mapping.append((custom_id, sid, int(snap["id"])))
+            chunk_bytes += item_bytes
+            built += 1
 
-        if not items:
+        if built == 0:
             LOG.info("BATCH no requests built; done")
             return 0
 
-        if args.dry_run:
-            LOG.info("BATCH dry-run requests=%d model=%s; exit", len(items), model)
-            for custom_id, sid, snapshot_id in mapping[:20]:
-                LOG.info("BATCH sample %s -> sreality_id=%d snapshot_id=%d",
-                         custom_id, sid, snapshot_id)
-            return 0
+        if items:
+            _submit_chunk(
+                conn, provider, items=items, mapping=mapping,
+                chunk_bytes=chunk_bytes, model=model,
+                n_images=args.n_images, dry_run=args.dry_run,
+            )
+            chunks += 1
 
-        provider_batch_id = provider.submit_batch(items)
-        batch_id = _insert_batch(
-            conn,
-            provider_batch_id=provider_batch_id,
-            model=model,
-            n_images=args.n_images,
-            mapping=mapping,
-        )
         LOG.info(
-            "BATCH submitted provider_batch_id=%s rows=%d batch_id=%d model=%s",
-            provider_batch_id, len(mapping), batch_id, model,
+            "BATCH done requests=%d chunks=%d model=%s dry_run=%s",
+            built, chunks, model, args.dry_run,
         )
     return 0
+
+
+def _submit_chunk(
+    conn: Any,
+    provider: Any,
+    *,
+    items: list[tuple[str, dict[str, Any]]],
+    mapping: list[tuple[str, int, int]],
+    chunk_bytes: int,
+    model: str,
+    n_images: int,
+    dry_run: bool,
+) -> None:
+    mb = chunk_bytes / (1024 * 1024)
+    if dry_run:
+        LOG.info(
+            "BATCH dry-run chunk requests=%d serialized=%.1fMB model=%s",
+            len(items), mb, model,
+        )
+        for custom_id, sid, snapshot_id in mapping[:5]:
+            LOG.info("BATCH sample %s -> sreality_id=%d snapshot_id=%d",
+                     custom_id, sid, snapshot_id)
+        return
+    provider_batch_id = provider.submit_batch(items)
+    batch_id = _insert_batch(
+        conn,
+        provider_batch_id=provider_batch_id,
+        model=model,
+        n_images=n_images,
+        mapping=mapping,
+    )
+    LOG.info(
+        "BATCH submitted provider_batch_id=%s requests=%d serialized=%.1fMB "
+        "batch_id=%d model=%s",
+        provider_batch_id, len(items), mb, batch_id, model,
+    )
 
 
 def _in_flight_sreality_ids(conn: Any) -> set[int]:

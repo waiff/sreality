@@ -11,6 +11,13 @@ This job makes that loud: it exits non-zero when there have been NO
 work (active listings without a condition level) — i.e. the pipeline should
 be producing calls but isn't. A failed scheduled run notifies the operator.
 
+A second, condition-specific probe guards against green-masking: unrelated
+agent/summarize traffic keeps the global max(called_at) fresh while the
+condition batch pipeline is dead (it did: the 413 outage from 2026-06-04).
+With pending work, no `called_for='score_listing_condition'` row within
+`--condition-max-idle-hours` (default 8 — the 3h submit cadence plus batch
+turnaround) is stalled regardless of other traffic.
+
 Needs only SUPABASE_DB_URL — deliberately NOT the Anthropic key, so it keeps
 working precisely when the API is the thing that's down.
 
@@ -31,15 +38,19 @@ LOG = logging.getLogger("check_llm_health")
 def assess(
     *,
     last_call_age_hours: float | None,
+    condition_call_age_hours: float | None,
     pending: int,
     max_idle_hours: float,
+    condition_max_idle_hours: float,
     min_pending: int,
 ) -> tuple[bool, str]:
     """Return (stalled, message). stalled=True means raise the alarm (exit 1).
 
     No alarm when there's nothing to score (pending below the floor) — a
     quiet pipeline with no backlog is legitimately idle. Otherwise alarm if
-    there have been no calls at all, or none within the idle window.
+    there have been no calls at all, none within the idle window, or — even
+    with fresh unrelated traffic — no condition-scoring call within its own
+    (wider) idle window.
     """
     if pending < min_pending:
         return False, f"OK idle: pending={pending} < min_pending={min_pending}"
@@ -51,8 +62,22 @@ def assess(
             f"(> {max_idle_hours}h) while pending={pending} — LLM pipeline "
             f"appears down (check Anthropic credit balance / API key)"
         )
+    if condition_call_age_hours is None:
+        return True, (
+            f"STALLED: no score_listing_condition llm_calls on record while "
+            f"pending={pending} — condition pipeline down despite other LLM "
+            f"traffic (check the batch submit/ingest workflow runs)"
+        )
+    if condition_call_age_hours > condition_max_idle_hours:
+        return True, (
+            f"STALLED: last score_listing_condition call "
+            f"{condition_call_age_hours:.1f}h ago (> {condition_max_idle_hours}h) "
+            f"while pending={pending} — condition pipeline down despite other "
+            f"LLM traffic (check the batch submit/ingest workflow runs)"
+        )
     return False, (
-        f"OK: last llm_call {last_call_age_hours:.1f}h ago, pending={pending}"
+        f"OK: last llm_call {last_call_age_hours:.1f}h ago, last condition "
+        f"call {condition_call_age_hours:.1f}h ago, pending={pending}"
     )
 
 
@@ -63,6 +88,14 @@ def main() -> int:
         default=float(os.environ.get("LLM_HEALTH_MAX_IDLE_HOURS", "4")),
         help="Alert if no llm_calls within this many hours (default 4; the "
              "batch submit cadence is 3h).",
+    )
+    parser.add_argument(
+        "--condition-max-idle-hours", type=float,
+        default=float(os.environ.get("LLM_HEALTH_CONDITION_MAX_IDLE_HOURS", "8")),
+        help="Alert if no score_listing_condition llm_calls within this many "
+             "hours while work is pending (default 8; covers the 3h submit "
+             "cadence plus batch turnaround) — catches a dead condition "
+             "pipeline that fresh unrelated LLM traffic would green-mask.",
     )
     parser.add_argument(
         "--min-pending", type=int,
@@ -87,12 +120,17 @@ def main() -> int:
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         last_call_age_hours = _last_call_age_hours(conn)
+        condition_call_age_hours = _last_call_age_hours(
+            conn, called_for="score_listing_condition",
+        )
         pending = _pending_unscored(conn)
 
     stalled, message = assess(
         last_call_age_hours=last_call_age_hours,
+        condition_call_age_hours=condition_call_age_hours,
         pending=pending,
         max_idle_hours=args.max_idle_hours,
+        condition_max_idle_hours=args.condition_max_idle_hours,
         min_pending=args.min_pending,
     )
     if stalled:
@@ -102,12 +140,17 @@ def main() -> int:
     return 0
 
 
-def _last_call_age_hours(conn: Any) -> float | None:
+def _last_call_age_hours(conn: Any, *, called_for: str | None = None) -> float | None:
+    sql = (
+        "SELECT EXTRACT(EPOCH FROM (now() - MAX(called_at))) / 3600.0 "
+        "FROM llm_calls"
+    )
+    params: tuple[Any, ...] = ()
+    if called_for is not None:
+        sql += " WHERE called_for = %s"
+        params = (called_for,)
     with conn.cursor() as cur:
-        cur.execute(
-            "SELECT EXTRACT(EPOCH FROM (now() - MAX(called_at))) / 3600.0 "
-            "FROM llm_calls"
-        )
+        cur.execute(sql, params)
         row = cur.fetchone()
     return float(row[0]) if row and row[0] is not None else None
 

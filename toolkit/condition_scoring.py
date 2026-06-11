@@ -208,6 +208,22 @@ def score_listing_condition(
     }
 
 
+def build_scoring_context(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+) -> dict[str, Any]:
+    """Resolve the static per-run request context once: the fully built
+    system prompt (template + rubric + marker dictionary, ~61KB) and the
+    model. The batch submitter passes this to `build_scoring_request` so
+    a 2000-listing build doesn't re-read app_settings 2000 times."""
+    system_template = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
+    model = llm_client.resolve_model(_MODEL_KEY)
+    rubric = _resolve_jsonb_setting(conn, _RUBRIC_KEY)
+    dictionary = _resolve_jsonb_setting(conn, _DICTIONARY_KEY)
+    system = _build_system_prompt(system_template, rubric=rubric, dictionary=dictionary)
+    return {"system": system, "model": model}
+
+
 def build_scoring_request(
     conn: "psycopg.Connection",
     llm_client: "LLMClient",
@@ -215,6 +231,7 @@ def build_scoring_request(
     sreality_id: int,
     snapshot: dict[str, Any],
     n_images: int,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the LLM request for one listing's condition score.
 
@@ -224,24 +241,25 @@ def build_scoring_request(
     accepts dict messages); the batch submitter feeds it to
     `AnthropicProvider.build_batch_request_params`. Keeping one builder
     guarantees both paths share an identical cached system+tools prefix.
+
+    `context` is an optional prebuilt `build_scoring_context` result;
+    when omitted the static settings are resolved per call (unchanged
+    behaviour for the synchronous callers).
     """
     listing = _fetch_listing(conn, sreality_id)
     text_payload = _build_text_payload(listing, snapshot)
     image_blocks = _build_image_blocks_if_available(conn, sreality_id, n_images)
 
-    system_template = llm_client.resolve_system_prompt(_SYSTEM_PROMPT_KEY)
-    model = llm_client.resolve_model(_MODEL_KEY)
-    rubric = _resolve_jsonb_setting(conn, _RUBRIC_KEY)
-    dictionary = _resolve_jsonb_setting(conn, _DICTIONARY_KEY)
-    system = _build_system_prompt(system_template, rubric=rubric, dictionary=dictionary)
+    if context is None:
+        context = build_scoring_context(conn, llm_client)
 
     return {
-        "system": system,
+        "system": context["system"],
         "messages": [
             {"role": "user", "content": _build_content(text_payload, image_blocks)}
         ],
         "tools": [RECORD_LISTING_CONDITION_TOOL],
-        "model": model,
+        "model": context["model"],
         "n_images": len(image_blocks),
     }
 
