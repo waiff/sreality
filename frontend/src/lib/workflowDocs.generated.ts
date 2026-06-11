@@ -461,7 +461,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "region_ids",
-        "description": "[submit] Comma-separated locality_region_id list (empty = no filter)",
+        "description": "[submit] Comma-separated admin_boundaries kraj ids (empty = the Settings-page enabled list)",
         "required": false,
         "type": "string",
         "default": "",
@@ -516,10 +516,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "inputs": [
       {
         "name": "region_ids",
-        "description": "Comma-separated locality_region_id list (empty = no region filter)",
+        "description": "Comma-separated admin_boundaries kraj ids (empty = the Settings-page enabled list)",
         "required": false,
         "type": "string",
-        "default": "10,11,2,13",
+        "default": "",
         "options": null
       },
       {

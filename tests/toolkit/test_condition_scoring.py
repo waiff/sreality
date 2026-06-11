@@ -383,6 +383,62 @@ def test_listings_update_uses_latest_wins_guard(monkeypatch):
     assert "apartment_condition_level" in update_sql
 
 
+def test_listings_update_clears_propagation_provenance(monkeypatch):
+    """An own genuine score must reset condition_levels_propagated_from to
+    NULL — it supersedes any sibling-propagated copy."""
+    _stub_image_storage(monkeypatch, configured=False)
+    plan = [
+        ("fetchone", (42, _NOW, {})),                                # snapshot
+        ("fetchone", None),                                          # cache miss
+        ("fetchone", _listing_row()),                                # listing
+        ("fetchone", ({"level_count": 5, "building_levels": [],
+                       "apartment_levels": []},)),
+        ("fetchone", ({"schema_version": 1, "building": [], "apartment": []},)),
+        ("execute_write", None),
+        ("execute_write", None),
+    ]
+    conn = _make_conn(plan)
+    llm = _FakeLLM([_llm_response(_good_score())])
+    condition_scoring.score_listing_condition(
+        conn, llm, sreality_id=123,  # type: ignore[arg-type]
+    )
+    update_sql = conn.cursor_obj.executed[-1][0]
+    assert "UPDATE listings" in update_sql
+    assert "condition_levels_propagated_from = NULL" in update_sql
+
+
+# ---- propagate_condition_levels ---------------------------------------------
+
+
+def test_propagate_condition_levels_sql_structure():
+    conn = _make_conn([("execute_write", None)])
+    n = condition_scoring.propagate_condition_levels(conn)  # type: ignore[arg-type]
+    assert n == 0
+    sql = conn.cursor_obj.executed[0][0]
+    assert "UPDATE listings" in sql
+    # Source = genuine scores only, preferring the freshest cache row.
+    assert "l.condition_levels_propagated_from IS NULL" in sql
+    assert "MAX(cs.created_at)" in sql
+    # Targets gain provenance pointing at the source listing.
+    assert "condition_levels_propagated_from = s.sreality_id" in sql
+    assert "t.sreality_id <> s.sreality_id" in sql
+
+
+def test_propagate_condition_levels_never_clobbers_genuine_scores():
+    conn = _make_conn([("execute_write", None)])
+    condition_scoring.propagate_condition_levels(conn)  # type: ignore[arg-type]
+    sql = " ".join(conn.cursor_obj.executed[0][0].split())
+    # Targets: levels still NULL, or themselves propagated — a genuine
+    # own-score (levels set + provenance NULL) is never overwritten.
+    assert (
+        "(t.building_condition_level IS NULL "
+        "AND t.apartment_condition_level IS NULL) "
+        "OR t.condition_levels_propagated_from IS NOT NULL"
+    ) in sql
+    # Idempotency: rows already equal to the source are skipped.
+    assert "IS DISTINCT FROM" in sql
+
+
 # ---- Helpers --------------------------------------------------------------
 
 
@@ -460,6 +516,7 @@ class _ScriptedCursor:
         self._idx = 0
         self.executed: list[tuple[str, Any]] = []
         self._next: tuple[str, Any] | None = None
+        self.rowcount = 0
 
     def execute(self, sql: str, params: Any = None) -> None:
         if self._idx >= len(self._plan):

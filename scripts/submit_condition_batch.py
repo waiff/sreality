@@ -13,14 +13,17 @@ walks every in-flight row.
 
 Listings already in an in-flight batch (a `pending` request row on a
 non-terminal batch) are skipped, so overlapping submit runs don't
-double-bill the same snapshot.
+double-bill the same snapshot. Before selection,
+toolkit.condition_scoring.propagate_condition_levels copies existing
+genuine scores to cross-portal siblings of the same property, so a
+duplicate never re-bills the LLM.
 
 Results are picked up later by scripts.ingest_condition_batch.
 
 Usage (typically via .github/workflows/condition_score_batches.yml):
 
     python -m scripts.submit_condition_batch \\
-        --region-ids 10,11,2,13 \\
+        --region-ids 27,43,108 \\
         --limit 2000
 
 Required env: SUPABASE_DB_URL, ANTHROPIC_API_KEY (the latter only when
@@ -92,6 +95,7 @@ def main() -> int:
     from toolkit.condition_scoring import (
         build_scoring_context,
         build_scoring_request,
+        propagate_condition_levels,
         resolve_snapshot,
     )
 
@@ -99,13 +103,19 @@ def main() -> int:
     LOG.info(
         "BATCH submit config region_ids=%s limit=%d n_images=%d "
         "max_age_days=%d dry_run=%s",
-        region_ids or "ALL", args.limit, args.n_images,
+        region_ids or "from-settings", args.limit, args.n_images,
         args.max_age_days, args.dry_run,
     )
 
     provider = AnthropicProvider()
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         llm_client = LLMClient(conn, providers={"anthropic": provider})
+
+        if not args.dry_run:
+            # Copy already-paid scores to cross-portal siblings first, so the
+            # selection below never re-bills a property a sibling already covers.
+            reused = propagate_condition_levels(conn)
+            LOG.info("PROPAGATE reused=%d", reused)
 
         pending = _select_pending(
             conn,
