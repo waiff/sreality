@@ -34,12 +34,18 @@ source for active rules; ROADMAP is for sequencing.
   check vs 6-hourly `data_quality_snapshots` captures; composed end-to-end latency check;
   image-failure breakdown matview + Health card; Health-matview staleness stamp + banner;
   failed-workflow-run recorder (30-min poller) + Health card.
+- **Price/area placeholder guards** (Sprint C "enum hygiene, price/area guards"):
+  `sane_price_czk` nulls `< 2` ("1 Kč dohodou" placeholders) alongside the overflow
+  cap; `sane_listing_numerics` nulls 0 m² areas; every portal main sanitizes its
+  index-price compare through the same clamp so placeholder-priced listings don't
+  refetch forever. Enum hygiene (status overlay, drevo, ownership) verified already
+  shipped in PR #273 + backfilled — production counts are 0.
 
 #### Next
 
 - Sprint C (data value): bazos locality backfill, street persistence + bazos dedup
-  revival, pHash throughput, idnes amenity parser, remax/bezrealitky subtype, enum
-  hygiene, price/area guards, remax drain investigation.
+  revival, pHash throughput, idnes amenity parser, remax/bezrealitky subtype, remax
+  drain investigation.
 - Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
   deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
 

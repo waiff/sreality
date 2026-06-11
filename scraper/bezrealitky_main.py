@@ -132,7 +132,9 @@ class BezrealitkyPortal:
                 nid = str(adv["id"])
                 if nid not in price_map:
                     native_ids.append(nid)
-                price_map[nid] = adv.get("price")
+                # Same clamps as the stored price so the unchanged-compare can't
+                # see a value the write boundary would have nulled.
+                price_map[nid] = db.sane_price_czk(adv.get("price"))
             offset += len(adverts)
             if self._max_pages and pages >= self._max_pages:
                 break

@@ -125,7 +125,9 @@ class RemaxPortal:
                     native_ids.append(nid)
                     new_on_page += 1
                 ref_map[nid] = detail_url(item.detail_path)
-                price_map[nid] = index_price(item.price_text)
+                # Same clamps as the stored price so the unchanged-compare can't
+                # see a value the write boundary would have nulled.
+                price_map[nid] = db.sane_price_czk(index_price(item.price_text))
                 cat_map[nid] = category_of(None, item.title)
             if self._max_pages and pages >= self._max_pages:
                 break

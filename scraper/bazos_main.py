@@ -195,7 +195,13 @@ class BazosPortal:
                 if item.source_id_native not in seen:
                     seen.add(item.source_id_native)
                     idx_price, _ = _parse_price(item.price_text, canon_type)
-                    items.append((item.source_id_native, item.detail_path, idx_price))
+                    # Same clamps as the stored price so the changed-compare can't
+                    # see a value the write boundary would have nulled.
+                    items.append((
+                        item.source_id_native,
+                        item.detail_path,
+                        db.sane_price_czk(idx_price),
+                    ))
             if self._max_pages and pages >= self._max_pages:
                 break
             if not page.items or page.next_offset is None:

@@ -33,6 +33,15 @@ def test_extract_id_and_price_from_real_search_result():
     assert scraper_main._extract_price(priced) == int(priced["price_summary_czk"])
 
 
+def test_extract_price_mirrors_db_placeholder_clamp():
+    # The write boundary nulls "1 Kč dohodou" placeholders (db.sane_price_czk),
+    # so the index side must too — otherwise stored NULL vs index 1 makes the
+    # unchanged-compare refetch such listings on every walk, forever.
+    assert scraper_main._extract_price({"price_czk": 1}) is None
+    assert scraper_main._extract_price({"price_summary_czk": 1}) is None
+    assert scraper_main._extract_price({"price_czk": 2}) == 2
+
+
 class _FakeClient:
     """Yields a deterministic per-category id range so tests can assert
     that mark_inactive is scoped correctly."""
