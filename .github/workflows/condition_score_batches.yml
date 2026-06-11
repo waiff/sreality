@@ -107,7 +107,11 @@ jobs:
           if [ "$MODE" = "submit" ]; then
             REGION='${{ inputs.region_ids }}'
             LIMIT='${{ inputs.limit }}'
-            if [ -z "$LIMIT" ]; then LIMIT="5000"; fi
+            # Scheduled fallback: 2000 is the last-known-good pre-Jun-4 value.
+            # The size-aware chunking inside scripts/submit_condition_batch.py
+            # is the real guard against the Batches API 256MB cap (HTTP 413);
+            # this limit just keeps each run's build time bounded.
+            if [ -z "$LIMIT" ]; then LIMIT="2000"; fi
             NIMG='${{ inputs.n_images }}'
             if [ -z "$NIMG" ]; then NIMG="0"; fi
             AGE='${{ inputs.max_age_days }}'
