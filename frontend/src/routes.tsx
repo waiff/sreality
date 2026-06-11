@@ -26,6 +26,10 @@ export const routes: RouteObject[] = [
     children: [
       { index: true, element: <Navigate to="/browse" replace /> },
       { path: 'browse', element: <Browse /> },
+      // Bare /listing handles the ?property=ID query form (the dedup merge feed
+      // + Browse merge links use it); ListingDetail resolves it to the
+      // property's representative listing and redirects to /listing/:id.
+      { path: 'listing', element: <ListingDetail /> },
       { path: 'listing/:sreality_id', element: <ListingDetail /> },
       { path: 'health', element: <Health /> },
       { path: 'estimate', element: <Navigate to="/estimations" replace /> },
