@@ -106,12 +106,22 @@ def main() -> int:
 
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
-    from toolkit.condition_scoring import ScoringError, score_listing_condition
+    from toolkit.condition_scoring import (
+        ScoringError,
+        propagate_condition_levels,
+        score_listing_condition,
+    )
 
     started_at = time.monotonic()
     with psycopg.connect(
         db_url, autocommit=True, prepare_threshold=None,
     ) as conn:
+        if not args.dry_run:
+            # Copy already-paid scores to cross-portal siblings first, so the
+            # selection below never re-bills a property a sibling already covers.
+            reused = propagate_condition_levels(conn)
+            LOG.info("PROPAGATE reused=%d", reused)
+
         pending = _select_pending(
             conn,
             region_ids=region_ids,
@@ -218,7 +228,13 @@ def _enabled_region_ids(conn: Any) -> list[int]:
         row = cur.fetchone()
     if row is None or not row[0]:
         return []
-    return [int(v) for v in row[0]]
+    try:
+        return [int(v) for v in row[0]]
+    except (TypeError, ValueError):
+        # A malformed value (e.g. hand-edited via the generic Settings JSON
+        # editor) pauses scoring instead of crashing the scheduled job.
+        LOG.warning("invalid %s value %r — treating as paused", _ENABLED_REGIONS_KEY, row[0])
+        return []
 
 
 def _select_pending(

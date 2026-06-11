@@ -23,7 +23,7 @@ Results are picked up later by scripts.ingest_condition_batch.
 Usage (typically via .github/workflows/condition_score_batches.yml):
 
     python -m scripts.submit_condition_batch \\
-        --region-ids 10,11,2,13 \\
+        --region-ids 27,43,108 \\
         --limit 2000
 
 Required env: SUPABASE_DB_URL, ANTHROPIC_API_KEY (the latter only when
@@ -111,10 +111,11 @@ def main() -> int:
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         llm_client = LLMClient(conn, providers={"anthropic": provider})
 
-        # Copy already-paid scores to cross-portal siblings first, so the
-        # selection below never re-bills a property a sibling already covers.
-        reused = propagate_condition_levels(conn)
-        LOG.info("PROPAGATE reused=%d", reused)
+        if not args.dry_run:
+            # Copy already-paid scores to cross-portal siblings first, so the
+            # selection below never re-bills a property a sibling already covers.
+            reused = propagate_condition_levels(conn)
+            LOG.info("PROPAGATE reused=%d", reused)
 
         pending = _select_pending(
             conn,
