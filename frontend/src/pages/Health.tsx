@@ -18,7 +18,9 @@ import {
   fetchImagesFailureOverview,
   fetchPortalHealth,
   fetchRecentScrapeRuns,
+  fetchRecentWorkflowFailures,
   fetchScraperHealthChecks,
+  type WorkflowFailureRow,
 } from '@/lib/queries';
 import type {
   CategoryTrend,
@@ -181,6 +183,8 @@ function Body({ data }: { data: HealthSummary }) {
               />
             </Card>
           </div>
+
+          <WorkflowFailuresCard />
         </div>
       </section>
     </div>
@@ -1331,6 +1335,66 @@ function FailuresPanel({
         <p className="mt-4 text-sm text-[var(--color-ink-4)]">No fetch failures recorded.</p>
       )}
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Failed workflow runs (migration 178 — recent_workflow_failures RPC, fed by  */
+/* the 30-min monitor_workflow_failures.yml poller)                            */
+/* -------------------------------------------------------------------------- */
+
+function WorkflowFailuresCard() {
+  const q = useQuery<WorkflowFailureRow[], Error>({
+    queryKey: ['workflow-failures', 48],
+    queryFn: () => fetchRecentWorkflowFailures(48),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+  return (
+    <Card label="Selhané workflow běhy (48 h)">
+      {q.error ? (
+        <p className="text-sm text-[var(--color-brick)]">
+          recent_workflow_failures failed: {q.error.message}
+        </p>
+      ) : q.isLoading && !q.data ? (
+        <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>
+      ) : !q.data || q.data.length === 0 ? (
+        <p className="text-sm text-[var(--color-ink-4)] py-2">
+          Žádné selhané běhy za posledních 48 hodin.
+        </p>
+      ) : (
+        <ul>
+          {q.data.map((f, i) => (
+            <li
+              key={`${f.html_url ?? f.workflow_name}-${i}`}
+              className="flex items-baseline gap-3 text-sm py-1.5 border-t border-[var(--color-rule-soft)] first:border-t-0 first:pt-0"
+            >
+              {f.html_url ? (
+                <a
+                  href={f.html_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[var(--color-copper)] hover:underline underline-offset-2 truncate"
+                >
+                  {f.workflow_name} ↗
+                </a>
+              ) : (
+                <span className="text-[var(--color-ink)] truncate">{f.workflow_name}</span>
+              )}
+              <span className="inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium bg-[var(--color-brick-soft)] text-[var(--color-brick)]">
+                {f.conclusion}
+              </span>
+              <span
+                className="ml-auto shrink-0 tabular-nums text-xs text-[var(--color-ink-3)]"
+                title={f.run_started_at ? fmtAbsolute(f.run_started_at) : undefined}
+              >
+                {f.run_started_at ? fmtRelative(f.run_started_at) : '—'}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
   );
 }
 

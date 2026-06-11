@@ -1036,6 +1036,23 @@ export const fetchScraperHealthChecks = async (
   return data as ScraperHealthChecks;
 };
 
+/* Migration 178 — failed GitHub Actions runs recorded by the 30-min poller
+ * (monitor_workflow_failures.yml). */
+export interface WorkflowFailureRow {
+  workflow_name: string;
+  conclusion: string;
+  run_started_at: string | null;
+  html_url: string | null;
+}
+
+export const fetchRecentWorkflowFailures = async (
+  hours: number = 48,
+): Promise<WorkflowFailureRow[]> => {
+  const { data, error } = await supabase.rpc('recent_workflow_failures', { p_hours: hours });
+  if (error) throw error;
+  return (data ?? []) as WorkflowFailureRow[];
+};
+
 export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {
   const { count, error } = await supabase
     .from('listings_public')

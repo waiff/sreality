@@ -1,0 +1,44 @@
+name: "Monitoring: workflow failures"
+
+# Polls the GitHub Actions API every 30 minutes and records failed runs
+# (failure / timed_out / startup_failure, last ~40 min, excluding itself) into
+# `workflow_failures`, so the Health page can list them — GitHub only emails
+# about failed SCHEDULED runs, leaving every other red run invisible unless
+# the operator opens the Actions tab.
+#
+# Required GitHub secret: SUPABASE_DB_URL. The default GITHUB_TOKEN with
+# `actions: read` covers the API read; no PAT needed.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: monitor-workflow-failures
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "psycopg[binary]>=3.2"
+
+      - name: Record failed workflow runs
+        run: python -m scripts.record_workflow_failures
