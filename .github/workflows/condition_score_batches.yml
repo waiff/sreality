@@ -4,17 +4,18 @@ name: "Scraping: Sreality condition scoring (batch API)"
 # API (50% cheaper than the synchronous condition_scores.yml job). Two
 # modes, selected by the `mode` input:
 #
-#   submit  — select pending listings and submit one batch
-#             (scripts.submit_condition_batch). Records the batch + its
-#             custom_id map in condition_score_batches /
+#   submit  — select pending listings and submit them as one or more
+#             size-bounded batches (scripts.submit_condition_batch keeps each
+#             chunk under the 256MB Batches API cap). Records every batch +
+#             its custom_id map in condition_score_batches /
 #             condition_score_batch_requests.
 #   ingest  — poll in-flight batches; on completion, write each result
 #             through persist_scoring_result + one llm_calls row at the
 #             50% batch-discounted cost (scripts.ingest_condition_batch).
 #             Idempotent and resumable.
 #
-# Typical lifecycle: a `submit` run puts pending listings into one batch,
-# then `ingest` runs poll until the batch flips to `ingested` (Anthropic
+# Typical lifecycle: a `submit` run chunks pending listings into batches,
+# then `ingest` runs poll until every batch flips to `ingested` (Anthropic
 # batches usually finish within an hour, 24h max).
 #
 # SCHEDULED steady-state condition-scoring driver — replaces the synchronous

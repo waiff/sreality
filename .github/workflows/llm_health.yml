@@ -9,7 +9,8 @@ name: "Monitoring: LLM pipeline liveness"
 #
 # Read-only; needs ONLY SUPABASE_DB_URL — deliberately not the Anthropic key,
 # so it keeps working when the API is the thing that's down. Tunable via
-# LLM_HEALTH_MAX_IDLE_HOURS (default 4) / LLM_HEALTH_MIN_PENDING (default 50).
+# LLM_HEALTH_MAX_IDLE_HOURS (default 4) / LLM_HEALTH_MIN_PENDING (default 50) /
+# LLM_HEALTH_CONDITION_MAX_IDLE_HOURS (default 8, condition-scoring liveness).
 #
 # Required GitHub secret: SUPABASE_DB_URL.
 
