@@ -37,16 +37,24 @@ from selectolax.parser import HTMLParser, Node
 from scraper.scraped_listing import ScrapedListing
 
 # Detail "Typ nemovitosti" value (diacritics-stripped, lowercased) -> canonical
-# category_main. remax's ~19 fine property types collapse onto the canonical five
-# (mirrors the sreality parser.CATEGORY_MAIN labels).
+# category_main. The live 2026 vocabulary is SEVEN coarse marketing groups
+# (Byty / Domy a vily / Pozemky / Chaty a rekreacni objekty / Najemni domy /
+# Komercni prostory / Hotely, penziony a restaurace — verified against the
+# stored raw params of the full active walk); the finer needles below it are
+# the legacy navigation taxonomy, kept in case remax serves it again.
+# "Najemni domy" maps to komercni: every other portal lands cinzovni_dum under
+# komercni (sreality category_sub_cb 38), so the category must agree for the
+# cross-portal subtype filter to see remax rows.
 TYP_TO_CATEGORY: tuple[tuple[str, str], ...] = (
     ("byty", "byt"),
     ("apartman", "byt"),
     ("domy a vily", "dum"),
+    ("chaty a rekreacni", "dum"),
+    ("najemni domy", "komercni"),
+    ("hotely", "komercni"),
     ("domy", "dum"),
     ("vily", "dum"),
     ("chaty a chalupy", "dum"),
-    ("najemni domy", "dum"),
     ("historicke objekty", "dum"),
     ("pozemky", "pozemek"),
     ("kancelare", "komercni"),
@@ -65,13 +73,30 @@ TYP_TO_CATEGORY: tuple[tuple[str, str], ...] = (
     ("jine", "ostatni"),
 )
 
-# Detail "Typ nemovitosti" value -> canonical portal-agnostic subtype slug
-# (migration 152). Only the collision-free correspondences are mapped; remax's
-# combined house types ("domy a vily", "chaty a chalupy") are genuinely
-# ambiguous between two of our slugs, so houses are left without a subtype
-# rather than guessing. Needles are diacritics-stripped/lowercased substrings,
-# none a substring of another, so order is irrelevant.
+# Detail-URL slug noun -> canonical portal-agnostic subtype slug (migration
+# 152). The 2026 coarse "Typ nemovitosti" groups erase the per-listing type,
+# but the detail URL keeps it ("/detail/{id}/prodej-ubytovaciho-zarizeni-…"),
+# so the URL is the structured signal now. Only the collision-free nouns
+# observed across the full production walk are mapped; "prodej-domu" and
+# "prodej-chaty-chalupy" are genuinely ambiguous between two of our slugs and
+# stay None. Ordered: the more specific noun first.
+URL_TO_SUBTYPE: tuple[tuple[str, str], ...] = (
+    ("najemniho-cinzovniho-domu", "cinzovni_dum"),
+    ("najemniho-domu", "cinzovni_dum"),
+    ("cinzovniho-domu", "cinzovni_dum"),
+    ("ubytovaciho-zarizeni", "ubytovani"),
+    ("kancelarskych-prostor", "kancelar"),
+    ("restaurace", "restaurace"),
+)
+
+# Detail "Typ nemovitosti" value -> canonical subtype slug, for the values
+# specific enough to map: "Najemni domy" from the live vocabulary plus the
+# legacy fine taxonomy. The live combined groups ("Hotely, penziony a
+# restaurace", "Chaty a rekreacni objekty", "Domy a vily") are ambiguous and
+# must NOT match any needle here — subtype_of guards the hotely group so its
+# "restaurace" tail can't mis-fire.
 TYP_TO_SUBTYPE: tuple[tuple[str, str], ...] = (
+    ("najemni domy", "cinzovni_dum"),
     ("kancelare", "kancelar"),
     ("obchodni", "obchodni_prostor"),
     ("restaurace", "restaurace"),
@@ -83,11 +108,14 @@ TYP_TO_SUBTYPE: tuple[tuple[str, str], ...] = (
 )
 
 # Title-noun fallback (diacritics-stripped, lowercased), checked in order so a
-# specific category wins before the garage/ostatni catch-all.
+# specific category wins before the garage/ostatni catch-all (and the
+# nájemní/činžovní dům nouns win before the generic "domu").
 CATEGORY_BY_TITLE: tuple[tuple[str, str], ...] = (
     ("bytu", "byt"),
     ("byt ", "byt"),
     ("apartman", "byt"),
+    ("najemniho domu", "komercni"),
+    ("cinzovniho domu", "komercni"),
     ("rodinneho domu", "dum"),
     ("domu", "dum"),
     ("vily", "dum"),
@@ -223,11 +251,18 @@ def category_of(typ: str | None, title: str | None) -> str | None:
     return category_from_typ(typ) or _category_from_title(title)
 
 
-def subtype_of(typ: str | None) -> str | None:
-    """Portal-agnostic subtype slug from the detail "Typ nemovitosti" value, for
-    the collision-free commercial / historic correspondences only (None else)."""
+def subtype_of(typ: str | None, url: str | None = None) -> str | None:
+    """Portal-agnostic subtype slug. The detail-URL noun is tried first (the
+    only per-listing type signal left since remax coarsened "Typ nemovitosti"
+    to seven marketing groups), then the typ value for the correspondences
+    specific enough to map. The combined "Hotely, penziony a restaurace"
+    group is guarded out so its "restaurace" tail can't mis-label a hotel."""
+    low_url = (url or "").lower()
+    for needle, slug in URL_TO_SUBTYPE:
+        if needle in low_url:
+            return slug
     key = _norm_key(typ)
-    if not key:
+    if not key or "hotely" in key or "penzion" in key:
         return None
     for needle, slug in TYP_TO_SUBTYPE:
         if needle in key:
@@ -515,7 +550,7 @@ def parse_detail(
         source_url=source_url,
         category_main=category_main,
         category_type=category_type,
-        subtype=subtype_of(params.get("typ nemovitosti")),
+        subtype=subtype_of(params.get("typ nemovitosti"), source_url),
         price_czk=price_czk,
         price_unit=price_unit,
         area_m2=area_m2,

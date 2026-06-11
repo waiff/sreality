@@ -147,12 +147,20 @@ assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
 # listing_snapshots.price_czk, listing_detail_queue.index_price_czk) — and in the
 # batched write a single oversized value fails the whole jsonb_to_recordset cast,
 # losing the entire batch. Clamp such values to NULL at every write boundary.
+# The low end is a placeholder too: "1 Kč" / "0 Kč" is the seller's "dohodou"
+# (price on request), not a price — NULL is the price-unknown representation.
 MAX_PRICE_CZK = 2_000_000_000
+MIN_PRICE_CZK = 2
 
 
 def sane_price_czk(price: int | None) -> int | None:
-    if price is not None and price > MAX_PRICE_CZK:
+    if price is None:
+        return None
+    if price > MAX_PRICE_CZK:
         LOG.warning("PRICE dropped implausible value=%s (> %s)", price, MAX_PRICE_CZK)
+        return None
+    if price < MIN_PRICE_CZK:
+        LOG.warning("PRICE dropped placeholder value=%s (< %s)", price, MIN_PRICE_CZK)
         return None
     return price
 
@@ -182,7 +190,10 @@ def sane_listing_numerics(obj: dict[str, Any]) -> None:
     """Clamp out-of-range int4/numeric LISTING_COLUMN values to NULL, in place.
 
     price_czk keeps its stricter business cap (sane_price_czk, applied first);
-    this is the column-range backstop for every other numeric column.
+    this is the column-range backstop for every other numeric column. Every
+    numeric LISTING_COLUMN is an area (asserted via _NUMERIC_ABS_MAX above),
+    and a 0 m² area is a form placeholder, never a measurement — NULL it so
+    area filters and Kč/m² math don't trip over it.
     """
     for col, pgtype in _LISTING_COLUMN_PGTYPE.items():
         v = obj.get(col)
@@ -190,6 +201,9 @@ def sane_listing_numerics(obj: dict[str, Any]) -> None:
             continue
         if pgtype == "integer" and not (INT4_MIN <= v <= INT4_MAX):
             LOG.warning("NUMERIC dropped col=%s value=%s (int4 range)", col, v)
+            obj[col] = None
+        elif pgtype == "numeric" and v == 0:
+            LOG.warning("NUMERIC dropped col=%s value=0 (area placeholder)", col)
             obj[col] = None
         elif pgtype == "numeric" and abs(v) >= _NUMERIC_ABS_MAX[col]:
             LOG.warning("NUMERIC dropped col=%s value=%s (numeric range)", col, v)

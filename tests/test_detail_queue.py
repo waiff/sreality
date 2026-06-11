@@ -164,6 +164,13 @@ def test_sane_price_czk_clamps_overflow_to_none():
     assert db.sane_price_czk(2_147_483_647) is None  # int4 max; seller placeholder
 
 
+def test_sane_price_czk_drops_low_placeholders():
+    # "1 Kč dohodou" / "0 Kč" is price-on-request, not a price.
+    assert db.sane_price_czk(0) is None
+    assert db.sane_price_czk(1) is None
+    assert db.sane_price_czk(2) == 2  # boundary: the smallest kept price
+
+
 def test_write_detail_batch_nulls_overflow_price():
     # A single >int4 price must not crash the jsonb_to_recordset cast of a ~100-row
     # batch; it's clamped to NULL in BOTH the listings upsert and the snapshot.
@@ -199,6 +206,26 @@ def test_sane_listing_numerics_clamps_int4_and_numeric_overflow():
     assert obj["area_m2"] == 120.5
     assert obj["usable_area"] == 99_999_999.0
     assert obj["price_czk"] == 5_000_000
+
+
+def test_sane_listing_numerics_nulls_zero_areas():
+    # 0 m² is a form placeholder, never a measurement; integer zeros (ground
+    # floor, no parking lots) are real values and must survive.
+    obj = {
+        "area_m2": 0,
+        "usable_area": 0.0,
+        "estate_area": 0,
+        "garden_area": 16.0,
+        "floor": 0,
+        "parking_lots": 0,
+    }
+    db.sane_listing_numerics(obj)
+    assert obj["area_m2"] is None
+    assert obj["usable_area"] is None
+    assert obj["estate_area"] is None
+    assert obj["garden_area"] == 16.0
+    assert obj["floor"] == 0
+    assert obj["parking_lots"] == 0
 
 
 def test_sane_listing_numerics_leaves_text_bool_and_none_untouched():
