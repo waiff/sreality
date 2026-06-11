@@ -1648,6 +1648,47 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_stale_images.yml"
   },
   {
+    "filename": "resplit_mixed.yml",
+    "name": "Re-split mixed-category properties (one-shot corrective)",
+    "description": "One-shot corrective for legacy mixed-category property groupings. The old geo-proximity matcher (replaced by the street+disposition dedup engine, rule #15) sometimes merged categorically-different listings at the same coordinates — a flat with a house, a sale with a rental, a flat with a commercial unit. The dedup engine + the merge_properties chokepoint guard now refuse such merges (PR #412), but pre-guard groupings persist. This re-singletonizes every active property whose child listings span more than one category_type or category_main: the representative child stays, every other child detaches onto its own fresh singleton property. Nothing is deleted (rule #3); the dedup engine re-merges any legitimate same-category pairs on its next daily run.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "apply",
+        "description": "Actually re-singletonize (false = dry-run report only)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "limit",
+        "description": "Cap properties processed (0 = no cap)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "sreality-property-maintenance",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resplit_mixed.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resplit_mixed.yml"
+  },
+  {
     "filename": "scrape.yml",
     "name": "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)",
     "description": "DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live pipeline is now the cadence split — index_walk.yml (fast, frequent, marks delistings + enqueues) feeds detail_drain.yml (async, batched writes). This combined index+detail walk (_run_full) is kept intact as the instant revert: if the split misbehaves, re-add `schedule: - cron: \"0 * * * *\"` here and disable the two new crons — no code change, the proven pipeline is back. It also remains the way to run an ad-hoc full walk by hand.",
