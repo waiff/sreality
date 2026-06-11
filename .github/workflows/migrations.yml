@@ -44,7 +44,7 @@ jobs:
       PGPASSWORD: postgres
       PGDATABASE: postgres
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Bootstrap roles + extensions
         run: psql -v ON_ERROR_STOP=1 -f scripts/ci_db_bootstrap.sql
