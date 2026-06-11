@@ -23,6 +23,9 @@ from typing import Any
 # hashed: coords are derived/geocoded data prone to oscillation (the
 # geocode-skip cycle), and listings.geom updates on every upsert regardless of
 # snapshots; a genuine location change surfaces via locality/description.
+# street is likewise NOT hashed — it is extracted/derived (regex over the
+# title + description for bazos), so backfilling or refining it must never
+# churn snapshots.
 _HASH_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
     "disposition", "locality", "district", "floor",
@@ -36,7 +39,7 @@ _HASH_FIELDS: tuple[str, ...] = (
 # scraper.db.LISTING_COLUMNS — sreality-only locality ids are left NULL).
 _LISTING_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
-    "disposition", "locality", "district", "floor", "total_floors",
+    "disposition", "locality", "district", "street", "floor", "total_floors",
     "has_balcony", "has_parking", "has_lift", "building_type", "condition",
     "energy_rating", "estate_area", "usable_area", "garden_area",
     "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
@@ -57,6 +60,9 @@ class ScrapedListing:
     disposition: str | None = None
     locality: str | None = None
     district: str | None = None
+    # Best-effort street name (the dedup engine's street_key input); extracted,
+    # not portal-structured, so it stays out of the content hash.
+    street: str | None = None
     lat: float | None = None
     lon: float | None = None
     floor: int | None = None
