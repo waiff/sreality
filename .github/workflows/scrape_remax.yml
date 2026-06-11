@@ -69,7 +69,12 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30 min could NEVER fit: ~7 min index walk (392 pages @ 1/s) + the drain's
+    # own 25-min --max-seconds budget + setup. Every run was SIGKILLed mid-drain:
+    # finalize never ran (scrape_runs rows stuck open until the API-boot sweep
+    # stamped them hours later -> phantom 722-min "durations"), and in-flight
+    # queue claims stranded for the 60-min reclaim window of the NEXT run.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v6
 
