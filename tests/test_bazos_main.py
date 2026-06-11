@@ -106,66 +106,55 @@ def test_portal_complete_walk_and_per_scope_labels():
     assert p.category_labels(_BYT_RENT) == ("byt", "pronajem")
 
 
-def test_mark_inactive_runs_native_sweep_when_due(monkeypatch):
-    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: True)
+def test_mark_inactive_runs_native_sweep_with_staleness_rail(monkeypatch):
     swept: dict[str, Any] = {}
     monkeypatch.setattr(
         bazos_main.db, "mark_inactive_native",
-        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype: swept.update(
-            src=src, cm=cm, ct=ct, seen=seen, subtype=subtype,
-            scope_subtype=scope_subtype) or 3,
-    )
-    recorded = {"n": 0}
-    monkeypatch.setattr(
-        bazos_main.db, "record_portal_inactive_sweep",
-        lambda _c, _s: recorded.__setitem__("n", recorded["n"] + 1),
+        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype, min_unseen_hours:
+            swept.update(src=src, cm=cm, ct=ct, seen=seen, subtype=subtype,
+                         scope_subtype=scope_subtype,
+                         min_unseen_hours=min_unseen_hours) or 3,
     )
     n = _portal().mark_inactive(object(), _BYT_RENT, {"a", "b"})
     assert n == 3
     # byt carries no subtype, but the sweep is still subtype-scoped (to NULL) so
-    # the fine sections that share category_main can't sweep each other.
+    # the fine sections that share category_main can't sweep each other. The
+    # 24h staleness rail rides on every sweep — only rows missed by 4+
+    # consecutive walks can flip; there is no sweep-window throttle anymore.
     assert swept == {"src": "bazos", "cm": "byt", "ct": "pronajem",
-                     "seen": {"a", "b"}, "subtype": None, "scope_subtype": True}
-    assert recorded["n"] == 1
+                     "seen": {"a", "b"}, "subtype": None, "scope_subtype": True,
+                     "min_unseen_hours": 24}
 
 
 def test_mark_inactive_scopes_fine_section_to_its_subtype(monkeypatch):
-    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: True)
-    monkeypatch.setattr(bazos_main.db, "record_portal_inactive_sweep", lambda _c, _s: None)
     swept: dict[str, Any] = {}
     monkeypatch.setattr(
         bazos_main.db, "mark_inactive_native",
-        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype: swept.update(
-            cm=cm, subtype=subtype) or 0,
+        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype, min_unseen_hours:
+            swept.update(cm=cm, subtype=subtype, scope_subtype=scope_subtype,
+                         min_unseen_hours=min_unseen_hours) or 0,
     )
     _portal([_CHATA_SALE]).mark_inactive(object(), _CHATA_SALE, {"a"})
     # chata collapses onto category_main=dum but is scoped to subtype=chata, so it
     # never sweeps the generic-dum (subtype NULL) section's rows.
-    assert swept == {"cm": "dum", "subtype": "chata"}
+    assert swept == {"cm": "dum", "subtype": "chata", "scope_subtype": True,
+                     "min_unseen_hours": 24}
 
 
-def test_mark_inactive_throttle_stamps_once_across_categories(monkeypatch):
-    # Both scopes sweep in one run, but the per-portal 12h clock is stamped once.
-    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: True)
-    monkeypatch.setattr(bazos_main.db, "mark_inactive_native", lambda *a, **k: 1)
-    stamps = {"n": 0}
-    monkeypatch.setattr(
-        bazos_main.db, "record_portal_inactive_sweep",
-        lambda _c, _s: stamps.__setitem__("n", stamps["n"] + 1),
-    )
-    p = _portal([_BYT_SALE, _BYT_RENT])
-    p.mark_inactive(object(), _BYT_SALE, {"a"})
-    p.mark_inactive(object(), _BYT_RENT, {"b"})
-    assert stamps["n"] == 1     # stamped once, not once per category
-
-
-def test_mark_inactive_throttled_when_not_due(monkeypatch):
-    monkeypatch.setattr(bazos_main.db, "portal_inactive_sweep_due", lambda _c, _s: False)
+def test_mark_inactive_sweeps_every_category_every_run(monkeypatch):
+    # No sweep-window throttle: every complete-walk category sweeps every run,
+    # so small categories can't burn a window while the big ones starve. The
+    # staleness rail (min_unseen_hours) is the conservatism guard instead.
+    calls: list[str] = []
     monkeypatch.setattr(
         bazos_main.db, "mark_inactive_native",
-        lambda *a, **k: pytest.fail("sweep must be skipped when throttled"),
+        lambda _c, src, cm, ct, seen, *, subtype, scope_subtype, min_unseen_hours:
+            calls.append(ct) or 1,
     )
-    assert _portal().mark_inactive(object(), _BYT_SALE, {"a"}) == 0
+    p = _portal([_BYT_SALE, _BYT_RENT])
+    assert p.mark_inactive(object(), _BYT_SALE, {"a"}) == 1
+    assert p.mark_inactive(object(), _BYT_RENT, {"b"}) == 1
+    assert calls == ["prodej", "pronajem"]
 
 
 def test_active_count_source_scoped(monkeypatch):
@@ -268,14 +257,11 @@ def test_walk_category_page_capped_is_incomplete(monkeypatch):
     assert complete is False     # max_pages cap → never claims completeness
 
 
-def test_walk_category_below_full_is_incomplete(monkeypatch):
-    # A full (un-capped) walk that still collected < 100% of the reported total
-    # must read incomplete: the inactive sweep runs only after a 100% walk
-    # (architectural rule #3), hardcoded (INDEX_MIN_COMPLETENESS=1.0), not tunable.
+def _walk_with(monkeypatch, n_items: int, total: int | None):
     page = SimpleNamespace(
         items=[SimpleNamespace(source_id_native=f"n{i}", detail_path=f"/n{i}", price_text=None)
-               for i in range(19)],
-        total=20, next_offset=None,
+               for i in range(n_items)],
+        total=total, next_offset=None,
     )
     monkeypatch.setattr(bazos_main, "parse_index", lambda _h: page)
     monkeypatch.setattr(bazos_main, "BazosClient", lambda **k: _IdxClient([page]))
@@ -283,10 +269,33 @@ def test_walk_category_below_full_is_incomplete(monkeypatch):
     monkeypatch.setattr(bazos_main.db, "index_summary_native", lambda *a, **k: {})
     monkeypatch.setattr(bazos_main.db, "touch_listings", lambda *a, **k: 0)
     monkeypatch.setattr(bazos_main.db, "enqueue_detail", lambda *a, **k: 1)
-    _seen, _counts, result_size, _pages, complete = _portal().walk_category(
+    return _portal().walk_category(
         {"sale_type": "prodam", "category": "byt"}, object(), False, _Limiter(),
     )
-    assert result_size == 20 and complete is False   # 19/20 = 95% < 100% → suppress sweep
+
+
+def test_walk_category_below_tolerance_is_incomplete(monkeypatch):
+    # A full (un-capped) walk well short of the reported total must read
+    # incomplete: the sweep runs only after a ~complete walk (architectural
+    # rule #3), hardcoded (INDEX_MIN_COMPLETENESS=0.995), not tunable.
+    _seen, _counts, result_size, _pages, complete = _walk_with(monkeypatch, 19, 20)
+    assert result_size == 20 and complete is False   # 19/20 = 95% < 99.5% → suppress sweep
+
+
+def test_walk_category_completeness_boundary(monkeypatch):
+    # 99.5% tolerance: a 0.4% deficit (mid-walk churn on a healthy walk) reads
+    # complete; a 0.6% deficit reads truncated and suppresses the sweep.
+    *_rest, complete = _walk_with(monkeypatch, 996, 1000)
+    assert complete is True                          # 996/1000 = 99.6% ≥ 99.5%
+    *_rest, complete = _walk_with(monkeypatch, 994, 1000)
+    assert complete is False                         # 994/1000 = 99.4% < 99.5%
+
+
+def test_walk_category_unknown_total_is_incomplete(monkeypatch):
+    # bazos-specific conservatism (unchanged by the tolerance): an HTML crawl
+    # whose total failed to parse never infers delistings.
+    _seen, _counts, result_size, _pages, complete = _walk_with(monkeypatch, 20, None)
+    assert result_size is None and complete is False
 
 
 class _SeqIdxClient:
