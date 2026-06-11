@@ -132,7 +132,9 @@ class MaximaPortal:
                     native_ids.append(nid)
                     new_on_page += 1
                 ref_map[nid] = detail_url(item.detail_path)
-                price_map[nid] = index_price(item.price_text)
+                # Same clamps as the stored price so the unchanged-compare can't
+                # see a value the write boundary would have nulled.
+                price_map[nid] = db.sane_price_czk(index_price(item.price_text))
                 # Title-first so the rent agenda (whose ids carry prefixes the sale
                 # taxonomy doesn't cover) is categorised the same way parse_detail
                 # will categorise it — no Health-reconciliation fragmentation.

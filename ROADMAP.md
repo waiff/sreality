@@ -41,13 +41,18 @@ source for active rules; ROADMAP is for sequencing.
   `backfill_bazos_street_locality.yml` re-parses staged `portal_raw_pages` HTML
   (no portal re-fetch, no geocode spend, no snapshots) to fill the ~30k active rows
   missing `street`/`locality`.
+- **Price/area placeholder guards** (Sprint C "enum hygiene, price/area guards"):
+  `sane_price_czk` nulls `< 2` ("1 Kč dohodou" placeholders) alongside the overflow
+  cap; `sane_listing_numerics` nulls 0 m² areas; every portal main sanitizes its
+  index-price compare through the same clamp so placeholder-priced listings don't
+  refetch forever. Enum hygiene (status overlay, drevo, ownership) verified already
+  shipped in PR #273 + backfilled — production counts are 0.
 
 #### Next
 
 - Sprint C (data value, remainder): bazos dedup match-rate follow-up (street_key
   normalization vs the "ul. …"/house-number forms), pHash throughput, idnes amenity
-  parser, remax/bezrealitky subtype, enum hygiene, price/area guards, remax drain
-  investigation.
+  parser, remax/bezrealitky subtype, remax drain investigation.
 - Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
   deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
 
