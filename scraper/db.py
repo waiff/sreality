@@ -928,18 +928,23 @@ def index_summary_native(
         }
 
 
-def native_ids_with_geom(conn: psycopg.Connection, source: str) -> set[str]:
-    """source_id_native of `source` rows that already carry coordinates.
+def native_ids_with_geom(
+    conn: psycopg.Connection, source: str,
+) -> dict[str, tuple[float, float]]:
+    """Stored (lat, lon) per source_id_native of `source` rows that already
+    carry coordinates.
 
-    Lets a detail drain skip re-geocoding a listing we've already placed, so a
-    refetch never re-spends a geocode credit on a stable coordinate."""
+    Lets a detail drain carry a stored coordinate forward onto a refetched
+    listing whose page gave none — geom is never wiped by the upsert and a
+    geocode credit is only ever spent once per listing."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT source_id_native FROM listings "
+            "SELECT source_id_native, ST_Y(geom::geometry), ST_X(geom::geometry) "
+            "FROM listings "
             "WHERE source = %s AND geom IS NOT NULL AND source_id_native IS NOT NULL",
             (source,),
         )
-        return {row[0] for row in cur.fetchall()}
+        return {native: (lat, lon) for native, lat, lon in cur.fetchall()}
 
 
 def active_count(

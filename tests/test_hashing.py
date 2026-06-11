@@ -39,6 +39,38 @@ def test_hash_unchanged_when_session_state_changes(sample):
     assert content_hash(mutated) == base
 
 
+def test_hash_unchanged_when_poi_labels_change(sample):
+    # labels / labels_extended are sreality's own nearby-POI enrichment,
+    # recomputed per request — 56% of churned snapshot pairs differed only here.
+    base = content_hash(sample)
+    mutated = copy.deepcopy(sample)
+    mutated["labels"] = [{"name": "different_poi", "distance": 1.0}]
+    mutated["labels_extended"] = {"doctors": {"data": []}}
+    assert content_hash(mutated) == base
+
+
+def test_hash_unchanged_when_user_avatar_url_changes(sample):
+    base = content_hash(sample)
+    mutated = copy.deepcopy(sample)
+    mutated["user"]["image"] = "//d18-a.sdn.cz/d_18/c_img_ob_F/resigned/other.jpeg"
+    assert content_hash(mutated) == base
+
+
+def test_hash_changes_when_broker_name_changes(sample):
+    base = content_hash(sample)
+    mutated = copy.deepcopy(sample)
+    mutated["user"]["user_name"] = "Jiná Makléřka"
+    assert content_hash(mutated) != base
+
+
+def test_hash_changes_when_params_change(sample):
+    # legacy camelCase raw_json shape: non-volatile keys under `params` count
+    base = content_hash(sample)
+    mutated = copy.deepcopy(sample)
+    mutated["params"] = {"floor": {"value": 3}}
+    assert content_hash(mutated) != base
+
+
 def test_hash_changes_when_price_changes(sample):
     base = content_hash(sample)
     mutated = copy.deepcopy(sample)

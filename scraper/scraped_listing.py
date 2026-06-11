@@ -19,10 +19,13 @@ from typing import Any
 
 # Fields whose change should append a listing_snapshots row. Mirrors the
 # semantics of sreality's content hash: identity (source ids, url) is NOT
-# hashed; the displayed/analytical content is.
+# hashed; the displayed/analytical content is. lat/lon are deliberately NOT
+# hashed: coords are derived/geocoded data prone to oscillation (the
+# geocode-skip cycle), and listings.geom updates on every upsert regardless of
+# snapshots; a genuine location change surfaces via locality/description.
 _HASH_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
-    "disposition", "locality", "district", "lat", "lon", "floor",
+    "disposition", "locality", "district", "floor",
     "total_floors", "has_balcony", "has_parking", "has_lift", "building_type",
     "condition", "energy_rating", "estate_area", "usable_area", "garden_area",
     "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
