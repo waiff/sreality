@@ -34,11 +34,15 @@ source for active rules; ROADMAP is for sequencing.
   check vs 6-hourly `data_quality_snapshots` captures; composed end-to-end latency check;
   image-failure breakdown matview + Health card; Health-matview staleness stamp + banner;
   failed-workflow-run recorder (30-min poller) + Health card.
+- **pHash throughput unstarved**: hourly cadence (was 6-hourly, every run cancelled at
+  the 30-min timeout at a measured 1.5 img/s serial), 8-worker R2 downloads with per-row
+  autocommit writes kept, cap 20,000/run, active-listing images hash first so the dedup
+  corroborator sees relevant photos ahead of the historical backlog.
 
 #### Next
 
 - Sprint C (data value): bazos locality backfill, street persistence + bazos dedup
-  revival, pHash throughput, idnes amenity parser, remax/bezrealitky subtype, enum
+  revival, idnes amenity parser, remax/bezrealitky subtype, enum
   hygiene, price/area guards, remax drain investigation.
 - Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
   deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.

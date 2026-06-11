@@ -1,25 +1,36 @@
 name: Compute image pHash (multi-portal dedup)
 
 # Backfills images.phash (a 64-bit perceptual dHash per stored image) for the
-# Tier-2 dedup sweep's cheap image corroborator. Downloads stored bytes from R2,
-# hashes them, writes images.phash. Idempotent + resumable; a no-op if R2 env
-# vars are missing.
+# Tier-2 dedup sweep's cheap image corroborator. Downloads stored bytes from R2
+# on a small worker pool, hashes them, writes images.phash per row (autocommit,
+# so a timeout/cancel preserves completed work). Idempotent + resumable; a no-op
+# if R2 env vars are missing. ACTIVE-listing images are selected first, so
+# dedup-relevant photos hash ahead of the historical backlog.
 #
-# Cadence: every 6 hours, offset off the image-download workflow so freshly
-# stored images get hashed shortly after they land. Portal-agnostic — hashes any
-# stored image regardless of source.
+# Cadence: hourly. The backlog is millions of stored images; the measured
+# serial rate was ~1.5 img/s (R2 GET + one UPDATE round trip each), so the old
+# 6-hourly 5,000-cap runs were years behind — and were themselves cancelled at
+# the 30-min timeout. With 8 download workers the per-row UPDATE round trip
+# (~0.10-0.12 s) is the serial floor (~7-9 img/s end-to-end); 20,000 images at
+# a conservative 7 img/s ≈ 48 min + ~2 min setup fits the 55-min timeout with
+# margin. Portal-agnostic — hashes any stored image regardless of source.
 #
 # Required GitHub secrets: SUPABASE_DB_URL + the R2_* set (same as images.yml).
 
 on:
   schedule:
-    - cron: "20 */6 * * *"
+    - cron: "20 * * * *"
   workflow_dispatch:
     inputs:
       limit:
         description: Max images hashed per run
         required: false
-        default: "5000"
+        default: "20000"
+        type: string
+      workers:
+        description: Parallel R2 downloads (DB writes stay serial per row)
+        required: false
+        default: "8"
         type: string
       dry_run:
         description: Report the pending count and exit without writing
@@ -37,7 +48,7 @@ concurrency:
 jobs:
   phash:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 55
     permissions:
       contents: read
     env:
@@ -60,6 +71,6 @@ jobs:
 
       - name: Compute pHashes
         run: |
-          ARGS="--limit ${{ inputs.limit || '5000' }}"
+          ARGS="--limit ${{ inputs.limit || '20000' }} --workers ${{ inputs.workers || '8' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python -m scripts.compute_image_phash $ARGS
