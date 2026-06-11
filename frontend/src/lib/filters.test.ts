@@ -78,6 +78,32 @@ describe('URL round-trip', () => {
     expect(fromSearchParams(dirty).conditionMatch).toEqual(['novostavba']);
   });
 
+  it('round-trips the condition-level bounds and price-change filters', () => {
+    const f: ListingFilters = {
+      ...DEFAULT_FILTERS,
+      buildingConditionLevelMin: 2,
+      buildingConditionLevelMax: 4,
+      apartmentConditionLevelMin: 3,
+      apartmentConditionLevelMax: 5,
+      priceChangeCountMin: 2,
+      priceChangeWindowDays: 90,
+      totalPriceChangePct: -10,
+      withEstimates: true,
+    };
+    const round = fromSearchParams(toSearchParams(f));
+    expect(round).toEqual(f);
+    // A window outside the 30/90/365 set must not leak into state — the
+    // backend only has precomputed columns for the legal windows.
+    const dirty = new URLSearchParams('changes_min=2&changes_window=45');
+    const parsed = fromSearchParams(dirty);
+    expect(parsed.priceChangeCountMin).toBe(2);
+    expect(parsed.priceChangeWindowDays).toBeNull();
+    // The retired per-direction params are gone — old URLs degrade to
+    // the default state rather than throwing.
+    const legacy = new URLSearchParams('drops_min=2&sites_min=2&drop_pct_min=10');
+    expect(fromSearchParams(legacy)).toEqual(DEFAULT_FILTERS);
+  });
+
   it('round-trips the subtype multi-select', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,
@@ -449,8 +475,9 @@ describe('filtersToWatchdogSpec', () => {
       priceMin: 1_000_000,
       priceMax: 5_000_000,
       mfGrossYieldPctMin: 4,
-      maxPriceDropPctMin: 10,
-      priceDropCountMin: 1,
+      totalPriceChangePct: -10,
+      priceChangeCountMin: 1,
+      priceChangeWindowDays: 90,
       minCityPopulation: 50_000,
       maxCityPopulation: 200_000,
       cityIndexRules: [{ index_name: 'safety', op: '>=', value: 7 }],
@@ -464,8 +491,9 @@ describe('filtersToWatchdogSpec', () => {
     expect(spec.min_price_czk).toBe(1_000_000);
     expect(spec.max_price_czk).toBe(5_000_000);
     expect(spec.min_mf_gross_yield_pct).toBe(4);
-    expect(spec.max_price_drop_pct_min).toBe(10);
-    expect(spec.price_drop_count_min).toBe(1);
+    expect(spec.total_price_change_pct).toBe(-10);
+    expect(spec.price_change_count_min).toBe(1);
+    expect(spec.price_change_window_days).toBe(90);
     expect(spec.min_city_population).toBe(50_000);
     expect(spec.max_city_population).toBe(200_000);
     expect(spec.city_index_rules).toEqual([{ index_name: 'safety', op: '>=', value: 7 }]);

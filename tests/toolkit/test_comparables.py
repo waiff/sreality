@@ -388,6 +388,20 @@ def test_condition_level_min_filters_add_where_branches():
     assert params["apartment_condition_level_min"] == 3
 
 
+def test_condition_level_max_filters_add_where_branches():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(
+            building_condition_level_max=3,
+            apartment_condition_level_max=2,
+        ),
+    )
+    assert "l.building_condition_level <= %(building_condition_level_max)s" in sql
+    assert "l.apartment_condition_level <= %(apartment_condition_level_max)s" in sql
+    assert params["building_condition_level_max"] == 3
+    assert params["apartment_condition_level_max"] == 2
+
+
 def test_condition_level_filters_absent_when_none():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),

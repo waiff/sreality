@@ -1223,6 +1223,60 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ]
     },
     {
+      "id": "building_condition_level_max",
+      "type": "int",
+      "pg_column": "building_condition_level",
+      "default": null,
+      "description": "Maximum building condition score (`building_condition_level <= N`, 1..5). Companion upper bound to building_condition_level_min; same scorer and rubric. NULL rows (not yet scored) are excluded from the result.",
+      "category": "Property",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "comparables",
+        "defaults",
+        "estimation",
+        "neighborhood",
+        "velocity",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 1,
+        "max": 5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "buildingConditionLevelMax"
+      ]
+    },
+    {
+      "id": "apartment_condition_level_max",
+      "type": "int",
+      "pg_column": "apartment_condition_level",
+      "default": null,
+      "description": "Maximum apartment condition score (`apartment_condition_level <= N`, 1..5). Companion upper bound to apartment_condition_level_min; same scorer and rubric. NULL rows (not yet scored) are excluded from the result.",
+      "category": "Property",
+      "ui_control": "number_input",
+      "agendas": [
+        "browse",
+        "comparables",
+        "defaults",
+        "estimation",
+        "neighborhood",
+        "velocity",
+        "watchdog"
+      ],
+      "constraints": {
+        "min": 1,
+        "max": 5
+      },
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "apartmentConditionLevelMax"
+      ]
+    },
+    {
       "id": "furnished",
       "type": "string_list",
       "pg_column": "furnished",
@@ -1905,6 +1959,24 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": []
     },
     {
+      "id": "with_estimates",
+      "type": "bool",
+      "pg_column": null,
+      "default": false,
+      "description": "When true, restrict to properties with at least one successful estimation run (any child listing's sreality_id appears in estimation_runs.input_sreality_id with status='success'). BROWSE-only: estimates are operator-triggered, so watching for them makes no sense.",
+      "category": "Curation",
+      "ui_control": "boolean",
+      "agendas": [
+        "browse"
+      ],
+      "constraints": null,
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "withEstimates"
+      ]
+    },
+    {
       "id": "city_index_rules",
       "type": "city_index_rule_list",
       "pg_column": null,
@@ -2169,11 +2241,11 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ]
     },
     {
-      "id": "distinct_site_count_min",
+      "id": "price_change_count_min",
       "type": "int",
-      "pg_column": "distinct_site_count",
+      "pg_column": null,
       "default": null,
-      "description": "Minimum number of distinct source sites a property is listed on (`distinct_site_count >= N`). 1 today for every property (sreality-only); lights up once multi-portal ingestion lands. Use 2+ for 'listed on multiple sites'.",
+      "description": "Minimum number of price changes (cuts AND raises) across the property's combined snapshot history, counted inside the `price_change_window_days` window (all time when the window is unset). One count per consecutive snapshot pair where the asking price moved. Use 2+ for repeatedly repriced listings.",
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
@@ -2186,70 +2258,67 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "unit": null,
       "enum_values": null,
       "aliases": [
-        "distinctSiteCountMin"
+        "priceChangeCountMin"
       ]
     },
     {
-      "id": "price_drop_count_min",
+      "id": "price_change_window_days",
       "type": "int",
-      "pg_column": "price_drop_count",
+      "pg_column": null,
       "default": null,
-      "description": "Minimum number of price decreases across the property's combined snapshot history (`price_drop_count >= N`). One count per consecutive snapshot pair where the asking price fell. Use 2+ for repeatedly-cut listings.",
+      "description": "Time window, in days, for `price_change_count_min`: 30 / 90 / 365, or unset for all time. Selects which precomputed price_change_count column the count filter reads; has no effect on its own.",
       "category": "Velocity",
-      "ui_control": "number_input",
+      "ui_control": "single_select",
       "agendas": [
         "browse",
         "watchdog"
       ],
       "constraints": {
-        "min": 1
+        "enum": [
+          30,
+          90,
+          365
+        ]
       },
-      "unit": null,
-      "enum_values": null,
-      "aliases": [
-        "priceDropCountMin"
-      ]
-    },
-    {
-      "id": "price_rise_count_min",
-      "type": "int",
-      "pg_column": "price_rise_count",
-      "default": null,
-      "description": "Minimum number of price increases across the property's combined snapshot history (`price_rise_count >= N`).",
-      "category": "Velocity",
-      "ui_control": "number_input",
-      "agendas": [
-        "browse",
-        "watchdog"
+      "unit": "days",
+      "enum_values": [
+        {
+          "value": 30,
+          "label_cs": "Posledních 30 dní",
+          "label_en": "Last 30 days"
+        },
+        {
+          "value": 90,
+          "label_cs": "Posledních 90 dní",
+          "label_en": "Last 90 days"
+        },
+        {
+          "value": 365,
+          "label_cs": "Poslední rok",
+          "label_en": "Last year"
+        }
       ],
-      "constraints": {
-        "min": 1
-      },
-      "unit": null,
-      "enum_values": null,
       "aliases": [
-        "priceRiseCountMin"
+        "priceChangeWindowDays"
       ]
     },
     {
-      "id": "max_price_drop_pct_min",
+      "id": "total_price_change_pct",
       "type": "float",
-      "pg_column": "max_price_drop_pct",
+      "pg_column": null,
       "default": null,
-      "description": "Minimum largest single-step price drop, as a percent (`max_price_drop_pct >= X`). The biggest one-change cut in the property's combined snapshot history. Use 10 for 'price dropped 10%+ at some point'.",
+      "description": "Signed total price change threshold, as a percent of the first observed price across the property's combined snapshot history. Negative = total drop of at least that much (`total_price_change_pct <= X`, e.g. -10 for 'down 10%+ overall'); positive = total rise of at least that much (`>= X`). Zero is treated as unset. Properties with fewer than two price points are excluded when set.",
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
         "browse",
         "watchdog"
       ],
-      "constraints": {
-        "min": 0
-      },
+      "constraints": null,
       "unit": "%",
       "enum_values": null,
       "aliases": [
-        "maxPriceDropPctMin"
+        "totalPriceChangePct"
       ]
     },
     {

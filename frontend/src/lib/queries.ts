@@ -8,6 +8,7 @@ import {
   type MapBounds,
   buildingMaterialToValues,
   isoNDaysAgo,
+  priceChangeCountColumn,
   UNKNOWN_FILTER_VALUE,
   FURNISHED_CANONICAL,
   OWNERSHIP_CANONICAL,
@@ -235,6 +236,19 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (furnishedOr) r = r.or(furnishedOr);
   const ownershipOr = enumOrUnknown('ownership', f.ownership, OWNERSHIP_CANONICAL);
   if (ownershipOr) r = r.or(ownershipOr);
+  /* Merged price-history filters (migration 173). The window picks which
+   * precomputed count column the threshold reads; the signed total-change
+   * threshold flips direction on sign (negative = "dropped at least",
+   * positive = "rose at least"). Mirrors browse_stats_properties and the
+   * watchdog matcher. */
+  if (f.priceChangeCountMin != null) {
+    r = r.gte(priceChangeCountColumn(f.priceChangeWindowDays), f.priceChangeCountMin);
+  }
+  if (f.totalPriceChangePct != null && f.totalPriceChangePct !== 0) {
+    r = f.totalPriceChangePct < 0
+      ? r.lte('total_price_change_pct', f.totalPriceChangePct)
+      : r.gte('total_price_change_pct', f.totalPriceChangePct);
+  }
   const bbox = effectiveBbox(f);
   if (bbox) {
     r = r.gte('lng', bbox.west)
@@ -366,6 +380,25 @@ async function resolvePriceGrowthPrefilter(
   return acc;
 }
 
+/* With-estimates prefilter (migration 173). property_estimates_public is the
+ * anon-readable property-grain projection of successful estimation runs —
+ * tiny (one row per estimated property), so fetching the full id list and
+ * AND'ing it via `.in('property_id', ids)` is the same composition pattern
+ * as the tags prefilter. Returns null when the filter is off. */
+async function resolveEstimatesPrefilter(
+  f: ListingFilters,
+): Promise<number[] | null> {
+  if (!f.withEstimates) return null;
+  const { data, error } = await supabase
+    .from('property_estimates_public')
+    .select('property_id')
+    .range(0, 99999);
+  if (error) throw error;
+  return ((data ?? []) as Array<{ property_id: number }>).map(
+    (r) => r.property_id,
+  );
+}
+
 /* Intersect two prefilter id sets (null = "no constraint"). Used so a
  * filter that combines tags + city-quality applies both prefilters
  * before paging the main query. */
@@ -379,6 +412,44 @@ const intersectPrefilters = (
   return a.filter((id) => set.has(id));
 };
 
+/* All Browse prefilters resolved together. Each is an id allowlist at its
+ * own grain (null = inactive); `empty` is true when any ACTIVE prefilter
+ * matched nothing, so the caller can short-circuit to zero results without
+ * issuing the main query. Shared by the Map / Table / Cards fetchers. */
+interface BrowsePrefilters {
+  srealityIds: number[] | null;   // tags ∩ city-quality
+  obecIds: number[] | null;       // market growth (price-stats datasets)
+  propertyIds: number[] | null;   // with-estimates
+  empty: boolean;
+}
+
+async function resolveBrowsePrefilters(
+  f: ListingFilters,
+): Promise<BrowsePrefilters> {
+  const [tagIds, cityIds, growthObec, estimateProps] = await Promise.all([
+    resolveTagPrefilter(f),
+    resolveCityQualityPrefilter(f),
+    resolvePriceGrowthPrefilter(f),
+    resolveEstimatesPrefilter(f),
+  ]);
+  const srealityIds = intersectPrefilters(tagIds, cityIds);
+  const empty =
+    (srealityIds != null && srealityIds.length === 0)
+    || (growthObec != null && growthObec.length === 0)
+    || (estimateProps != null && estimateProps.length === 0);
+  return { srealityIds, obecIds: growthObec, propertyIds: estimateProps, empty };
+}
+
+const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
+  let r = q as unknown as {
+    in: (c: string, v: readonly unknown[]) => typeof r;
+  };
+  if (p.srealityIds != null) r = r.in('sreality_id', p.srealityIds);
+  if (p.obecIds != null) r = r.in('obec_id', p.obecIds);
+  if (p.propertyIds != null) r = r.in('property_id', p.propertyIds);
+  return r as unknown as T;
+};
+
 /* Browse cohort fetchers (Map / Table / Cards) AND fetchBrowseStats read the
  * property grain (properties_public / browse_stats_properties), so Browse is
  * one-dot-per-property. `sreality_id` on properties_public is the
@@ -390,31 +461,19 @@ const intersectPrefilters = (
  * The Stats RPC was repointed in Slice 2a once migration 095 denormalised the
  * filter columns onto `properties` — that drops the listings join from the
  * function's plan, making browse_stats_properties perf-equivalent to the
- * listing-grain browse_stats. It also gained the four derived predicates
- * (distinct_site_count_min / price_{drop,rise}_count_min / max_price_drop_pct_min). */
+ * listing-grain browse_stats. Migration 173 carries the merged price-change
+ * predicates, the condition-level bounds, and the with-estimates flag. */
 export const fetchListingsForMap = async (
   f: ListingFilters,
 ): Promise<MapResult> => {
-  const [tagIds, cityIds, growthObec] = await Promise.all([
-    resolveTagPrefilter(f),
-    resolveCityQualityPrefilter(f),
-    resolvePriceGrowthPrefilter(f),
-  ]);
-  const prefilter = intersectPrefilters(tagIds, cityIds);
-  if ((prefilter != null && prefilter.length === 0)
-      || (growthObec != null && growthObec.length === 0)) {
-    return { rows: [], total: 0, capped: false };
-  }
+  const pre = await resolveBrowsePrefilters(f);
+  if (pre.empty) return { rows: [], total: 0, capped: false };
   const base = supabase
     .from('properties_public')
     .select(MAP_COLS, { count: 'exact' })
     .not('lat', 'is', null)
     .not('lng', 'is', null);
-  const filtered0 = applyFilters(base, f);
-  const filtered = growthObec != null ? filtered0.in('obec_id', growthObec) : filtered0;
-  const scoped = prefilter != null
-    ? filtered.in('sreality_id', prefilter)
-    : filtered;
+  const scoped = applyPrefilters(applyFilters(base, f), pre);
   const { data, count, error } = await scoped.limit(MAP_CAP);
   if (error) throw error;
   const rows = (data ?? []) as unknown as MapRow[];
@@ -458,26 +517,14 @@ export const fetchListingsForTable = async (
   sort: SortSpec,
   page: number,
 ): Promise<TableResult> => {
-  const [tagIds, cityIds, growthObec] = await Promise.all([
-    resolveTagPrefilter(f),
-    resolveCityQualityPrefilter(f),
-    resolvePriceGrowthPrefilter(f),
-  ]);
-  const prefilter = intersectPrefilters(tagIds, cityIds);
-  if ((prefilter != null && prefilter.length === 0)
-      || (growthObec != null && growthObec.length === 0)) {
-    return { rows: [], total: 0 };
-  }
+  const pre = await resolveBrowsePrefilters(f);
+  if (pre.empty) return { rows: [], total: 0 };
   const from = (page - 1) * TABLE_PAGE_SIZE;
   const to = from + TABLE_PAGE_SIZE - 1;
   const base = supabase
     .from('properties_public')
     .select(TABLE_COLS, { count: 'exact' });
-  const filtered0 = applyFilters(base, f);
-  const filtered = growthObec != null ? filtered0.in('obec_id', growthObec) : filtered0;
-  const scoped = prefilter != null
-    ? filtered.in('sreality_id', prefilter)
-    : filtered;
+  const scoped = applyPrefilters(applyFilters(base, f), pre);
   const sorted = scoped.order(sort.field, {
     ascending: sort.direction === 'asc',
     nullsFirst: false,
@@ -536,26 +583,14 @@ export const fetchListingsForCards = async (
   sort: SortSpec,
   page: number,
 ): Promise<CardsResult> => {
-  const [tagIds, cityIds, growthObec] = await Promise.all([
-    resolveTagPrefilter(f),
-    resolveCityQualityPrefilter(f),
-    resolvePriceGrowthPrefilter(f),
-  ]);
-  const prefilter = intersectPrefilters(tagIds, cityIds);
-  if ((prefilter != null && prefilter.length === 0)
-      || (growthObec != null && growthObec.length === 0)) {
-    return { rows: [], total: 0 };
-  }
+  const pre = await resolveBrowsePrefilters(f);
+  if (pre.empty) return { rows: [], total: 0 };
   const from = (page - 1) * CARD_PAGE_SIZE;
   const to = from + CARD_PAGE_SIZE - 1;
   const base = supabase
     .from('properties_public')
     .select(CARD_COLS, { count: 'exact' });
-  const filtered0 = applyFilters(base, f);
-  const filtered = growthObec != null ? filtered0.in('obec_id', growthObec) : filtered0;
-  const scoped = prefilter != null
-    ? filtered.in('sreality_id', prefilter)
-    : filtered;
+  const scoped = applyPrefilters(applyFilters(base, f), pre);
   const sorted = scoped.order(sort.field, {
     ascending: sort.direction === 'asc',
     nullsFirst: false,
@@ -716,12 +751,17 @@ export const fetchBrowseStats = async (
     /* Migration 133 — MF gross rental yield % bounds (sale apartments). */
     mf_gross_yield_pct_min:  f.mfGrossYieldPctMin,
     mf_gross_yield_pct_max:  f.mfGrossYieldPctMax,
-    /* Migration 095 — multi-portal / price-history derived predicates.
-     * Property grain only; columns maintained by the recompute job. */
-    distinct_site_count_min: f.distinctSiteCountMin,
-    price_drop_count_min:    f.priceDropCountMin,
-    price_rise_count_min:    f.priceRiseCountMin,
-    max_price_drop_pct_min:  f.maxPriceDropPctMin,
+    /* Migration 173 — merged price-history predicates + condition-level
+     * bounds + with-estimates. Property grain; columns maintained by the
+     * recompute job, estimates read via property_estimates_public. */
+    price_change_count_min:        f.priceChangeCountMin,
+    price_change_window_days:      f.priceChangeWindowDays,
+    total_price_change_pct_filter: f.totalPriceChangePct,
+    with_estimates:                f.withEstimates,
+    building_condition_level_min:  f.buildingConditionLevelMin,
+    building_condition_level_max:  f.buildingConditionLevelMax,
+    apartment_condition_level_min: f.apartmentConditionLevelMin,
+    apartment_condition_level_max: f.apartmentConditionLevelMax,
     /* Migration 118 — filter the Stats cohort by source portal. */
     portal_filter:           f.portals.length ? f.portals : null,
     /* Migration 162 — market-growth obec allowlist (price-stats datasets). */

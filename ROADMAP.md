@@ -6,6 +6,34 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Browse filter restructure (price-change merge, condition ranges, Other band)
+- **Sidebar reorganised, no band grew taller.** The "Property" band is gone — its
+  filters were listing-level anyway (furnished / ownership / amenities live on
+  `listings`, mirrored to the property row; there is no building entity in the
+  schema) — replaced by a **Features** band (Unit + Amenities groups). "Market
+  signals" dissolved entirely: velocity moved to a new bottom **Other** band
+  (together with Source portal and the viewport-vs-centre Map filter), price
+  history moved up into Essentials > Price.
+- **Condition levels became 1–5 ranges.** `building/apartment_condition_level_max`
+  joined the registry (all agendas — comparables/estimation/watchdog get the upper
+  bound too), rendering as compact paired min/max inputs inside Condition &
+  material. The Stats RPC finally applies condition levels (it never had — a
+  Map-vs-Stats divergence closed by migration 173).
+- **Price-history filters merged + windowed** (migration 173). The per-direction
+  quartet (listed-on-N-sites / cut-N-times / raised-N-times / biggest-drop) was
+  retired for `price_change_count_min` + a 30/90/365-day window select (reading
+  precomputed `price_change_count[_30d/_90d/_365d]` columns) and a signed
+  `total_price_change_pct` (−10 = "dropped 10 %+ overall", first→last observed
+  price). Recompute job fills the new columns; old keys in stored presets and
+  watchdog specs are dropped silently on load.
+- **"With estimates" checkbox** (Curation) — new anon-readable
+  `property_estimates_public` view (property grain over successful
+  `estimation_runs`); Map/Table/Cards prefilter by property-id allowlist, Stats
+  via EXISTS, Browse-only by agenda design.
+- `isDefault` was rewritten as a generic compare against `DEFAULT_FILTERS`
+  (the hand-maintained chain had already drifted), and the three cohort fetchers
+  now share one `resolveBrowsePrefilters` helper.
+
 ### 2026-06: Listing page is the primary estimation surface
 - **The listing/property page now owns estimations** — the "← back to estimations" /
   "view full listing" ping-pong is gone. A new **Estimates** section renders the two

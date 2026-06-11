@@ -17,8 +17,11 @@ Two phases, both idempotent:
      repr_listing_id     = the active, most-recently-seen child
      category/area/...    + current_price_czk mirror that representative child
      price_drop_count     \\
-     price_rise_count      } from the union of all children's snapshots,
-     max_price_drop_pct   /  ordered by scraped_at (consecutive-step deltas)
+     price_rise_count      \\
+     max_price_drop_pct     } from the union of all children's snapshots,
+     price_change_count*   /  ordered by scraped_at (consecutive-step deltas;
+     total_price_change_pct/  the *_30d/_90d/_365d window counts + the signed
+                              first-to-last total back migration 173's filters)
      last_change_at      = max(children snapshots.scraped_at) -- "recently changed"
      stats_computed_at   = now()
 
@@ -128,6 +131,7 @@ _RECOMPUTE_BATCH_SQL = """
       SELECT
         l.property_id AS pid,
         s.price_czk,
+        s.scraped_at,
         row_number() OVER (
           PARTITION BY l.property_id ORDER BY s.scraped_at, s.id
         ) AS rn
@@ -138,17 +142,31 @@ _RECOMPUTE_BATCH_SQL = """
     ),
     steps AS (
       SELECT
-        pid, price_czk,
+        pid, price_czk, scraped_at, rn,
         lag(price_czk) OVER (PARTITION BY pid ORDER BY rn) AS prev
       FROM prices
     ),
+    -- Windowed change counts (migration 173): a "change" is any consecutive
+    -- pair where the price moved, dated by the later snapshot's scraped_at.
+    -- The windowed counts decay as events age out, so they are only as fresh
+    -- as the last recompute of the row -- the daily full sweep is the bound.
     price_hist AS (
       SELECT
         pid,
         count(*) FILTER (WHERE prev IS NOT NULL AND price_czk < prev) AS drops,
         count(*) FILTER (WHERE prev IS NOT NULL AND price_czk > prev) AS rises,
+        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev) AS changes,
+        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev
+                         AND scraped_at >= now() - interval '30 days')  AS changes_30d,
+        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev
+                         AND scraped_at >= now() - interval '90 days')  AS changes_90d,
+        count(*) FILTER (WHERE prev IS NOT NULL AND price_czk <> prev
+                         AND scraped_at >= now() - interval '365 days') AS changes_365d,
         max(CASE WHEN prev IS NOT NULL AND price_czk < prev
-                 THEN (prev - price_czk)::numeric / prev * 100 END)   AS max_drop_pct
+                 THEN (prev - price_czk)::numeric / prev * 100 END)   AS max_drop_pct,
+        (array_agg(price_czk ORDER BY rn))[1]      AS first_price,
+        (array_agg(price_czk ORDER BY rn DESC))[1] AS last_price,
+        count(*)                                   AS price_points
       FROM steps
       GROUP BY pid
     ),
@@ -198,6 +216,14 @@ _RECOMPUTE_BATCH_SQL = """
       price_drop_count    = coalesce(ph.drops, 0),
       price_rise_count    = coalesce(ph.rises, 0),
       max_price_drop_pct  = ph.max_drop_pct,
+      price_change_count      = coalesce(ph.changes, 0),
+      price_change_count_30d  = coalesce(ph.changes_30d, 0),
+      price_change_count_90d  = coalesce(ph.changes_90d, 0),
+      price_change_count_365d = coalesce(ph.changes_365d, 0),
+      total_price_change_pct  = CASE
+          WHEN ph.price_points >= 2 AND ph.first_price > 0
+          THEN (ph.last_price - ph.first_price)::numeric / ph.first_price * 100
+      END,
       last_change_at      = coalesce(ch.last_change_at, ca.first_seen_at),
       stats_computed_at   = now()
     FROM child_agg ca

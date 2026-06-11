@@ -55,6 +55,16 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   'ownership',
   // Operator tags — not yet translated to PostgREST (no public-view column).
   'tags',
+  // Merged price-history pair (migration 173): the window picks which
+  // precomputed count column the threshold reads, and the signed
+  // total-change predicate flips direction on sign — both hand-coded in
+  // queries.ts:applyFilters.
+  'price_change_count_min',
+  'price_change_window_days',
+  'total_price_change_pct',
+  // With-estimates is a property-id allowlist prefilter
+  // (property_estimates_public), not a column predicate.
+  'with_estimates',
 ]);
 
 /* Minimal PostgREST builder shape we need to call into. The real

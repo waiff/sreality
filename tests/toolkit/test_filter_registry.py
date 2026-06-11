@@ -94,9 +94,11 @@ def test_pg_columns_subset_of_known_listings_columns() -> None:
         "price_per_m2",
         # Migration 133 — MF gross rental yield % (sale apartments).
         "mf_gross_yield_pct",
-        # Property-grain derived columns (migrations 091/095), exposed via
+        # Property-grain derived columns (migrations 091/095/173), exposed via
         # properties_public and filtered by the Browse property-grain RPC.
         # Not on `listings` — they aggregate across a property's children.
+        # (The merged price-change filters are synthetic — pg_column=None —
+        # because the window picks among four count columns at query time.)
         "distinct_site_count", "price_drop_count", "price_rise_count",
         "max_price_drop_pct",
         # Source portal (migration 091); exposed on listings_public and
@@ -225,13 +227,9 @@ def test_min_max_pairs_have_companion() -> None:
     import re
     ONE_SIDED_MINS = frozenset({
         "min_parking_lots",
-        "building_condition_level_min",
-        "apartment_condition_level_min",
-        # Property-grain derived thresholds (migrations 091/095) — min-only.
-        "distinct_site_count_min",
-        "price_drop_count_min",
-        "price_rise_count_min",
-        "max_price_drop_pct_min",
+        # Merged price-change threshold (migration 173) — min-only by design;
+        # its window modifier is a separate single_select, not a max side.
+        "price_change_count_min",
         # City-proximity (migration 142) — "at least N within radius"; an upper
         # bound is meaningless, so these are min-only by design.
         "near_pop_5km_min",

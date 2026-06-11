@@ -184,18 +184,24 @@ export interface ListingFilters {
   gardenAreaMax: number | null;
   /* Derived condition scores (migrations 072 / 073). 1..5 each; rows
    * with NULL (not yet scored) are excluded from the result when a
-   * min is set. Set by toolkit.condition_scoring.score_listing_condition. */
+   * bound is set. Set by toolkit.condition_scoring.score_listing_condition. */
   buildingConditionLevelMin: number | null;
+  buildingConditionLevelMax: number | null;
   apartmentConditionLevelMin: number | null;
-  /* Multi-portal / price-history signals (migrations 091/093/095). Derived
-   * columns on `properties`, maintained by the recompute job. Property grain:
-   * applied against properties_public. `distinctSiteCountMin` is 1 for every
-   * property today (sreality-only) and lights up with multi-portal ingestion;
-   * the price-history mins read the union of a property's snapshot history. */
-  distinctSiteCountMin: number | null;
-  priceDropCountMin: number | null;
-  priceRiseCountMin: number | null;
-  maxPriceDropPctMin: number | null;
+  apartmentConditionLevelMax: number | null;
+  /* Price-history signals (migration 173). Derived columns on `properties`,
+   * maintained by the recompute job; property grain, applied against
+   * properties_public. `priceChangeCountMin` counts cuts AND raises across
+   * the union of a property's snapshot history, inside the
+   * `priceChangeWindowDays` window (30/90/365, null = all time).
+   * `totalPriceChangePct` is signed: -10 = "dropped 10%+ overall from the
+   * first observed price", +10 = "rose 10%+ overall". */
+  priceChangeCountMin: number | null;
+  priceChangeWindowDays: number | null;
+  totalPriceChangePct: number | null;
+  /* Browse-only: restrict to properties with at least one successful
+   * estimation run (property_estimates_public, migration 173). */
+  withEstimates: boolean;
   /* Migration 025 — operator tags. AND-semantics: a listing must carry
    * every selected tag id. Stored as ids (not names) so renames /
    * recolour-by-delete-recreate stay queryable. */
@@ -274,11 +280,13 @@ export const DEFAULT_FILTERS: ListingFilters = {
   gardenAreaMin: null,
   gardenAreaMax: null,
   buildingConditionLevelMin: null,
+  buildingConditionLevelMax: null,
   apartmentConditionLevelMin: null,
-  distinctSiteCountMin: null,
-  priceDropCountMin: null,
-  priceRiseCountMin: null,
-  maxPriceDropPctMin: null,
+  apartmentConditionLevelMax: null,
+  priceChangeCountMin: null,
+  priceChangeWindowDays: null,
+  totalPriceChangePct: null,
+  withEstimates: false,
   tags: [],
   bounds: null,
   locationMode: 'viewport',
@@ -437,6 +445,31 @@ const parseFloatOrNull = (s: string | null): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
+/* Legal `priceChangeWindowDays` values — must mirror the registry's
+ * `price_change_window_days` enum and the precomputed properties columns
+ * (price_change_count_30d / _90d / _365d, migration 173). Null = all time. */
+export const PRICE_CHANGE_WINDOWS = [30, 90, 365] as const;
+
+const parsePriceChangeWindow = (s: string | null): number | null => {
+  const n = parseIntOrNull(s);
+  return n != null && (PRICE_CHANGE_WINDOWS as ReadonlyArray<number>).includes(n)
+    ? n
+    : null;
+};
+
+/* Which precomputed properties_public count column `priceChangeCountMin`
+ * reads for a given window. Mirrors the backend's canonical
+ * `toolkit.filter_registry.PRICE_CHANGE_COUNT_COLUMNS` (the watchdog
+ * matcher) and the CASE inside browse_stats_properties (migration 173). */
+export const priceChangeCountColumn = (windowDays: number | null): string => {
+  switch (windowDays) {
+    case 30: return 'price_change_count_30d';
+    case 90: return 'price_change_count_90d';
+    case 365: return 'price_change_count_365d';
+    default: return 'price_change_count';
+  }
+};
+
 export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   const dispRaw = splitCsv(sp.get('disposition'));
   const dispositions = dispRaw.filter((d): d is Disposition =>
@@ -506,11 +539,13 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     gardenAreaMin: parseIntOrNull(sp.get('garden_min')),
     gardenAreaMax: parseIntOrNull(sp.get('garden_max')),
     buildingConditionLevelMin: parseIntOrNull(sp.get('bld_cond_min')),
+    buildingConditionLevelMax: parseIntOrNull(sp.get('bld_cond_max')),
     apartmentConditionLevelMin: parseIntOrNull(sp.get('apt_cond_min')),
-    distinctSiteCountMin: parseIntOrNull(sp.get('sites_min')),
-    priceDropCountMin: parseIntOrNull(sp.get('drops_min')),
-    priceRiseCountMin: parseIntOrNull(sp.get('rises_min')),
-    maxPriceDropPctMin: parseFloatOrNull(sp.get('drop_pct_min')),
+    apartmentConditionLevelMax: parseIntOrNull(sp.get('apt_cond_max')),
+    priceChangeCountMin: parseIntOrNull(sp.get('changes_min')),
+    priceChangeWindowDays: parsePriceChangeWindow(sp.get('changes_window')),
+    totalPriceChangePct: parseFloatOrNull(sp.get('total_change_pct')),
+    withEstimates: sp.get('with_est') === '1',
     tags: parseIntList(sp.get('tags')),
     bounds: parseBounds(sp.get('bbox')),
     locationMode: sp.get('locmode') === 'center_radius'
@@ -739,11 +774,13 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.gardenAreaMin != null) sp.set('garden_min', String(f.gardenAreaMin));
   if (f.gardenAreaMax != null) sp.set('garden_max', String(f.gardenAreaMax));
   if (f.buildingConditionLevelMin != null) sp.set('bld_cond_min', String(f.buildingConditionLevelMin));
+  if (f.buildingConditionLevelMax != null) sp.set('bld_cond_max', String(f.buildingConditionLevelMax));
   if (f.apartmentConditionLevelMin != null) sp.set('apt_cond_min', String(f.apartmentConditionLevelMin));
-  if (f.distinctSiteCountMin != null) sp.set('sites_min', String(f.distinctSiteCountMin));
-  if (f.priceDropCountMin != null) sp.set('drops_min', String(f.priceDropCountMin));
-  if (f.priceRiseCountMin != null) sp.set('rises_min', String(f.priceRiseCountMin));
-  if (f.maxPriceDropPctMin != null) sp.set('drop_pct_min', String(f.maxPriceDropPctMin));
+  if (f.apartmentConditionLevelMax != null) sp.set('apt_cond_max', String(f.apartmentConditionLevelMax));
+  if (f.priceChangeCountMin != null) sp.set('changes_min', String(f.priceChangeCountMin));
+  if (f.priceChangeWindowDays != null) sp.set('changes_window', String(f.priceChangeWindowDays));
+  if (f.totalPriceChangePct != null) sp.set('total_change_pct', String(f.totalPriceChangePct));
+  if (f.withEstimates) sp.set('with_est', '1');
   if (f.tags.length) sp.set('tags', f.tags.join(','));
   if (f.bounds) {
     const { west, south, east, north } = f.bounds;
@@ -889,70 +926,19 @@ export const watchdogNameSuggestion = (f: ListingFilters): string => {
   return parts.join(' · ');
 };
 
+/* Generic compare against DEFAULT_FILTERS so new fields can never be
+ * forgotten here (the old hand-maintained &&-chain silently missed
+ * priceGrowthRules). Arrays count as default when empty; object-valued
+ * fields (bounds, centerRadius, nearCityProximity) default to null, so a
+ * null-vs-set check is exact. */
 export const isDefault = (f: ListingFilters): boolean =>
-  f.categoryMain === 'byt' &&
-  f.categoryType === 'pronajem' &&
-  f.districts.length === 0 &&
-  f.dispositions.length === 0 &&
-  f.priceMin == null &&
-  f.priceMax == null &&
-  f.pricePerM2Min == null &&
-  f.pricePerM2Max == null &&
-  f.mfGrossYieldPctMin == null &&
-  f.mfGrossYieldPctMax == null &&
-  f.areaMin == null &&
-  f.areaMax == null &&
-  f.status === 'any' &&
-  f.lastSeenMinDays == null &&
-  f.lastSeenMaxDays == null &&
-  f.firstSeenMinDays == null &&
-  f.firstSeenMaxDays == null &&
-  f.recentlyAddedDays == null &&
-  f.recentlyChangedDays == null &&
-  f.tomDaysMin == null &&
-  f.tomDaysMax == null &&
-  f.hasBalcony === 'any' &&
-  f.hasLift === 'any' &&
-  f.hasParking === 'any' &&
-  f.terrace === 'any' &&
-  f.cellar === 'any' &&
-  f.garage === 'any' &&
-  f.furnished.length === 0 &&
-  f.ownership.length === 0 &&
-  f.portals.length === 0 &&
-  f.conditionMatch.length === 0 &&
-  f.categorySubCb == null &&
-  f.subtype.length === 0 &&
-  f.buildingMaterial.length === 0 &&
-  f.estateAreaMin == null &&
-  f.estateAreaMax == null &&
-  f.usableAreaMin == null &&
-  f.usableAreaMax == null &&
-  f.parkingLotsMin == null &&
-  f.gardenAreaMin == null &&
-  f.gardenAreaMax == null &&
-  f.buildingConditionLevelMin == null &&
-  f.apartmentConditionLevelMin == null &&
-  f.distinctSiteCountMin == null &&
-  f.priceDropCountMin == null &&
-  f.priceRiseCountMin == null &&
-  f.maxPriceDropPctMin == null &&
-  f.tags.length === 0 &&
-  f.bounds == null &&
-  f.locationMode === 'viewport' &&
-  f.centerRadius == null &&
-  f.cityIndexRules.length === 0 &&
-  f.minCityPopulation == null &&
-  f.maxCityPopulation == null &&
-  f.nearCityProximity == null &&
-  f.nearPop5kmMin == null &&
-  f.nearPop15kmMin == null &&
-  f.nearJobs5kmMin == null &&
-  f.nearJobs15kmMin == null &&
-  f.nearYouth5kmMin == null &&
-  f.nearYouth15kmMin == null &&
-  f.nearOverall5kmMin == null &&
-  f.nearOverall15kmMin == null;
+  (Object.keys(DEFAULT_FILTERS) as Array<keyof ListingFilters>).every((k) => {
+    const value = f[k];
+    const def = DEFAULT_FILTERS[k];
+    if (Array.isArray(def)) return Array.isArray(value) && value.length === 0;
+    if (def === null) return value == null;
+    return value === def;
+  });
 
 
 /* -------------------------------------------------------------------------- */
@@ -1089,11 +1075,13 @@ export const REGISTRY_KEY_MAP = {
   min_garden_area: 'gardenAreaMin',
   max_garden_area: 'gardenAreaMax',
   building_condition_level_min: 'buildingConditionLevelMin',
+  building_condition_level_max: 'buildingConditionLevelMax',
   apartment_condition_level_min: 'apartmentConditionLevelMin',
-  distinct_site_count_min: 'distinctSiteCountMin',
-  price_drop_count_min: 'priceDropCountMin',
-  price_rise_count_min: 'priceRiseCountMin',
-  max_price_drop_pct_min: 'maxPriceDropPctMin',
+  apartment_condition_level_max: 'apartmentConditionLevelMax',
+  price_change_count_min: 'priceChangeCountMin',
+  price_change_window_days: 'priceChangeWindowDays',
+  total_price_change_pct: 'totalPriceChangePct',
+  with_estimates: 'withEstimates',
   tags: 'tags',
   tom_days_min: 'tomDaysMin',
   tom_days_max: 'tomDaysMax',
@@ -1290,6 +1278,7 @@ const UNSUPPORTED_LABELS: ReadonlyArray<{
   { test: (f) => f.gardenAreaMin != null || f.gardenAreaMax != null, label: 'garden area' },
   { test: (f) => f.tags.length > 0, label: 'tags' },
   { test: (f) => f.priceGrowthRules.length > 0, label: 'market growth (datasets)' },
+  { test: (f) => f.withEstimates, label: 'with estimates' },
 ];
 
 export interface FiltersToWatchdogResult {
@@ -1342,11 +1331,16 @@ export function filtersToWatchdogSpec(
     condition_match: arr(f.conditionMatch),
     min_parking_lots: f.parkingLotsMin,
     building_condition_level_min: f.buildingConditionLevelMin,
+    building_condition_level_max: f.buildingConditionLevelMax,
     apartment_condition_level_min: f.apartmentConditionLevelMin,
-    distinct_site_count_min: f.distinctSiteCountMin,
-    price_drop_count_min: f.priceDropCountMin,
-    price_rise_count_min: f.priceRiseCountMin,
-    max_price_drop_pct_min: f.maxPriceDropPctMin,
+    apartment_condition_level_max: f.apartmentConditionLevelMax,
+    price_change_count_min: f.priceChangeCountMin,
+    price_change_window_days:
+      f.priceChangeWindowDays != null
+      && (PRICE_CHANGE_WINDOWS as ReadonlyArray<number>).includes(f.priceChangeWindowDays)
+        ? (f.priceChangeWindowDays as 30 | 90 | 365)
+        : null,
+    total_price_change_pct: f.totalPriceChangePct,
     city_index_rules: arr(f.cityIndexRules),
     min_city_population: f.minCityPopulation,
     max_city_population: f.maxCityPopulation,
