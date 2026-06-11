@@ -1,9 +1,10 @@
 """Tests for /admin/* — skills + app_settings + tools endpoints.
 
-The whole prefix is exempted from the API_TOKEN bearer gate per
-CLAUDE.md rule #8 (private Railway URL is the security perimeter).
-We confirm that exemption here, plus the happy-path read / update
-flows.
+The whole prefix is bearer-gated like every other write surface per
+CLAUDE.md rule #8. We confirm that gate here (missing/wrong token ->
+401, correct token -> 200), plus the happy-path read / update flows.
+The happy-path tests leave API_TOKEN unset so the gate no-ops, exactly
+as in local dev.
 """
 
 from __future__ import annotations
@@ -252,13 +253,17 @@ def test_admin_tools_lists_agent_registry(client):
     assert "record_estimate" in names
 
 
-def test_admin_routes_exempt_from_bearer_gate(client, monkeypatch):
-    """Even with API_TOKEN set, /admin/* must respond without an Authorization header."""
+def test_admin_routes_require_bearer_token(client, monkeypatch):
+    """With API_TOKEN set, /admin/* rejects a missing/wrong token and accepts the right one."""
     monkeypatch.setenv("API_TOKEN", "secret-xyz")
-    res = client.get("/admin/skills")
-    assert res.status_code == 200
-    res = client.get("/admin/tools")
-    assert res.status_code == 200
+    assert client.get("/admin/skills").status_code == 401
+    assert client.get("/admin/tools").status_code == 401
+    assert client.get(
+        "/admin/skills", headers={"Authorization": "Bearer wrong"}
+    ).status_code == 401
+    good = {"Authorization": "Bearer secret-xyz"}
+    assert client.get("/admin/skills", headers=good).status_code == 200
+    assert client.get("/admin/tools", headers=good).status_code == 200
 
 
 def test_filter_schema_returns_registry_with_visibility(client):
@@ -322,7 +327,10 @@ def test_put_filter_visibility_rejects_undeclared_pairing(client):
     assert res.status_code == 400
 
 
-def test_filter_schema_is_exempt_from_bearer_gate(client, monkeypatch):
+def test_filter_schema_requires_bearer_token(client, monkeypatch):
     monkeypatch.setenv("API_TOKEN", "secret-xyz")
-    res = client.get("/admin/filter-schema")
+    assert client.get("/admin/filter-schema").status_code == 401
+    res = client.get(
+        "/admin/filter-schema", headers={"Authorization": "Bearer secret-xyz"}
+    )
     assert res.status_code == 200

@@ -1,14 +1,13 @@
 """Admin endpoints: skills + app_settings + agent tool inventory.
 
-Routes registered under the `/admin/*` prefix. Per slice-1 design
-the entire prefix is exempted from the API_TOKEN bearer gate (same
-exemption category as /health) — the private Railway URL is the
-security perimeter. This is documented in CLAUDE.md alongside the
-/health exemption and is intentionally narrow: every other endpoint
-on the API still requires the bearer token.
-
-All writes still flow through this service-side Python with a
-service-role psycopg connection. The frontend never touches Postgres
+Routes under the `/admin/*` prefix. Bearer-gated like every other write
+surface — the router carries `Depends(require_token)`, so when `API_TOKEN`
+is set each call needs the `Authorization: Bearer` header (no-op in local
+dev when unset). The SPA's Settings page already sends the token, so the
+gate is transparent there. (Historically exempted on the theory that the
+private Railway URL was the perimeter — but that URL ships in the public
+SPA bundle, so the exemption gave no real protection.) Writes go through a
+service-role psycopg connection; the frontend never touches Postgres
 directly for these tables.
 """
 
@@ -35,7 +34,11 @@ from toolkit import filter_registry
 if TYPE_CHECKING:
     import psycopg
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(
+    prefix="/admin",
+    tags=["admin"],
+    dependencies=[Depends(deps.require_token)],
+)
 
 
 # --- request schemas ------------------------------------------------------

@@ -691,13 +691,16 @@ it (`api/`). They do not apply to the scraper.
 7. **psycopg directly, not supabase-py.** Same reasoning as the scraper.
    `prepare_threshold=None` for pgbouncer-mode pooler.
 8. **API auth gated by `API_TOKEN`.** When the env var is set, every endpoint except
-   `/health` and `/admin/*` requires `Authorization: Bearer <token>`. When unset (local
-   development) the gate is a no-op. `/health` stays open so Railway healthchecks keep
-   working. `/admin/*` (Settings-page surface: skills, `app_settings`, agent tool inventory)
-   is also exempt: the operator chose to skip per-page auth, so the private Railway URL is
-   the security perimeter for that prefix. Every other route still requires the token; *no*
-   write path bypasses the FastAPI service. The token is shared with every caller (including
-   the Chrome extension and any ClickUp caller); no per-user identity layer.
+   `/health` requires `Authorization: Bearer <token>`. When unset (local development) the
+   gate is a no-op. `/health` stays open so Railway healthchecks keep working. `/admin/*`
+   (Settings-page surface: skills, `app_settings`, agent tool inventory) is **bearer-gated
+   like every other write surface** — its router carries `Depends(require_token)`. (It was
+   historically exempt on the theory that the private Railway URL was the perimeter, but that
+   URL ships inside the public SPA bundle, so the exemption gave no real protection; the SPA's
+   Settings page already sends the token on every `/admin` call, so gating it is transparent.)
+   Every route except `/health` requires the token; *no* write path bypasses the FastAPI
+   service. The token is shared with every caller (including the Chrome extension and any
+   ClickUp caller); no per-user identity layer.
 9. **Trace format on `estimation_runs.trace` is versioned.** `TRACE_SCHEMA_VERSION` lives in
    `api/estimation_runs.py`; every row's `trace.version` matches that constant at write time.
    Shape: `{version, summary, steps: [{n, kind, started_at, duration_ms, output_summary,

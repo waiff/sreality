@@ -1,8 +1,7 @@
 """FastAPI routes for the cross-source dedup review surface.
 
 Mounted under `/dedup/*`, bearer-gated by the standard `require_token`
-dependency — these are mutating operator actions (merge / dismiss / unmerge),
-not a configuration surface, so no `/admin/*`-style exemption applies.
+dependency — these are mutating operator actions (merge / dismiss / unmerge).
 
 The transaction mechanics live in `toolkit.property_identity`; this router is a
 thin HTTP layer over `api.property_dedup`.
