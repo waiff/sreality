@@ -43,8 +43,13 @@ LOG = logging.getLogger("submit_condition_batch")
 
 # The Message Batches API rejects request bodies over 256MB; flush with a
 # wide safety margin so the per-request system prompt can't sum past it.
-MAX_BATCH_BYTES = 150 * 1024 * 1024
-MAX_BATCH_REQUESTS = 2000
+# Practical ceiling is NOT the API's 256MB cap but the edge/LB upload window:
+# a ~150MB single chunk uploads for 6-8 min from a GitHub runner and the LB
+# intermittently 502s it (observed 18:36Z Jun 11 -> 04:44Z Jun 12, while two
+# equally-sized uploads succeeded earlier the same day — timeout roulette).
+# ~45MB uploads in well under 2 min and removes that failure mode.
+MAX_BATCH_BYTES = 45 * 1024 * 1024
+MAX_BATCH_REQUESTS = 600
 
 
 def should_flush(

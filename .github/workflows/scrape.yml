@@ -9,8 +9,9 @@ name: "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)"
 # disable the two new crons — no code change, the proven pipeline is back. It
 # also remains the way to run an ad-hoc full walk by hand.
 #
-# The single scrape pipeline. Each run walks the COMPLETE index of all six
-# category pairs (byt + dum + komercni × pronajem + prodej), so:
+# The single scrape pipeline. Each run walks the COMPLETE index of every
+# configured category pair (scraper.main.CATEGORIES — the full category_main
+# × category_type cross product), so:
 #   - newly-listed properties surface, and
 #   - delisted properties flip to is_active=false — a complete walk is what
 #     makes that inference valid (architectural rule #3).

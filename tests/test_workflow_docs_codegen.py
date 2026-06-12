@@ -107,7 +107,7 @@ def test_portal_tag_drives_the_per_portal_schedule() -> None:
     by_file = {d["filename"]: d for d in _docs()}
     assert by_file["idnes_index_walk.yml"]["portal"] == "idnes"
     assert by_file["idnes_detail_drain.yml"]["portal"] == "idnes"
-    assert by_file["scrape_bazos.yml"]["portal"] == "bazos"
+    assert by_file["bazos_index_walk.yml"]["portal"] == "bazos"
     assert by_file["index_walk.yml"]["portal"] == "sreality"
     # Shared platform jobs and non-portal ingests are NOT tagged.
     assert by_file["images.yml"]["portal"] is None

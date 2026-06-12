@@ -4,7 +4,8 @@ name: "Scraping: Sreality index walk (Phase 2)"
 # The fast half of the Phase-2 cadence split, now on the shared portal
 # framework: `scraper.sreality_main --index-only` drives SrealityPortal through
 # the one generic portal_runner (the same loop every other portal uses). Walks
-# the COMPLETE index of all twelve category pairs (incl. drazba/podil;
+# the COMPLETE index of every configured category pair (scraper.main.CATEGORIES
+# — the full category cross product incl. pozemek/ostatni/drazba/podil;
 # district-split + national fallback above the deep-pagination cap), bumps
 # last_seen on still-listed ids (touch), flips delisted ones to is_active=false
 # (mark_inactive, under the 100% completeness guard), and enqueues new +

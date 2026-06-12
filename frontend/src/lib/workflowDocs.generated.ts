@@ -1297,7 +1297,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "index_walk.yml",
     "name": "Scraping: Sreality index walk (Phase 2)",
-    "description": "The fast half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --index-only` drives SrealityPortal through the one generic portal_runner (the same loop every other portal uses). Walks the COMPLETE index of all twelve category pairs (incl. drazba/podil; district-split + national fallback above the deep-pagination cap), bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the 100% completeness guard), and enqueues new + price-changed ids into listing_detail_queue (source='sreality'). It does NO detail fetching, so it finishes in minutes and delistings surface fast.",
+    "description": "The fast half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --index-only` drives SrealityPortal through the one generic portal_runner (the same loop every other portal uses). Walks the COMPLETE index of every configured category pair (scraper.main.CATEGORIES — the full category cross product incl. pozemek/ostatni/drazba/podil; district-split + national fallback above the deep-pagination cap), bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the 100% completeness guard), and enqueues new + price-changed ids into listing_detail_queue (source='sreality'). It does NO detail fetching, so it finishes in minutes and delistings surface fast.",
     "portal": "sreality",
     "manual": true,
     "schedules": [
@@ -1899,90 +1899,6 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape.yml"
   },
   {
-    "filename": "scrape_bazos.yml",
-    "name": "Scraping: Bazos crawler combined walk (fallback)",
-    "description": "DISPATCH-ONLY combined index+detail fallback for reality.bazos.cz, mirroring sreality's scrape.yml and idnes's scrape_idnes.yml. The scheduled pipeline is the cadence SPLIT — the full bazos_index_walk.yml (walk + mark_inactive + enqueue) feeds the bounded bazos_detail_drain.yml — because bazos now walks 14 nationwide scopes (~1500 index pages, ~50 min) and a single combined run can't do both inside one job (the full index eats the window, starving the drain).",
-    "portal": "bazos",
-    "manual": true,
-    "schedules": [],
-    "onPush": false,
-    "onPullRequest": false,
-    "paths": null,
-    "inputs": [
-      {
-        "name": "sale_type",
-        "description": "prodam (sale) or pronajmu (rent); blank = every configured scope",
-        "required": false,
-        "type": "choice",
-        "default": "",
-        "options": [
-          "",
-          "prodam",
-          "pronajmu"
-        ]
-      },
-      {
-        "name": "category",
-        "description": "bazos category segment; blank = every configured scope",
-        "required": false,
-        "type": "choice",
-        "default": "",
-        "options": [
-          "",
-          "byt",
-          "dum",
-          "chata",
-          "restaurace",
-          "kancelar",
-          "prostory",
-          "sklad"
-        ]
-      },
-      {
-        "name": "locality",
-        "description": "locality filter (e.g. Praha); blank = nationwide",
-        "required": false,
-        "type": "string",
-        "default": "",
-        "options": null
-      },
-      {
-        "name": "radius_km",
-        "description": "radius around locality in km (blank = none)",
-        "required": false,
-        "type": "string",
-        "default": "",
-        "options": null
-      },
-      {
-        "name": "max_pages",
-        "description": "cap index pages per scope (blank = full walk)",
-        "required": false,
-        "type": "string",
-        "default": "",
-        "options": null
-      },
-      {
-        "name": "max_detail",
-        "description": "cap detail-drain claims this run (blank = drain the queue)",
-        "required": false,
-        "type": "string",
-        "default": "400",
-        "options": null
-      }
-    ],
-    "secrets": [
-      "MAPY_CZ_API_KEY",
-      "SUPABASE_DB_URL"
-    ],
-    "concurrencyGroup": "bazos-scrape",
-    "cancelInProgress": false,
-    "timeoutMinutes": 50,
-    "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bazos.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bazos.yml"
-  },
-  {
     "filename": "scrape_bezrealitky.yml",
     "name": "Scraping: Bezrealitky scraper (pilot)",
     "description": "Scheduled (every 6h) + manual scraper for bezrealitky.cz on the shared portal framework. Bezrealitky is a JSON-API portal (public GraphQL at api.bezrealitky.cz) like sreality: the index walk pages listAdverts and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches advert(id), parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
@@ -2040,53 +1956,6 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bezrealitky.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bezrealitky.yml"
-  },
-  {
-    "filename": "scrape_idnes.yml",
-    "name": "Scraping: iDNES Reality combined walk (fallback)",
-    "description": "DISPATCH-ONLY combined index+detail fallback for reality.idnes.cz, mirroring sreality's scrape.yml. The scheduled pipeline is the cadence SPLIT — the fast idnes_index_walk.yml (full walk + mark_inactive + enqueue) feeds the bounded idnes_detail_drain.yml — because iDNES is large (~2400 index pages, ~60k listings) and a single combined run can't do both inside one job (the full index eats the window, starving the drain).",
-    "portal": "idnes",
-    "manual": true,
-    "schedules": [],
-    "onPush": false,
-    "onPullRequest": false,
-    "paths": null,
-    "inputs": [
-      {
-        "name": "max_pages",
-        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
-        "required": false,
-        "type": "string",
-        "default": "",
-        "options": null
-      },
-      {
-        "name": "max_detail",
-        "description": "cap detail-drain claims this run",
-        "required": false,
-        "type": "string",
-        "default": "6000",
-        "options": null
-      },
-      {
-        "name": "rate",
-        "description": "detail-fetch requests/second ceiling",
-        "required": false,
-        "type": "string",
-        "default": "3.0",
-        "options": null
-      }
-    ],
-    "secrets": [
-      "MAPY_CZ_API_KEY",
-      "SUPABASE_DB_URL"
-    ],
-    "concurrencyGroup": "idnes-scrape",
-    "cancelInProgress": false,
-    "timeoutMinutes": 55,
-    "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_idnes.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_idnes.yml"
   },
   {
     "filename": "scrape_maxima.yml",

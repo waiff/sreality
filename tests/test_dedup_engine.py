@@ -19,6 +19,7 @@ from toolkit.dedup_engine import (
     disposition_compatible,
     normalize_street,
     rooms_in_priority,
+    street_group_keys,
     verdict_is_merge,
 )
 
@@ -29,12 +30,14 @@ def _key(
     floor: int | None = 3, area: float | None = 60.0,
     description: str | None = None,
     category_type: str | None = "prodej", category_main: str | None = "byt",
+    street_id: int | None = None,
 ) -> ListingKey:
     return ListingKey(
         sreality_id=sid, property_id=pid if pid is not None else sid,
         source=source, street_key=street, disposition=disp,
         house_number=hn, floor=floor, area_m2=area, description=description,
         category_type=category_type, category_main=category_main,
+        street_id=street_id,
     )
 
 
@@ -45,13 +48,54 @@ def test_normalize_street_prefers_street_id() -> None:
 
 
 def test_normalize_street_falls_back_to_name_diacritics_stripped() -> None:
-    assert normalize_street("Nádražní 12", None) == "name:nadrazni 12"
+    assert normalize_street("Nádražní 12", None) == "name:nadrazni"
 
 
 def test_normalize_street_none_when_empty_or_negative_id() -> None:
     assert normalize_street(None, None) is None
     assert normalize_street("", None) is None
     assert normalize_street("Hlavní", -1) == "name:hlavni"  # -1 sentinel -> name
+
+
+def test_normalize_street_strips_street_words_and_house_numbers() -> None:
+    # bazos "ul. Hlavní 12" and sreality "Hlavní" are one street.
+    assert (
+        normalize_street("ul. Hlavní 12", None)
+        == normalize_street("Hlavní", None)
+        == normalize_street("hlavni 123/4a", None)
+        == "name:hlavni"
+    )
+    assert normalize_street("ulice Dlouhá", None) == "name:dlouha"
+    assert normalize_street("nám. Míru", None) == "name:miru"
+    assert normalize_street("náměstí Míru", None) == "name:miru"
+    assert normalize_street("tř. Svobody", None) == "name:svobody"
+    assert normalize_street("třída Svobody", None) == "name:svobody"
+    assert normalize_street("Vinohradská třída 5", None) == "name:vinohradska"
+    assert normalize_street("Sídliště Osvobození 650/29", None) == "name:osvobozeni"
+    assert normalize_street("nábřeží Závodu míru", None) == "name:zavodu miru"
+
+
+def test_normalize_street_words_only_strip_as_whole_tokens() -> None:
+    # Names merely STARTING like a street word stay intact.
+    assert normalize_street("Třebízského", None) == "name:trebizskeho"
+    assert normalize_street("Trnková 12", None) == "name:trnkova"
+    assert normalize_street("Brno", None) == "name:brno"
+    # Date-streets keep their leading ordinal (only TRAILING numbers strip).
+    assert normalize_street("28. října 12", None) == "name:28. rijna"
+
+
+def test_normalize_street_never_empties_the_key() -> None:
+    assert normalize_street("ulice", None) == "name:ulice"
+    assert normalize_street("Náměstí", None) == "name:namesti"
+    assert normalize_street("123", None) == "name:123"
+
+
+def test_street_group_keys_dual_keys_id_and_name() -> None:
+    assert street_group_keys("Hlavní", 42) == ("id:42", "name:hlavni")
+    assert street_group_keys(None, 42) == ("id:42",)
+    assert street_group_keys("ul. Hlavní 12", None) == ("name:hlavni",)
+    assert street_group_keys(None, None) == ()
+    assert street_group_keys("", -1) == ()
 
 
 # --- disposition compatibility ----------------------------------------------
@@ -175,6 +219,22 @@ def test_street_mismatch_rejects() -> None:
     d = classify_pair(_key(1, street="id:1"), _key(2, street="id:2"))
     assert d.action == "reject"
     assert d.detail == "street_mismatch"
+
+
+def test_street_id_contradiction_rejects_same_name_different_street() -> None:
+    # Dual-keying puts two same-named streets from different towns in one name
+    # group; differing canonical ids are a hard reject.
+    d = classify_pair(
+        _key(1, street="name:hlavni", street_id=42),
+        _key(2, street="name:hlavni", street_id=99),
+    )
+    assert d.action == "reject"
+    assert d.detail == "street_id_contradiction"
+    # A NULL id (bazos) never contradicts a known one (sreality).
+    assert classify_pair(
+        _key(1, street="name:hlavni", street_id=42),
+        _key(2, street="name:hlavni", street_id=None, source="bazos"),
+    ).action == "auto_merge"
 
 
 def test_disposition_mismatch_rejects() -> None:
@@ -305,14 +365,15 @@ class _FakeConn:
         return _Ctx()
 
 
-def _row(sid: int, pid: int, *, street_id: int = 42, disp: str = "2+kk",
+def _row(sid: int, pid: int, *, street: str = "Nádražní",
+         street_id: int | None = 42, disp: str = "2+kk",
          hn: str | None = "10", floor: int | None = 3, area: float | None = 60.0,
          source: str = "sreality", description: str | None = None,
          category_type: str | None = "prodej", category_main: str | None = "byt") -> tuple[Any, ...]:
     # matches _ELIGIBLE_SQL column order:
     # sreality_id, property_id, source, street, street_id, disposition,
     # house_number, floor, area_m2, description, category_type, category_main
-    return (sid, pid, source, "Nádražní", street_id, disp, hn, floor, area,
+    return (sid, pid, source, street, street_id, disp, hn, floor, area,
             description, category_type, category_main)
 
 
@@ -333,6 +394,78 @@ def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
     assert stats["auto_address"] == 1
     assert merges == [(101, 102, "address_exact")]
     assert stats["auto_phash"] == 0 and stats["auto_visual"] == 0
+
+
+def test_run_engine_groups_id_keyed_sreality_with_name_keyed_bazos(monkeypatch: Any) -> None:
+    # The cross-portal lever: the sreality row is id-keyed (street_id 42) but
+    # dual-keying also lands it in the 'name:hlavni' group, where the bazos row
+    # (decorated street string, no street_id) meets it and rule B fires.
+    import scripts.dedup_engine as eng
+
+    merges: list[tuple[int, int, str]] = []
+
+    def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
+        merges.append((survivor_id, retired_id, reason))
+        return {"data": {}}
+
+    monkeypatch.setattr(eng, "merge_properties", fake_merge)
+
+    conn = _FakeConn([
+        _row(1, 101, street="Hlavní", street_id=42),
+        _row(2, 102, street="ul. Hlavní 12", street_id=None, source="bazos"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+
+    assert stats["auto_address"] == 1
+    assert merges == [(101, 102, "address_exact")]
+
+
+def test_run_engine_dual_keys_act_once_per_listing_pair(monkeypatch: Any) -> None:
+    # Two dual-keyed sreality rows share BOTH the id and the name group; the
+    # pair must be classified + merged exactly once.
+    import scripts.dedup_engine as eng
+
+    merges: list[tuple[int, int, str]] = []
+
+    def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
+        merges.append((survivor_id, retired_id, reason))
+        return {"data": {}}
+
+    monkeypatch.setattr(eng, "merge_properties", fake_merge)
+
+    conn = _FakeConn([
+        _row(1, 101, street="Hlavní", street_id=42),
+        _row(2, 102, street="Hlavní", street_id=42),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+
+    assert stats["auto_address"] == 1
+    assert merges == [(101, 102, "address_exact")]
+    assert stats["rejected"] == 0
+
+
+def test_run_engine_same_name_different_street_id_rejects(monkeypatch: Any) -> None:
+    # Same-named streets in two towns meet in the name group but their
+    # canonical ids differ — hard reject, never a merge.
+    import scripts.dedup_engine as eng
+
+    merges: list[tuple[int, int, str]] = []
+
+    def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
+        merges.append((survivor_id, retired_id, reason))
+        return {"data": {}}
+
+    monkeypatch.setattr(eng, "merge_properties", fake_merge)
+
+    conn = _FakeConn([
+        _row(1, 101, street="Hlavní", street_id=42),
+        _row(2, 102, street="Hlavní", street_id=99),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+
+    assert merges == []
+    assert stats["auto_address"] == 0
+    assert stats["rejected"] == 1
 
 
 def test_run_engine_phash_fastpath_merges(monkeypatch: Any) -> None:
