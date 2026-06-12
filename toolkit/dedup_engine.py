@@ -58,7 +58,7 @@ class ListingKey:
     sreality_id: int
     property_id: int | None
     source: str
-    street_key: str          # street_id as text, or normalized street name
+    street_key: str          # one grouping key: 'id:<street_id>' or 'name:<normalized>'
     disposition: str
     house_number: str | None
     floor: int | None
@@ -70,6 +70,10 @@ class ListingKey:
     # property — so a mismatch is a hard reject in classify_pair.
     category_type: str | None = None
     category_main: str | None = None
+    # Canonical portal street id when known (sreality), regardless of which
+    # grouping key this instance carries. Two known-but-different ids inside a
+    # name group mean two distinct streets sharing a name — a hard reject.
+    street_id: int | None = None
 
 
 # Unit markers in the description that identify a SPECIFIC unit within one
@@ -157,17 +161,74 @@ class PairDecision:
     detail: str | None = None
 
 
+# Street words that decorate a name without identifying it ("ul. Hlavní" and
+# "Hlavní" are one street; "Vinohradská třída" ~ "Vinohradská"). Diacritics-
+# folded forms incl. the inflections bazos' extract_street emits. Compared
+# token-wise with a trailing dot stripped, so "Třebízského" is never touched.
+_STREET_WORDS = frozenset({
+    "ul", "ulice", "ulici",
+    "nam", "namesti",
+    "tr", "trida", "tride", "tridu", "tridy",
+    "nabr", "nabrezi",
+    "sidliste", "sidlisti",
+})
+# A trailing house-number token: 12, 12a, 123/45, 160/26b. Bounded at 4 digits
+# like the bazos extractor; "679 61" (PSČ) strips as two successive tokens.
+_HOUSE_NO_TOKEN_RE = re.compile(r"\d{1,4}[a-z]?(?:/\d{1,4}[a-z]?)?")
+
+
+def _street_name_key(street: str | None) -> str | None:
+    """Grouping form of a street NAME: diacritics-stripped lowercase with
+    street words and trailing house-number tokens removed. Portals disagree on
+    decoration (sreality stores the bare canonical name; bazos mines "ul.
+    Koterovská 12"-style strings from free text), so the key must not. Falls
+    back to the undecorated-stripped form rather than going empty (a street
+    literally named "Náměstí" keeps a usable key)."""
+    if not street or not street.strip():
+        return None
+    decomposed = unicodedata.normalize("NFKD", street.strip().lower())
+    ascii_name = "".join(c for c in decomposed if not unicodedata.combining(c))
+    collapsed = " ".join(ascii_name.split())
+    if not collapsed:
+        return None
+    tokens = collapsed.split()
+    changed = True
+    while changed and tokens:
+        changed = False
+        if tokens[0].rstrip(".") in _STREET_WORDS:
+            tokens.pop(0)
+            changed = True
+        if tokens and tokens[-1].rstrip(".") in _STREET_WORDS:
+            tokens.pop()
+            changed = True
+        if tokens and _HOUSE_NO_TOKEN_RE.fullmatch(tokens[-1]):
+            tokens.pop()
+            changed = True
+    stripped = " ".join(tokens)
+    return stripped or collapsed
+
+
 def normalize_street(street: str | None, street_id: int | None) -> str | None:
-    """The street grouping key: prefer the portal's canonical street_id, else a
-    diacritics-stripped lowercase street name. None when there is no street."""
+    """The primary street grouping key: prefer the portal's canonical
+    street_id, else the normalized street name. None when there is no street."""
     if street_id is not None and street_id > 0:
         return f"id:{street_id}"
-    if street and street.strip():
-        decomposed = unicodedata.normalize("NFKD", street.strip().lower())
-        ascii_name = "".join(c for c in decomposed if not unicodedata.combining(c))
-        collapsed = " ".join(ascii_name.split())
-        return f"name:{collapsed}" if collapsed else None
-    return None
+    name = _street_name_key(street)
+    return f"name:{name}" if name is not None else None
+
+
+def street_group_keys(street: str | None, street_id: int | None) -> tuple[str, ...]:
+    """ALL grouping keys for one listing, canonical id first. A row carrying
+    both a street_id and a street name is dual-keyed — it joins its 'id:' group
+    AND the 'name:' group — so an id-keyed sreality row can meet a name-only
+    bazos row in one candidate group (id-only grouping made that impossible)."""
+    keys: list[str] = []
+    if street_id is not None and street_id > 0:
+        keys.append(f"id:{street_id}")
+    name = _street_name_key(street)
+    if name is not None:
+        keys.append(f"name:{name}")
+    return tuple(keys)
 
 
 def disposition_compatible(a: str | None, b: str | None) -> bool:
@@ -202,6 +263,14 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
         return PairDecision("reject", None, "already_merged")
     if a.street_key != b.street_key:
         return PairDecision("reject", None, "street_mismatch")
+    # Dual-keying lets same-NAME streets from different towns share one name
+    # group; when both portals supplied a canonical street_id and they differ,
+    # these are two distinct streets — hard reject (NULL ids don't contradict).
+    if (
+        a.street_id is not None and b.street_id is not None
+        and a.street_id != b.street_id
+    ):
+        return PairDecision("reject", None, "street_id_contradiction")
     # Offering category is fundamental: a sale and a rental (prodej vs pronajem),
     # or a flat and a house (byt vs dum), at one address are different offerings,
     # never the same property — reject before anything else. NULLs don't
