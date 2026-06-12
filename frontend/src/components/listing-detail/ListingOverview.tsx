@@ -1,8 +1,10 @@
-/* Shared "what is this property" overview — the single-column hero + property
- * facts + MF reference rent + description + compact map + photo gallery. Extracted
- * from the Listing Detail page so the Estimation Detail page renders its subject
- * with the SAME structure (one surface, not two). Driven by a ListingPublic row;
- * the estimation page passes the subject's resolved listings row. */
+/* Shared "what is this property" overview — the dossier header (identity +
+ * price left, location map anchored top-right), a dense facts strip,
+ * description, an optional estimates slot, and the photo gallery. Extracted
+ * from the Listing Detail page so the Estimation Detail page renders its
+ * subject with the SAME structure (one surface, not two). Driven by a
+ * ListingPublic row; the estimation page passes the subject's resolved
+ * listings row. */
 import { Suspense, lazy, useLayoutEffect, useRef, useState } from 'react';
 import {
   fmtCzk,
@@ -12,7 +14,6 @@ import {
   fmtFurnished,
   fmtOwnership,
   fmtParkingLots,
-  fmtCategorySub,
 } from '@/lib/format';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
 import { placePrimary } from '@/lib/placeLabel';
@@ -25,19 +26,24 @@ export function ListingOverview({
   images = [],
   imagesLoading = false,
   showStatus = true,
+  estimatesSlot,
 }: {
   listing: ListingPublic;
   images?: ImagePublic[];
   imagesLoading?: boolean;
   showStatus?: boolean;
+  /* The estimation chapter, rendered between description and gallery — the
+   * listing page passes its EstimationsBlock here so the estimates sit in
+   * the prime slot the location map used to occupy (the map lives in the
+   * header now). The slot brings its own leading hairline. */
+  estimatesSlot?: React.ReactNode;
 }) {
   return (
     <>
       <Header listing={listing} showStatus={showStatus} />
       <KeyFactsBlock listing={listing} />
       <DescriptionBlock listing={listing} />
-      <Hairline />
-      <MapBlock listing={listing} />
+      {estimatesSlot}
       <Hairline />
       <GalleryBlock
         images={images}
@@ -77,6 +83,12 @@ function Header({
 }) {
   const disposition = listing.disposition ?? '—';
   const area = fmtArea(listing.area_m2);
+  const floor =
+    listing.floor != null
+      ? listing.total_floors != null
+        ? `${listing.floor}/${listing.total_floors}`
+        : String(listing.floor)
+      : null;
   // A null price means the seller hid it (often quoting it in the description);
   // it's real source state, not missing data — surface it as such.
   const hasPrice = listing.price_czk != null;
@@ -84,15 +96,30 @@ function Header({
   const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
   const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
   const hasId = listing.sreality_id > 0;
+  const { lat, lng } = listing;
+  const hasMap = lat != null && lng != null;
 
   return (
-    <div className="mt-5 flex items-start justify-between gap-6">
+    <div className="mt-5 grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)] items-start">
       <div className="min-w-0">
-        <p className="font-mono tabular-nums text-[var(--color-ink-2)] text-sm">
-          <span>{disposition}</span>
-          <span className="mx-2 text-[var(--color-ink-4)]">·</span>
-          <span>{area}</span>
-        </p>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <p className="font-mono tabular-nums text-[var(--color-ink-2)] text-sm">
+            <span>{disposition}</span>
+            <span className="mx-2 text-[var(--color-ink-4)]">·</span>
+            <span>{area}</span>
+            {floor != null && (
+              <>
+                <span className="mx-2 text-[var(--color-ink-4)]">·</span>
+                <span title="Floor">
+                  floor <span className="text-[var(--color-ink)]">{floor}</span>
+                </span>
+              </>
+            )}
+          </p>
+          {showStatus && (
+            <StatusPill isActive={listing.is_active} lastSeenAt={listing.last_seen_at} />
+          )}
+        </div>
         <h1
           className={[
             'mt-1.5 leading-[1.05] tabular-nums',
@@ -129,9 +156,29 @@ function Header({
           </p>
         )}
       </div>
-      {showStatus && (
-        <StatusPill isActive={listing.is_active} lastSeenAt={listing.last_seen_at} />
-      )}
+      {/* The dossier's "file photo": the location map anchored top-right.
+          Missing coordinates keep the slot with an explicit note — silence
+          would read as a render failure, not a data fact. */}
+      <div className="w-full">
+        {hasMap ? (
+          <Suspense
+            fallback={
+              <div className="h-[190px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
+            }
+          >
+            <DetailMap
+              lat={lat}
+              lng={lng}
+              isActive={listing.is_active}
+              heightClass="h-[190px]"
+            />
+          </Suspense>
+        ) : (
+          <div className="h-[190px] flex items-center justify-center text-sm text-[var(--color-ink-3)] border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)]">
+            No coordinates recorded
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -156,37 +203,6 @@ function StatusPill({ isActive, lastSeenAt }: { isActive: boolean; lastSeenAt: s
     >
       Inactive
     </span>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Map block (compact)                                                        */
-/* -------------------------------------------------------------------------- */
-
-function MapBlock({ listing }: { listing: ListingPublic }) {
-  if (listing.lat == null || listing.lng == null) {
-    return (
-      <div>
-        <SectionLabel>Location</SectionLabel>
-        <div className="mt-2 h-32 flex items-center justify-center text-sm text-[var(--color-ink-3)] border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)]">
-          No coordinates recorded
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div>
-      <SectionLabel>Location</SectionLabel>
-      <div className="mt-2">
-        <Suspense
-          fallback={
-            <div className="h-40 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
-          }
-        >
-          <DetailMap lat={listing.lat} lng={listing.lng} isActive={listing.is_active} />
-        </Suspense>
-      </div>
-    </div>
   );
 }
 
@@ -293,28 +309,18 @@ function DescriptionBody({ text }: { text: string }) {
 /* Key facts                                                                  */
 /* -------------------------------------------------------------------------- */
 
+/* One dense data strip instead of the old Property/Building grids:
+ * disposition, area, floor and district live in the header; subtype is the
+ * disposition for apartments (a duplicate) so it's dropped entirely. What
+ * remains — lot/garden for houses, the building facts — renders as inline
+ * label·value pairs on one wrapping line, with the amenity chips below. */
 function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
-  const floor = listing.floor != null
-    ? listing.total_floors != null
-      ? `${listing.floor} / ${listing.total_floors}`
-      : String(listing.floor)
-    : null;
-
-  /* Disposition, usable area and district are intentionally omitted — they're
-   * already in the header above, so this grid carries only the facts the header
-   * doesn't. Fields universally NULL for a category drop out via pruneNulls. */
-
-  const property: Fact[] = pruneNulls([
-    { label: 'Subtype', value: fmtCategorySubOrNull(listing.category_sub_cb) },
-    { label: 'Lot area', value: fmtAreaOrNull(listing.estate_area), mono: true },
-    { label: 'Garden area', value: fmtAreaOrNull(listing.garden_area), mono: true },
-    { label: 'Floor', value: floor, mono: true },
-  ]);
-
-  const building: Fact[] = pruneNulls([
+  const facts: Fact[] = pruneNulls([
+    { label: 'Lot', value: fmtAreaOrNull(listing.estate_area), mono: true },
+    { label: 'Garden', value: fmtAreaOrNull(listing.garden_area), mono: true },
     { label: 'Building', value: capitalise(listing.building_type) },
     { label: 'Condition', value: capitalise(listing.condition) },
-    { label: 'Energy class', value: listing.energy_rating, mono: true },
+    { label: 'Energy', value: listing.energy_rating, mono: true },
     {
       label: 'Ownership',
       value: listing.ownership ? fmtOwnership(listing.ownership) : null,
@@ -325,10 +331,10 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
     },
   ]);
 
-  /* Amenities render as pictogram tiles (present = lit glyph, absent =
-   * dimmed + slashed) rather than Yes/No text. Unknown (null) amenities
-   * drop out — null ≠ absent, so we never slash something we can't confirm.
-   * The parking-spaces count rides along as a note on the Parking tile. */
+  /* Amenities render as compact pictogram chips (present = lit glyph,
+   * absent = dimmed + slashed). Unknown (null) amenities drop out — null ≠
+   * absent, so we never slash something we can't confirm. The parking-spaces
+   * count rides along as a note on the Parking chip. */
   const amenities: Amenity[] = [
     { label: 'Balcony', present: listing.has_balcony, Glyph: BalconyGlyph },
     { label: 'Terrace', present: listing.terrace, Glyph: TerraceGlyph },
@@ -346,14 +352,37 @@ function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
     },
   ].filter((a) => a.present != null);
 
-  if (property.length === 0 && building.length === 0 && amenities.length === 0) {
+  if (facts.length === 0 && amenities.length === 0) {
     return null;
   }
   return (
-    <div className="mt-8 space-y-7">
-      {property.length > 0 && <FactsGrid title="Property" facts={property} />}
-      {building.length > 0 && <FactsGrid title="Building" facts={building} />}
-      {amenities.length > 0 && <AmenitiesGrid amenities={amenities} />}
+    <div className="mt-7 space-y-3">
+      {facts.length > 0 && (
+        <dl className="flex flex-wrap items-baseline gap-x-6 gap-y-2">
+          {facts.map((f) => (
+            <div key={f.label} className="flex items-baseline gap-1.5">
+              <dt className="text-[0.62rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+                {f.label}
+              </dt>
+              <dd
+                className={[
+                  'text-sm text-[var(--color-ink)]',
+                  f.mono ? 'font-mono tabular-nums' : '',
+                ].join(' ')}
+              >
+                {f.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+      {amenities.length > 0 && (
+        <ul className="flex flex-wrap gap-1.5">
+          {amenities.map((a) => (
+            <AmenityChip key={a.label} amenity={a} />
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -379,62 +408,18 @@ function fmtAreaOrNull(n: number | null): string | null {
   return n == null ? null : fmtArea(n);
 }
 
-function fmtCategorySubOrNull(cb: number | null): string | null {
-  if (cb == null) return null;
-  const out = fmtCategorySub(cb);
-  return out === '—' ? null : out;
-}
-
 function capitalise(s: string | null): string | null {
   if (!s) return null;
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-function FactsGrid({ title, facts }: { title: string; facts: Fact[] }) {
-  return (
-    <div>
-      <SectionLabel>{title}</SectionLabel>
-      <dl className="mt-3 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-4">
-        {facts.map((f) => (
-          <div key={f.label}>
-            <dt className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-              {f.label}
-            </dt>
-            <dd
-              className={[
-                'mt-1 text-sm text-[var(--color-ink)]',
-                f.mono ? 'font-mono tabular-nums' : '',
-              ].join(' ')}
-            >
-              {f.value}
-            </dd>
-          </div>
-        ))}
-      </dl>
-    </div>
-  );
-}
-
-function AmenitiesGrid({ amenities }: { amenities: Amenity[] }) {
-  return (
-    <div>
-      <SectionLabel>Amenities</SectionLabel>
-      <ul className="mt-3 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        {amenities.map((a) => (
-          <AmenityTile key={a.label} amenity={a} />
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function AmenityTile({ amenity }: { amenity: Amenity }) {
+function AmenityChip({ amenity }: { amenity: Amenity }) {
   const on = amenity.present === true;
   const { Glyph } = amenity;
   return (
     <li
       className={[
-        'flex flex-col items-center justify-center gap-2 rounded-md border px-2 py-4 text-center',
+        'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border px-2 py-1',
         on
           ? 'border-[var(--color-rule)] bg-[var(--color-paper-2)]'
           : 'border-[var(--color-rule-soft)] bg-transparent',
@@ -452,18 +437,18 @@ function AmenityTile({ amenity }: { amenity: Amenity }) {
       </span>
       <span
         className={[
-          'text-[0.65rem] tracking-[0.12em] uppercase',
+          'text-[0.62rem] tracking-[0.12em] uppercase',
           on ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink-4)]',
         ].join(' ')}
       >
         {amenity.label}
+        {amenity.note != null && (
+          <span className="ml-1 font-mono tabular-nums normal-case tracking-normal text-[var(--color-ink-3)]">
+            {amenity.note}
+          </span>
+        )}
         <span className="sr-only">: {on ? 'yes' : 'no'}</span>
       </span>
-      {amenity.note != null && (
-        <span className="text-[0.7rem] font-mono tabular-nums text-[var(--color-ink-3)]">
-          {amenity.note}
-        </span>
-      )}
     </li>
   );
 }
@@ -475,8 +460,8 @@ function AmenityTile({ amenity }: { amenity: Amenity }) {
 function GlyphSvg({ children }: { children: React.ReactNode }) {
   return (
     <svg
-      width="26"
-      height="26"
+      width="16"
+      height="16"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -494,8 +479,8 @@ function CrossSlash() {
   return (
     <svg
       className="absolute inset-0"
-      width="26"
-      height="26"
+      width="16"
+      height="16"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"

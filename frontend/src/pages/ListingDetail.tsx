@@ -221,16 +221,19 @@ export default function ListingDetail() {
         listing={listing}
         images={images}
         imagesLoading={imagesQ.isLoading}
+        estimatesSlot={
+          /* The estimation chapter: MF reference + our runs, side by side —
+             in the prime slot after the description (the map moved into the
+             header). Renders nothing for listings with no estimable data. */
+          <Suspense fallback={null}>
+            <EstimationsBlock
+              listing={listing}
+              listingIds={childIds.length > 0 ? childIds : [listing.sreality_id]}
+              prefill={newEstimationPrefill}
+            />
+          </Suspense>
+        }
       />
-      {/* The estimation chapter: MF reference + our runs, side by side.
-          Renders nothing for listings with no estimable data. */}
-      <Suspense fallback={null}>
-        <EstimationsBlock
-          listing={listing}
-          listingIds={childIds.length > 0 ? childIds : [listing.sreality_id]}
-          prefill={newEstimationPrefill}
-        />
-      </Suspense>
       <Hairline />
       <Suspense fallback={null}>
         <ManualEstimatesBlock sreality_id={listing.sreality_id} />
@@ -331,8 +334,11 @@ function LatestActiveLink({
 /* -------------------------------------------------------------------------- */
 
 function Page({ children }: { children: React.ReactNode }) {
+  // max-w-5xl matches the platform's other work surfaces (Estimations,
+  // Buildings, Collections); the header uses the width for its two-column
+  // identity + map layout.
   return (
-    <div className="px-6 py-8 max-w-3xl mx-auto">{children}</div>
+    <div className="px-6 py-8 max-w-5xl mx-auto">{children}</div>
   );
 }
 

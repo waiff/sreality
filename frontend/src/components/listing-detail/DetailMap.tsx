@@ -7,9 +7,12 @@ interface Props {
   lat: number;
   lng: number;
   isActive: boolean;
+  /* Height override (default h-40) — the listing header embeds the map in
+   * its top-right column with a taller frame. */
+  heightClass?: string;
 }
 
-export default function DetailMap({ lat, lng, isActive }: Props) {
+export default function DetailMap({ lat, lng, isActive, heightClass }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
 
@@ -58,7 +61,12 @@ export default function DetailMap({ lat, lng, isActive }: Props) {
   }, [lat, lng, isActive]);
 
   return (
-    <div className="relative h-40 rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]">
+    <div
+      className={[
+        'relative rounded-[var(--radius-md)] overflow-hidden border border-[var(--color-rule)]',
+        heightClass ?? 'h-40',
+      ].join(' ')}
+    >
       <div
         ref={containerRef}
         className="absolute inset-0"

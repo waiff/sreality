@@ -127,6 +127,14 @@ source for active rules; ROADMAP is for sequencing.
   (immutable id; `property_id` regroups under the dedup engine), the page carries the
   property context. No stub listings for orphan runs — the listings table stays
   scrape-only.
+- **Layout pass (follow-up PR):** the page widened from `max-w-3xl` to `max-w-5xl`
+  (matching Estimations / Buildings); the header became two-column — identity + price
+  left, the **location map anchored top-right** (the standalone Location section is
+  gone) — with the Active/Inactive pill inline next to the disposition line and
+  **floor in the header meta line**. The Property/Building/Amenities grids collapsed
+  into one dense facts strip + compact amenity chips (duplicate Subtype dropped), and
+  the **Estimates section moved up into the old map slot** right after the
+  description, via `ListingOverview`'s `estimatesSlot`.
 
 ### 2026-06: On-card "Estimate" action in Browse (run + show yield in place)
 - Every **apartment** card in Browse > Map now carries a small bottom-right control.
