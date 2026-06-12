@@ -96,16 +96,11 @@ function Header({
   const ppm = fmtPricePerM2(listing.price_czk, listing.area_m2);
   const unit = hasPrice && listing.price_unit ? ` / ${listing.price_unit}` : '';
   const hasId = listing.sreality_id > 0;
-  const hasMap = listing.lat != null && listing.lng != null;
+  const { lat, lng } = listing;
+  const hasMap = lat != null && lng != null;
 
   return (
-    <div
-      className={
-        hasMap
-          ? 'mt-5 grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)] items-start'
-          : 'mt-5'
-      }
-    >
+    <div className="mt-5 grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)] items-start">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <p className="font-mono tabular-nums text-[var(--color-ink-2)] text-sm">
@@ -161,22 +156,29 @@ function Header({
           </p>
         )}
       </div>
-      {hasMap && (
-        <div className="w-full">
+      {/* The dossier's "file photo": the location map anchored top-right.
+          Missing coordinates keep the slot with an explicit note — silence
+          would read as a render failure, not a data fact. */}
+      <div className="w-full">
+        {hasMap ? (
           <Suspense
             fallback={
               <div className="h-[190px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)]" />
             }
           >
             <DetailMap
-              lat={listing.lat as number}
-              lng={listing.lng as number}
+              lat={lat}
+              lng={lng}
               isActive={listing.is_active}
               heightClass="h-[190px]"
             />
           </Suspense>
-        </div>
-      )}
+        ) : (
+          <div className="h-[190px] flex items-center justify-center text-sm text-[var(--color-ink-3)] border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)]">
+            No coordinates recorded
+          </div>
+        )}
+      </div>
     </div>
   );
 }
