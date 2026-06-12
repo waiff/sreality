@@ -192,20 +192,12 @@ def test_run_full_calls_mark_inactive_per_category_when_no_limit(patched_db):
     assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
 
     # Each call is scoped to its own (cm_text, ct_text) and carries the
-    # ids that came from that category's index walk only.
+    # ids that came from that category's index walk only. Expected labels
+    # derive from the parser maps so the set tracks CATEGORIES (the full
+    # cross product) instead of rotting on every coverage expansion.
     expected_pairs = {
-        ("byt", "pronajem"),
-        ("byt", "prodej"),
-        ("byt", "drazba"),
-        ("byt", "podil"),
-        ("dum", "pronajem"),
-        ("dum", "prodej"),
-        ("dum", "drazba"),
-        ("dum", "podil"),
-        ("komercni", "pronajem"),
-        ("komercni", "prodej"),
-        ("komercni", "drazba"),
-        ("komercni", "podil"),
+        (scraper_main.parser.CATEGORY_MAIN[cm], scraper_main.parser.CATEGORY_TYPE[ct])
+        for cm, ct in scraper_main.CATEGORIES
     }
     actual_pairs = {(cm, ct) for cm, ct, _ids in patched_db["mark_inactive"]}
     assert actual_pairs == expected_pairs
