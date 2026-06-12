@@ -16,9 +16,9 @@ from scripts.submit_condition_batch import (
 def test_caps_sit_safely_under_the_api_limit():
     # 256MB is the Anthropic Message Batches hard cap; the byte budget must
     # leave a wide margin, and the count cap matches the pre-Jun-4 value.
-    assert MAX_BATCH_BYTES == 150 * 1024 * 1024
+    assert MAX_BATCH_BYTES == 45 * 1024 * 1024
     assert MAX_BATCH_BYTES < 256 * 1024 * 1024
-    assert MAX_BATCH_REQUESTS == 2000
+    assert MAX_BATCH_REQUESTS == 600
 
 
 def test_never_flushes_an_empty_chunk():
