@@ -1,16 +1,19 @@
 name: "Scraping: Sreality index walk (Phase 2)"
 
 # portal: sreality
-# The fast half of the Phase-2 cadence split. Walks the COMPLETE index of all
-# six category pairs, bumps last_seen on still-listed ids (touch), flips
-# delisted ones to is_active=false (mark_inactive, under the completeness
-# guard), and enqueues new + price-changed ids into listing_detail_queue for
-# the asynchronous detail-drain. It does NO detail fetching, so it finishes in
-# minutes and delistings surface fast — decoupled from the slow per-listing
-# write that used to drag it.
+# The fast half of the Phase-2 cadence split, now on the shared portal
+# framework: `scraper.sreality_main --index-only` drives SrealityPortal through
+# the one generic portal_runner (the same loop every other portal uses). Walks
+# the COMPLETE index of all twelve category pairs (incl. drazba/podil;
+# district-split + national fallback above the deep-pagination cap), bumps
+# last_seen on still-listed ids (touch), flips delisted ones to is_active=false
+# (mark_inactive, under the 100% completeness guard), and enqueues new +
+# price-changed ids into listing_detail_queue (source='sreality'). It does NO
+# detail fetching, so it finishes in minutes and delistings surface fast.
 #
 # This replaces the index+detail+mark_inactive of the legacy scrape.yml (now a
-# dispatch-only fallback). The companion detail_drain.yml consumes the queue.
+# dispatch-only fallback running the unchanged `scraper.main` CLI — the
+# instant-revert path). The companion detail_drain.yml consumes the queue.
 # Records run_type='index' with index_pages>0, which is what the Health
 # liveness check keys off (freshness/delisting depend on the index walk, not
 # the drain).
@@ -19,7 +22,10 @@ name: "Scraping: Sreality index walk (Phase 2)"
 # tick under the same per-category walk-completeness rail (architectural rule
 # #3) so a truncated page never mass-flips live listings. GitHub throttles
 # scheduled workflows, so effective cadence is slower; Health liveness is tuned
-# to this (warn >90 min, fail >180 min).
+# to this (warn >90 min, fail >180 min). The --max-seconds budget (default
+# 1200 = 20 min) makes a slow/grown walk finalize CLEANLY between categories
+# instead of being SIGKILLed by the job timeout; already-walked categories are
+# complete (their sweep stays safe), the rest refresh next tick.
 #
 # Concurrency: cancel-in-progress=false so a long walk is never killed mid-walk;
 # the next tick queues behind it. Its own group keeps it isolated from the
@@ -33,6 +39,11 @@ on:
     - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
+      max_seconds:
+        description: "wall-clock budget; the walk finalizes cleanly before this (blank = 1200 = 20 min)"
+        required: false
+        default: ""
+        type: string
       dry_run:
         description: "Walk the index and log enqueue intent, but write nothing"
         required: false
@@ -47,8 +58,9 @@ jobs:
   index-walk:
     runs-on: ubuntu-latest
     # A complete index walk + touch + mark_inactive + enqueue is cheap (no
-    # detail fetches). 25 min is generous headroom; kept under the API's
-    # sweep_stuck_scrape_runs cutoff (90 min) so a live run is never finalized.
+    # detail fetches). The --max-seconds clean-stop is the real bound; this
+    # timeout is the generous outer backstop (budget + finalize headroom),
+    # kept under the API's sweep_stuck_scrape_runs cutoff (90 min).
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
@@ -65,10 +77,11 @@ jobs:
       - name: Run index walk
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '1200' }}
         run: |
-          ARGS="--index-only --no-image-downloads --no-condition-scoring --run-type index"
+          ARGS="--index-only --max-seconds $MAX_SECONDS"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS="$ARGS --dry-run"
           fi
-          echo "Running with: $ARGS"
-          python -m scraper.main $ARGS
+          echo "python -m scraper.sreality_main $ARGS"
+          eval "python -m scraper.sreality_main $ARGS"

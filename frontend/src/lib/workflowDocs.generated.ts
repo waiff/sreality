@@ -709,7 +709,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "detail_drain.yml",
     "name": "Scraping: Sreality detail drain (Phase 2)",
-    "description": "The slow half of the Phase-2 cadence split. Claims a bounded slice of listing_detail_queue (enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool, and writes them in batches via the set-based write_detail_batch (one transaction per ~100 listings) — targeting ~0.1-0.2 s/listing versus the ~1.5 s of the legacy per-listing write. New listings land with property_id NULL; the Tier-1 matcher is deferred to the recompute_property_stats straggler-attach phase.",
+    "description": "The slow half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --drain-only` drives SrealityPortal through the one generic portal_runner. Claims a bounded slice of listing_detail_queue (source='sreality', enqueued by index_walk.yml), fetches each listing's detail on a rate-limited worker pool (429/403 auto-penalize), and writes them in batches via the set-based write_detail_batch (one transaction per ~100 listings) on the Session-mode pooler — the Phase-1 prepared-statement win. New listings land with property_id NULL; the Tier-1 matcher is deferred to the recompute_property_stats straggler-attach phase.",
     "portal": "sreality",
     "manual": true,
     "schedules": [
@@ -723,27 +723,35 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "paths": null,
     "inputs": [
       {
-        "name": "max_detail_refetches",
-        "description": "Cap listings claimed + fetched this run (blank = 12000)",
+        "name": "max_seconds",
+        "description": "wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)",
         "required": false,
         "type": "string",
-        "default": null,
+        "default": "",
         "options": null
       },
       {
-        "name": "detail_workers",
-        "description": "Concurrent detail-fetch workers (blank = 8)",
+        "name": "max_detail",
+        "description": "cap listings claimed + fetched this run (blank = per-portal config, 12000)",
         "required": false,
         "type": "string",
-        "default": null,
+        "default": "",
         "options": null
       },
       {
-        "name": "detail_rate",
-        "description": "Global detail-fetch rate cap, req/s (blank = 6.0)",
+        "name": "workers",
+        "description": "concurrent detail-fetch workers (blank = per-portal config, 8)",
         "required": false,
         "type": "string",
-        "default": null,
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "global detail-fetch rate cap, req/s (blank = per-portal config, 6.0)",
+        "required": false,
+        "type": "string",
+        "default": "",
         "options": null
       },
       {
@@ -1289,7 +1297,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "index_walk.yml",
     "name": "Scraping: Sreality index walk (Phase 2)",
-    "description": "The fast half of the Phase-2 cadence split. Walks the COMPLETE index of all six category pairs, bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the completeness guard), and enqueues new + price-changed ids into listing_detail_queue for the asynchronous detail-drain. It does NO detail fetching, so it finishes in minutes and delistings surface fast — decoupled from the slow per-listing write that used to drag it.",
+    "description": "The fast half of the Phase-2 cadence split, now on the shared portal framework: `scraper.sreality_main --index-only` drives SrealityPortal through the one generic portal_runner (the same loop every other portal uses). Walks the COMPLETE index of all twelve category pairs (incl. drazba/podil; district-split + national fallback above the deep-pagination cap), bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the 100% completeness guard), and enqueues new + price-changed ids into listing_detail_queue (source='sreality'). It does NO detail fetching, so it finishes in minutes and delistings surface fast.",
     "portal": "sreality",
     "manual": true,
     "schedules": [
@@ -1302,6 +1310,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "onPullRequest": false,
     "paths": null,
     "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 1200 = 20 min)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
       {
         "name": "dry_run",
         "description": "Walk the index and log enqueue intent, but write nothing",
