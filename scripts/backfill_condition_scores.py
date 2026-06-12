@@ -260,6 +260,14 @@ def _select_pending(
     enabled kraje, or without a region yet, is parked, not scored. An
     empty effective list pauses scoring entirely.
 
+    Category scope: the two-axis rubric (building + apartment condition)
+    only carries meaning for byt/dum, so the selector hard-scopes to
+    those two category_main values. pozemek/ostatni listings — walked by
+    the scrapers since the category-parity expansion — would otherwise
+    enter the queue and bill the LLM for scores with no semantics. This
+    also parks komercni (previously selectable under the unfiltered
+    WHERE) and rows with category_main NULL.
+
     Sibling reuse: a listing is skipped while a same-property sibling
     already holds a GENUINE score (condition_levels_propagated_from IS
     NULL) — propagate_condition_levels copies that score over instead of
@@ -297,6 +305,7 @@ def _select_pending(
         + freshness_clause +
         "  AND cs.id IS NULL "
         "  AND l.region_id = ANY(%s::bigint[]) "
+        "  AND l.category_main IN ('byt', 'dum') "
         "  AND (l.property_id IS NULL OR NOT EXISTS ( "
         "    SELECT 1 FROM listings sib "
         "    WHERE sib.property_id = l.property_id "

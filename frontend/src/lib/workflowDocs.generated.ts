@@ -1289,7 +1289,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "index_walk.yml",
     "name": "Scraping: Sreality index walk (Phase 2)",
-    "description": "The fast half of the Phase-2 cadence split. Walks the COMPLETE index of all six category pairs, bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the completeness guard), and enqueues new + price-changed ids into listing_detail_queue for the asynchronous detail-drain. It does NO detail fetching, so it finishes in minutes and delistings surface fast — decoupled from the slow per-listing write that used to drag it.",
+    "description": "The fast half of the Phase-2 cadence split. Walks the COMPLETE index of every configured category pair (scraper.main.CATEGORIES), bumps last_seen on still-listed ids (touch), flips delisted ones to is_active=false (mark_inactive, under the completeness guard), and enqueues new + price-changed ids into listing_detail_queue for the asynchronous detail-drain. It does NO detail fetching, so it finishes in minutes and delistings surface fast — decoupled from the slow per-listing write that used to drag it.",
     "portal": "sreality",
     "manual": true,
     "schedules": [

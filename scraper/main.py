@@ -87,7 +87,14 @@ SUSPICIOUS_STOP_THRESHOLD = 0.30
 # those listings get no complete index walk, so mark_inactive never runs for
 # them (it is scoped per (source, category_main, category_type)) and a delisted
 # auction/share stays is_active=true forever — see the stuck-active backlog the
-# missing slices left behind.
+# missing slices left behind. pozemek (land) and ostatni (other) close the same
+# gap on the category_main axis: iDNES already ingests both, so without them
+# the cross-portal picture was asymmetric AND any historical sreality rows in
+# those categories were stuck active forever. The full cross product of
+# parser.CATEGORY_MAIN x parser.CATEGORY_TYPE is walked; every pair had
+# nonzero national inventory when probed (pozemek/prodej ~21k — over
+# SPLIT_THRESHOLD, district-split like any large pair; the split path is
+# pair-agnostic).
 CATEGORIES: tuple[tuple[int, int], ...] = (
     (1, 2),  # byt / pronajem
     (1, 1),  # byt / prodej
@@ -97,10 +104,18 @@ CATEGORIES: tuple[tuple[int, int], ...] = (
     (2, 1),  # dum / prodej
     (2, 3),  # dum / drazba
     (2, 4),  # dum / podil
+    (3, 2),  # pozemek / pronajem
+    (3, 1),  # pozemek / prodej
+    (3, 3),  # pozemek / drazba
+    (3, 4),  # pozemek / podil
     (4, 2),  # komercni / pronajem
     (4, 1),  # komercni / prodej
     (4, 3),  # komercni / drazba
     (4, 4),  # komercni / podil
+    (5, 2),  # ostatni / pronajem
+    (5, 1),  # ostatni / prodej
+    (5, 3),  # ostatni / drazba
+    (5, 4),  # ostatni / podil
 )
 
 
