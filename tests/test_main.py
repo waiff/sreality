@@ -306,6 +306,33 @@ def test_run_full_marks_inactive_when_walk_complete(patched_db, monkeypatch):
     assert len(patched_db["mark_inactive"]) == len(scraper_main.CATEGORIES)
 
 
+# --- category coverage (delisting depends on a complete walk per pair) ------
+
+
+def test_categories_is_the_full_category_cross_product():
+    """Every category_main x category_type pair the parser knows must be
+    walked: mark_inactive is scoped per (source, category_main,
+    category_type), so a missing slice never gets a complete walk and its
+    delisted rows stay is_active=true forever (first the drazba/podil gap,
+    then pozemek/ostatni). Every pair had nonzero live inventory when
+    probed, so none of the slices is a wasted walk."""
+    expected = {
+        (cm, ct)
+        for cm in scraper_main.parser.CATEGORY_MAIN
+        for ct in scraper_main.parser.CATEGORY_TYPE
+    }
+    assert set(scraper_main.CATEGORIES) == expected
+    # No duplicate pairs — each would double-walk and double-count.
+    assert len(scraper_main.CATEGORIES) == len(expected)
+
+
+def test_categories_include_pozemek_and_ostatni_sale():
+    # The two concrete slices the parity fix is about (iDNES ingests both;
+    # sreality's were stuck un-walked): land sale ~21k, other sale ~1.3k.
+    assert (3, 1) in scraper_main.CATEGORIES  # pozemek / prodej
+    assert (5, 1) in scraper_main.CATEGORIES  # ostatni / prodej
+
+
 # --- category-order rotation (detail-budget fairness) -----------------------
 
 

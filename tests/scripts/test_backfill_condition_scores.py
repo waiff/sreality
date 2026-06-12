@@ -87,6 +87,20 @@ def test_no_freshness_clause_when_max_age_days_zero():
     assert params == ([27], 10)
 
 
+# ---- _select_pending: category scope -----------------------------------------
+
+
+def test_category_scope_limits_scoring_to_byt_and_dum():
+    # The two-axis rubric (building + apartment) has no semantics for land
+    # (pozemek) or ostatni — both walked since the category-parity expansion —
+    # so the selector must never queue them for the LLM. komercni and
+    # category_main NULL are parked by the same clause.
+    conn = _make_conn([("fetchall", [])])
+    _select_pending(conn, region_ids=[27], max_age_days=30, limit=10)
+    sql = conn.cursor_obj.executed[0][0]
+    assert "l.category_main IN ('byt', 'dum')" in sql
+
+
 # ---- _select_pending: sibling-reuse exclusion --------------------------------
 
 
