@@ -26,12 +26,17 @@ export function ListingOverview({
   images = [],
   imagesLoading = false,
   showStatus = true,
+  headerExtras,
   estimatesSlot,
 }: {
   listing: ListingPublic;
   images?: ImagePublic[];
   imagesLoading?: boolean;
   showStatus?: boolean;
+  /* Chip row (portal links, active-sibling alert) rendered at the TOP of the
+   * header's left column — inside the grid, so the map column starts at the
+   * very top instead of below a stack of full-width rows. */
+  headerExtras?: React.ReactNode;
   /* The estimation chapter, rendered between description and gallery — the
    * listing page passes its EstimationsBlock here so the estimates sit in
    * the prime slot the location map used to occupy (the map lives in the
@@ -40,7 +45,7 @@ export function ListingOverview({
 }) {
   return (
     <>
-      <Header listing={listing} showStatus={showStatus} />
+      <Header listing={listing} showStatus={showStatus} extras={headerExtras} />
       <KeyFactsBlock listing={listing} />
       <DescriptionBlock listing={listing} />
       {estimatesSlot}
@@ -77,9 +82,11 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 function Header({
   listing,
   showStatus,
+  extras,
 }: {
   listing: ListingPublic;
   showStatus: boolean;
+  extras?: React.ReactNode;
 }) {
   const disposition = listing.disposition ?? '—';
   const area = fmtArea(listing.area_m2);
@@ -100,8 +107,9 @@ function Header({
   const hasMap = lat != null && lng != null;
 
   return (
-    <div className="mt-5 grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)] items-start">
+    <div className="mt-4 grid gap-x-8 gap-y-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,400px)] items-start">
       <div className="min-w-0">
+        {extras && <div className="mb-4">{extras}</div>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <p className="font-mono tabular-nums text-[var(--color-ink-2)] text-sm">
             <span>{disposition}</span>

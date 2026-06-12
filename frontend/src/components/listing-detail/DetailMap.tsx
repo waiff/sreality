@@ -22,7 +22,9 @@ export default function DetailMap({ lat, lng, isActive, heightClass }: Props) {
       container: containerRef.current,
       style: TILE_STYLE,
       center: [lng, lat],
-      zoom: 14.5,
+      // Two levels out from the original 14.5 — the header map is for grasping
+      // the neighbourhood context (river, arterials, districts), not the street.
+      zoom: 12.5,
       attributionControl: { compact: true },
       interactive: true,
       cooperativeGestures: false,

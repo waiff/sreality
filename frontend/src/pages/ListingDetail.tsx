@@ -212,15 +212,20 @@ export default function ListingDetail() {
         <Crumb />
         <NewEstimationButton prefill={newEstimationPrefill} />
       </div>
-      {/* Portal links live at the top — jumping out to the source listing is
-          a first-class action, not something to scroll for. One chip per
-          portal observation of this property. */}
-      <PortalLinksRow listing={listing} sources={sources} />
-      <LatestActiveLink listing={listing} sources={sources} />
       <ListingOverview
         listing={listing}
         images={images}
         imagesLoading={imagesQ.isLoading}
+        headerExtras={
+          /* Portal links live at the top — jumping out to the source listing
+             is a first-class action. One row: a chip per portal observation,
+             plus the active-sibling alert when this record is delisted.
+             Rendered inside the header grid so the map starts at the top. */
+          <div className="flex flex-wrap items-center gap-2">
+            <PortalLinksRow listing={listing} sources={sources} />
+            <LatestActiveLink listing={listing} sources={sources} />
+          </div>
+        }
         estimatesSlot={
           /* The estimation chapter: MF reference + our runs, side by side —
              in the prime slot after the description (the map moved into the
@@ -264,8 +269,9 @@ function PortalLinksRow({
   const urls = useMemo(() => listingUrlRows(sources, listing), [sources, listing]);
   const linkable = urls.filter((u) => u.url != null);
   if (linkable.length === 0) return null;
+  // Bare chips — the header's extras row provides the flex container.
   return (
-    <div className="mt-4 flex flex-wrap items-center gap-2">
+    <>
       {linkable.map((u) => (
         <a
           key={u.id}
@@ -293,7 +299,7 @@ function PortalLinksRow({
           <OutArrow />
         </a>
       ))}
-    </div>
+    </>
   );
 }
 
@@ -319,7 +325,7 @@ function LatestActiveLink({
   return (
     <Link
       to={`/listing/${liveSibling.sreality_id}`}
-      className="mt-4 inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] px-3 py-1.5 text-[0.8rem] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
+      className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] px-3 py-1.5 text-[0.8rem] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
     >
       <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]" aria-hidden />
       View the current active listing

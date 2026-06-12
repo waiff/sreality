@@ -161,6 +161,11 @@ source for active rules; ROADMAP is for sequencing.
   into one dense facts strip + compact amenity chips (duplicate Subtype dropped), and
   the **Estimates section moved up into the old map slot** right after the
   description, via `ListingOverview`'s `estimatesSlot`.
+- **Header compaction (second follow-up):** the portal chips + active-sibling alert
+  moved INSIDE the header grid's left column (`ListingOverview`'s `headerExtras`) as
+  one wrapping row, so the map column starts at the very top instead of below two
+  stacked full-width rows; the map zoomed out two levels (14.5 → 12.5) for
+  neighbourhood-scale context.
 
 ### 2026-06: On-card "Estimate" action in Browse (run + show yield in place)
 - Every **apartment** card in Browse > Map now carries a small bottom-right control.
