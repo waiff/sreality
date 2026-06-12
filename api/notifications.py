@@ -60,11 +60,14 @@ class DistrictChip(BaseModel):
     resolved pick carries `level` ('obec' | 'okres' | 'kraj' | 'locality') and
     the admin `id` (admin_boundaries.id for an admin level, or the containing
     obec_id for a 'locality' chip) and is matched by STABLE ID -- so an obec
-    pick can't collide with its same-named okres. A chip with no level/id (a
-    legacy saved filter) falls back to ILIKE-by-name across
-    `district` / `locality` / `okres` / `region`. `context` is the parent
-    municipality (display + legacy narrow); `excluded` flips the chip from an
-    INCLUDE to an EXCLUDE filter (NOT-ed in the matcher WHERE).
+    pick can't collide with its same-named okres. Free-text place matching
+    (the 'locality' street-pick branch and the no-level legacy fallback) goes
+    through `place_search_text` (street + locality, migration 182) so portals
+    that store the street outside `locality` (bazos) match too. A chip with no
+    level/id (a legacy saved filter) falls back to ILIKE-by-name across
+    `district` / `place_search_text` / `okres` / `region`. `context` is the
+    parent municipality (display + legacy narrow); `excluded` flips the chip
+    from an INCLUDE to an EXCLUDE filter (NOT-ed in the matcher WHERE).
     """
 
     name: str
@@ -289,12 +292,15 @@ def _build_match_clauses(
         where.append("l.locality_region_id = %(locality_region_id)s")
         params["locality_region_id"] = spec.locality_region_id
     if spec.districts:
-        # Per-chip predicate kept in lockstep with browse_stats (migration 172)
-        # and Browse (queries.ts): a resolved pick matches by STABLE ADMIN ID at
-        # its level (obec_id / okres_id / region_id) so an obec pick can't
-        # collide with its same-named okres; a 'locality' pick narrows to its
-        # containing obec + a locality-text match; a legacy chip with no level/id
-        # falls back to the name ILIKE across district/locality/okres/region.
+        # Per-chip predicate kept in lockstep with browse_stats (migration 182)
+        # and Browse (queries.ts districtsFilterClause): a resolved pick matches
+        # by STABLE ADMIN ID at its level (obec_id / okres_id / region_id) so an
+        # obec pick can't collide with its same-named okres; a 'locality' pick
+        # narrows to its containing obec + a place-text match; a legacy chip
+        # with no level/id falls back to the name ILIKE across
+        # district/place_search_text/okres/region. Free-text matching uses
+        # place_search_text (street + locality, migration 182), never bare
+        # locality — bazos stores the street outside locality.
         # INCLUDE chips are OR'd (match any); EXCLUDE chips are NOT-ed (subtract).
         _ID_COL = {"obec": "obec_id", "okres": "okres_id", "kraj": "region_id"}
         inc_clauses: list[str] = []
@@ -309,13 +315,13 @@ def _build_match_clauses(
                 # literals (psycopg treats a bare '%' as a malformed placeholder).
                 n_key = f"district_name_{i}"
                 params[n_key] = f"%{chip.name}%"
-                locality_match = f"l.locality ILIKE %({n_key})s"
+                place_match = f"l.place_search_text ILIKE %({n_key})s"
                 if chip.id is not None:
                     id_key = f"district_id_{i}"
                     params[id_key] = chip.id
-                    clause = f"(l.obec_id = %({id_key})s AND {locality_match})"
+                    clause = f"(l.obec_id = %({id_key})s AND {place_match})"
                 else:
-                    clause = locality_match
+                    clause = place_match
             else:
                 # Legacy / unresolved chip: name ILIKE across all name columns,
                 # AND'd with an optional parent-municipality context narrow.
@@ -323,7 +329,7 @@ def _build_match_clauses(
                 params[n_key] = f"%{chip.name}%"
                 name_half = (
                     f"(l.district ILIKE %({n_key})s "
-                    f"OR l.locality ILIKE %({n_key})s "
+                    f"OR l.place_search_text ILIKE %({n_key})s "
                     f"OR l.okres ILIKE %({n_key})s "
                     f"OR l.region ILIKE %({n_key})s)"
                 )
@@ -332,7 +338,7 @@ def _build_match_clauses(
                     params[c_key] = f"%{chip.context}%"
                     ctx_half = (
                         f"(l.district ILIKE %({c_key})s "
-                        f"OR l.locality ILIKE %({c_key})s "
+                        f"OR l.place_search_text ILIKE %({c_key})s "
                         f"OR l.okres ILIKE %({c_key})s "
                         f"OR l.region ILIKE %({c_key})s)"
                     )

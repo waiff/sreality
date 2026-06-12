@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_FILTERS } from './filters';
-import { effectiveBbox } from './queries';
+import { districtsFilterClause, effectiveBbox } from './queries';
 
 describe('effectiveBbox', () => {
   it('returns null when both modes are empty', () => {
@@ -95,5 +95,84 @@ describe('effectiveBbox', () => {
     });
     expect(got).not.toBeNull();
     expect(got!.north - 50).toBeCloseTo(0.00899, 4);
+  });
+});
+
+/* `districtsFilterClause` builds the PostgREST predicate for the location
+ * chips — the frontend's copy of the chip contract kept in lockstep with
+ * the watchdog matcher (`_build_match_clauses`) and browse_stats
+ * (migration 182). Pinned here so a drive-by edit can't silently change
+ * what a chip means on one surface only. */
+describe('districtsFilterClause', () => {
+  it('returns null with no chips', () => {
+    expect(districtsFilterClause([])).toBeNull();
+  });
+
+  it('matches a resolved obec chip by stable admin id, never by name', () => {
+    const got = districtsFilterClause([
+      { name: 'Jihlava', context: null, level: 'obec', id: 586846 },
+    ]);
+    expect(got).toBe('and(or(obec_id.eq.586846))');
+  });
+
+  it('matches okres / kraj chips on their own id columns', () => {
+    const got = districtsFilterClause([
+      { name: 'okres Jihlava', context: null, level: 'okres', id: 3707 },
+      { name: 'Kraj Vysočina', context: null, level: 'kraj', id: 108 },
+    ]);
+    expect(got).toBe('and(or(okres_id.eq.3707,region_id.eq.108))');
+  });
+
+  it('street pick = containing obec id AND place_search_text ILIKE', () => {
+    // The bazos regression: the street lives in `street`, not `locality`,
+    // so the text half must read place_search_text (street + locality).
+    const got = districtsFilterClause([
+      { name: 'Pezinská', context: 'Mladá Boleslav', level: 'locality', id: 535419 },
+    ]);
+    expect(got).toBe(
+      'and(or(and(obec_id.eq.535419,place_search_text.ilike."*Pezinská*")))',
+    );
+  });
+
+  it('legacy chip falls back to name ILIKE across the place columns', () => {
+    const got = districtsFilterClause([
+      { name: 'Edvarda Beneše', context: 'Plzeň' },
+    ]);
+    expect(got).toBe(
+      'and(or(and(or(district.ilike."*Edvarda Beneše*",'
+      + 'place_search_text.ilike."*Edvarda Beneše*",'
+      + 'okres.ilike."*Edvarda Beneše*",region.ilike."*Edvarda Beneše*"),'
+      + 'or(district.ilike."*Plzeň*",place_search_text.ilike."*Plzeň*",'
+      + 'okres.ilike."*Plzeň*",region.ilike."*Plzeň*"))))',
+    );
+  });
+
+  it('never references the bare locality column in any branch', () => {
+    const got = districtsFilterClause([
+      { name: 'Pezinská', context: null, level: 'locality', id: 535419 },
+      { name: 'Brno', context: 'Jihomoravský kraj' },
+      { name: 'Modřany', context: null, excluded: true },
+    ]);
+    expect(got).not.toBeNull();
+    expect(got!).not.toMatch(/[(,]locality\.ilike/);
+    expect(got!).toContain('place_search_text.ilike');
+  });
+
+  it('splits include and exclude chips into or(...) and not.or(...)', () => {
+    const got = districtsFilterClause([
+      { name: 'Jihlava', context: null, level: 'obec', id: 586846 },
+      { name: 'Modřany', context: null, level: 'locality', id: 554782, excluded: true },
+    ]);
+    expect(got).toBe(
+      'and(or(obec_id.eq.586846),'
+      + 'not.or(and(obec_id.eq.554782,place_search_text.ilike."*Modřany*")))',
+    );
+  });
+
+  it('escapes PostgREST breakout characters in chip names', () => {
+    const got = districtsFilterClause([
+      { name: 'Nové Město (u Brna), *', context: null },
+    ]);
+    expect(got).toContain('"*Nové Město \\(u Brna\\)\\, \\**"');
   });
 });

@@ -10,15 +10,20 @@
  *   value: DistrictChip[] | null  — selected chips
  *   onChange(next)                — null normalises to no constraint
  *
- * Each chip is `{name, context, excluded?}`. On pick, the suggestion's
- * `name` field becomes the chip's `name`; `deriveContext` walks
- * `regionalStructure` for the nearest `regional.municipality` and
+ * Each chip is `{name, context, excluded?, level?, id?}`. On pick, the
+ * suggestion's `name` field becomes the chip's `name`; `deriveContext`
+ * walks `regionalStructure` for the nearest `regional.municipality` and
  * sets that as `context` (or null for picks already at the
- * municipality / region / country level). The downstream filter
- * (queries.ts applyFilters + browse_stats migration 146 + the
- * Watchdog matcher in api/notifications.py) matches each chip as
- *   (district/locality/okres/region ILIKE *name*)
- *   AND (context IS NULL OR district/locality/okres/region ILIKE *context*)
+ * municipality / region / country level); `/maps/resolve` fills the
+ * admin `level` + `id`. The downstream filter (queries.ts
+ * districtsFilterClause + browse_stats migration 182 + the Watchdog
+ * matcher in api/notifications.py) matches a resolved chip by STABLE
+ * ADMIN ID at its level (obec_id/okres_id/region_id); a 'locality'
+ * (street/POI) pick by its containing obec_id AND
+ *   place_search_text ILIKE *name*    (street + locality combined)
+ * and a legacy chip (no level/id) by
+ *   (district/place_search_text/okres/region ILIKE *name*)
+ *   AND (context IS NULL OR district/place_search_text/okres/region ILIKE *context*)
  * INCLUDE chips OR'd (match any), then AND NOT-(OR of EXCLUDE chips). The
  * per-chip `−`/`+` button toggles `excluded` (red chip = subtract this
  * locality). This is the registry-aligned widget for both Browse and

@@ -126,7 +126,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "district_chip_list",
       "pg_column": "district",
       "default": null,
-      "description": "Match listings whose `district` (human-readable text) is in the list. Each chip is an object `{name: str, context: str | null}`: `name` is the primary phrase to match (ILIKE substring across `district` and `locality`), `context` is the parent municipality from Mapy.cz's `regionalStructure` that narrows the match when set (so picking the Plzeň entry for 'Edvarda Beneše' doesn't drag in the Olomouc + Hradec Králové streets of the same name). Multi-value AND-of-OR: a listing matches if ANY chip matches, and districts is AND'd with the other filters. Use `locality_district_id` for renames-stable matching.",
+      "description": "Location chips. Each chip is an object `{name: str, context: str | null, level: 'obec' | 'okres' | 'kraj' | 'locality' | null, id: int | null, excluded: bool}`. A resolved chip (level + id set) matches by STABLE ADMIN ID at its level (`obec_id` / `okres_id` / `region_id`); a 'locality' chip (street / POI / address pick) matches its containing `obec_id` AND an ILIKE substring on `place_search_text` (street + locality combined, so portals that store the street outside `locality` match too). A legacy chip (no level/id) falls back to ILIKE-by-name across `district` / `place_search_text` / `okres` / `region`, narrowed by `context` (the parent municipality from Mapy.cz's `regionalStructure`) when set. INCLUDE chips OR together; chips with `excluded: true` are subtracted from the result.",
       "category": "Spatial",
       "ui_control": "multiselect",
       "agendas": [
