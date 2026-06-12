@@ -59,8 +59,9 @@ scopes (byt/dum/chata/restaurace/kancelar/prostory/sklad × prodam/pronajmu), so
 sreality/idnes (rule #19) — it is **cadence-split**: `bazos_index_walk.yml` (every 6h, full
 walk + mark_inactive + enqueue) feeds the bounded `bazos_detail_drain.yml` (hourly,
 `--max-seconds` budget). A combined run can't do both inside one job (~1500 index pages ≈
-50 min eats the window, starving the drain); `scrape_bazos.yml` keeps that combined flow as a
-dispatch-only fallback for narrow ad-hoc runs. **Detail-page** raw HTML is staged in `portal_raw_pages`
+50 min eats the window, starving the drain); narrow ad-hoc runs go through the split
+workflows' dispatch inputs (`-f sale_type=… -f category=…`, or locality + radius) or
+`scraper.bazos_main` locally. **Detail-page** raw HTML is staged in `portal_raw_pages`
 (migration 099) before parsing (the parsed-state ledger + reparse-without-refetch capability); INDEX/search-page
 HTML is NOT staged — it was write-only dead weight (nothing reads `page_kind='index'`) and the per-page TOAST
 write was the dominant cost on slow HTML index walks, so all HTML portals (bazos/idnes/mmreality/remax/maxima)
@@ -89,7 +90,8 @@ also has an on-demand URL parser (`scraper/source_parsers/bezrealitky.py`, LLM) 
 estimation preview — a separate entry point that is unchanged by the scheduled scraper.
 
 **Data source (reality.idnes.cz).** A scheduled scraper (`scraper/idnes_client.py`,
-`idnes_parser.py`, `idnes_main.py`, workflow `scrape_idnes.yml` — pilot, every 6h) tagged
+`idnes_parser.py`, `idnes_main.py` — **cadence-split** like sreality/bazos:
+`idnes_index_walk.yml` every 6h feeds the hourly bounded `idnes_detail_drain.yml`) tagged
 `source='idnes'`. iDNES is an HTML portal (like bazos, not a JSON API) but a STRUCTURED one:
 `idnes_parser` reads the `<dl>` spec table, a clean price element, and **precise per-listing
 coordinates from the page's embedded map config** (`"center":[lon,lat]`), so there is no
@@ -107,9 +109,11 @@ job downloads the bytes to R2 (source-agnostic). NOTE: iDNES also has an on-dema
 estimation preview — a separate entry point unchanged by the scheduled scraper, which is why
 the Health dashboard's iDNES card shows BOTH a scraper and an on-demand-parser badge.
 
-**Data source (mmreality.cz).** A scheduled scraper (`scraper/mmreality_client.py`,
+**Data source (mmreality.cz).** A crawler (`scraper/mmreality_client.py`,
 `mmreality_parser.py`, `mmreality_main.py`, workflow `scrape_mmreality.yml` — pilot,
-every 6h + dispatch) tagged `source='mmreality'`. M&M Reality is server-rendered HTML
+**dispatch-only**: Cloudflare 403-blocks GitHub-hosted runner IPs, so the cron was removed
+while every scheduled run produced zero listings; re-enable only with non-datacenter
+egress) tagged `source='mmreality'`. M&M Reality is server-rendered HTML
 but **every detail page embeds a COMPLETE structured estate object** as a Vue
 `:property` prop (HTML-entity-encoded JSON), so `mmreality_parser.parse_detail` decodes
 that JSON rather than scraping markup: precise per-listing coordinates (`point`), typed
@@ -985,13 +989,14 @@ cron, disable the two new ones) and ad-hoc full walks. The bazos crawl is **cade
 like sreality (bazos walks 14 nationwide scopes, ~1500 index pages — a combined run starves the
 drain): `bazos_index_walk.yml` ("Scraping: Bazos index walk", cron `0 */6`, full walk +
 mark_inactive + enqueue) feeds `bazos_detail_drain.yml` ("Scraping: Bazos detail drain", cron
-`45 * * * *`, bounded `--max-seconds`). `scrape_bazos.yml` ("Scraping: Bazos crawler combined
-walk (fallback)") is the **dispatch-only** combined entry point for narrow ad-hoc runs. The
-bezrealitky scrape is
+`45 * * * *`, bounded `--max-seconds`). The bezrealitky scrape is
 `scrape_bezrealitky.yml` ("Scraping: Bezrealitky scraper (pilot)", every 6h + dispatch; runs
-both index walk + detail drain in one job via `bezrealitky_main`). The mmreality scrape is
-`scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", every 6h + dispatch; runs
-both phases in one job via `mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
+both index walk + detail drain in one job via `bezrealitky_main`). The maxima scrape is
+`scrape_maxima.yml` ("Scraping: Maxima Reality scraper (pilot)", every 6h + dispatch; the
+~220-listing catalogue fits both phases in one job via `maxima_main`). The mmreality scrape is
+`scrape_mmreality.yml` ("Scraping: M&M Reality scraper (pilot)", **dispatch-only** — Cloudflare
+403-blocks GitHub-hosted runner IPs, so its cron was removed; runs both phases in one job via
+`mmreality_main`, bounded by `--max-pages`/`--max-detail`). The remax
 scrape is `scrape_remax.yml` ("Scraping: RE/MAX scraper (pilot)", every 6h + dispatch; runs both
 phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds` budget so the
 ~7,900-listing backlog drains over several ticks). The idnes scrape is
@@ -999,15 +1004,24 @@ phases in one job via `remax_main`, bounded by `--max-detail` + a `--max-seconds
 combined run's full index starves the drain): `idnes_index_walk.yml` ("Scraping: iDNES Reality
 index walk", `idnes_main --index-only`, cron `15 */6`, full complete-walk + mark_inactive +
 enqueue) feeds `idnes_detail_drain.yml` ("Scraping: iDNES Reality detail drain", `--drain-only`,
-cron `30 */2`, bounded `--max-detail`). `scrape_idnes.yml` ("Scraping: iDNES Reality combined
-walk (fallback)") is the **dispatch-only** combined entry point (ad-hoc full runs + small
-`-f max_pages=N` validation passes). The dedup/properties track adds
+hourly cron `30 * * * *`, bounded by a `--max-seconds` wall-clock budget; with
+`SCRAPE_CHAIN_TOKEN` it re-dispatches itself while the queue has work, for near-continuous
+backlog drains). There is no combined bazos/idnes fallback workflow anymore — sreality's
+`scrape.yml` is the only retained combined fallback (its `_run_full` is the instant revert for
+the split); for the other portals an ad-hoc combined run is `python -m scraper.<portal>_main`
+locally. The dedup/properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
 singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
 property + clears the dirty queue), `dedup_engine.yml` (daily street+disposition dedup engine +
 auto-merge; rule #15), and
-`compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Run any directly:
+`compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor
+workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow failures", cron
+`*/30` — records failed / timed-out / startup-failed runs into `workflow_failures` so the Health
+page can list them; GitHub only emails about failed *scheduled* runs) and `llm_health.yml`
+("Monitoring: LLM pipeline liveness", hourly — goes red when `llm_calls` has been idle for hours
+while condition-scoring work is pending, catching the silent dead-key/no-credit mode). Run any
+directly:
 - CLI: `gh workflow run index_walk.yml --ref <branch>` (or `detail_drain.yml`, `-f` for flags).
   Watch with `gh run list --workflow=index_walk.yml` then `gh run watch`.
 - Browser: GitHub repo → **Actions** → the workflow → **Run workflow** → pick branch + optional
@@ -1035,7 +1049,7 @@ from the slow "download each ad" write:
   liveness keys off). Uses the **transaction pooler** (`connect()`) — bulk set-based statements,
   no per-listing loop.
 - **`detail_drain.yml` (slow, async, bounded).** Claims a bounded slice of the queue
-  (`--max-detail-refetches`, default 6000), fetches details on a rate-limited pool, and writes
+  (`--max-detail-refetches`, the workflow passes 12000), fetches details on a rate-limited pool, and writes
   them **batched** via `db.write_detail_batch` (set-based `jsonb_to_recordset`, one transaction
   per ~100 listings, ~0.1–0.2 s/listing). Uses the **session pooler** (`connect_session()`) for
   prepared statements. New listings land with `property_id` NULL and become **singletons** via
@@ -1068,9 +1082,23 @@ the selector targets only listings whose geo-derived `region_id` is in
 "Hodnocení stavu — kraje" toggles; empty = paused; `region_id` NULL = parked), and
 `propagate_condition_levels` copies a property's genuine score to its cross-portal siblings
 (`listings.condition_levels_propagated_from` records provenance) before every submit/backfill,
-so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope. **Images** stay decoupled (`images.yml`, `--images-only`,
-2-hourly); both new workflows pass `--no-image-downloads`. Neither `images.yml` nor the drain's
-write phase downloads bytes — the drain only writes image-URL rows.
+so a duplicate never re-bills the LLM. `check_llm_health` mirrors the same scope.
+
+**Images** stay decoupled across three workflows (both halves of the scrape split pass
+`--no-image-downloads`; the drain's write phase only records image-URL rows — bytes land in R2
+via these jobs):
+- `images.yml` ("Scraping: image backlog drain (sharded)", 2-hourly) — THE deep backlog drain
+  across ALL portals, horizontally **sharded into 4 parallel jobs** (each owns the
+  `image_id mod 4 == shard` slice via `--image-shard k/4`), each with its own per-shard cap,
+  suspicious-stop circuit-breaker, and runner IP.
+- `images_fresh.yml` ("Scraping: fresh-listing image fast lane", cron `*/15` + self-chaining via
+  `SCRAPE_CHAIN_TOKEN` while work remains) — drains the newest ACTIVE listings' photos first so
+  a freshly-scraped card renders an image within minutes instead of waiting for the 2-hourly
+  drain.
+- `refresh_stale_images.yml` ("Jobs: refresh stale image URLs", every 6h) — re-enqueues active
+  listings whose un-downloaded image URLs have rotated/gone stale into `listing_detail_queue`
+  (low priority) so the detail drain repoints the URLs and the backfill can then store the
+  bytes.
 
 **Cadence:** `*/15` for each half, deliberately — frequent index walks surface delistings fast,
 while the bounded drain keeps a steady, polite fetch volume. GitHub throttles scheduled
@@ -1084,35 +1112,62 @@ run is never killed mid-batch; the next tick queues behind it. Per-category mark
 immediately after each category's walk, so even a timed-out index walk leaves a consistent
 partial result.
 
-The image backfill (`images.yml`) and the detail-drain both write `scrape_runs` rows, but only
-the **index walk** sets `index_pages>0` — so "last scrape", the liveness check, and
-reconciliation track the index walk specifically, while the 24h new/updated/error counters sum
-across the drain's `index_pages=0` rows too (see `scraper_health_checks()`, migration 105).
+The detail-drain writes `scrape_runs` rows too (`run_type='detail'`), but only the **index
+walk** sets `index_pages>0` — so "last scrape", the liveness check, and reconciliation track
+the index walk specifically, while the 24h new/updated/error counters sum across the drain's
+`index_pages=0` rows too (see `scraper_health_checks()`, migration 105). The image backfill
+(`--images-only`) deliberately writes NO `scrape_runs` row — recording it once polluted
+liveness/reconciliation with `index_pages=0` noise.
 
 ## Reading the logs
 
-The scraper emits structured progress lines:
+The scheduled pipeline logs in two halves; the shared `portal_runner` emits the same line
+shapes for every portal (with its own `source=`), so this reads the same for bazos/idnes/etc.
 
-- `INDEX offset=N estates=M total=K` per search page (offset/limit paging)
-- `INDEX total=N pages=M` once at end of index walk
-- `PLAN unchanged=N refetch=M` once after deciding what to fetch
-- `PLAN priority_retry=N` once if any listings have prior failure rows
-- `PLAN cap=N deferred=M` once if the per-run refetch cap kicks in
-- `DETAIL starting refetch=N workers=W` once before the refetch loop (detail fetches run on a
-  `W`-thread pool paced by a shared rate limiter; DB writes stay serial on the main thread)
-- `DETAIL progress=N/M new=... updated=... gone=... errors=...` every 50 refetches
-- `RATE penalize status=429|403 url=...` when the portal throttles us and the limiter widens its
-  interval (auto-recovers on subsequent healthy fetches)
-- `DETAIL id=... new|updated|unchanged` per refetched listing
-- `IMAGE id=... inserted=N` per listing with new image rows recorded
-- `DETAIL id=... gone (is_active=false)` per listing whose detail fetch reported it delisted
+**Index walk** (`index_walk.yml` and the per-portal walks):
+- `CATEGORY start cm=... ct=...` per category pair
+- `INDEX offset=N estates=M total=K` per search page (offset/limit paging; sreality)
+- `SPLIT cm=... ct=... result_size=N > T: walking D districts` when a sreality category exceeds
+  the deep-pagination window and is walked per-district
+- `PLAN unchanged=N refetch=M` per category walk (per district when split) after diffing index
+  prices against the DB; `PLAN priority_retry=N` if any listings have prior failure rows
+  (sreality — the other portals go straight to ENQUEUE)
+- `ENQUEUE enqueued=N new=... changed=... priority=...` per category — the ids handed to the
+  drain via `listing_detail_queue`
 - `INACTIVE cm=... ct=... marked=N collected=M result_size=K` per category after a
   completeness-checked mark_inactive
 - `INACTIVE skipped cm=... ct=...` per category whose walk looked truncated (flip suppressed)
-- `RUN done pages=... new=... updated=... unchanged=... gone=... errors=...`
-- `IMAGES pending=N cap=N workers=N` once before the image-download phase
-- `IMAGES progress=N/M ...` every 50 images during the phase
-- `IMAGES done downloaded=... errors=... attempted=...` after image phase
+- `RECONCILE cm=... ct=... sreality=... collected=... active=...` — portal-reported total vs
+  collected vs our active DB count (drift feeds the Health page)
+- `INDEX total=N pages=M enqueued=K` once at end of the walk
+- `RUN done pages=N enqueued=M inactive=K errors=E`
+
+**Detail drain** (`detail_drain.yml` and the per-portal drains):
+- `DRAIN reclaimed stale claims=N` when a prior SIGKILLed run left claims behind
+- `DRAIN starting source=... max_claims=... workers=W batch=B budget=Ss` once
+- `DETAIL id=... gone (is_active=false)` / `DETAIL id=... error: ...` per non-ok listing
+- `DRAIN flush size=N new=... updated=... unchanged=... images=...` per batched write
+  (one transaction per ~100 listings)
+- `DRAIN progress claimed=N new=... updated=... unchanged=... gone=... errors=... buffered=...`
+  per claim chunk
+- `DRAIN time budget Ss reached at claimed=N; finalizing cleanly` when `--max-seconds` stops
+  the run before the job timeout
+- `RATE penalize status=429|403 url=...` when the portal throttles us and the limiter widens its
+  interval (auto-recovers on subsequent healthy fetches)
+- `RUN done pages=0 new=... updated=... unchanged=... gone=... errors=... claimed=...`
+
+**Image workflows** (`images.yml` / `images_fresh.yml`, `--images-only`):
+- `IMAGES start cap=... workers=... active_only=... shard=... sources=...` once
+- `IMAGES progress=N downloaded=... errors=... taken_down=... source_unavailable=...` every 50
+- `IMAGE listing_taken_down sid=... marked=N` / `IMAGE source_unavailable id=...` per classified
+  failure (an inline freshness check flips a taken-down listing inactive + bulk-marks its images)
+- `IMAGES STOP suspicious ...` when the transient-failure circuit-breaker trips (exits 75; the
+  next cron tick retries)
+- `IMAGES done downloaded=... errors=... taken_down=... source_unavailable=... attempted=...`
+
+The dispatch-only `scrape.yml` fallback additionally emits the legacy coupled-path lines
+(`PLAN cap=N deferred=M`, `DETAIL starting refetch=N workers=W`, `DETAIL progress=N/M ...`,
+`DETAIL id=... new|updated|unchanged`, `IMAGE id=... inserted=N`).
 
 A run ending with `errors > 0` is not necessarily a failure (single-listing fetch errors are
 tolerated). A run that did not emit a `RUN done` line is a real failure — check the GitHub
