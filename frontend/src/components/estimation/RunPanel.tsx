@@ -1741,10 +1741,10 @@ function pickSkillNameFromTrace(trace: Trace | null): string | null {
 const DEFAULT_SKILL_NAME = 'rental_estimator_full_v1';
 
 /* Positions the floating panel column to the right of the centered
- * `max-w-3xl` page body. Built so the panel fills the *residual*
+ * `max-w-5xl` page body. Built so the panel fills the *residual*
  * horizontal space when there is one, and falls back to a usable
  * right-pinned width on narrower viewports.                       */
-const PANEL_LEFT = 'max(1rem, calc(50% + 24rem + 1rem))';
+const PANEL_LEFT = 'max(1rem, calc(50% + 32rem + 1rem))';
 const PANEL_RIGHT = '1rem';
 const PANEL_TOP = '3.75rem';
 const PANEL_MAX_HEIGHT = 'calc(100dvh - 4.5rem)';

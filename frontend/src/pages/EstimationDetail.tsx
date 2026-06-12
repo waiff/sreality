@@ -167,7 +167,7 @@ function subjectAsListing(run: EstimationRun): ListingPublic | null {
 /* -------------------------------------------------------------------------- */
 
 function Page({ children }: { children: React.ReactNode }) {
-  return <div className="px-6 py-8 max-w-3xl mx-auto">{children}</div>;
+  return <div className="px-6 py-8 max-w-5xl mx-auto">{children}</div>;
 }
 
 function Hairline() {
