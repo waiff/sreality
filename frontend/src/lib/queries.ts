@@ -131,6 +131,55 @@ const escapeIlikePattern = (raw: string): string => {
   return `"*${escaped}*"`;
 };
 
+/* PostgREST `or=(...)` predicate for the location chips, or null when no
+ * chips are set. Each chip resolves to a STABLE ADMIN ID at the level the
+ * user picked (migration 171/172): an obec pick matches `obec_id`, an okres
+ * pick `okres_id`, a kraj pick `region_id` — so picking obec "Jihlava" can't
+ * collide with its same-named okres. A `locality` pick (street / POI /
+ * address) matches its containing `obec_id` AND an ILIKE on
+ * `place_search_text` (street + locality, migration 182 — bazos stores the
+ * street outside `locality`, so bare `locality` would miss it), narrowing a
+ * street to its municipality without dragging in same-named streets
+ * elsewhere. A legacy / unresolved chip (no level/id — a pre-resolution
+ * saved filter, or a point that matched no admin unit) falls back to the
+ * name ILIKE across district/place_search_text/okres/region with an
+ * optional parent-municipality context narrow.
+ *
+ * Chips split by `excluded`: INCLUDE chips are OR'd (match any), then
+ * AND'd with NOT-(OR of the EXCLUDE chips) so an excluded locality is
+ * subtracted from the cohort. Combined into a single `and(...)` tree so
+ * PostgREST AND's the two groups. Kept in lockstep with the watchdog
+ * matcher (`_build_match_clauses`) and browse_stats (migration 182),
+ * which apply the same per-chip predicate + include/exclude split. */
+export const districtsFilterClause = (districts: DistrictChip[]): string | null => {
+  if (!districts.length) return null;
+  const ID_COL: Record<string, string> = {
+    obec: 'obec_id', okres: 'okres_id', kraj: 'region_id',
+  };
+  const chipClause = (d: DistrictChip): string => {
+    if (d.id != null && d.level != null && d.level in ID_COL) {
+      return `${ID_COL[d.level]}.eq.${d.id}`;
+    }
+    const namePat = escapeIlikePattern(d.name);
+    if (d.level === 'locality') {
+      const loc = `place_search_text.ilike.${namePat}`;
+      return d.id != null ? `and(obec_id.eq.${d.id},${loc})` : loc;
+    }
+    const cols = (pat: string): string =>
+      `district.ilike.${pat},place_search_text.ilike.${pat},okres.ilike.${pat},region.ilike.${pat}`;
+    const nameHalf = `or(${cols(namePat)})`;
+    if (!d.context) return nameHalf;
+    const ctxPat = escapeIlikePattern(d.context);
+    return `and(${nameHalf},or(${cols(ctxPat)}))`;
+  };
+  const inc = districts.filter((d) => !d.excluded).map(chipClause);
+  const exc = districts.filter((d) => d.excluded).map(chipClause);
+  const groups: string[] = [];
+  if (inc.length) groups.push(`or(${inc.join(',')})`);
+  if (exc.length) groups.push(`not.or(${exc.join(',')})`);
+  return groups.length ? `and(${groups.join(',')})` : null;
+};
+
 /* Generic identity-typed helper. Postgrest's filter methods all return the
  * same builder, so passing the chain through any subset of them preserves
  * the input type at runtime.
@@ -141,9 +190,9 @@ const escapeIlikePattern = (raw: string): string => {
  * What stays hand-coded here is the small set of irregular shapes:
  * the `status` multi-enum → boolean column predicate, the
  * days-ago → ISO timestamp translation, the 1-enum → IN-over-many
- * `building_material` expansion, the multi-chip district ILIKE OR
- * predicate, and the bbox spatial predicates that aren't registry
- * filters at all. The drift test in registryQueryBuilder.test.ts
+ * `building_material` expansion, the multi-chip district predicate
+ * (districtsFilterClause), and the bbox spatial predicates that aren't
+ * registry filters at all. The drift test in registryQueryBuilder.test.ts
  * fails CI if a new registry filter is added that fits no path. */
 const applyFilters = <T>(q: T, f: ListingFilters): T => {
   let r = applyRegistryFilters(q, f) as unknown as {
@@ -168,50 +217,8 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
    * "changed" = newest content snapshot (last_change_at) within N days. */
   if (f.recentlyAddedDays != null) r = r.gte('first_seen_at', isoNDaysAgo(f.recentlyAddedDays));
   if (f.recentlyChangedDays != null) r = r.gte('last_change_at', isoNDaysAgo(f.recentlyChangedDays));
-  if (f.districts.length) {
-    /* Each chip resolves to a STABLE ADMIN ID at the level the user picked
-     * (migration 171/172): an obec pick matches `obec_id`, an okres pick
-     * `okres_id`, a kraj pick `region_id` — so picking obec "Jihlava" can't
-     * collide with its same-named okres. A `locality` pick (street / POI /
-     * address) matches its containing `obec_id` AND a `locality` ILIKE on the
-     * place name, so a street narrows to its municipality without dragging in
-     * same-named streets elsewhere. A legacy / unresolved chip (no level/id —
-     * a pre-resolution saved filter, or a point that matched no admin unit)
-     * falls back to the old name ILIKE across district/locality/okres/region
-     * with an optional parent-municipality context narrow.
-     *
-     * Chips split by `excluded`: INCLUDE chips are OR'd (match any), then
-     * AND'd with NOT-(OR of the EXCLUDE chips) so an excluded locality is
-     * subtracted from the cohort. Combined into a single `and(...)` tree so
-     * PostgREST AND's the two groups. Kept in lockstep with the watchdog
-     * matcher (`_build_match_clauses`) and browse_stats (migration 172),
-     * which apply the same per-chip predicate + include/exclude split. */
-    const ID_COL: Record<string, string> = {
-      obec: 'obec_id', okres: 'okres_id', kraj: 'region_id',
-    };
-    const chipClause = (d: DistrictChip): string => {
-      if (d.id != null && d.level != null && d.level in ID_COL) {
-        return `${ID_COL[d.level]}.eq.${d.id}`;
-      }
-      const namePat = escapeIlikePattern(d.name);
-      if (d.level === 'locality') {
-        const loc = `locality.ilike.${namePat}`;
-        return d.id != null ? `and(obec_id.eq.${d.id},${loc})` : loc;
-      }
-      const cols = (pat: string): string =>
-        `district.ilike.${pat},locality.ilike.${pat},okres.ilike.${pat},region.ilike.${pat}`;
-      const nameHalf = `or(${cols(namePat)})`;
-      if (!d.context) return nameHalf;
-      const ctxPat = escapeIlikePattern(d.context);
-      return `and(${nameHalf},or(${cols(ctxPat)}))`;
-    };
-    const inc = f.districts.filter((d) => !d.excluded).map(chipClause);
-    const exc = f.districts.filter((d) => d.excluded).map(chipClause);
-    const groups: string[] = [];
-    if (inc.length) groups.push(`or(${inc.join(',')})`);
-    if (exc.length) groups.push(`not.or(${exc.join(',')})`);
-    if (groups.length) r = r.or(`and(${groups.join(',')})`);
-  }
+  const districtsClause = districtsFilterClause(f.districts);
+  if (districtsClause) r = r.or(districtsClause);
   if (f.buildingMaterial.length) {
     r = r.in('building_type', buildingMaterialToValues(f.buildingMaterial));
   }

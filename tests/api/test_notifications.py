@@ -167,9 +167,11 @@ def test_build_clauses_no_subtype_by_default() -> None:
 
 def test_build_clauses_district_chip_without_context() -> None:
     """A chip with `context=None` produces a single (district ILIKE name OR
-    locality ILIKE name) clause — same shape as the migration 067
+    place-text ILIKE name) clause — same shape as the migration 067
     behaviour, preserved for picks at the municipality / okres / kraj
-    level (where there's nothing finer to narrow against)."""
+    level (where there's nothing finer to narrow against). Free-text
+    matching reads `place_search_text` (street + locality, migration 182),
+    never bare `locality` — bazos stores the street outside locality."""
     spec = WatchdogFilterSpec(
         districts=[{"name": "okres Jihlava", "context": None}],
     )
@@ -179,7 +181,8 @@ def test_build_clauses_district_chip_without_context() -> None:
     # a bare '%' in the query string is a malformed psycopg placeholder and
     # raised at execute time, silently killing every matcher pass.
     assert "l.district ILIKE %(district_name_0)s" in district_clause
-    assert "l.locality ILIKE %(district_name_0)s" in district_clause
+    assert "l.place_search_text ILIKE %(district_name_0)s" in district_clause
+    assert "l.locality ILIKE" not in district_clause
     assert "'%'" not in district_clause
     assert " AND " not in district_clause
     assert params["district_name_0"] == "%okres Jihlava%"
@@ -308,7 +311,7 @@ def test_build_clauses_okres_and_kraj_chips_match_their_id_columns() -> None:
 
 
 def test_build_clauses_locality_chip_narrows_to_containing_obec() -> None:
-    """A street/POI pick matches its containing obec_id AND a locality-text
+    """A street/POI pick matches its containing obec_id AND a place-text
     ILIKE — scoped to the municipality, no cross-city street collisions."""
     spec = WatchdogFilterSpec(
         districts=[
@@ -318,19 +321,44 @@ def test_build_clauses_locality_chip_narrows_to_containing_obec() -> None:
     where, params = _build_match_clauses(spec)
     clause = next(w for w in where if "district_id_0" in w)
     assert "l.obec_id = %(district_id_0)s" in clause
-    assert "l.locality ILIKE %(district_name_0)s" in clause
+    assert "l.place_search_text ILIKE %(district_name_0)s" in clause
     assert params["district_id_0"] == 554791
     assert params["district_name_0"] == "%Edvarda Beneše%"
     assert "'%'" not in clause  # wildcards stay in the bound value
 
 
+def test_build_clauses_locality_chip_never_matches_bare_locality() -> None:
+    """Regression for the invisible-bazos-listing bug: bazos stores the town
+    in `locality` and the street in `street`, so a street pick matched on
+    bare `locality` can never see a bazos listing. Free-text place matching
+    must go through `place_search_text` (street + locality, migration 182)
+    in EVERY chip branch — street pick, legacy fallback, include and
+    exclude alike."""
+    spec = WatchdogFilterSpec(
+        districts=[
+            {"name": "Pezinská", "level": "locality", "id": 535419},
+            {"name": "Pezinská", "level": "locality", "id": 535419,
+             "excluded": True},
+            {"name": "Brno", "context": "Jihomoravský kraj"},
+        ],
+    )
+    where, _params = _build_match_clauses(spec)
+    chip_clauses = [w for w in where if "district_name_" in w]
+    assert chip_clauses, "expected district chip clauses"
+    for clause in chip_clauses:
+        assert "l.locality ILIKE" not in clause
+    assert any("l.place_search_text ILIKE" in w for w in chip_clauses)
+
+
 def test_build_clauses_unresolved_chip_falls_back_to_name_match() -> None:
     """A chip with no level/id (legacy saved filter) keeps the name-ILIKE
-    predicate across district/locality/okres/region — never breaks."""
+    predicate across district/place_search_text/okres/region — never
+    breaks, and pre-#409 street chips gain street matching too."""
     spec = WatchdogFilterSpec(districts=[{"name": "Brno", "context": None}])
     where, params = _build_match_clauses(spec)
     clause = next(w for w in where if "district_name_0" in w)
     assert "l.okres ILIKE %(district_name_0)s" in clause
+    assert "l.place_search_text ILIKE %(district_name_0)s" in clause
     assert "district_id_0" not in params
 
 

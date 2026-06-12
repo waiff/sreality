@@ -19,7 +19,7 @@
  *
  * Irregular filter shapes (status enum → boolean column predicate,
  * days-ago → ISO timestamp, building_material → many-buckets-to-many
- * building_type expansion, districts → multi-column ILIKE OR predicate, tags →
+ * building_type expansion, districts → admin-id + place-text predicate, tags →
  * not yet wired in PostgREST) stay hand-coded in `queries.ts` and
  * are listed in HAND_CODED_BROWSE_FILTERS so the dispatcher skips
  * them. The drift test (`registryQueryBuilder.test.ts`) asserts
@@ -47,7 +47,7 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   'recently_changed_days',
   // One enum → IN over multiple building_type values (cihla/panel/smisena/ostatni-bucket).
   'building_material',
-  // Multi-chip → multi-column ILIKE OR predicate.
+  // Multi-chip → admin-id match + place_search_text ILIKE (districtsFilterClause).
   'districts',
   // Multi-select enums whose '__unknown__' sentinel needs an `.or(is.null,…)`
   // predicate the plain `.in` auto-path can't express.

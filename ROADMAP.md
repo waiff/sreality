@@ -6,6 +6,27 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Street picks see every portal (place_search_text)
+
+- **Bug:** a street-level location chip (e.g. "Pezinská" in Mladá Boleslav) matched
+  only the free-text `locality` column — but bazos stores the town in `locality` and
+  the street in the structured `street` column, so ~12k active bazos listings with a
+  known street were invisible to street picks even when obec, bbox and deal matched.
+- **Fix — one canonical match column (migration 182):** `properties_public` gained
+  `place_search_text` = `concat_ws(', ', street, locality)`, the single definition of
+  "the free-text place words of a row". All three chip-matching surfaces (Browse
+  Map/Table via PostgREST, Browse Stats `browse_stats_properties`, the watchdog
+  matcher `_build_match_clauses`) now ILIKE that ONE column wherever they consulted
+  `locality` — the street-pick branch *and* the legacy no-level fallback, include and
+  exclude alike, so pre-resolution saved chips behave identically. PostgREST can only
+  filter view columns, so a view column is the one mechanism that centralizes the
+  semantic for every surface; a future portal that lands streets in `street` is
+  covered with no further work.
+- The frontend chip predicate moved out of `applyFilters` into the exported pure
+  `districtsFilterClause` (queries.ts) with unit tests pinning every branch; matcher
+  tests now assert no branch references bare `locality`. The agent/operator-facing
+  `districts` registry description was rewritten (it predated level/id chips).
+
 ### 2026-06: Sprint D — architecture unification + dedup keying + market parity
 
 - **sreality on the shared Portal framework** (PR #439): new `scraper/sreality_main.py`
