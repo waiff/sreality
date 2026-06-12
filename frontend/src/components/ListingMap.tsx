@@ -310,6 +310,11 @@ interface Props {
    * mouseenter/mouseleave events outward through onHover. */
   hoveredIds: ReadonlySet<number>;
   onHover: (ids: ReadonlyArray<number> | null) => void;
+  /* Which pane originated the current hover. The locator halo renders
+   * only for 'list' hovers — echoing a map-origin hover back onto the
+   * map would just redraw under the cursor (and a cluster hover would
+   * drop dozens of halos at once). */
+  hoverOrigin?: 'map' | 'list' | null;
   /* When set (i.e. the operator chose centre+radius mode in the
    * sidebar) the map renders a dashed copper circle around the
    * point so the cohort's geographic scope is visible. The circle
@@ -391,6 +396,7 @@ export default function ListingMap({
   onBoundsChange,
   hoveredIds,
   onHover,
+  hoverOrigin = null,
   centerCircle,
   flyTo,
   cities,
@@ -956,6 +962,50 @@ export default function ListingMap({
           .addTo(map);
       });
 
+      /* Locator halo — the card→map "where is it" answer. A separate
+       * (unclustered) source fed from the hovered rows' coordinates and
+       * drawn above every listing layer, so the highlight lands at the
+       * property's true position even when its dot is currently absorbed
+       * into a cluster bubble: the ochre pool + ring sit on top of the
+       * group and the pin-dot marks the exact spot inside it. */
+      map.addSource('hover-halo', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'hover-halo-glow',
+        type: 'circle',
+        source: 'hover-halo',
+        paint: {
+          'circle-radius': 22,
+          'circle-color': '#b58438',
+          'circle-blur': 1,
+          'circle-opacity': 0.4,
+        },
+      });
+      map.addLayer({
+        id: 'hover-halo-ring',
+        type: 'circle',
+        source: 'hover-halo',
+        paint: {
+          'circle-radius': 11,
+          'circle-opacity': 0,
+          'circle-stroke-color': '#b58438',
+          'circle-stroke-width': 2.5,
+        },
+      });
+      map.addLayer({
+        id: 'hover-halo-dot',
+        type: 'circle',
+        source: 'hover-halo',
+        paint: {
+          'circle-radius': 3,
+          'circle-color': '#b58438',
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 1,
+        },
+      });
+
       setReady(true);
 
       /* Restore the exact viewport captured in the URL on mount.
@@ -1229,6 +1279,27 @@ export default function ListingMap({
     }
     styledIdsRef.current = new Set(hoveredIds);
   }, [hoveredIds, ready, rows]);
+
+  /* Locator halo data: list-origin hovers project the hovered rows'
+   * coordinates into the halo source; everything else clears it (a
+   * map-origin hover means the cursor is already on the spot). */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const src = map.getSource('hover-halo') as GeoJSONSource | undefined;
+    if (!src) return;
+    const features: GeoJSON.Feature<GeoJSON.Point>[] =
+      hoverOrigin === 'list' && hoveredIds.size > 0
+        ? rows
+            .filter((r) => hoveredIds.has(r.sreality_id))
+            .map((r) => ({
+              type: 'Feature',
+              geometry: { type: 'Point', coordinates: [r.lng, r.lat] },
+              properties: {},
+            }))
+        : [];
+    src.setData({ type: 'FeatureCollection', features });
+  }, [hoveredIds, hoverOrigin, rows, ready]);
 
   /* Reset-view clears the bbox URL param, which triggers the parent
    * to refetch the unbounded cohort. Once those rows arrive the

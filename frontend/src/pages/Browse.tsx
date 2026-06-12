@@ -312,25 +312,44 @@ export default function Browse() {
    * lives only in component state, never in the URL. Hovering a single
    * card or pin produces a one-element set; hovering a cluster on the
    * map produces N elements (one per leaf) so the matching cards all
-   * highlight together. */
-  const [hoveredIds, setHoveredIds] = useState<ReadonlySet<number>>(
-    () => new Set(),
-  );
+   * highlight together. `origin` records which pane is pointing so each
+   * side can react differently: a map-origin hover dims the card grid
+   * around the matches and scrolls the first one into view, while a
+   * list-origin hover drops the locator halo on the map. */
+  const [hoverState, setHoverState] = useState<{
+    ids: ReadonlySet<number>;
+    origin: 'map' | 'list' | null;
+  }>({ ids: new Set(), origin: null });
+  const hoveredIds = hoverState.ids;
   const setHovered = useCallback(
-    (ids: ReadonlyArray<number> | null) => {
-      setHoveredIds((prev) => {
+    (ids: ReadonlyArray<number> | null, origin: 'map' | 'list') => {
+      setHoverState((prev) => {
         if (ids == null || ids.length === 0) {
-          return prev.size === 0 ? prev : new Set();
+          return prev.ids.size === 0
+            ? prev
+            : { ids: new Set<number>(), origin: null };
         }
         // Avoid spurious re-renders if the same id is reported twice
         // (maplibre emits mouseenter on every move within the layer).
-        if (prev.size === ids.length && ids.every((id) => prev.has(id))) {
+        if (
+          prev.origin === origin &&
+          prev.ids.size === ids.length &&
+          ids.every((id) => prev.ids.has(id))
+        ) {
           return prev;
         }
-        return new Set(ids);
+        return { ids: new Set(ids), origin };
       });
     },
     [],
+  );
+  const setHoveredFromMap = useCallback(
+    (ids: ReadonlyArray<number> | null) => setHovered(ids, 'map'),
+    [setHovered],
+  );
+  const setHoveredFromList = useCallback(
+    (ids: ReadonlyArray<number> | null) => setHovered(ids, 'list'),
+    [setHovered],
   );
 
   /* Operator-resizable columns. `sidebar` is column 1 (filters, all
@@ -776,7 +795,8 @@ export default function Browse() {
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
                 hoveredIds={hoveredIds}
-                onHover={setHovered}
+                hoverOrigin={hoverState.origin}
+                onHover={setHoveredFromList}
                 onPage={setPage}
                 onSort={writeSort}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
@@ -805,7 +825,8 @@ export default function Browse() {
                     bounds={filters.bounds}
                     onBoundsChange={setBounds}
                     hoveredIds={hoveredIds}
-                    onHover={setHovered}
+                    hoverOrigin={hoverState.origin}
+                    onHover={setHoveredFromMap}
                     centerCircle={
                       filters.locationMode === 'center_radius'
                         ? filters.centerRadius
@@ -862,7 +883,7 @@ export default function Browse() {
                 isLoading={tableQuery.isLoading}
                 hasFilters={!isDefault(filters)}
                 hoveredIds={hoveredIds}
-                onHover={setHovered}
+                onHover={setHoveredFromList}
                 onSort={setSortByField}
                 onPage={setPage}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}

@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ImageCarousel from '@/components/ImageCarousel';
 import {
@@ -31,6 +31,12 @@ interface Props {
    * state outward via onHover. */
   hoveredIds: ReadonlySet<number>;
   onHover: (ids: ReadonlyArray<number> | null) => void;
+  /* Which pane originated the hover. Map-origin hovers get the full
+   * "find it in the archive" treatment — non-matching cards recede and
+   * the first match scrolls into view. List-origin hovers (the
+   * operator's own pointer) must not dim or scroll the very grid
+   * they're sweeping. */
+  hoverOrigin?: 'map' | 'list' | null;
   onPage: (page: number) => void;
   onSort: (next: SortSpec) => void;
   onClearFilters: () => void;
@@ -60,6 +66,7 @@ export default function ListingCards({
   hasBounds,
   hoveredIds,
   onHover,
+  hoverOrigin = null,
   onPage,
   onSort,
   onClearFilters,
@@ -73,6 +80,16 @@ export default function ListingCards({
 }: Props) {
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && rows != null && rows.length === 0;
+
+  /* Map-origin hover: dim the rest of the grid only when the map is
+   * pointing at something actually on this page — otherwise a far-off
+   * cluster hover would grey the whole grid with nothing lit. */
+  const hoveredOnPage =
+    hoverOrigin === 'map' && rows != null
+      ? rows.filter((r) => hoveredIds.has(r.sreality_id))
+      : [];
+  const mapHover = hoveredOnPage.length > 0;
+  const firstHoveredId = mapHover ? hoveredOnPage[0].sreality_id : null;
 
   const totalPages =
     total != null && total > 0 ? Math.ceil(total / CARD_PAGE_SIZE) : 1;
@@ -114,6 +131,8 @@ export default function ListingCards({
                 <Card
                   r={r}
                   hovered={hoveredIds.has(r.sreality_id)}
+                  dimmed={mapHover && !hoveredIds.has(r.sreality_id)}
+                  scrollOnHover={mapHover && r.sreality_id === firstHoveredId}
                   onHover={onHover}
                   mergeMode={mergeMode}
                   selected={selectedPropertyIds.has(r.property_id)}
@@ -138,6 +157,8 @@ export default function ListingCards({
 function Card({
   r,
   hovered,
+  dimmed,
+  scrollOnHover,
   onHover,
   mergeMode,
   selected,
@@ -148,6 +169,12 @@ function Card({
 }: {
   r: CardRow;
   hovered: boolean;
+  /* A map-origin hover is lighting OTHER cards — this one recedes so
+   * the group reads at a glance. */
+  dimmed: boolean;
+  /* First match of a map-origin hover: gently pull it into view in
+   * case it sits below the fold of the card column. */
+  scrollOnHover: boolean;
   onHover: (ids: ReadonlyArray<number> | null) => void;
   mergeMode: boolean;
   selected: boolean;
@@ -156,6 +183,20 @@ function Card({
   estimating: boolean;
   onEstimate: (srealityId: number) => void;
 }) {
+  /* Callback ref so the one ref serves both wrappers (Link → anchor,
+   * merge-mode → div). */
+  const wrapperElRef = useRef<HTMLElement | null>(null);
+  const setWrapperEl = (el: HTMLElement | null) => {
+    wrapperElRef.current = el;
+  };
+  useEffect(() => {
+    if (hovered && scrollOnHover) {
+      wrapperElRef.current?.scrollIntoView({
+        block: 'nearest',
+        behavior: 'smooth',
+      });
+    }
+  }, [hovered, scrollOnHover]);
   const title = formatTitle(r);
   /* Precise place first (geo town when the free-text locality is just the okres
    * — the Bazoš "Jihlava"-for-Telč case), then the district/okres for context,
@@ -169,10 +210,13 @@ function Card({
    * rather than archived). Surface drops to --color-inset, matching
    * "filed away" in the paper / archive language; image gets a
    * gentle desaturation so it still reads as a photo. */
+  /* The hover-link state is OCHRE — the same surveyor's-mark color the
+   * map uses for its locator halo, so the two ends of the link read as
+   * one gesture. Copper stays reserved for committed selection. */
   const surface = selected
     ? 'bg-[var(--color-paper-2)] border-[var(--color-copper)] ring-1 ring-[var(--color-copper)]'
     : hovered
-      ? 'bg-[var(--color-paper-2)] border-[var(--color-copper)]'
+      ? 'bg-[var(--color-ochre-soft)] border-[var(--color-ochre)] ring-1 ring-[var(--color-ochre)]'
       : inactive
         ? 'bg-[var(--color-inset)] border-[var(--color-rule-soft)] hover:border-[var(--color-rule)]'
         : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] hover:border-[var(--color-rule-strong)]';
@@ -195,7 +239,9 @@ function Card({
     : `Aktivní${days ? ` · na trhu ${days}` : ''} (od ${fmtShortDate(r.first_seen_at)})`;
 
   const wrapperClass = [
-    'group block rounded-[var(--radius-sm)] border transition-colors overflow-hidden',
+    'group block rounded-[var(--radius-sm)] border overflow-hidden',
+    'transition-[border-color,background-color,opacity] duration-150',
+    dimmed ? 'opacity-50' : '',
     mergeMode ? 'cursor-pointer' : '',
     surface,
   ].join(' ');
@@ -314,6 +360,7 @@ function Card({
   if (mergeMode) {
     return (
       <div
+        ref={setWrapperEl}
         role="button"
         tabIndex={0}
         onClick={() => onToggleSelect(r.property_id)}
@@ -331,6 +378,7 @@ function Card({
   }
   return (
     <Link
+      ref={setWrapperEl}
       to={`/listing/${r.sreality_id}`}
       onMouseEnter={() => onHover([r.sreality_id])}
       onMouseLeave={() => onHover(null)}
