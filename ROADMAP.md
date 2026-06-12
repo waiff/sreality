@@ -6,6 +6,32 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Sprint D — architecture unification + dedup keying + market parity
+
+- **sreality on the shared Portal framework** (PR #439): new `scraper/sreality_main.py`
+  entrypoint drives SrealityPortal through the generic portal_runner with the framework
+  CLI; `index_walk.yml`/`detail_drain.yml` switched over with registry-governed limits;
+  `scraper/main.py` + `scrape.yml` kept untouched as the instant-revert fallback (and the
+  image phase host). Validated by branch-dispatched production walk (20 pairs, 0 errors,
+  61 flips) + drain (11,691 ingested, 0 errors, clean finalize) before merge.
+- **Dedup dual-keying** (PR #443): verified sreality streets are always `id:`-keyed so
+  name-normalization alone could never bridge to bazos (and the legacy idnes merges came
+  from the removed geo machinery); `street_group_keys` now emits id+name keys, the name
+  key is stripped of street-words + house numbers (full bazos `extract_street` keyword
+  family), and a new `street_id_contradiction` reject closes the cross-town channel
+  dual-keying opens.
+- **sreality category parity** (PR #440): all 20 category pairs walked (pozemek +
+  ostatni × prodej/pronajem/drazba/podil added); condition-score selector now
+  category-gated to byt/dum so land/other rows never bill the LLM (idnes pozemek rows
+  had been leaking into the queue).
+- **Docs + fallback cleanup** (PR #441): superseded `scrape_bazos.yml`/`scrape_idnes.yml`
+  deleted; CLAUDE.md scraper-ops sections synced to the split pipeline reality.
+- **Condition batch chunks 45MB** (PR #442): the API edge's upload window — not the
+  256MB cap — is the real ceiling; 6-8-min 150MB uploads were getting 502'd.
+- Placeholder backfill executed (274 rows backed up to
+  `placeholder_backfill_backup_20260612`, price 0/1 + zero areas nulled).
+
+
 ### 2026-06: Scraper P0 sprint + kraj-scoped condition scoring + observability (Sprint A/B)
 
 - **Delisting fixed** (PR #418): completeness gate 0.995 + 24h staleness rail on
@@ -67,10 +93,10 @@ source for active rules; ROADMAP is for sequencing.
 
 #### Next
 
-- Sprint C (data value, remainder): bazos dedup match-rate follow-up (street_key
-  normalization vs the "ul. …"/house-number forms), remax drain follow-up (timeout fix).
-- Sprint D (architecture): sreality → Portal framework, shared CLI, fallback-workflow
-  deletion, CLAUDE.md scraper-section rewrite, sreality pozemek/ostatní category parity.
+- Scraper program remainder: registry `portals.categories` reconciliation for sreality
+  (code CATEGORIES is authoritative today); name-group scoping by `obec_id` if cross-town
+  address-exact false merges appear; `scrape.yml` + legacy main.py CLI retirement once the
+  framework path has a quiet week.
 
 
 ### 2026-06: Browse filter restructure (price-change merge, condition ranges, Other band)
