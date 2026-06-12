@@ -7,8 +7,9 @@ Replaces the old geo `scripts.dedup_sweep`.
 Pipeline (rules A-E; see toolkit.dedup_engine for the rule text):
 
   0. Load ELIGIBLE listings (street + disposition both present, active) grouped
-     by street_key. Eligibility is computed inline (rule A; a partial index
-     backs the scan — see migration 127).
+     by street_key — rows with both a canonical street_id and a street name are
+     dual-keyed into their 'id:' and 'name:' groups. Eligibility is computed
+     inline (rule A; a partial index backs the scan — see migration 127).
   1. Within each (street_key) group, classify every cross-property pair
      (classify_pair). Rule B exact-address pairs auto-merge immediately
      (5% area guard); rule C contradictions are rejected; the rest are visual
@@ -43,8 +44,8 @@ from toolkit.dedup_engine import (
     ListingKey,
     classify_pair,
     decide_phash_fastpath,
-    normalize_street,
     rooms_in_priority,
+    street_group_keys,
     verdict_is_merge,
 )
 from toolkit.image_classification import INTERIOR_ROOM_TYPES, SITE_PLAN_ROOM_TYPE
@@ -78,27 +79,32 @@ _ELIGIBLE_SQL = """
 
 
 def _load_eligible(conn: Any) -> list[ListingKey]:
+    """One ListingKey per (listing, grouping key): a row with both a canonical
+    street_id and a street name is dual-keyed into its 'id:' and 'name:' groups
+    so cross-portal rows keyed differently can still meet (run_engine dedups
+    the listing pairs that surface in both groups)."""
     with conn.cursor() as cur:
         cur.execute(_ELIGIBLE_SQL)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
-        street_key = normalize_street(r[3], r[4])
-        if street_key is None:
-            continue
-        keys.append(ListingKey(
-            sreality_id=int(r[0]),
-            property_id=int(r[1]) if r[1] is not None else None,
-            source=r[2],
-            street_key=street_key,
-            disposition=r[5],
-            house_number=r[6],
-            floor=int(r[7]) if r[7] is not None else None,
-            area_m2=float(r[8]) if r[8] is not None else None,
-            description=r[9],
-            category_type=r[10],
-            category_main=r[11],
-        ))
+        raw_street_id = int(r[4]) if r[4] is not None else None
+        street_id = raw_street_id if raw_street_id is not None and raw_street_id > 0 else None
+        for street_key in street_group_keys(r[3], raw_street_id):
+            keys.append(ListingKey(
+                sreality_id=int(r[0]),
+                property_id=int(r[1]) if r[1] is not None else None,
+                source=r[2],
+                street_key=street_key,
+                disposition=r[5],
+                house_number=r[6],
+                floor=int(r[7]) if r[7] is not None else None,
+                area_m2=float(r[8]) if r[8] is not None else None,
+                description=r[9],
+                category_type=r[10],
+                category_main=r[11],
+                street_id=street_id,
+            ))
     return keys
 
 
@@ -346,6 +352,7 @@ def run_engine(
     groups = _group_by_street(keys)
     vision_budget = [max_vision_calls]
     seen_property_pairs: set[tuple[int, int]] = set()
+    seen_listing_pairs: set[tuple[int, int]] = set()
     pairs_left = max_pairs
 
     for street_key, members in groups.items():
@@ -358,6 +365,15 @@ def run_engine(
                     LOG.info("PAIR cap reached; deferring remainder to next run")
                     return _finish(stats, vision_budget, max_vision_calls)
                 a, b = members[i], members[j]
+                # Dual-keyed listings appear in their 'id:' AND 'name:' groups;
+                # classify each listing pair once (first group wins).
+                lpair = (
+                    min(a.sreality_id, b.sreality_id),
+                    max(a.sreality_id, b.sreality_id),
+                )
+                if lpair in seen_listing_pairs:
+                    continue
+                seen_listing_pairs.add(lpair)
                 decision = classify_pair(a, b)
                 if decision.action == "reject":
                     stats["rejected"] += 1
