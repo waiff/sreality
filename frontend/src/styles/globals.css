@@ -312,6 +312,22 @@
     text-decoration: underline;
     text-underline-offset: 2px;
   }
+  /* Small-caps record-type line at the top of non-listing popups
+   * ("Kvalita města", "Cenová mapa nájemného") so reference data can
+   * never be mistaken for an inzerát. */
+  .lp-kicker {
+    margin: 0 0 4px;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--color-ink-3);
+  }
+  /* Reference-data popups additionally carry a copper top rule — the
+   * "official stamped record" cue; listing popups stay plain paper. */
+  .city-popup .maplibregl-popup-content,
+  .rent-map-popup .maplibregl-popup-content {
+    border-top: 2px solid var(--color-copper) !important;
+  }
 }
 
 /* Region page (Part D) — copper centre pin for the radius-mode map. */

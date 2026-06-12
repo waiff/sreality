@@ -282,6 +282,7 @@ const rentPopupHtml = (p: RentFeatureProps): string => {
   const place = p.kraj ? `${p.name}, ${p.kraj}` : p.name;
   return `
     <div class="lp">
+      <p class="lp-kicker">Cenová mapa nájemného</p>
       <div class="lp-row">
         <p class="lp-price">${escape(p.name)}</p>
       </div>
@@ -614,6 +615,16 @@ export default function ListingMap({
       /* Hover popup for the choropleth. The fill is the hit target;
        * mirrors the city-pin popup approach. Only wired here — the layer
        * visibility toggle handles whether it's actually reachable. */
+      /* Listing dots and clusters always win the click. The fill layers
+       * underneath (rent map, city polygons) only open their popups when
+       * nothing from the listings source sits under the cursor — without
+       * this, clicking a dot inside a polygon fired BOTH handlers and the
+       * later-registered one replaced the listing popup with the city /
+       * rent popup ("I clicked a listing and got city info"). */
+      const listingUnderCursor = (p: maplibregl.PointLike): boolean =>
+        map.queryRenderedFeatures(p, { layers: ['point', 'clusters'] })
+          .length > 0;
+
       map.on('mouseenter', 'rent-map-fill', () => {
         map.getCanvas().style.cursor = 'pointer';
       });
@@ -621,6 +632,7 @@ export default function ListingMap({
         map.getCanvas().style.cursor = '';
       });
       map.on('click', 'rent-map-fill', (e) => {
+        if (listingUnderCursor(e.point)) return;
         const f = e.features?.[0];
         if (!f) return;
         const props = f.properties as unknown as RentFeatureProps;
@@ -676,19 +688,21 @@ export default function ListingMap({
         },
       });
       /* Thick conditional-coloured border so each municipality stands
-       * out; a touch thinner / softer when it has no index reading. */
+       * out. Split into two layers because line-dasharray cannot be
+       * data-driven: cities WITH a reading keep the solid choropleth
+       * stroke, cities WITHOUT one get the dashed administrative-
+       * boundary stroke — the cartographic "this is territory, not a
+       * listing" cue that holds even when the polygon shrinks to a
+       * speck at country zoom. */
       map.addLayer({
         id: 'city-outline',
         type: 'line',
         source: 'cities',
+        filter: ['>=', ['get', 'value'], 0],
         paint: {
           'line-color': [
-            'case',
-            ['<', ['get', 'value'], 0], CITY_NULL_COLOR,
-            [
-              'interpolate', ['linear'], ['get', 'value'],
-              ...CITY_INDEX_RAMP.flatMap(([stop, color]) => [stop, color]),
-            ],
+            'interpolate', ['linear'], ['get', 'value'],
+            ...CITY_INDEX_RAMP.flatMap(([stop, color]) => [stop, color]),
           ],
           'line-width': [
             'interpolate', ['linear'], ['zoom'],
@@ -696,11 +710,24 @@ export default function ListingMap({
             10, 2.4,
             14, 3.2,
           ],
-          'line-opacity': [
-            'case',
-            ['<', ['get', 'value'], 0], 0.5,
-            0.9,
+          'line-opacity': 0.9,
+        },
+      });
+      map.addLayer({
+        id: 'city-outline-null',
+        type: 'line',
+        source: 'cities',
+        filter: ['<', ['get', 'value'], 0],
+        paint: {
+          'line-color': CITY_NULL_COLOR,
+          'line-width': [
+            'interpolate', ['linear'], ['zoom'],
+            6, 1.6,
+            10, 2.4,
+            14, 3.2,
           ],
+          'line-opacity': 0.55,
+          'line-dasharray': [2, 1.6],
         },
       });
       /* The selected index figure, drawn at each municipality's
@@ -947,6 +974,7 @@ export default function ListingMap({
         map.getCanvas().style.cursor = '';
       });
       map.on('click', 'city-fill', (e) => {
+        if (listingUnderCursor(e.point)) return;
         const f = e.features?.[0];
         if (!f) return;
         const props = f.properties as unknown as CityFeatureProps;
@@ -1188,7 +1216,7 @@ export default function ListingMap({
      * are any cities to show — avoids drawing a stale empty layer
      * during the initial load. */
     const vis = showCities && list.length > 0 ? 'visible' : 'none';
-    for (const id of ['city-fill', 'city-outline', 'city-label']) {
+    for (const id of ['city-fill', 'city-outline', 'city-outline-null', 'city-label']) {
       if (map.getLayer(id)) {
         map.setLayoutProperty(id, 'visibility', vis);
       }
@@ -1766,6 +1794,7 @@ function cityPopupHtml(
   }).join('');
   return `
     <div class="lp">
+      <p class="lp-kicker">Kvalita města</p>
       <div class="lp-row">
         <p class="lp-price">${escape(c.name)}</p>
       </div>
