@@ -71,10 +71,14 @@ export interface NearCityProximity {
   radius_km: number;
 }
 
-/* One entry of the district chip list. `name` is the primary phrase
- * to match (`district` / `locality` ILIKE substring); `context` is
+/* One entry of the district chip list. A resolved chip (level + id)
+ * matches by STABLE ADMIN ID at its level; a 'locality' (street/POI)
+ * pick additionally matches `name` as an ILIKE substring on
+ * `place_search_text` (street + locality combined, migration 182);
+ * a legacy chip (no level/id) falls back to the `name` ILIKE across
+ * `district` / `place_search_text` / `okres` / `region`. `context` is
  * the parent municipality from Mapy.cz's `regionalStructure` that
- * narrows the match when set, so picking the Plzeň entry for
+ * narrows the legacy match when set, so picking the Plzeň entry for
  * "Edvarda Beneše" doesn't drag in the Olomouc + Hradec Králové
  * streets of the same name. Picks at the municipality / okres / kraj
  * level (or coarser) leave context null and behave exactly like the
