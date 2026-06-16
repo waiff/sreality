@@ -166,6 +166,32 @@ def test_locality_ids_missing_keys_are_none():
     assert row["locality_ward_id"] is None
 
 
+def test_street_structured_wins():
+    # When sreality supplies a structured street, that is used verbatim — the
+    # free-text `value` fallback never overrides it.
+    row = parse_listing(_estate(locality={
+        "street": "Koterovská", "value": "Jiná, Plzeň",
+    }))
+    assert row["street"] == "Koterovská"
+
+
+def test_street_falls_back_to_index_value():
+    # Index-shape rows have an empty structured street but carry the street in
+    # the free-text `value` ("Street, City - Quarter") — recovered via the
+    # shared first-segment extractor.
+    row = parse_listing(_estate(locality={
+        "value": "Pařížská, Praha 1 - Josefov",
+        "gps_lat": 50.09, "gps_lon": 14.42,
+    }))
+    assert row["street"] == "Pařížská"
+
+
+def test_street_value_town_only_stays_none():
+    # A town-only `value` ("Town, okres X") must not fabricate a street.
+    row = parse_listing(_estate(locality={"value": "Studénka, okres Nový Jičín"}))
+    assert row["street"] is None
+
+
 def test_floor(sample):
     assert parse_listing(sample)["floor"] == 1
 
