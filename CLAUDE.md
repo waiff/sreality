@@ -519,8 +519,13 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `location_unclear` / `disposition_unclear` and never matched. **(B)** same street + house
     number + disposition + floor → auto-merge, with a 5% area guard that demotes
     mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
-    a hard floor / >20%-area / house-number contradiction rejects it; nothing is ever compared
-    that doesn't share street + disposition, AND no **same-development guard** fires.
+    a >20%-area / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
+    that doesn't share street + disposition, AND no **same-development guard** fires. (Floor is a
+    SOFT cross-portal signal — idnes counts the ground floor as 0 (patro), sreality as 1 (NP), so the
+    same flat reads one floor apart on the two portals, and sreality is itself lister-inconsistent;
+    a gap of exactly 1 is convention noise that falls through to the visual layer, only a gap of 2+
+    is a hard reject. Rule B's exact auto-merge still requires floor *equality*, so an off-by-one
+    never auto-merges without photo confirmation.)
     Two development guards keep near-identical units of one project from auto-merging:
     a TEXT one (rule C `unit_marker_contradiction` — the descriptions name the same
     keyword with different unit tokens: `pozemek č.3` vs `č.4`, `dům 3A` vs `5C`,

@@ -290,7 +290,18 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
 
     # Rule C hard disqualifiers (apply to BOTH the exact-address and candidate
     # paths — a contradiction means "not the same property", full stop).
-    if a.floor is not None and b.floor is not None and a.floor != b.floor:
+    # Floor is a SOFT cross-portal signal: idnes counts the ground floor as 0
+    # (patro) while sreality counts it as 1 (NP), so the SAME flat reads one
+    # floor apart on the two portals — and sreality is itself lister-inconsistent.
+    # A gap of exactly 1 is therefore convention noise, not a contradiction: let
+    # it fall through to the visual layer (rule B's exact auto-merge still
+    # requires floor equality, so an off-by-one never auto-merges without photo
+    # confirmation). Only a gap of 2+ is a real "different unit" signal worth a
+    # hard reject.
+    if (
+        a.floor is not None and b.floor is not None
+        and abs(a.floor - b.floor) >= 2
+    ):
         return PairDecision("reject", None, "floor_contradiction")
     if _house_numbers_contradict(a.house_number, b.house_number):
         return PairDecision("reject", None, "house_number_contradiction")

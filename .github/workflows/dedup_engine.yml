@@ -32,17 +32,22 @@ on:
       max_pairs:
         description: Max visual candidate pairs examined per run
         required: false
-        default: "2000"
+        default: "4000"
         type: string
       max_vision_calls:
         description: Cap forensic vision calls per run (0 = pHash-only)
         required: false
-        default: "200"
+        default: "400"
         type: string
       max_room_attempts:
         description: Max like-room forensic comparisons per candidate pair
         required: false
         default: "4"
+        type: string
+      max_seconds:
+        description: Wall-clock budget; finalize cleanly before the job timeout
+        required: false
+        default: "4800"
         type: string
       dry_run:
         description: Report eligible counts + street groups and exit without writing
@@ -60,7 +65,7 @@ concurrency:
 jobs:
   engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
@@ -85,9 +90,10 @@ jobs:
 
       - name: Run dedup engine
         run: |
-          ARGS="--max-pairs ${{ inputs.max_pairs || '2000' }}"
-          ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '200' }}"
+          ARGS="--max-pairs ${{ inputs.max_pairs || '4000' }}"
+          ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '400' }}"
           ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
+          ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS

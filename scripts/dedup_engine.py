@@ -37,6 +37,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from typing import Any
 
 from toolkit.dedup_engine import (
@@ -329,6 +330,7 @@ def run_engine(
     max_vision_calls: int = 200,
     max_room_attempts: int = 4,
     auto_merge_enabled: bool = True,
+    deadline: float | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
 
@@ -363,6 +365,18 @@ def run_engine(
             for j in range(i + 1, len(members)):
                 if pairs_left <= 0:
                     LOG.info("PAIR cap reached; deferring remainder to next run")
+                    return _finish(stats, vision_budget, max_vision_calls)
+                # Wall-clock budget: the cold-cache classification flood (one
+                # uncapped vision call per newly-eligible listing) can outrun the
+                # job timeout, which SIGKILLs the run before it writes results.
+                # Stop cleanly so the run row + the inline-committed merges persist
+                # and the next run resumes with a warm cache (mirrors the detail
+                # drain's --max-seconds).
+                if deadline is not None and time.monotonic() >= deadline:
+                    LOG.info(
+                        "TIME budget reached; finalizing cleanly at pairs_considered=%d",
+                        stats["pairs_considered"],
+                    )
                     return _finish(stats, vision_budget, max_vision_calls)
                 a, b = members[i], members[j]
                 # Dual-keyed listings appear in their 'id:' AND 'name:' groups;
@@ -517,6 +531,9 @@ def main() -> int:
                         help="Cap forensic vision calls per run (0 = pHash-only, no LLM).")
     parser.add_argument("--max-room-attempts", type=int, default=4,
                         help="Max like-room forensic comparisons per candidate pair.")
+    parser.add_argument("--max-seconds", type=int, default=0,
+                        help="Wall-clock budget; stop + finalize cleanly before the "
+                             "job timeout SIGKILLs the run (0 = no limit).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report eligible counts + street groups and exit without writing.")
     parser.add_argument("--verbose", action="store_true")
@@ -564,12 +581,14 @@ def main() -> int:
         # When auto-merge is off the engine never reaches the visual step, so we
         # skip building the (LLM-backed) classify/compare fns entirely.
 
+        deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
         stats = run_engine(
             conn, classify_fn=classify_fn, compare_fn=compare_fn,
             site_plan_fn=site_plan_fn,
             max_pairs=args.max_pairs, max_vision_calls=args.max_vision_calls,
             max_room_attempts=args.max_room_attempts,
             auto_merge_enabled=auto_merge_enabled,
+            deadline=deadline,
         )
         _write_run_row(conn, stats)
 

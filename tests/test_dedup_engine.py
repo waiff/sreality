@@ -147,6 +147,21 @@ def test_floor_contradiction_rejects() -> None:
     assert d.detail == "floor_contradiction"
 
 
+def test_floor_off_by_one_is_candidate_not_reject() -> None:
+    # idnes counts the ground floor as 0 (patro), sreality as 1 (NP): the SAME
+    # flat reads one floor apart across portals. A gap of 1 is convention noise,
+    # not a contradiction -> visual candidate, never a hard reject.
+    d = classify_pair(_key(1, hn=None, floor=2), _key(2, hn=None, floor=3))
+    assert d.action == "candidate"
+    assert d.detail != "floor_contradiction"
+
+
+def test_floor_gap_of_two_still_rejects() -> None:
+    d = classify_pair(_key(1, hn=None, floor=2), _key(2, hn=None, floor=4))
+    assert d.action == "reject"
+    assert d.detail == "floor_contradiction"
+
+
 def test_area_contradiction_rejects_beyond_20pct() -> None:
     d = classify_pair(_key(1, hn=None, area=50.0), _key(2, hn=None, area=80.0))
     assert d.action == "reject"
