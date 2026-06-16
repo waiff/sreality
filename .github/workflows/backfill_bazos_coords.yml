@@ -45,6 +45,7 @@ jobs:
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+      MAPY2_CZ_API_KEY: ${{ secrets.MAPY2_CZ_API_KEY }}
     steps:
       - uses: actions/checkout@v6
 

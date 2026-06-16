@@ -266,3 +266,97 @@ def test_bbox_optional_when_absent(monkeypatch):
         }],
     })])
     assert geocoding.geocode("X", session=sess).bbox is None
+
+
+# ----------------------------------------------------------------------
+# Backup-key failover (MAPY2_CZ_API_KEY)
+# ----------------------------------------------------------------------
+
+_OK_BODY = {
+    "items": [{
+        "location": "Praha, Česko",
+        "position": {"lon": 14.43, "lat": 50.08},
+        "type": "regional.municipality",
+    }],
+}
+
+
+def test_mapy_api_keys_priority_order(monkeypatch):
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "primary")
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup")
+    assert geocoding.mapy_api_keys() == ["primary", "backup"]
+
+
+def test_mapy_api_keys_skips_blank_and_dedups(monkeypatch):
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "  ")
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "only")
+    assert geocoding.mapy_api_keys() == ["only"]
+
+
+@pytest.mark.parametrize("bad_status", [401, 403, 429])
+def test_failover_to_backup_on_key_level_status(monkeypatch, bad_status):
+    monkeypatch.setattr(geocoding.time, "sleep", lambda _s: None)
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "primary")
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup")
+    sess = _FakeSession([
+        _FakeResponse(status_code=bad_status),
+        _FakeResponse(body=_OK_BODY),
+    ])
+    result = geocoding.geocode("Praha", session=sess)
+    assert result.confidence == "low"
+    # Primary rejected on the first hit (no wasted same-key retries), then backup.
+    assert len(sess.calls) == 2
+    assert sess.calls[0]["params"]["apikey"] == "primary"
+    assert sess.calls[1]["params"]["apikey"] == "backup"
+
+
+def test_failover_exhausted_both_keys_preserves_http_error(monkeypatch):
+    # Both keys 401: the LAST key runs without failover and raises the same raw
+    # HTTPError single-key callers already handle — behaviour unchanged for them.
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "primary")
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup")
+    sess = _FakeSession([
+        _FakeResponse(status_code=401),
+        _FakeResponse(status_code=401),
+    ])
+    with pytest.raises(requests.HTTPError):
+        geocoding.geocode("Praha", session=sess)
+    assert len(sess.calls) == 2
+
+
+def test_no_failover_on_transient_5xx(monkeypatch):
+    # A 5xx is a Mapy outage, not a key problem — switching keys can't help, so we
+    # retry the SAME key and never touch the backup.
+    monkeypatch.setattr(geocoding.time, "sleep", lambda _s: None)
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "primary")
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup")
+    sess = _FakeSession([
+        _FakeResponse(status_code=503),
+        _FakeResponse(status_code=503),
+        _FakeResponse(status_code=503),
+    ])
+    with pytest.raises(geocoding.GeocodingError):
+        geocoding.geocode("Praha", session=sess, max_retries=2)
+    assert len(sess.calls) == 3
+    assert {c["params"]["apikey"] for c in sess.calls} == {"primary"}
+
+
+def test_backup_only_key_used_when_primary_unset(monkeypatch):
+    monkeypatch.delenv("MAPY_CZ_API_KEY", raising=False)
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup")
+    sess = _FakeSession([_FakeResponse(body=_OK_BODY)])
+    result = geocoding.geocode("Praha", session=sess)
+    assert result.confidence == "low"
+    assert sess.calls[0]["params"]["apikey"] == "backup"
+
+
+def test_explicit_api_key_disables_failover(monkeypatch):
+    # An explicit api_key overrides env entirely — no backup is consulted even if
+    # the explicit key is rejected.
+    monkeypatch.setenv("MAPY_CZ_API_KEY", "primary")
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup")
+    sess = _FakeSession([_FakeResponse(status_code=401)])
+    with pytest.raises(requests.HTTPError):
+        geocoding.geocode("Praha", api_key="explicit", session=sess)
+    assert len(sess.calls) == 1
+    assert sess.calls[0]["params"]["apikey"] == "explicit"

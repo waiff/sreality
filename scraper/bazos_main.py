@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 from typing import Any
 
 from scraper import db, geocoding, portal_runner
@@ -102,10 +101,10 @@ class _CachingGeocoder:
 
 
 def _build_geocoder() -> Geocoder | None:
-    """A cached Mapy.cz geocoder, or None when MAPY_CZ_API_KEY is unset so the
-    crawl still runs (coordinates then come from the CZ-guarded maps link)."""
-    if not os.environ.get("MAPY_CZ_API_KEY"):
-        LOG.info("GEOCODE skipped: MAPY_CZ_API_KEY unset; coords from maps link only")
+    """A cached Mapy.cz geocoder, or None when no Mapy.cz key is set so the crawl
+    still runs (coordinates then come from the CZ-guarded maps link)."""
+    if not geocoding.mapy_api_keys():
+        LOG.info("GEOCODE skipped: no Mapy.cz API key set; coords from maps link only")
         return None
     return _CachingGeocoder(geocoding.geocode)
 

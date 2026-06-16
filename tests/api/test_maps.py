@@ -138,6 +138,68 @@ def test_suggest_limit_bounds(client, monkeypatch):
     assert client.get("/maps/suggest", params={"query": "x", "limit": 21}).status_code == 422
 
 
+# ---------------- backup-key failover (MAPY2_CZ_API_KEY) ----------------
+
+
+def _http_error(status: int) -> requests.HTTPError:
+    resp = requests.Response()
+    resp.status_code = status
+    return requests.HTTPError(f"{status}", response=resp)
+
+
+def _mock_http_sequence(monkeypatch, outcomes: list[Any]) -> dict[str, Any]:
+    """Mock _http_get_json to yield each outcome (payload or Exception) per call,
+    recording the apikey used each time."""
+    state: dict[str, Any] = {"i": 0, "keys": []}
+
+    def fake(url: str, params: dict[str, Any]) -> dict[str, Any]:
+        state["keys"].append(params.get("apikey"))
+        outcome = outcomes[state["i"]]
+        state["i"] += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(maps, "_http_get_json", fake)
+    return state
+
+
+@pytest.mark.parametrize("bad_status", [401, 403, 429])
+def test_suggest_fails_over_to_backup_key(client, monkeypatch, bad_status):
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup-key")
+    state = _mock_http_sequence(monkeypatch, [_http_error(bad_status), _MOCK_SUGGEST])
+    res = client.get("/maps/suggest", params={"query": "Vinohrady"})
+    assert res.status_code == 200
+    assert len(res.json()["items"]) == 2
+    assert state["keys"] == ["test-key", "backup-key"]
+
+
+def test_suggest_no_failover_on_server_error(client, monkeypatch):
+    # A 500 is a Mapy outage, not a key problem: 503 immediately, backup untouched.
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup-key")
+    state = _mock_http_sequence(monkeypatch, [_http_error(500), _MOCK_SUGGEST])
+    res = client.get("/maps/suggest", params={"query": "Vinohrady"})
+    assert res.status_code == 503
+    assert state["keys"] == ["test-key"]
+
+
+def test_suggest_both_keys_rejected_returns_503(client, monkeypatch):
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup-key")
+    state = _mock_http_sequence(monkeypatch, [_http_error(403), _http_error(403)])
+    res = client.get("/maps/suggest", params={"query": "Vinohrady"})
+    assert res.status_code == 503
+    assert state["keys"] == ["test-key", "backup-key"]
+
+
+def test_suggest_uses_backup_when_primary_unset(client, monkeypatch):
+    monkeypatch.delenv("MAPY_CZ_API_KEY", raising=False)
+    monkeypatch.setenv("MAPY2_CZ_API_KEY", "backup-key")
+    state = _mock_http_sequence(monkeypatch, [_MOCK_SUGGEST])
+    res = client.get("/maps/suggest", params={"query": "Vinohrady"})
+    assert res.status_code == 200
+    assert state["keys"] == ["backup-key"]
+
+
 # ---------------- /maps/resolve ----------------
 
 

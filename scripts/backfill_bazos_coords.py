@@ -131,7 +131,7 @@ def main() -> int:
 
     geocoder = _build_geocoder()
     if geocoder is None:
-        LOG.info("BACKFILL skip: MAPY_CZ_API_KEY unset; nothing to re-place")
+        LOG.info("BACKFILL skip: no Mapy.cz API key set; nothing to re-place")
         return 0
 
     start = time.monotonic()
