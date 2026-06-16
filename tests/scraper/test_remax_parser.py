@@ -271,6 +271,8 @@ def test_parse_detail_full():
     assert listing.lat is not None and 50.08 < listing.lat < 50.10
     assert listing.lon is not None and 14.48 < listing.lon < 14.50
     assert "Žižkov" in (listing.locality or "")
+    # Street is the leading segment of data-address "Na vrcholu, Praha 3 - Žižkov, Praha".
+    assert listing.street == "Na vrcholu"
     assert listing.district == "Žižkov"
     assert listing.floor == 8
     assert listing.total_floors == 8

@@ -1214,3 +1214,19 @@ it rather than duplicating a list here.
   display `district` text column is filled from okres (or obec for Prague) only when NULL, so
   sreality's richer "City - Quarter" labels are preserved. Don't re-derive hierarchy from `locality`;
   read the normalized columns.
+- `listings.street` is **portal-uniform via one shared extractor, `scraper/street.py`** (migration
+  122 added the column). sreality + bezrealitky read a structured street (bezrealitky also fills
+  `house_number` / `zip`); the HTML portals mine it from a free-text locality (`street_from_locality`:
+  first segment for idnes/remax, last for maxima) or clean a regex capture (`clean_street` for bazos).
+  The ONE don't-fabricate guard (`reject_as_town`) lives here so it isn't reimplemented per portal —
+  it rejects foreign coords/countries, "Town - Quarter" forms, "okres X" qualifiers, and any candidate
+  equal to the row's own geo-derived obec/okres/region; a wrong street is worse than NULL (it poisons
+  the dedup street-key and Browse). Stored values are bare/human-readable for display; the SEPARATE
+  match-time grouping key is `toolkit.dedup_engine._street_name_key` (don't confuse the two). `street` /
+  `house_number` / `zip` are OUT of the content hash, so backfilling them never churns snapshots
+  (`scripts/backfill_portal_streets.py` re-derives from already-stored data — no re-fetch). Browse
+  street picks ILIKE `properties_public.place_search_text`, which is a **group-best** street
+  (`coalesce(p.street, l.street)`, migration 183) denormalized onto `properties` by
+  `recompute_property_stats` — so a multi-portal property matches a street even when its representative
+  listing lacks one. (The old expand-normalizer `toolkit/addresses.py` that turned `ul.`→`ulice` was
+  dead code and was removed.)

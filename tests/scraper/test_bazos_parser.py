@@ -150,11 +150,12 @@ def test_parse_detail_live_three_cell_lokalita_enables_street_geocode():
     assert listing.raw["psc"] == "326 00"
     # Breadcrumb is authoritative for the category.
     assert (listing.category_main, listing.category_type) == ("byt", "pronajem")
-    # The street name stops at the title's end — no "Nabízíme" from the next line.
+    # The raw extract (used as the geocoder query, where the "ul." prefix helps)
+    # stops at the title's end — no "Nabízíme" from the next line.
     assert listing.raw["coords"]["street"] == "ul. Koterovská"
-    # The extracted street also lands on the contract itself (listings.street is
-    # what the street+disposition dedup engine keys on), not just in provenance.
-    assert listing.street == "ul. Koterovská"
+    # The STORED street is cleaned to a bare, uniform name (prefix stripped) — it
+    # is what the street+disposition dedup engine keys on and Browse displays.
+    assert listing.street == "Koterovská"
     # With a real locality available, the street geocode wins over the link pin.
     assert listing.raw["coords"]["source"] == "street"
     assert (listing.lat, listing.lon) == (49.738, 13.410)
@@ -381,14 +382,15 @@ def test_parsed_listing_bridges_into_ingest_contract():
 
 def test_parse_detail_street_survives_into_listing_row():
     # No geocoder at all: the street extraction is text-only and must still
-    # surface on ScrapedListing.street and ride to_row into listings.street.
+    # surface on ScrapedListing.street (cleaned to a bare name) and ride to_row
+    # into listings.street.
     listing = parse_detail(
         LIVE_LOKALITA_DETAIL_HTML,
         source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
         category_main="byt", category_type="pronajem", geocoder=None,
     )
-    assert listing.street == "ul. Koterovská"
-    assert listing.to_row(-9)["street"] == "ul. Koterovská"
+    assert listing.street == "Koterovská"
+    assert listing.to_row(-9)["street"] == "Koterovská"
 
 
 def test_parse_detail_dohodou_price_is_none():

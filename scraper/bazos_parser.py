@@ -29,6 +29,7 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import clean_street
 
 Geocoder = Callable[[str], GeocodeResult]
 
@@ -585,7 +586,10 @@ def parse_detail(
         disposition=_parse_disposition(haystack),
         locality=locality,
         district=None,
-        street=street,
+        # The raw extract (with its "ul." prefix) is the better geocoder query;
+        # the STORED street is cleaned to a bare, uniform name (prefix stripped,
+        # trailing description bleed like "ul. Teplého Nabízíme" trimmed).
+        street=clean_street(street),
         lat=lat,
         lon=lon,
         description=description,

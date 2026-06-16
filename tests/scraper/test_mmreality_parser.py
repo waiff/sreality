@@ -148,6 +148,7 @@ def test_parse_detail_full_mapping():
     assert listing.usable_area == 54.0
     assert listing.disposition == "2+1"
     assert listing.locality == "Na Blatech, Pacov"
+    assert listing.street == "Na Blatech"
     assert listing.district == "Pelhřimov"
     assert listing.lat == 49.47841185
     assert listing.lon == 15.003274356

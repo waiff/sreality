@@ -29,6 +29,7 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import street_from_locality
 
 # Native-id leading letter -> our canonical category_main (mirrors the sreality
 # parser.CATEGORY_* labels). The letter is the agency's own taxonomy and is the
@@ -463,6 +464,12 @@ def parse_detail(
         disposition=_parse_disposition(title) or _parse_disposition(params.get("dispozice")),
         locality=locality,
         district=None,
+        # Street is the LAST comma-segment ("Praha 6, Suchdol, U Hotelu") — the
+        # opposite order from idnes. require_morphology guards the ambiguous
+        # 2-segment case where the last token is a village, not a street.
+        street=street_from_locality(
+            locality, position="last", require_morphology=True, lat=lat, lon=lon
+        ),
         lat=lat,
         lon=lon,
         floor=floor,

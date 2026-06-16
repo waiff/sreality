@@ -23,9 +23,10 @@ from typing import Any
 # hashed: coords are derived/geocoded data prone to oscillation (the
 # geocode-skip cycle), and listings.geom updates on every upsert regardless of
 # snapshots; a genuine location change surfaces via locality/description.
-# street is likewise NOT hashed — it is extracted/derived (regex over the
-# title + description for bazos), so backfilling or refining it must never
-# churn snapshots.
+# street / house_number / zip are likewise NOT hashed — they are
+# extracted/derived (regex over the title+description for bazos, a comma-split
+# of the locality for idnes/maxima/remax), so backfilling or refining them must
+# never churn snapshots.
 _HASH_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
     "disposition", "locality", "district", "floor",
@@ -39,7 +40,8 @@ _HASH_FIELDS: tuple[str, ...] = (
 # scraper.db.LISTING_COLUMNS — sreality-only locality ids are left NULL).
 _LISTING_FIELDS: tuple[str, ...] = (
     "category_main", "category_type", "price_czk", "price_unit", "area_m2",
-    "disposition", "locality", "district", "street", "floor", "total_floors",
+    "disposition", "locality", "district", "street", "house_number", "zip",
+    "floor", "total_floors",
     "has_balcony", "has_parking", "has_lift", "building_type", "condition",
     "energy_rating", "estate_area", "usable_area", "garden_area",
     "category_sub_cb", "subtype", "furnished", "terrace", "cellar", "garage",
@@ -61,8 +63,12 @@ class ScrapedListing:
     locality: str | None = None
     district: str | None = None
     # Best-effort street name (the dedup engine's street_key input); extracted,
-    # not portal-structured, so it stays out of the content hash.
+    # not portal-structured, so it stays out of the content hash. house_number
+    # / zip are structured where a portal carries them (bezrealitky today) — the
+    # DB columns + LISTING_COLUMNS already exist; the contract just gains a slot.
     street: str | None = None
+    house_number: str | None = None
+    zip: str | None = None
     lat: float | None = None
     lon: float | None = None
     floor: int | None = None

@@ -79,6 +79,10 @@ def test_core_mapping():
     assert listing.lat == pytest.approx(49.91198895)
     assert listing.lon == pytest.approx(17.363417275899)
     assert listing.locality == "Břidličná"
+    # bezrealitky carries the full structured triple (street + house_number + zip).
+    assert listing.street == "Jesenická"
+    assert listing.house_number == "460"
+    assert listing.zip == "793 51"
     assert listing.building_type == "panel"
     assert listing.condition == "po_rekonstrukci"
     assert listing.ownership == "osobni"

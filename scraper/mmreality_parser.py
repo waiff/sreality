@@ -30,6 +30,7 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import clean_street
 
 SOURCE = "mmreality"
 
@@ -367,6 +368,8 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         disposition=_disposition((obj.get("type") or {}).get("name"), obj.get("title")),
         locality=_locality(obj),
         district=obj.get("district") or None,
+        # The embedded :property estate object carries a structured `street`.
+        street=clean_street(obj.get("street") if isinstance(obj.get("street"), str) else None),
         lat=lat,
         lon=lon,
         floor=_to_int(obj.get("floor")),

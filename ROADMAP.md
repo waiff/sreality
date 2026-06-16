@@ -6,7 +6,33 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
-### 2026-06: Street picks see every portal (place_search_text)
+### 2026-06: Reliable street across portals (street extractor + group-best place_search_text)
+
+- **Problem (verified live):** `listings.street` powered Browse street picks + the
+  street+disposition dedup engine, but only sreality (~43%) and bazos (38%, polluted)
+  carried it — idnes (108k rows), maxima, remax, bezrealitky, mmreality were all 0%,
+  even though every source carries the data.
+- **One shared contract — `scraper/street.py`:** `clean_street` (strip `ul.`/`ulice`
+  decoration, split glued bleed, drop trailing boilerplate + house number),
+  `reject_as_town` (the single don't-fabricate guard: foreign coords/countries,
+  "Town - Quarter", "okres X", and any candidate equal to the row's own
+  obec/okres/region), and `street_from_locality` (first segment idnes/remax, last
+  maxima with a morphology gate that relaxes for the safe 3-segment shape). Returns
+  None whenever uncertain — a wrong street is worse than NULL.
+- **Per-portal wiring:** idnes/maxima/remax mine the locality/data-address; bazos routes
+  its stored value through `clean_street`; bezrealitky reads the structured
+  street+houseNumber+zip; mmreality reads its `:property` JSON. `ScrapedListing` gained
+  `house_number`/`zip` (DB columns already existed). All three stay out of the content
+  hash → backfilling never churns snapshots.
+- **Read path (migration 183):** `place_search_text` is now `coalesce(p.street, l.street)`
+  — a group-best `properties.street` (best non-null child, sreality-preferred) denormalized
+  by `recompute_property_stats`, so a multi-portal property matches a street even when its
+  representative listing lacks one. No regression window (falls back to repr street until
+  the recompute populates it).
+- **Backfill** (`scripts/backfill_portal_streets.py` + dispatch workflow): re-derives the
+  historical rows from already-stored data — no re-fetch, no LLM, no Mapy spend,
+  snapshot-safe. Validated on live samples (idnes 63% fill, zero fabrication). Removed the
+  dead expand-normalizer `toolkit/addresses.py` (the geo sweep that used it was already gone).
 
 - **Bug:** a street-level location chip (e.g. "Pezinská" in Mladá Boleslav) matched
   only the free-text `locality` column — but bazos stores the town in `locality` and

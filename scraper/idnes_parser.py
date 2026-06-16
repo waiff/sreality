@@ -25,6 +25,7 @@ from selectolax.parser import HTMLParser, Node
 
 from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import street_from_locality
 
 Geocoder = Callable[[str], GeocodeResult]
 
@@ -542,6 +543,10 @@ def parse_detail(
         disposition=_parse_disposition(title) or _parse_disposition(_text(params.get("dispozice"))),
         locality=locality,
         district=None,
+        # Street is the FIRST comma-segment of locality ("Bělehradská, Pardubice
+        # - Polabiny"); the shared guard rejects foreign localities (idnes carries
+        # ~37%), "Town - Quarter" tails, and "Town, okres X" forms.
+        street=street_from_locality(locality, position="first", lat=lat, lon=lon),
         lat=lat,
         lon=lon,
         floor=_parse_floor(_text(params.get("podlaží"))),
