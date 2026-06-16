@@ -2,7 +2,7 @@
  * The domains (x = months, y = value) are passed in fixed across all obce, so
  * the line reads as one chart with a moving trace as the cursor moves between
  * municipalities. X labels are years (not month names). Civic-archive tokens. */
-import type { HoverPoint } from '@/lib/growthChoropleth';
+import type { GrowthTier, HoverPoint } from '@/lib/growthChoropleth';
 
 const W = 248;
 const H = 156;
@@ -22,10 +22,20 @@ interface Props {
   yMax: number;
   valueLabel: string;
   format: (v: number) => string;
+  /* The computed growth/yield figure for this region (rent/sale CAGR or yield
+   * change) — the same number the Datasets table + choropleth read from the
+   * price_stat_growth RPC. When provided it becomes the chart's headline and
+   * the trace's latest reading drops to the footer; omitted → the chart keeps
+   * its original latest-value header (back-compat for any other caller). */
+  metricLabel?: string;
+  metricValue?: number | null;
+  metricTier?: GrowthTier;
+  metricFormat?: (v: number) => string;
 }
 
 export default function HoverChart({
   title, points, xMin, xMax, yMin, yMax, valueLabel, format,
+  metricLabel, metricValue = null, metricTier = 0, metricFormat,
 }: Props) {
   const xSpan = Math.max(1, xMax - xMin);
   const ySpan = Math.max(1e-9, yMax - yMin);
@@ -34,6 +44,10 @@ export default function HoverChart({
 
   const line = points.map((p) => `${sx(p.ymi).toFixed(1)},${sy(p.value).toFixed(1)}`).join(' ');
   const latest = points.length ? points[points.length - 1].value : null;
+
+  const showMetric = metricLabel != null && metricFormat != null;
+  const metricNeg = metricValue != null && metricValue < 0;
+  const metricNote = metricValue == null ? 'bez dat' : metricTier === 1 ? 'málo dat' : null;
 
   const firstYear = Math.ceil(xMin / 12);
   const lastYear = Math.floor(xMax / 12);
@@ -44,11 +58,27 @@ export default function HoverChart({
 
   return (
     <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-3)]/97 shadow-[0_2px_8px_rgba(0,0,0,0.08)] px-2 pt-1.5 pb-1">
-      <div className="flex items-baseline justify-between gap-3 px-1">
-        <span className="text-[0.72rem] text-[var(--color-ink)] truncate max-w-[150px]">{title}</span>
-        <span className="text-[0.72rem] tabular-nums text-[var(--color-copper)]">
-          {latest != null ? format(latest) : '—'}
-        </span>
+      <div className="flex items-start justify-between gap-3 px-1">
+        <div className="min-w-0">
+          <div className="text-[0.72rem] text-[var(--color-ink)] truncate max-w-[150px]">{title}</div>
+          {showMetric && (
+            <div className="text-[0.56rem] leading-tight text-[var(--color-ink-3)] truncate max-w-[150px]">{metricLabel}</div>
+          )}
+        </div>
+        {showMetric ? (
+          <div className="text-right shrink-0">
+            <div className={`text-[0.92rem] leading-tight tabular-nums ${metricNeg ? 'text-[var(--color-brick)]' : 'text-[var(--color-copper)]'}`}>
+              {metricValue != null ? metricFormat!(metricValue) : '—'}
+            </div>
+            {metricNote && (
+              <div className="text-[0.52rem] leading-tight text-[var(--color-ink-4)]">{metricNote}</div>
+            )}
+          </div>
+        ) : (
+          <span className="text-[0.72rem] tabular-nums text-[var(--color-copper)]">
+            {latest != null ? format(latest) : '—'}
+          </span>
+        )}
       </div>
       <svg width={W} height={H} className="block">
         {/* y bounds */}
@@ -75,7 +105,12 @@ export default function HoverChart({
           <circle cx={sx(points[0].ymi)} cy={sy(points[0].value)} r={2} style={{ fill: 'var(--color-copper)' }} />
         )}
       </svg>
-      <div className="px-1 text-[0.6rem] text-[var(--color-ink-4)]">{valueLabel}</div>
+      <div className="flex items-baseline justify-between gap-2 px-1 text-[0.6rem] text-[var(--color-ink-4)]">
+        <span className="truncate">{valueLabel}</span>
+        {showMetric && latest != null && (
+          <span className="tabular-nums shrink-0">{format(latest)}</span>
+        )}
+      </div>
     </div>
   );
 }

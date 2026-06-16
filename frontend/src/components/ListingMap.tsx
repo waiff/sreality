@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { TILE_STYLE } from '@/lib/basemap';
 import type {
@@ -16,6 +16,8 @@ import {
   GROWTH_METRICS,
   GROWTH_METRIC_ORDER,
   GROWTH_NO_DATA,
+  buildMetricByObec,
+  formatGrowthMetric,
   growthToFeatureCollection,
   type GrowthMetric,
   type HoverData,
@@ -440,6 +442,13 @@ export default function ListingMap({
   const psgChartHoverRef = useRef(growthChartOnHover);
   psgChartHoverRef.current = growthChartOnHover;
   const [psgHover, setPsgHover] = useState<{ obecId: number; name: string; x: number; y: number } | null>(null);
+  /* Computed growth/yield figure per obec for the active metric — the same
+   * value the choropleth fill + the Datasets table show, surfaced on the hover
+   * chart. Memoized so the frequent hover-driven re-renders don't rebuild it. */
+  const psgMetricByObec = useMemo(
+    () => buildMetricByObec(growthRows ?? [], growthMetric),
+    [growthRows, growthMetric],
+  );
   /* City-overlay min-value threshold. When set, cities whose selected
    * color-by-index reading is below it render grey ("off"). Purely a map
    * visual, so it lives here rather than in URL/Browse state. Resets when
@@ -1362,6 +1371,10 @@ export default function ListingMap({
             yMin={growthHoverData.yMin} yMax={growthHoverData.yMax}
             valueLabel={growthHoverData.valueLabel}
             format={growthHoverData.format}
+            metricLabel={GROWTH_METRICS[growthMetric].label}
+            metricValue={psgMetricByObec.get(psgHover.obecId)?.value ?? null}
+            metricTier={psgMetricByObec.get(psgHover.obecId)?.tier ?? 0}
+            metricFormat={(v) => formatGrowthMetric(growthMetric, v)}
           />
         </div>
       )}

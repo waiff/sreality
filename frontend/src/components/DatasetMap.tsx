@@ -2,7 +2,7 @@
  * yield-change per municipality over the chosen window. Shares the ramp +
  * feature-collection logic with the Browse overlay via lib/growthChoropleth.
  * Each metric is its own fill layer toggled by visibility. */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { TILE_STYLE } from '@/lib/basemap';
 import type { PriceStatGrowthRow } from '@/lib/priceStats';
@@ -10,6 +10,8 @@ import {
   GROWTH_METRICS,
   GROWTH_METRIC_ORDER,
   GROWTH_NO_DATA,
+  buildMetricByObec,
+  formatGrowthMetric,
   growthToFeatureCollection,
   type GrowthMetric,
   type HoverData,
@@ -36,6 +38,10 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
   const chartOnHoverRef = useRef(chartOnHover);
   chartOnHoverRef.current = chartOnHover;
   const [hover, setHover] = useState<{ obecId: number; name: string; x: number; y: number } | null>(null);
+  // Computed growth/yield figure per obec for the active metric — the same
+  // value this map's choropleth + the Datasets table show, surfaced on the
+  // hover chart (memoized so frequent hover re-renders don't rebuild it).
+  const metricByObec = useMemo(() => buildMetricByObec(rows, metric), [rows, metric]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -141,6 +147,7 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
   }, [metric, ready]);
 
   const hoverPoints = hover && hoverData ? hoverData.byObec.get(hover.obecId) : undefined;
+  const hoverCell = hover ? metricByObec.get(hover.obecId) : undefined;
   const cw = containerRef.current?.clientWidth ?? 900;
   const chartLeft = hover ? (hover.x + 270 > cw ? hover.x - 262 : hover.x + 14) : 0;
   const chartTop = hover ? (hover.y + 200 > 560 ? hover.y - 190 : hover.y + 14) : 0;
@@ -158,6 +165,10 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
             yMin={hoverData!.yMin} yMax={hoverData!.yMax}
             valueLabel={hoverData!.valueLabel}
             format={hoverData!.format}
+            metricLabel={GROWTH_METRICS[metric].label}
+            metricValue={hoverCell?.value ?? null}
+            metricTier={hoverCell?.tier ?? 0}
+            metricFormat={(v) => formatGrowthMetric(metric, v)}
           />
         </div>
       )}

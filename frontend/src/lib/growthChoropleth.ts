@@ -62,6 +62,38 @@ export function growthTier(
   return { value: raw, tier: active < CONFIDENT_MIN ? 1 : 2 };
 }
 
+/* The computed growth/yield figure per obec for the active metric — the SAME
+ * value the Datasets table column + the choropleth fill read from the
+ * price_stat_growth RPC. `value` is the raw RPC figure (null when absent — kept
+ * even for a thin obec so its number still shows, matching the table); `tier`
+ * carries the confident/thin/none classification for the chart's annotation. */
+export interface GrowthMetricCell { value: number | null; tier: GrowthTier; }
+
+export function buildMetricByObec(
+  rows: PriceStatGrowthRow[],
+  metric: GrowthMetric,
+): Map<number, GrowthMetricCell> {
+  const m = new Map<number, GrowthMetricCell>();
+  for (const p of rows) {
+    const raw = p[metric];
+    m.set(p.obec_id, {
+      value: raw != null && Number.isFinite(raw) ? raw : null,
+      tier: growthTier(p, metric).tier,
+    });
+  }
+  return m;
+}
+
+/* Format a computed growth/yield figure exactly as the Datasets table does:
+ * rent/sale growth → "2.3%" (unsigned), yield change → "+0.15 pp" (signed). */
+export function formatGrowthMetric(metric: GrowthMetric, v: number): string {
+  const { digits, suffix } = GROWTH_METRICS[metric];
+  if (metric === 'yield_change_pp_pa') {
+    return `${v >= 0 ? '+' : ''}${v.toFixed(digits)} ${suffix}`;
+  }
+  return `${v.toFixed(digits)}${suffix}`;
+}
+
 export interface GrowthFeatureProps {
   obec_name: string;
   v_rent: number; h_rent: number; tn_rent: number;
