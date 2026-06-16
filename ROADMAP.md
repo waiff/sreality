@@ -6,6 +6,32 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Apartment street-coverage levers (sreality locality.value + idnes/bazoš fixes)
+
+Follow-up to the street-extractor work, after a cohort audit showed the two coverage
+tables differed only by denominator (apartments vs all-categories) and surfaced the
+real recoverable gaps. Principle: **only precise available data, no estimates** — a
+wrong street is worse than NULL.
+- **sreality `locality.value` fallback (the big win):** the parser read only the
+  *structured* `locality.street`, empty on index-shape rows that carry the street in
+  the free-text `locality.value` ("Street, City - Quarter"). `parse_listing` now falls
+  back to that through the shared `street_from_locality` (structured always wins).
+  Validated on live data: 87% of value-bearing rows recovered, **zero town-as-street
+  fabrications** → sreality apartments **71.8% → ~87.6%**. Backfillable from `raw_json`
+  (`backfill_portal_streets.py` gained a `sreality` source), snapshot-safe.
+- **iDNES rule fixes:** the area-token guard wrongly ate `1. máje`-family streets
+  (anchored it on the `m²` unit); Brno's doubled-`okres` form wrongly rejected a real
+  first-segment street (only reject a *bare* `okres X` neighbour).
+- **bazoš glued `ul.Výstavní`:** the keyword-anchored extractor + `clean_street` now
+  handle a dotted prefix glued to the name, while still protecting real streets that
+  merely start with "Ul" (Ulrychova/Ulická). Fuzzy prepositional/bare-name recall
+  rules were deliberately **not** added (fabrication risk > the small gain).
+- **Honest reporting:** iDNES's headline 60.5% is ~77% foreign apartments; on Czech
+  apartments it is already ~87%. Report coverage foreign-excluded.
+- **Next (scoped, not built):** a coords→street source via a one-time RÚIAN
+  "Adresní místa" address-point ingest (free, offline, exact-match-only) is the durable
+  path to ~88–90% overall — see `docs/design/street-coverage-ruian.md`.
+
 ### 2026-06: Reliable street across portals (street extractor + group-best place_search_text)
 
 - **Problem (verified live):** `listings.street` powered Browse street picks + the

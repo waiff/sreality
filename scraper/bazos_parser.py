@@ -105,9 +105,12 @@ _STREET_NAME = rf"[{_CZ_UPPER}]\w+(?:[^\S\r\n]+[{_CZ_UPPER}]\w+){{0,2}}"
 # Optional trailing house number — a street + number geocodes to a precise
 # address (high confidence); the lookahead rejects a PSČ ("679 61").
 _HOUSE_NO = r"(?:\s+\d{1,4}(?:/\d{1,4})?(?!\s*\d))?"
+# Dotted abbreviations (ul./tř./nám./nábř.) may be glued to the name with no
+# space ("ul.Výstavní"); the spelled-out keywords still require a space.
 _STREET_PREFIX_RE = re.compile(
-    rf"(?i:\bulic[ei]|\bul\.|\btříd[aěu]|\btř\.|\bnáměstí|\bnám\.|\bnábřeží|\bnábř\.|\bsídlišt[ěi])"
-    rf"\s+{_STREET_NAME}{_HOUSE_NO}"
+    rf"(?:(?i:\bul\.|\btř\.|\bnám\.|\bnábř\.)\s*"
+    rf"|(?i:\bulic[ei]|\btříd[aěu]|\bnáměstí|\bnábřeží|\bsídlišt[ěi])\s+)"
+    rf"{_STREET_NAME}{_HOUSE_NO}"
 )
 _STREET_SUFFIX_RE = re.compile(
     rf"\b{_STREET_NAME}\s+(?i:ulic[ei]|tříd[aěy]|náměstí|nábřeží){_HOUSE_NO}"

@@ -27,6 +27,12 @@ class TestCleanStreet:
         ("ul. Sokolovská", "Sokolovská"),
         ("ulice Klapálkova", "Klapálkova"),
         ("ulici Technického", "Technického"),
+        # glued dotted prefix ("ul.Výstavní") -> stripped; bare "ul " too...
+        ("ul.Výstavní", "Výstavní"),
+        ("ul Koterovská", "Koterovská"),
+        # ...but a real street that merely STARTS with "Ul" is never stripped
+        ("Ulrychova", "Ulrychova"),
+        ("Ulická", "Ulická"),
         # bazos description bleed (space + glued)
         ("ul. Vrchlického Nabízíme", "Vrchlického"),
         ("ul. SNP Nabízíme", "SNP"),
@@ -99,6 +105,13 @@ class TestIdnesFirstSegment:
         ("Sokolovská, Plzeň - Severní Předměstí", "Sokolovská"),
         ("Boženy Němcové, Sokolov", "Boženy Němcové"),
         ("K Haltýři, Praha 8 - Troja", "K Haltýři"),
+        # "N. máje"-family streets must NOT be eaten by the area-token guard
+        ("1. máje, Most", "1. máje"),
+        ("5. máje, Praha 5 - Stodůlky", "5. máje"),
+        ("17. listopadu, Pardubice", "17. listopadu"),
+        # idnes doubled-okres Brno form: parts[1] has a " - " quarter tail, so the
+        # first segment is still a real street (not the town)
+        ("Václavská, okres Brno-město - Staré Brno, okres Brno-město", "Václavská"),
         # fabrication traps -> None
         ("Estepona, Španělsko", None),
         ("Dubaj, Spojené arabské emiráty", None),

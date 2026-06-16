@@ -44,7 +44,10 @@ _GLUE_RE = re.compile(rf"([{_CZ_LOWER}])([{_CZ_UPPER}])")
 # "ul. Koterovská" stores as "Koterovská" (uniform with sreality's bare names).
 # "náměstí"/"třída"/"nábřeží" are frequently INTEGRAL to the proper name
 # ("náměstí Míru", "Vinohradská třída") -> kept; the dedup key folds them anyway.
-_LEAD_GENERIC_RE = re.compile(r"^(?:ulice|ulici|ul\.?)\s+", re.IGNORECASE)
+# The dotted "ul." may be glued to the name ("ul.Výstavní") so it allows no
+# space; the bare "ul"/"ulice"/"ulici" require a following space, so a real
+# street like "Ulrychova" or "Ulická" is never mistaken for the prefix.
+_LEAD_GENERIC_RE = re.compile(r"^(?:ulice|ulici|ul)\s+|^ul\.\s*", re.IGNORECASE)
 
 # A trailing house-number token (12, 12a, 123/45) — stored street is the bare
 # name; bazos never resolves a reliable house_number off its free-text capture.
@@ -192,7 +195,9 @@ def street_from_locality(
         return None
     parts = [p.strip() for p in locality.split(",") if p.strip()]
     # Drop a leading area token ("114 m², Praha 6, …" on some index strings).
-    if parts and re.match(r"^\d[\d\s.,]*m", _fold(parts[0])):
+    # Anchored on the m²/m2 unit (folds to "m2") so a street like "1. máje" —
+    # which folds to "1. maje" — is NOT mistaken for an area.
+    if parts and re.match(r"^\d[\d\s]*\s*m2\b", _fold(parts[0])):
         parts = parts[1:]
     if len(parts) < 2:
         return None
@@ -201,9 +206,13 @@ def street_from_locality(
 
     idx = 0 if position == "first" else len(parts) - 1
     candidate = parts[idx]
-    # For a first-segment street, an immediately-following "okres X" means the
-    # first segment IS the town ("Studénka, okres Nový Jičín"), not a street.
-    if position == "first" and len(parts) >= 2 and _OKRES_RE.match(parts[1]):
+    # For a first-segment street, an immediately-following BARE "okres X" means
+    # the first segment IS the town ("Studénka, okres Nový Jičín"), not a street.
+    # But idnes's doubled-okres Brno form ("Václavská, okres Brno-město - Staré
+    # Brno, …") carries a quarter tail in parts[1] — there the first segment is
+    # still a real street, so only reject when parts[1] has no " - " quarter.
+    if (position == "first" and len(parts) >= 2
+            and _OKRES_RE.match(parts[1]) and " - " not in parts[1]):
         return None
 
     cleaned = clean_street(candidate)

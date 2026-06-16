@@ -15,6 +15,8 @@ import re
 from typing import Any
 from unicodedata import combining, normalize
 
+from scraper.street import street_from_locality
+
 CATEGORY_MAIN: dict[int, str] = {
     1: "byt",
     2: "dum",
@@ -200,6 +202,8 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("could not determine sreality_id from response")
 
     loc = raw.get("locality") or {}
+    lat = _coord(loc.get("gps_lat"))
+    lon = _coord(loc.get("gps_lon"))
 
     return {
         "sreality_id": sreality_id,
@@ -216,8 +220,8 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "locality_municipality_id": _id_or_none(loc.get("municipality_id")),
         "locality_quarter_id": _id_or_none(loc.get("quarter_id")),
         "locality_ward_id": _id_or_none(loc.get("ward_id")),
-        "lon": _coord(loc.get("gps_lon")),
-        "lat": _coord(loc.get("gps_lat")),
+        "lon": lon,
+        "lat": lat,
         "floor": _int_or_none(raw.get("floor_number")),
         "total_floors": _int_or_none(raw.get("floors")),
         "has_balcony": _has_balcony(raw),
@@ -238,7 +242,11 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any]:
         "parking_lots": _int_or_none(raw.get("parking")),
         "ownership": OWNERSHIP.get(_cb_value(raw.get("ownership"))),
         "description": _description(raw),
-        "street": _loc_str(loc, "street"),
+        # Prefer sreality's structured street; on index-shape rows that key is
+        # empty but the free-text `value` ("Street, City - Quarter") carries it,
+        # so fall back to the shared first-segment extractor (foreign/okres/
+        # quarter guarded). Structured always wins — no estimation.
+        "street": _loc_str(loc, "street") or _street_from_value(loc, lat, lon),
         "house_number": _loc_str(loc, "housenumber") or _loc_str(loc, "streetnumber"),
         "zip": _loc_str(loc, "zip"),
         "street_id": _id_or_none(loc.get("street_id")),
@@ -326,6 +334,16 @@ def _loc_str(loc: dict[str, Any], key: str) -> str | None:
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         val = str(val)
     return val.strip() or None if isinstance(val, str) else None
+
+
+def _street_from_value(loc: dict[str, Any], lat: float | None, lon: float | None) -> str | None:
+    """Recover the street from the index-shape free-text `value` ("Street, City
+    - Quarter") when the structured `street` key is empty — via the same shared
+    first-segment extractor idnes/remax use."""
+    value = loc.get("value")
+    if not isinstance(value, str):
+        return None
+    return street_from_locality(value, position="first", lat=lat, lon=lon)
 
 
 def _district(loc: dict[str, Any]) -> str | None:

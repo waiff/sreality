@@ -43,12 +43,16 @@ from scraper.street import clean_street, street_from_locality
 
 LOG = logging.getLogger("backfill_portal_streets")
 
-_SOURCES: tuple[str, ...] = ("idnes", "maxima", "remax", "bezrealitky", "bazos")
+_SOURCES: tuple[str, ...] = ("sreality", "idnes", "maxima", "remax", "bezrealitky", "bazos")
 
 # Rows with the input we need that haven't been processed this pass. obec IS NOT
 # NULL (CZ-resolved coordinate, migration 140) excludes foreign listings — the
 # dominant idnes fabrication vector — before the helper's guards even run.
 _INPUT_PREDICATE: dict[str, str] = {
+    # sreality index-shape rows: structured street empty but the free-text
+    # locality `value` ("Street, City - Quarter") carries it (same lever the
+    # parser now applies forward — this backfills the existing rows).
+    "sreality":    "l.street IS NULL AND l.obec IS NOT NULL AND l.raw_json->'locality'->>'value' IS NOT NULL",
     "idnes":       "l.locality IS NOT NULL AND l.obec IS NOT NULL AND l.street IS NULL",
     "maxima":      "l.locality IS NOT NULL AND l.obec IS NOT NULL AND l.street IS NULL",
     "remax":       "l.raw_json->>'address' IS NOT NULL AND l.obec IS NOT NULL AND l.street IS NULL",
@@ -62,7 +66,8 @@ _SELECT_SQL = """
            l.raw_json->>'address' AS address,
            l.raw_json->>'street' AS adv_street,
            l.raw_json->>'houseNumber' AS adv_house_number,
-           l.raw_json->>'zip' AS adv_zip
+           l.raw_json->>'zip' AS adv_zip,
+           l.raw_json->'locality'->>'value' AS loc_value
     FROM listings l
     WHERE l.source = %(source)s AND l.is_active
       AND l.raw_json->>'portal_street_backfill' IS NULL
@@ -103,6 +108,9 @@ _CHUNK = 1000
 def derive(source: str, row: dict[str, Any]) -> tuple[str | None, str | None, str | None, bool]:
     """Per-source (street, house_number, zip, improved) from stored fields."""
     geo = (row["obec"], row["okres"], row["region"])
+    if source == "sreality":
+        s = street_from_locality(row["loc_value"], position="first", geo_names=geo)
+        return s, None, None, s is not None
     if source == "idnes":
         s = street_from_locality(row["locality"], position="first", geo_names=geo)
         return s, None, None, s is not None
@@ -130,7 +138,7 @@ def derive(source: str, row: dict[str, Any]) -> tuple[str | None, str | None, st
 
 _COLS = ("sreality_id", "property_id", "locality", "district", "street",
          "obec", "okres", "region", "address", "adv_street",
-         "adv_house_number", "adv_zip")
+         "adv_house_number", "adv_zip", "loc_value")
 
 
 def process_source(conn: Any, source: str, limit: int, deadline: float | None) -> dict[str, int]:
