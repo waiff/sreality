@@ -16,10 +16,10 @@ via boto3 (scraper.image_storage), base64 into the vision payload.
 
 from __future__ import annotations
 
-import base64
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
+from toolkit.vision_images import image_block
 
 if TYPE_CHECKING:
     import psycopg
@@ -167,18 +167,9 @@ def _storage_paths(conn: "psycopg.Connection", image_ids: list[int]) -> list[str
 
 
 def _blocks(r2: Any, keys: list[str]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for key in keys:
-        data = r2.download_bytes(key)
-        out.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": base64.standard_b64encode(data).decode("ascii"),
-            },
-        })
-    return out
+    # Downscale before encoding: full-res originals blow the 200k-token prompt
+    # limit when several are packed into one call (toolkit.vision_images).
+    return [image_block(r2, key) for key in keys]
 
 
 def _extract(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:
