@@ -35,6 +35,7 @@ from unicodedata import combining, normalize
 from selectolax.parser import HTMLParser, Node
 
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import street_from_locality
 
 # Detail "Typ nemovitosti" value (diacritics-stripped, lowercased) -> canonical
 # category_main. The live 2026 vocabulary is SEVEN coarse marketing groups
@@ -528,6 +529,14 @@ def parse_detail(
             locality = parts[1]
             district = locality.split(" - ")[-1].strip() if " - " in locality else district
 
+    # data-address leads with the street ("Na vrcholu, Praha 3 - Žižkov, Praha")
+    # WHEN present, but is often just the municipality ("Roztoky"). The geo
+    # cross-check against the row's own locality/district rejects a town leaking
+    # as parts[0]; town-only listings keep street=NULL.
+    street = street_from_locality(
+        address, position="first", geo_names=(locality, district), lat=lat, lon=lon
+    )
+
     usable_text = params.get("uzitna plocha")
     total_text = params.get("celkova plocha") or params.get("plocha")
     area_m2 = _parse_area(usable_text) or _parse_area(total_text) or _parse_area(title)
@@ -558,6 +567,7 @@ def parse_detail(
         disposition=_parse_disposition(params.get("dispozice")) or _parse_disposition(title),
         locality=locality,
         district=district,
+        street=street,
         lat=lat,
         lon=lon,
         floor=_parse_int(params.get("cislo podlazi")),

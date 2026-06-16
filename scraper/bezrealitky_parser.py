@@ -15,6 +15,7 @@ from typing import Any
 
 from scraper.bezrealitky_client import detail_url
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import clean_street
 
 SOURCE = "bezrealitky"
 
@@ -110,6 +111,13 @@ def _energy(value: str | None) -> str | None:
     return value if value in ("A", "B", "C", "D", "E", "F", "G") else None
 
 
+def _str_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
 def _locality(advert: dict[str, Any]) -> str | None:
     city = advert.get("city")
     quarter = advert.get("cityDistrict")
@@ -174,6 +182,11 @@ def parse_advert(advert: dict[str, Any]) -> ScrapedListing:
         disposition=_disposition(advert.get("disposition")),
         locality=_locality(advert),
         district=None,
+        # bezrealitky's GraphQL advert carries structured street/houseNumber/zip
+        # (the only portal that gives the full triple deterministically).
+        street=clean_street(_str_or_none(advert.get("street"))),
+        house_number=_str_or_none(advert.get("houseNumber")),
+        zip=_str_or_none(advert.get("zip")),
         lat=lat,
         lon=lon,
         floor=_int(advert.get("etage")),

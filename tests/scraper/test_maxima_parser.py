@@ -173,6 +173,8 @@ def test_parse_detail_full():
     assert listing.lat == 50.135296277954296
     assert listing.lon == 14.3808766436688
     assert "Praha 6" in (listing.locality or "")
+    # Street is the last comma-segment of "Praha 6, Suchdol, U Hotelu".
+    assert listing.street == "U Hotelu"
     assert listing.floor == 3
     assert listing.total_floors == 6
     assert listing.building_type == "skelet"

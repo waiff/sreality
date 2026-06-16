@@ -197,6 +197,8 @@ def test_parse_detail_full():
     assert listing.lat == 50.130427866
     assert listing.lon == 14.484176216
     assert "Praha 8" in (listing.locality or "")
+    # Street is the first comma-segment of "Černého, Praha 8 - Střížkov".
+    assert listing.street == "Černého"
     assert listing.floor == 2
     assert listing.total_floors == 12
     assert listing.building_type == "panel"

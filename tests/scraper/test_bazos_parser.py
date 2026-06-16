@@ -150,11 +150,12 @@ def test_parse_detail_live_three_cell_lokalita_enables_street_geocode():
     assert listing.raw["psc"] == "326 00"
     # Breadcrumb is authoritative for the category.
     assert (listing.category_main, listing.category_type) == ("byt", "pronajem")
-    # The street name stops at the title's end — no "Nabízíme" from the next line.
+    # The raw extract (used as the geocoder query, where the "ul." prefix helps)
+    # stops at the title's end — no "Nabízíme" from the next line.
     assert listing.raw["coords"]["street"] == "ul. Koterovská"
-    # The extracted street also lands on the contract itself (listings.street is
-    # what the street+disposition dedup engine keys on), not just in provenance.
-    assert listing.street == "ul. Koterovská"
+    # The STORED street is cleaned to a bare, uniform name (prefix stripped) — it
+    # is what the street+disposition dedup engine keys on and Browse displays.
+    assert listing.street == "Koterovská"
     # With a real locality available, the street geocode wins over the link pin.
     assert listing.raw["coords"]["source"] == "street"
     assert (listing.lat, listing.lon) == (49.738, 13.410)
