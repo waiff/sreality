@@ -415,6 +415,7 @@ def test_write_details_ingests_and_counts(monkeypatch):
 
 def test_build_geocoder_none_without_key(monkeypatch):
     monkeypatch.delenv("MAPY_CZ_API_KEY", raising=False)
+    monkeypatch.delenv("MAPY2_CZ_API_KEY", raising=False)
     assert bazos_main._build_geocoder() is None
 
 
