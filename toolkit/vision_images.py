@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from typing import Any
+
+LOG = logging.getLogger("vision_images")
 
 # Anthropic resizes vision inputs to <=1568px long edge / ~1.15 MP and counts
 # ~1600 tokens at that size; bounding the long edge here keeps a 12-image classify
@@ -28,7 +31,8 @@ def downscale_jpeg(data: bytes, max_edge: int = DEFAULT_MAX_EDGE) -> bytes:
     """
     try:
         from PIL import Image
-    except Exception:
+    except Exception as exc:
+        LOG.warning("downscale: PIL import failed (sending full-res): %r", exc)
         return data
     try:
         with Image.open(io.BytesIO(data)) as im:
@@ -37,7 +41,8 @@ def downscale_jpeg(data: bytes, max_edge: int = DEFAULT_MAX_EDGE) -> bytes:
             buf = io.BytesIO()
             im.save(buf, format="JPEG", quality=80)
             return buf.getvalue()
-    except Exception:
+    except Exception as exc:
+        LOG.warning("downscale: resize failed (%d bytes; sending full-res): %r", len(data), exc)
         return data
 
 
