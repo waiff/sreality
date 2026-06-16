@@ -127,6 +127,20 @@ _RECOMPUTE_BATCH_SQL = """
       ORDER BY l.property_id, l.is_active DESC, l.last_seen_at DESC NULLS LAST,
                l.sreality_id DESC
     ),
+    -- Group-best street (migration 183): the best non-null child street,
+    -- sreality-preferred (structured + most reliable), then active + most
+    -- recently seen. Lets place_search_text match a street even when the
+    -- representative listing lacks one. LEFT-JOINed below -> NULL when no child
+    -- carries a street.
+    best_street AS (
+      SELECT DISTINCT ON (l.property_id)
+        l.property_id AS pid, l.street
+      FROM listings l
+      JOIN batch b ON b.id = l.property_id
+      WHERE l.street IS NOT NULL AND l.street <> ''
+      ORDER BY l.property_id, (l.source = 'sreality') DESC,
+               l.is_active DESC, l.last_seen_at DESC NULLS LAST, l.sreality_id DESC
+    ),
     prices AS (
       SELECT
         l.property_id AS pid,
@@ -197,6 +211,7 @@ _RECOMPUTE_BATCH_SQL = """
       geom                = r.geom,
       current_price_czk   = r.price_czk,
       locality            = r.locality,
+      street              = bs.street,
       has_balcony         = r.has_balcony,
       has_parking         = r.has_parking,
       has_lift            = r.has_lift,
@@ -228,6 +243,7 @@ _RECOMPUTE_BATCH_SQL = """
       stats_computed_at   = now()
     FROM child_agg ca
     JOIN repr r ON r.pid = ca.pid
+    LEFT JOIN best_street bs ON bs.pid = ca.pid
     LEFT JOIN price_hist ph ON ph.pid = ca.pid
     LEFT JOIN changes ch ON ch.pid = ca.pid
     WHERE p.id = ca.pid
