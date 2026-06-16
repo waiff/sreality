@@ -206,6 +206,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "default": "",
         "options": [
           "",
+          "sreality",
           "idnes",
           "maxima",
           "remax",
