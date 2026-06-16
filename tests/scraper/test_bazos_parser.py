@@ -382,14 +382,15 @@ def test_parsed_listing_bridges_into_ingest_contract():
 
 def test_parse_detail_street_survives_into_listing_row():
     # No geocoder at all: the street extraction is text-only and must still
-    # surface on ScrapedListing.street and ride to_row into listings.street.
+    # surface on ScrapedListing.street (cleaned to a bare name) and ride to_row
+    # into listings.street.
     listing = parse_detail(
         LIVE_LOKALITA_DETAIL_HTML,
         source_url="https://reality.bazos.cz/inzerat/219722150/x.php",
         category_main="byt", category_type="pronajem", geocoder=None,
     )
-    assert listing.street == "ul. Koterovská"
-    assert listing.to_row(-9)["street"] == "ul. Koterovská"
+    assert listing.street == "Koterovská"
+    assert listing.to_row(-9)["street"] == "Koterovská"
 
 
 def test_parse_detail_dohodou_price_is_none():
