@@ -72,6 +72,13 @@ RETRYABLE_STATUS: frozenset[int] = frozenset(
     {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
 )
 
+# 401/403 = the key was rejected (dead / suspended / wrong); 429 = it hit its
+# rate limit. All three are KEY-level failures: a *different* key may succeed, so
+# when a backup key is configured we abandon this key and try the next instead of
+# burning same-key retries. Transient 5xx/connection errors are deliberately NOT
+# here — a second key can't fix a Mapy.cz outage, so those stay same-key retries.
+KEY_LEVEL_STATUS: frozenset[int] = frozenset({401, 403, 429})
+
 # Specificity ordering — higher score = more precise coordinates.
 # regional.address is the only "high" tier because everything else
 # returns a centroid that may be ~100m (street) to ~1km+ (city) off
@@ -92,6 +99,28 @@ _MEDIUM_MIN_SPECIFICITY = 60
 
 class GeocodingError(RuntimeError):
     """Raised when Mapy.cz returns no usable result for a query."""
+
+
+class _KeyFailover(Exception):
+    """Internal signal: this key was rejected/throttled — try the next key."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__(f"Mapy.cz key rejected with status {status}")
+        self.status = status
+
+
+def mapy_api_keys() -> list[str]:
+    """Mapy.cz API keys in priority order: primary then optional backup.
+
+    `MAPY2_CZ_API_KEY` is a fallback used only when the primary is rejected or
+    throttled (see KEY_LEVEL_STATUS). Empty list when neither env var is set.
+    """
+    keys: list[str] = []
+    for name in ("MAPY_CZ_API_KEY", "MAPY2_CZ_API_KEY"):
+        value = (os.environ.get(name) or "").strip()
+        if value and value not in keys:
+            keys.append(value)
+    return keys
 
 
 @dataclass(frozen=True)
@@ -117,22 +146,39 @@ def geocode(
 ) -> GeocodeResult:
     """Geocode a Czech locality string.
 
-    Reads `MAPY_CZ_API_KEY` from env if api_key is None. Raises
-    GeocodingError if the request fails after retries or if the response
-    contains no usable item.
+    Tries `MAPY_CZ_API_KEY` then the optional `MAPY2_CZ_API_KEY` backup, failing
+    over to the next key only on a key-level rejection (see KEY_LEVEL_STATUS). An
+    explicit `api_key` overrides env lookup and disables failover. Raises
+    GeocodingError if every key fails or the response carries no usable item.
     """
     if not isinstance(locality, str) or not locality.strip():
         raise GeocodingError("empty locality")
-    key = api_key or os.environ.get("MAPY_CZ_API_KEY")
-    if not key:
+    keys = [api_key] if api_key else mapy_api_keys()
+    if not keys:
         raise GeocodingError("MAPY_CZ_API_KEY is not set")
 
     sess = session or requests.Session()
-    params = {"query": locality, "apikey": key, "lang": lang, "limit": limit}
-    payload = _request_with_retry(
-        sess, params, timeout_s=timeout_s, max_retries=max_retries,
-    )
-    return _payload_to_result(payload)
+    base_params = {"query": locality, "lang": lang, "limit": limit}
+    last_status: int | None = None
+    for i, key in enumerate(keys):
+        params = {**base_params, "apikey": key}
+        try:
+            payload = _request_with_retry(
+                sess, params,
+                timeout_s=timeout_s, max_retries=max_retries,
+                allow_failover=i < len(keys) - 1,
+            )
+        except _KeyFailover as exc:
+            last_status = exc.status
+            LOG.warning(
+                "Mapy.cz key %d/%d rejected (status=%s); failing over to backup",
+                i + 1, len(keys), exc.status,
+            )
+            continue
+        return _payload_to_result(payload)
+    # Unreachable: the last key runs with allow_failover=False and raises a real
+    # error directly rather than signalling failover.
+    raise GeocodingError(f"Mapy.cz request failed: status {last_status}")
 
 
 def _request_with_retry(
@@ -141,6 +187,7 @@ def _request_with_retry(
     *,
     timeout_s: float,
     max_retries: int,
+    allow_failover: bool = False,
 ) -> dict[str, Any]:
     error: Exception | None = None
     for attempt in range(max_retries + 1):
@@ -155,6 +202,8 @@ def _request_with_retry(
                 GEOCODE_URL, attempt + 1, max_retries + 1, exc,
             )
             continue
+        if allow_failover and r.status_code in KEY_LEVEL_STATUS:
+            raise _KeyFailover(r.status_code)
         if r.status_code in RETRYABLE_STATUS:
             error = requests.HTTPError(
                 f"{r.status_code} from {GEOCODE_URL}", response=r,

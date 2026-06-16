@@ -128,6 +128,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
@@ -302,6 +303,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
@@ -1210,6 +1212,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
       "SCRAPE_CHAIN_TOKEN",
       "SUPABASE_DB_URL"
@@ -2356,6 +2359,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
       "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],

@@ -74,6 +74,7 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+          MAPY2_CZ_API_KEY: ${{ secrets.MAPY2_CZ_API_KEY }}
           MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
           MAX_DETAIL: ${{ inputs.max_detail }}
           WORKERS: ${{ inputs.workers }}

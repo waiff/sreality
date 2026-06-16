@@ -788,6 +788,12 @@ LLM + maps (FastAPI service + scoring jobs):
 - `GEMINI_API_KEY` — Google AI Studio key; required for the agent under `provider='gemini'`.
   A request selecting an unconfigured provider returns 502; missing at boot is not fatal.
 - `MAPY_CZ_API_KEY` — Mapy.cz REST key; geocodes locality strings and powers `/maps/*`.
+- `MAPY2_CZ_API_KEY` (optional backup) — a second Mapy.cz key. `scraper.geocoding` and the
+  `/maps/suggest` proxy fail over to it automatically **only** when the primary is rejected
+  (401/403) or rate-limited (429); a Mapy outage (5xx) does not trigger failover. Set it in
+  **both runtimes** that geocode — the GitHub Actions secret (already injected into the bazos /
+  idnes detail drains + the seed/backfill jobs) and the **Railway API service env var** (powers
+  `/maps/suggest` + URL-parse geocoding). Unset → no-op, primary behaviour unchanged.
 - `LLM_DAILY_COST_WARN_USD` (optional, default `5.0`) — soft cross-provider warning
   threshold; `LLMClient` logs one WARNING per day when the `llm_calls.cost_usd` sum first
   crosses it. Each provider's own console spend cap is the hard guard.

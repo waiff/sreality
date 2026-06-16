@@ -11,12 +11,13 @@ deploys.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any
 
 import requests
 from fastapi import HTTPException
+
+from scraper.geocoding import KEY_LEVEL_STATUS, mapy_api_keys
 
 LOG = logging.getLogger(__name__)
 
@@ -54,11 +55,11 @@ _SUGGEST_CACHE_MAX = 256
 _suggest_cache: dict[tuple[str, int, str], tuple[float, dict[str, Any]]] = {}
 
 
-def _api_key() -> str:
-    key = os.environ.get("MAPY_CZ_API_KEY")
-    if not key:
+def _api_keys() -> list[str]:
+    keys = mapy_api_keys()
+    if not keys:
         raise HTTPException(status_code=503, detail="geocoding not configured")
-    return key
+    return keys
 
 
 def _http_get_json(url: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -78,34 +79,53 @@ def clear_suggest_cache() -> None:
 
 
 def suggest(query: str, *, limit: int = 10, lang: str = "cs") -> dict[str, Any]:
-    key = _api_key()
+    keys = _api_keys()
     cache_key = (query, limit, lang)
     now = time.monotonic()
     hit = _suggest_cache.get(cache_key)
     if hit is not None and hit[0] > now:
         return hit[1]
     _cache_evict_expired(now)
-    try:
-        raw = _http_get_json(
-            MAPY_SUGGEST_URL,
-            {"query": query, "limit": limit, "lang": lang, "apikey": key},
-        )
-    except (requests.RequestException, ValueError) as exc:
-        # A rejected key / throttle / outage from Mapy must NOT surface as a raw
-        # 500 — the frontend only degrades gracefully (fallback district pickers)
-        # on 503, so a 500 leaves a silent empty dropdown. Log the real upstream
-        # status for diagnosis and return 503.
-        status = getattr(getattr(exc, "response", None), "status_code", None)
-        LOG.warning("Mapy suggest upstream failure status=%s: %s", status, exc)
-        raise HTTPException(
-            status_code=503, detail="geocoding temporarily unavailable",
-        ) from exc
+    raw = _fetch_suggest(query, limit=limit, lang=lang, keys=keys)
     items = raw.get("items") or []
     payload = {"items": items}
     if len(_suggest_cache) >= _SUGGEST_CACHE_MAX:
         _suggest_cache.pop(next(iter(_suggest_cache)))
     _suggest_cache[cache_key] = (now + _SUGGEST_TTL_SECONDS, payload)
     return payload
+
+
+def _fetch_suggest(
+    query: str, *, limit: int, lang: str, keys: list[str]
+) -> dict[str, Any]:
+    last_exc: Exception | None = None
+    for i, key in enumerate(keys):
+        try:
+            return _http_get_json(
+                MAPY_SUGGEST_URL,
+                {"query": query, "limit": limit, "lang": lang, "apikey": key},
+            )
+        except (requests.RequestException, ValueError) as exc:
+            last_exc = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status in KEY_LEVEL_STATUS and i < len(keys) - 1:
+                LOG.warning(
+                    "Mapy suggest key %d/%d rejected (status=%s); failing over to backup",
+                    i + 1, len(keys), status,
+                )
+                continue
+            # A rejected key / throttle / outage from Mapy must NOT surface as a raw
+            # 500 — the frontend only degrades gracefully (fallback district pickers)
+            # on 503, so a 500 leaves a silent empty dropdown. Log the real upstream
+            # status for diagnosis and return 503.
+            LOG.warning("Mapy suggest upstream failure status=%s: %s", status, exc)
+            raise HTTPException(
+                status_code=503, detail="geocoding temporarily unavailable",
+            ) from exc
+    # Unreachable: the last key never `continue`s.
+    raise HTTPException(
+        status_code=503, detail="geocoding temporarily unavailable",
+    ) from last_exc
 
 
 def _admin_boundaries_present(conn: Any) -> bool:
