@@ -188,6 +188,70 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_street_locality.yml"
   },
   {
+    "filename": "backfill_portal_streets.yml",
+    "name": "Backfill portal streets",
+    "description": "One-off, dispatch-only backfill. Re-derives listings.street (+ house_number / zip for bezrealitky) on existing idnes / maxima / remax / bezrealitky / bazos rows from data ALREADY stored (locality, raw_json, or the existing street), via the shared scraper.street helper — NO re-fetch, NO LLM, NO Mapy spend. street/house_number/zip are out of the content hash so NO snapshot is written. Idempotent + resumable (each row stamped raw_json.portal_street_backfill); rerun until \"pending=0\". A changed-street row enqueues its property so the */5 recompute propagates the group-best street to properties.street. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "source",
+        "description": "Limit to one portal (blank = all)",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "idnes",
+          "maxima",
+          "remax",
+          "bezrealitky",
+          "bazos"
+        ]
+      },
+      {
+        "name": "limit",
+        "description": "Max listings processed per source per run",
+        "required": false,
+        "type": "string",
+        "default": "40000",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget in seconds (blank = no budget)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the pending counts and exit without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "backfill-portal-streets",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_portal_streets.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
+  },
+  {
     "filename": "bazos_detail_drain.yml",
     "name": "Scraping: Bazos detail drain",
     "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",

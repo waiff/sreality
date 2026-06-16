@@ -127,6 +127,9 @@ class TestMaximaLastSegment:
     @pytest.mark.parametrize("locality,expected", [
         ("Praha 6, Suchdol, U Hotelu", "U Hotelu"),
         ("Praha 4, Chodov, Brodského", "Brodského"),
+        # 3-segment "City, Quarter, Street": last segment trusted even when its
+        # morphology is a genitive/possessive the 2-segment gate would reject.
+        ("Praha 7, Holešovice, Františka Křížka", "Františka Křížka"),
         ("Kladno, Huťská", "Huťská"),
         ("Chrastava, náměstí 1. máje", "náměstí 1. máje"),
         # village last-segments -> None (require_morphology)

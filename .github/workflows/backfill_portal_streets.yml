@@ -1,0 +1,79 @@
+name: Backfill portal streets
+
+# One-off, dispatch-only backfill. Re-derives listings.street (+ house_number /
+# zip for bezrealitky) on existing idnes / maxima / remax / bezrealitky / bazos
+# rows from data ALREADY stored (locality, raw_json, or the existing street),
+# via the shared scraper.street helper — NO re-fetch, NO LLM, NO Mapy spend.
+# street/house_number/zip are out of the content hash so NO snapshot is written.
+# Idempotent + resumable (each row stamped raw_json.portal_street_backfill);
+# rerun until "pending=0". A changed-street row enqueues its property so the */5
+# recompute propagates the group-best street to properties.street. NOT a portal
+# ingest workflow, so it carries no `# portal:` tag.
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: Limit to one portal (blank = all)
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - idnes
+          - maxima
+          - remax
+          - bezrealitky
+          - bazos
+      limit:
+        description: Max listings processed per source per run
+        required: false
+        default: "40000"
+        type: string
+      max_seconds:
+        description: Wall-clock budget in seconds (blank = no budget)
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: Report the pending counts and exit without writing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: backfill-portal-streets
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Backfill streets
+        run: |
+          ARGS="--limit ${{ inputs.limit || '40000' }}"
+          if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
+          if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.backfill_portal_streets $ARGS

@@ -212,6 +212,9 @@ def street_from_locality(
     context = tuple(geo_names) + tuple(p for i, p in enumerate(parts) if i != idx)
     if reject_as_town(cleaned, geo_names=context, lat=lat, lon=lon):
         return None
-    if require_morphology and not looks_like_czech_street(cleaned):
+    # A 3+-segment locality is "City, Quarter, Street" — the last segment is
+    # reliably a street, so the morphology gate is only needed for the ambiguous
+    # 2-segment case ("City, Street" vs "Village, Village/Quarter").
+    if require_morphology and len(parts) < 3 and not looks_like_czech_street(cleaned):
         return None
     return cleaned
