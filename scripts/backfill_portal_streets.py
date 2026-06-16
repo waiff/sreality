@@ -82,14 +82,22 @@ _COUNT_SQL = """
 # town-only row (street -> NULL) keeps NULL and a re-clean never nulls out a
 # value the cleaner couldn't parse. geom untouched -> no admin-geo re-derive, no
 # snapshot. The marker stamps every processed row so it leaves the selection.
+# Set-based: one statement per chunk (unnest join on the PK) instead of a
+# per-row round-trip, so a 40k-source run is minutes, not hours.
 _UPDATE_SQL = """
-    UPDATE listings
-    SET street       = COALESCE(%(street)s, street),
-        house_number = COALESCE(%(house_number)s, house_number),
-        zip          = COALESCE(%(zip)s, zip),
-        raw_json     = raw_json || '{"portal_street_backfill": true}'::jsonb
-    WHERE sreality_id = %(id)s
+    UPDATE listings l
+    SET street       = COALESCE(d.street, l.street),
+        house_number = COALESCE(d.house_number, l.house_number),
+        zip          = COALESCE(d.zip, l.zip),
+        raw_json     = l.raw_json || '{"portal_street_backfill": true}'::jsonb
+    FROM (SELECT * FROM unnest(
+            %(ids)s::bigint[], %(streets)s::text[],
+            %(house_numbers)s::text[], %(zips)s::text[]
+          ) AS t(id, street, house_number, zip)) d
+    WHERE l.sreality_id = d.id
 """
+
+_CHUNK = 1000
 
 
 def derive(source: str, row: dict[str, Any]) -> tuple[str | None, str | None, str | None, bool]:
@@ -140,31 +148,37 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None) -
         rows = [dict(zip(_COLS, r)) for r in cur.fetchall()]
 
     updated = skipped = 0
-    dirty: list[int] = []
-    for i, row in enumerate(rows):
+    for start in range(0, len(rows), _CHUNK):
         if deadline is not None and time.monotonic() > deadline:
             LOG.info("BACKFILL source=%s stopping: --max-seconds reached", source)
             break
-        street, hn, zp, improved = derive(source, row)
+        chunk = rows[start:start + _CHUNK]
+        ids: list[int] = []
+        streets: list[str | None] = []
+        house_numbers: list[str | None] = []
+        zips: list[str | None] = []
+        dirty: list[int] = []
+        for row in chunk:
+            street, hn, zp, improved = derive(source, row)
+            ids.append(row["sreality_id"])
+            streets.append(street)
+            house_numbers.append(hn)
+            zips.append(zp)
+            if improved:
+                updated += 1
+                if row["property_id"] is not None:
+                    dirty.append(row["property_id"])
+            else:
+                skipped += 1
         with conn.cursor() as cur:
             cur.execute(_UPDATE_SQL, {
-                "id": row["sreality_id"], "street": street,
-                "house_number": hn, "zip": zp,
+                "ids": ids, "streets": streets,
+                "house_numbers": house_numbers, "zips": zips,
             })
-        if improved:
-            updated += 1
-            if row["property_id"] is not None:
-                dirty.append(row["property_id"])
-        else:
-            skipped += 1
-        if len(dirty) >= 500:
+        if dirty:
             db.mark_properties_dirty(conn, dirty)
-            dirty = []
-        if (i + 1) % 500 == 0:
-            LOG.info("BACKFILL source=%s progress=%d/%d updated=%d skipped=%d",
-                     source, i + 1, len(rows), updated, skipped)
-    if dirty:
-        db.mark_properties_dirty(conn, dirty)
+        LOG.info("BACKFILL source=%s progress=%d/%d updated=%d skipped=%d",
+                 source, min(start + _CHUNK, len(rows)), len(rows), updated, skipped)
 
     with conn.cursor() as cur:
         cur.execute(_COUNT_SQL.format(predicate=predicate), {"source": source})
