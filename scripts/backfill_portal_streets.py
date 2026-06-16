@@ -72,16 +72,16 @@ _SELECT_SQL = """
     WHERE l.source = %(source)s AND l.is_active
       AND l.raw_json->>'portal_street_backfill' IS NULL
       AND ({predicate})
+      AND l.sreality_id > %(cursor)s
     ORDER BY l.sreality_id
-    LIMIT %(limit)s
+    LIMIT %(chunk)s
 """
 
-_COUNT_SQL = """
-    SELECT count(*) FROM listings l
-    WHERE l.source = %(source)s AND l.is_active
-      AND l.raw_json->>'portal_street_backfill' IS NULL
-      AND ({predicate})
-"""
+# Keyset pagination by the PK (sreality_id): each chunk query is bounded and
+# index-ordered, so it never triggers a full-table scan + COUNT timeout on a big
+# table (sreality has ~140k large-jsonb rows). No COUNT — the loop runs until a
+# chunk comes back empty.
+_CURSOR_MIN = -(10 ** 18)
 
 # COALESCE(new, existing): a derived value overrides only when present, so a
 # town-only row (street -> NULL) keeps NULL and a re-clean never nulls out a
@@ -142,31 +142,26 @@ _COLS = ("sreality_id", "property_id", "locality", "district", "street",
 
 
 def process_source(conn: Any, source: str, limit: int, deadline: float | None) -> dict[str, int]:
-    predicate = _INPUT_PREDICATE[source]
-    with conn.cursor() as cur:
-        cur.execute(_COUNT_SQL.format(predicate=predicate), {"source": source})
-        pending = int(cur.fetchone()[0])
-    LOG.info("BACKFILL source=%s pending=%d limit=%d", source, pending, limit)
-    if pending == 0:
-        return {"updated": 0, "skipped": 0, "remaining": 0}
-
-    with conn.cursor() as cur:
-        cur.execute(_SELECT_SQL.format(predicate=predicate),
-                    {"source": source, "limit": limit})
-        rows = [dict(zip(_COLS, r)) for r in cur.fetchall()]
-
-    updated = skipped = 0
-    for start in range(0, len(rows), _CHUNK):
+    sql = _SELECT_SQL.format(predicate=_INPUT_PREDICATE[source])
+    cursor = _CURSOR_MIN
+    updated = skipped = processed = 0
+    while processed < limit:
         if deadline is not None and time.monotonic() > deadline:
             LOG.info("BACKFILL source=%s stopping: --max-seconds reached", source)
             break
-        chunk = rows[start:start + _CHUNK]
+        chunk_size = min(_CHUNK, limit - processed)
+        with conn.cursor() as cur:
+            cur.execute(sql, {"source": source, "cursor": cursor, "chunk": chunk_size})
+            rows = [dict(zip(_COLS, r)) for r in cur.fetchall()]
+        if not rows:
+            break
+        cursor = rows[-1]["sreality_id"]
         ids: list[int] = []
         streets: list[str | None] = []
         house_numbers: list[str | None] = []
         zips: list[str | None] = []
         dirty: list[int] = []
-        for row in chunk:
+        for row in rows:
             street, hn, zp, improved = derive(source, row)
             ids.append(row["sreality_id"])
             streets.append(street)
@@ -185,15 +180,12 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None) -
             })
         if dirty:
             db.mark_properties_dirty(conn, dirty)
-        LOG.info("BACKFILL source=%s progress=%d/%d updated=%d skipped=%d",
-                 source, min(start + _CHUNK, len(rows)), len(rows), updated, skipped)
-
-    with conn.cursor() as cur:
-        cur.execute(_COUNT_SQL.format(predicate=predicate), {"source": source})
-        remaining = int(cur.fetchone()[0])
-    LOG.info("BACKFILL source=%s done updated=%d skipped=%d remaining=%d",
-             source, updated, skipped, remaining)
-    return {"updated": updated, "skipped": skipped, "remaining": remaining}
+        processed += len(rows)
+        LOG.info("BACKFILL source=%s processed=%d updated=%d skipped=%d cursor=%d",
+                 source, processed, updated, skipped, cursor)
+    LOG.info("BACKFILL source=%s done updated=%d skipped=%d processed=%d",
+             source, updated, skipped, processed)
+    return {"updated": updated, "skipped": skipped, "processed": processed}
 
 
 def main() -> int:
@@ -223,14 +215,16 @@ def main() -> int:
 
     with db.connect() as conn:
         if args.dry_run:
+            # Cheap existence probe (one keyset chunk), not a full COUNT.
             for source in sources:
                 with conn.cursor() as cur:
-                    cur.execute(_COUNT_SQL.format(predicate=_INPUT_PREDICATE[source]),
-                                {"source": source})
-                    LOG.info("BACKFILL source=%s pending=%d", source, int(cur.fetchone()[0]))
+                    cur.execute(_SELECT_SQL.format(predicate=_INPUT_PREDICATE[source]),
+                                {"source": source, "cursor": _CURSOR_MIN, "chunk": 1})
+                    has = cur.fetchone() is not None
+                LOG.info("BACKFILL source=%s pending=%s", source, "yes" if has else "none")
             return 0
 
-        totals = {"updated": 0, "skipped": 0, "remaining": 0}
+        totals = {"updated": 0, "skipped": 0, "processed": 0}
         for source in sources:
             if deadline is not None and time.monotonic() > deadline:
                 LOG.info("BACKFILL stopping before source=%s: --max-seconds reached", source)
@@ -239,8 +233,8 @@ def main() -> int:
             for k in totals:
                 totals[k] += res[k]
 
-    LOG.info("BACKFILL all-done updated=%d skipped=%d remaining=%d",
-             totals["updated"], totals["skipped"], totals["remaining"])
+    LOG.info("BACKFILL all-done updated=%d skipped=%d processed=%d",
+             totals["updated"], totals["skipped"], totals["processed"])
     return 0
 
 
