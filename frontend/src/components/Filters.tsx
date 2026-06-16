@@ -182,6 +182,25 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
             />
           </ControlGroup>
 
+          {/* Subtype sits directly under Type — it's a refinement of the
+              chosen category (houses / commercial), so it belongs next to it
+              rather than further down the band. Only shown when relevant. */}
+          {(filters.categoryMain === 'dum' || filters.categoryMain === 'komercni') && (
+            <ControlGroup title="Subtype" bordered={false}>
+              <MultiselectChips
+                value={filters.subtype}
+                options={SUBTYPE_LABELS_BY_MAIN[filters.categoryMain].map((o) => ({
+                  value: o.slug,
+                  label: o.label,
+                }))}
+                onChange={(next) =>
+                  handleRegistryChange([{ id: 'subtype', value: next }])
+                }
+                cols={2}
+              />
+            </ControlGroup>
+          )}
+
           <ControlGroup title="Status" bordered={false}>
             <FilterForm
               scope="browse"
@@ -208,22 +227,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
               />
             </Section>
           </ControlGroup>
-
-          {(filters.categoryMain === 'dum' || filters.categoryMain === 'komercni') && (
-            <ControlGroup title="Subtype" bordered={false}>
-              <MultiselectChips
-                value={filters.subtype}
-                options={SUBTYPE_LABELS_BY_MAIN[filters.categoryMain].map((o) => ({
-                  value: o.slug,
-                  label: o.label,
-                }))}
-                onChange={(next) =>
-                  handleRegistryChange([{ id: 'subtype', value: next }])
-                }
-                cols={2}
-              />
-            </ControlGroup>
-          )}
 
           <ControlGroup title="Disposition" bordered={false}>
             <FilterForm
