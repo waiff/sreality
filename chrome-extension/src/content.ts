@@ -108,7 +108,11 @@ function defaultPrice(state: PanelState): number | null {
 }
 
 function defaultRent(state: PanelState): number | null {
-  return state.run?.estimated_monthly_rent_czk ?? null;
+  /* Prefer the comparables estimate; if it found nothing (thin market), fall
+   * back to the MF reference rent so the yield calculator still works. */
+  return state.run?.estimated_monthly_rent_czk
+    ?? state.listing?.mf_reference_rent_czk
+    ?? null;
 }
 
 function computeYield(state: PanelState): number | null {
@@ -301,15 +305,43 @@ function mountPanel(): {
     head.textContent = 'Odhad výnosu (komparativní)';
     sec.appendChild(head);
 
+    /* No estimation yet (or one is running). */
     if (state.run == null) {
+      if (state.busy) {
+        sec.appendChild(note('Odhad probíhá… (~10–30 s)'));
+      } else {
+        const btn = document.createElement('button');
+        btn.className = 'btn-primary';
+        btn.textContent = 'Spustit odhad';
+        btn.onclick = () => onCreateRun();
+        sec.appendChild(btn);
+      }
+      body.appendChild(sec);
+      return;
+    }
+
+    /* A failed run loaded/just-completed — show the reason + a retry. */
+    if (state.run.status === 'failed') {
+      sec.appendChild(errorLine(state.run.error_message ?? 'Odhad selhal.'));
       const btn = document.createElement('button');
       btn.className = 'btn-primary';
-      btn.textContent = state.busy ? 'Počítám…' : 'Spustit odhad';
+      btn.textContent = state.busy ? 'Počítám…' : 'Spustit znovu';
       btn.disabled = state.busy;
       btn.onclick = () => onCreateRun();
       sec.appendChild(btn);
       body.appendChild(sec);
       return;
+    }
+
+    /* Success — surface what kind of result it is. A 'rent' run with no rent
+     * means the comparables search found nothing nearby (thin market): we fall
+     * the calculator back to the MF rent and say so. */
+    if (state.run.estimate_kind === 'rent' && state.run.estimated_monthly_rent_czk == null) {
+      sec.appendChild(note(
+        'Bez srovnatelných nájmů v okolí — počítáno z MF nájmu (uprav dle potřeby).',
+      ));
+    } else if (state.run.confidence === 'low') {
+      sec.appendChild(note('Nízká spolehlivost odhadu (málo srovnatelných).'));
     }
 
     const fields = document.createElement('div');

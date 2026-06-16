@@ -31,6 +31,7 @@ export interface EstimationRun {
   estimated_monthly_rent_czk: number | null;
   estimated_sale_price_czk: number | null;
   gross_yield_pct: number | null;
+  confidence: 'high' | 'medium' | 'low' | null;
   input_spec: { area_m2?: number | null } | null;
   scenario: YieldScenario | null;
   reference_rent: ReferenceRent | null;
