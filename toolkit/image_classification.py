@@ -14,10 +14,10 @@ auto-invalidates on a model bump. Image bytes come from R2 via boto3
 
 from __future__ import annotations
 
-import base64
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
+from toolkit.vision_images import image_block
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -160,15 +160,9 @@ def _classify_missing(
     ]
     for i, img in enumerate(images):
         content.append({"type": "text", "text": f"Image index {i}:"})
-        data = r2.download_bytes(img["storage_path"])
-        content.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": base64.standard_b64encode(data).decode("ascii"),
-            },
-        })
+        # Downscale before encoding: full-res originals (12 of them) blow the
+        # 200k-token limit. Room labeling is coarse, so 1024px is ample.
+        content.append(image_block(r2, img["storage_path"], max_edge=1024))
 
     system = llm_client.resolve_system_prompt(_PROMPT_KEY)
     response = llm_client.call(
