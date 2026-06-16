@@ -724,7 +724,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "Max visual candidate pairs examined per run",
         "required": false,
         "type": "string",
-        "default": "2000",
+        "default": "4000",
         "options": null
       },
       {
@@ -732,7 +732,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "Cap forensic vision calls per run (0 = pHash-only)",
         "required": false,
         "type": "string",
-        "default": "200",
+        "default": "400",
         "options": null
       },
       {
@@ -741,6 +741,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "required": false,
         "type": "string",
         "default": "4",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget; finalize cleanly before the job timeout",
+        "required": false,
+        "type": "string",
+        "default": "4800",
         "options": null
       },
       {
@@ -766,7 +774,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "dedup-engine",
     "cancelInProgress": false,
-    "timeoutMinutes": 45,
+    "timeoutMinutes": 90,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_engine.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_engine.yml"
