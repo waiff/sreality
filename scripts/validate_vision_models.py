@@ -198,8 +198,10 @@ def main() -> int:
     ap.add_argument("--skip-classify", action="store_true")
     args = ap.parse_args()
 
-    from api.dependencies import get_providers
+    # Build the LLMClient without api.dependencies (which pulls in FastAPI) — mirrors
+    # scripts.backfill_condition_scores so the harness runs under the minimal scoring deps.
     from api.llm_client import LLMClient
+    from api.providers.anthropic import AnthropicProvider
 
     if not image_storage.is_configured():
         LOG.error("R2 is not configured; cannot fetch image bytes. Aborting.")
@@ -208,7 +210,7 @@ def main() -> int:
     conn = db.connect()
     try:
         r2 = image_storage.R2Client.from_env()
-        llm = LLMClient(conn, providers=get_providers())
+        llm = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
         prod_compare_model = llm.resolve_model(vm._MODEL_KEY)
         prod_classify_model = llm.resolve_model(ic._MODEL_KEY)
 
