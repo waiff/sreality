@@ -128,6 +128,76 @@ WHERE bi.source = 'sreality' AND bi.source_broker_id_native = (l.raw_json->'user
   AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
 """
 
+# --- idnes attribution (from raw_json->'broker'; account_oid is the per-broker key,
+#     name from the contact heading, email/phone from the contact links). Same shape
+#     as sreality but a different JSON path + a scalar phone. ---
+
+_IDNES_IDENTITIES_UPSERT = """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'account_oid')            AS uid,
+    nullif(l.raw_json->'broker'->>'name', '')          AS name,
+    lower(nullif(l.raw_json->'broker'->>'email', ''))  AS email,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'account_oid') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (SELECT DISTINCT ON (uid) uid, name, email FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, email, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'idnes', a.uid, lt.name, lt.email, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  email        = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.email ELSE broker_identities.email END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+"""
+
+_IDNES_CONTACTS_EMAIL_UPSERT = """
+INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
+SELECT bi.id, 'idnes', 'email', lower(nullif(l.raw_json->'broker'->>'email', '')),
+       min(l.first_seen_at), max(l.last_seen_at)
+FROM listings l
+JOIN broker_identities bi
+  ON bi.source = 'idnes' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'account_oid')
+WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
+  AND nullif(l.raw_json->'broker'->>'email', '') IS NOT NULL AND {sel}
+GROUP BY bi.id, lower(nullif(l.raw_json->'broker'->>'email', ''))
+ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
+  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
+"""
+
+_IDNES_CONTACTS_PHONE_UPSERT = """
+INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
+SELECT bi.id, 'idnes', 'phone', regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g'),
+       min(l.first_seen_at), max(l.last_seen_at)
+FROM listings l
+JOIN broker_identities bi
+  ON bi.source = 'idnes' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'account_oid')
+WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
+  AND length(regexp_replace(coalesce(l.raw_json->'broker'->>'phone', ''), '[^0-9]', '', 'g')) >= 9
+  AND {sel}
+GROUP BY bi.id, regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g')
+ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
+  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
+"""
+
+_IDNES_LINK_LISTINGS_IDENTITY = """
+UPDATE listings l SET broker_identity_id = bi.id
+FROM broker_identities bi
+WHERE bi.source = 'idnes' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'account_oid')
+  AND l.source = 'idnes' AND l.raw_json ? 'broker'
+  AND (l.raw_json->'broker'->>'account_oid') IS NOT NULL
+  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
+"""
+
 # --- Firm resolution (global; %(free)s / %(franchise)s are text[] params). ---
 
 _FIRMS_UPSERT = """
@@ -309,8 +379,11 @@ _DELETE_DIRTY = "DELETE FROM dirty_broker_listings WHERE sreality_id = ANY(%(ids
 _CLEAR_DIRTY = "DELETE FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s"
 _STRAGGLERS = """
 SELECT sreality_id FROM listings
-WHERE source = 'sreality' AND broker_identity_id IS NULL AND raw_json ? 'user'
-  AND (raw_json->'user'->>'user_id') IS NOT NULL
+WHERE broker_identity_id IS NULL
+  AND (
+    (source = 'sreality' AND raw_json ? 'user'   AND (raw_json->'user'->>'user_id') IS NOT NULL)
+    OR (source = 'idnes'  AND raw_json ? 'broker' AND (raw_json->'broker'->>'account_oid') IS NOT NULL)
+  )
 LIMIT %(limit)s
 """
 
@@ -327,12 +400,16 @@ def _settings(conn: Any) -> tuple[list[str], list[str], list[str]]:
 
 
 def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
-    """Run the four sreality attribution statements for a listings selector."""
+    """Run per-source attribution (sreality raw_json.user + idnes raw_json.broker)."""
     with conn.cursor() as cur:
         cur.execute(_IDENTITIES_UPSERT.format(sel=sel), params)
         cur.execute(_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
         cur.execute(_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
         cur.execute(_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
+        cur.execute(_IDNES_IDENTITIES_UPSERT.format(sel=sel), params)
+        cur.execute(_IDNES_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
+        cur.execute(_IDNES_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
+        cur.execute(_IDNES_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
 
 
 def _resolve_firms(conn: Any, free: list[str], franchise: list[str], *, link_listings_extra: str = "",
@@ -469,11 +546,14 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
         )
         run_id = int(cur.fetchone()[0])
 
-    # Chunk the ACTUAL sreality listing ids (sreality_id is the portal's sparse id —
-    # 37k..4.3bn — so a numeric-range loop would walk ~859k empty ranges). One cheap
-    # PK-only scan fetches every id; attribution then runs per id-chunk.
+    # Chunk the ACTUAL listing ids of every broker-bearing source (sreality_id is the
+    # sparse PK — a numeric-range loop would walk huge empty gaps). One cheap PK-only
+    # scan fetches every id; attribution then runs per id-chunk, source-filtered inside.
     with conn.cursor() as cur:
-        cur.execute("SELECT sreality_id FROM listings WHERE source = 'sreality' ORDER BY sreality_id")
+        cur.execute(
+            "SELECT sreality_id FROM listings WHERE source IN ('sreality', 'idnes') "
+            "ORDER BY sreality_id"
+        )
         all_ids = [int(r[0]) for r in cur.fetchall()]
     for i in range(0, len(all_ids), batch_size):
         _attribute(conn, "l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})

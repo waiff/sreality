@@ -23,6 +23,7 @@ from unicodedata import combining, normalize
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.broker_idnes import parse_idnes_broker
 from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import street_from_locality
@@ -527,6 +528,10 @@ def parse_detail(
         "image_urls": image_urls,
         "coords": coord_provenance,
         "params": {k: _text(v) for k, v in params.items()},
+        # Broker/agency block for broker intelligence (resolver reads raw_json.broker).
+        # Out of the content hash (_HASH_FIELDS is typed columns only), so it never
+        # churns snapshots.
+        "broker": parse_idnes_broker(html),
     }
 
     return ScrapedListing(

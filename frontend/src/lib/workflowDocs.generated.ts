@@ -189,6 +189,47 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_bazos_street_locality.yml"
   },
   {
+    "filename": "backfill_idnes_brokers.yml",
+    "name": "Data: backfill idnes broker blocks",
+    "description": "One-shot backfill: reparse the staged idnes detail HTML (portal_raw_pages) into listings.raw_json.broker via scraper.broker_idnes.parse_idnes_broker. raw_json.broker is OUT of the content hash (_HASH_FIELDS is typed columns only), so this never churns snapshots. The broker resolver then attributes idnes brokers from raw_json.broker like sreality's raw_json.user. No re-fetch, no LLM, no new secrets.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget; resume from the cursor next run",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Parse + report counts without writing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "idnes-broker-backfill",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_idnes_brokers.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_idnes_brokers.yml"
+  },
+  {
     "filename": "backfill_portal_streets.yml",
     "name": "Backfill portal streets",
     "description": "One-off, dispatch-only backfill. Re-derives listings.street (+ house_number / zip for bezrealitky) on existing idnes / maxima / remax / bezrealitky / bazos rows from data ALREADY stored (locality, raw_json, or the existing street), via the shared scraper.street helper — NO re-fetch, NO LLM, NO Mapy spend. street/house_number/zip are out of the content hash so NO snapshot is written. Idempotent + resumable (each row stamped raw_json.portal_street_backfill); rerun until \"pending=0\". A changed-street row enqueues its property so the */5 recompute propagates the group-best street to properties.street. NOT a portal ingest workflow, so it carries no `# portal:` tag.",
