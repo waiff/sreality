@@ -6,6 +6,41 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Broker intelligence — identity foundation (phase 1 of 5)
+
+Tie real-estate broker/agency contact data to listings so we can ask "broker X has N
+listings of type T in region R" and "who has the most in R", then power a Brokers UI +
+human-in-the-loop outreach (later phases). No re-scrape needed — sreality broker data is
+already in `listings.raw_json->'user'` (idnes, phase 2, backfills from staged
+`portal_raw_pages` HTML).
+
+- **Two-layer identity model mirroring `listings → properties`** (migrations 185–188):
+  `broker_identities` (per-source, authoritative on the portal-native id) → `brokers`
+  (canonical human) and `firm_identities` → `firms` (agency, keyed on email domain), plus
+  `broker_identity_contacts`, `broker_firm_memberships` (a broker can have many firms),
+  the `dirty_broker_listings` queue, a reversible `broker_merge_events` ledger, and
+  `broker_resolution_runs`. `listings.broker_identity_id` / `broker_firm_id` link the
+  point-in-time facts. Hot public views (`listings_public`/`properties_public`) deliberately
+  untouched — broker fields wire in later behind a measured migration.
+- **Identity keystone (data-validated):** a contact bridges identity across sources ONLY
+  if personal on both sides (frequency==1 each source) — shared role inboxes
+  (`info@…`→353 brokers) and toll-free/switchboard numbers (one number→464 brokers) are
+  excluded as bridges. Merges are conservative (≥2 bridges, or 1 + name match; oversized/
+  transitive components queue) and reversible. Built + unit-tested now, dormant until the
+  2nd source (idnes) lands.
+- **Decoupled resolver** (`toolkit/broker_resolver.py` pure rules + `scripts/resolve_brokers.py`
+  orchestrator + `broker_resolution.yml` */10 incremental + `resolve_brokers_full.yml` daily/
+  backfill), off the scrape hot path (mirrors property-maintenance, rule #20). Firms via
+  domain minus a curated free-provider list (`data/broker_free_email_domains.json` →
+  `app_settings`, operator-tunable).
+- **Read surface:** `broker_region_type_stats` matview (per region/okres/obec, distinct-
+  property counts AT each level) + `broker_leaderboard` RPC + `brokers_public`/`firms_public`/
+  `broker_firm_memberships_public` — answers both example queries under the anon 3s timeout.
+- **Next:** run the post-merge backfill (`resolve_brokers_full -f mode=backfill`); phase 2
+  idnes extraction (activates cross-source merge); phase 3 Brokers UI + `toolkit/brokers.py`
+  + API; phase 4 outreach CRM (LLM drafts, human-in-the-loop send, GDPR opt-out); phase 5
+  operator merge-review + franchise office split.
+
 ### 2026-06: Apartment street-coverage levers (sreality locality.value + idnes/bazoš fixes)
 
 Follow-up to the street-extractor work, after a cohort audit showed the two coverage

@@ -1520,6 +1520,17 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
+# Broker intelligence (phase 1): a content change can alter a listing's broker
+# block (it is part of the content hash), so enqueue the changed listings for
+# re-attribution by scripts.resolve_brokers --incremental. New listings are also
+# covered by the resolver's unattributed-straggler scan; enqueuing them too is a
+# harmless idempotent overlap.
+_BATCH_DIRTY_BROKERS_FROM_SIDS_SQL = """
+    INSERT INTO dirty_broker_listings (sreality_id)
+    SELECT unnest(%s::bigint[])
+    ON CONFLICT (sreality_id) DO UPDATE SET marked_at = now()
+"""
+
 _BATCH_IMAGES_SQL = """
     INSERT INTO images (sreality_id, sreality_url, sequence)
     SELECT j.sreality_id, j.sreality_url, j.sequence
@@ -1611,6 +1622,7 @@ def write_detail_batch(
 
         if changed_sids:
             cur.execute(_BATCH_DIRTY_FROM_SIDS_SQL, (changed_sids,))
+            cur.execute(_BATCH_DIRTY_BROKERS_FROM_SIDS_SQL, (changed_sids,))
 
     # snapshots == new + updated (a brand-new listing always gets one snapshot);
     # the rest were content-identical touches.
