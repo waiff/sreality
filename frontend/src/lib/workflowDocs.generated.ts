@@ -2364,6 +2364,39 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_remax.yml"
   },
   {
+    "filename": "seed_broker_settings.yml",
+    "name": "Data: seed broker settings (free-email + franchise domains)",
+    "description": "One-shot workflow that populates the two app_settings rows created as `[]` placeholders by migration 186 — `broker_free_email_domains` and `broker_franchise_domains` — from the committed JSON files (data/broker_free_email_domains.json + data/broker_franchise_domains.json).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "dry_run",
+        "description": "Print domain counts and exit without UPDATEing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 5,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/seed_broker_settings.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/seed_broker_settings.yml"
+  },
+  {
     "filename": "seed_condition_settings.yml",
     "name": "Data: seed condition settings (rubric + markers)",
     "description": "One-shot workflow that populates the two large app_settings rows created by migration 072 — `llm_condition_rubric` and `llm_condition_marker_dictionary` — from the committed JSON files (data/condition_rubric_v1.json + data/condition_markers_curated.json).",
