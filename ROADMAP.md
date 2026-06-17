@@ -45,10 +45,20 @@ already in `listings.raw_json->'user'` (idnes, phase 2, backfills from staged
   URL-synced) and a **broker detail** page (contact card with tel:/mailto: for outreach,
   regional footprint, firm memberships, inventory → listing detail). Reads the public views +
   RPC via anon; civic-archive tokens.
-- **Next:** phase 2 idnes extraction (activates cross-source merge); `toolkit/brokers.py` +
-  FastAPI routes (programmatic/agent access — UI uses the RPC directly today); phase 4 outreach
-  CRM (LLM drafts, human-in-the-loop send, GDPR opt-out); phase 5 operator merge-review +
-  franchise office split.
+- **DONE (code) — phase 2 idnes extraction:** `scraper/broker_idnes.py` parses the idnes
+  detail contact block (account.<oid> = the per-broker key, validated against the makler-detail
+  URL; name; entity-decoded email; tel: phone; agency name) into `idnes_parser`'s
+  `raw_json.broker` (out of the content hash → no churn). The resolver attributes idnes from
+  `raw_json->'broker'` alongside sreality's `raw_json->'user'` (source-generic rollups +
+  cross-source merge follow automatically). `scripts/backfill_idnes_brokers.py` + workflow
+  reparse the ~126k staged detail pages into `raw_json.broker` (resumable, no re-fetch).
+  POST-MERGE: dispatch `backfill_idnes_brokers` → `resolve_brokers_full` → validate idnes
+  freq distribution → add `'idnes'` to `app_settings.broker_auto_merge_sources` to activate
+  the cross-source merge.
+- **Next:** `toolkit/brokers.py` + FastAPI routes (programmatic/agent access — UI uses the RPC
+  directly today); firm display names from idnes agency labels (deferred polish); phase 4
+  outreach CRM (LLM drafts, human-in-the-loop send, GDPR opt-out); phase 5 operator
+  merge-review + franchise office split.
 
 ### 2026-06: Apartment street-coverage levers (sreality locality.value + idnes/bazoš fixes)
 
