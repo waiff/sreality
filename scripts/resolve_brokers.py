@@ -424,13 +424,20 @@ def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
         cur.execute(_IDNES_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
 
 
-def _resolve_firms(conn: Any, free: list[str], franchise: list[str], *, link_listings_extra: str = "",
-                   listings_params: dict[str, Any] | None = None) -> None:
+def _resolve_firms(conn: Any, free: list[str], franchise: list[str]) -> None:
+    """Upsert firms + firm identities and link identities to firms (once per run)."""
     with conn.cursor() as cur:
         cur.execute(_FIRMS_UPSERT, {"free": free, "franchise": franchise})
         cur.execute(_FIRM_IDENTITIES_UPSERT, {"free": free})
         cur.execute(_LINK_IDENTITY_FIRM)
-        cur.execute(_LINK_LISTINGS_FIRM.format(extra=link_listings_extra), listings_params or {})
+
+
+def _link_listings_firm(conn: Any, extra: str = "", params: dict[str, Any] | None = None) -> None:
+    """Point listings at their identity's resolved firm. Bounded by `extra` (an id
+    scope) so the full sweep batches it — one global UPDATE over every linked
+    listing exceeds the pooler statement timeout once a second source lands."""
+    with conn.cursor() as cur:
+        cur.execute(_LINK_LISTINGS_FIRM.format(extra=extra), params or {})
 
 
 def _attach_singletons(conn: Any) -> int:
@@ -575,6 +582,12 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
             break
 
     _resolve_firms(conn, free, franchise)
+    # Batch the listings->firm link over the same id chunks — a single global UPDATE
+    # joining every linked listing to its firm exceeds the pooler statement timeout
+    # now that idnes adds ~125k linkable rows. sreality_id is sparse, so chunk the
+    # actual ids (the PR #470 lesson), not a numeric range.
+    for i in range(0, len(all_ids), batch_size):
+        _link_listings_firm(conn, "AND l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
     attached = _attach_singletons(conn)
     # Rollups batched by our dense serial ids (broker_identity.id / broker.id) — a
     # single global UPDATE over every broker exceeds the pooler statement timeout.
@@ -593,7 +606,12 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
                 bscope="AND bi.broker_id >= %(lo)s AND bi.broker_id < %(hi)s",
                 mscope="m.broker_id >= %(lo)s AND m.broker_id < %(hi)s AND"),
                 {"lo": lo, "hi": lo + batch_size})
-    with conn.cursor() as cur:
+    # Global firm rollup aggregates the whole linked-listings corpus in one pass;
+    # like the matview refresh, lift the statement timeout for this once-per-sweep
+    # analytical statement rather than batch it (firms are few, so a firm-id window
+    # would just re-scan the same listings).
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(_FIRM_ROLLUP)
     auto_merges, queued = _cross_source_merge(conn, auto, run_id)
     _refresh_matview(conn)
@@ -628,8 +646,8 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
 
     ids = list(sids)
     _attribute(conn, "l.sreality_id = ANY(%(ids)s)", {"ids": ids})
-    _resolve_firms(conn, free, franchise, link_listings_extra="AND l.sreality_id = ANY(%(ids)s)",
-                   listings_params={"ids": ids})
+    _resolve_firms(conn, free, franchise)
+    _link_listings_firm(conn, "AND l.sreality_id = ANY(%(ids)s)", {"ids": ids})
     _attach_singletons(conn)
     bids = _affected(conn, ids)
     with conn.cursor() as cur:
