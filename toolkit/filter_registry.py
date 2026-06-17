@@ -112,7 +112,7 @@ class FilterDef:
     serialiser boundary without polluting the canonical model.
 
     `pg_column` is the underlying listings column for column-backed
-    filters; `None` for synthetic ones (population, status, max_age_days
+    filters; `None` for synthetic ones (lifecycle, status, max_age_days
     which is a derived predicate).
     """
     id: str
@@ -252,7 +252,7 @@ SUBTYPE_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("ostatni", "Ostatní", "Other"),
 )
 
-POPULATION_OPTIONS: tuple[EnumOption, ...] = (
+LIFECYCLE_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("active", "Aktivní", "Active"),
     EnumOption("delisted", "Stažené", "Delisted"),
     EnumOption("all", "Vše", "All"),
@@ -483,10 +483,9 @@ def _build_registry() -> dict[str, FilterDef]:
             default=None,
             description=(
                 "Drop listings whose `last_seen_at` is older than N "
-                "days. Applied only when `population` resolves to "
-                "`active` (or `active_only=true`). Set explicitly when "
-                "you want a freshness gate — there's no implicit "
-                "default."
+                "days. Applied only when `lifecycle='active'`. Set "
+                "explicitly when you want a freshness gate — there's no "
+                "implicit default."
             ),
             category=CATEGORY_VELOCITY,
             ui_control=UiControl.NUMBER_INPUT,
@@ -499,42 +498,27 @@ def _build_registry() -> dict[str, FilterDef]:
             unit="days",
         ),
         FilterDef(
-            id="active_only",
-            type=FilterType.BOOL,
-            pg_column=None,
-            default=False,
-            description=(
-                "When true, restricts the cohort to `l.is_active = true`. "
-                "Legacy boolean retained for backwards compatibility; "
-                "`population='active'` is the modern equivalent and "
-                "carries the same effect plus an optional freshness "
-                "gate via `max_age_days`."
-            ),
-            category=CATEGORY_STATUS,
-            ui_control=UiControl.BOOLEAN,
-            agendas=frozenset({Agenda.COMPARABLES, Agenda.ESTIMATION, Agenda.DEFAULTS}),
-            aliases=("activeOnly",),
-        ),
-        FilterDef(
-            id="population",
+            id="lifecycle",
             type=FilterType.STRING,
             pg_column=None,
             default=None,
             description=(
-                "Coarse cohort population selector. `active` = "
-                "is_active=true (plus max_age_days if set); "
-                "`delisted` = is_active=false (closed deals only — "
-                "rough proxy for transacted listings); `all` = both. "
-                "Mutually exclusive with `active_only`; if both are set, "
-                "population wins."
+                "The single cohort lifecycle selector. `active` = "
+                "is_active=true (plus the max_age_days freshness gate "
+                "when set); `delisted` = is_active=false (closed deals "
+                "only — rough proxy for transacted listings); `all` = "
+                "both. Unset means no is_active gate (the raw-tool "
+                "default); the estimation path seeds `active` from "
+                "`default_lifecycle`."
             ),
             category=CATEGORY_STATUS,
             ui_control=UiControl.SINGLE_SELECT,
             agendas=frozenset({
-                Agenda.COMPARABLES, Agenda.ESTIMATION, Agenda.VELOCITY,
+                Agenda.COMPARABLES, Agenda.ESTIMATION,
+                Agenda.VELOCITY, Agenda.DEFAULTS,
             }),
             constraints={"enum": ["active", "delisted", "all"]},
-            enum_values=POPULATION_OPTIONS,
+            enum_values=LIFECYCLE_OPTIONS,
         ),
 
         # --- listing status (BROWSE friendlier alt) ----------------------
@@ -548,7 +532,7 @@ def _build_registry() -> dict[str, FilterDef]:
                 "live and delisted; `active` only is_active=true; "
                 "`inactive` only is_active=false. The Watchdog matcher "
                 "ignores this (it fires on new listings only) — use "
-                "`population` for the analytical surfaces."
+                "`lifecycle` for the analytical surfaces."
             ),
             category=CATEGORY_STATUS,
             ui_control=UiControl.PILL_GROUP,
@@ -1917,7 +1901,7 @@ __all__ = [
     "CONDITION_OPTIONS",
     "ENERGY_RATING_OPTIONS",
     "DISPOSITION_OPTIONS",
-    "POPULATION_OPTIONS",
+    "LIFECYCLE_OPTIONS",
     "DISPOSITION_MATCH_OPTIONS",
     "STATUS_OPTIONS",
     "PORTAL_OPTIONS",

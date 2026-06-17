@@ -40,10 +40,11 @@ class FindComparablesIn(BaseModel):
     radius_m: int = 1000
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
-    # No implicit freshness gate. Pass max_age_days / active_only
-    # explicitly when you want only fresh active listings.
+    # No implicit freshness gate. Pass max_age_days + lifecycle='active'
+    # explicitly when you want only fresh active listings; lifecycle
+    # also unlocks 'delisted' / 'all' cohorts.
     max_age_days: int | None = None
-    active_only: bool = False
+    lifecycle: Literal["active", "delisted", "all"] | None = None
     floor_band: int | None = None
     portals: list[str] | None = None
     condition_match: list[str] | None = None
@@ -185,7 +186,7 @@ class ComputeMarketVelocityIn(BaseModel):
     last_seen_max_days: int | None = None
     first_seen_min_days: int | None = None
     first_seen_max_days: int | None = None
-    population: Literal["active", "delisted", "all"] = "all"
+    lifecycle: Literal["active", "delisted", "all"] = "all"
     trend_split_days: int = 7
 
 
@@ -193,7 +194,7 @@ class ComputeListingVelocityIn(BaseModel):
     sreality_id: int
     radius_m: int = 1000
     disposition_match: Literal["exact", "loose", "any"] = "exact"
-    population: Literal["active", "delisted", "all"] = "all"
+    lifecycle: Literal["active", "delisted", "all"] = "all"
 
 
 class FindAnchorAmenitiesIn(BaseModel):
@@ -310,11 +311,12 @@ class CreateEstimationIn(BaseModel):
     (`pronajem` for rent, `prodej` for sale) unless the caller
     explicitly overrides it.
 
-    The five comparable-search knobs (radius_m, area_band_pct,
-    disposition_match, max_age_days, active_only) were removed from
-    this schema: agent-mode runs choose them per-iteration, and
-    deterministic runs use the built-in defaults in
-    `api.estimation_runs._build_filters`. UI callers default to
+    The comparable-search knobs (radius_m, area_band_pct,
+    disposition_match, max_age_days) were removed from this schema:
+    agent-mode runs choose them per-iteration, and deterministic runs
+    use the built-in defaults in `api.estimation_runs._build_filters`.
+    `lifecycle` is the one cohort knob kept here (optional override of
+    `default_lifecycle`). UI callers default to
     `mode='agent'`; direct API callers may still pass
     `mode='deterministic'` for a single-shot estimate with the
     built-in filter defaults.
@@ -328,10 +330,10 @@ class CreateEstimationIn(BaseModel):
 
     estimate_kind: Literal["rent", "sale"] = "rent"
 
-    # Cohort population. None (default) preserves the legacy
-    # "active and recently-seen" filter; "delisted" restricts to
+    # Cohort lifecycle. None (default) inherits `default_lifecycle`
+    # ("active and recently-seen"); "delisted" restricts to
     # is_active=false (likely closed deals); "all" applies no filter.
-    population: Literal["active", "delisted", "all"] | None = None
+    lifecycle: Literal["active", "delisted", "all"] | None = None
 
     url: str | None = None
     spec: TargetIn | None = None
@@ -438,7 +440,7 @@ class EstimateYieldIn(BaseModel):
     area_band_pct: float = 0.20
     disposition_match: Literal["exact", "loose", "any"] = "exact"
     max_age_days: int | None = None
-    active_only: bool = False
+    lifecycle: Literal["active", "delisted", "all"] | None = None
     floor_band: int | None = None
     portals: list[str] | None = None
     condition_match: list[str] | None = None
@@ -487,7 +489,7 @@ class EstimateYieldIn(BaseModel):
                 "pronajem" if self.estimate_kind == "rent" else "prodej"
             )
         # No implicit freshness gate. Callers that want only fresh active
-        # listings now pass max_age_days / active_only explicitly.
+        # listings now pass max_age_days + lifecycle='active' explicitly.
         return self
 
 

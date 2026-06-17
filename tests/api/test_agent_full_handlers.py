@@ -38,27 +38,27 @@ def _state(
 def test_market_velocity_forwards_radius_and_population(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, target, filters, *, population, trend_split_days):
+    def fake(conn, target, filters, *, lifecycle, trend_split_days):
         captured["radius_m"] = filters.radius_m
-        captured["population"] = population
+        captured["lifecycle"] = lifecycle
         captured["trend_split_days"] = trend_split_days
         return {"data": {"cohort_size": 12, "tom_stats": {"median_days": 42}}, "metadata": {}}
 
     monkeypatch.setattr(agent_mod, "compute_market_velocity", fake)
     state = _state()
     out = agent_mod._handle_compute_market_velocity(
-        {"radius_m": 1500, "population": "delisted", "trend_split_days": 14}, state,
+        {"radius_m": 1500, "lifecycle": "delisted", "trend_split_days": 14}, state,
     )
-    assert captured == {"radius_m": 1500, "population": "delisted", "trend_split_days": 14}
+    assert captured == {"radius_m": 1500, "lifecycle": "delisted", "trend_split_days": 14}
     assert out["data"]["cohort_size"] == 12
 
 
 def test_market_velocity_defaults(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, target, filters, *, population, trend_split_days):
+    def fake(conn, target, filters, *, lifecycle, trend_split_days):
         captured["radius_m"] = filters.radius_m
-        captured["population"] = population
+        captured["lifecycle"] = lifecycle
         captured["trend_split_days"] = trend_split_days
         return {"data": {}, "metadata": {}}
 
@@ -66,7 +66,7 @@ def test_market_velocity_defaults(monkeypatch):
     state = _state()
     agent_mod._handle_compute_market_velocity({}, state)
     assert captured["radius_m"] == 1000  # from base_filters
-    assert captured["population"] == "all"
+    assert captured["lifecycle"] == "all"
     assert captured["trend_split_days"] == 7
 
 
@@ -75,12 +75,12 @@ def test_market_velocity_defaults(monkeypatch):
 def test_listing_velocity_forwards_args(monkeypatch):
     captured: dict[str, Any] = {}
 
-    def fake(conn, sreality_id, *, radius_m, disposition_match, population):
+    def fake(conn, sreality_id, *, radius_m, disposition_match, lifecycle):
         captured.update({
             "sreality_id": sreality_id,
             "radius_m": radius_m,
             "disposition_match": disposition_match,
-            "population": population,
+            "lifecycle": lifecycle,
         })
         return {"data": {"classification": "stuck"}, "metadata": {}}
 
@@ -91,7 +91,7 @@ def test_listing_velocity_forwards_args(monkeypatch):
             "sreality_id": 12345,
             "radius_m": 800,
             "disposition_match": "loose",
-            "population": "active",
+            "lifecycle": "active",
         },
         state,
     )
@@ -99,7 +99,7 @@ def test_listing_velocity_forwards_args(monkeypatch):
         "sreality_id": 12345,
         "radius_m": 800,
         "disposition_match": "loose",
-        "population": "active",
+        "lifecycle": "active",
     }
     assert out["data"]["classification"] == "stuck"
 

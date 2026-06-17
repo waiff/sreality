@@ -2,7 +2,7 @@ import type {
   CreateEstimationIn,
   EstimationProvider,
   EstimationRun,
-  Population,
+  Lifecycle,
   TargetSpecIn,
 } from '@/lib/types';
 
@@ -17,7 +17,7 @@ export type RerunOverrides = {
   spec?: TargetSpecIn;
   estimate_kind?: 'rent' | 'sale';
   provider?: EstimationProvider;
-  population?: Population;
+  lifecycle?: Lifecycle;
   purchase_price_czk?: number | null;
   expected_monthly_rent_czk?: number | null;
 };
@@ -60,7 +60,7 @@ export function buildRerunPayload(
     special_instructions: run.special_instructions ?? null,
     contextual_text: run.contextual_text ?? null,
     ...(overrides?.provider ? { provider: overrides.provider } : {}),
-    ...(overrides?.population ? { population: overrides.population } : {}),
+    ...(overrides?.lifecycle ? { lifecycle: overrides.lifecycle } : {}),
   };
 
   if (overrides?.spec) {

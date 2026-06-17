@@ -71,7 +71,7 @@ TRACE_SCHEMA_VERSION = 2
 _DEFAULT_RADIUS_M = 1000
 _DEFAULT_AREA_BAND_PCT = 0.20
 _DEFAULT_DISPOSITION_MATCH = "exact"
-_DEFAULT_ACTIVE_ONLY = True
+_DEFAULT_LIFECYCLE = "active"
 _DEFAULT_MIN_RESULTS = 5
 
 
@@ -101,7 +101,7 @@ class FilterDefaults:
     radius_m: int
     area_band_pct: float
     disposition_match: str
-    active_only: bool
+    lifecycle: str
     max_age_days_rent: int
     max_age_days_sale: int
     min_results: int
@@ -117,7 +117,7 @@ def load_filter_defaults(conn: "psycopg.Connection") -> FilterDefaults:
         radius_m=int(_load_app_setting(conn, "default_radius_m", _DEFAULT_RADIUS_M)),
         area_band_pct=float(_load_app_setting(conn, "default_area_band_pct", _DEFAULT_AREA_BAND_PCT)),
         disposition_match=str(_load_app_setting(conn, "default_disposition_match", _DEFAULT_DISPOSITION_MATCH)),
-        active_only=bool(_load_app_setting(conn, "default_active_only", _DEFAULT_ACTIVE_ONLY)),
+        lifecycle=str(_load_app_setting(conn, "default_lifecycle", _DEFAULT_LIFECYCLE)),
         max_age_days_rent=int(_load_app_setting(conn, "default_max_age_days_rent", 7)),
         max_age_days_sale=int(_load_app_setting(conn, "default_max_age_days_sale", 30)),
         min_results=int(_load_app_setting(conn, "default_min_results", _DEFAULT_MIN_RESULTS)),
@@ -1450,8 +1450,9 @@ def _build_filters(
         area_band_pct=defaults.area_band_pct,
         disposition_match=defaults.disposition_match,
         max_age_days=defaults.max_age_days_for(body.estimate_kind),
-        active_only=defaults.active_only,
-        population=body.population,
+        lifecycle=(
+            body.lifecycle if body.lifecycle is not None else defaults.lifecycle
+        ),
         floor_band=body.floor_band,
         portals=body.portals,
         condition_match=body.condition_match,

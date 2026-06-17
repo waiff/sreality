@@ -22,8 +22,8 @@
  * Estimate kind (rent vs sale) for the apartment path is operator-
  * chosen via a segmented control, defaulted to rent. The toggle always
  * wins — pasting a `prodej` URL while the toggle is on Rent still
- * submits a rent estimate. Provider and population fall back to the
- * same defaults the form used to ship with (Claude + active-only).
+ * submits a rent estimate. Provider and lifecycle fall back to the
+ * same defaults the form used to ship with (Claude + active).
  */
 
 import {
@@ -768,7 +768,7 @@ function buildEstimationPayload(
     source: 'ui',
     mode,
     provider: 'anthropic',
-    population: 'active',
+    lifecycle: 'active',
     estimate_kind: estimateKind,
     // Sent explicitly so house / commercial estimations drive the right
     // cohort instead of silently falling back to byt / pronajem.

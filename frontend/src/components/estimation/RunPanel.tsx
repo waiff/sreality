@@ -59,7 +59,7 @@ import type {
   ImagePublic,
   ListingPublic,
   ListingSummaryBatchRow,
-  Population,
+  Lifecycle,
   SkillRefinement,
   Trace,
 } from '@/lib/types';
@@ -1225,7 +1225,7 @@ interface AdjustState {
   floor: number | null;
   estimate_kind: 'rent' | 'sale';
   provider: EstimationProvider;
-  population: Population;
+  lifecycle: Lifecycle;
   purchase_price_czk: number | null;
   expected_monthly_rent_czk: number | null;
 }
@@ -1240,7 +1240,7 @@ function adjustStateFromRun(run: EstimationRun): AdjustState {
     floor: spec?.floor ?? null,
     estimate_kind: run.estimate_kind ?? 'rent',
     provider: 'anthropic',
-    population: 'active',
+    lifecycle: 'active',
     purchase_price_czk: run.input_purchase_price_czk,
     expected_monthly_rent_czk: null,
   };
@@ -1281,7 +1281,7 @@ function RerunBlock({
       },
       estimate_kind: state.estimate_kind,
       provider: state.provider,
-      population: state.population,
+      lifecycle: state.lifecycle,
       purchase_price_czk:
         state.estimate_kind === 'rent' ? state.purchase_price_czk : null,
       expected_monthly_rent_czk:
@@ -1466,15 +1466,15 @@ function AdjustPanel({
             />
           </div>
           <div>
-            <FieldLabel>Comparable population</FieldLabel>
+            <FieldLabel>Comparable lifecycle</FieldLabel>
             <SegRow
               options={[
                 { value: 'active', label: 'Active' },
                 { value: 'delisted', label: 'Delisted' },
                 { value: 'all', label: 'Both' },
               ]}
-              value={state.population}
-              onChange={(v) => set('population', v)}
+              value={state.lifecycle}
+              onChange={(v) => set('lifecycle', v)}
             />
           </div>
         </>

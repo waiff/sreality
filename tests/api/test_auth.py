@@ -48,7 +48,7 @@ def client(monkeypatch):
     def fake_outliers(conn, listings, **_kw):
         return {"data": {"outliers": []}, "metadata": {"tool": "find_distribution_outliers"}}
 
-    def fake_market_vel(conn, target, filters, population, trend_split_days):
+    def fake_market_vel(conn, target, filters, lifecycle, trend_split_days):
         return {"data": {"cohort_size": 0}, "metadata": {"tool": "compute_market_velocity"}}
 
     def fake_listing_vel(conn, sreality_id, **_kw):

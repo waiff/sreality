@@ -53,6 +53,8 @@ interface SelectionRoundFilters {
   disposition_match: string | null;
   max_age_days: number | null;
   min_results: number | null;
+  lifecycle?: string | null;
+  // Legacy keys, still present on immutable historical traces (pre-191).
   active_only?: boolean | null;
   population?: string | null;
   floor_band?: number | null;
@@ -325,14 +327,25 @@ const FILTER_ROWS: Array<{
   key: keyof SelectionRoundFilters;
   label: string;
   fmt: (v: unknown) => string;
+  // When present, the displayed value is derived from the whole filter
+  // object instead of filters[key] — used by the lifecycle row to read
+  // the new key while falling back to legacy traces' population/active_only.
+  derive?: (f: SelectionRoundFilters) => unknown;
 }> = [
   { key: 'radius_m', label: 'Radius', fmt: (v) => fmtNumberUnit(v, 'm') },
   { key: 'area_band_pct', label: 'Area band', fmt: (v) => (typeof v === 'number' ? `±${Math.round(v * 100)}%` : EM_DASH) },
   { key: 'disposition_match', label: 'Disposition', fmt: fmtString },
   { key: 'max_age_days', label: 'Max age', fmt: (v) => (typeof v === 'number' ? `${v} d` : EM_DASH) },
   { key: 'min_results', label: 'Min results', fmt: (v) => (typeof v === 'number' ? String(v) : EM_DASH) },
-  { key: 'active_only', label: 'Active only', fmt: fmtBool },
-  { key: 'population', label: 'Population', fmt: fmtString },
+  {
+    key: 'lifecycle',
+    label: 'Lifecycle',
+    fmt: fmtString,
+    derive: (f) =>
+      f.lifecycle ??
+      f.population ??
+      (f.active_only == null ? null : f.active_only ? 'active' : 'all'),
+  },
   { key: 'floor_band', label: 'Floor band', fmt: (v) => (typeof v === 'number' ? `±${v}` : EM_DASH) },
   { key: 'condition_match', label: 'Condition', fmt: fmtList },
   { key: 'building_type_match', label: 'Building type', fmt: fmtList },
@@ -426,7 +439,7 @@ function FilterDeltaTable({ rounds }: { rounds: SelectionRound[] }) {
         </tr>
       </thead>
       <tbody>
-        {FILTER_ROWS.map(({ key, label, fmt }) => (
+        {FILTER_ROWS.map(({ key, label, fmt, derive }) => (
           <tr key={key} className="border-t border-[var(--color-rule-soft)]">
             <th
               scope="row"
@@ -435,8 +448,13 @@ function FilterDeltaTable({ rounds }: { rounds: SelectionRound[] }) {
               {label}
             </th>
             {rounds.map((r, idx) => {
-              const v = r.filters[key];
-              const prev = idx === 0 ? undefined : rounds[idx - 1].filters[key];
+              const v = derive ? derive(r.filters) : r.filters[key];
+              const prev =
+                idx === 0
+                  ? undefined
+                  : derive
+                    ? derive(rounds[idx - 1].filters)
+                    : rounds[idx - 1].filters[key];
               const changed = idx > 0 && !filterValueEqual(v, prev);
               return (
                 <td
@@ -453,7 +471,11 @@ function FilterDeltaTable({ rounds }: { rounds: SelectionRound[] }) {
               );
             })}
             <td className="text-right font-mono tabular-nums text-[0.78rem] pl-3 py-1.5 text-[var(--color-copper)] font-semibold">
-              {fmt(rounds[rounds.length - 1].filters[key])}
+              {fmt(
+                derive
+                  ? derive(rounds[rounds.length - 1].filters)
+                  : rounds[rounds.length - 1].filters[key],
+              )}
             </td>
           </tr>
         ))}

@@ -287,10 +287,10 @@ def test_find_distribution_outliers_uses_defaults(client, monkeypatch):
 
 def test_compute_market_velocity_passes_target_and_filters(client, monkeypatch):
     captured = {}
-    def fake(conn, target, filters, population, trend_split_days):
+    def fake(conn, target, filters, lifecycle, trend_split_days):
         captured["target"] = target
         captured["filters"] = filters
-        captured["population"] = population
+        captured["lifecycle"] = lifecycle
         captured["trend_split_days"] = trend_split_days
         return {"data": {"cohort_size": 0}, "metadata": {"tool": "compute_market_velocity"}}
     monkeypatch.setattr(api_main, "compute_market_velocity", fake)
@@ -300,7 +300,7 @@ def test_compute_market_velocity_passes_target_and_filters(client, monkeypatch):
         json={
             "target": {"lat": 50.087, "lng": 14.42, "disposition": "2+kk"},
             "radius_m": 1500,
-            "population": "active",
+            "lifecycle": "active",
             "trend_split_days": 14,
             "category_main": "komercni",
             "category_type": "prodej",
@@ -310,18 +310,19 @@ def test_compute_market_velocity_passes_target_and_filters(client, monkeypatch):
     assert captured["target"].lat == 50.087
     assert captured["target"].disposition == "2+kk"
     assert captured["filters"].radius_m == 1500
-    # Endpoint always passes active_only=False; population controls instead.
-    assert captured["filters"].active_only is False
+    # Endpoint leaves the cohort filters' lifecycle unset; the velocity
+    # `lifecycle` arg drives the is_active gate instead.
+    assert captured["filters"].lifecycle is None
     assert captured["filters"].category_main == "komercni"
     assert captured["filters"].category_type == "prodej"
-    assert captured["population"] == "active"
+    assert captured["lifecycle"] == "active"
     assert captured["trend_split_days"] == 14
 
 
 def test_compute_market_velocity_uses_defaults(client, monkeypatch):
     captured = {}
-    def fake(conn, target, filters, population, trend_split_days):
-        captured["population"] = population
+    def fake(conn, target, filters, lifecycle, trend_split_days):
+        captured["lifecycle"] = lifecycle
         captured["trend_split_days"] = trend_split_days
         captured["radius_m"] = filters.radius_m
         return {"data": {}, "metadata": {"tool": "compute_market_velocity"}}
@@ -335,18 +336,18 @@ def test_compute_market_velocity_uses_defaults(client, monkeypatch):
         },
     )
     assert res.status_code == 200
-    assert captured["population"] == "all"
+    assert captured["lifecycle"] == "all"
     assert captured["trend_split_days"] == 7
     assert captured["radius_m"] == 1000
 
 
 def test_compute_listing_velocity_passes_args(client, monkeypatch):
     captured = {}
-    def fake(conn, sreality_id, *, radius_m, disposition_match, population):
+    def fake(conn, sreality_id, *, radius_m, disposition_match, lifecycle):
         captured["sreality_id"] = sreality_id
         captured["radius_m"] = radius_m
         captured["disposition_match"] = disposition_match
-        captured["population"] = population
+        captured["lifecycle"] = lifecycle
         return {"data": {"sreality_id": sreality_id, "found": True}, "metadata": {"tool": "compute_listing_velocity"}}
     monkeypatch.setattr(api_main, "compute_listing_velocity", fake)
 
@@ -356,22 +357,22 @@ def test_compute_listing_velocity_passes_args(client, monkeypatch):
             "sreality_id": 12345,
             "radius_m": 2000,
             "disposition_match": "loose",
-            "population": "delisted",
+            "lifecycle": "delisted",
         },
     )
     assert res.status_code == 200
     assert captured["sreality_id"] == 12345
     assert captured["radius_m"] == 2000
     assert captured["disposition_match"] == "loose"
-    assert captured["population"] == "delisted"
+    assert captured["lifecycle"] == "delisted"
 
 
 def test_compute_listing_velocity_uses_defaults(client, monkeypatch):
     captured = {}
-    def fake(conn, sreality_id, *, radius_m, disposition_match, population):
+    def fake(conn, sreality_id, *, radius_m, disposition_match, lifecycle):
         captured["radius_m"] = radius_m
         captured["disposition_match"] = disposition_match
-        captured["population"] = population
+        captured["lifecycle"] = lifecycle
         return {"data": {"sreality_id": sreality_id, "found": True}, "metadata": {"tool": "compute_listing_velocity"}}
     monkeypatch.setattr(api_main, "compute_listing_velocity", fake)
 
@@ -382,7 +383,7 @@ def test_compute_listing_velocity_uses_defaults(client, monkeypatch):
     assert res.status_code == 200
     assert captured["radius_m"] == 1000
     assert captured["disposition_match"] == "exact"
-    assert captured["population"] == "all"
+    assert captured["lifecycle"] == "all"
 
 
 def test_find_anchor_amenities_passes_args(client, monkeypatch):
