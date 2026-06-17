@@ -91,11 +91,26 @@ def test_normalize_street_never_empties_the_key() -> None:
 
 
 def test_street_group_keys_dual_keys_id_and_name() -> None:
-    assert street_group_keys("Hlavní", 42) == ("id:42", "name:hlavni")
+    # NAME key is obec-scoped (default obec_id=None when unknown).
+    assert street_group_keys("Hlavní", 42) == ("id:42", "name:None:hlavni")
     assert street_group_keys(None, 42) == ("id:42",)
-    assert street_group_keys("ul. Hlavní 12", None) == ("name:hlavni",)
+    assert street_group_keys("ul. Hlavní 12", None) == ("name:None:hlavni",)
     assert street_group_keys(None, None) == ()
     assert street_group_keys("", -1) == ()
+
+
+def test_street_group_keys_scopes_name_by_obec() -> None:
+    # Same street name in two municipalities → DIFFERENT name groups (so a
+    # common name like "Žižkova" no longer lumps every town into one oversized,
+    # skipped group). The id: key stays global (a street_id is one street).
+    a = street_group_keys("Žižkova", None, 5001)
+    b = street_group_keys("Žižkova", None, 5002)
+    assert a == ("name:5001:zizkova",)
+    assert b == ("name:5002:zizkova",)
+    assert a != b
+    # A street_id-bearing row still dual-keys into its obec-scoped name group,
+    # so it can meet a name-only HTML-portal row in the same town.
+    assert street_group_keys("Žižkova", 98996, 5001) == ("id:98996", "name:5001:zizkova")
 
 
 # --- disposition compatibility ----------------------------------------------
@@ -384,12 +399,13 @@ def _row(sid: int, pid: int, *, street: str = "Nádražní",
          street_id: int | None = 42, disp: str = "2+kk",
          hn: str | None = "10", floor: int | None = 3, area: float | None = 60.0,
          source: str = "sreality", description: str | None = None,
-         category_type: str | None = "prodej", category_main: str | None = "byt") -> tuple[Any, ...]:
+         category_type: str | None = "prodej", category_main: str | None = "byt",
+         obec_id: int | None = 5001) -> tuple[Any, ...]:
     # matches _ELIGIBLE_SQL column order:
     # sreality_id, property_id, source, street, street_id, disposition,
-    # house_number, floor, area_m2, description, category_type, category_main
+    # house_number, floor, area_m2, description, category_type, category_main, obec_id
     return (sid, pid, source, street, street_id, disp, hn, floor, area,
-            description, category_type, category_main)
+            description, category_type, category_main, obec_id)
 
 
 def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:

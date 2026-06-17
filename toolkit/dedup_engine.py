@@ -217,17 +217,28 @@ def normalize_street(street: str | None, street_id: int | None) -> str | None:
     return f"name:{name}" if name is not None else None
 
 
-def street_group_keys(street: str | None, street_id: int | None) -> tuple[str, ...]:
+def street_group_keys(
+    street: str | None, street_id: int | None, obec_id: int | None = None,
+) -> tuple[str, ...]:
     """ALL grouping keys for one listing, canonical id first. A row carrying
     both a street_id and a street name is dual-keyed — it joins its 'id:' group
     AND the 'name:' group — so an id-keyed sreality row can meet a name-only
-    bazos row in one candidate group (id-only grouping made that impossible)."""
+    bazos row in one candidate group (id-only grouping made that impossible).
+
+    The NAME key is scoped by `obec_id` (the geom-derived municipality). A common
+    street name like "Žižkova" has 100+ active listings across dozens of towns;
+    one nationwide "name:zizkova" group blows MAX_GROUP_SIZE and gets the WHOLE
+    group skipped — so cross-portal pairs there (HTML portals carry no street_id,
+    so the name group is the only place they can meet a sreality row) were never
+    compared. Scoping by obec keeps each town's street its own small group AND
+    blocks cross-town false merges (classify_pair has no geo check). The 'id:' key
+    stays global — a street_id is one physical street, already town-specific."""
     keys: list[str] = []
     if street_id is not None and street_id > 0:
         keys.append(f"id:{street_id}")
     name = _street_name_key(street)
     if name is not None:
-        keys.append(f"name:{name}")
+        keys.append(f"name:{obec_id}:{name}")
     return tuple(keys)
 
 

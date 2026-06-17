@@ -1233,7 +1233,13 @@ it rather than duplicating a list here.
   it rejects foreign coords/countries, "Town - Quarter" forms, "okres X" qualifiers, and any candidate
   equal to the row's own geo-derived obec/okres/region; a wrong street is worse than NULL (it poisons
   the dedup street-key and Browse). Stored values are bare/human-readable for display; the SEPARATE
-  match-time grouping key is `toolkit.dedup_engine._street_name_key` (don't confuse the two). `street` /
+  match-time grouping key is `toolkit.dedup_engine.street_group_keys` (don't confuse the two): a row
+  dual-keys into `id:<street_id>` (sreality/bezrealitky) AND `name:<obec_id>:<_street_name_key>`. The
+  NAME key is **obec-scoped** — a common name like "Žižkova" has 100+ active listings across dozens of
+  towns; one nationwide group blows `MAX_GROUP_SIZE=40` and gets the whole group SKIPPED, so the
+  cross-portal pairs there (HTML portals have no street_id → name group is the only place they meet a
+  sreality row) were never compared. obec-scoping keeps each town's street its own small group AND
+  blocks cross-town false merges (classify_pair has no geo check). `street` /
   `house_number` / `zip` are OUT of the content hash, so backfilling them never churns snapshots
   (`scripts/backfill_portal_streets.py` re-derives from already-stored data — no re-fetch). Browse
   street picks ILIKE `properties_public.place_search_text`, which is a **group-best** street
