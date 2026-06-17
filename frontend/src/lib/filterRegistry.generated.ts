@@ -251,7 +251,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "int",
       "pg_column": null,
       "default": null,
-      "description": "Drop listings whose `last_seen_at` is older than N days. Applied only when `population` resolves to `active` (or `active_only=true`). Set explicitly when you want a freshness gate — there's no implicit default.",
+      "description": "Drop listings whose `last_seen_at` is older than N days. Applied only when `lifecycle='active'`. Set explicitly when you want a freshness gate — there's no implicit default.",
       "category": "Velocity",
       "ui_control": "number_input",
       "agendas": [
@@ -270,35 +270,16 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "aliases": []
     },
     {
-      "id": "active_only",
-      "type": "bool",
-      "pg_column": null,
-      "default": false,
-      "description": "When true, restricts the cohort to `l.is_active = true`. Legacy boolean retained for backwards compatibility; `population='active'` is the modern equivalent and carries the same effect plus an optional freshness gate via `max_age_days`.",
-      "category": "Status",
-      "ui_control": "boolean",
-      "agendas": [
-        "comparables",
-        "defaults",
-        "estimation"
-      ],
-      "constraints": null,
-      "unit": null,
-      "enum_values": null,
-      "aliases": [
-        "activeOnly"
-      ]
-    },
-    {
-      "id": "population",
+      "id": "lifecycle",
       "type": "string",
       "pg_column": null,
       "default": null,
-      "description": "Coarse cohort population selector. `active` = is_active=true (plus max_age_days if set); `delisted` = is_active=false (closed deals only — rough proxy for transacted listings); `all` = both. Mutually exclusive with `active_only`; if both are set, population wins.",
+      "description": "The single cohort lifecycle selector. `active` = is_active=true (plus the max_age_days freshness gate when set); `delisted` = is_active=false (closed deals only — rough proxy for transacted listings); `all` = both. Unset means no is_active gate (the raw-tool default); the estimation path seeds `active` from `default_lifecycle`.",
       "category": "Status",
       "ui_control": "single_select",
       "agendas": [
         "comparables",
+        "defaults",
         "estimation",
         "velocity"
       ],
@@ -334,7 +315,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string",
       "pg_column": null,
       "default": "any",
-      "description": "Listing status filter for Browse. `any` shows both live and delisted; `active` only is_active=true; `inactive` only is_active=false. The Watchdog matcher ignores this (it fires on new listings only) — use `population` for the analytical surfaces.",
+      "description": "Listing status filter for Browse. `any` shows both live and delisted; `active` only is_active=true; `inactive` only is_active=false. The Watchdog matcher ignores this (it fires on new listings only) — use `lifecycle` for the analytical surfaces.",
       "category": "Status",
       "ui_control": "pill_group",
       "agendas": [

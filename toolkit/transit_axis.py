@@ -35,6 +35,7 @@ from toolkit.comparables import (
     ComparableFilters,
     TargetSpec,
     _filters_used,
+    _lifecycle_where,
     _shared_filter_where,
 )
 
@@ -281,13 +282,11 @@ def _query_corridor(
     ]
     params.pop("radius_m", None)
 
-    if filters.active_only:
-        listing_where.append("l.is_active = true")
-        if filters.max_age_days is not None:
-            listing_where.append(
-                "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
-            )
-            params["max_age_days"] = filters.max_age_days
+    life_where, life_params = _lifecycle_where(
+        filters.lifecycle, filters.max_age_days,
+    )
+    listing_where.extend(life_where)
+    params.update(life_params)
 
     params.update({
         "transport_types":  list(transport_types),

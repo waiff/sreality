@@ -21,7 +21,7 @@ from toolkit.comparables import _apply_relaxation
 def test_minimal_query_only_spatial():
     target = TargetSpec(lat=50.0, lng=14.0)
     filters = ComparableFilters(
-        active_only=False,
+        lifecycle=None,
         category_main=None,
         category_type=None,
         include_unreliable=True,
@@ -31,16 +31,17 @@ def test_minimal_query_only_spatial():
     assert "ST_Distance" in sql
     assert "ORDER BY distance_m" in sql
     assert "LIMIT 500" in sql
+    assert "is_active" not in sql
     assert params["lat"] == 50.0
     assert params["lng"] == 14.0
     assert params["radius_m"] == 1000
 
 
-def test_active_only_adds_recency_filter():
+def test_lifecycle_active_adds_recency_filter():
     sql, params = build_query(
         TargetSpec(lat=50.0, lng=14.0),
         ComparableFilters(
-            active_only=True,
+            lifecycle="active",
             max_age_days=14,
             category_main=None,
             category_type=None,
@@ -50,6 +51,36 @@ def test_active_only_adds_recency_filter():
     assert "l.is_active = true" in sql
     assert "make_interval(days => %(max_age_days)s)" in sql
     assert params["max_age_days"] == 14
+
+
+def test_lifecycle_delisted_gates_inactive_without_recency():
+    sql, params = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(
+            lifecycle="delisted",
+            max_age_days=14,
+            category_main=None,
+            category_type=None,
+            include_unreliable=True,
+        ),
+    )
+    assert "l.is_active = false" in sql
+    # delisted never applies the recency gate.
+    assert "make_interval(days => %(max_age_days)s)" not in sql
+    assert "max_age_days" not in params
+
+
+def test_lifecycle_all_emits_no_is_active_clause():
+    sql, _ = build_query(
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(
+            lifecycle="all",
+            category_main=None,
+            category_type=None,
+            include_unreliable=True,
+        ),
+    )
+    assert "is_active" not in sql
 
 
 def test_default_excludes_unreliable():

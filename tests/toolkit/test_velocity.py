@@ -49,7 +49,7 @@ def test_market_velocity_query_includes_spatial_and_disposition():
     assert params["lat"] == 50.0 and params["lng"] == 14.0
 
 
-def test_market_velocity_query_active_population_adds_clause():
+def test_market_velocity_query_active_lifecycle_adds_clause():
     sql, _ = build_market_velocity_query(
         TargetSpec(lat=50.0, lng=14.0), ComparableFilters(), "active",
     )
@@ -57,7 +57,7 @@ def test_market_velocity_query_active_population_adds_clause():
     assert "l.is_active = false" not in sql
 
 
-def test_market_velocity_query_delisted_population_adds_clause():
+def test_market_velocity_query_delisted_lifecycle_adds_clause():
     sql, _ = build_market_velocity_query(
         TargetSpec(lat=50.0, lng=14.0), ComparableFilters(), "delisted",
     )
@@ -65,7 +65,7 @@ def test_market_velocity_query_delisted_population_adds_clause():
     assert "l.is_active = true" not in sql
 
 
-def test_market_velocity_query_all_population_no_active_clause():
+def test_market_velocity_query_all_lifecycle_no_active_clause():
     sql, _ = build_market_velocity_query(
         TargetSpec(lat=50.0, lng=14.0), ComparableFilters(), "all",
     )
@@ -148,13 +148,13 @@ def test_market_velocity_envelope_basic():
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
         ComparableFilters(),
-        population="all",
+        lifecycle="all",
     )
     d = res["data"]
     assert d["cohort_size"] == 5
     assert d["active_count"] == 3
     assert d["delisted_count"] == 2
-    assert d["population"] == "all"
+    assert d["lifecycle"] == "all"
     assert d["tom_stats"]["n"] == 5
     assert d["tom_stats"]["min_days"] == 5
     assert d["tom_stats"]["max_days"] == 25
@@ -208,10 +208,10 @@ def test_market_velocity_population_passed_through_to_metadata():
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
         ComparableFilters(),
-        population="active",
+        lifecycle="active",
     )
-    assert res["data"]["population"] == "active"
-    assert res["metadata"]["filters_used"]["population"] == "active"
+    assert res["data"]["lifecycle"] == "active"
+    assert res["metadata"]["filters_used"]["lifecycle"] == "active"
 
 
 # compute_listing_velocity

@@ -353,7 +353,7 @@ export type EstimationStatus = 'pending' | 'running' | 'success' | 'failed';
 export type EstimationSource = 'ui' | 'api' | 'clickup';
 export type EstimationMode = 'deterministic' | 'agent';
 export type EstimationProvider = 'anthropic' | 'gemini';
-export type Population = 'active' | 'delisted' | 'all';
+export type Lifecycle = 'active' | 'delisted' | 'all';
 /* Result confidence (estimate_yield) only ever returns the first three;
  * parse confidence (URL parser) can additionally be 'best_effort'. The
  * widened union covers both call sites. */
@@ -637,10 +637,10 @@ export interface SkillRefinement {
 /* Filter half of the POST /estimations body — mirrors ComparableFilters
  * via api/schemas.CreateEstimationIn. Only fields the UI actually exposes.
  *
- * The five cohort-search knobs (radius_m, area_band_pct,
- * disposition_match, max_age_days, active_only) intentionally do NOT
- * appear here: the agent decides them per-iteration and deterministic
- * runs use the backend's built-in defaults. */
+ * The cohort-search knobs (radius_m, area_band_pct, disposition_match,
+ * max_age_days) intentionally do NOT appear here: the agent decides them
+ * per-iteration and deterministic runs use the backend's built-in
+ * defaults. `lifecycle` rides on CreateEstimationIn directly. */
 export interface EstimationFilters {
   floor_band: number | null;
   condition_match: string[] | null;
@@ -678,7 +678,7 @@ export interface CreateEstimationIn extends Partial<EstimationFilters> {
   mode?: EstimationMode;
   provider?: EstimationProvider;
   skill?: string;
-  population?: Population;
+  lifecycle?: Lifecycle;
   estimate_kind?: 'rent' | 'sale';
   url?: string;
   spec?: TargetSpecIn;

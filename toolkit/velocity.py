@@ -9,7 +9,7 @@ and classification happen in Python.
 
 Active vs delisted matters interpretively: TOM-so-far on active listings
 is right-censored (they haven't finished yet), while delisted TOM is
-final. Mixing them via population="all" gives the broadest picture but
+final. Mixing them via lifecycle="all" gives the broadest picture but
 the agent should reason about the mix.
 """
 
@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from toolkit.comparables import (
     ComparableFilters,
     TargetSpec,
+    _lifecycle_where,
     _shared_filter_where,
 )
 
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     import psycopg
 
 
-_VelocityPopulation = Literal["active", "delisted", "all"]
+_VelocityLifecycle = Literal["active", "delisted", "all"]
 _HARD_LIMIT = 5000
 
 
@@ -44,15 +45,15 @@ VELOCITY_BANDS = {
 def build_market_velocity_query(
     target: TargetSpec,
     filters: ComparableFilters,
-    population: _VelocityPopulation,
+    lifecycle: _VelocityLifecycle,
 ) -> tuple[str, dict[str, Any]]:
     """Render SQL + params. Exposed for hermetic tests."""
     where, params = _shared_filter_where(target, filters)
-    if population == "active":
-        where.append("l.is_active = true")
-    elif population == "delisted":
-        where.append("l.is_active = false")
-    # "all": no clause
+    # Velocity gates lifecycle without a recency window (TOM analytics want
+    # the full sojourn), so no max_age_days is passed.
+    life_where, life_params = _lifecycle_where(lifecycle)
+    where.extend(life_where)
+    params.update(life_params)
 
     sql = (
         "SELECT l.sreality_id, l.first_seen_at, l.last_seen_at, l.is_active\n"
@@ -68,12 +69,12 @@ def compute_market_velocity(
     conn: "psycopg.Connection",
     target: TargetSpec,
     filters: ComparableFilters,
-    population: _VelocityPopulation = "all",
+    lifecycle: _VelocityLifecycle = "all",
     trend_split_days: int = 7,
 ) -> dict[str, Any]:
     from toolkit import _now_iso
 
-    sql, params = build_market_velocity_query(target, filters, population)
+    sql, params = build_market_velocity_query(target, filters, lifecycle)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         rows = cur.fetchall()
@@ -112,7 +113,7 @@ def compute_market_velocity(
         notes.append(
             f"cohort size {len(cohort)} below 5; stats are noisy"
         )
-    if active_count > 0 and delisted_count == 0 and population == "all":
+    if active_count > 0 and delisted_count == 0 and lifecycle == "all":
         notes.append(
             "cohort contains no delisted listings; TOM is right-censored"
         )
@@ -122,7 +123,7 @@ def compute_market_velocity(
             "cohort_size": len(cohort),
             "active_count": active_count,
             "delisted_count": delisted_count,
-            "population": population,
+            "lifecycle": lifecycle,
             "tom_stats": tom_stats,
             "trend": {
                 "split_days": trend_split_days,
@@ -138,7 +139,7 @@ def compute_market_velocity(
         },
         "metadata": {
             "tool": "compute_market_velocity",
-            "filters_used": _filters_used(target, filters, population, trend_split_days),
+            "filters_used": _filters_used(target, filters, lifecycle, trend_split_days),
             "result_count": len(cohort),
             "queried_at": _now_iso(),
             "data_freshness": _max_last_seen_dt(cohort),
@@ -152,7 +153,7 @@ def compute_listing_velocity(
     sreality_id: int,
     radius_m: int = 1000,
     disposition_match: Literal["exact", "loose", "any"] = "exact",
-    population: _VelocityPopulation = "all",
+    lifecycle: _VelocityLifecycle = "all",
 ) -> dict[str, Any]:
     """Percentile-rank a single listing against its peer cohort.
 
@@ -168,7 +169,7 @@ def compute_listing_velocity(
             sreality_id=sreality_id,
             radius_m=radius_m,
             disposition_match=disposition_match,
-            population=population,
+            lifecycle=lifecycle,
             data={"sreality_id": sreality_id, "found": False},
             queried_at=_now_iso(),
         )
@@ -184,7 +185,7 @@ def compute_listing_velocity(
             sreality_id=sreality_id,
             radius_m=radius_m,
             disposition_match=disposition_match,
-            population=population,
+            lifecycle=lifecycle,
             data={
                 "sreality_id": sreality_id,
                 "found": True,
@@ -208,7 +209,8 @@ def compute_listing_velocity(
     filters = ComparableFilters(
         radius_m=radius_m,
         disposition_match=disposition_match,
-        active_only=False,  # let `population` dictate
+        # lifecycle is left at the default (None) on the cohort filters;
+        # the velocity `lifecycle` arg drives the is_active gate instead.
         # Peers must be the same category as the subject; otherwise a
         # house would be ranked against apartments. ComparableFilters no
         # longer defaults to byt/pronajem, so carry the subject's own
@@ -216,7 +218,7 @@ def compute_listing_velocity(
         category_main=listing["category_main"],
         category_type=listing["category_type"],
     )
-    sql, params = build_market_velocity_query(target, filters, population)
+    sql, params = build_market_velocity_query(target, filters, lifecycle)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         peer_rows = cur.fetchall()
@@ -251,7 +253,7 @@ def compute_listing_velocity(
         sreality_id=sreality_id,
         radius_m=radius_m,
         disposition_match=disposition_match,
-        population=population,
+        lifecycle=lifecycle,
         data=data,
         queried_at=_now_iso(),
         notes=notes,
@@ -366,7 +368,7 @@ def _max_last_seen_dt(cohort: list[dict[str, Any]]) -> str | None:
 def _filters_used(
     target: TargetSpec,
     filters: ComparableFilters,
-    population: str,
+    lifecycle: str,
     trend_split_days: int,
 ) -> dict[str, Any]:
     return {
@@ -408,7 +410,7 @@ def _filters_used(
         "last_seen_max_days": filters.last_seen_max_days,
         "first_seen_min_days": filters.first_seen_min_days,
         "first_seen_max_days": filters.first_seen_max_days,
-        "population": population,
+        "lifecycle": lifecycle,
         "trend_split_days": trend_split_days,
     }
 
@@ -418,7 +420,7 @@ def _listing_envelope(
     sreality_id: int,
     radius_m: int,
     disposition_match: str,
-    population: str,
+    lifecycle: str,
     data: dict[str, Any],
     queried_at: str,
     notes: list[str] | None = None,
@@ -429,7 +431,7 @@ def _listing_envelope(
             "sreality_id": sreality_id,
             "radius_m": radius_m,
             "disposition_match": disposition_match,
-            "population": population,
+            "lifecycle": lifecycle,
         },
         "result_count": data.get("cohort_size", 0),
         "queried_at": queried_at,

@@ -387,7 +387,8 @@ def post_compute_market_velocity(
         radius_m=body.radius_m,
         area_band_pct=body.area_band_pct,
         disposition_match=body.disposition_match,
-        active_only=False,
+        # lifecycle left at default (None); the velocity `lifecycle` arg
+        # drives the is_active gate.
         floor_band=body.floor_band,
         portals=body.portals,
         condition_match=body.condition_match,
@@ -421,7 +422,7 @@ def post_compute_market_velocity(
     )
     return compute_market_velocity(
         conn, target, filters,
-        population=body.population,
+        lifecycle=body.lifecycle,
         trend_split_days=body.trend_split_days,
     )
 
@@ -594,7 +595,7 @@ def post_compute_listing_velocity(
         body.sreality_id,
         radius_m=body.radius_m,
         disposition_match=body.disposition_match,
-        population=body.population,
+        lifecycle=body.lifecycle,
     )
 
 
@@ -1045,7 +1046,7 @@ def post_estimate_yield(
         area_band_pct=body.area_band_pct,
         disposition_match=body.disposition_match,
         max_age_days=body.max_age_days,
-        active_only=body.active_only,
+        lifecycle=body.lifecycle,
         floor_band=body.floor_band,
         portals=body.portals,
         condition_match=body.condition_match,
@@ -1442,7 +1443,7 @@ def _build_comparables_inputs(
         area_band_pct=body.area_band_pct,
         disposition_match=body.disposition_match,
         max_age_days=body.max_age_days,
-        active_only=body.active_only,
+        lifecycle=body.lifecycle,
         floor_band=body.floor_band,
         portals=body.portals,
         condition_match=body.condition_match,

@@ -1000,7 +1000,7 @@ def run_pending_estimation(run_id: int) -> None:
             area_band_pct=defaults.area_band_pct,
             disposition_match=defaults.disposition_match,
             max_age_days=defaults.max_age_days_for(estimate_kind),
-            active_only=defaults.active_only,
+            lifecycle=defaults.lifecycle,
             category_main=category_main or "byt",
             category_type=category_type
                 or ("pronajem" if estimate_kind == "rent" else "prodej"),

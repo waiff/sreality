@@ -228,14 +228,14 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
-                    # The handler honours radius_m + population only,
+                    # The handler honours radius_m + lifecycle only,
                     # plus the velocity-specific trend_split_days. Other
                     # cohort knobs come from base_filters.
                     "radius_m": filter_registry.to_jsonschema_property(
                         filter_registry.by_id("radius_m"),
                     ),
-                    "population": filter_registry.to_jsonschema_property(
-                        filter_registry.by_id("population"),
+                    "lifecycle": filter_registry.to_jsonschema_property(
+                        filter_registry.by_id("lifecycle"),
                     ),
                     "trend_split_days": {
                         "type": "integer", "minimum": 1, "maximum": 90,
@@ -268,7 +268,7 @@ def _build_tool_registry() -> dict[str, _ToolDef]:
                         "type": "string",
                         "enum": ["exact", "loose", "any"],
                     },
-                    "population": {
+                    "lifecycle": {
                         "type": "string",
                         "enum": ["active", "delisted", "all"],
                     },
@@ -789,7 +789,7 @@ _FCR_OVERRIDE_FIELDS: tuple[tuple[str, Callable[[Any], Any]], ...] = (
     ("area_band_pct", float),
     ("disposition_match", str),
     ("max_age_days", int),
-    ("population", str),
+    ("lifecycle", str),
     ("floor_band", int),
     ("portals", list),
     ("condition_match", list),
@@ -841,8 +841,7 @@ def _filters_snapshot(
         "disposition_match": filters.disposition_match,
         "max_age_days": filters.max_age_days,
         "min_results": min_results,
-        "active_only": filters.active_only,
-        "population": filters.population,
+        "lifecycle": filters.lifecycle,
         "floor_band": filters.floor_band,
         "portals": list(filters.portals) if filters.portals else None,
         "condition_match": (
@@ -1120,7 +1119,7 @@ def _handle_compute_market_velocity(
         filters = replace(filters, radius_m=int(args["radius_m"]))
     return compute_market_velocity(
         state.conn, state.target, filters,
-        population=args.get("population", "all"),
+        lifecycle=args.get("lifecycle", "all"),
         trend_split_days=int(args.get("trend_split_days", 7)),
     )
 
@@ -1135,7 +1134,7 @@ def _handle_compute_listing_velocity(
         disposition_match=args.get(
             "disposition_match", state.base_filters.disposition_match,
         ),
-        population=args.get("population", "all"),
+        lifecycle=args.get("lifecycle", "all"),
     )
 
 

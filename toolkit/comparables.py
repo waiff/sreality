@@ -53,8 +53,12 @@ class ComparableFilters:
     # within N days" must say so explicitly. The agent and the
     # deterministic estimator both pass these on demand.
     max_age_days: int | None = None
-    active_only: bool = False
-    population: Literal["active", "delisted", "all"] | None = None
+    # The single lifecycle selector. `active` = is_active=true (plus the
+    # max_age_days recency gate when set); `delisted` = is_active=false
+    # (closed deals — the estimator's transacted-price proxy); `all` /
+    # None = no is_active gate. Rendered by `_lifecycle_where`, the one
+    # place Toolkit rule #4's "active" definition lives.
+    lifecycle: Literal["active", "delisted", "all"] | None = None
     floor_band: int | None = None
     portals: list[str] | None = None
     condition_match: list[str] | None = None
@@ -324,10 +328,9 @@ def _shared_filter_where(
     condition/building/energy filters, amenity booleans, price bounds,
     locality IDs, exclude_ids, and the failure-row exclusion.
 
-    Does NOT include the active_only / max_age_days clauses — those are
-    operational rather than attribute filters, and different consumers
-    (find_comparables vs compute_market_velocity) want different
-    semantics. Each caller appends its own.
+    Does NOT include the lifecycle / max_age_days clauses — those are
+    operational rather than attribute filters. Each caller appends them
+    via the shared `_lifecycle_where` helper.
     """
     params: dict[str, Any] = {
         "lat": target.lat,
@@ -539,6 +542,31 @@ def _shared_filter_where(
     return where, params
 
 
+def _lifecycle_where(
+    lifecycle: str | None, max_age_days: int | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Render the is_active lifecycle gate (+ optional recency) for a cohort.
+
+    The single source of truth for Toolkit rule #4's "active" definition.
+    Every cohort query — comparables, market velocity, the transit-axis
+    search — renders its is_active clause here, so the surfaces can never
+    drift. `active` couples the optional max_age_days freshness gate;
+    `delisted` is is_active=false; `all`/None emit nothing.
+    """
+    where: list[str] = []
+    params: dict[str, Any] = {}
+    if lifecycle == "active":
+        where.append("l.is_active = true")
+        if max_age_days is not None:
+            where.append(
+                "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
+            )
+            params["max_age_days"] = max_age_days
+    elif lifecycle == "delisted":
+        where.append("l.is_active = false")
+    return where, params
+
+
 def build_query(
     target: TargetSpec, filters: ComparableFilters
 ) -> tuple[str, dict[str, Any]]:
@@ -548,24 +576,11 @@ def build_query(
     """
     where, params = _shared_filter_where(target, filters)
 
-    if filters.population == "delisted":
-        where.append("l.is_active = false")
-    elif filters.population == "all":
-        pass
-    elif filters.population == "active":
-        where.append("l.is_active = true")
-        if filters.max_age_days is not None:
-            where.append(
-                "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
-            )
-            params["max_age_days"] = filters.max_age_days
-    elif filters.active_only:
-        where.append("l.is_active = true")
-        if filters.max_age_days is not None:
-            where.append(
-                "l.last_seen_at > now() - make_interval(days => %(max_age_days)s)"
-            )
-            params["max_age_days"] = filters.max_age_days
+    life_where, life_params = _lifecycle_where(
+        filters.lifecycle, filters.max_age_days,
+    )
+    where.extend(life_where)
+    params.update(life_params)
 
     sql = (
         "SELECT\n"
@@ -621,8 +636,7 @@ def _filters_used(target: TargetSpec, filters: ComparableFilters) -> dict[str, A
         "area_band_pct": filters.area_band_pct,
         "disposition_match": filters.disposition_match,
         "max_age_days": filters.max_age_days,
-        "active_only": filters.active_only,
-        "population": filters.population,
+        "lifecycle": filters.lifecycle,
         "floor_band": filters.floor_band,
         "portals": list(filters.portals) if filters.portals else None,
         "condition_match": (
@@ -812,7 +826,7 @@ def find_comparables_relaxed(
     each action in order until the cohort hits min_results or the ladder
     is exhausted. Every intermediate step is recorded in
     `data.relaxation_trace` for full provenance. Locality, category,
-    price bounds, and active_only are NEVER relaxed — they encode user
+    price bounds, and lifecycle are NEVER relaxed — they encode user
     intent.
     """
     from toolkit import _max_last_seen, _now_iso

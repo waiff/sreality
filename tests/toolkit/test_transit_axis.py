@@ -78,7 +78,7 @@ def test_cache_hit_skips_overpass(monkeypatch):
     res = ta.find_comparables_along_axis(
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(active_only=False),
+        ComparableFilters(),
         transport_types=["tram"],
         overpass_client=overpass,
     )
@@ -113,7 +113,7 @@ def test_cache_miss_fetches_and_writes(monkeypatch):
     res = ta.find_comparables_along_axis(
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(active_only=False),
+        ComparableFilters(),
         transport_types=["tram"],
         overpass_client=overpass,
     )
@@ -147,7 +147,7 @@ def test_corridor_excludes_radius_from_shared_filter():
     ta.find_comparables_along_axis(
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(active_only=False, radius_m=999_999),
+        ComparableFilters(radius_m=999_999),
         transport_types=["tram"],
         overpass_client=overpass,
     )
@@ -158,6 +158,28 @@ def test_corridor_excludes_radius_from_shared_filter():
     # But the anchor-circle ST_DWithin against the listing geom is NOT.
     assert "ST_DWithin(\n      l.geom" not in corridor_sql
     assert "%(radius_m)s" not in corridor_sql
+
+
+def test_corridor_honours_lifecycle():
+    """Regression: the along-axis search must honour filters.lifecycle
+    (it used to read the removed active_only and ignore lifecycle, so a
+    delisted corridor search silently returned active listings too)."""
+    overpass = _FakeOverpass([])
+    plan = [
+        _Step("fetchone", (1,)),
+        _Step("fetchall", _listing_rows([])),
+        _Step("fetchall", _line_rows([])),
+    ]
+    conn = _make_conn(plan)
+    ta.find_comparables_along_axis(
+        conn,  # type: ignore[arg-type]
+        TargetSpec(lat=50.0, lng=14.0),
+        ComparableFilters(lifecycle="delisted"),
+        transport_types=["tram"],
+        overpass_client=overpass,
+    )
+    corridor_sql = conn.cursor_obj.executed[1][0]
+    assert "l.is_active = false" in corridor_sql
 
 
 def test_listing_rows_carry_nearest_line_columns():
@@ -184,7 +206,7 @@ def test_listing_rows_carry_nearest_line_columns():
     res = ta.find_comparables_along_axis(
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(active_only=False),
+        ComparableFilters(),
         transport_types=["tram"],
         overpass_client=overpass,
     )
@@ -210,7 +232,7 @@ def test_envelope_metadata_shape():
     res = ta.find_comparables_along_axis(
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(active_only=False),
+        ComparableFilters(),
         transport_types=["tram", "subway"],
         anchor_radius_m=600,
         corridor_m=250,
@@ -237,7 +259,7 @@ def test_transport_types_get_deduped_and_sorted():
     res = ta.find_comparables_along_axis(
         conn,  # type: ignore[arg-type]
         TargetSpec(lat=50.0, lng=14.0),
-        ComparableFilters(active_only=False),
+        ComparableFilters(),
         transport_types=["tram", "tram", "bus"],
         overpass_client=overpass,
     )

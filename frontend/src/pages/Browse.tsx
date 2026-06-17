@@ -539,7 +539,7 @@ export default function Browse() {
         mode: 'agent',
         provider: 'anthropic',
         estimate_kind: 'rent',
-        population: 'active',
+        lifecycle: 'active',
       }),
     onMutate: (srealityId) => {
       setEstimatingIds((prev) => new Set(prev).add(srealityId));
