@@ -356,7 +356,16 @@ def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -
     No-op while only one source is attributed (no cross-source bridges). Review
     pairs are counted only — the operator review queue lands with Phase 5.
     """
+    # Cross-source bridges need >=2 sources; with one source the freq scan is
+    # guaranteed empty, so skip it entirely (the Phase-1 reality — avoids a costly
+    # full-contacts scan). When it does run, lift the statement timeout: it is a
+    # once-daily full-table analytical read.
     with conn.cursor() as cur:
+        cur.execute("SELECT count(DISTINCT source) FROM broker_identities")
+        if int(cur.fetchone()[0]) < 2:
+            return 0, 0
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(_BRIDGE_CANDIDATES)
         rows = cur.fetchall()
     if not rows:
@@ -440,11 +449,14 @@ def _max_id(conn: Any, table: str) -> int:
 
 
 def _refresh_matview(conn: Any) -> None:
-    with conn.cursor() as cur:
-        try:
-            cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY broker_region_type_stats")
-        except Exception:  # noqa: BLE001 — first refresh on an unpopulated matview
-            cur.execute("REFRESH MATERIALIZED VIEW broker_region_type_stats")
+    # Non-concurrent REFRESH inside a txn so SET LOCAL can lift the statement
+    # timeout — the matview aggregates the whole linked-listings corpus and
+    # CONCURRENTLY cannot run in a txn (so it can't get the raised timeout). A
+    # brief lock on a matview only the Brokers page reads, once per daily sweep,
+    # is the right tradeoff for reliability.
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = 0")
+        cur.execute("REFRESH MATERIALIZED VIEW broker_region_type_stats")
 
 
 def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
