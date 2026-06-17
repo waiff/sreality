@@ -571,7 +571,7 @@ def test_run_engine_phash_fastpath_merges(monkeypatch: Any) -> None:
         ]}}
 
     # No house number -> candidate (not exact-address), so it goes to visual.
-    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(conn, classify_fn=classify, compare_fn=lambda *a, **k: None,
                            max_vision_calls=10)
 
@@ -596,7 +596,7 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
     def compare(a: int, b: int, room: str, ids_a: list, ids_b: list) -> dict:
         return {"verdict": "High", "rationale": "matching tiles"}
 
-    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(conn, classify_fn=classify, compare_fn=compare, max_vision_calls=10)
     assert stats["auto_visual"] == 1
     assert merges == ["visual_match"]
@@ -604,7 +604,7 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
 
     # Low verdict -> queue, no merge.
     merges.clear()
-    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats2 = eng.run_engine(
         conn2, classify_fn=classify,
         compare_fn=lambda *a, **k: {"verdict": "Low", "rationale": "different windows"},
@@ -638,7 +638,7 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
     def site_plan(a: int, b: int, ids_a: list, ids_b: list) -> dict:
         return {"verdict": "different_unit", "rationale": "plot 3 vs plot 4"}
 
-    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(
         conn, classify_fn=classify, compare_fn=lambda *a, **k: {"verdict": "High"},
         site_plan_fn=site_plan, max_vision_calls=10,
@@ -666,7 +666,7 @@ def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any)
             {"image_id": sid * 10 + 2, "room_type": "kitchen"},
         ]}}
 
-    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(
         conn, classify_fn=classify, compare_fn=lambda *a, **k: None,
         site_plan_fn=lambda *a, **k: {"verdict": "same_unit", "rationale": "both plot 3"},
@@ -740,7 +740,7 @@ def test_run_engine_auto_merge_off_queues_candidate_without_vision(monkeypatch: 
         vision.append(sid)
         return {"data": {"images": []}}
 
-    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(
         conn, classify_fn=classify, compare_fn=lambda *a, **k: None,
         max_vision_calls=10, auto_merge_enabled=False,
