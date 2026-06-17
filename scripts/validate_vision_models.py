@@ -35,6 +35,26 @@ from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
 LOG = logging.getLogger("validate_vision_models")
 
 
+def _is_infra_error(exc: Exception) -> bool:
+    """True for an API/account error (credit, quota, rate, auth) — not a real verdict.
+
+    Such errors mean the run can't measure recall; counting them as 'not High' would
+    masquerade a dead key as a recall regression (the 2026-06-17 credit-exhaustion
+    incident). The caller aborts and reports INCONCLUSIVE instead.
+    """
+    s = str(exc).lower()
+    return any(
+        k in s for k in (
+            "credit balance", "quota", "rate_limit", "rate limit", "429",
+            "overloaded", "529", "authentication", "x-api-key", "permission",
+        )
+    )
+
+
+class _InfraAbort(RuntimeError):
+    """Raised to abort an A/B run when the API/account is unusable."""
+
+
 def _room_images(
     conn: Any, sreality_id: int, room_type: str, prod_model: str, limit: int,
 ) -> list[str]:
@@ -119,10 +139,10 @@ def run_compare_ab(
                 model=candidate_model,
             )
             verdict, _ = vm._extract(resp.tool_calls)
-        except Exception as exc:  # noqa: BLE001 - one bad pair must not abort the gate
-            LOG.warning("compare a=%s b=%s room=%s failed: %s", a, b, room, exc)
-            misses.append(f"{a}/{b} {room}: ERROR {exc}")
-            evaluated += 1
+        except Exception as exc:  # noqa: BLE001
+            if _is_infra_error(exc):
+                raise _InfraAbort(f"compare a={a} b={b}: {exc}") from exc
+            LOG.warning("compare a=%s b=%s room=%s failed (counted neither): %s", a, b, room, exc)
             continue
         evaluated += 1
         if verdict == "High":
@@ -171,7 +191,9 @@ def run_classify_ab(
             )
             rooms = ic._extract_rooms(resp.tool_calls)
         except Exception as exc:  # noqa: BLE001
-            LOG.warning("classify sid=%s failed: %s", sid, exc)
+            if _is_infra_error(exc):
+                raise _InfraAbort(f"classify sid={sid}: {exc}") from exc
+            LOG.warning("classify sid=%s failed (skipped): %s", sid, exc)
             continue
         cand = {}
         for entry in rooms:
@@ -219,22 +241,40 @@ def main() -> int:
             args.candidate_model, args.max_edge, prod_compare_model, prod_classify_model,
         )
 
-        still_high, evaluated, misses = run_compare_ab(
-            conn, llm, r2,
-            candidate_model=args.candidate_model, max_edge=args.max_edge,
-            prod_model=prod_compare_model, limit=args.compare_limit,
-        )
-        compare_recall = (still_high / evaluated) if evaluated else 1.0
-
-        agreement = 1.0
-        if not args.skip_classify:
-            agree, total = run_classify_ab(
+        try:
+            still_high, evaluated, misses = run_compare_ab(
                 conn, llm, r2,
                 candidate_model=args.candidate_model, max_edge=args.max_edge,
-                prod_model=prod_classify_model, sample=args.classify_sample,
+                prod_model=prod_compare_model, limit=args.compare_limit,
             )
-            agreement = (agree / total) if total else 1.0
-            LOG.info("CLASSIFY agreement %d/%d = %.1f%%", agree, total, 100 * agreement)
+            agreement = 1.0
+            total = 1
+            if not args.skip_classify:
+                agree, total = run_classify_ab(
+                    conn, llm, r2,
+                    candidate_model=args.candidate_model, max_edge=args.max_edge,
+                    prod_model=prod_classify_model, sample=args.classify_sample,
+                )
+                agreement = (agree / total) if total else 1.0
+                LOG.info("CLASSIFY agreement %d/%d = %.1f%%", agree, total, 100 * agreement)
+        except _InfraAbort as exc:
+            print(
+                f"\n=== VISION A/B RESULT ===\n"
+                f"candidate model: {args.candidate_model} @ {args.max_edge}px\n"
+                f"verdict: INCONCLUSIVE — API/account error (credit, quota, rate or auth):\n"
+                f"  {exc}\n"
+                f"Top up / fix the key and re-run. No recall conclusion can be drawn from a "
+                f"partial run (API errors are NOT recall misses).\n"
+            )
+            return 3
+        compare_recall = (still_high / evaluated) if evaluated else 1.0
+        if evaluated == 0:
+            print(
+                "\n=== VISION A/B RESULT ===\n"
+                "verdict: INCONCLUSIVE — no historical High verdicts were evaluable "
+                "(none reproducible / no images). Nothing to conclude.\n"
+            )
+            return 3
 
         LOG.info(
             "COMPARE recall %d/%d = %.1f%% (still High at candidate)",
