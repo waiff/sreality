@@ -18,6 +18,7 @@ from api.providers.base import (
     BatchResultItem,
     BatchStatus,
     Completion,
+    ImageBlock,
     Message,
     ModelPrice,
     ProviderError,
@@ -267,6 +268,15 @@ def _msg_to_anthropic(msg: Message) -> dict[str, Any]:
             if block.is_error:
                 entry["is_error"] = True
             content.append(entry)
+        elif isinstance(block, ImageBlock):
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": block.media_type,
+                    "data": block.data,
+                },
+            })
     return {"role": msg.role, "content": content}
 
 

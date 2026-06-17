@@ -53,7 +53,14 @@ class ToolResultBlock:
     is_error: bool = False
 
 
-Block = TextBlock | ToolUseBlock | ToolResultBlock
+@dataclass(frozen=True)
+class ImageBlock:
+    """A base64-encoded image in a user message (vision input)."""
+    media_type: str
+    data: str
+
+
+Block = TextBlock | ToolUseBlock | ToolResultBlock | ImageBlock
 
 
 @dataclass(frozen=True)

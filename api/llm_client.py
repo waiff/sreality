@@ -35,6 +35,7 @@ from api.providers import (
     Block,
     Completion,
     CompletionProvider,
+    ImageBlock,
     Message,
     ProviderError,
     TextBlock,
@@ -346,13 +347,23 @@ def _to_neutral_message(msg: Any) -> Message:
 
 
 def _to_neutral_block(entry: Any) -> Block:
-    if isinstance(entry, (TextBlock, ToolUseBlock, ToolResultBlock)):
+    if isinstance(entry, (TextBlock, ToolUseBlock, ToolResultBlock, ImageBlock)):
         return entry
     if isinstance(entry, str):
         return TextBlock(text=entry)
     kind = entry.get("type")
     if kind == "text":
         return TextBlock(text=entry.get("text") or "")
+    if kind == "image":
+        # Vision input: an Anthropic-shaped image block
+        # {"type":"image","source":{"type":"base64","media_type":...,"data":...}}.
+        # Without this case it would fall through to the str() fallback below and
+        # the base64 would be sent as TEXT (blowing the token limit; no image seen).
+        src = entry.get("source") or {}
+        return ImageBlock(
+            media_type=str(src.get("media_type") or "image/jpeg"),
+            data=str(src.get("data") or ""),
+        )
     if kind == "tool_use":
         return ToolUseBlock(
             id=str(entry.get("id") or ""),
