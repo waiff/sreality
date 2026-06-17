@@ -6,8 +6,9 @@ Replaces the old geo `scripts.dedup_sweep`.
 
 Pipeline (rules A-E; see toolkit.dedup_engine for the rule text):
 
-  0. Load ELIGIBLE listings (street + disposition both present, active) grouped
-     by street_key — rows with both a canonical street_id and a street name are
+  0. Load ELIGIBLE listings (street + disposition both present; active AND
+     inactive — price history must survive a delisting/relisting) grouped by
+     street_key — rows with both a canonical street_id and a street name are
      dual-keyed into their 'id:' and 'name:' groups. Eligibility is computed
      inline (rule A; a partial index backs the scan — see migration 127).
   1. Within each (street_key) group, classify every cross-property pair
@@ -60,10 +61,16 @@ LOG = logging.getLogger("dedup_engine")
 MAX_GROUP_SIZE = 40
 
 
-# Eligible, active listings that can still be matched, with everything the rules
-# need. Rule A eligibility (street + disposition both present) is computed inline
-# — see migration 127 for why it isn't a stored column. Ordered so grouping by
-# street_key is a simple consecutive walk.
+# Eligible listings that can still be matched, with everything the rules need.
+# Rule A eligibility (street + disposition both present) is computed inline — see
+# migration 127 for why it isn't a stored column. Ordered so grouping by street_key
+# is a simple consecutive walk.
+#
+# INACTIVE listings participate too (no is_active filter). A property's price/lifecycle
+# history is only complete if a listing taken down on one portal — or delisted and later
+# relisted under a new id — can still merge into the surviving group; gating on is_active
+# would orphan that history. The properties JOIN already excludes merged-away groups, and
+# an inactive listing keeps its own active singleton property, so it stays matchable.
 _ELIGIBLE_SQL = """
     SELECT
       l.sreality_id, l.property_id, l.source,
@@ -74,7 +81,6 @@ _ELIGIBLE_SQL = """
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE l.street IS NOT NULL AND l.street <> ''
       AND l.disposition IS NOT NULL
-      AND l.is_active = true
     ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition
 """
 
@@ -118,7 +124,11 @@ def _group_by_street(keys: list[ListingKey]) -> dict[str, list[ListingKey]]:
 
 
 def _eligibility_counts(conn: Any) -> dict[str, int]:
-    """Rule A breakdown over active listings (eligibility computed inline)."""
+    """Rule A breakdown over all listings (eligibility computed inline).
+
+    Counts active AND inactive, matching the eligible set _load_eligible processes
+    — an inactive listing still merges so its price history survives a delisting.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -130,7 +140,7 @@ def _eligibility_counts(conn: Any) -> dict[str, int]:
               count(*) FILTER (
                 WHERE street IS NOT NULL AND street <> '' AND disposition IS NULL
               ) AS flagged_disposition
-            FROM listings WHERE is_active = true
+            FROM listings
             """
         )
         row = cur.fetchone()
