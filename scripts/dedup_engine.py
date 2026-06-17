@@ -69,13 +69,13 @@ _ELIGIBLE_SQL = """
       l.sreality_id, l.property_id, l.source,
       l.street, l.street_id, l.disposition, l.house_number, l.floor, l.area_m2,
       left(l.description, 600) AS description,
-      l.category_type, l.category_main
+      l.category_type, l.category_main, l.obec_id
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE l.street IS NOT NULL AND l.street <> ''
       AND l.disposition IS NOT NULL
       AND l.is_active = true
-    ORDER BY l.street_id NULLS LAST, lower(l.street), l.disposition
+    ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition
 """
 
 
@@ -91,7 +91,8 @@ def _load_eligible(conn: Any) -> list[ListingKey]:
     for r in rows:
         raw_street_id = int(r[4]) if r[4] is not None else None
         street_id = raw_street_id if raw_street_id is not None and raw_street_id > 0 else None
-        for street_key in street_group_keys(r[3], raw_street_id):
+        obec_id = int(r[12]) if r[12] is not None else None
+        for street_key in street_group_keys(r[3], raw_street_id, obec_id):
             keys.append(ListingKey(
                 sreality_id=int(r[0]),
                 property_id=int(r[1]) if r[1] is not None else None,
