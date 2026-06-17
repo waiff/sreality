@@ -441,12 +441,6 @@ def _refresh_matview(conn: Any) -> None:
             cur.execute("REFRESH MATERIALIZED VIEW broker_region_type_stats")
 
 
-def _max_sid(conn: Any) -> int:
-    with conn.cursor() as cur:
-        cur.execute("SELECT coalesce(max(sreality_id), 0) FROM listings WHERE source = 'sreality'")
-        return int(cur.fetchone()[0])
-
-
 def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
               batch_size: int, deadline: float | None) -> dict[str, int]:
     with conn.cursor() as cur:
@@ -457,12 +451,17 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
         )
         run_id = int(cur.fetchone()[0])
 
-    max_sid = _max_sid(conn)
-    for lo in range(1, max_sid + 1, batch_size):
-        _attribute(conn, "l.sreality_id >= %(lo)s AND l.sreality_id < %(hi)s",
-                   {"lo": lo, "hi": lo + batch_size})
+    # Chunk the ACTUAL sreality listing ids (sreality_id is the portal's sparse id —
+    # 37k..4.3bn — so a numeric-range loop would walk ~859k empty ranges). One cheap
+    # PK-only scan fetches every id; attribution then runs per id-chunk.
+    with conn.cursor() as cur:
+        cur.execute("SELECT sreality_id FROM listings WHERE source = 'sreality' ORDER BY sreality_id")
+        all_ids = [int(r[0]) for r in cur.fetchall()]
+    for i in range(0, len(all_ids), batch_size):
+        _attribute(conn, "l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
         if deadline and time.monotonic() > deadline:
-            LOG.warning("RESOLVE full: time budget reached during attribution at sid<%d", lo + batch_size)
+            LOG.warning("RESOLVE full: time budget reached during attribution at %d/%d ids",
+                        i, len(all_ids))
             break
 
     _resolve_firms(conn, free, franchise)
