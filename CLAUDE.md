@@ -887,6 +887,26 @@ exception per Toolkit rule #5. System prompts and model IDs are operator-tunable
   snapshot. Powers the `summarize-1` annotated-charts feature; FACTS not opinions (toolkit
   rule #1) — it describes the distribution, never recommends a price.
 
+**Vision image downscaling is unified in `toolkit/vision_images.py` — one helper, two
+tiers.** Every image→LLM call routes R2 bytes through `image_block(r2, key, max_edge)`
+(download → Pillow downscale → base64) rather than hand-rolling base64 per call. Two
+semantic constants pick the tier: `COMPARISON_MAX_EDGE = 768` for photo comparison /
+classification (`classify_listing_images`, `compare_listings_visually`,
+`compare_listing_images`) — sub-megapixel is ample and, crucially, *below* Anthropic's
+~1.15 MP resize cap, so it actually cuts vision tokens to ~⅓ (the cost lever); and
+`DOCUMENT_MAX_EDGE = 1568` for reads where fine text/markers matter (site-plan compare,
+condition scoring/markers, building-extraction listing photos) — that *is* Anthropic's own
+cap, so the model sees the same pixels it would have anyway (quality-neutral; just less
+upload + no 200k prompt-assembly blowups). Anthropic bills tokens on the post-resize size,
+so anything ≥ the cap costs the *same* tokens — the saving only appears below it. **Operator
+attachments (`read_floor_plan`, building-extraction custom attachments) are deliberately
+NOT routed through this** — they carry arbitrary mime (PDF/PNG line-art) where the JPEG
+re-encode would corrupt PDFs and degrade crisp text; they keep their full-fidelity base64
+path. The forensic `compare_listings_visually` is the one call whose verdict auto-merges, so
+its tier is gated: `scripts/validate_vision_models.py` (workflow
+`validate_vision_models.yml`) A/Bs a candidate `(model, max_edge)` against every historical
+`High` verdict and only a green run authorizes flipping its model to Haiku / its edge to 768.
+
 ## Secondary rent reference (MF Cenová mapa nájemného)
 
 Every **rental** estimate carries a second, independent reference figure from the Czech

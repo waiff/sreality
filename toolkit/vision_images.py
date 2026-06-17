@@ -17,10 +17,20 @@ from typing import Any
 
 LOG = logging.getLogger("vision_images")
 
-# Anthropic resizes vision inputs to <=1568px long edge / ~1.15 MP and counts
-# ~1600 tokens at that size; bounding the long edge here keeps a 12-image classify
-# call near ~19k tokens instead of ~210k.
-DEFAULT_MAX_EDGE = 1568
+# Anthropic resizes every vision input down to <=1568px long edge AND <=~1.15 MP,
+# then bills tokens on the RESIZED size (~1.6k tokens at the cap). Two consequences
+# drive the two constants below:
+#   - Sending anything ABOVE the cap costs the SAME tokens (only wasted upload) and
+#     risks the 200k prompt-assembly limit. So document/diagram reads use 1568px:
+#     the model sees the same pixels it would have anyway, with no upload waste.
+#   - The token bill only DROPS once the image is BELOW the cap. 768px (~0.4 MP) is
+#     ~1/3 the vision tokens of the cap, which is the real cost saving — used for
+#     photo comparison/classification, where sub-megapixel detail is ample.
+COMPARISON_MAX_EDGE = 768   # photo comparison / room classification — the cost lever
+DOCUMENT_MAX_EDGE = 1568    # site plans / condition / diagrams — Anthropic's own cap, quality-neutral
+
+# The default favours the cheap path; document readers pass DOCUMENT_MAX_EDGE explicitly.
+DEFAULT_MAX_EDGE = COMPARISON_MAX_EDGE
 
 
 def downscale_jpeg(data: bytes, max_edge: int = DEFAULT_MAX_EDGE) -> bytes:

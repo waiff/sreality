@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
-from toolkit.vision_images import image_block
+from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -160,9 +160,10 @@ def _classify_missing(
     ]
     for i, img in enumerate(images):
         content.append({"type": "text", "text": f"Image index {i}:"})
-        # Downscale before encoding: full-res originals (12 of them) blow the
-        # 200k-token limit. Room labeling is coarse, so 1024px is ample.
-        content.append(image_block(r2, img["storage_path"], max_edge=1024))
+        # Room labeling is coarse and feeds only like-room pairing + the pHash
+        # interior gate (never a merge by itself), so the cheap comparison tier is
+        # ample — and well under Anthropic's resize cap, so it actually cuts tokens.
+        content.append(image_block(r2, img["storage_path"], max_edge=COMPARISON_MAX_EDGE))
 
     system = llm_client.resolve_system_prompt(_PROMPT_KEY)
     response = llm_client.call(

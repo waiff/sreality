@@ -7,9 +7,24 @@ import io
 
 import pytest
 
-from toolkit.vision_images import downscale_jpeg, image_block
+from toolkit.vision_images import (
+    COMPARISON_MAX_EDGE,
+    DEFAULT_MAX_EDGE,
+    DOCUMENT_MAX_EDGE,
+    downscale_jpeg,
+    image_block,
+)
 
 Image = pytest.importorskip("PIL.Image")
+
+
+def test_semantic_tiers() -> None:
+    # The cost lever (sub-megapixel) vs Anthropic's own resize cap (quality-neutral).
+    assert COMPARISON_MAX_EDGE == 768
+    assert DOCUMENT_MAX_EDGE == 1568
+    assert COMPARISON_MAX_EDGE < DOCUMENT_MAX_EDGE
+    # The default favours the cheap path, so a forgetful caller errs cheap, not costly.
+    assert DEFAULT_MAX_EDGE == COMPARISON_MAX_EDGE
 
 
 def _jpeg(width: int, height: int) -> bytes:
@@ -55,3 +70,16 @@ def test_image_block_downscales_and_encodes() -> None:
     assert block["source"]["media_type"] == "image/jpeg"
     decoded = base64.standard_b64decode(block["source"]["data"])
     assert max(_dims(decoded)) <= 1024
+
+
+def test_image_block_default_is_comparison_tier() -> None:
+    big = _jpeg(4000, 3000)
+
+    class _FakeR2:
+        def download_bytes(self, key: str) -> bytes:
+            return big
+
+    decoded = base64.standard_b64decode(
+        image_block(_FakeR2(), "k.jpg")["source"]["data"]
+    )
+    assert max(_dims(decoded)) <= COMPARISON_MAX_EDGE

@@ -23,11 +23,11 @@ post-hoc deduplication / clustering lives in
 
 from __future__ import annotations
 
-import base64
 import logging
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
+from toolkit.vision_images import DOCUMENT_MAX_EDGE, image_block
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -377,19 +377,9 @@ def _build_image_blocks_if_available(
     if not keys:
         return []
     r2 = image_storage.R2Client.from_env()
-    blocks: list[dict[str, Any]] = []
-    for key in keys:
-        data = r2.download_bytes(key)
-        encoded = base64.standard_b64encode(data).decode("ascii")
-        blocks.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": encoded,
-            },
-        })
-    return blocks
+    # Document tier (= Anthropic's own resize cap): quality-neutral vs full-res,
+    # kept above the comparison tier to preserve fine visible condition markers.
+    return [image_block(r2, key, DOCUMENT_MAX_EDGE) for key in keys]
 
 
 def _fetch_image_keys(
