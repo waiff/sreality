@@ -358,7 +358,7 @@ def run_engine(
     stats.update({
         "pairs_considered": 0, "rejected": 0,
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
-        "queued": 0, "vision_calls": 0,
+        "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
     })
 
     keys = _load_eligible(conn)
@@ -426,6 +426,16 @@ def run_engine(
                             {**markers, "reason": "auto_merge_off:address_exact"},
                         )
                         stats["queued"] += 1
+                    continue
+
+                # Cross-source gate: the paid visual layer (classify + forensic compare)
+                # exists to match one portal's listing against ANOTHER portal's — same-source
+                # pairs buy nothing there (73/74 historical visual auto-merges were
+                # cross-source). Rule B above already auto-merges exact same-source relists for
+                # free; a same-source non-exact pair is skipped (no LLM, no queue), which cut
+                # ~36% of candidate pairs off the visual stage at ~1.4% recall cost.
+                if a.source == b.source:
+                    stats["skipped_same_source"] += 1
                     continue
 
                 # rule C candidate -> rule D visual
@@ -605,9 +615,10 @@ def main() -> int:
 
     LOG.info(
         "ENGINE done eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
-        "queued=%d rejected=%d pairs=%d vision_calls=%d",
+        "queued=%d rejected=%d skipped_same_source=%d pairs=%d vision_calls=%d",
         stats["eligible"], stats["auto_address"], stats["auto_phash"],
         stats["auto_visual"], stats["queued"], stats["rejected"],
+        stats.get("skipped_same_source", 0),
         stats["pairs_considered"], stats["vision_calls"],
     )
     return 0

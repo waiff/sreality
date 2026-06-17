@@ -428,6 +428,48 @@ def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
     assert stats["auto_phash"] == 0 and stats["auto_visual"] == 0
 
 
+def test_run_engine_skips_same_source_candidates(monkeypatch: Any) -> None:
+    # The cross-source gate: a same-source rule-C candidate (shares street+disposition,
+    # no exact-address rule B because house_number is absent) must NOT reach the paid
+    # visual stage — no classify, no compare, no merge, no queue.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
+
+    classified: list[int] = []
+
+    def fake_classify(sid: int) -> dict:
+        classified.append(sid)
+        return {"data": {"images": []}}
+
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="sreality"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=fake_classify, compare_fn=None, max_vision_calls=10)
+
+    assert stats["skipped_same_source"] == 1
+    assert stats["pairs_considered"] == 0      # never reached the visual stage
+    assert classified == []                    # classify never spent
+    assert stats["queued"] == 0 and stats["auto_visual"] == 0
+
+
+def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
+    # A cross-source candidate (sreality + bazos) DOES reach the visual stage.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="bazos"),
+    ])
+    # No classify_fn -> _resolve_visual returns queue('no_images'); the point is it was REACHED.
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+
+    assert stats["skipped_same_source"] == 0
+    assert stats["pairs_considered"] == 1
+
+
 def test_eligible_sql_includes_inactive_listings() -> None:
     # Price history must survive a delisting/relisting, so the engine considers
     # inactive listings too — the eligible scan and the counter must not gate on
