@@ -19,6 +19,7 @@ from scraper.portal_base import BasePortalClient
 from scraper.price_stats_parser import (
     build_estate_prices_params,
     parse_estate_prices,
+    parse_suggest_municipalities,
     parse_suggest_municipality,
 )
 
@@ -70,6 +71,23 @@ class PriceStatsClient(BasePortalClient):
             },
         )
         return parse_suggest_municipality(resp.json(), phrase=phrase)
+
+    def suggest_municipalities(self, phrase: str, *, limit: int = 80) -> list[dict[str, Any]]:
+        """ALL municipality entities matching a name (each with its own geo), so
+        same-name obce can be resolved individually by coordinate. Queries the
+        municipality_cz category ALONE: sreality caps the suggest response at ~50
+        results, and the full category lets wards/streets crowd out muni results
+        — muni-only returns every bearer (e.g. all 34 'Nová Ves')."""
+        resp = self._request(
+            SUGGEST_URL,
+            params={
+                "phrase": phrase,
+                "category": "municipality_cz",
+                "lang": "cs",
+                "limit": limit,
+            },
+        )
+        return parse_suggest_municipalities(resp.json())
 
     def fetch_window(
         self,

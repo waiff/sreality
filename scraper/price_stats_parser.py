@@ -106,45 +106,54 @@ def parse_estate_prices(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _suggest_munis(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """The municipality (`source == 'muni'`) userData objects in a suggest response."""
+    results = payload.get("results") if isinstance(payload, dict) else None
+    out: list[dict[str, Any]] = []
+    for r in results or []:
+        ud = r.get("userData") or {}
+        if ud.get("source") == ENTITY_MUNICIPALITY:
+            out.append(ud)
+    return out
+
+
+def _muni_dict(ud: dict[str, Any]) -> dict[str, Any]:
+    """The fields we cache in price_stat_localities for one muni candidate."""
+    lat, lon = ud.get("latitude"), ud.get("longitude")
+    return {
+        "entity_id": ud.get("id"),
+        "entity_type": ENTITY_MUNICIPALITY,
+        "name": ud.get("municipality") or ud.get("suggestFirstRow"),
+        "municipality_id": ud.get("municipality_id"),
+        "municipality_seo_name": ud.get("municipality_seo_name"),
+        "district": ud.get("district"),
+        "district_id": ud.get("district_id"),
+        "district_seo_name": ud.get("district_seo_name"),
+        "region": ud.get("region"),
+        "region_id": ud.get("region_id"),
+        "region_seo_name": ud.get("region_seo_name"),
+        "lat": float(lat) if lat is not None else None,
+        "lon": float(lon) if lon is not None else None,
+    }
+
+
 def parse_suggest_municipality(
     payload: dict[str, Any], *, phrase: str
 ) -> dict[str, Any] | None:
-    """Best municipality (`source == 'muni'`) match from a suggest response.
-
-    Prefers an exact (case-insensitive) name match on `municipality`, else the
-    first municipality result. Returns the fields we cache in
-    `price_stat_localities`, or None if no municipality is in the results.
-    """
-    results = payload.get("results") if isinstance(payload, dict) else None
-    if not results:
-        return None
-
-    munis: list[dict[str, Any]] = []
-    for r in results:
-        ud = r.get("userData") or {}
-        if ud.get("source") == ENTITY_MUNICIPALITY:
-            munis.append(ud)
+    """Best municipality match (exact name, else first), or None if no muni."""
+    munis = _suggest_munis(payload)
     if not munis:
         return None
-
     want = phrase.strip().casefold()
     chosen = next(
         (m for m in munis if (m.get("municipality") or "").strip().casefold() == want),
         munis[0],
     )
-    lat, lon = chosen.get("latitude"), chosen.get("longitude")
-    return {
-        "entity_id": chosen.get("id"),
-        "entity_type": ENTITY_MUNICIPALITY,
-        "name": chosen.get("municipality") or chosen.get("suggestFirstRow"),
-        "municipality_id": chosen.get("municipality_id"),
-        "municipality_seo_name": chosen.get("municipality_seo_name"),
-        "district": chosen.get("district"),
-        "district_id": chosen.get("district_id"),
-        "district_seo_name": chosen.get("district_seo_name"),
-        "region": chosen.get("region"),
-        "region_id": chosen.get("region_id"),
-        "region_seo_name": chosen.get("region_seo_name"),
-        "lat": float(lat) if lat is not None else None,
-        "lon": float(lon) if lon is not None else None,
-    }
+    return _muni_dict(chosen)
+
+
+def parse_suggest_municipalities(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """EVERY municipality candidate. Each carries its own coordinates, so
+    upsert_locality PIP-places each to its own RÚIAN obec — resolving all
+    same-name obce ('Nová Ves' has ~30) instead of just the first."""
+    return [_muni_dict(ud) for ud in _suggest_munis(payload)]

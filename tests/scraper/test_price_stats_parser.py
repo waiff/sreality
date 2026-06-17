@@ -8,6 +8,7 @@ from scraper.price_stats_parser import (
     PriceStatsParseError,
     build_estate_prices_params,
     parse_estate_prices,
+    parse_suggest_municipalities,
     parse_suggest_municipality,
 )
 
@@ -83,3 +84,20 @@ def test_parse_suggest_prefers_exact_municipality():
 def test_parse_suggest_no_municipality_returns_none():
     payload = {"results": [{"userData": {"source": "stre", "id": 1}}]}
     assert parse_suggest_municipality(payload, phrase="x") is None
+
+
+def test_parse_suggest_municipalities_returns_every_bearer():
+    # Same-name obce in different districts must ALL come back (each PIP-placed by
+    # its own coords downstream), and non-muni sources are excluded.
+    payload = {"results": [
+        {"userData": {"source": "muni", "id": 1, "municipality": "Nová Ves",
+                      "district": "Mělník", "latitude": 50.3, "longitude": 14.5}},
+        {"userData": {"source": "ward", "id": 9, "municipality": "Nová Ves-X"}},
+        {"userData": {"source": "muni", "id": 2, "municipality": "Nová Ves",
+                      "district": "Sokolov", "latitude": 50.2, "longitude": 12.6}},
+    ]}
+    out = parse_suggest_municipalities(payload)
+    assert [m["entity_id"] for m in out] == [1, 2]
+    assert [m["district"] for m in out] == ["Mělník", "Sokolov"]
+    assert out[0]["lat"] == pytest.approx(50.3)
+    assert parse_suggest_municipalities({"results": []}) == []
