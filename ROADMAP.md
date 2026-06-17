@@ -36,10 +36,19 @@ already in `listings.raw_json->'user'` (idnes, phase 2, backfills from staged
 - **Read surface:** `broker_region_type_stats` matview (per region/okres/obec, distinct-
   property counts AT each level) + `broker_leaderboard` RPC + `brokers_public`/`firms_public`/
   `broker_firm_memberships_public` — answers both example queries under the anon 3s timeout.
-- **Next:** run the post-merge backfill (`resolve_brokers_full -f mode=backfill`); phase 2
-  idnes extraction (activates cross-source merge); phase 3 Brokers UI + `toolkit/brokers.py`
-  + API; phase 4 outreach CRM (LLM drafts, human-in-the-loop send, GDPR opt-out); phase 5
-  operator merge-review + franchise office split.
+- **DONE — backfill:** 12,560 brokers / 3,544 firms / 0 free-provider firms / 148k matview
+  rows; leaderboard returns ranked brokers with contacts. Three backfill-path fixes shipped
+  (sparse-id chunking, rollup id-batching, cross-source-scan skip + raised timeout on the
+  bridge/matview statements).
+- **DONE — phase 3 Brokers UI** (migration 189 `broker_geo_options` + `broker_listings_public`):
+  top-nav "Brokers" → a ranked registry **leaderboard** (kraj/okres × type × offer × metric,
+  URL-synced) and a **broker detail** page (contact card with tel:/mailto: for outreach,
+  regional footprint, firm memberships, inventory → listing detail). Reads the public views +
+  RPC via anon; civic-archive tokens.
+- **Next:** phase 2 idnes extraction (activates cross-source merge); `toolkit/brokers.py` +
+  FastAPI routes (programmatic/agent access — UI uses the RPC directly today); phase 4 outreach
+  CRM (LLM drafts, human-in-the-loop send, GDPR opt-out); phase 5 operator merge-review +
+  franchise office split.
 
 ### 2026-06: Apartment street-coverage levers (sreality locality.value + idnes/bazoš fixes)
 
