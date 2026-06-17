@@ -48,7 +48,9 @@ def downscale_jpeg(data: bytes, max_edge: int = DEFAULT_MAX_EDGE) -> bytes:
 
 def image_block(r2: Any, storage_path: str, max_edge: int = DEFAULT_MAX_EDGE) -> dict[str, Any]:
     """Download one R2 image, downscale, and wrap it as an Anthropic image block."""
-    data = downscale_jpeg(r2.download_bytes(storage_path), max_edge)
+    raw = r2.download_bytes(storage_path)
+    data = downscale_jpeg(raw, max_edge)
+    LOG.info("image_block %s raw=%dB out=%dB max_edge=%d", storage_path, len(raw), len(data), max_edge)
     return {
         "type": "image",
         "source": {
