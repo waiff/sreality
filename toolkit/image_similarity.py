@@ -10,10 +10,10 @@ Cache lives in `listing_image_comparisons`, keyed on the canonical
 ordered pair (sreality_id_a < sreality_id_b). Repeat calls return
 instantly with no LLM cost.
 
-Image bytes come from R2 via boto3 GetObject; we base64-encode them
-into the Anthropic vision payload. This is more robust than passing
-the public R2 URL (doesn't require Anthropic to reach our bucket;
-survives bucket-permission changes; the read path is reusable).
+Image bytes come from R2 via the shared `toolkit.vision_images.image_block`
+helper (downscale + base64), at the comparison tier. This is more robust
+than passing the public R2 URL (doesn't require Anthropic to reach our
+bucket; survives bucket-permission changes; the read path is reusable).
 
 Write-allowed exception per CLAUDE.md toolkit rule #5: same rationale
 as `find_anchor_amenities` and `summarize_listing` — the LLM is the
@@ -24,10 +24,10 @@ so caching matters more here than anywhere else in the toolkit.
 
 from __future__ import annotations
 
-import base64
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
+from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -271,19 +271,9 @@ def _fetch_image_keys(
 def _build_image_blocks(
     r2: Any, keys: list[str],
 ) -> list[dict[str, Any]]:
-    blocks: list[dict[str, Any]] = []
-    for key in keys:
-        data = r2.download_bytes(key)
-        encoded = base64.standard_b64encode(data).decode("ascii")
-        blocks.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": encoded,
-            },
-        })
-    return blocks
+    # Photo comparison: the shared downscaler at the comparison tier (sub-megapixel
+    # is ample for visual similarity, and cuts vision tokens to ~1/3 vs full-res).
+    return [image_block(r2, key, COMPARISON_MAX_EDGE) for key in keys]
 
 
 def _extract_tool_call(

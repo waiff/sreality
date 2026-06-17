@@ -29,6 +29,7 @@ import base64
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
+from toolkit.vision_images import DOCUMENT_MAX_EDGE, image_block
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -449,18 +450,9 @@ def _build_image_blocks(
             "decomposition ran against the description text only."
         )
     r2 = image_storage.R2Client.from_env()
-    blocks: list[dict[str, Any]] = []
-    for key in keys:
-        data = r2.download_bytes(key)
-        encoded = base64.standard_b64encode(data).decode("ascii")
-        blocks.append({
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/jpeg",
-                "data": encoded,
-            },
-        })
+    # Document tier (= Anthropic's resize cap): quality-neutral vs full-res, kept
+    # high because listing galleries here include floor/site plans with fine text.
+    blocks = [image_block(r2, key, DOCUMENT_MAX_EDGE) for key in keys]
     return blocks, len(blocks), None
 
 

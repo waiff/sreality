@@ -2585,5 +2585,83 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/test.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/test.yml"
+  },
+  {
+    "filename": "validate_vision_models.yml",
+    "name": "Jobs: validate vision model/resolution A/B",
+    "description": "Read-only A/B gate for a dedup-vision (model, max_edge) change. Re-runs the forensic compare on every historical 'High' verdict and re-classifies a sample, then reports whether the candidate (default Haiku @ 768px) reproduces the ground-truth recall. Writes NO cache / app_settings — only the standard llm_calls audit rows. Exits non-zero (red run) when a gate is missed, so the model flip is only made after a green run. See scripts/validate_vision_models.py.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "candidate_model",
+        "description": "Candidate model id to A/B (e.g. claude-haiku-4-5)",
+        "required": true,
+        "type": "string",
+        "default": "claude-haiku-4-5",
+        "options": null
+      },
+      {
+        "name": "max_edge",
+        "description": "Candidate image long-edge px (768 = comparison tier)",
+        "required": true,
+        "type": "string",
+        "default": "768",
+        "options": null
+      },
+      {
+        "name": "compare_limit",
+        "description": "Max historical High verdicts to re-run",
+        "required": true,
+        "type": "string",
+        "default": "200",
+        "options": null
+      },
+      {
+        "name": "classify_sample",
+        "description": "Listings to re-classify for label agreement",
+        "required": true,
+        "type": "string",
+        "default": "40",
+        "options": null
+      },
+      {
+        "name": "min_compare_recall",
+        "description": "Gate — fraction of historical Highs that must stay High (1.0 = every one)",
+        "required": true,
+        "type": "string",
+        "default": "1.0",
+        "options": null
+      },
+      {
+        "name": "skip_classify",
+        "description": "Only run the compare-recall gate",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "validate-vision-models",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_vision_models.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/validate_vision_models.yml"
   }
 ];

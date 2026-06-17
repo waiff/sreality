@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
-from toolkit.vision_images import image_block
+from toolkit.vision_images import DOCUMENT_MAX_EDGE, image_block
 
 if TYPE_CHECKING:
     import psycopg
@@ -34,6 +34,12 @@ _SITE_PLAN_PROMPT_KEY = "llm_site_plan_match_prompt"
 _SITE_PLAN_MODEL_KEY = "llm_site_plan_match_model"
 _SITE_PLAN_CALLED_FOR = "compare_listing_site_plans"
 _SITE_PLAN_VERDICTS = ("same_unit", "different_unit", "inconclusive")
+
+# The forensic compare is the only call whose verdict auto-merges, so its resolution
+# is gated: it stays at the (quality-neutral) document tier until the Haiku+768 A/B
+# (scripts/validate_vision_models) confirms 768px reproduces every historical High.
+# Then this becomes COMPARISON_MAX_EDGE in a one-line follow-up.
+_COMPARE_MAX_EDGE = DOCUMENT_MAX_EDGE
 
 
 class VisualMatchError(RuntimeError):
@@ -130,9 +136,9 @@ def _produce(
     content: list[dict[str, Any]] = [
         {"type": "text", "text": f"Listing A — {room_type} ({len(keys_a)} image(s)):"}
     ]
-    content.extend(_blocks(r2, keys_a))
+    content.extend(_blocks(r2, keys_a, _COMPARE_MAX_EDGE))
     content.append({"type": "text", "text": f"Listing B — {room_type} ({len(keys_b)} image(s)):"})
-    content.extend(_blocks(r2, keys_b))
+    content.extend(_blocks(r2, keys_b, _COMPARE_MAX_EDGE))
     content.append({
         "type": "text",
         "text": (
@@ -166,10 +172,10 @@ def _storage_paths(conn: "psycopg.Connection", image_ids: list[int]) -> list[str
         return [r[0] for r in cur.fetchall()]
 
 
-def _blocks(r2: Any, keys: list[str]) -> list[dict[str, Any]]:
+def _blocks(r2: Any, keys: list[str], max_edge: int) -> list[dict[str, Any]]:
     # Downscale before encoding: full-res originals blow the 200k-token prompt
     # limit when several are packed into one call (toolkit.vision_images).
-    return [image_block(r2, key) for key in keys]
+    return [image_block(r2, key, max_edge) for key in keys]
 
 
 def _extract(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:
@@ -338,9 +344,9 @@ def _produce_site_plan(
     content: list[dict[str, Any]] = [
         {"type": "text", "text": f"Listing A — site/situation plan(s) ({len(keys_a)}):"}
     ]
-    content.extend(_blocks(r2, keys_a))
+    content.extend(_blocks(r2, keys_a, DOCUMENT_MAX_EDGE))
     content.append({"type": "text", "text": f"Listing B — site/situation plan(s) ({len(keys_b)}):"})
-    content.extend(_blocks(r2, keys_b))
+    content.extend(_blocks(r2, keys_b, DOCUMENT_MAX_EDGE))
     content.append({
         "type": "text",
         "text": "Decide same_unit vs different_unit, then call record_site_plan_match once.",

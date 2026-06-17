@@ -1,0 +1,96 @@
+name: "Jobs: validate vision model/resolution A/B"
+
+# Read-only A/B gate for a dedup-vision (model, max_edge) change. Re-runs the
+# forensic compare on every historical 'High' verdict and re-classifies a sample,
+# then reports whether the candidate (default Haiku @ 768px) reproduces the
+# ground-truth recall. Writes NO cache / app_settings — only the standard llm_calls
+# audit rows. Exits non-zero (red run) when a gate is missed, so the model flip is
+# only made after a green run. See scripts/validate_vision_models.py.
+#
+# Dispatch-only. Required GitHub secrets:
+#   SUPABASE_DB_URL, ANTHROPIC_API_KEY, R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+#   R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_model:
+        description: Candidate model id to A/B (e.g. claude-haiku-4-5)
+        required: true
+        default: "claude-haiku-4-5"
+        type: string
+      max_edge:
+        description: Candidate image long-edge px (768 = comparison tier)
+        required: true
+        default: "768"
+        type: string
+      compare_limit:
+        description: Max historical High verdicts to re-run
+        required: true
+        default: "200"
+        type: string
+      classify_sample:
+        description: Listings to re-classify for label agreement
+        required: true
+        default: "40"
+        type: string
+      min_compare_recall:
+        description: Gate — fraction of historical Highs that must stay High (1.0 = every one)
+        required: true
+        default: "1.0"
+        type: string
+      skip_classify:
+        description: Only run the compare-recall gate
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: validate-vision-models
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "psycopg[binary]>=3.2" \
+            "requests>=2.32" \
+            "boto3>=1.35" \
+            "anthropic>=0.40" \
+            "Pillow>=10.0"
+
+      - name: Run vision A/B
+        run: |
+          ARGS="--candidate-model '${{ inputs.candidate_model }}'"
+          ARGS="$ARGS --max-edge ${{ inputs.max_edge }}"
+          ARGS="$ARGS --compare-limit ${{ inputs.compare_limit }}"
+          ARGS="$ARGS --classify-sample ${{ inputs.classify_sample }}"
+          ARGS="$ARGS --min-compare-recall ${{ inputs.min_compare_recall }}"
+          if [ "${{ inputs.skip_classify }}" = "true" ]; then
+            ARGS="$ARGS --skip-classify"
+          fi
+          echo "Running with: $ARGS"
+          eval python -m scripts.validate_vision_models $ARGS
