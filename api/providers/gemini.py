@@ -18,12 +18,14 @@ bulk of this file. A few quirks worth knowing:
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 from typing import Any
 
 from api.providers.base import (
     Completion,
+    ImageBlock,
     Message,
     ModelPrice,
     ProviderError,
@@ -150,6 +152,11 @@ def _msg_to_gemini(msg: Message, types: Any) -> Any:
                         "result": None if block.is_error else block.content,
                     },
                 ),
+            ))
+        elif isinstance(block, ImageBlock):
+            parts.append(types.Part.from_bytes(
+                data=base64.b64decode(block.data),
+                mime_type=block.media_type,
             ))
     role = "model" if msg.role == "assistant" else "user"
     return types.Content(role=role, parts=parts)

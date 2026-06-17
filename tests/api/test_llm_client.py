@@ -248,6 +248,32 @@ def test_legacy_tool_result_block_round_trips():
     assert m.content[0].is_error is True
 
 
+def test_legacy_image_block_becomes_image_block_not_text():
+    # Regression: a vision image dict must convert to ImageBlock, NOT fall
+    # through to the str() fallback (which sent the base64 as TEXT, blowing the
+    # token limit and sending no actual image to the model).
+    from api.providers import ImageBlock
+    from api.providers.anthropic import _msg_to_anthropic
+
+    raw: dict[str, Any] = {
+        "role": "user",
+        "content": [{
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"},
+        }],
+    }
+    m = lc._to_neutral_message(raw)
+    assert isinstance(m.content[0], ImageBlock)
+    assert m.content[0].data == "QUJD"
+    assert m.content[0].media_type == "image/jpeg"
+
+    # round-trips back to a real Anthropic image block, not a text block
+    out = _msg_to_anthropic(m)
+    block = out["content"][0]
+    assert block["type"] == "image"
+    assert block["source"]["data"] == "QUJD"
+
+
 def test_parse_tool_input_json_handles_dict_and_string():
     assert lc.parse_tool_input_json({"a": 1}) == {"a": 1}
     assert lc.parse_tool_input_json('{"a": 2}') == {"a": 2}
