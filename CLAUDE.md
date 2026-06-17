@@ -516,7 +516,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `scripts/dedup_engine.py` (orchestrator, `dedup_engine.yml`, daily) replaced the old
     geo-proximity matcher. Rules: **(A)** only listings with BOTH a `street` and a `disposition`
     are eligible (computed inline; a partial index backs the scan, migration 127); the rest are
-    `location_unclear` / `disposition_unclear` and never matched. **(B)** same street + house
+    `location_unclear` / `disposition_unclear` and never matched. **Inactive listings are
+    eligible too** (the scan does NOT gate on `is_active`): a property's price/lifecycle history
+    is only complete if a listing taken down on one portal — or delisted then relisted under a
+    new id — can still merge into the surviving group. The merge chokepoint gates on the
+    *property* `status='active'` and an inactive listing keeps its own active singleton property,
+    so it stays matchable; gating the scan on `is_active` would orphan that history. **(B)** same street + house
     number + disposition + floor → auto-merge, with a 5% area guard that demotes
     mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
     a >20%-area / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared

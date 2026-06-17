@@ -8,6 +8,7 @@ caps, and merge/queue dispatch are verified without a real DB or LLM.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import pytest
@@ -365,7 +366,7 @@ class _Cur:
     def execute(self, sql: str, params: Any = None) -> None:
         s = " ".join(sql.split())
         self._conn.executed.append(s)
-        if "count(*) FILTER" in s and "FROM listings WHERE is_active" in s:
+        if "count(*) FILTER" in s and "FROM listings" in s:
             self._rows = [(4, 100, 5)]  # eligible, flagged_location, flagged_disposition
         elif "FROM listings l" in s and "l.street IS NOT NULL" in s:
             self._rows = list(self._conn.eligible_rows)
@@ -425,6 +426,17 @@ def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
     assert stats["auto_address"] == 1
     assert merges == [(101, 102, "address_exact")]
     assert stats["auto_phash"] == 0 and stats["auto_visual"] == 0
+
+
+def test_eligible_sql_includes_inactive_listings() -> None:
+    # Price history must survive a delisting/relisting, so the engine considers
+    # inactive listings too — the eligible scan and the counter must not gate on
+    # is_active (the merge chokepoint gates on property status, not listing state).
+    import scripts.dedup_engine as eng
+
+    assert "is_active" not in eng._ELIGIBLE_SQL
+    src = inspect.getsource(eng._eligibility_counts)
+    assert "is_active" not in src
 
 
 def test_run_engine_groups_id_keyed_sreality_with_name_keyed_bazos(monkeypatch: Any) -> None:
