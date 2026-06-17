@@ -72,8 +72,8 @@ def _dataset_localities(
     """Localities for a dataset (its selected obce, else all), stalest first.
 
     Selected obce with a precomputed admin_boundaries.sreality_id map straight
-    through (resolve_obce). Any WITHOUT one are resolved on demand by name via
-    localities/suggest (then PIP-placed by upsert_locality), so a dataset can
+    through (resolve_obce). Any WITHOUT one are resolved on demand via
+    localities/suggest + coordinate PIP (resolve_obce_by_geo), so a dataset can
     target the full obec breakdown — not only the spatial-join-mapped subset.
     """
     obec_ids = dataset.get("obec_ids")
@@ -82,9 +82,41 @@ def _dataset_localities(
         db.resolve_obce(conn, ids)
         names = db.unresolved_obec_names(conn, ids)
         if names:
-            LOG.info("OBEC resolve-by-name: %d unmapped obce", len(names))
-            resolve_localities(conn, client, names, dry_run=dry_run)
+            LOG.info("OBEC resolve-by-geo: %d unmapped obce", len(names))
+            resolve_obce_by_geo(conn, client, names, dry_run=dry_run)
     return db.localities_ordered(conn, dataset["id"], ids)
+
+
+def resolve_obce_by_geo(
+    conn: Any, client: PriceStatsClient, names: list[str], *, dry_run: bool
+) -> int:
+    """Resolve unmapped obce by name, caching EVERY muni candidate per name.
+
+    Each candidate carries its own coordinates, and upsert_locality PIP-places it
+    to its own RÚIAN obec — so one 'Nová Ves' suggest resolves all ~30 distinct
+    obce of that name, not just the first (the bug that left ~600 same-name obce
+    unscrapeable). One suggest call per distinct name; ON CONFLICT makes the
+    candidate upserts idempotent."""
+    seen: set[str] = set()
+    cached = 0
+    for name in names:
+        key = name.strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            candidates = client.suggest_municipalities(name)
+        except Exception as exc:  # one bad name must not sink the whole resolve
+            LOG.warning("SUGGEST error name=%r: %s", name, exc)
+            continue
+        for c in candidates:
+            if c.get("entity_id") is None or c.get("lat") is None:
+                continue
+            if not dry_run:
+                db.upsert_locality(conn, c)
+            cached += 1
+    LOG.info("OBEC geo-resolve names=%d candidates_cached=%d", len(seen), cached)
+    return cached
 
 
 def resolve_localities(
