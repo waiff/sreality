@@ -1,0 +1,14 @@
+{
+  "description": "Email domains that are a national franchise BRAND, not a single office. v1 treats the whole brand as one firm (firms.is_franchise=true) because firm is secondary metadata to broker-level queries; office-level granularity is a later firm_offices child. The flag lets the UI separate franchise brands from independent firms in any 'top firms' view so brand size does not dominate. Operator-tunable via app_settings.broker_franchise_domains.",
+  "domains": [
+    "re-max.cz",
+    "remax-czech.cz",
+    "century21.cz",
+    "kwcz.cz",
+    "engelvoelkers.com",
+    "engelvoelkers.cz",
+    "dumrealit.cz",
+    "mmreality.cz",
+    "bidli.cz"
+  ]
+}

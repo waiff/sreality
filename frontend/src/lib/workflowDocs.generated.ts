@@ -395,6 +395,32 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/bazos_index_walk.yml"
   },
   {
+    "filename": "broker_resolution.yml",
+    "name": "Broker resolution (incremental)",
+    "description": "Broker intelligence: the incremental identity resolver. Attributes new (unattributed-straggler) + content-changed (dirty_broker_listings) sreality listings to their per-source broker_identities, ensures their firms, attaches singleton canonical brokers, and recomputes ONLY the affected brokers' rollups + firm memberships. O(changes); never refreshes the leaderboard matview (that is the daily full sweep's job). Source-agnostic maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution concurrency group with the full sweep so the two never mutate the broker tables at once.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/10 * * * *",
+        "human": "Every 10 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "broker-resolution",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/broker_resolution.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/broker_resolution.yml"
+  },
+  {
     "filename": "build-extension.yml",
     "name": "CI: build Chrome extension",
     "description": "Builds the chrome-extension/ bundle and uploads dist/ as a workflow artifact you can download from the Actions tab. Keeps the build off the operator's laptop (no local Node install needed).",
@@ -1822,6 +1848,52 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/refresh_stale_images.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_stale_images.yml"
+  },
+  {
+    "filename": "resolve_brokers_full.yml",
+    "name": "Broker resolution (full sweep + backfill)",
+    "description": "Broker intelligence: the daily full-sweep reconcile + the one-shot backfill. Re-attributes EVERY sreality listing from raw_json (keyset-batched so the raw_json scan never times out over the pooler), recomputes all rollups, rebuilds firm memberships + firm counts, runs the cross-source merge step, REFRESHes the leaderboard matview, and clears the dirty queue — the self-healing backstop for anything the */10 incremental pass missed. Runs after the property recompute (04:15) so property_id is fresh for property_count. mode=backfill is the same code path (the first population); dispatch it once after this lands on main. Source-agnostic — no `# portal:` tag. Shares the broker-resolution concurrency group with the incremental job.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "35 4 * * *",
+        "human": "Daily at 04:35 UTC"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "full | backfill (same code path; backfill = first population)",
+        "required": false,
+        "type": "choice",
+        "default": "full",
+        "options": [
+          "full",
+          "backfill"
+        ]
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget for the attribution scan; finalize cleanly before timeout",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "broker-resolution",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resolve_brokers_full.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resolve_brokers_full.yml"
   },
   {
     "filename": "resplit_mixed.yml",
