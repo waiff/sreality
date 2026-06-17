@@ -13,6 +13,7 @@ import {
   fetchFreshnessChecksByListing,
   fetchImagesByListing,
 } from '@/lib/queries';
+import { fetchListingBroker } from '@/lib/brokers';
 import {
   ApiError,
   verifyListingFreshness,
@@ -224,6 +225,7 @@ export default function ListingDetail() {
           <div className="flex flex-wrap items-center gap-2">
             <PortalLinksRow listing={listing} sources={sources} />
             <LatestActiveLink listing={listing} sources={sources} />
+            <BrokerChip srealityId={listing.sreality_id} />
           </div>
         }
         estimatesSlot={
@@ -330,6 +332,31 @@ function LatestActiveLink({
       <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]" aria-hidden />
       View the current active listing
       <span className="capitalize text-[var(--color-ink-3)]">· {liveSibling.source}</span>
+      <OutArrow />
+    </Link>
+  );
+}
+
+/* The resolved broker behind this listing → its broker-intelligence detail.
+   Renders nothing for listings whose broker isn't resolved yet. */
+function BrokerChip({ srealityId }: { srealityId: number }) {
+  const q = useQuery({
+    queryKey: ['listing-broker', srealityId],
+    queryFn: () => fetchListingBroker(srealityId),
+    staleTime: 60_000,
+  });
+  const b = q.data;
+  if (!b) return null;
+  return (
+    <Link
+      to={`/brokers/${b.broker_id}`}
+      title={`Zobrazit makléře${b.broker_firm_label ? ` · ${b.broker_firm_label}` : ''}`}
+      className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-3)] px-3 py-1.5 text-[0.8rem] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper-2)] transition-colors"
+    >
+      <span className="text-[var(--color-ink-3)]">Makléř:</span>
+      <span className="font-medium truncate max-w-[12rem]">
+        {b.broker_display_name ?? 'detail'}
+      </span>
       <OutArrow />
     </Link>
   );

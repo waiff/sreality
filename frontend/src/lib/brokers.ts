@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import type { DistrictChip } from './filters';
 
 // 420731404040 -> +420 731 404 040 (display only; storage stays digit-normalized).
 export function prettyPhone(p: string): string {
@@ -96,12 +97,40 @@ export interface BrokerRegionShare {
 }
 
 export interface LeaderboardParams {
-  geoLevel: GeoLevel;
-  geoId: number;
+  regionIds: number[];
+  okresIds: number[];
+  obecIds: number[];
   categoryMain: string | null;
   categoryType: string | null;
   metric: LeaderMetric;
   limit?: number;
+}
+
+export interface ListingBroker {
+  sreality_id: number;
+  broker_id: number;
+  broker_display_name: string | null;
+  broker_firm_label: string | null;
+}
+
+// Split Browse location chips into per-level admin-id arrays for the leaderboard
+// RPC. Only resolved, non-excluded chips contribute; a 'locality' chip's id is its
+// containing obec.
+export function chipsToGeoArrays(chips: DistrictChip[]): {
+  regionIds: number[];
+  okresIds: number[];
+  obecIds: number[];
+} {
+  const regionIds: number[] = [];
+  const okresIds: number[] = [];
+  const obecIds: number[] = [];
+  for (const c of chips) {
+    if (c.excluded || c.id == null) continue;
+    if (c.level === 'kraj') regionIds.push(c.id);
+    else if (c.level === 'okres') okresIds.push(c.id);
+    else if (c.level === 'obec' || c.level === 'locality') obecIds.push(c.id);
+  }
+  return { regionIds, okresIds, obecIds };
 }
 
 export async function fetchBrokerGeoOptions(): Promise<BrokerGeoOption[]> {
@@ -116,15 +145,39 @@ export async function fetchBrokerLeaderboard(
   p: LeaderboardParams,
 ): Promise<BrokerLeaderRow[]> {
   const { data, error } = await supabase.rpc('broker_leaderboard', {
-    p_geo_level: p.geoLevel,
-    p_geo_id: p.geoId,
+    p_region_ids: p.regionIds.length ? p.regionIds : null,
+    p_okres_ids: p.okresIds.length ? p.okresIds : null,
+    p_obec_ids: p.obecIds.length ? p.obecIds : null,
     p_category_main: p.categoryMain,
     p_category_type: p.categoryType,
     p_metric: p.metric,
-    p_limit: p.limit ?? 200,
+    p_limit: p.limit ?? 100,
   });
   if (error) throw error;
   return (data ?? []) as BrokerLeaderRow[];
+}
+
+export async function searchBrokersByName(q: string): Promise<BrokerPublic[]> {
+  const term = q.trim();
+  if (term.length < 2) return [];
+  const { data, error } = await supabase
+    .from('brokers_public')
+    .select('*')
+    .ilike('display_name', `%${term}%`)
+    .order('active_property_count', { ascending: false })
+    .limit(12);
+  if (error) throw error;
+  return (data ?? []) as BrokerPublic[];
+}
+
+export async function fetchListingBroker(srealityId: number): Promise<ListingBroker | null> {
+  const { data, error } = await supabase
+    .from('listing_broker_public')
+    .select('*')
+    .eq('sreality_id', srealityId)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as ListingBroker) ?? null;
 }
 
 export async function fetchBroker(brokerId: number): Promise<BrokerPublic | null> {
