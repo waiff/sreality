@@ -540,6 +540,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     when both listings carry a site/situation plan, `compare_listing_site_plans` checks
     whether they highlight the SAME unit — a `different_unit` verdict **queues** the pair
     for the operator (never auto-merges, never auto-rejects — the conservative choice).
+    **Cross-source gate (cost):** the paid visual layer (D) runs only on CROSS-source pairs —
+    same-portal rule-C candidates are skipped (no classify, no compare, no queue), since
+    dedup's payoff is matching one portal against another (73/74 historical visual auto-merges
+    were cross-source). Rule B above still auto-merges exact same-source relists for free. This
+    cut ~36% of candidate pairs off the LLM stage at ~1.4% recall cost.
     **(D)** layered visual confirmation: ≥2 near-identical INTERIOR photos (pHash;
     facade/floor-plan/site-plan excluded) auto-merge, else a room-aware forensic comparison
     (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in priority
