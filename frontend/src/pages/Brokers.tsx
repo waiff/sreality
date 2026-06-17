@@ -1,18 +1,19 @@
-import { useMemo, type ReactNode } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
-  fetchBrokerGeoOptions,
+  chipsToGeoArrays,
   fetchBrokerLeaderboard,
   prettyPhone,
+  searchBrokersByName,
   type BrokerLeaderRow,
   type LeaderMetric,
 } from '../lib/brokers';
+import type { DistrictChip } from '../lib/filters';
+import { LocationTypeahead } from '../components/filter-controls/LocationTypeahead';
 import { PickButton } from '../components/controls';
 import { fmtCount } from '../lib/format';
 
-// Page-local UI vocabulary — there is no shared category_main/type label map, and
-// these are the Brokers page's own filter words.
 const CATEGORY_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
   { value: 'byt', label: 'Byty' },
   { value: 'dum', label: 'Domy' },
@@ -29,75 +30,38 @@ const METRIC_OPTIONS: ReadonlyArray<{ value: LeaderMetric; label: string }> = [
   { value: 'active_property_count', label: 'Nemovitosti' },
   { value: 'listing_count', label: 'Inzeráty' },
 ];
-
-const SELECT_CLS =
-  'text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] ' +
-  'bg-[var(--color-paper-3)] px-2.5 py-1.5 text-[var(--color-ink)] ' +
-  'focus:outline-none focus:ring-2 focus:ring-[var(--color-focus)]';
+const LIMIT_OPTIONS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 50, label: '50' },
+  { value: 100, label: '100' },
+  { value: 200, label: '200' },
+  { value: 2000, label: 'Vše' },
+];
 
 export default function Brokers() {
   const navigate = useNavigate();
-  const [params, setParams] = useSearchParams();
+  const [districts, setDistricts] = useState<DistrictChip[]>([]);
+  const [categoryMain, setCategoryMain] = useState<string | null>('byt');
+  const [categoryType, setCategoryType] = useState<string | null>('prodej');
+  const [metric, setMetric] = useState<LeaderMetric>('active_property_count');
+  const [limit, setLimit] = useState<number>(100);
 
-  const geoQ = useQuery({
-    queryKey: ['broker-geo-options'],
-    queryFn: fetchBrokerGeoOptions,
-    staleTime: 5 * 60_000,
-  });
-
-  const regions = useMemo(
-    () =>
-      (geoQ.data ?? [])
-        .filter((o) => o.geo_level === 'region')
-        .sort((a, b) => b.broker_count - a.broker_count),
-    [geoQ.data],
-  );
-
-  // Region defaults to the busiest kraj once options load; URL is the source of truth.
-  const krajParam = params.get('kraj');
-  const kraj = krajParam ? Number(krajParam) : regions[0]?.geo_id ?? null;
-  const okres = params.get('okres') ? Number(params.get('okres')) : null;
-  const categoryMain = params.has('cm') ? params.get('cm') || null : 'byt';
-  const categoryType = params.has('ct') ? params.get('ct') || null : 'prodej';
-  const metric = (params.get('metric') as LeaderMetric) || 'active_property_count';
-
-  const okresOptions = useMemo(
-    () =>
-      (geoQ.data ?? [])
-        .filter((o) => o.geo_level === 'okres' && o.parent_id === kraj)
-        .sort((a, b) => a.name.localeCompare(b.name, 'cs')),
-    [geoQ.data, kraj],
-  );
-
-  const geoLevel = okres ? 'okres' : 'region';
-  const geoId = okres ?? kraj;
+  const geo = useMemo(() => chipsToGeoArrays(districts), [districts]);
 
   const boardQ = useQuery({
-    queryKey: ['broker-leaderboard', geoLevel, geoId, categoryMain, categoryType, metric],
+    queryKey: [
+      'broker-leaderboard',
+      geo.regionIds, geo.okresIds, geo.obecIds,
+      categoryMain, categoryType, metric, limit,
+    ],
     queryFn: () =>
-      fetchBrokerLeaderboard({
-        geoLevel,
-        geoId: geoId as number,
-        categoryMain,
-        categoryType,
-        metric,
-        limit: 150,
-      }),
-    enabled: geoId != null,
+      fetchBrokerLeaderboard({ ...geo, categoryMain, categoryType, metric, limit }),
     staleTime: 60_000,
   });
 
-  const setParam = (key: string, value: string | null) => {
-    const next = new URLSearchParams(params);
-    if (value === null) next.delete(key);
-    else next.set(key, value);
-    setParams(next, { replace: true });
-  };
-
   const rows = boardQ.data ?? [];
-  const krajName = regions.find((r) => r.geo_id === kraj)?.name;
-  const okresName = okresOptions.find((o) => o.geo_id === okres)?.name;
-  const placeLabel = okresName ?? krajName ?? '';
+  const resolved = districts.filter((d) => d.id != null && !d.excluded);
+  const placeLabel =
+    resolved.length === 0 ? 'Celá ČR' : resolved.map((d) => d.name).join(' + ');
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto text-[var(--color-ink)]">
@@ -112,65 +76,33 @@ export default function Brokers() {
         </p>
       </header>
 
+      <NameSearch onPick={(id) => navigate(`/brokers/${id}`)} />
+
       {/* Filter ledger header */}
-      <div className="mt-6 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3.5 flex flex-wrap items-end gap-x-6 gap-y-3">
-        <Field label="Kraj">
-          <select
-            className={SELECT_CLS}
-            value={kraj ?? ''}
-            onChange={(e) => {
-              setParam('kraj', e.target.value || null);
-              setParam('okres', null);
-            }}
-          >
-            {regions.map((r) => (
-              <option key={r.geo_id} value={r.geo_id}>
-                {r.name} · {r.broker_count}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Okres">
-          <select
-            className={SELECT_CLS}
-            value={okres ?? ''}
-            onChange={(e) => setParam('okres', e.target.value || null)}
-            disabled={okresOptions.length === 0}
-          >
-            <option value="">— celý kraj —</option>
-            {okresOptions.map((o) => (
-              <option key={o.geo_id} value={o.geo_id}>
-                {o.name} · {o.broker_count}
-              </option>
-            ))}
-          </select>
+      <div className="mt-5 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3.5 flex flex-wrap items-end gap-x-6 gap-y-3">
+        <Field label="Lokalita" className="min-w-[16rem] flex-1">
+          <LocationTypeahead
+            value={districts}
+            onChange={(next) => setDistricts(next ?? [])}
+          />
         </Field>
         <Field label="Typ">
-          <Segmented
-            options={CATEGORY_OPTIONS}
-            value={categoryMain}
-            onChange={(v) => setParam('cm', v === 'byt' ? null : v ?? '')}
-          />
+          <Segmented options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
         </Field>
         <Field label="Nabídka">
-          <Segmented
-            options={OFFER_OPTIONS}
-            value={categoryType}
-            onChange={(v) => setParam('ct', v === 'prodej' ? null : v ?? '')}
-          />
+          <Segmented options={OFFER_OPTIONS} value={categoryType} onChange={setCategoryType} />
         </Field>
         <Field label="Řadit dle">
-          <Segmented
-            options={METRIC_OPTIONS}
-            value={metric}
-            onChange={(v) => setParam('metric', v === 'active_property_count' ? null : v)}
-          />
+          <Segmented options={METRIC_OPTIONS} value={metric} onChange={setMetric} />
+        </Field>
+        <Field label="Počet">
+          <Segmented options={LIMIT_OPTIONS} value={limit} onChange={setLimit} />
         </Field>
       </div>
 
       {/* The ledger */}
       <div className="mt-5">
-        {boardQ.isLoading || geoQ.isLoading ? (
+        {boardQ.isLoading ? (
           <p className="mt-10 text-sm text-[var(--color-ink-3)]">Načítám žebříček…</p>
         ) : boardQ.isError ? (
           <p className="mt-4 text-sm text-[var(--color-brick)]">
@@ -183,6 +115,7 @@ export default function Brokers() {
             rows={rows}
             metric={metric}
             placeLabel={placeLabel}
+            capped={rows.length >= limit}
             onOpen={(id) => navigate(`/brokers/${id}`)}
           />
         )}
@@ -191,9 +124,82 @@ export default function Brokers() {
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function NameSearch({ onPick }: { onPick: (brokerId: number) => void }) {
+  const [q, setQ] = useState('');
+  const [debounced, setDebounced] = useState('');
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(q.trim()), 200);
+    return () => clearTimeout(t);
+  }, [q]);
+
+  const resultsQ = useQuery({
+    queryKey: ['broker-name-search', debounced],
+    queryFn: () => searchBrokersByName(debounced),
+    enabled: debounced.length >= 2,
+    staleTime: 60_000,
+  });
+  const results = resultsQ.data ?? [];
+
   return (
-    <label className="flex flex-col gap-1">
+    <div className="mt-5 relative max-w-xl">
+      <input
+        value={q}
+        onChange={(e) => {
+          setQ(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 150)}
+        placeholder="Hledat makléře podle jména…"
+        className="w-full text-sm border border-[var(--color-rule)] rounded-[var(--radius-sm)] bg-[var(--color-paper-3)] px-3 py-2 text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:ring-2 focus:ring-[var(--color-focus)]"
+      />
+      {open && debounced.length >= 2 && (
+        <div className="absolute z-20 mt-1 w-full border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-3)] shadow-sm max-h-80 overflow-y-auto">
+          {resultsQ.isLoading ? (
+            <p className="px-3 py-2 text-sm text-[var(--color-ink-3)]">Hledám…</p>
+          ) : results.length === 0 ? (
+            <p className="px-3 py-2 text-sm text-[var(--color-ink-4)]">Nic nenalezeno.</p>
+          ) : (
+            results.map((b) => (
+              <button
+                key={b.broker_id}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => onPick(b.broker_id)}
+                className="w-full text-left px-3 py-2 flex items-center justify-between gap-3 border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-copper-soft)]"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm text-[var(--color-ink)]">
+                    {b.display_name ?? 'Neznámý makléř'}
+                  </span>
+                  <span className="block truncate text-xs text-[var(--color-ink-3)]">
+                    {b.firm_name ?? b.firm_domain ?? 'nezávislý'}
+                  </span>
+                </span>
+                <span className="shrink-0 text-xs font-[family-name:var(--font-mono)] tabular-nums text-[var(--color-ink-3)]">
+                  {fmtCount(b.active_property_count)}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+  className = '',
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <label className={`flex flex-col gap-1 ${className}`}>
       <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
         {label}
       </span>
@@ -202,7 +208,7 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function Segmented<T extends string | null>({
+function Segmented<T extends string | number | null>({
   options,
   value,
   onChange,
@@ -214,11 +220,7 @@ function Segmented<T extends string | null>({
   return (
     <div className="flex flex-wrap gap-1">
       {options.map((o) => (
-        <PickButton
-          key={o.label}
-          on={value === o.value}
-          onClick={() => onChange(o.value)}
-        >
+        <PickButton key={o.label} on={value === o.value} onClick={() => onChange(o.value)}>
           {o.label}
         </PickButton>
       ))}
@@ -230,11 +232,13 @@ function Ledger({
   rows,
   metric,
   placeLabel,
+  capped,
   onOpen,
 }: {
   rows: BrokerLeaderRow[];
   metric: LeaderMetric;
   placeLabel: string;
+  capped: boolean;
   onOpen: (brokerId: number) => void;
 }) {
   return (
@@ -244,7 +248,7 @@ function Ledger({
           {placeLabel}
         </span>
         <span className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-          {rows.length} makléřů
+          {rows.length} makléřů{capped ? ' (limit)' : ''}
         </span>
       </div>
       <ol>
@@ -324,7 +328,7 @@ function Empty({ placeLabel }: { placeLabel: string }) {
   return (
     <div className="mt-6 border border-dashed border-[var(--color-rule-strong)] rounded-[var(--radius-md)] p-8 text-center">
       <p className="text-sm text-[var(--color-ink-2)]">
-        Žádní makléři pro tento výběr{placeLabel ? ` v ${placeLabel}` : ''}.
+        Žádní makléři pro tento výběr v {placeLabel}.
       </p>
       <p className="mt-1 text-xs text-[var(--color-ink-3)]">
         Zkuste jiný typ nemovitosti nebo nabídku.
