@@ -433,6 +433,12 @@ def _affected(conn: Any, sids: list[int]) -> list[int]:
         return [int(r[0]) for r in cur.fetchall()]
 
 
+def _max_id(conn: Any, table: str) -> int:
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT coalesce(max(id), 0) FROM {table}")
+        return int(cur.fetchone()[0])
+
+
 def _refresh_matview(conn: Any) -> None:
     with conn.cursor() as cur:
         try:
@@ -466,10 +472,24 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
 
     _resolve_firms(conn, free, franchise)
     attached = _attach_singletons(conn)
+    # Rollups batched by our dense serial ids (broker_identity.id / broker.id) — a
+    # single global UPDATE over every broker exceeds the pooler statement timeout.
+    # Mirrors recompute_property_stats' id-range batching.
+    for lo in range(1, _max_id(conn, "broker_identities") + 1, batch_size):
+        with conn.cursor() as cur:
+            cur.execute(_IDENTITY_ROLLUP.format(
+                extra="AND broker_identity_id >= %(lo)s AND broker_identity_id < %(hi)s"),
+                {"lo": lo, "hi": lo + batch_size})
+    for lo in range(1, _max_id(conn, "brokers") + 1, batch_size):
+        with conn.cursor() as cur:
+            cur.execute(_BROKER_ROLLUP.format(
+                bscope="AND broker_id >= %(lo)s AND broker_id < %(hi)s"),
+                {"lo": lo, "hi": lo + batch_size})
+            cur.execute(_MEMBERSHIP_RECOMPUTE.format(
+                bscope="AND bi.broker_id >= %(lo)s AND bi.broker_id < %(hi)s",
+                mscope="m.broker_id >= %(lo)s AND m.broker_id < %(hi)s AND"),
+                {"lo": lo, "hi": lo + batch_size})
     with conn.cursor() as cur:
-        cur.execute(_IDENTITY_ROLLUP.format(extra=""))
-        cur.execute(_BROKER_ROLLUP.format(bscope=""))
-        cur.execute(_MEMBERSHIP_RECOMPUTE.format(bscope="", mscope=""))
         cur.execute(_FIRM_ROLLUP)
     auto_merges, queued = _cross_source_merge(conn, auto, run_id)
     _refresh_matview(conn)
