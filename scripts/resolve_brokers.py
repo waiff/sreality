@@ -160,31 +160,43 @@ ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
   attrs_computed_at = now()
 """
 
+# The chunk CTE is MATERIALIZED so the listings scan is bounded by {sel} (the chunk
+# ids) BEFORE the join to broker_identities — otherwise, with cold idnes stats on the
+# first sweep, the planner inverts the join and detoasts far more idnes raw_json than
+# the chunk, blowing the statement timeout.
 _IDNES_CONTACTS_EMAIL_UPSERT = """
+WITH chunk AS MATERIALIZED (
+  SELECT (l.raw_json->'broker'->>'account_oid') AS uid,
+         lower(nullif(l.raw_json->'broker'->>'email', '')) AS email,
+         l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
+    AND nullif(l.raw_json->'broker'->>'email', '') IS NOT NULL AND {sel}
+)
 INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'idnes', 'email', lower(nullif(l.raw_json->'broker'->>'email', '')),
-       min(l.first_seen_at), max(l.last_seen_at)
-FROM listings l
-JOIN broker_identities bi
-  ON bi.source = 'idnes' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'account_oid')
-WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
-  AND nullif(l.raw_json->'broker'->>'email', '') IS NOT NULL AND {sel}
-GROUP BY bi.id, lower(nullif(l.raw_json->'broker'->>'email', ''))
+SELECT bi.id, 'idnes', 'email', c.email, min(c.first_seen_at), max(c.last_seen_at)
+FROM chunk c
+JOIN broker_identities bi ON bi.source = 'idnes' AND bi.source_broker_id_native = c.uid
+GROUP BY bi.id, c.email
 ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
   last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
 """
 
 _IDNES_CONTACTS_PHONE_UPSERT = """
+WITH chunk AS MATERIALIZED (
+  SELECT (l.raw_json->'broker'->>'account_oid') AS uid,
+         regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g') AS phone,
+         l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
+    AND length(regexp_replace(coalesce(l.raw_json->'broker'->>'phone', ''), '[^0-9]', '', 'g')) >= 9
+    AND {sel}
+)
 INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
-SELECT bi.id, 'idnes', 'phone', regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g'),
-       min(l.first_seen_at), max(l.last_seen_at)
-FROM listings l
-JOIN broker_identities bi
-  ON bi.source = 'idnes' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'account_oid')
-WHERE l.source = 'idnes' AND l.raw_json ? 'broker'
-  AND length(regexp_replace(coalesce(l.raw_json->'broker'->>'phone', ''), '[^0-9]', '', 'g')) >= 9
-  AND {sel}
-GROUP BY bi.id, regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g')
+SELECT bi.id, 'idnes', 'phone', c.phone, min(c.first_seen_at), max(c.last_seen_at)
+FROM chunk c
+JOIN broker_identities bi ON bi.source = 'idnes' AND bi.source_broker_id_native = c.uid
+GROUP BY bi.id, c.phone
 ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
   last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
 """
