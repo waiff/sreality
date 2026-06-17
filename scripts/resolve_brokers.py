@@ -488,41 +488,70 @@ def _cross_source_merge(conn: Any, auto_merge_sources: list[str], run_id: int) -
                     bridges.append(R.Bridge(a[0], b[0], kind, value))
 
     decision = R.decide_merges(list(identities.values()), bridges, auto_merge_sources)
-    auto = 0
-    for group in decision.auto_merge_groups:
-        auto += _apply_merge(conn, group, run_id)
+    auto = _apply_merges(conn, decision.auto_merge_groups)
     return auto, len(decision.review_pairs)
 
 
-def _apply_merge(conn: Any, identity_ids: list[int], run_id: int) -> int:
-    """Unify the brokers of these identities onto one survivor; reversible ledger."""
-    group = str(uuid.uuid4())
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "SELECT id, broker_id FROM broker_identities WHERE id = ANY(%s) ORDER BY id",
-            (identity_ids,),
-        )
-        rows = cur.fetchall()
-        broker_of = {int(i): int(b) for i, b in rows if b is not None}
-        if len(set(broker_of.values())) <= 1:
-            return 0
-        survivor = min(broker_of.values())
-        for ident_id, prev_broker in broker_of.items():
-            if prev_broker == survivor:
+def _apply_merges(conn: Any, groups: list[list[int]]) -> int:
+    """Unify each group's identities onto one survivor broker, set-based.
+
+    One query fetches every group member's current broker, the plan is built in
+    Python (cheap — the groups are union-find output), and the whole thing applies
+    in three array-driven statements. Per-group transactions were ~4 pooler
+    round-trips each and overran the job timeout once a second source produced
+    thousands of merges. Idempotent — a group already sharing one broker is
+    skipped, so a re-run after a partial apply converges. Reversible via
+    broker_merge_events."""
+    if not groups:
+        return 0
+    ident_ids = sorted({iid for g in groups for iid in g})
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, broker_id FROM broker_identities WHERE id = ANY(%s)", (ident_ids,))
+        broker_of = {int(i): int(b) for i, b in cur.fetchall() if b is not None}
+
+    gids: list[str] = []
+    survivors: list[int] = []
+    retired: list[int] = []
+    idents: list[int] = []
+    losers: dict[int, int] = {}
+    for group in groups:
+        brokers_in = {broker_of[i] for i in group if i in broker_of}
+        if len(brokers_in) <= 1:
+            continue
+        survivor = min(brokers_in)
+        gid = str(uuid.uuid4())
+        for iid in group:
+            prev = broker_of.get(iid)
+            if prev is None or prev == survivor:
                 continue
-            cur.execute(
-                "INSERT INTO broker_merge_events (merge_group_id, survivor_broker_id, "
-                "retired_broker_id, identity_id, prev_broker_id, reason, source) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 'auto')",
-                (group, survivor, prev_broker, ident_id, prev_broker, "contact_bridge"),
-            )
-            cur.execute("UPDATE broker_identities SET broker_id = %s WHERE id = %s", (survivor, ident_id))
+            gids.append(gid)
+            survivors.append(survivor)
+            retired.append(prev)
+            idents.append(iid)
+            losers[prev] = survivor
+    if not idents:
+        return 0
+
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(
-            "UPDATE brokers SET status = 'merged_away', merged_into = %s, merged_at = now() "
-            "WHERE id = ANY(%s) AND id <> %s",
-            (survivor, list(set(broker_of.values())), survivor),
+            "INSERT INTO broker_merge_events (merge_group_id, survivor_broker_id, "
+            "retired_broker_id, identity_id, prev_broker_id, reason, source) "
+            "SELECT g, s, r, i, r, 'contact_bridge', 'auto' "
+            "FROM unnest(%(g)s::uuid[], %(s)s::bigint[], %(r)s::bigint[], %(i)s::bigint[]) AS d(g, s, r, i)",
+            {"g": gids, "s": survivors, "r": retired, "i": idents},
         )
-    return len(set(broker_of.values())) - 1
+        cur.execute(
+            "UPDATE broker_identities bi SET broker_id = d.s "
+            "FROM unnest(%(i)s::bigint[], %(s)s::bigint[]) AS d(i, s) WHERE bi.id = d.i",
+            {"i": idents, "s": survivors},
+        )
+        cur.execute(
+            "UPDATE brokers b SET status = 'merged_away', merged_into = d.s, merged_at = now() "
+            "FROM unnest(%(l)s::bigint[], %(s)s::bigint[]) AS d(l, s) WHERE b.id = d.l",
+            {"l": list(losers), "s": list(losers.values())},
+        )
+    return len(losers)
 
 
 def _affected(conn: Any, sids: list[int]) -> list[int]:
@@ -564,6 +593,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
             "INSERT INTO broker_resolution_runs (mode) VALUES ('full') RETURNING id"
         )
         run_id = int(cur.fetchone()[0])
+    t0 = time.monotonic()
 
     # Chunk the ACTUAL listing ids of every broker-bearing source (sreality_id is the
     # sparse PK — a numeric-range loop would walk huge empty gaps). One cheap PK-only
@@ -589,6 +619,15 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     for i in range(0, len(all_ids), batch_size):
         _link_listings_firm(conn, "AND l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
     attached = _attach_singletons(conn)
+    LOG.info("RESOLVE full attribution+firms done elapsed=%.1fs", time.monotonic() - t0)
+
+    # Merge BEFORE the rollups so dsc / listing_count / membership reflect the unified
+    # broker groupings (a merge re-points broker_identities.broker_id). _cross_source_merge
+    # no-ops with one source and is gated per-source by broker_auto_merge_sources.
+    auto_merges, queued = _cross_source_merge(conn, auto, run_id)
+    LOG.info("RESOLVE full merge done auto=%d queued=%d elapsed=%.1fs",
+             auto_merges, queued, time.monotonic() - t0)
+
     # Rollups batched by our dense serial ids (broker_identity.id / broker.id) — a
     # single global UPDATE over every broker exceeds the pooler statement timeout.
     # Mirrors recompute_property_stats' id-range batching.
@@ -613,7 +652,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(_FIRM_ROLLUP)
-    auto_merges, queued = _cross_source_merge(conn, auto, run_id)
+    LOG.info("RESOLVE full rollups done elapsed=%.1fs", time.monotonic() - t0)
     _refresh_matview(conn)
     with conn.cursor() as cur:
         cur.execute(_CLEAR_DIRTY, {"cutoff": cutoff})
