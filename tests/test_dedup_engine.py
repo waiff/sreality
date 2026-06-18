@@ -553,7 +553,9 @@ def test_run_engine_same_name_different_street_id_rejects(monkeypatch: Any) -> N
     assert stats["rejected"] == 1
 
 
-def test_run_engine_phash_fastpath_merges(monkeypatch: Any) -> None:
+def test_run_engine_phash_fastpath_merges_before_classify(monkeypatch: Any) -> None:
+    # The free pHash tier runs BEFORE classify: >=2 raw matches -> auto-merge with
+    # NO classify/compare. classify_fn is None to prove the LLM is never touched.
     import scripts.dedup_engine as eng
 
     merges: list[str] = []
@@ -561,21 +563,35 @@ def test_run_engine_phash_fastpath_merges(monkeypatch: Any) -> None:
         eng, "merge_properties",
         lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
     )
-    # >=2 identical interior pairs
-    monkeypatch.setattr(eng, "_phash_interior_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
 
-    def classify(sid: int) -> dict:
-        return {"data": {"images": [
-            {"image_id": sid * 10 + 1, "room_type": "kitchen"},
-            {"image_id": sid * 10 + 2, "room_type": "bathroom"},
-        ]}}
-
-    # No house number -> candidate (not exact-address), so it goes to visual.
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
-    stats = eng.run_engine(conn, classify_fn=classify, compare_fn=lambda *a, **k: None,
-                           max_vision_calls=10)
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
     assert stats["auto_phash"] == 1
+    assert stats["vision_calls"] == 0
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
+    # The pHash tier runs before the cross-source gate, so an identical-photo
+    # SAME-source re-post merges for free (the recall the gate would otherwise drop).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 4)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="sreality")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert stats["skipped_same_source"] == 0  # pHash resolved it before the gate
     assert merges == ["image_phash"]
 
 
@@ -587,7 +603,7 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
         eng, "merge_properties",
         lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
     )
-    monkeypatch.setattr(eng, "_phash_interior_identical_pairs", lambda *a, **k: 0)
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> falls to visual
 
     def classify(sid: int) -> dict:
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
@@ -616,8 +632,9 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
 
 
 def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
-    """Both listings carry a site plan; the guard says 'different_unit' → QUEUE,
-    never auto-merge — even though interiors would otherwise confirm."""
+    """Both listings carry a site plan: the pHash fast-path DEFERS to the visual
+    stage, and the 'different_unit' guard QUEUES instead of auto-merging — even
+    though >=2 pHash matches would otherwise have merged."""
     import scripts.dedup_engine as eng
 
     merges: list[str] = []
@@ -625,9 +642,9 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
         eng, "merge_properties",
         lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
     )
-    # If the interior pHash / forensic path were reached it WOULD merge — prove
-    # the site-plan gate short-circuits before that.
-    monkeypatch.setattr(eng, "_phash_interior_identical_pairs", lambda *a, **k: 5)
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 5)
+    # Both have a site plan -> pHash defers to the development guard.
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)
 
     def classify(sid: int) -> dict:
         return {"data": {"images": [
@@ -645,12 +662,12 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
     )
     assert stats["queued"] == 1
     assert stats["auto_visual"] == 0 and stats["auto_phash"] == 0
-    assert merges == []  # the development guard blocked the otherwise-certain merge
+    assert merges == []  # the development guard blocked the otherwise-certain pHash merge
 
 
 def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any) -> None:
-    """A 'same_unit' (or inconclusive) site-plan verdict does NOT block — the
-    normal interior confirmation still runs and can merge."""
+    """A 'same_unit' site-plan verdict does NOT block — after the pHash deferral the
+    forensic compare still runs and a High verdict merges."""
     import scripts.dedup_engine as eng
 
     merges: list[str] = []
@@ -658,7 +675,8 @@ def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any)
         eng, "merge_properties",
         lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
     )
-    monkeypatch.setattr(eng, "_phash_interior_identical_pairs", lambda *a, **k: 5)
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 5)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)  # defer to visual stage
 
     def classify(sid: int) -> dict:
         return {"data": {"images": [
@@ -668,12 +686,12 @@ def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any)
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(
-        conn, classify_fn=classify, compare_fn=lambda *a, **k: None,
+        conn, classify_fn=classify, compare_fn=lambda *a, **k: {"verdict": "High", "rationale": "same kitchen"},
         site_plan_fn=lambda *a, **k: {"verdict": "same_unit", "rationale": "both plot 3"},
         max_vision_calls=10,
     )
-    assert stats["auto_phash"] == 1
-    assert merges == ["image_phash"]
+    assert stats["auto_visual"] == 1
+    assert merges == ["visual_match"]
 
 
 def test_run_engine_rejects_floor_contradiction(monkeypatch: Any) -> None:

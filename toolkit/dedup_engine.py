@@ -37,10 +37,12 @@ from toolkit.comparables import _DISPOSITION_LOOSE
 ADDRESS_AREA_GUARD_PCT = 0.05
 # Rule C disqualifier: a >20% area gap means "not the same property".
 CANDIDATE_AREA_MAX_PCT = 0.20
-# Rule D layer 1: an interior image pair this close (Hamming) counts as identical.
+# pHash fast-path: an image pair this close (Hamming) counts as identical.
 PHASH_IDENTICAL_MAX = 6
-# Rule D layer 1: need at least this many identical interior pairs to auto-merge
-# (one shared photo can be a reused stock/marketing shot; two is a real signal).
+# pHash fast-path: need at least this many identical image pairs (any image) to
+# auto-merge. One shared photo can be a reused stock/marketing shot (a development
+# sharing a facade/site-plan across units); two distinct matches is a real same-
+# property signal — validated against the operator-dismissed set (only 0.34% reach 2).
 PHASH_MIN_IDENTICAL_PAIRS = 2
 
 # Rule D priority order: cheap, distinctive rooms first; bedrooms last (most
@@ -359,7 +361,7 @@ class VisualOutcome:
 
 
 def decide_phash_fastpath(identical_interior_pairs: int) -> bool:
-    """Rule D layer 1: >=2 near-identical INTERIOR image pairs => same property."""
+    """pHash fast-path: >=2 near-identical image pairs (any image) => same property."""
     return identical_interior_pairs >= PHASH_MIN_IDENTICAL_PAIRS
 
 
