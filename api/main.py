@@ -54,6 +54,7 @@ from api import notifications as nf_module
 from api.portal_lookup import lookup_portal_listings
 from api.routes.admin import router as admin_router
 from api.routes.brokers import router as brokers_router
+from api.routes.broker_review import router as broker_review_router
 from api.routes.dedup import router as dedup_router
 from api.routes.outreach import router as outreach_router
 from api.routes.filter_presets import router as filter_presets_router
@@ -207,6 +208,9 @@ app.include_router(brokers_router)
 # /outreach/* (broker outreach CRM: campaigns, LLM-drafted messages, suppression)
 # — operator write actions over PII, standard bearer gate. Human-in-the-loop send.
 app.include_router(outreach_router)
+# /broker-review/* (operator merge-review queue: merge/dismiss/unmerge brokers the
+# auto-merge guard left apart) — mutating operator actions, standard bearer gate.
+app.include_router(broker_review_router)
 # /filter-presets/* (named Browse filter presets: CRUD) — operator content,
 # standard bearer gate. Decoupled from /notifications (a preset never fires).
 app.include_router(filter_presets_router)
