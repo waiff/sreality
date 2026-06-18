@@ -39,7 +39,7 @@ from typing import Any
 
 import requests
 
-from scraper import db, hashing, image_storage, parser, portal_runner
+from scraper import db, hashing, image_storage, media, parser, portal_runner
 from scraper.portal import PortalLimits, default_config, load_portal_config
 from scraper.portal_runner import DrainItem
 from scraper.rate_limit import RateLimiter
@@ -1457,7 +1457,7 @@ def _run_image_downloads(
     r2 = image_storage.R2Client.from_env(max_pool_connections=workers)
     counts = {
         "downloaded": 0, "errors": 0, "attempted": 0,
-        "taken_down": 0, "source_unavailable": 0,
+        "taken_down": 0, "source_unavailable": 0, "not_an_image": 0,
     }
     by_cat: dict[tuple[str | None, str | None], int] = {}
     # Per-listing classification cache for THIS run, so we never call
@@ -1566,6 +1566,17 @@ def _run_image_downloads(
                             LOG.info(
                                 "IMAGE source_unavailable id=%d", image_id
                             )
+                        elif kind == "not_an_image":
+                            # Downloaded bytes weren't an image (video / HTML /
+                            # oversize). Terminal: park it so it leaves the queue
+                            # and doesn't count toward the suspicious-stop ratio.
+                            db.mark_image_unavailable(
+                                conn, image_id, "not_an_image",
+                                error=str(error),
+                            )
+                            counts["not_an_image"] += 1
+                            outcome_window.append("not_an_image")
+                            LOG.info("IMAGE not_an_image id=%d", image_id)
                         else:
                             db.mark_image_attempt(conn, image_id, error=str(error))
                             counts["errors"] += 1
@@ -1596,9 +1607,10 @@ def _run_image_downloads(
 
     LOG.info(
         "IMAGES done downloaded=%d errors=%d taken_down=%d "
-        "source_unavailable=%d attempted=%d",
+        "source_unavailable=%d not_an_image=%d attempted=%d",
         counts["downloaded"], counts["errors"],
-        counts["taken_down"], counts["source_unavailable"], counts["attempted"],
+        counts["taken_down"], counts["source_unavailable"],
+        counts["not_an_image"], counts["attempted"],
     )
     return {
         "images_stored": counts["downloaded"],
@@ -1640,6 +1652,11 @@ def _classify_image_failure(
     reset, R2 failures) are 'transient'. Per-run caches keep each liveness
     verdict to at most one freshness_check.
     """
+    if isinstance(error, image_storage.NotAnImageError):
+        # Bytes were a video / HTML / oversize, not an image. Terminal: retrying
+        # the same URL yields the same non-image, so park it (out of the queue)
+        # without tripping the suspicious-stop ratio.
+        return "not_an_image"
     if _is_dead_url_image_error(error):
         # A 400/401/415 on the image URL is a URL-level rejection (bare URL,
         # rotated path, malformed/unsupported transform chain), not a rate-limit
@@ -1710,11 +1727,23 @@ def _fetch_one_image(
     url: str,
     r2: image_storage.R2Client,
 ) -> tuple[str, Exception | None]:
-    """Worker: download from sreality, upload to R2. Returns (key, error)."""
+    """Worker: download from the portal CDN, validate, upload to R2. Returns (key, error).
+
+    The byte-level guard (after the URL-level filter at ingest) is what keeps a
+    non-image — a video served under an image URL, an HTML error page — from being
+    stored as a fake JPEG and fed to the LLM-vision / pHash consumers. The real
+    content-type is stored so the browser decodes it (the old hardcoded image/jpeg
+    is why an MP4 rendered blank).
+    """
     key = image_storage.image_key(sreality_id, sequence)
     try:
         data = image_storage.download_image(url)
-        r2.upload_bytes(key, data)
+        content_type = media.is_image_bytes(data)
+        if content_type is None:
+            raise image_storage.NotAnImageError(
+                f"downloaded {len(data)} bytes are not a recognised image"
+            )
+        r2.upload_bytes(key, data, content_type=content_type)
         return (key, None)
     except Exception as exc:
         return (key, exc)

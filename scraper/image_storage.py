@@ -14,7 +14,18 @@ import boto3
 import requests
 from botocore.config import Config as BotoConfig
 
+from scraper import media
+
 LOG = logging.getLogger(__name__)
+
+
+class NotAnImageError(Exception):
+    """Raised when a download is too large or its bytes are not a known image.
+
+    Terminal (not transient): the image-download loop routes it to
+    `mark_image_unavailable(reason='not_an_image')` so the row leaves the queue
+    and never trips the suspicious-stop circuit-breaker.
+    """
 
 R2_ENV_VARS: tuple[str, ...] = (
     "R2_ACCOUNT_ID",
@@ -63,9 +74,27 @@ def _with_transform(url: str) -> str:
 
 
 def download_image(url: str, timeout: float = 15.0) -> bytes:
-    response = requests.get(_with_transform(url), timeout=timeout)
-    response.raise_for_status()
-    return response.content
+    """Download one image, capped at media.MAX_IMAGE_BYTES.
+
+    Streams so an oversize body (e.g. a video served under an image-looking URL)
+    is rejected without buffering it all into memory — a Content-Length over the
+    cap short-circuits before the first byte. Raises NotAnImageError on oversize.
+    """
+    with requests.get(_with_transform(url), timeout=timeout, stream=True) as response:
+        response.raise_for_status()
+        declared = response.headers.get("Content-Length")
+        if declared and declared.isdigit() and int(declared) > media.MAX_IMAGE_BYTES:
+            raise NotAnImageError(
+                f"declared size {declared} exceeds {media.MAX_IMAGE_BYTES} bytes"
+            )
+        buf = bytearray()
+        for chunk in response.iter_content(chunk_size=65536):
+            buf += chunk
+            if len(buf) > media.MAX_IMAGE_BYTES:
+                raise NotAnImageError(
+                    f"body exceeds {media.MAX_IMAGE_BYTES} bytes"
+                )
+        return bytes(buf)
 
 
 class R2Client:
