@@ -15,6 +15,7 @@ import {
 import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
 import { PickButton } from '../components/controls';
+import { listingPath } from '@/lib/listingUrl';
 
 const CATEGORY_LABEL: Record<string, string> = {
   byt: 'Byt',
@@ -388,7 +389,7 @@ function Inventory({
                 >
                   <td className="px-3 py-1.5 max-w-[16rem]">
                     <Link
-                      to={`/listing/${l.sreality_id}`}
+                      to={listingPath(l.sreality_id)}
                       className="flex items-center gap-2 hover:text-[var(--color-copper-2)]"
                     >
                       {!l.is_active && (

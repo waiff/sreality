@@ -46,6 +46,7 @@ import Timeline from '@/components/estimation/Timeline';
 import { MfReferenceCard } from '@/components/estimation/MfReferenceCard';
 import { PickButton } from '@/components/controls';
 import { canRerun, type RerunOverrides } from '@/lib/rerun';
+import { listingPath } from '@/lib/listingUrl';
 import type {
   ComparableExcluded,
   ComparableUsed,
@@ -796,7 +797,7 @@ function InputRecap({ run }: { run: EstimationRun }) {
         <p className="mt-1.5 text-sm">
           <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)] mr-2">Listing</span>
           <Link
-            to={`/listing/${run.input_sreality_id}`}
+            to={listingPath(run.input_sreality_id)}
             className="font-mono tabular-nums text-[var(--color-copper)] hover:text-[var(--color-copper-2)] underline-offset-2 hover:underline"
           >
             id {run.input_sreality_id}
@@ -1189,7 +1190,7 @@ function ExcludedComparables({
             className="flex items-baseline gap-3 text-[0.82rem] text-[var(--color-ink-2)] px-3 py-1.5 rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)] bg-[var(--color-paper-2)]"
           >
             <Link
-              to={`/listing/${row.sreality_id}`}
+              to={listingPath(row.sreality_id)}
               className="shrink-0 font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
             >
               {row.sreality_id}

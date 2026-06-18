@@ -1,4 +1,5 @@
 import type { EstimationRun } from './types';
+import { listingPath } from './listingUrl';
 
 /* The one place that decides where an estimation run "lives" in the UI.
  *
@@ -15,7 +16,7 @@ export function runSurfaceUrl(
   hash: '#estimations' | '#feedback' = '#estimations',
 ): string {
   if (run.input_sreality_id != null) {
-    return `/listing/${run.input_sreality_id}?run=${run.id}${hash}`;
+    return `${listingPath(run.input_sreality_id)}?run=${run.id}${hash}`;
   }
   return `/estimation/${run.id}${hash === '#feedback' ? '#feedback' : ''}`;
 }

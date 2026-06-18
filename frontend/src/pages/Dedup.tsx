@@ -37,6 +37,7 @@ import { imageSrc } from '@/lib/imageUrl';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
+import { listingPath, propertyListingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
   DedupPropertySide,
@@ -662,7 +663,7 @@ function PropertyPanel({
       {/* Secondary link to the listing's detail page in our own DB. */}
       {side.sreality_id != null ? (
         <Link
-          to={`/listing/${side.sreality_id}`}
+          to={listingPath(side.sreality_id)}
           className="mt-1.5 inline-block text-[0.7rem] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           view in database →
@@ -740,7 +741,7 @@ function PortalChip({
     );
   }
   return (
-    <Link to={`/listing/${source.sreality_id}`} className={cls}>
+    <Link to={listingPath(source.sreality_id)} className={cls}>
       {label}
     </Link>
   );
@@ -794,7 +795,7 @@ function MergeRow({
         <div className="flex flex-wrap items-center gap-2">
           <SourceBadge source={merge.source} />
           <Link
-            to={`/listing?property=${merge.survivor_property_id}`}
+            to={propertyListingPath(merge.survivor_property_id)}
             className="text-sm text-[var(--color-ink)] hover:text-[var(--color-copper)]"
           >
             property #{merge.survivor_property_id}

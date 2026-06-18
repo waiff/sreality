@@ -11,6 +11,7 @@ import {
 } from '@/lib/format';
 import type { Furnished, Ownership } from '@/lib/types';
 import { placePrimary } from '@/lib/placeLabel';
+import { listingPath } from '@/lib/listingUrl';
 
 interface Column {
   field: SortField | 'furnished' | 'ownership';
@@ -198,7 +199,7 @@ function Row({
     >
       <td className="px-4 py-2.5 align-middle">
         <Link
-          to={`/listing/${row.sreality_id}`}
+          to={listingPath(row.sreality_id)}
           className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           {row.sreality_id}

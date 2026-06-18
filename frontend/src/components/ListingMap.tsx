@@ -24,6 +24,7 @@ import {
   type HoverData,
 } from '@/lib/growthChoropleth';
 import HoverChart from '@/components/HoverChart';
+import { listingPath } from '@/lib/listingUrl';
 
 const psgLayerId = (m: GrowthMetric) => `psg-${m}`;
 
@@ -1744,7 +1745,7 @@ function popupHtml(r: MapRow): string {
       </p>
       ${district ? `<p class="lp-district">${escape(district)}</p>` : ''}
       <p class="lp-seen" title="${escape(seenAbs)}">last seen ${escape(seen)}</p>
-      <a href="/listing/${r.sreality_id}" class="lp-link">View details →</a>
+      <a href="${listingPath(r.sreality_id)}" class="lp-link">View details →</a>
     </div>
   `;
 }

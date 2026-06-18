@@ -22,6 +22,7 @@ import {
   fmtRelative,
 } from '@/lib/format';
 import { portalListingUrl, portalShort } from '@/lib/portals';
+import { listingPath } from '@/lib/listingUrl';
 import type {
   WatchdogDispatch,
   WatchdogDispatchesResponse,
@@ -455,7 +456,7 @@ function Row({
     >
       <td className="px-4 py-2.5 align-middle max-w-[280px]">
         <Link
-          to={`/listing/${dispatch.sreality_id}`}
+          to={listingPath(dispatch.sreality_id)}
           onClick={handleListingClick}
           className="block hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
@@ -566,7 +567,7 @@ function PortalCell({
   }
   return (
     <Link
-      to={`/listing/${dispatch.sreality_id}`}
+      to={listingPath(dispatch.sreality_id)}
       onClick={onClick}
       className={chip}
       title={`Last seen on ${label}`}
