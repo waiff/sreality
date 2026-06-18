@@ -12,6 +12,7 @@ const navItems: ReadonlyArray<NavItem> = [
   { kind: 'link', to: '/watchdog',    label: 'Watchdog' },
   { kind: 'link', to: '/estimations', label: 'Estimations' },
   { kind: 'link', to: '/brokers',     label: 'Brokers' },
+  { kind: 'link', to: '/outreach',    label: 'Outreach' },
   { kind: 'link', to: '/collections', label: 'Collections', disabled: true },
   { kind: 'divider' },
   { kind: 'link', to: '/dedup',       label: 'Dedup' },
