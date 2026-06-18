@@ -1,6 +1,7 @@
 # Street coverage via RÚIAN address points (coords → street)
 
-Status: **proposed / scoped, not built.** Durable answer for the residual
+Status: **built** — migration 196 (`address_points`), `scripts/ingest_address_points.py`,
+`scripts/backfill_address_point_streets.py`, and the ingest + resolve workflows. Durable answer for the residual
 apartment street gap that text parsing cannot reach. Governing principle from the
 operator: **only precise available data, no estimates — a wrong street is worse
 than NULL.** This design is exact-match-only by construction.
