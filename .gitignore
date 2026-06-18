@@ -28,6 +28,12 @@ env/
 scratch/
 *.log
 
+# Claude Code local git worktrees — scaffolding, never committed. (Tracked
+# .claude/settings.json + .claude/skills/ are intentional; only worktrees are
+# local.) They were once committed as bare submodule gitlinks, which made every
+# `actions/checkout` post-step warn `git ... exit code 128` (no .gitmodules).
+.claude/worktrees/
+
 # Frontend (Node/Vite)
 frontend/node_modules/
 frontend/dist/
