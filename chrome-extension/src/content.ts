@@ -27,12 +27,25 @@ const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;
 const HOST_ELEMENT_ID = '__sreality_yield_panel_host__';
 
+/* SPA base URL for the "Otevřít v aplikaci" deep-link, inlined at build time.
+ * Inlined here (not shared with api.ts) because MV3 content scripts are classic
+ * scripts that can't `import` — content.js must stay self-contained. Empty →
+ * link hidden. Default https when the operator omits the scheme. */
+const APP_BASE_URL = ((raw: string): string => {
+  const t = raw.trim();
+  if (t === '') return '';
+  return (/^https?:\/\//i.test(t) ? t : `https://${t}`).replace(/\/$/, '');
+})(import.meta.env.VITE_APP_BASE_URL ?? '');
+
 type Phase = 'loading' | 'deactivated' | 'active' | 'error';
 
 interface PanelState {
   phase: Phase;
   /* Our scraped facts + MF rent/yield for the subject listing. */
   listing: PortalListing | null;
+  /* byt+prodej? Gates the MF + estimation blocks; the app link + facts show
+   * regardless. null = unknown (not in our DB and no URL category hint). */
+  isSaleApt: boolean | null;
   /* Optional comparables estimation (full row) for the editable yield block. */
   run: EstimationRun | null;
   /* Per-axis "touched" — null + touched=false means "follow the default". */
@@ -206,14 +219,21 @@ function mountPanel(): {
       return;
     }
     if (state.phase === 'deactivated') {
-      body.appendChild(note('Výnos MF je k dispozici jen u bytů na prodej.'));
+      body.appendChild(note('Tato nemovitost není v naší databázi.'));
       return;
     }
 
-    /* active */
-    renderMfBlock(body, state);
-    renderSubjectFacts(body, state);
-    renderEstimation(body, state);
+    /* active — the "open in our app" link + subject facts show for ANY listing
+     * we have; the MF headline + estimation are gated to apartments for sale. */
+    renderAppLink(body, state);
+    if (state.isSaleApt !== false) {
+      renderMfBlock(body, state);
+      renderSubjectFacts(body, state);
+      renderEstimation(body, state);
+    } else {
+      renderSubjectFacts(body, state);
+      body.appendChild(note('Výnos MF a odhad jsou jen u bytů na prodej.'));
+    }
     if (state.errorMessage != null) body.appendChild(errorLine(state.errorMessage));
 
     /* Restore focus after a full re-render so typing isn't interrupted. */
@@ -241,6 +261,21 @@ function mountPanel(): {
     p.className = 'error';
     p.textContent = text;
     return p;
+  }
+
+  function renderAppLink(body: HTMLElement, state: PanelState): void {
+    const sid = state.listing?.sreality_id;
+    if (sid == null || !APP_BASE_URL) return;  // not in our DB, or base unset
+    const row = document.createElement('div');
+    row.className = 'app-link-row';
+    const a = document.createElement('a');
+    a.className = 'app-link';
+    a.href = `${APP_BASE_URL}/listing/${sid}`;  // same template as every SPA surface
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = 'Otevřít v aplikaci →';
+    row.appendChild(a);
+    body.appendChild(row);
   }
 
   function renderMfBlock(body: HTMLElement, state: PanelState): void {
@@ -538,7 +573,7 @@ export async function openPanel(
   render = panel.render;
   panelShadow = panel.shadow;
   state = {
-    phase: 'loading', listing: null, run: null,
+    phase: 'loading', listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
     rent: null, costPerM2: null, price: null, busy: false, errorMessage: null,
   };
@@ -564,16 +599,19 @@ export async function openPanel(
       ? listing.category_main === 'byt' && listing.category_type === 'prodej'
       : urlSaleApartmentHint(url);
 
-  if (saleApt === false) {
-    setState((prev) => ({ ...prev, phase: 'deactivated', listing }));
-    return;
-  }
-
-  setState((prev) => ({ ...prev, phase: 'active', listing }));
+  /* Show the panel for ANY listing we have (app link + facts). The only dead
+   * end is a listing not in our DB whose URL clearly isn't a sale apartment —
+   * nothing to link, no MF, no estimate. */
+  const active = Boolean(listing?.found) || saleApt !== false;
+  setState((prev) => ({
+    ...prev, phase: active ? 'active' : 'deactivated',
+    listing, isSaleApt: saleApt,
+  }));
+  if (!active) return;
 
   /* Lazily load an existing estimation so the editable yield block appears
-   * without blocking the MF headline. */
-  const est = listing?.latest_estimation;
+   * without blocking the MF headline (only the estimation section uses it). */
+  const est = saleApt !== false ? listing?.latest_estimation : null;
   if (est != null) {
     const full = await call<EstimationRun>({
       type: 'get_estimation', run_id: est.estimation_id,

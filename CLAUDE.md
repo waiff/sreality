@@ -218,15 +218,18 @@ rules. Identify which one a task belongs to before you start.
   bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality) — widen `matches`
   (and the registry in `src/portals.ts`) as new portals come online; `host_permissions`
   stays broad `https://*/*` for the background fetch. **Detail pages** get a floating
-  panel (closed shadow root) showing the precomputed `mf_reference_rent_czk` +
-  `mf_gross_yield_pct` ("Výnos MF") for sale apartments, with the comparables estimation
-  as the deeper tool/fallback; the panel is visibly deactivated for non-(byt+prodej).
+  panel (closed shadow root). For ANY listing we have it shows an "Otevřít v aplikaci"
+  deep-link to the SPA page (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide
+  identity every SPA surface uses, negative for non-sreality portals) + subject facts; for
+  sale apartments it ALSO shows the precomputed `mf_reference_rent_czk` +
+  `mf_gross_yield_pct` ("Výnos MF") with the comparables estimation as the deeper
+  tool/fallback (MF + estimation gated to byt+prodej, the link + facts are not).
   **Index/search pages** get per-card badges via anchor-href scanning (no per-portal card
   selectors — robust to markup changes). The default display is a **read** through
   `POST /listings/lookup`, which maps a card's on-page `(source, native id)` to our row +
-  MF figures (the public views don't expose `source_id_native`, so the browser can't
-  resolve non-sreality listings directly). `src/portals.ts` is the single source of truth
-  for host→portal + detail-URL→native-id. Two-entry Vite build (`content.js` +
+  MF figures + `sreality_id` (the public views don't expose `source_id_native`, so the
+  browser can't resolve non-sreality listings directly). `src/portals.ts` is the single
+  source of truth for host→portal + detail-URL→native-id. Two-entry Vite build (`content.js` +
   `background.js`, with `index_overlay.ts` bundled into `content.js`) plus a copied-over
   `manifest.json` and `icon-128.png`; output lands in `chrome-extension/dist/`.
 - **Vanilla TypeScript only — no React, no Tailwind.** The panel lives inside a closed
