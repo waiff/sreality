@@ -55,6 +55,7 @@ def test_is_image_bytes_recognises_formats():
 class _Cur:
     def __init__(self, calls: list[tuple[str, Any]]):
         self._calls = calls
+        self._rows = 1
 
     def __enter__(self) -> "_Cur":
         return self
@@ -64,9 +65,12 @@ class _Cur:
 
     def execute(self, sql: str, params: Any) -> None:
         self._calls.append((sql, params))
+        # The INSERTs flatten to (sreality_id, url, sequence) triples; echo one
+        # "inserted" row per triple so record_images' RETURNING count is honest.
+        self._rows = len(params) // 3 if params else 1
 
     def fetchall(self) -> list[tuple[bool]]:
-        return [(True,)]
+        return [(True,)] * self._rows
 
 
 class _Conn:
