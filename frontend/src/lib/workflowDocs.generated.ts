@@ -454,7 +454,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "broker-resolution",
+    "concurrencyGroup": "broker-resolution-incremental",
     "cancelInProgress": false,
     "timeoutMinutes": 20,
     "permissions": "contents: read",
@@ -1929,7 +1929,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "secrets": [
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "broker-resolution",
+    "concurrencyGroup": "broker-resolution-full",
     "cancelInProgress": false,
     "timeoutMinutes": 60,
     "permissions": "contents: read",

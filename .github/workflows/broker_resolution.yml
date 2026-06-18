@@ -16,8 +16,11 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 
+# Per-workflow group (NOT shared with the full sweep) so neither cancels the other's
+# pending run. Cross-workflow mutual exclusion is the DB lock (broker_resolution_lock,
+# migration 192): this incremental skips cleanly when the full sweep holds it.
 concurrency:
-  group: broker-resolution
+  group: broker-resolution-incremental
   cancel-in-progress: false
 
 jobs:
