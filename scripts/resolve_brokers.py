@@ -369,6 +369,37 @@ LEFT JOIN lc ON lc.firm_id = ff.id
 WHERE f.id = ff.id
 """
 
+# Friendly firm names from idnes agency labels (sreality's raw_json.user has no
+# agency field). Only the DOMINANT label of a non-franchise domain — single-firm
+# domains carry one clean 100%-modal name (prexima.cz -> "PREXIMA nemovitosti
+# s.r.o."); franchise/aggregator domains (re-max.cz: 95 offices, century21.cz)
+# have no dominant label, so they stay NULL and the UI falls back to the domain
+# rather than mislabel the brand as one office.
+_FIRM_DISPLAY_NAMES = """
+WITH agency AS (
+  SELECT bi.email_domain AS domain,
+         l.raw_json->'broker'->>'agency_name' AS name,
+         count(*) AS n
+  FROM listings l
+  JOIN broker_identities bi ON bi.id = l.broker_identity_id
+  WHERE l.source = 'idnes' AND bi.email_domain IS NOT NULL
+    AND coalesce(l.raw_json->'broker'->>'agency_name', '') <> ''
+  GROUP BY bi.email_domain, l.raw_json->'broker'->>'agency_name'
+),
+ranked AS (
+  SELECT domain, name, n,
+         row_number() OVER (PARTITION BY domain ORDER BY n DESC, name) AS rk,
+         sum(n) OVER (PARTITION BY domain) AS total
+  FROM agency
+)
+UPDATE firms f SET display_name = r.name
+FROM ranked r
+WHERE r.rk = 1 AND r.n::numeric / r.total >= 0.60
+  AND f.canonical_domain = r.domain
+  AND NOT f.is_franchise
+  AND f.display_name IS DISTINCT FROM r.name
+"""
+
 _BRIDGE_CANDIDATES = """
 WITH freq AS (
   SELECT source, kind, value, count(DISTINCT broker_identity_id) AS n
@@ -701,6 +732,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     with conn.transaction(), conn.cursor() as cur:
         cur.execute("SET LOCAL statement_timeout = 0")
         cur.execute(_FIRM_ROLLUP)
+        cur.execute(_FIRM_DISPLAY_NAMES)
     LOG.info("RESOLVE full rollups done elapsed=%.1fs", time.monotonic() - t0)
     _refresh_matview(conn)
     with conn.cursor() as cur:
