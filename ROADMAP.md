@@ -6,6 +6,30 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup vision cost — async batch warm-up lane (50% off, recall-identical)
+
+The last recall-safe lever in the dedup-vision cost program (after the cross-source gate,
+classify→Haiku, 768px downscale, and pHash-first). An async lane pre-warms the dedup engine's
+classify/compare/site_plan caches through the Anthropic Message Batches API (50% off) so the
+daily engine run replays unchanged over warm cache and merges for free.
+
+- **migration 197** — `dedup_batches` + `dedup_batch_requests` (mirror condition's 098); model
+  on the request (kinds mix Haiku/Sonnet), `image_ids` for the classify index→id ingest mapping.
+- **Defer-and-replay, no rule duplication:** `scripts/submit_dedup_batch.py` runs the engine's
+  FREE funnel (rules A/B/C + pHash + cross-source gate, reusing the same pure rules + SQL helpers)
+  and enqueues only the not-yet-cached vision; `scripts/ingest_dedup_batch.py` polls, routes by
+  kind to each toolkit module's persist helper (same cache rows the sync tools write), records one
+  50%-discounted `llm_calls` row. Neither merges — the daily `dedup_engine.yml` replay does, over
+  warm cache. A cache miss falls back to a sync call (correct, just not discounted).
+- **Recall-identical:** submit enqueues `rooms_in_priority(common)[:max_room_attempts]` — the
+  superset of rooms the engine's stop-at-first-High walk could reach — guarded by a golden test.
+  Both-site-plan pairs defer compare behind the development-guard verdict, mirroring `_resolve_visual`.
+- **`dedup_batches.yml`** — submit every 6h, ingest hourly (mode by cron), untagged (`portal: null`).
+- **Cost:** the ~$640 post-lever sweep's remaining real vision halves to ~$380–430.
+- **Next:** extract a shared `scripts/batch_lane.py` (submit/ingest plumbing) and retrofit the
+  condition lane (rule-of-three unify); make the engine's `max_vision_calls` budget count only
+  real (cache-miss) calls so warm-cache replay drains in one run instead of throttling on hits.
+
 ### 2026-06: Broker intelligence — identity foundation (phase 1 of 5)
 
 Tie real-estate broker/agency contact data to listings so we can ask "broker X has N

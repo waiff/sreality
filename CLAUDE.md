@@ -571,6 +571,13 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (migration 129), and `compare_listing_site_plans` (migration 171,
     `listing_site_plan_matches`) — are write-allowed exceptions (toolkit rule #5). A
     `dedup_engine_runs` row (migration 130) per run powers the `/dedup` automation dashboard.
+    **Vision is batch-pre-warmed (cost):** `dedup_batches.yml` (migration 197 — `dedup_batches`
+    / `dedup_batch_requests`) runs the engine's FREE funnel and submits the surviving cross-source
+    pairs' classify/compare/site_plan vision through the Anthropic Message Batches API (50% off,
+    recall-identical), writing the SAME caches the sync tools write
+    (`scripts/submit_dedup_batch.py` + `ingest_dedup_batch.py`). The daily engine run then REPLAYS
+    unchanged over the warm caches → identical merges for free (a cache miss falls back to a sync
+    call). The lane NEVER merges; merging stays the engine's job.
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so
@@ -1072,7 +1079,9 @@ locally. The dedup/properties track adds
 singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
 property + clears the dirty queue), `dedup_engine.yml` (daily street+disposition dedup engine +
-auto-merge; rule #15), and
+auto-merge; rule #15), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
+6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
+off so the daily engine run merges over warm cache for free; rule #15), and
 `compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor
 workflows watch the rest: `monitor_workflow_failures.yml` ("Monitoring: workflow failures", cron
 `*/30` — records failed / timed-out / startup-failed runs into `workflow_failures` so the Health
