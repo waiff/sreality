@@ -14,6 +14,7 @@ import {
 } from '../lib/brokers';
 import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
+import { PickButton } from '../components/controls';
 
 const CATEGORY_LABEL: Record<string, string> = {
   byt: 'Byt',
@@ -23,6 +24,21 @@ const CATEGORY_LABEL: Record<string, string> = {
   ostatni: 'Ostatní',
 };
 const OFFER_LABEL: Record<string, string> = { prodej: 'prodej', pronajem: 'pronájem' };
+
+// Mirror the Žebříček (leaderboard) filter chips, but the broker's own inventory
+// defaults to Vše/Vše so nothing is hidden on load.
+const CATEGORY_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
+  { value: null, label: 'Vše' },
+  { value: 'byt', label: 'Byty' },
+  { value: 'dum', label: 'Domy' },
+  { value: 'pozemek', label: 'Pozemky' },
+  { value: 'komercni', label: 'Komerční' },
+];
+const OFFER_OPTIONS: ReadonlyArray<{ value: string | null; label: string }> = [
+  { value: null, label: 'Vše' },
+  { value: 'prodej', label: 'Prodej' },
+  { value: 'pronajem', label: 'Pronájem' },
+];
 
 export default function BrokerDetail() {
   const { id } = useParams<{ id: string }>();
@@ -303,6 +319,20 @@ function Inventory({
   loading: boolean;
   total: number;
 }) {
+  const [categoryMain, setCategoryMain] = useState<string | null>(null);
+  const [categoryType, setCategoryType] = useState<string | null>(null);
+
+  const filtered = useMemo(
+    () =>
+      rows.filter(
+        (l) =>
+          (categoryMain === null || l.category_main === categoryMain) &&
+          (categoryType === null || l.category_type === categoryType),
+      ),
+    [rows, categoryMain, categoryType],
+  );
+  const isFiltered = categoryMain !== null || categoryType !== null;
+
   return (
     <section className="mt-7">
       <div className="flex items-baseline justify-between">
@@ -311,15 +341,31 @@ function Inventory({
         </h2>
         {rows.length > 0 && (
           <span className="text-[0.7rem] text-[var(--color-ink-4)] tabular-nums">
-            {rows.length < total ? `${fmtCount(rows.length)} z ${fmtCount(total)}` : fmtCount(total)}
+            {isFiltered
+              ? `${fmtCount(filtered.length)} z ${fmtCount(rows.length)}`
+              : rows.length < total
+                ? `${fmtCount(rows.length)} z ${fmtCount(total)}`
+                : fmtCount(total)}
           </span>
         )}
       </div>
+
+      {rows.length > 0 && (
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
+          <InvSegment label="Typ" options={CATEGORY_OPTIONS} value={categoryMain} onChange={setCategoryMain} />
+          <InvSegment label="Nabídka" options={OFFER_OPTIONS} value={categoryType} onChange={setCategoryType} />
+        </div>
+      )}
+
       <div className="mt-3 overflow-x-auto border border-[var(--color-rule)] rounded-[var(--radius-md)]">
         {loading ? (
           <p className="px-4 py-6 text-sm text-[var(--color-ink-3)]">Načítám inzeráty…</p>
         ) : rows.length === 0 ? (
           <p className="px-4 py-6 text-sm text-[var(--color-ink-4)]">Žádné inzeráty.</p>
+        ) : filtered.length === 0 ? (
+          <p className="px-4 py-6 text-sm text-[var(--color-ink-4)]">
+            Žádné inzeráty pro zvolený filtr.
+          </p>
         ) : (
           <table className="w-full text-sm border-collapse">
             <thead>
@@ -335,7 +381,7 @@ function Inventory({
               </tr>
             </thead>
             <tbody className="font-[family-name:var(--font-mono)] text-[0.78rem]">
-              {rows.map((l) => (
+              {filtered.map((l) => (
                 <tr
                   key={l.sreality_id}
                   className="border-b border-[var(--color-rule-soft)] last:border-0 hover:bg-[var(--color-paper-2)]"
@@ -384,5 +430,32 @@ function Inventory({
         )}
       </div>
     </section>
+  );
+}
+
+function InvSegment({
+  label,
+  options,
+  value,
+  onChange,
+}: {
+  label: string;
+  options: ReadonlyArray<{ value: string | null; label: string }>;
+  value: string | null;
+  onChange: (v: string | null) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-[0.62rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+        {label}
+      </span>
+      <div className="flex flex-wrap gap-1">
+        {options.map((o) => (
+          <PickButton key={String(o.value)} on={o.value === value} onClick={() => onChange(o.value)}>
+            {o.label}
+          </PickButton>
+        ))}
+      </div>
+    </div>
   );
 }
