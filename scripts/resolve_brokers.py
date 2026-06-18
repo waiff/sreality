@@ -654,6 +654,56 @@ def _refresh_matview(conn: Any) -> None:
         cur.execute("REFRESH MATERIALIZED VIEW broker_region_type_stats")
 
 
+_CANDIDATE_BROKERS = """
+SELECT b.id, b.display_name, b.primary_firm_id, f.canonical_domain, f.display_name
+FROM brokers b JOIN firms f ON f.id = b.primary_firm_id
+WHERE b.status = 'active' AND b.display_name IS NOT NULL
+"""
+
+_CANDIDATE_UPSERT = """
+INSERT INTO broker_merge_candidates (group_key, broker_ids, reason, evidence)
+VALUES (%(gk)s, %(ids)s, 'name_firm', %(ev)s)
+ON CONFLICT (group_key) DO UPDATE SET
+  broker_ids = EXCLUDED.broker_ids, evidence = EXCLUDED.evidence
+  WHERE broker_merge_candidates.status = 'proposed'
+"""
+
+
+def _generate_merge_candidates(conn: Any) -> int:
+    """Propose Phase-5 review groups: active brokers that share a normalized name AND
+    a firm but are separate ids (the corporate/role-inbox case the auto-merge guard
+    deliberately leaves apart). Idempotent — group_key keeps regeneration from
+    reviving a merged/dismissed group; a merged group's losers go inactive and the
+    group shrinks below 2, so it never re-proposes."""
+    from collections import defaultdict
+    from psycopg.types.json import Jsonb
+    groups: dict[tuple[str, int], list[int]] = defaultdict(list)
+    meta: dict[tuple[str, int], tuple[str, str | None, str | None]] = {}
+    with conn.cursor() as cur:
+        cur.execute(_CANDIDATE_BROKERS)
+        for bid, name, firm_id, domain, firm_name in cur.fetchall():
+            nk = R.name_key(name)
+            if not nk:
+                continue
+            key = (nk, int(firm_id))
+            groups[key].append(int(bid))
+            meta[key] = (name, domain, firm_name)
+    proposed = 0
+    with conn.cursor() as cur:
+        for (nk, firm_id), ids in groups.items():
+            if len(ids) < 2:
+                continue
+            name, domain, firm_name = meta[(nk, firm_id)]
+            cur.execute(_CANDIDATE_UPSERT, {
+                "gk": f"namefirm:{firm_id}:{nk}",
+                "ids": sorted(ids),
+                "ev": Jsonb({"name": name, "firm_domain": domain,
+                             "firm_name": firm_name, "broker_count": len(ids)}),
+            })
+            proposed += 1
+    return proposed
+
+
 def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
               batch_size: int, deadline: float | None, holder: str = "") -> dict[str, int]:
     with conn.cursor() as cur:
@@ -735,6 +785,9 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
         cur.execute(_FIRM_DISPLAY_NAMES)
     LOG.info("RESOLVE full rollups done elapsed=%.1fs", time.monotonic() - t0)
     _refresh_matview(conn)
+    candidates = _generate_merge_candidates(conn)
+    LOG.info("RESOLVE full merge candidates proposed=%d elapsed=%.1fs",
+             candidates, time.monotonic() - t0)
     with conn.cursor() as cur:
         cur.execute(_CLEAR_DIRTY, {"cutoff": cutoff})
         cur.execute(
