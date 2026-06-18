@@ -1371,3 +1371,77 @@ export const removeOutreachSuppression = (
   request<{ removed: number }>(`/outreach/suppressions/${broker_id}`, {
     method: 'DELETE',
   });
+
+/* ----- broker merge review (Phase 5) ------------------------------------- *
+ *
+ * The auto-merge engine leaves corporate/role-inbox accounts apart (no personal
+ * bridge). This queue surfaces "same name + same firm" groups for one-click
+ * reversible operator merge. All bearer-gated. */
+
+export interface BrokerMergeBroker {
+  broker_id: number;
+  display_name: string | null;
+  firm_name: string | null;
+  firm_domain: string | null;
+  primary_email: string | null;
+  primary_phone: string | null;
+  source_count: number;
+  distinct_source_count: number;
+  active_property_count: number;
+  property_count: number;
+}
+
+export interface BrokerMergeCandidate {
+  id: number;
+  group_key: string;
+  broker_ids: number[];
+  reason: string;
+  evidence: { name?: string; firm_name?: string | null; firm_domain?: string | null; broker_count?: number };
+  status: string;
+  created_at: string | null;
+  brokers: BrokerMergeBroker[];
+}
+
+export interface BrokerMergeRecord {
+  merge_group_id: string;
+  survivor_broker_id: number;
+  survivor_name: string | null;
+  retired_broker_ids: number[];
+  reason: string | null;
+  source: string | null;
+  merged_at: string | null;
+}
+
+export const listBrokerMergeCandidates = (
+  limit = 100,
+): Promise<{ candidates: BrokerMergeCandidate[]; count: number }> =>
+  request<{ candidates: BrokerMergeCandidate[]; count: number }>(
+    '/broker-review/candidates',
+    { query: { limit } },
+  );
+
+export const mergeBrokerCandidate = (
+  candidateId: number,
+  brokerIds?: number[],
+): Promise<{ merge_group_id: string; survivor_broker_id: number; retired_broker_ids: number[] }> =>
+  request('/broker-review/candidates/' + candidateId + '/merge', {
+    method: 'POST',
+    json: { broker_ids: brokerIds ?? null },
+  });
+
+export const dismissBrokerCandidate = (
+  candidateId: number,
+): Promise<{ id: number; status: string }> =>
+  request('/broker-review/candidates/' + candidateId + '/dismiss', { method: 'POST' });
+
+export const listBrokerMerges = (
+  limit = 50,
+): Promise<{ merges: BrokerMergeRecord[] }> =>
+  request<{ merges: BrokerMergeRecord[] }>('/broker-review/merges', { query: { limit } });
+
+export const unmergeBrokers = (
+  mergeGroupId: string,
+): Promise<{ merge_group_id: string; survivor_broker_id: number; restored_broker_ids: number[] }> =>
+  request('/broker-review/merges/' + encodeURIComponent(mergeGroupId) + '/unmerge', {
+    method: 'POST',
+  });

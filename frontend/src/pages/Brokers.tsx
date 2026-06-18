@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { listBrokerMergeCandidates } from '../lib/api';
 import {
   chipsToGeoArrays,
   fetchBrokerLeaderboard,
@@ -47,6 +48,13 @@ export default function Brokers() {
 
   const geo = useMemo(() => chipsToGeoArrays(districts), [districts]);
 
+  const reviewQ = useQuery({
+    queryKey: ['broker-merge-candidates-count'],
+    queryFn: () => listBrokerMergeCandidates(100),
+    staleTime: 300_000,
+  });
+  const reviewCount = reviewQ.data?.count ?? 0;
+
   const boardQ = useQuery({
     queryKey: [
       'broker-leaderboard',
@@ -65,15 +73,23 @@ export default function Brokers() {
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto text-[var(--color-ink)]">
-      <header>
-        <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-          broker intelligence
-        </p>
-        <h1 className="mt-1 text-2xl font-[family-name:var(--font-display)]">Makléři</h1>
-        <p className="mt-1 text-sm text-[var(--color-ink-3)] max-w-2xl">
-          Kdo drží nejvíc inventáře v daném regionu a typu nemovitosti — žebříček
-          makléřů a jejich kontakty pro oslovení.
-        </p>
+      <header className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+            broker intelligence
+          </p>
+          <h1 className="mt-1 text-2xl font-[family-name:var(--font-display)]">Makléři</h1>
+          <p className="mt-1 text-sm text-[var(--color-ink-3)] max-w-2xl">
+            Kdo drží nejvíc inventáře v daném regionu a typu nemovitosti — žebříček
+            makléřů a jejich kontakty pro oslovení.
+          </p>
+        </div>
+        {reviewCount > 0 && (
+          <Link to="/brokers/review"
+            className="shrink-0 mt-1 text-xs rounded-[var(--radius-sm)] border border-[var(--color-copper)] bg-[var(--color-copper-soft)] px-3 py-1.5 text-[var(--color-copper)] hover:bg-[var(--color-copper)] hover:text-[var(--color-paper)] transition-colors">
+            Sloučit duplicity ({reviewCount})
+          </Link>
+        )}
       </header>
 
       <NameSearch onPick={(id) => navigate(`/brokers/${id}`)} />
