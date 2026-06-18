@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { TILE_STYLE } from '@/lib/basemap';
+import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
 import type {
   CityIndexDefinition,
   CuratedCity,
@@ -480,9 +481,6 @@ export default function ListingMap({
    * map remount. */
   const suppressBoundsRef = useRef(centerCircle != null);
   suppressBoundsRef.current = centerCircle != null;
-  /* Tracks which feature ids currently carry feature-state.hovered =
-   * true so we know which to clear before applying the next set. */
-  const styledIdsRef = useRef<Set<number>>(new Set());
   /* Initial bbox from URL captured once at mount time — applying it
    * on the load event is what restores a shared link's exact viewport.
    * Reading the live `bounds` prop instead would refit every time the
@@ -1296,26 +1294,11 @@ export default function ListingMap({
     didInitialFitRef.current = true;
   }, [flyTo, ready]);
 
-  /* Project the shared hoveredIds set onto maplibre's feature-state
-   * so the paint expressions on the 'point' layer light up. Clearing
-   * the previous set before applying the new one keeps the styled
-   * features in sync without scanning the whole source. */
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!ready || !map) return;
-    const prev = styledIdsRef.current;
-    for (const id of prev) {
-      if (!hoveredIds.has(id)) {
-        map.setFeatureState({ source: 'listings', id }, { hovered: false });
-      }
-    }
-    for (const id of hoveredIds) {
-      if (!prev.has(id)) {
-        map.setFeatureState({ source: 'listings', id }, { hovered: true });
-      }
-    }
-    styledIdsRef.current = new Set(hoveredIds);
-  }, [hoveredIds, ready, rows]);
+  /* Project the shared hoveredIds set onto maplibre's feature-state so the
+   * 'point' layer paint expressions light up. Extracted to a shared hook so the
+   * estimation comparables map rides the same mechanism; `rows` re-applies the
+   * state after the source data is replaced. */
+  useMapFeatureHover(mapRef.current, ready, 'listings', hoveredIds, rows);
 
   /* Locator halo data: list-origin hovers project the hovered rows'
    * coordinates into the halo source; everything else clears it (a
