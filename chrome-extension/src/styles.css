@@ -257,3 +257,22 @@
   color: var(--copper);
   font-variant-numeric: tabular-nums;
 }
+
+/* "Open in our app" deep-link — shown for any listing we have. */
+.app-link-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 0.5rem;
+}
+
+.app-link {
+  color: var(--copper);
+  text-decoration: none;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  border-bottom: 1px solid var(--copper);
+  padding-bottom: 1px;
+}
+
+.app-link:hover { color: #9a4b25; border-color: #9a4b25; }

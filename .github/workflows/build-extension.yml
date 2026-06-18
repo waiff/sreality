@@ -46,6 +46,8 @@ jobs:
           # operator sees a clear "API base URL not configured" message.
           VITE_API_BASE_URL: ${{ secrets.EXT_API_BASE_URL }}
           VITE_API_TOKEN: ${{ secrets.EXT_API_TOKEN }}
+          # SPA base URL for the "Otevřít v aplikaci" link. Optional — empty → link hidden.
+          VITE_APP_BASE_URL: ${{ secrets.EXT_APP_BASE_URL }}
       - name: Stamp build metadata
         run: |
           cat > dist/build-info.json <<EOF

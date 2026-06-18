@@ -14,7 +14,12 @@ import type {
 
 /* Tolerate an operator entering the API URL without a scheme (e.g. just
  * `api.up.railway.app`) — fetch() needs an absolute URL, so default to https.
- * Also strip any trailing slash so `BASE_URL + path` doesn't double up. */
+ * Also strip any trailing slash so `BASE_URL + path` doesn't double up.
+ *
+ * NB: this is duplicated as a tiny inline in content.ts — MV3 content scripts
+ * are classic scripts that can't `import`, so the content + service-worker
+ * bundles cannot share a runtime module. A 5-line pure helper is the cheapest
+ * thing to copy across that boundary. */
 function normalizeBaseUrl(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed === '') return '';

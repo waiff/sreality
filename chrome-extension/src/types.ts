@@ -59,6 +59,9 @@ export interface PortalListing {
   source: string;
   source_id: string;
   found: boolean;
+  /* App-wide listing identity (negative for non-sreality portals); the SPA
+   * page is /listing/{sreality_id}. Null when not in our DB (no app page). */
+  sreality_id: number | null;
   category_main: string | null;
   category_type: string | null;
   area_m2: number | null;

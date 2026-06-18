@@ -6,10 +6,13 @@ figures the SPA's Browse cards show for sale apartments — on listing pages
 across **every portal we scrape** (sreality, bazos, bezrealitky, idnes,
 maxima, remax, mmreality, ceskereality).
 
-- **Detail pages** get a floating panel (closed shadow root): the Výnos MF
-  headline + MF reference rent for the listing, with a comparables-based
-  estimation as the deeper tool / fallback. The panel is **visibly
-  deactivated** for anything that isn't an apartment for sale.
+- **Detail pages** get a floating panel (closed shadow root). For **any**
+  listing we have, it shows an **"Otevřít v aplikaci"** deep-link to that
+  listing's page in our app (`/listing/{sreality_id}`) plus its subject facts.
+  For **apartments for sale** it additionally shows the Výnos MF headline + MF
+  reference rent, with a comparables-based estimation as the deeper tool /
+  fallback. (MF + estimation are gated to byt+prodej; the app link + facts are
+  not.) Listings not in our DB show a short "není v databázi" note.
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
   on-demand estimation by that card's own URL.
@@ -52,6 +55,9 @@ One-time setup — repository secrets:
 2. Add `EXT_API_BASE_URL` = the Railway FastAPI URL (no trailing slash).
 3. Add `EXT_API_TOKEN` = the same `API_TOKEN` value the Railway
    service uses.
+4. (Optional) Add `EXT_APP_BASE_URL` = the SPA (browser app) URL, no trailing
+   slash — powers the "Otevřít v aplikaci" link to a listing's page in our app
+   (`/listing/{sreality_id}`). Leave it unset to hide the link.
 
 Building:
 1. The workflow runs automatically on every push to `main` that
