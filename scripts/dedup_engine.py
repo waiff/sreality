@@ -13,13 +13,15 @@ Pipeline (rules A-E; see toolkit.dedup_engine for the rule text):
      inline (rule A; a partial index backs the scan — see migration 127).
   1. Within each (street_key) group, classify every cross-property pair
      (classify_pair). Rule B exact-address pairs auto-merge immediately
-     (5% area guard); rule C contradictions are rejected; the rest are visual
-     candidates.
-  2. For each candidate pair, the layered visual confirmation (rule D):
-       a. pHash fast-path — >=2 near-identical INTERIOR image pairs -> merge,
-          no LLM (interior gate needs room classification, so it shares the
-          classify step).
-       b. room-aware forensic comparison in priority order, stop at first High.
+     (5% area guard); rule C contradictions are rejected; the rest are candidates.
+  2. For each candidate pair:
+       a. pHash fast-path (FREE, no LLM, runs FIRST, all sources) — >=2
+          near-identical image pairs (any image) -> auto-merge. Catches
+          identical-photo re-posts before paying for any classify/compare.
+       b. cross-source gate — same-source pairs that pHash didn't resolve are
+          skipped (the paid visual layer only pays off cross-portal).
+       c. layered visual confirmation (rule D), cross-source only: classify ->
+          room-aware forensic comparison in priority order, stop at first High.
      A High verdict (or the pHash fast-path) merges; everything else queues
      (rule E).
 
@@ -29,7 +31,7 @@ cached so re-runs are nearly free. Writes one `dedup_engine_runs` row.
 
 Runnable as `python -m scripts.dedup_engine`. Required env: SUPABASE_DB_URL
 (+ ANTHROPIC_API_KEY / R2_* for the visual layer; absent these the engine still
-does rule-A/B/C work and the pHash fast-path degrades to a logged skip).
+does rule-A/B/C work + the free pHash fast-path).
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ from toolkit.dedup_engine import (
     street_group_keys,
     verdict_is_merge,
 )
-from toolkit.image_classification import INTERIOR_ROOM_TYPES, SITE_PLAN_ROOM_TYPE
+from toolkit.image_classification import SITE_PLAN_ROOM_TYPE
 from toolkit.property_identity import MergeError, merge_properties
 
 LOG = logging.getLogger("dedup_engine")
@@ -193,25 +195,42 @@ def _enqueue_candidate(conn: Any, a: ListingKey, b: ListingKey, markers: dict[st
         )
 
 
-def _phash_interior_identical_pairs(
-    conn: Any, a_id: int, b_id: int, interior_image_ids_a: list[int], interior_image_ids_b: list[int],
-) -> int:
-    """Count INTERIOR image pairs within the identical-Hamming threshold.
-
-    Restricted to the classifier-selected interior image ids of each listing, so
-    a shared facade render / floor plan can't trigger the fast-path.
+def _phash_identical_pairs(conn: Any, a_id: int, b_id: int) -> int:
+    """Count near-identical image pairs (Hamming <= PHASH_IDENTICAL_MAX) across ALL
+    stored images of the two listings — no classify needed, so this runs BEFORE the
+    LLM stage. A development sharing one stock facade/plan yields 1 such pair; an
+    actual re-post of the same listing shares many. The PHASH_MIN_IDENTICAL_PAIRS
+    count threshold is what separates them (validated against the dismissed-pairs set),
+    which is why this can drop the old interior-only gate (which needed the classifier).
     """
-    if not interior_image_ids_a or not interior_image_ids_b:
-        return 0
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM images ia JOIN images ib ON true "
-            "WHERE ia.id = ANY(%s) AND ib.id = ANY(%s) "
+            "WHERE ia.sreality_id = %s AND ib.sreality_id = %s "
             "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
             "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %s",
-            (interior_image_ids_a, interior_image_ids_b, PHASH_IDENTICAL_MAX),
+            (a_id, b_id, PHASH_IDENTICAL_MAX),
         )
         return int(cur.fetchone()[0])
+
+
+def _both_have_site_plan(conn: Any, a_id: int, b_id: int) -> bool:
+    """True if BOTH listings already have a classified site/situation plan.
+
+    The pHash fast-path runs before classify, so it would otherwise bypass the
+    site-plan development guard (rule C, 'different_unit' -> queue). When both sides
+    carry a site plan, defer the pair to the visual stage so that guard adjudicates
+    rather than pHash auto-merging two units of one development.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE i.sreality_id = %(a)s) > 0 "
+            "   AND count(*) FILTER (WHERE i.sreality_id = %(b)s) > 0 "
+            "FROM images i JOIN image_room_classifications c ON c.image_id = i.id "
+            "WHERE i.sreality_id IN (%(a)s, %(b)s) AND c.room_type = %(sp)s",
+            {"a": a_id, "b": b_id, "sp": SITE_PLAN_ROOM_TYPE},
+        )
+        return bool(cur.fetchone()[0])
 
 
 def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]] | None:
@@ -238,13 +257,13 @@ def _resolve_visual(
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
 
-    {action: 'auto_merge'|'queue', reason, room_type?, verdict?, rationale?,
-     phash_pairs}. Mutates vision_budget[0] as forensic calls are spent.
+    {action: 'auto_merge'|'queue', reason, room_type?, verdict?, rationale?}.
+    Mutates vision_budget[0] as forensic calls are spent.
     """
     imgs_a = _classify_or_none(classify_fn, a.sreality_id)
     imgs_b = _classify_or_none(classify_fn, b.sreality_id)
     if imgs_a is None or imgs_b is None:
-        return {"action": "queue", "reason": "no_images", "phash_pairs": 0}
+        return {"action": "queue", "reason": "no_images"}
 
     # Development guard (runs FIRST): if both listings carry a site/situation
     # plan, check whether they highlight the same unit. A 'different_unit'
@@ -260,22 +279,15 @@ def _resolve_visual(
             return {
                 "action": "queue", "reason": "site_plan_different_unit",
                 "verdict": sp["verdict"], "rationale": sp.get("rationale"),
-                "phash_pairs": 0,
             }
 
-    # Layer 1: interior pHash fast-path.
-    interior_a = [i["image_id"] for i in imgs_a if i["room_type"] in INTERIOR_ROOM_TYPES]
-    interior_b = [i["image_id"] for i in imgs_b if i["room_type"] in INTERIOR_ROOM_TYPES]
-    phash_pairs = _phash_interior_identical_pairs(
-        conn, a.sreality_id, b.sreality_id, interior_a, interior_b,
-    )
-    if decide_phash_fastpath(phash_pairs):
-        return {"action": "auto_merge", "reason": "image_phash", "phash_pairs": phash_pairs}
-
+    # The free pHash fast-path now runs in run_engine BEFORE classify (so a strong
+    # photo match never pays for the LLM at all). A pair only reaches here if pHash
+    # did NOT resolve it, so the visual layer is purely the forensic room compare.
     if compare_fn is None:
-        return {"action": "queue", "reason": "vision_unavailable", "phash_pairs": phash_pairs}
+        return {"action": "queue", "reason": "vision_unavailable"}
 
-    # Layer 3: room-aware forensic comparison, priority order, stop at first High.
+    # Room-aware forensic comparison, priority order, stop at first High.
     rooms_a = {i["room_type"] for i in imgs_a}
     rooms_b = {i["room_type"] for i in imgs_b}
     common = rooms_a & rooms_b
@@ -298,12 +310,11 @@ def _resolve_visual(
             return {
                 "action": "auto_merge", "reason": "visual_match",
                 "room_type": room, "verdict": last_verdict, "rationale": last_rationale,
-                "phash_pairs": phash_pairs,
             }
 
     return {
         "action": "queue", "reason": "visual_inconclusive",
-        "verdict": last_verdict, "rationale": last_rationale, "phash_pairs": phash_pairs,
+        "verdict": last_verdict, "rationale": last_rationale,
     }
 
 
@@ -428,6 +439,29 @@ def run_engine(
                         stats["queued"] += 1
                     continue
 
+                # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw
+                # photo match (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over any
+                # images) is a same-property signal that needs no LLM. The pair already
+                # passed rule C (no house#/floor/area/unit-token contradiction), so a
+                # match here auto-merges. Runs before the cross-source gate so identical-
+                # photo re-posts (incl. same-source, which the gate would otherwise drop)
+                # merge for free — and cross-posted cross-source pairs skip classify AND
+                # compare. (Replaces the old interior-gated fast-path that needed classify.)
+                phash_pairs = _phash_identical_pairs(conn, a.sreality_id, b.sreality_id)
+                if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
+                    conn, a.sreality_id, b.sreality_id
+                ):
+                    markers = {"tier": "street_disposition", "reason": "image_phash",
+                               "phash_pairs": phash_pairs, "street_key": street_key,
+                               "confidence": 0.97}
+                    if auto_merge_enabled:
+                        if _merge_pair(conn, a, b, "image_phash", markers):
+                            stats["auto_phash"] += 1
+                    else:
+                        _enqueue_candidate(conn, a, b, {**markers, "reason": "auto_merge_off:image_phash"})
+                        stats["queued"] += 1
+                    continue
+
                 # Cross-source gate: the paid visual layer (classify + forensic compare)
                 # exists to match one portal's listing against ANOTHER portal's — same-source
                 # pairs buy nothing there (73/74 historical visual auto-merges were
@@ -456,16 +490,15 @@ def run_engine(
                 )
                 markers = {
                     "tier": "street_disposition", "street_key": street_key,
-                    "reason": outcome.get("reason"), "phash_pairs": outcome.get("phash_pairs", 0),
+                    "reason": outcome.get("reason"),
                     "verdict": outcome.get("verdict"), "rationale": outcome.get("rationale"),
                     "room_type": outcome.get("room_type"),
                     "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6,
                 }
+                # pHash already ran (pre-classify); the visual stage only auto-merges via
+                # a High forensic verdict.
                 if outcome["action"] == "auto_merge":
-                    merged = _merge_pair(conn, a, b, outcome["reason"], markers)
-                    if merged and outcome["reason"] == "image_phash":
-                        stats["auto_phash"] += 1
-                    elif merged:
+                    if _merge_pair(conn, a, b, outcome["reason"], markers):
                         stats["auto_visual"] += 1
                 else:
                     _enqueue_candidate(conn, a, b, markers)

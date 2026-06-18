@@ -543,15 +543,29 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     when both listings carry a site/situation plan, `compare_listing_site_plans` checks
     whether they highlight the SAME unit — a `different_unit` verdict **queues** the pair
     for the operator (never auto-merges, never auto-rejects — the conservative choice).
+    **pHash fast-path (FREE, runs FIRST — before classify, all sources).** `_phash_identical_pairs`:
+    ≥2 near-identical image pairs (`PHASH_MIN_IDENTICAL_PAIRS`, any image, Hamming ≤6) → auto-merge
+    with NO LLM. Runs before the cross-source gate, so identical-photo re-posts merge for free —
+    including SAME-source ones the gate would otherwise drop (a price-history/recall win) — and
+    cross-posted cross-source pairs skip classify AND compare. The raw any-image **count** is the
+    safety bar (a development sharing one stock facade/plan gives 1 match; an actual re-post shares
+    many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. To preserve the site-plan
+    development guard (which is post-classify), the fast-path **defers** (falls through to the visual
+    stage) when both listings already carry a classified `site_plan` (`_both_have_site_plan`). This
+    REPLACES the old interior-gated fast-path that needed classify first. NOTE: pHash only catches
+    listings that SHARE photos — most cross-source dups have DIFFERENT photos (different portals), so
+    pHash resolves a minority; the forensic compare below is still needed for the rest. (pHash
+    coverage on the `images` table must keep up — `compute_image_phash.yml` — or the fast-path
+    under-fires.)
     **Cross-source gate (cost):** the paid visual layer (D) runs only on CROSS-source pairs —
-    same-portal rule-C candidates are skipped (no classify, no compare, no queue), since
-    dedup's payoff is matching one portal against another (73/74 historical visual auto-merges
+    same-portal pairs that pHash didn't resolve are skipped (no classify, no compare, no queue),
+    since dedup's payoff is matching one portal against another (73/74 historical visual auto-merges
     were cross-source). Rule B above still auto-merges exact same-source relists for free. This
     cut ~36% of candidate pairs off the LLM stage at ~1.4% recall cost.
-    **(D)** layered visual confirmation: ≥2 near-identical INTERIOR photos (pHash;
-    facade/floor-plan/site-plan excluded) auto-merge, else a room-aware forensic comparison
-    (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in priority
-    order, stop at the first **High** verdict → auto-merge. **(E)**
+    **(D)** forensic visual confirmation (cross-source, the pair reached here only because pHash did
+    NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
+    forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
+    priority order, stop at the first **High** verdict → auto-merge. **(E)**
     everything else queues on the operator's `/dedup` review page. The visual layer's cached
     LLM tools — `classify_listing_images` (migration 128), `compare_listings_visually`
     (migration 129), and `compare_listing_site_plans` (migration 171,
