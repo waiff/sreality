@@ -370,6 +370,10 @@ class _Cur:
             self._rows = [(4, 100, 5)]  # eligible, flagged_location, flagged_disposition
         elif "FROM listings l" in s and "l.street IS NOT NULL" in s:
             self._rows = list(self._conn.eligible_rows)
+        elif "FROM images ia JOIN images ib" in s:
+            self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
+        elif "image_room_classifications" in s:
+            self._rows = [(False,)]  # _both_have_site_plan default
         elif "INSERT INTO property_identity_candidates" in s:
             self._conn.enqueued.append(params)
             self._rows = []
