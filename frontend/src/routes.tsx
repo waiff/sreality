@@ -8,6 +8,7 @@ import EstimationDetail from './pages/EstimationDetail';
 import EstimationList from './pages/EstimationList';
 import Brokers from './pages/Brokers';
 import BrokerDetail from './pages/BrokerDetail';
+import BrokerReview from './pages/BrokerReview';
 import Outreach from './pages/Outreach';
 import OutreachDetail from './pages/OutreachDetail';
 import Collections from './pages/Collections';
@@ -40,6 +41,7 @@ export const routes: RouteObject[] = [
       { path: 'estimations', element: <EstimationList /> },
       { path: 'estimation/:id', element: <EstimationDetail /> },
       { path: 'brokers', element: <Brokers /> },
+      { path: 'brokers/review', element: <BrokerReview /> },
       { path: 'brokers/:id', element: <BrokerDetail /> },
       { path: 'outreach', element: <Outreach /> },
       { path: 'outreach/:id', element: <OutreachDetail /> },
