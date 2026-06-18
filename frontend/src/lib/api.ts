@@ -1209,3 +1209,165 @@ export const runPriceStatDataset = (
   id: number,
 ): Promise<{ dispatched: boolean; run_url?: string; detail?: string }> =>
   apiPost(`/price-stats/datasets/${id}/run`, {});
+
+/* ----- broker outreach CRM (Phase 4) ------------------------------------- *
+ *
+ * Human-in-the-loop: the operator creates a campaign, the LLM drafts a
+ * message per targeted broker, the operator reviews/edits/approves and sends
+ * MANUALLY (mailto/copy) then marks it sent. No automated email send in v1.
+ * All endpoints are bearer-gated (PII). */
+
+export interface OutreachTargetSpec {
+  region_ids?: number[];
+  okres_ids?: number[];
+  obec_ids?: number[];
+  category_main?: string | null;
+  category_type?: string | null;
+  metric?: string;
+}
+
+export interface OutreachCampaign {
+  id: number;
+  name: string;
+  goal: string | null;
+  guidance: string | null;
+  status: 'draft' | 'active' | 'archived';
+  target: OutreachTargetSpec;
+  created_at: string | null;
+  updated_at: string | null;
+  message_count?: number;
+  sent_count?: number;
+  approved_count?: number;
+  draft_count?: number;
+  message_stats?: Record<string, number>;
+}
+
+export type OutreachMessageStatus =
+  | 'draft' | 'approved' | 'sent' | 'skipped' | 'replied' | 'bounced';
+
+export interface OutreachMessage {
+  id: number;
+  campaign_id: number;
+  broker_id: number;
+  broker_name: string | null;
+  firm_name: string | null;
+  channel: string;
+  to_email: string | null;
+  to_phone: string | null;
+  subject: string | null;
+  body: string | null;
+  status: OutreachMessageStatus;
+  model: string | null;
+  cost_usd: number | null;
+  generated_at: string | null;
+  approved_at: string | null;
+  sent_at: string | null;
+  sent_via: string | null;
+  notes: string | null;
+}
+
+export interface OutreachTarget {
+  broker_id: number;
+  display_name: string | null;
+  primary_email: string | null;
+  primary_phone: string | null;
+  firm_name: string | null;
+  firm_domain: string | null;
+  active_property_count: number;
+  property_count: number;
+}
+
+export interface OutreachSuppression {
+  broker_id: number;
+  broker_name: string | null;
+  reason: string | null;
+  suppressed_at: string | null;
+}
+
+export const listOutreachCampaigns = (): Promise<{ campaigns: OutreachCampaign[] }> =>
+  request<{ campaigns: OutreachCampaign[] }>('/outreach/campaigns');
+
+export const getOutreachCampaign = (id: number): Promise<OutreachCampaign> =>
+  request<OutreachCampaign>(`/outreach/campaigns/${id}`);
+
+export const createOutreachCampaign = (input: {
+  name: string;
+  goal?: string | null;
+  guidance?: string | null;
+  target?: OutreachTargetSpec | null;
+}): Promise<OutreachCampaign> =>
+  request<OutreachCampaign>('/outreach/campaigns', { method: 'POST', json: input });
+
+export const updateOutreachCampaign = (
+  id: number,
+  patch: {
+    name?: string;
+    goal?: string | null;
+    guidance?: string | null;
+    status?: string;
+    target?: OutreachTargetSpec;
+  },
+): Promise<OutreachCampaign> =>
+  request<OutreachCampaign>(`/outreach/campaigns/${id}`, { method: 'PATCH', json: patch });
+
+export const previewOutreachTargets = (
+  id: number,
+  limit = 50,
+): Promise<{ targets: OutreachTarget[]; count: number }> =>
+  request<{ targets: OutreachTarget[]; count: number }>(
+    `/outreach/campaigns/${id}/targets`,
+    { query: { limit } },
+  );
+
+export const generateOutreachDrafts = (
+  id: number,
+  limit = 25,
+): Promise<{ generated: number; targets: number }> =>
+  request<{ generated: number; targets: number }>(
+    `/outreach/campaigns/${id}/generate`,
+    { method: 'POST', query: { limit } },
+  );
+
+export const listOutreachMessages = (
+  id: number,
+  status?: string,
+): Promise<{ messages: OutreachMessage[] }> =>
+  request<{ messages: OutreachMessage[] }>(
+    `/outreach/campaigns/${id}/messages`,
+    { query: status ? { status } : undefined },
+  );
+
+export const updateOutreachMessage = (
+  messageId: number,
+  patch: { status?: string; subject?: string; body?: string; notes?: string },
+): Promise<OutreachMessage> =>
+  request<OutreachMessage>(`/outreach/messages/${messageId}`, {
+    method: 'PATCH',
+    json: patch,
+  });
+
+export const regenerateOutreachMessage = (
+  messageId: number,
+): Promise<OutreachMessage> =>
+  request<OutreachMessage>(`/outreach/messages/${messageId}/regenerate`, {
+    method: 'POST',
+  });
+
+export const listOutreachSuppressions = (): Promise<{ suppressions: OutreachSuppression[] }> =>
+  request<{ suppressions: OutreachSuppression[] }>('/outreach/suppressions');
+
+export const addOutreachSuppression = (
+  broker_id: number,
+  reason?: string,
+): Promise<OutreachSuppression> =>
+  request<OutreachSuppression>('/outreach/suppressions', {
+    method: 'POST',
+    json: { broker_id, reason },
+  });
+
+export const removeOutreachSuppression = (
+  broker_id: number,
+): Promise<{ removed: number }> =>
+  request<{ removed: number }>(`/outreach/suppressions/${broker_id}`, {
+    method: 'DELETE',
+  });
