@@ -1481,6 +1481,52 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/index_walk.yml"
   },
   {
+    "filename": "ingest_address_points.yml",
+    "name": "Jobs - ingest RÚIAN address points",
+    "description": "Refreshes the local `address_points` mirror from the ČÚZK RÚIAN \"Adresní místa\" whole-country structured CSV (~3M points, monthly). Full replace each run. Feeds the coordinate->street resolver (resolve_coord_streets.yml). Implements docs/design/street-coverage-ruian.md. NOT a portal ingest workflow — no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "30 3 3 * *",
+        "human": "30 3 3 * *"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "date",
+        "description": "strukt_ADR file date YYYYMMDD (blank = latest month-end)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Download + parse, report counts, write nothing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "ingest-address-points",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/ingest_address_points.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ingest_address_points.yml"
+  },
+  {
     "filename": "ingest_boundaries.yml",
     "name": "Data: ingest admin boundaries",
     "description": "Loads ČÚZK RÚIAN administrative-unit polygons (kraj / okres / obec / KÚ) into the admin_boundaries table. Manual-only; boundaries change rarely (a few municipal mergers / cadastral re-alignments per year), so there is no cron. Re-run when ČÚZK publishes a notable update or when the operator wants to bring in newly-created units.",
@@ -1935,6 +1981,86 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resolve_brokers_full.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resolve_brokers_full.yml"
+  },
+  {
+    "filename": "resolve_coord_streets.yml",
+    "name": "Jobs - resolve streets from coordinates (RÚIAN)",
+    "description": "Resolves listings.street from a trustworthy per-listing coordinate via the RÚIAN address_points mirror — exact-match only, never a town-center geocode (docs/design/street-coverage-ruian.md). Dispatch-driven (+ weekly catch-up for newly-scraped trustworthy-coord rows). Run `-f calibrate=true` first to pick the tolerance from ground truth. NOT a portal ingest workflow — no `# portal:` tag.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 5 * * 1",
+        "human": "0 5 * * 1"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "calibrate",
+        "description": "Report same-street distance distribution and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "tolerance",
+        "description": "Max metres from coordinate to the RÚIAN point",
+        "required": false,
+        "type": "string",
+        "default": "25",
+        "options": null
+      },
+      {
+        "name": "min_share",
+        "description": "Coord shared by >= N active listings is a town-center pin (rejected)",
+        "required": false,
+        "type": "string",
+        "default": "4",
+        "options": null
+      },
+      {
+        "name": "source",
+        "description": "Limit to one portal (blank = all eligible)",
+        "required": false,
+        "type": "choice",
+        "default": "",
+        "options": [
+          "",
+          "sreality",
+          "idnes",
+          "remax",
+          "bezrealitky",
+          "maxima"
+        ]
+      },
+      {
+        "name": "dry_run",
+        "description": "Match but write nothing",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "sreality-property-maintenance",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resolve_coord_streets.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resolve_coord_streets.yml"
   },
   {
     "filename": "resplit_mixed.yml",

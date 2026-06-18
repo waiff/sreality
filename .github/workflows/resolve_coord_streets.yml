@@ -1,0 +1,82 @@
+name: Jobs - resolve streets from coordinates (RÚIAN)
+
+# Resolves listings.street from a trustworthy per-listing coordinate via the
+# RÚIAN address_points mirror — exact-match only, never a town-center geocode
+# (docs/design/street-coverage-ruian.md). Dispatch-driven (+ weekly catch-up for
+# newly-scraped trustworthy-coord rows). Run `-f calibrate=true` first to pick the
+# tolerance from ground truth. NOT a portal ingest workflow — no `# portal:` tag.
+#
+# Required GitHub secret: SUPABASE_DB_URL. Depends on ingest_address_points.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      calibrate:
+        description: Report same-street distance distribution and exit
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      tolerance:
+        description: Max metres from coordinate to the RÚIAN point
+        required: false
+        default: "25"
+        type: string
+      min_share:
+        description: Coord shared by >= N active listings is a town-center pin (rejected)
+        required: false
+        default: "4"
+        type: string
+      source:
+        description: Limit to one portal (blank = all eligible)
+        required: false
+        default: ""
+        type: choice
+        options:
+          - ""
+          - sreality
+          - idnes
+          - remax
+          - bezrealitky
+          - maxima
+      dry_run:
+        description: Match but write nothing
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  schedule:
+    - cron: "0 5 * * 1"   # weekly Mon 05:00 UTC — catch newer trustworthy-coord rows
+
+concurrency:
+  group: sreality-property-maintenance   # shares the properties-mutation group (writes street + enqueues dirty)
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e .
+      - name: Resolve streets from coordinates
+        run: |
+          ARGS="--tolerance ${{ inputs.tolerance || '25' }} --min-share ${{ inputs.min_share || '4' }}"
+          if [ "${{ inputs.calibrate }}" = "true" ]; then ARGS="$ARGS --calibrate"; fi
+          if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.backfill_address_point_streets $ARGS
