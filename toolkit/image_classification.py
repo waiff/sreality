@@ -34,6 +34,11 @@ _PROMPT_KEY = "llm_room_classify_prompt"
 _MODEL_KEY = "llm_room_classify_model"
 _CALLED_FOR = "classify_listing_images"
 
+# Images classified per listing. The batch lane's "is this listing fully
+# classified?" check must use the SAME bound as the synchronous tool, or it
+# would mis-decide warm vs. cold — so both read this one constant.
+DEFAULT_CLASSIFY_N_IMAGES = 12
+
 ROOM_TYPES = (
     "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
     "exterior_facade", "balcony_terrace", "garden", "floor_plan", "site_plan",
@@ -94,7 +99,7 @@ def classify_listing_images(
     llm_client: "LLMClient",
     *,
     sreality_id: int,
-    n_images: int = 12,
+    n_images: int = DEFAULT_CLASSIFY_N_IMAGES,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
     """Return per-image room types for one listing, classifying on cache miss.
@@ -155,16 +160,7 @@ def _classify_missing(
         raise ClassifyError("R2 is not configured; cannot fetch image bytes for vision")
 
     r2 = image_storage.R2Client.from_env()
-    content: list[dict[str, Any]] = [
-        {"type": "text", "text": f"{len(images)} listing images, in order (index 0..N):"}
-    ]
-    for i, img in enumerate(images):
-        content.append({"type": "text", "text": f"Image index {i}:"})
-        # Room labeling is coarse and feeds only like-room pairing + the pHash
-        # interior gate (never a merge by itself), so the cheap comparison tier is
-        # ample — and well under Anthropic's resize cap, so it actually cuts tokens.
-        content.append(image_block(r2, img["storage_path"], max_edge=COMPARISON_MAX_EDGE))
-
+    content = _build_classify_content(r2, images)
     system = llm_client.resolve_system_prompt(_PROMPT_KEY)
     response = llm_client.call(
         called_for=_CALLED_FOR,
@@ -174,20 +170,125 @@ def _classify_missing(
         model=model,
     )
     rooms = _extract_rooms(response.tool_calls)
+    produced = rooms_to_produced(rooms, [img["id"] for img in images])
+    _cache_store(conn, produced, model, response.llm_call_id, response.cost_usd, len(produced))
+    return produced, float(response.cost_usd or 0.0)
 
+
+def _build_classify_content(r2: Any, images: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assemble the room-classify vision payload for one listing's images, in order.
+
+    Shared by the synchronous tool and the batch lane's build_classify_request so
+    the two paths send byte-identical content (same cached prefix, same images).
+    """
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": f"{len(images)} listing images, in order (index 0..N):"}
+    ]
+    for i, img in enumerate(images):
+        content.append({"type": "text", "text": f"Image index {i}:"})
+        # Room labeling is coarse and feeds only like-room pairing + the pHash
+        # interior gate (never a merge by itself), so the cheap comparison tier is
+        # ample — and well under Anthropic's resize cap, so it actually cuts tokens.
+        content.append(image_block(r2, img["storage_path"], max_edge=COMPARISON_MAX_EDGE))
+    return content
+
+
+def rooms_to_produced(
+    rooms: list[dict[str, Any]], image_ids: list[int],
+) -> dict[int, dict[str, str]]:
+    """Map a record_room_types result onto image_ids by 0-based index.
+
+    image_ids is the exact ordered list the request sent; the LLM returns one
+    entry per image keyed by that index. Out-of-range / unknown values degrade
+    safely (skipped / 'other' / 'low')."""
     produced: dict[int, dict[str, str]] = {}
     for entry in rooms:
         idx = entry.get("index")
-        if not isinstance(idx, int) or idx < 0 or idx >= len(images):
+        if not isinstance(idx, int) or idx < 0 or idx >= len(image_ids):
             continue
         rt = entry.get("room_type")
         if rt not in ROOM_TYPES:
             rt = "other"
         conf = entry.get("confidence") if entry.get("confidence") in ("high", "medium", "low") else "low"
-        produced[images[idx]["id"]] = {"room_type": rt, "confidence": conf}
+        produced[image_ids[idx]] = {"room_type": rt, "confidence": conf}
+    return produced
 
-    _cache_store(conn, produced, model, response.llm_call_id, response.cost_usd, len(produced))
-    return produced, float(response.cost_usd or 0.0)
+
+def build_classify_request(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    *,
+    sreality_id: int,
+    n_images: int = DEFAULT_CLASSIFY_N_IMAGES,
+) -> dict[str, Any]:
+    """Build one listing's room-classify request for the async batch lane.
+
+    Returns {system, messages, tools, model, image_ids} — the Anthropic-shaped
+    request body the batch submitter wraps, plus the ordered image_ids the
+    ingester maps the tool-call indices back onto (rooms_to_produced)."""
+    model = llm_client.resolve_model(_MODEL_KEY)
+    images = _fetch_images(conn, sreality_id, n_images)
+    if not images:
+        raise ClassifyError(f"no R2-stored images for sreality_id={sreality_id}")
+    if not image_storage.is_configured():
+        raise ClassifyError("R2 is not configured; cannot fetch image bytes for vision")
+    r2 = image_storage.R2Client.from_env()
+    content = _build_classify_content(r2, images)
+    system = llm_client.resolve_system_prompt(_PROMPT_KEY)
+    return {
+        "system": system,
+        "messages": [{"role": "user", "content": content}],
+        "tools": [RECORD_ROOM_TYPES_TOOL],
+        "model": model,
+        "image_ids": [img["id"] for img in images],
+    }
+
+
+def cached_classification(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id: int,
+    model: str,
+    n_images: int = DEFAULT_CLASSIFY_N_IMAGES,
+) -> tuple[str, dict[str, list[int]] | None]:
+    """Cache-only room read for the batch lane — never triggers the LLM.
+
+    Returns (state, rooms):
+      ('no_images', None)     — no R2-stored images (replay would queue 'no_images')
+      ('need_classify', None) — has images, not all classified under `model`
+      ('classified', {room_type: [image_id, ...]}) — fully classified
+
+    The submitter uses this to decide whether to enqueue a classify request and,
+    once classified, to pick each room's images for the compare/site_plan requests.
+    """
+    images = _fetch_images(conn, sreality_id, n_images)
+    if not images:
+        return ("no_images", None)
+    cached = _cache_lookup(conn, [im["id"] for im in images], model)
+    if len(cached) < len(images):
+        return ("need_classify", None)
+    rooms: dict[str, list[int]] = {}
+    for im in images:
+        rooms.setdefault(cached[im["id"]]["room_type"], []).append(im["id"])
+    return ("classified", rooms)
+
+
+def persist_room_classifications(
+    conn: "psycopg.Connection",
+    *,
+    image_ids: list[int],
+    tool_calls: list[dict[str, Any]],
+    model: str,
+    llm_call_id: int,
+    cost_usd: float,
+) -> int:
+    """Write a batched record_room_types result to the cache (same row the sync
+    tool writes). image_ids is the ordered list the request sent. Returns the
+    number of image rows persisted."""
+    rooms = _extract_rooms(tool_calls)
+    produced = rooms_to_produced(rooms, list(image_ids))
+    _cache_store(conn, produced, model, llm_call_id, cost_usd, len(produced))
+    return len(produced)
 
 
 def _fetch_images(
