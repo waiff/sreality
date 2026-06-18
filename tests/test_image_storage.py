@@ -7,6 +7,37 @@ import pytest
 from scraper.image_storage import R2_ENV_VARS, image_key, is_configured
 
 
+class _StreamResp:
+    """Minimal stand-in for a streamed requests.Response (context manager)."""
+
+    def __init__(self, content: bytes, headers: dict | None = None) -> None:
+        self._content = content
+        self.headers = headers or {}
+
+    def __enter__(self) -> "_StreamResp":
+        return self
+
+    def __exit__(self, *a: object) -> None:
+        return None
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_content(self, chunk_size: int = 65536):
+        for i in range(0, len(self._content), chunk_size):
+            yield self._content[i : i + chunk_size]
+
+
+def _patch_get(monkeypatch, captured: list, resp: _StreamResp) -> None:
+    import scraper.image_storage as image_storage
+
+    def _get(url, timeout=15.0, stream=False):
+        captured.append(url)
+        return resp
+
+    monkeypatch.setattr(image_storage.requests, "get", _get)
+
+
 def test_image_key_pads_sequence():
     assert image_key(2836292428, 1) == "2836292428/0001.jpg"
     assert image_key(2836292428, 19) == "2836292428/0019.jpg"
@@ -45,17 +76,7 @@ def test_download_image_appends_transform(monkeypatch):
     import scraper.image_storage as image_storage
 
     captured: list[str] = []
-
-    class _Resp:
-        content = b"jpegbytes"
-
-        def raise_for_status(self) -> None:
-            return None
-
-    monkeypatch.setattr(
-        image_storage.requests, "get",
-        lambda url, timeout=15.0: (captured.append(url), _Resp())[1],
-    )
+    _patch_get(monkeypatch, captured, _StreamResp(b"jpegbytes"))
     assert image_storage.download_image("https://d18-a.sdn.cz/x/y.jpeg") == b"jpegbytes"
     assert captured == ["https://d18-a.sdn.cz/x/y.jpeg?fl=res,749,562,3|shr,,20|jpg,90"]
 
@@ -65,20 +86,34 @@ def test_download_image_idempotent_on_existing_fl(monkeypatch):
     import scraper.image_storage as image_storage
 
     captured: list[str] = []
-
-    class _Resp:
-        content = b""
-
-        def raise_for_status(self) -> None:
-            return None
-
-    monkeypatch.setattr(
-        image_storage.requests, "get",
-        lambda url, timeout=15.0: (captured.append(url), _Resp())[1],
-    )
+    _patch_get(monkeypatch, captured, _StreamResp(b""))
     existing = "https://d18-a.sdn.cz/x/y.jpeg?fl=res,749,562,3|shr,,20|jpg,90"
     image_storage.download_image(existing)
     assert captured == [existing]
+
+
+def test_download_image_rejects_oversize_content_length(monkeypatch):
+    """A Content-Length over the cap is rejected before the body is read."""
+    import scraper.image_storage as image_storage
+    from scraper import media
+
+    captured: list[str] = []
+    headers = {"Content-Length": str(media.MAX_IMAGE_BYTES + 1)}
+    _patch_get(monkeypatch, captured, _StreamResp(b"irrelevant", headers=headers))
+    with pytest.raises(image_storage.NotAnImageError):
+        image_storage.download_image("https://www.bazos.cz/img/1/1/1.jpg")
+
+
+def test_download_image_rejects_oversize_body(monkeypatch):
+    """A body that streams past the cap (no/short Content-Length) is rejected."""
+    import scraper.image_storage as image_storage
+    from scraper import media
+
+    captured: list[str] = []
+    oversize = b"\x00" * (media.MAX_IMAGE_BYTES + 1)
+    _patch_get(monkeypatch, captured, _StreamResp(oversize))
+    with pytest.raises(image_storage.NotAnImageError):
+        image_storage.download_image("https://www.bazos.cz/img/1/1/1.jpg")
 
 
 def test_with_transform_completes_rot_prefix_chain():
@@ -118,17 +153,7 @@ def test_download_image_leaves_non_sreality_url_untouched(monkeypatch):
     import scraper.image_storage as image_storage
 
     captured: list[str] = []
-
-    class _Resp:
-        content = b"bazosbytes"
-
-        def raise_for_status(self) -> None:
-            return None
-
-    monkeypatch.setattr(
-        image_storage.requests, "get",
-        lambda url, timeout=15.0: (captured.append(url), _Resp())[1],
-    )
+    _patch_get(monkeypatch, captured, _StreamResp(b"bazosbytes"))
     bazos = "https://www.bazos.cz/img/1/123/456.jpg"
     assert image_storage.download_image(bazos) == b"bazosbytes"
     assert captured == [bazos]  # no transform appended

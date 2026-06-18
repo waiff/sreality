@@ -22,6 +22,7 @@ from typing import Any, Literal, Protocol
 import psycopg
 from psycopg.types.json import Jsonb, set_json_dumps
 
+from scraper import media
 from scraper.scraped_listing import ScrapedListing
 
 LOG = logging.getLogger(__name__)
@@ -578,6 +579,11 @@ def record_images(
         url = img.get("url")
         if not url:
             continue
+        # Backstop: `images` is strictly photographic. Video URLs are routed to
+        # listing_videos by record_media; this guard keeps a stray non-image URL
+        # (a caller that bypassed the split) out of the photo pipeline regardless.
+        if not media.is_image_url(url):
+            continue
         seq = img.get("sequence")
         if seq is not None:
             if seq in seen_seqs:
@@ -608,6 +614,67 @@ def record_images(
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(sql, flat)
         return sum(1 for (inserted,) in cur.fetchall() if inserted)
+
+
+def record_videos(
+    conn: psycopg.Connection,
+    sreality_id: int,
+    videos: Iterable[dict[str, Any]],
+) -> int:
+    """Insert video-media rows into listing_videos. Returns newly inserted count.
+
+    Mirrors record_images (same de-dupe + URL-refresh-where-not-downloaded upsert)
+    but writes the non-image sibling table. We capture the URL only — bytes are NOT
+    downloaded today (storage_path stays NULL), keeping the image pool free of large
+    video fetches; a future isolated video drain can fill them in.
+    """
+    rows: list[tuple[int, str, Any]] = []
+    seen_seqs: set[int] = set()
+    for vid in videos:
+        url = vid.get("url")
+        if not url:
+            continue
+        seq = vid.get("sequence")
+        if seq is not None:
+            if seq in seen_seqs:
+                continue
+            seen_seqs.add(seq)
+        rows.append((sreality_id, url, seq))
+    if not rows:
+        return 0
+
+    values_sql = ", ".join("(%s, %s, %s)" for _ in rows)
+    flat: list[Any] = [v for triple in rows for v in triple]
+    sql = f"""
+        INSERT INTO listing_videos (sreality_id, source_url, sequence)
+        VALUES {values_sql}
+        ON CONFLICT (sreality_id, sequence) DO UPDATE SET
+            source_url = EXCLUDED.source_url
+        WHERE listing_videos.storage_path IS NULL
+        RETURNING (xmax = 0) AS inserted
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(sql, flat)
+        return sum(1 for (inserted,) in cur.fetchall() if inserted)
+
+
+def record_media(
+    conn: psycopg.Connection,
+    sreality_id: int,
+    media_urls: Iterable[str],
+) -> int:
+    """Split a portal's ordered media URLs into images + videos and record each.
+
+    The single ingest chokepoint every portal calls instead of hand-rolling the
+    enumerate-then-record incantation: images land in `images`, videos in
+    `listing_videos`, with each item's sequence = its original gallery position
+    (so a leading video leaves a sequence gap, never renumbering the photos).
+    Returns the number of newly inserted image rows (what the portals log).
+    """
+    image_rows, video_rows = media.split_media_rows(media_urls)
+    new_images = record_images(conn, sreality_id, image_rows)
+    record_videos(conn, sreality_id, video_rows)
+    return new_images
 
 
 TOUCH_CHUNK_SIZE = 250
@@ -1591,6 +1658,11 @@ def write_detail_batch(
         for img in r.images or []:
             url = img.get("url")
             if not url:
+                continue
+            # Backstop (mirrors record_images): keep non-image URLs out of the
+            # photo pipeline. sreality has no video media today, so this never
+            # fires for the drain — it's defense-in-depth for a future schema shift.
+            if not media.is_image_url(url):
                 continue
             seq = img.get("sequence")
             if seq is not None:

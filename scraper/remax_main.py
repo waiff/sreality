@@ -249,8 +249,7 @@ class RemaxPortal:
             )
             pk, result = db.ingest_scraped_listing(conn, p["listing"])
             image_urls = p["listing"].raw.get("image_urls") or []
-            images = [{"url": u, "sequence": seq} for seq, u in enumerate(image_urls)]
-            inserted = db.record_images(conn, pk, images)
+            inserted = db.record_media(conn, pk, image_urls)
             db.mark_portal_page_parsed(conn, page_id)
             if result in counts:
                 counts[result] += 1
