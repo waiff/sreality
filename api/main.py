@@ -53,6 +53,7 @@ from api.estimation_runs import (
 from api import notifications as nf_module
 from api.portal_lookup import lookup_portal_listings
 from api.routes.admin import router as admin_router
+from api.routes.brokers import router as brokers_router
 from api.routes.dedup import router as dedup_router
 from api.routes.filter_presets import router as filter_presets_router
 from api.routes.images import router as images_router
@@ -199,6 +200,9 @@ app.include_router(notifications_router)
 # /dedup/* (cross-source merge review: list candidates, merge/dismiss/unmerge)
 # — mutating operator actions, standard bearer gate.
 app.include_router(dedup_router)
+# /brokers/* (broker intelligence reads: leaderboard, detail, listings, contacts)
+# — standard bearer gate; contacts are PII not exposed by the anon public views.
+app.include_router(brokers_router)
 # /filter-presets/* (named Browse filter presets: CRUD) — operator content,
 # standard bearer gate. Decoupled from /notifications (a preset never fires).
 app.include_router(filter_presets_router)
