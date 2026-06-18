@@ -922,6 +922,8 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
   );
   const ids = useMemo(() => comps.map((c) => c.sreality_id), [comps]);
   const [activeId, setActiveId] = useState<number | null>(null);
+  /* Shared hover id — drives the bidirectional table↔map highlight. */
+  const [hoveredId, setHoveredId] = useState<number | null>(null);
 
   const listingsQ = useQuery<Map<number, ListingPublic>, Error>({
     queryKey: ['estimation-comparables', 'listings', ids.join(',')],
@@ -957,6 +959,28 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
     staleTime: 10 * 60_000,
   });
 
+  /* Memoised so a hover-driven re-render (hoveredId) doesn't hand the map a new
+   * array identity every time, which would refire its setData + fitBounds. */
+  const mapPoints = useMemo(() => {
+    const ls = listingsQ.data;
+    if (!ls) return [];
+    return comps
+      .map((c) => {
+        const l = ls.get(c.sreality_id);
+        if (!l || l.lat == null || l.lng == null) return null;
+        return {
+          sreality_id: l.sreality_id,
+          lat: l.lat,
+          lng: l.lng,
+          price_czk: l.price_czk,
+          area_m2: l.area_m2,
+          disposition: l.disposition,
+          district: l.district,
+        };
+      })
+      .filter((p): p is NonNullable<typeof p> => p !== null);
+  }, [comps, listingsQ.data]);
+
   if (comps.length === 0) {
     return (
       <div>
@@ -973,22 +997,6 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
   const listings = listingsQ.data ?? new Map<number, ListingPublic>();
   const images = imagesQ.data ?? new Map<number, ImagePublic[]>();
   const summaries = summariesQ.data ?? new Map<number, ListingSummaryBatchRow>();
-
-  const mapPoints = comps
-    .map((c) => {
-      const l = listings.get(c.sreality_id);
-      if (!l || l.lat == null || l.lng == null) return null;
-      return {
-        sreality_id: l.sreality_id,
-        lat: l.lat,
-        lng: l.lng,
-        price_czk: l.price_czk,
-        area_m2: l.area_m2,
-        disposition: l.disposition,
-        district: l.district,
-      };
-    })
-    .filter((p): p is NonNullable<typeof p> => p !== null);
 
   const activeListing = activeId != null ? listings.get(activeId) ?? null : null;
   const activeSummary = activeId != null ? summaries.get(activeId) ?? null : null;
@@ -1013,6 +1021,9 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
             <ComparablesMap
               subject={{ lat: subjectLat, lng: subjectLng }}
               comparables={mapPoints}
+              imagesById={images}
+              hoveredId={hoveredId}
+              onHover={setHoveredId}
               onPick={(id) => setActiveId(id)}
             />
           </Suspense>
@@ -1040,6 +1051,8 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
                 listing={listings.get(c.sreality_id) ?? null}
                 summary={summaries.get(c.sreality_id) ?? null}
                 onOpen={() => setActiveId(c.sreality_id)}
+                hovered={hoveredId === c.sreality_id}
+                onHover={setHoveredId}
                 listingsLoading={listingsQ.isLoading}
                 summariesLoading={summariesQ.isLoading}
               />
@@ -1071,6 +1084,8 @@ function ComparableRow({
   listing,
   summary,
   onOpen,
+  hovered,
+  onHover,
   listingsLoading,
   summariesLoading,
 }: {
@@ -1078,6 +1093,8 @@ function ComparableRow({
   listing: ListingPublic | null;
   summary: ListingSummaryBatchRow | null;
   onOpen: () => void;
+  hovered: boolean;
+  onHover: (id: number | null) => void;
   listingsLoading: boolean;
   summariesLoading: boolean;
 }) {
@@ -1094,7 +1111,14 @@ function ComparableRow({
   return (
     <tr
       onClick={onOpen}
-      className="cursor-pointer border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors"
+      onMouseEnter={() => onHover(comp.sreality_id)}
+      onMouseLeave={() => onHover(null)}
+      className={[
+        'cursor-pointer border-b border-[var(--color-rule-soft)] last:border-b-0 transition-colors',
+        hovered
+          ? 'bg-[var(--color-copper-soft)]'
+          : 'hover:bg-[var(--color-copper-soft)]/40',
+      ].join(' ')}
     >
       <td className="px-3 py-2 align-middle">
         <button
