@@ -20,9 +20,9 @@ on:
           - "false"
           - "true"
       tolerance:
-        description: Max metres from coordinate to the RÚIAN point
+        description: Max metres from coordinate to the RÚIAN point (15 = 99.2% precision, calibrated)
         required: false
-        default: "25"
+        default: "15"
         type: string
       min_share:
         description: Coord shared by >= N active listings is a town-center pin (rejected)
@@ -75,7 +75,7 @@ jobs:
         run: pip install -e .
       - name: Resolve streets from coordinates
         run: |
-          ARGS="--tolerance ${{ inputs.tolerance || '25' }} --min-share ${{ inputs.min_share || '4' }}"
+          ARGS="--tolerance ${{ inputs.tolerance || '15' }} --min-share ${{ inputs.min_share || '4' }}"
           if [ "${{ inputs.calibrate }}" = "true" ]; then ARGS="$ARGS --calibrate"; fi
           if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi

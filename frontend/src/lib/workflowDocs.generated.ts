@@ -2011,10 +2011,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "tolerance",
-        "description": "Max metres from coordinate to the RÚIAN point",
+        "description": "Max metres from coordinate to the RÚIAN point (15 = 99.2% precision, calibrated)",
         "required": false,
         "type": "string",
-        "default": "25",
+        "default": "15",
         "options": null
       },
       {
