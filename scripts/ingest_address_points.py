@@ -1,11 +1,15 @@
 """Ingest the ČÚZK RÚIAN "Adresní místa" address points into `address_points`.
 
-Implements docs/design/street-coverage-ruian.md. The whole-country structured
-CSV (one ZIP, ~3M points, CC-BY, regenerated on the last day of each month):
+Implements docs/design/street-coverage-ruian.md. ČÚZK publishes the denormalized
+address points (street name + house number + obec code + coordinate in one row)
+as PER-OBEC CSV zips — there is no single national denormalized dump (the national
+`strukt_ADR` export is normalized FK-linkage tables with no names/coords). So we
+iterate every obec (the ~6,250 obec ids in admin_boundaries, which ARE the RÚIAN
+Kód obce):
 
-    https://vdp.cuzk.gov.cz/vymenny_format/csv/{YYYYMMDD}_strukt_ADR.csv.zip
+    https://vdp.cuzk.gov.cz/vymenny_format/csv/{YYYYMMDD}_OB_{obec}_ADR.csv.zip
 
-Windows-1250, semicolon-separated, stable column order:
+Each is Windows-1250, semicolon-separated, stable 19-column order:
 
     0 Kód ADM | 1 Kód obce | 2 Název obce | 3 Kód MOMC | 4 Název MOMC |
     5 Kód obvodu Prahy | 6 Název obvodu Prahy | 7 Kód části obce |
@@ -14,15 +18,12 @@ Windows-1250, semicolon-separated, stable column order:
     16 Souřadnice Y | 17 Souřadnice X | 18 Platí Od
 
 Only STREET-BEARING points are stored (single-street villages have no street and
-can't resolve one). Coordinates are S-JTSK / Křovák (EPSG:5514) written as
-POSITIVE magnitudes; PostGIS wants them negative, so we transform
-`ST_SetSRID(ST_MakePoint(-Y,-X), 5514)` -> 4326 at insert. Full replace each run.
+can't resolve one). Coordinates are S-JTSK / Křovák (EPSG:5514), POSITIVE
+magnitudes; transformed `ST_SetSRID(ST_MakePoint(-Y,-X), 5514)` -> 4326 at insert.
+Full replace each run. Downloads run on a small thread pool; rows are inserted
+in bounded batches (DB serialized in the main thread). Stdlib only + psycopg.
 
-Loaded in bounded batches (ST_Transform per row in the INSERT) so no single
-statement trips the statement timeout. Stdlib only (urllib / zipfile / csv / io),
-psycopg for the DB.
-
-Usage:  python -m scripts.ingest_address_points [--date YYYYMMDD] [--max-back 6] [--dry-run]
+Usage:  python -m scripts.ingest_address_points [--date YYYYMMDD] [--workers 12] [--dry-run]
 Required: SUPABASE_DB_URL.
 """
 
@@ -38,13 +39,15 @@ import sys
 import urllib.error
 import urllib.request
 import zipfile
-from typing import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 
 from scraper import db
 
 LOG = logging.getLogger("ingest_address_points")
 
-_URL = "https://vdp.cuzk.gov.cz/vymenny_format/csv/{date}_strukt_ADR.csv.zip"
+_URL = "https://vdp.cuzk.gov.cz/vymenny_format/csv/{date}_OB_{obec}_ADR.csv.zip"
+_PROBE_OBEC = 554782  # Praha — used to find the published month-end file date
 _BATCH = 10000
 
 _INSERT_SQL = """
@@ -61,35 +64,35 @@ def _month_end(d: datetime.date) -> datetime.date:
     return d.replace(day=1) - datetime.timedelta(days=1)
 
 
-def _candidate_dates(start: str | None, max_back: int) -> list[str]:
-    if start:
-        return [start]
-    cur = _month_end(datetime.date.today())
-    out: list[str] = []
-    for _ in range(max_back):
-        out.append(cur.strftime("%Y%m%d"))
-        cur = _month_end(cur)
-    return out
-
-
-def _download(date: str) -> tuple[str, bytes] | None:
-    url = _URL.format(date=date)
+def _download(date: str, obec: int) -> bytes | None:
+    url = _URL.format(date=date, obec=obec)
     req = urllib.request.Request(url, headers={"User-Agent": "sreality-ruian-ingest/1"})
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            return url, resp.read()
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return resp.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return None
         raise
 
 
+def _resolve_date(start: str | None, max_back: int) -> str | None:
+    """Find a published month-end by probing one known obec (Praha)."""
+    if start:
+        return start if _download(start, _PROBE_OBEC) is not None else None
+    cur = _month_end(datetime.date.today())
+    for _ in range(max_back):
+        date = cur.strftime("%Y%m%d")
+        if _download(date, _PROBE_OBEC) is not None:
+            return date
+        cur = _month_end(cur)
+    return None
+
+
 def _num(value: str) -> float | None:
     v = (value or "").strip().replace(",", ".")
-    if not v:
-        return None
     try:
-        return float(v)
+        return float(v) if v else None
     except ValueError:
         return None
 
@@ -101,32 +104,44 @@ def _int(value: str) -> int | None:
         return None
 
 
-def _rows(zip_bytes: bytes) -> Iterator[tuple]:
-    """Yield (id, street, house_number, obec_id, y, x) for street-bearing rows
-    with coordinates. S-JTSK Y/X kept positive here; negated in SQL."""
+def _parse(zip_bytes: bytes) -> list[tuple]:
+    """Street-bearing rows (id, street, house_number, obec_id, y, x) from one
+    per-obec CSV. S-JTSK Y/X kept positive; negated in SQL."""
+    out: list[tuple] = []
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-        name = next(n for n in zf.namelist() if n.lower().endswith(".csv"))
+        name = next((n for n in zf.namelist() if n.lower().endswith(".csv")), None)
+        if name is None:
+            return out
         with zf.open(name) as raw:
             reader = csv.reader(io.TextIOWrapper(raw, encoding="cp1250", newline=""),
                                 delimiter=";")
-            next(reader, None)  # skip the Czech header row
+            next(reader, None)  # header
             for row in reader:
                 if len(row) < 18:
                     continue
                 street = (row[10] or "").strip()
                 if not street:
-                    continue  # street NOT NULL — single-street villages dropped
+                    continue
                 y, x = _num(row[16]), _num(row[17])
                 adm = _int(row[0])
                 if y is None or x is None or adm is None:
                     continue
-                yield (adm, street, (row[12] or "").strip() or None, _int(row[1]), y, x)
+                out.append((adm, street, (row[12] or "").strip() or None, _int(row[1]), y, x))
+    return out
+
+
+def _obec_codes(conn: Any) -> list[int]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM admin_boundaries WHERE level = 'obec' ORDER BY id")
+        return [r[0] for r in cur.fetchall()]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--date", help="strukt_ADR file date YYYYMMDD (default: latest month-end)")
+    parser.add_argument("--date", help="strukt file date YYYYMMDD (default: latest month-end)")
     parser.add_argument("--max-back", type=int, default=6)
+    parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--limit-obce", type=int, default=None, help="Process only the first N obce (testing).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Download + parse, report counts, write nothing.")
     parser.add_argument("--verbose", action="store_true")
@@ -140,48 +155,61 @@ def main() -> int:
         print("ERROR: SUPABASE_DB_URL is not set.", file=sys.stderr)
         return 2
 
-    blob = used_date = None
-    for date in _candidate_dates(args.date, args.max_back):
-        LOG.info("RUIAN trying %s", _URL.format(date=date))
-        got = _download(date)
-        if got is not None:
-            url, blob = got
-            used_date = date
-            LOG.info("RUIAN downloaded %s (%.1f MB)", url, len(blob) / 1e6)
-            break
-    if blob is None:
-        LOG.error("RUIAN no strukt_ADR file found in the last %d month-ends", args.max_back)
+    date = _resolve_date(args.date, args.max_back)
+    if date is None:
+        LOG.error("RUIAN no published per-obec file found in the last %d month-ends", args.max_back)
         return 1
+    LOG.info("RUIAN using date=%s", date)
 
-    if args.dry_run:
-        n = 0
-        for _ in _rows(blob):
-            n += 1
-        LOG.info("RUIAN dry-run street_bearing_rows=%d date=%s", n, used_date)
-        return 0
-
-    inserted = 0
     with db.connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute("TRUNCATE address_points")
+        codes = _obec_codes(conn)
+        if args.limit_obce:
+            codes = codes[:args.limit_obce]
+        LOG.info("RUIAN obce=%d workers=%d", len(codes), args.workers)
+
+        if not args.dry_run:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE address_points")
+
+        inserted = obce_ok = obce_404 = 0
         batch: list[tuple] = []
-        for r in _rows(blob):
-            batch.append(r)
-            if len(batch) >= _BATCH:
+
+        def flush() -> None:
+            nonlocal inserted, batch
+            if batch and not args.dry_run:
                 with conn.cursor() as cur:
                     cur.executemany(_INSERT_SQL, batch)
-                inserted += len(batch)
-                batch = []
-                if inserted % 200000 == 0:
-                    LOG.info("RUIAN inserted=%d", inserted)
-        if batch:
-            with conn.cursor() as cur:
-                cur.executemany(_INSERT_SQL, batch)
             inserted += len(batch)
-        with conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM address_points")
-            total = cur.fetchone()[0]
-    LOG.info("RUIAN done date=%s inserted=%d total=%d", used_date, inserted, total)
+            batch = []
+
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futures = {pool.submit(_download, date, k): k for k in codes}
+            for i, fut in enumerate(as_completed(futures)):
+                try:
+                    blob = fut.result()
+                except Exception as exc:  # noqa: BLE001 — one bad obec must not abort the run
+                    LOG.warning("RUIAN obec=%s download error: %s", futures[fut], exc)
+                    continue
+                if blob is None:
+                    obce_404 += 1
+                    continue
+                obce_ok += 1
+                batch.extend(_parse(blob))
+                if len(batch) >= _BATCH:
+                    flush()
+                if (i + 1) % 1000 == 0:
+                    LOG.info("RUIAN progress obce=%d/%d ok=%d 404=%d inserted=%d",
+                             i + 1, len(codes), obce_ok, obce_404, inserted)
+        flush()
+
+        if not args.dry_run:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*), count(DISTINCT obec_id) FROM address_points")
+                total, distinct_obce = cur.fetchone()
+        else:
+            total = distinct_obce = "(dry-run)"
+    LOG.info("RUIAN done date=%s obce_ok=%d obce_404=%d inserted=%d total=%s distinct_obce=%s",
+             date, obce_ok, obce_404, inserted, total, distinct_obce)
     return 0
 
 
