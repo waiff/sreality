@@ -210,8 +210,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calibrate", action="store_true",
                         help="Report same-street distance distribution and exit (pick --tolerance).")
-    parser.add_argument("--tolerance", type=float, default=25.0,
-                        help="Max metres from coordinate to the RÚIAN point (exact-match guard).")
+    parser.add_argument("--tolerance", type=float, default=15.0,
+                        help="Max metres from coordinate to the RÚIAN point (exact-match guard). "
+                             "15 m calibrated on ground truth = 99.2% precision; looser drops it (20 m → 97.6%).")
     parser.add_argument("--min-share", type=int, default=4,
                         help="A coord shared by >= this many active listings is a town-center pin (rejected).")
     parser.add_argument("--source", choices=_SOURCES, default=None)
