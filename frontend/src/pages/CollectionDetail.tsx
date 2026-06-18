@@ -13,6 +13,7 @@ import {
   updateCollection,
 } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
+import { listingPath } from '@/lib/listingUrl';
 import {
   fmtAbsolute,
   fmtArea,
@@ -347,7 +348,7 @@ function ListingRowView({
     <tr className="border-b border-[var(--color-rule-soft)] last:border-b-0 hover:bg-[var(--color-copper-soft)]/40 transition-colors">
       <td className="px-3 py-2.5 align-middle font-mono tabular-nums text-[var(--color-ink-3)]">
         <Link
-          to={`/listing/${row.sreality_id}`}
+          to={listingPath(row.sreality_id)}
           className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           {row.sreality_id}

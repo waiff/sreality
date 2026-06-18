@@ -10,6 +10,7 @@ import {
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
 import { imageSrc } from '@/lib/imageUrl';
 import { portalListingUrl, portalShort } from '@/lib/portals';
+import { listingPath } from '@/lib/listingUrl';
 
 interface Props {
   listing: ListingPublic;
@@ -353,7 +354,7 @@ function Footer({ listing }: { listing: ListingPublic }) {
   return (
     <div className="flex items-center justify-between">
       <Link
-        to={`/listing/${listing.sreality_id}`}
+        to={listingPath(listing.sreality_id)}
         className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-copper)]/40 bg-[var(--color-copper-soft)] text-[var(--color-copper)] hover:text-[var(--color-copper-2)] hover:border-[var(--color-copper)] transition-colors"
       >
         View in full

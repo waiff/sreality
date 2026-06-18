@@ -67,6 +67,9 @@ src/
     supabase.ts      single shared client
     types.ts         shapes mirroring listings_public et al.
     queries.ts       supabase query helpers (grows with parts B–E)
+    listingUrl.ts    listingPath(srealityId) — the ONE internal /listing/:id
+                     builder; every listing link routes through it (runLinks
+                     builds the ?run= surface on top). Don't hand-roll the path.
   components/
     Shell.tsx        top bar + nav + footer
   pages/

@@ -27,6 +27,7 @@ import { runSurfaceUrl } from '@/lib/runLinks';
 import { buildRerunPayload, canRerun } from '@/lib/rerun';
 import { ControlGroup } from '@/components/controls';
 import { useNewEstimationModal } from '@/components/NewEstimationModal';
+import { listingPath } from '@/lib/listingUrl';
 
 const PAGE_SIZE = 50;
 
@@ -412,7 +413,7 @@ function ListingLinkCell({ run }: { run: EstimationRun }) {
     return (
       <span className="inline-flex items-center gap-1.5">
         <Link
-          to={`/listing/${run.input_sreality_id}`}
+          to={listingPath(run.input_sreality_id)}
           className="text-[var(--color-copper)] hover:underline underline-offset-2"
         >
           Listing

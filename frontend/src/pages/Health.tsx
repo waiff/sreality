@@ -44,6 +44,7 @@ import type {
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
 import { portalShort } from '@/lib/portals';
 import { WORKFLOW_DOCS } from '@/lib/workflowDocs.generated';
+import { listingPath } from '@/lib/listingUrl';
 
 const STALE_HOURS_WARN = 36;
 // The pg_cron loop refreshes the Health matviews every 10 min; 25 min of
@@ -1299,7 +1300,7 @@ function FailuresPanel({
                   <tr key={r.sreality_id} className="border-t border-[var(--color-rule-soft)]">
                     <td className="py-1.5 px-1.5">
                       <Link
-                        to={`/listing/${r.sreality_id}`}
+                        to={listingPath(r.sreality_id)}
                         className="font-mono tabular-nums text-[var(--color-copper)] hover:underline underline-offset-2"
                       >
                         {r.sreality_id}

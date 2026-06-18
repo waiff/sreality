@@ -41,6 +41,7 @@ import {
 import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
+import { listingPath } from '@/lib/listingUrl';
 
 const PriceLineChart = lazy(
   () => import('@/components/listing-detail/PriceLineChart'),
@@ -77,7 +78,7 @@ export default function ListingDetail() {
   });
   useLayoutEffect(() => {
     if (reprQ.data != null) {
-      navigate(`/listing/${reprQ.data}`, { replace: true });
+      navigate(listingPath(reprQ.data), { replace: true });
     }
   }, [reprQ.data, navigate]);
 
@@ -326,7 +327,7 @@ function LatestActiveLink({
   if (!liveSibling) return null;
   return (
     <Link
-      to={`/listing/${liveSibling.sreality_id}`}
+      to={listingPath(liveSibling.sreality_id)}
       className="inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] px-3 py-1.5 text-[0.8rem] text-[var(--color-copper)] hover:bg-[var(--color-copper)]/15 transition-colors"
     >
       <span className="w-1.5 h-1.5 rounded-full bg-[var(--color-sage)]" aria-hidden />

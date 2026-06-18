@@ -14,6 +14,8 @@ import {
 import { portalLabel } from '@/lib/portals';
 import { placePrimary } from '@/lib/placeLabel';
 import type { ListingEstimate } from '@/lib/types';
+import { runSurfaceUrl } from '@/lib/runLinks';
+import { listingPath } from '@/lib/listingUrl';
 
 interface Props {
   rows: CardRow[] | null;
@@ -379,7 +381,7 @@ function Card({
   return (
     <Link
       ref={setWrapperEl}
-      to={`/listing/${r.sreality_id}`}
+      to={listingPath(r.sreality_id)}
       onMouseEnter={() => onHover([r.sreality_id])}
       onMouseLeave={() => onHover(null)}
       className={wrapperClass}
@@ -464,7 +466,7 @@ function EstimateCorner({
           onClick={(e) => {
             stop(e);
             navigate(
-              `/listing/${estimate.sreality_id}?run=${estimate.run_id}#estimations`,
+              runSurfaceUrl({ id: estimate.run_id, input_sreality_id: estimate.sreality_id }),
             );
           }}
           title="Náš odhad nájmu — otevřít detail odhadu"
