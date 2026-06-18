@@ -1,14 +1,13 @@
 """Tests for POST /listings/lookup — the Chrome extension's batch (source,
-native id) → MF rent/yield + latest-estimate lookup.
+native id) → MF rent/yield + sreality_id (app deep-link) + latest-estimate.
 
-The logic tests drive `lookup_portal_listings` against a tiny fake cursor
-(one canned result set per query); the route tests exercise the bearer gate,
-request validation, and delegation.
+The logic tests drive `lookup_portal_listings` against a tiny fake cursor that
+returns dict rows (the real query uses psycopg's dict_row factory); the route
+tests exercise the bearer gate, request validation, and delegation.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -25,11 +24,26 @@ from api import schemas as s
 
 
 # ----------------------------------------------------------------------
-# Logic: lookup_portal_listings against a fake cursor.
+# Logic: lookup_portal_listings against a fake dict-row cursor.
 # ----------------------------------------------------------------------
 
+def _mk_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, Any]:
+    """One dict row keyed by the SELECT aliases (defaults null)."""
+    row: dict[str, Any] = {
+        "source": source, "source_id": source_id, "found": found,
+        "sreality_id": None, "category_main": None, "category_type": None,
+        "area_m2": None, "price_czk": None, "disposition": None,
+        "district": None, "locality": None, "is_active": None,
+        "last_seen_at": None, "mf_reference_rent_czk": None,
+        "mf_gross_yield_pct": None, "estimation_id": None,
+        "estimation_kind": None, "estimation_yield": None,
+    }
+    row.update(cols)
+    return row
+
+
 class _FakeCursor:
-    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
         self.executed: tuple[str, list[Any]] | None = None
 
@@ -42,15 +56,15 @@ class _FakeCursor:
     def execute(self, sql: str, params: list[Any]) -> None:
         self.executed = (sql, params)
 
-    def fetchall(self) -> list[tuple[Any, ...]]:
+    def fetchall(self) -> list[dict[str, Any]]:
         return self._rows
 
 
 class _FakeConn:
-    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
         self.cur = _FakeCursor(rows)
 
-    def cursor(self) -> _FakeCursor:
+    def cursor(self, **_kwargs: Any) -> _FakeCursor:  # accepts row_factory=dict_row
         return self.cur
 
 
@@ -61,68 +75,67 @@ def _items(*pairs: tuple[str, str]) -> list[s.PortalLookupItem]:
     return [s.PortalLookupItem(source=src, source_id=sid) for src, sid in pairs]
 
 
-def test_lookup_maps_rows_with_mf_and_estimation() -> None:
+def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     rows = [
-        # sreality: found, has MF + a successful estimation
-        ("sreality", "1184977484", True, "byt", "prodej", Decimal("65.0"),
-         4_800_000, "2+kk", "Praha 5", "Praha 5 - Smíchov", True, _TS,
-         21_840, Decimal("5.46"), 99, "rent", Decimal("5.46")),
-        # idnes: found, has MF but no estimation
-        ("idnes", "69efb4b677527bbe3f0ee7d5", True, "byt", "prodej",
-         Decimal("253.0"), 83_000_000, "5+1", "Praha 1", "Praha 1", True, _TS,
-         71_852, Decimal("1.04"), None, None, None),
-        # bazos: not found
-        ("bazos", "219122924", False, None, None, None, None, None, None, None,
-         None, None, None, None, None, None, None),
+        # sreality: found, has MF + a successful estimation; positive sreality_id
+        _mk_row("sreality", "1184977484", True, sreality_id=1184977484,
+                category_main="byt", category_type="prodej", area_m2=Decimal("65.0"),
+                price_czk=4_800_000, disposition="2+kk", district="Praha 5",
+                locality="Praha 5 - Smíchov", is_active=True, last_seen_at=_TS,
+                mf_reference_rent_czk=21_840, mf_gross_yield_pct=Decimal("5.46"),
+                estimation_id=99, estimation_kind="rent",
+                estimation_yield=Decimal("5.46")),
+        # bazos: found, NEGATIVE synthetic sreality_id, no MF, no estimation
+        _mk_row("bazos", "220291221", True, sreality_id=-187691,
+                category_main="byt", category_type="prodej", price_czk=7_700_000,
+                disposition="3+kk", district="okres Pardubice", is_active=True),
+        # idnes: not found → sreality_id null
+        _mk_row("idnes", "deadbeef", False),
     ]
-    conn = _FakeConn(rows)
     out = pl.lookup_portal_listings(
-        conn,
-        _items(("sreality", "1184977484"),
-               ("idnes", "69efb4b677527bbe3f0ee7d5"),
-               ("bazos", "219122924")),
+        _FakeConn(rows),
+        _items(("sreality", "1184977484"), ("bazos", "220291221"),
+               ("idnes", "deadbeef")),
     )
     data = out["data"]
-    assert [d["source"] for d in data] == ["sreality", "idnes", "bazos"]
+    assert [d["source"] for d in data] == ["sreality", "bazos", "idnes"]
 
     sr = data[0]
     assert sr["found"] is True
-    assert sr["category_main"] == "byt" and sr["category_type"] == "prodej"
+    assert sr["sreality_id"] == 1184977484  # positive for sreality
     assert sr["area_m2"] == 65.0  # Decimal → float
-    assert sr["price_czk"] == 4_800_000
-    assert sr["mf_reference_rent_czk"] == 21_840
     assert sr["mf_gross_yield_pct"] == 5.46
     assert sr["last_seen_at"] == _TS.isoformat()  # datetime → iso8601
     assert sr["latest_estimation"] == {
         "estimation_id": 99, "estimate_kind": "rent", "gross_yield_pct": 5.46,
     }
 
-    assert data[1]["found"] is True
-    assert data[1]["latest_estimation"] is None
-
-    bz = data[2]
-    assert bz["found"] is False
-    assert bz["mf_gross_yield_pct"] is None
+    bz = data[1]
+    assert bz["found"] is True
+    assert bz["sreality_id"] == -187691  # negative synthetic for non-sreality
     assert bz["latest_estimation"] is None
+
+    idn = data[2]
+    assert idn["found"] is False
+    assert idn["sreality_id"] is None  # not in our DB → no app page
+    assert idn["latest_estimation"] is None
 
 
 def test_lookup_binds_one_value_pair_per_item() -> None:
-    conn = _FakeConn([])
-    pl.lookup_portal_listings(conn, _items(("sreality", "1"), ("idnes", "abc")))
-    sql, params = conn.cur.executed
+    out_conn = _FakeConn([])
+    pl.lookup_portal_listings(out_conn, _items(("sreality", "1"), ("idnes", "abc")))
+    sql, params = out_conn.cur.executed
     # two (%s::text, %s::text) tuples → 4 bound params, in request order
     assert params == ["sreality", "1", "idnes", "abc"]
     assert sql.count("%s") == 4
 
 
 def test_lookup_preserves_request_order_even_if_db_reorders() -> None:
-    # DB returns rows in a different order than requested; output follows the
-    # request order (we key by (source, source_id)).
     rows = [
-        ("idnes", "b", True, "byt", "prodej", None, None, None, None, None,
-         True, None, None, None, None, None, None),
-        ("sreality", "a", True, "byt", "prodej", None, None, None, None, None,
-         True, None, None, None, None, None, None),
+        _mk_row("idnes", "b", True, sreality_id=-2, category_main="byt",
+                category_type="prodej", is_active=True),
+        _mk_row("sreality", "a", True, sreality_id=1, category_main="byt",
+                category_type="prodej", is_active=True),
     ]
     out = pl.lookup_portal_listings(
         _FakeConn(rows), _items(("sreality", "a"), ("idnes", "b")),
