@@ -124,13 +124,36 @@ def _produce(
     keys_b_ids: list[int],
     model: str,
 ) -> tuple[str, str, float, int]:
+    content = _build_compare_content(conn, room_type, keys_a_ids, keys_b_ids)
+    system = llm_client.resolve_system_prompt(_PROMPT_KEY)
+    response = llm_client.call(
+        called_for=_CALLED_FOR,
+        messages=[{"role": "user", "content": content}],
+        system=system,
+        tools=[RECORD_VISUAL_MATCH_TOOL],
+        model=model,
+    )
+    verdict, rationale = _extract(response.tool_calls)
+    return verdict, rationale, float(response.cost_usd or 0.0), response.llm_call_id
+
+
+def _build_compare_content(
+    conn: "psycopg.Connection",
+    room_type: str,
+    keys_a_ids: list[int],
+    keys_b_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Assemble the forensic same-property payload for one room pair.
+
+    Shared by the synchronous tool and the batch lane's build_compare_request so
+    the two paths send byte-identical content."""
     if not image_storage.is_configured():
         raise VisualMatchError("R2 is not configured; cannot fetch image bytes for vision")
 
     keys_a = _storage_paths(conn, keys_a_ids)
     keys_b = _storage_paths(conn, keys_b_ids)
     if not keys_a or not keys_b:
-        raise VisualMatchError(f"missing {room_type} images for one side ({a} or {b})")
+        raise VisualMatchError(f"missing {room_type} images for one side")
 
     r2 = image_storage.R2Client.from_env()
     content: list[dict[str, Any]] = [
@@ -146,17 +169,69 @@ def _produce(
             "same physical property, then call record_visual_match once."
         ),
     })
+    return content
 
+
+def build_compare_request(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    room_type: str,
+    image_ids_a: list[int],
+    image_ids_b: list[int],
+) -> dict[str, Any]:
+    """Build one room-pair forensic request for the async batch lane.
+
+    Canonicalises the pair (sorted ids) so the request matches the cache key the
+    ingester writes. Returns {system, messages, tools, model}."""
+    if sreality_id_a == sreality_id_b:
+        raise VisualMatchError("cannot compare a listing to itself")
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    model = llm_client.resolve_model(_MODEL_KEY)
+    keys_a_ids = image_ids_a if a == sreality_id_a else image_ids_b
+    keys_b_ids = image_ids_b if a == sreality_id_a else image_ids_a
+    content = _build_compare_content(conn, room_type, keys_a_ids, keys_b_ids)
     system = llm_client.resolve_system_prompt(_PROMPT_KEY)
-    response = llm_client.call(
-        called_for=_CALLED_FOR,
-        messages=[{"role": "user", "content": content}],
-        system=system,
-        tools=[RECORD_VISUAL_MATCH_TOOL],
-        model=model,
-    )
-    verdict, rationale = _extract(response.tool_calls)
-    return verdict, rationale, float(response.cost_usd or 0.0), response.llm_call_id
+    return {
+        "system": system,
+        "messages": [{"role": "user", "content": content}],
+        "tools": [RECORD_VISUAL_MATCH_TOOL],
+        "model": model,
+    }
+
+
+def cached_visual_verdict(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    room_type: str,
+    model: str,
+) -> str | None:
+    """Cache-only verdict read for the batch lane (skip already-warm room pairs)."""
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    row = _cache_lookup(conn, a, b, room_type, model)
+    return row["verdict"] if row else None
+
+
+def persist_visual_match(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    room_type: str,
+    tool_calls: list[dict[str, Any]],
+    model: str,
+    llm_call_id: int,
+    cost_usd: float,
+) -> None:
+    """Write a batched record_visual_match result to the cache (same row the sync
+    tool writes), keyed on the canonical pair + room + model."""
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    verdict, rationale = _extract(tool_calls)
+    _cache_store(conn, a, b, room_type, verdict, rationale, model, llm_call_id, cost_usd)
 
 
 def _storage_paths(conn: "psycopg.Connection", image_ids: list[int]) -> list[str]:
@@ -332,13 +407,34 @@ def _produce_site_plan(
     keys_b_ids: list[int],
     model: str,
 ) -> tuple[str, str, float, int]:
+    content = _build_site_plan_content(conn, keys_a_ids, keys_b_ids)
+    system = llm_client.resolve_system_prompt(_SITE_PLAN_PROMPT_KEY)
+    response = llm_client.call(
+        called_for=_SITE_PLAN_CALLED_FOR,
+        messages=[{"role": "user", "content": content}],
+        system=system,
+        tools=[RECORD_SITE_PLAN_MATCH_TOOL],
+        model=model,
+    )
+    verdict, rationale = _extract_site_plan(response.tool_calls)
+    return verdict, rationale, float(response.cost_usd or 0.0), response.llm_call_id
+
+
+def _build_site_plan_content(
+    conn: "psycopg.Connection",
+    keys_a_ids: list[int],
+    keys_b_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Assemble the development-guard payload for two listings' site plans.
+
+    Shared by the synchronous tool and the batch lane's build_site_plan_request."""
     if not image_storage.is_configured():
         raise VisualMatchError("R2 is not configured; cannot fetch image bytes for vision")
 
     keys_a = _storage_paths(conn, keys_a_ids)
     keys_b = _storage_paths(conn, keys_b_ids)
     if not keys_a or not keys_b:
-        raise VisualMatchError(f"missing site-plan images for one side ({a} or {b})")
+        raise VisualMatchError("missing site-plan images for one side")
 
     r2 = image_storage.R2Client.from_env()
     content: list[dict[str, Any]] = [
@@ -351,17 +447,63 @@ def _produce_site_plan(
         "type": "text",
         "text": "Decide same_unit vs different_unit, then call record_site_plan_match once.",
     })
+    return content
 
+
+def build_site_plan_request(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    image_ids_a: list[int],
+    image_ids_b: list[int],
+) -> dict[str, Any]:
+    """Build one development-guard (site-plan) request for the async batch lane."""
+    if sreality_id_a == sreality_id_b:
+        raise VisualMatchError("cannot compare a listing to itself")
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
+    keys_a_ids = image_ids_a if a == sreality_id_a else image_ids_b
+    keys_b_ids = image_ids_b if a == sreality_id_a else image_ids_a
+    content = _build_site_plan_content(conn, keys_a_ids, keys_b_ids)
     system = llm_client.resolve_system_prompt(_SITE_PLAN_PROMPT_KEY)
-    response = llm_client.call(
-        called_for=_SITE_PLAN_CALLED_FOR,
-        messages=[{"role": "user", "content": content}],
-        system=system,
-        tools=[RECORD_SITE_PLAN_MATCH_TOOL],
-        model=model,
-    )
-    verdict, rationale = _extract_site_plan(response.tool_calls)
-    return verdict, rationale, float(response.cost_usd or 0.0), response.llm_call_id
+    return {
+        "system": system,
+        "messages": [{"role": "user", "content": content}],
+        "tools": [RECORD_SITE_PLAN_MATCH_TOOL],
+        "model": model,
+    }
+
+
+def cached_site_plan_verdict(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    model: str,
+) -> str | None:
+    """Cache-only site-plan verdict read for the batch lane."""
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    row = _site_plan_cache_lookup(conn, a, b, model)
+    return row["verdict"] if row else None
+
+
+def persist_site_plan_match(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    tool_calls: list[dict[str, Any]],
+    model: str,
+    llm_call_id: int,
+    cost_usd: float,
+) -> None:
+    """Write a batched record_site_plan_match result to the cache (same row the
+    sync tool writes), keyed on the canonical pair + model."""
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    verdict, rationale = _extract_site_plan(tool_calls)
+    _site_plan_cache_store(conn, a, b, verdict, rationale, model, llm_call_id, cost_usd)
 
 
 def _extract_site_plan(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:

@@ -1,0 +1,115 @@
+name: "Dedup engine (vision batch warm-up)"
+
+# Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the
+# synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the
+# engine's classify/compare/site_plan caches; the daily "Dedup engine
+# (street + disposition)" run then REPLAYS unchanged over the warm caches and
+# produces the identical merges for free. Two modes, selected by which cron fired
+# (or the `mode` dispatch input):
+#
+#   submit  — run the engine's FREE funnel (rules A/B/C + pHash + cross-source
+#             gate) and enqueue the cross-source pairs' classify/compare/site_plan
+#             requests as size-bounded batches (scripts.submit_dedup_batch). Two
+#             waves fall out across runs: classify first, then compare/site_plan
+#             once classify ingests. Does NO merges.
+#   ingest  — poll in-flight batches; on completion, write each result to its
+#             cache (the same row the sync tool writes) + one llm_calls row at the
+#             50% batch-discounted cost (scripts.ingest_dedup_batch). Idempotent.
+#
+# This is a source-agnostic cost optimization, not a portal ingest — left
+# untagged (no `# portal:` line) so it appears in Settings > Workflows, not any
+# one portal's pipeline panel.
+#
+# Required GitHub secrets: SUPABASE_DB_URL, ANTHROPIC_API_KEY, and R2_* (submit
+# downloads image bytes to build the vision requests).
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # submit: enqueue the next slice of vision requests
+    - cron: "30 * * * *"    # ingest: poll + persist completed batches
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "submit a new batch, or ingest completed ones"
+        required: true
+        default: "ingest"
+        type: choice
+        options:
+          - "ingest"
+          - "submit"
+      max_pairs:
+        description: "[submit] Max visual candidate pairs examined per run"
+        required: false
+        default: "4000"
+        type: string
+      max_requests:
+        description: "[submit] Cap total vision requests enqueued per run"
+        required: false
+        default: "1500"
+        type: string
+      max_room_attempts:
+        description: "[submit] Max like-room compare requests enqueued per pair"
+        required: false
+        default: "4"
+        type: string
+      dry_run:
+        description: "[submit] Report what would be enqueued without submitting"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: dedup-batches
+  cancel-in-progress: false
+
+jobs:
+  batch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e ".[api]"
+
+      - name: Run batch step
+        run: |
+          # Scheduled triggers pass no inputs; pick mode from which cron fired.
+          MODE="${{ inputs.mode }}"
+          if [ -z "$MODE" ]; then
+            if [ "${{ github.event.schedule }}" = "0 */6 * * *" ]; then
+              MODE="submit"
+            else
+              MODE="ingest"
+            fi
+          fi
+
+          if [ "$MODE" = "submit" ]; then
+            ARGS="--max-pairs ${{ inputs.max_pairs || '4000' }}"
+            ARGS="$ARGS --max-requests ${{ inputs.max_requests || '1500' }}"
+            ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            echo "submit with: $ARGS"
+            python -m scripts.submit_dedup_batch $ARGS
+          else
+            echo "ingest in-flight batches"
+            python -m scripts.ingest_dedup_batch
+          fi

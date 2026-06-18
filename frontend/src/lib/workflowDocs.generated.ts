@@ -774,6 +774,88 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/condition_scores.yml"
   },
   {
+    "filename": "dedup_batches.yml",
+    "name": "Dedup engine (vision batch warm-up)",
+    "description": "Async dedup-vision via the Anthropic Message Batches API (50% cheaper than the synchronous dedup engine's per-call vision, recall-identical). PRE-WARMS the engine's classify/compare/site_plan caches; the daily \"Dedup engine (street + disposition)\" run then REPLAYS unchanged over the warm caches and produces the identical merges for free. Two modes, selected by which cron fired (or the `mode` dispatch input):",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "0 */6 * * *",
+        "human": "Every 6 hours"
+      },
+      {
+        "cron": "30 * * * *",
+        "human": "Every hour at :30"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "submit a new batch, or ingest completed ones",
+        "required": true,
+        "type": "choice",
+        "default": "ingest",
+        "options": [
+          "ingest",
+          "submit"
+        ]
+      },
+      {
+        "name": "max_pairs",
+        "description": "[submit] Max visual candidate pairs examined per run",
+        "required": false,
+        "type": "string",
+        "default": "4000",
+        "options": null
+      },
+      {
+        "name": "max_requests",
+        "description": "[submit] Cap total vision requests enqueued per run",
+        "required": false,
+        "type": "string",
+        "default": "1500",
+        "options": null
+      },
+      {
+        "name": "max_room_attempts",
+        "description": "[submit] Max like-room compare requests enqueued per pair",
+        "required": false,
+        "type": "string",
+        "default": "4",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "[submit] Report what would be enqueued without submitting",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "ANTHROPIC_API_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "dedup-batches",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/dedup_batches.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/dedup_batches.yml"
+  },
+  {
     "filename": "dedup_engine.yml",
     "name": "Dedup engine (street + disposition)",
     "description": "Street + disposition keyed dedup engine. Groups listings that share a street and disposition into one real-world property, autonomously. Replaces the old geo-proximity Tier-2 sweep. Rules: (A) only listings with BOTH a street and a disposition are eligible; (B) same street + house number + disposition + floor auto-merges (with a 5% area guard); (C) same street + disposition with no contradicting floor/area/house-number becomes a visual candidate; (D) the visual layer confirms — >=2 near-identical interior photos (pHash), else a room-aware forensic comparison stopping at the first High verdict — and merges on confirmation; (E) everything else is queued for the operator's /dedup page.",
