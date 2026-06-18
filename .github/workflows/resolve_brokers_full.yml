@@ -32,8 +32,11 @@ on:
         default: "3000"
         type: string
 
+# Per-workflow group (NOT shared with the incremental) so the */10 incremental can
+# never cancel this pending run. Cross-workflow mutual exclusion is the DB lock
+# (broker_resolution_lock, migration 192), which this sweep waits on.
 concurrency:
-  group: broker-resolution
+  group: broker-resolution-full
   cancel-in-progress: false
 
 jobs:

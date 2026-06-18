@@ -411,6 +411,45 @@ def _settings(conn: Any) -> tuple[list[str], list[str], list[str]]:
     return free, franchise, auto
 
 
+# Pooler-safe mutual exclusion (migration 192). A session pg_advisory_lock is
+# unreliable through the transaction-mode pooler, so we claim a single lock row
+# instead; the holder heartbeats during a long run and a stale heartbeat lets a
+# later run take over after a SIGKILL.
+_LOCK_STALE_MIN = 10
+_LOCK_POLL_SECONDS = 10
+_LOCK_WAIT_MAX_SECONDS = 660  # > the stale window, so a dead holder is always taken over
+
+
+def _try_acquire_lock(conn: Any, holder: str, mode: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE broker_resolution_lock SET holder=%(h)s, mode=%(m)s, acquired_at=now(), "
+            "heartbeat_at=now() WHERE id=1 AND (holder IS NULL OR "
+            "heartbeat_at < now() - make_interval(mins => %(stale)s))",
+            {"h": holder, "m": mode, "stale": _LOCK_STALE_MIN})
+        return cur.rowcount == 1
+
+
+def _acquire_lock_blocking(conn: Any, holder: str, mode: str, deadline_s: float) -> bool:
+    while not _try_acquire_lock(conn, holder, mode):
+        if time.monotonic() > deadline_s:
+            return False
+        time.sleep(_LOCK_POLL_SECONDS)
+    return True
+
+
+def _heartbeat_lock(conn: Any, holder: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE broker_resolution_lock SET heartbeat_at=now() WHERE id=1 AND holder=%(h)s",
+                    {"h": holder})
+
+
+def _release_lock(conn: Any, holder: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE broker_resolution_lock SET holder=NULL WHERE id=1 AND holder=%(h)s",
+                    {"h": holder})
+
+
 def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
     """Run per-source attribution (sreality raw_json.user + idnes raw_json.broker)."""
     with conn.cursor() as cur:
@@ -585,7 +624,7 @@ def _refresh_matview(conn: Any) -> None:
 
 
 def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
-              batch_size: int, deadline: float | None) -> dict[str, int]:
+              batch_size: int, deadline: float | None, holder: str = "") -> dict[str, int]:
     with conn.cursor() as cur:
         cur.execute("SELECT now()")
         cutoff = cur.fetchone()[0]
@@ -605,6 +644,8 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
         )
         all_ids = [int(r[0]) for r in cur.fetchall()]
     for i in range(0, len(all_ids), batch_size):
+        if holder:
+            _heartbeat_lock(conn, holder)
         _attribute(conn, "l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
         if deadline and time.monotonic() > deadline:
             LOG.warning("RESOLVE full: time budget reached during attribution at %d/%d ids",
@@ -617,6 +658,8 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # now that idnes adds ~125k linkable rows. sreality_id is sparse, so chunk the
     # actual ids (the PR #470 lesson), not a numeric range.
     for i in range(0, len(all_ids), batch_size):
+        if holder:
+            _heartbeat_lock(conn, holder)
         _link_listings_firm(conn, "AND l.sreality_id = ANY(%(ids)s)", {"ids": all_ids[i:i + batch_size]})
     attached = _attach_singletons(conn)
     LOG.info("RESOLVE full attribution+firms done elapsed=%.1fs", time.monotonic() - t0)
@@ -624,6 +667,8 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # Merge BEFORE the rollups so dsc / listing_count / membership reflect the unified
     # broker groupings (a merge re-points broker_identities.broker_id). _cross_source_merge
     # no-ops with one source and is gated per-source by broker_auto_merge_sources.
+    if holder:
+        _heartbeat_lock(conn, holder)
     auto_merges, queued = _cross_source_merge(conn, auto, run_id)
     LOG.info("RESOLVE full merge done auto=%d queued=%d elapsed=%.1fs",
              auto_merges, queued, time.monotonic() - t0)
@@ -632,11 +677,15 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # single global UPDATE over every broker exceeds the pooler statement timeout.
     # Mirrors recompute_property_stats' id-range batching.
     for lo in range(1, _max_id(conn, "broker_identities") + 1, batch_size):
+        if holder:
+            _heartbeat_lock(conn, holder)
         with conn.cursor() as cur:
             cur.execute(_IDENTITY_ROLLUP.format(
                 extra="AND broker_identity_id >= %(lo)s AND broker_identity_id < %(hi)s"),
                 {"lo": lo, "hi": lo + batch_size})
     for lo in range(1, _max_id(conn, "brokers") + 1, batch_size):
+        if holder:
+            _heartbeat_lock(conn, holder)
         with conn.cursor() as cur:
             cur.execute(_BROKER_ROLLUP.format(
                 bscope="AND broker_id >= %(lo)s AND broker_id < %(hi)s"),
@@ -743,14 +792,29 @@ def main() -> int:
                      mode, len(free), len(franchise), stragglers, dirty)
             return 0
 
+        # Pooler-safe mutual exclusion (migration 192). The incremental yields when the
+        # lock is held (its work is subsumed by whatever holds it); the full sweep waits,
+        # taking over only a stale (dead-holder) lock — it is the reconcile that must run.
+        holder = f"{mode}-{uuid.uuid4()}"
         if args.incremental:
-            res = _run_incremental(conn, free, franchise, args.batch_size)
-            LOG.info("RESOLVE incremental done attributed=%d brokers=%d elapsed=%.1fs",
-                     res["attributed"], res["brokers"], time.monotonic() - started)
-        else:
-            res = _run_full(conn, free, franchise, auto, args.batch_size, deadline)
-            LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d elapsed=%.1fs",
-                     res["attached"], res["auto_merges"], res["queued"], time.monotonic() - started)
+            if not _try_acquire_lock(conn, holder, mode):
+                LOG.info("RESOLVE skip mode=incremental: lock held by another resolution run")
+                return 0
+        elif not _acquire_lock_blocking(conn, holder, mode, started + _LOCK_WAIT_MAX_SECONDS):
+            LOG.error("RESOLVE abort mode=full: could not acquire lock within %ds", _LOCK_WAIT_MAX_SECONDS)
+            return 1
+
+        try:
+            if args.incremental:
+                res = _run_incremental(conn, free, franchise, args.batch_size)
+                LOG.info("RESOLVE incremental done attributed=%d brokers=%d elapsed=%.1fs",
+                         res["attributed"], res["brokers"], time.monotonic() - started)
+            else:
+                res = _run_full(conn, free, franchise, auto, args.batch_size, deadline, holder)
+                LOG.info("RESOLVE full done attached=%d auto_merges=%d queued=%d elapsed=%.1fs",
+                         res["attached"], res["auto_merges"], res["queued"], time.monotonic() - started)
+        finally:
+            _release_lock(conn, holder)
     return 0
 
 
