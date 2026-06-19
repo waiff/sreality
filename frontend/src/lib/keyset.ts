@@ -36,6 +36,19 @@ export interface KeysetCursor {
   id: number;
 }
 
+/* Sort columns that are NOT NULL on `properties`. For these the NULLS-LAST
+ * tail doesn't exist, so the `field IS NULL` disjunct (which nullable columns
+ * REQUIRE — see applyKeyset) is omitted: an `OR col IS NULL` defeats the
+ * composite (col, id) btree, forcing a seq-scan + sort, and these are exactly
+ * the hot, indexed lanes (the default last_seen_at and the cards' first_seen
+ * presets). Verified against information_schema; keep in sync if a sort
+ * column's nullability changes. Everything else is treated as nullable. */
+const NON_NULL_SORT_FIELDS = new Set<string>([
+  'last_seen_at',
+  'first_seen_at',
+  'is_active',
+]);
+
 /* A PostgREST filter builder, narrowed to the methods keyset needs. The
  * supabase-js query builder satisfies this at runtime; typing it
  * structurally keeps this module decoupled from the concrete builder. */
@@ -47,6 +60,7 @@ export interface KeysetBuilder {
   or: (filters: string) => KeysetBuilder;
   is: (column: string, value: null) => KeysetBuilder;
   lt: (column: string, value: number) => KeysetBuilder;
+  gt: (column: string, value: number) => KeysetBuilder;
 }
 
 /* Format a non-null cursor value for embedding in a PostgREST `or=()`
@@ -60,36 +74,54 @@ export function formatKeysetValue(value: string | number | boolean): string {
   return `"${escaped}"`;
 }
 
-/* Apply the keyset ORDER BY (sort field, then property_id DESC) and, when a
- * cursor is supplied, the "everything strictly after this row" predicate.
- * Direction-aware: DESC pages with `<`, ASC with `>`; the property_id
- * tiebreaker always pages with `<` (it is ordered DESC in both cases). */
+/* Apply the keyset ORDER BY (sort field, then property_id — BOTH in the sort
+ * direction) and, when a cursor is supplied, the "everything strictly after
+ * this row" predicate. Tying the tiebreaker to the sort direction (rather
+ * than fixing it DESC) is what lets a single plain `(col, id)` btree serve
+ * BOTH scroll directions via a forward / backward scan. Direction-aware: DESC
+ * pages with `<`, ASC with `>`, for the field AND the tiebreaker. */
 export function applyKeyset<T extends KeysetBuilder>(
   query: T,
   sort: SortSpec,
   cursor: KeysetCursor | null,
 ): T {
+  const asc = sort.direction === 'asc';
   const ordered = query
-    .order(sort.field, { ascending: sort.direction === 'asc', nullsFirst: false })
-    .order('property_id', { ascending: false }) as T;
+    .order(sort.field, { ascending: asc, nullsFirst: false })
+    .order('property_id', { ascending: asc }) as T;
 
   if (!cursor) return ordered;
 
   /* Phase 2 — NULLS-LAST tail: every non-null-sort-value row has already
-   * been emitted, so the remainder is exactly the null rows with a smaller
-   * property_id. A plain AND of two predicates, no OR needed. */
+   * been emitted, so the remainder is exactly the null rows beyond the
+   * tiebreaker. A plain AND of two predicates, no OR needed. */
   if (cursor.value === null) {
-    return ordered.is(sort.field, null).lt('property_id', cursor.id) as T;
+    const tail = ordered.is(sort.field, null);
+    return (asc
+      ? tail.gt('property_id', cursor.id)
+      : tail.lt('property_id', cursor.id)) as T;
   }
 
-  /* Phase 1 — non-null block. `field <op> v` excludes NULLs for free (NULL
-   * comparisons are never true), so the tail is correctly withheld until
-   * the boundary itself goes null. */
-  const op = sort.direction === 'asc' ? 'gt' : 'lt';
+  /* Phase 1 — non-null block. Disjuncts: the strictly-beyond rows, the
+   * equal-value-beyond-tiebreaker rows, and (NULLABLE columns only) every
+   * NULL row. That last term is essential and easy to miss: with NULLS LAST,
+   * all nulls sort AFTER every non-null, so "everything after a non-null
+   * boundary" includes them — but `field <op> v` can never match a null
+   * (null comparisons aren't true), so without `field IS NULL` the page at
+   * the non-null→null boundary returns empty and the whole tail becomes
+   * unreachable. The ORDER BY keeps nulls last, so they only surface once the
+   * non-nulls within the LIMIT are exhausted. NOT NULL columns omit the term
+   * (it would defeat the index — see NON_NULL_SORT_FIELDS). */
+  const op = asc ? 'gt' : 'lt';
   const v = formatKeysetValue(cursor.value);
-  return ordered.or(
-    `${sort.field}.${op}.${v},and(${sort.field}.eq.${v},property_id.lt.${cursor.id})`,
-  ) as T;
+  const terms = [
+    `${sort.field}.${op}.${v}`,
+    `and(${sort.field}.eq.${v},property_id.${op}.${cursor.id})`,
+  ];
+  if (!NON_NULL_SORT_FIELDS.has(sort.field)) {
+    terms.push(`${sort.field}.is.null`);
+  }
+  return ordered.or(terms.join(',')) as T;
 }
 
 /* Derive the cursor for the NEXT page from the last row of THIS page.

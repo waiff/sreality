@@ -16,7 +16,8 @@ type Call =
   | { m: 'order'; column: string; ascending: boolean; nullsFirst?: boolean }
   | { m: 'or'; filters: string }
   | { m: 'is'; column: string; value: null }
-  | { m: 'lt'; column: string; value: number };
+  | { m: 'lt'; column: string; value: number }
+  | { m: 'gt'; column: string; value: number };
 
 class Recorder implements KeysetBuilder {
   calls: Call[] = [];
@@ -34,6 +35,10 @@ class Recorder implements KeysetBuilder {
   }
   lt(column: string, value: number) {
     this.calls.push({ m: 'lt', column, value });
+    return this;
+  }
+  gt(column: string, value: number) {
+    this.calls.push({ m: 'gt', column, value });
     return this;
   }
 }
@@ -63,7 +68,7 @@ describe('formatKeysetValue', () => {
 });
 
 describe('applyKeyset — ORDER BY', () => {
-  it('always appends property_id DESC as the tiebreaker', () => {
+  it('appends property_id as the tiebreaker in the DESC direction for a desc sort', () => {
     const r = new Recorder();
     applyKeyset(r, sort('last_seen_at', 'desc'), null);
     expect(r.calls).toEqual([
@@ -72,20 +77,18 @@ describe('applyKeyset — ORDER BY', () => {
     ]);
   });
 
-  it('orders the sort column ascending for an asc sort', () => {
+  it('orders BOTH the sort column and property_id ascending for an asc sort', () => {
     const r = new Recorder();
     applyKeyset(r, sort('price_czk', 'asc'), null);
-    expect(r.calls[0]).toEqual({
-      m: 'order',
-      column: 'price_czk',
-      ascending: true,
-      nullsFirst: false,
-    });
+    expect(r.calls).toEqual([
+      { m: 'order', column: 'price_czk', ascending: true, nullsFirst: false },
+      { m: 'order', column: 'property_id', ascending: true },
+    ]);
   });
 });
 
 describe('applyKeyset — DESC non-null cursor', () => {
-  it('emits `field.lt.v OR (field.eq.v AND property_id.lt.id)`', () => {
+  it('NOT NULL column (last_seen_at): no is.null disjunct (keeps the index)', () => {
     const r = new Recorder();
     const cur: KeysetCursor = { value: '2026-06-19T10:00:00+00:00', id: 9931 };
     applyKeyset(r, sort('last_seen_at', 'desc'), cur);
@@ -93,25 +96,34 @@ describe('applyKeyset — DESC non-null cursor', () => {
     expect(orCall).toEqual({
       m: 'or',
       filters:
-        'last_seen_at.lt."2026-06-19T10:00:00+00:00",and(last_seen_at.eq."2026-06-19T10:00:00+00:00",property_id.lt.9931)',
+        'last_seen_at.lt."2026-06-19T10:00:00+00:00",'
+        + 'and(last_seen_at.eq."2026-06-19T10:00:00+00:00",property_id.lt.9931)',
     });
   });
 
-  it('uses bare numeric values for a numeric sort', () => {
+  it('NULLABLE column (price_czk): appends is.null so the tail stays reachable', () => {
     const r = new Recorder();
     applyKeyset(r, sort('price_czk', 'desc'), { value: 4250000, id: 12 });
     expect((r.calls.find((c) => c.m === 'or') as { filters: string }).filters).toBe(
-      'price_czk.lt.4250000,and(price_czk.eq.4250000,property_id.lt.12)',
+      'price_czk.lt.4250000,and(price_czk.eq.4250000,property_id.lt.12),price_czk.is.null',
+    );
+  });
+
+  it('NOT NULL column (first_seen_at): no is.null disjunct', () => {
+    const r = new Recorder();
+    applyKeyset(r, sort('first_seen_at', 'asc'), { value: '2026-01-01T00:00:00+00:00', id: 5 });
+    expect((r.calls.find((c) => c.m === 'or') as { filters: string }).filters).toBe(
+      'first_seen_at.gt."2026-01-01T00:00:00+00:00",and(first_seen_at.eq."2026-01-01T00:00:00+00:00",property_id.gt.5)',
     );
   });
 });
 
 describe('applyKeyset — ASC non-null cursor', () => {
-  it('flips the boundary comparison to `gt` but keeps the tiebreaker `lt`', () => {
+  it('flips BOTH the boundary and the tiebreaker comparison to `gt`, keeps the null disjunct', () => {
     const r = new Recorder();
     applyKeyset(r, sort('price_czk', 'asc'), { value: 999, id: 7 });
     expect((r.calls.find((c) => c.m === 'or') as { filters: string }).filters).toBe(
-      'price_czk.gt.999,and(price_czk.eq.999,property_id.lt.7)',
+      'price_czk.gt.999,and(price_czk.eq.999,property_id.gt.7),price_czk.is.null',
     );
   });
 });
@@ -129,12 +141,14 @@ describe('applyKeyset — NULLS-LAST tail (cursor value null)', () => {
     expect(r.calls.some((c) => c.m === 'or')).toBe(false);
   });
 
-  it('null-tail predicate is identical for an ASC sort (NULLs are last either way)', () => {
+  it('null-tail pages the tiebreaker in the sort direction (`gt` for ASC)', () => {
     const r = new Recorder();
     applyKeyset(r, sort('area_m2', 'asc'), { value: null, id: 4040 });
-    expect(r.calls.slice(2)).toEqual([
+    expect(r.calls).toEqual([
+      { m: 'order', column: 'area_m2', ascending: true, nullsFirst: false },
+      { m: 'order', column: 'property_id', ascending: true },
       { m: 'is', column: 'area_m2', value: null },
-      { m: 'lt', column: 'property_id', value: 4040 },
+      { m: 'gt', column: 'property_id', value: 4040 },
     ]);
   });
 });
