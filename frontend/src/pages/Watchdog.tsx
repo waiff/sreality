@@ -100,23 +100,38 @@ export default function Watchdog() {
     staleTime: 30_000,
   });
 
-  /* Surgical in-place update of one dispatch across every loaded page of
-   * every dispatches infinite query — so mark-seen / kickoff don't blow the
-   * cache and reset the scroll position (the old invalidate(all) did). The
-   * mutation responses already carry the updated row. */
-  const patchDispatch = (updated: WatchdogDispatch) => {
-    qc.setQueriesData<InfiniteData<WatchdogPage>>(
-      { queryKey: ['watchdog', 'dispatches'] },
-      (prev) =>
-        prev && {
-          ...prev,
-          pages: prev.pages.map((pg) => ({
-            ...pg,
-            rows: pg.rows.map((r) => (r.id === updated.id ? updated : r)),
-          })),
-        },
-    );
+  /* Surgical update of one dispatch across every loaded page of every
+   * dispatches infinite query — so mark-seen / kickoff don't blow the cache
+   * and reset the scroll position (the old invalidate(all) did). The mutation
+   * responses already carry the updated row. The callback is partition-aware
+   * (it sees each cached query's `seen` filter) so marking a row seen DROPS
+   * it from the 'unseen' view instead of leaving a now-read row lingering. */
+  const updateDispatchCaches = (
+    fn: (
+      rows: WatchdogDispatch[],
+      seenFilter: WatchdogSeenFilter | undefined,
+    ) => WatchdogDispatch[],
+  ) => {
+    const entries = qc.getQueriesData<InfiniteData<WatchdogPage>>({
+      queryKey: ['watchdog', 'dispatches'],
+    });
+    for (const [key, data] of entries) {
+      if (!data) continue;
+      const params = key[2] as { seen?: WatchdogSeenFilter } | undefined;
+      qc.setQueryData<InfiniteData<WatchdogPage>>(key, {
+        ...data,
+        pages: data.pages.map((pg) => ({
+          ...pg,
+          rows: fn(pg.rows, params?.seen),
+        })),
+      });
+    }
   };
+
+  const patchDispatch = (updated: WatchdogDispatch) =>
+    updateDispatchCaches((rows) =>
+      rows.map((r) => (r.id === updated.id ? updated : r)),
+    );
 
   const matcherMut = useMutation({
     mutationFn: runWatchdogMatcher,
@@ -140,7 +155,12 @@ export default function Watchdog() {
 
   const markSeenMut = useMutation({
     mutationFn: (dispatchId: string) => markWatchdogDispatchSeen(dispatchId),
-    onSuccess: (updated) => patchDispatch(updated),
+    onSuccess: (updated) =>
+      updateDispatchCaches((rows, seenFilter) =>
+        seenFilter === 'unseen'
+          ? rows.filter((r) => r.id !== updated.id)
+          : rows.map((r) => (r.id === updated.id ? updated : r)),
+      ),
   });
 
   const setFilter = (key: 'subscription' | 'seen', value: string | null) => {

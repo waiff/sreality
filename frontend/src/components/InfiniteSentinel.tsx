@@ -51,7 +51,14 @@ export default function InfiniteSentinel({
       { root, rootMargin },
     );
     obs.observe(el);
-    return () => obs.disconnect();
+    return () => {
+      obs.disconnect();
+      // Clear the cached flag so the auto-chain effect below can't fire on a
+      // stale "intersecting" left over from a previous observer (e.g. when
+      // hasNextPage toggles false→true on a live-feed refetch while the
+      // sentinel is off-screen). The fresh observer reports real state.
+      intersectingRef.current = false;
+    };
   }, [hasNextPage, rootRef, rootMargin]);
 
   /* If a freshly-loaded page was too short to push the sentinel back out of

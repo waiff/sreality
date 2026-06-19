@@ -2,6 +2,7 @@ import {
   Suspense,
   lazy,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -538,24 +539,65 @@ export default function Browse() {
   const [estimatingIds, setEstimatingIds] = useState<ReadonlySet<number>>(
     () => new Set(),
   );
-  const estimatesQuery = useQuery<Record<number, ListingEstimate>, Error>({
-    queryKey: ['card-estimates', cardIds],
-    queryFn: () => latestEstimationsByListing(cardIds),
-    enabled: tabFromUrl === 'map' && isApiConfigured() && cardIds.length > 0,
-    placeholderData: (prev) => prev,
-    refetchInterval: (query) => {
-      const data = query.state.data as
-        | Record<number, ListingEstimate>
-        | undefined;
-      const anyRunning =
-        estimatingIds.size > 0 ||
-        (data != null &&
-          Object.values(data).some(
-            (e) => e.status === 'pending' || e.status === 'running',
-          ));
-      return anyRunning ? 4000 : false;
-    },
-  });
+  /* On-card estimates accumulate as you scroll: each newly-loaded card's
+   * latest rent estimate is fetched ONCE (infinite scroll makes cardIds grow
+   * unbounded — re-requesting the whole set would blow the GET URL length and
+   * be O(n²) over a session). Still-running runs are polled on their small id
+   * set until they settle. */
+  const [estimates, setEstimates] = useState<Record<number, ListingEstimate>>(
+    {},
+  );
+  const requestedEstIdsRef = useRef<Set<number>>(new Set());
+  const estimatesEnabled = tabFromUrl === 'map' && isApiConfigured();
+
+  // A genuinely new cohort (filters/sort) is a different card set — drop the
+  // accumulated chips so they don't bleed across. Keyed on the stable cohort
+  // signature, NOT raw searchParams, so a map-overlay toggle doesn't reset.
+  useEffect(() => {
+    setEstimates({});
+    requestedEstIdsRef.current = new Set();
+  }, [cardsRestorationKey]);
+
+  // Fetch estimates for the DELTA of newly-loaded cards (≤ one page of ids,
+  // so the request URL stays bounded).
+  useEffect(() => {
+    if (!estimatesEnabled) return;
+    const fresh = cardIds.filter((id) => !requestedEstIdsRef.current.has(id));
+    if (fresh.length === 0) return;
+    fresh.forEach((id) => requestedEstIdsRef.current.add(id));
+    let cancelled = false;
+    latestEstimationsByListing(fresh)
+      .then((map) => {
+        if (!cancelled) setEstimates((prev) => ({ ...prev, ...map }));
+      })
+      .catch(() => {
+        /* best-effort chip — a failed lookup just leaves the card chip-less */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cardIds, estimatesEnabled]);
+
+  // Poll only the small set of still-running estimates (optimistic + any
+  // pending/running in the accumulator) until they terminate.
+  const pendingEstIds = useMemo(
+    () => [
+      ...estimatingIds,
+      ...Object.values(estimates)
+        .filter((e) => e.status === 'pending' || e.status === 'running')
+        .map((e) => e.sreality_id),
+    ],
+    [estimatingIds, estimates],
+  );
+  useEffect(() => {
+    if (!estimatesEnabled || pendingEstIds.length === 0) return;
+    const timer = setInterval(() => {
+      latestEstimationsByListing(pendingEstIds)
+        .then((map) => setEstimates((prev) => ({ ...prev, ...map })))
+        .catch(() => {});
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [estimatesEnabled, pendingEstIds]);
   const estimateMut = useMutation({
     mutationFn: (srealityId: number) =>
       createEstimation({
@@ -570,21 +612,18 @@ export default function Browse() {
       setEstimatingIds((prev) => new Set(prev).add(srealityId));
     },
     onSuccess: (run, srealityId) => {
-      queryClient.setQueriesData<Record<number, ListingEstimate>>(
-        { queryKey: ['card-estimates'] },
-        (prev) => ({
-          ...(prev ?? {}),
-          [srealityId]: {
-            sreality_id: srealityId,
-            run_id: run.id,
-            status: run.status,
-            estimate_kind: run.estimate_kind,
-            gross_yield_pct: run.gross_yield_pct,
-            estimated_monthly_rent_czk: run.estimated_monthly_rent_czk,
-            created_at: run.created_at,
-          },
-        }),
-      );
+      setEstimates((prev) => ({
+        ...prev,
+        [srealityId]: {
+          sreality_id: srealityId,
+          run_id: run.id,
+          status: run.status,
+          estimate_kind: run.estimate_kind,
+          gross_yield_pct: run.gross_yield_pct,
+          estimated_monthly_rent_czk: run.estimated_monthly_rent_czk,
+          created_at: run.created_at,
+        },
+      }));
     },
     onSettled: (_run, _err, srealityId) => {
       setEstimatingIds((prev) => {
@@ -836,7 +875,7 @@ export default function Browse() {
                 mergeMode={mergeMode}
                 selectedPropertyIds={selectedForMerge}
                 onToggleSelect={toggleSelectForMerge}
-                estimates={estimatesQuery.data}
+                estimates={estimates}
                 estimatingIds={estimatingIds}
                 onEstimate={(srealityId) => estimateMut.mutate(srealityId)}
               />
