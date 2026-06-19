@@ -1,14 +1,18 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import {
+  fetchPipelineMemberSet,
+  pipelineKeys,
   sortToParam,
   type CardRow,
   type SortSpec,
 } from '@/lib/queries';
+import { addPipelineCard, removePipelineCard } from '@/lib/api';
 import {
   fmtArea, fmtCzk, fmtPricePerM2,
   fmtShortDate, fmtTomDays,
@@ -180,6 +184,56 @@ export default function ListingCards({
   );
 }
 
+/* Pipeline bookmark toggle on a Browse card. Reads the shared member set (one
+ * deduped query across all cards) and toggles the property in/out of the
+ * pipeline's entry stage. Stops the click from triggering the card's Link. */
+function BookmarkButton({ property_id }: { property_id: number }) {
+  const qc = useQueryClient();
+  const membersQ = useQuery({
+    queryKey: pipelineKeys.members,
+    queryFn: fetchPipelineMemberSet,
+    staleTime: 30_000,
+  });
+  const inPipeline = membersQ.data?.has(property_id) ?? false;
+  const onDone = () =>
+    qc.invalidateQueries({ queryKey: pipelineKeys.members });
+  const add = useMutation({
+    mutationFn: () => addPipelineCard(property_id),
+    onSuccess: onDone,
+  });
+  const remove = useMutation({
+    mutationFn: () => removePipelineCard(property_id),
+    onSuccess: onDone,
+  });
+  const pending = add.isPending || remove.isPending;
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (pending) return;
+        (inPipeline ? remove : add).mutate();
+      }}
+      disabled={pending}
+      aria-pressed={inPipeline}
+      aria-label={inPipeline ? 'Odebrat z pipeline' : 'Přidat do pipeline'}
+      title={inPipeline ? 'V pipeline — odebrat' : 'Přidat do pipeline'}
+      className={[
+        'flex items-center justify-center w-6 h-6 rounded-[var(--radius-xs)] border backdrop-blur transition-colors disabled:opacity-60',
+        inPipeline
+          ? 'bg-[var(--color-copper-soft)]/90 border-[var(--color-copper)] text-[var(--color-copper)]'
+          : 'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:border-[var(--color-copper)]',
+      ].join(' ')}
+    >
+      <span aria-hidden className="text-[0.8rem] leading-none">
+        {inPipeline ? '★' : '☆'}
+      </span>
+    </button>
+  );
+}
+
 function Card({
   r,
   hovered,
@@ -294,6 +348,11 @@ function Card({
                 <path d="M2.5 6.2 5 8.5l4.5-5" />
               </svg>
             </span>
+          </div>
+        )}
+        {!mergeMode && (
+          <div className="absolute top-1 left-1 z-10">
+            <BookmarkButton property_id={r.property_id} />
           </div>
         )}
         {/* Metadata margin: two file-tab badges down the right edge of

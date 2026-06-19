@@ -2463,6 +2463,17 @@ Hardens the merge reconciler against the cases the design red-team flagged.
   integration. CLAUDE.md rule #22 updated.
 - Next: Browse-card bookmark icons; operator stage-management UI; drag-and-drop.
 
+### Phase U-PIPE Phase 3a: Browse-card bookmark icons (done)
+A ★/☆ bookmark toggle on every Browse card (Map/Table cards view, top-left of
+the photo; hidden in merge-mode where that slot holds the select checkbox).
+Toggling adds/removes the property at the pipeline entry stage via
+`POST/DELETE /pipeline/cards`. Membership is read once per page from a shared
+`fetchPipelineMemberSet()` (React Query dedupes `pipelineKeys.members` across all
+cards → one query), and the toggle invalidates it. Lets the operator bookmark
+straight from the search results, not just the listing-detail page.
+- Next (remaining Phase 3 polish): operator stage-management UI (rename / reorder
+  / add / recolor stages); drag-and-drop card moves on the kanban board.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and
