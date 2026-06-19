@@ -23,6 +23,7 @@ from psycopg.types.json import Jsonb
 
 from scripts.recompute_property_stats import recompute_one
 from toolkit.operator_state import carry_operator_state_on_merge
+from toolkit.pipeline_identity import reconcile_pipeline_on_merge
 
 MergeSource = Literal["auto", "operator"]
 
@@ -120,6 +121,12 @@ def merge_properties(
             # transaction, so it never orphans onto the merged_away loser.
             carry_operator_state_on_merge(
                 cur, retired_id=retired_id, survivor_id=survivor_id
+            )
+            # The single-valued deal-pipeline stage can't be a generic re-point
+            # (PK on property_id); keep the most-advanced stage on the survivor.
+            reconcile_pipeline_on_merge(
+                cur, retired_id=retired_id, survivor_id=survivor_id,
+                merge_group_id=group,
             )
             cur.execute(
                 """

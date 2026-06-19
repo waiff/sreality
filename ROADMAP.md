@@ -2411,6 +2411,25 @@ pipeline (Phase U-PIPE) plugs into next.
   `property_id`. Design validated by adversarial red-team before build
   (CLAUDE.md rule #18, #16).
 
+### Phase U-PIPE Phase 0: Deal pipeline — bookmark MVP (done)
+A Trello-style deal pipeline over properties. Phase 0 ships the schema + the
+bookmark entry point; the kanban board and stage moves are the next phases.
+- Migration 205: `pipeline_stages` (TABLE not enum — operator-curatable; seeded
+  Zájem[entry] / Prohlídka / Nabídka / Koupeno[terminal] / Zamítnuto[terminal]),
+  `property_pipeline` (PK property_id — single-valued; stage_id, board_position,
+  note, entered_stage_at), append-only `property_pipeline_events` ledger, +
+  `pipeline_stages_public` / `property_pipeline_public` anon views.
+- "Bookmark / interested" == the entry stage (presence of a card), not a flag.
+- Merge reconciler `toolkit/pipeline_identity.reconcile_pipeline_on_merge` runs
+  in the `merge_properties` chokepoint alongside the curation carry (rule #22):
+  keeps the most-advanced stage on the survivor, logs the dropped card. Best-
+  effort unmerge/split today; lossless replay + terminal-aware policy deferred.
+- API `api/pipeline.py`: `POST/DELETE /pipeline/cards`, `GET /pipeline/stages`.
+- Frontend: a bookmark toggle (★/☆ + stage label) in CurationBlock on listing
+  detail; membership read from `property_pipeline_public`.
+- Next: kanban board + drag stage-moves (Phase 1); lossless unmerge + terminal
+  policy (Phase 2); Browse-card bookmark icons; stage management UI.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

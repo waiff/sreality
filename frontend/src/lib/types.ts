@@ -819,6 +819,18 @@ export interface Note {
   created_at: string;
 }
 
+/* Deal pipeline (migration 205). A property is in the pipeline iff it has a
+ * card; "bookmarked / interested" is the entry stage. Read from
+ * property_pipeline_public; single-valued (one card per property). */
+export interface PipelineCard {
+  property_id: number;
+  stage_key: string;
+  stage_label: string;
+  stage_color: TagColor | null;
+  is_terminal: boolean;
+  stage_position: number;
+}
+
 /* GET /collections/{id} embeds a slimmer property projection than
  * ListingPublic — see api/curation.get_collection. Each row carries the
  * property_id plus its representative listing's sreality_id (for

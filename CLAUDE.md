@@ -699,6 +699,22 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     bazos (partial single-category walks) is such a portal; bezrealitky is NOT (its GraphQL
     `totalCount` + uncapped paging make a per-category walk provable-complete, so it sets
     `supports_complete_walk=true` and marks delistings inactive, source-scoped).
+22. **The deal pipeline is single-valued, property-grain operator state (migration 205).**
+    `property_pipeline` holds at most ONE card per property (PK on `property_id`) at one
+    `stage_id` (`pipeline_stages`, a TABLE not an enum so the operator can rename/reorder/add
+    columns with no migration — the curated-index precedent). **A "bookmark / interested" is
+    just the entry stage** (`pipeline_stages.is_entry`), not a separate flag: presence of a
+    `property_pipeline` row == the property is in the pipeline. Single-valued-ness is why it
+    can't live at advert grain (unlike the m2m curation of rule #18) — so it gets its OWN
+    merge reconciler, `toolkit/pipeline_identity.reconcile_pipeline_on_merge`, called in the
+    `merge_properties` transaction alongside the curation carry: it keeps the MOST-ADVANCED
+    stage on the survivor (max `position`; tie → later `updated_at`) and logs the dropped card
+    to the append-only `property_pipeline_events` ledger. Unmerge/split are best-effort today
+    (the card stays on the surviving/anchor property); the lossless unmerge replay + a
+    terminal-aware conflict policy (don't let a `lost` stage bury a live deal) are deferred to
+    a later phase. Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards`,
+    `GET /pipeline/stages`); membership reads via `property_pipeline_public`. The kanban board
+    + stage moves are a later phase; Phase 0 is the bookmark surface only.
 
 ## Toolkit and API rules
 

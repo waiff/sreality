@@ -917,6 +917,24 @@ export const createPropertyNote = (
         : { body },
   });
 
+/* Deal pipeline (migration 205) — bookmark a property into the pipeline
+ * (entry stage) / remove it. Membership is read via property_pipeline_public. */
+
+export const addPipelineCard = (
+  property_id: number,
+): Promise<{ property_id: number; stage_key: string; added: boolean }> =>
+  request<{ property_id: number; stage_key: string; added: boolean }>(
+    '/pipeline/cards',
+    { method: 'POST', json: { property_id } },
+  );
+
+export const removePipelineCard = (
+  property_id: number,
+): Promise<{ removed: boolean }> =>
+  request<{ removed: boolean }>(`/pipeline/cards/${property_id}`, {
+    method: 'DELETE',
+  });
+
 /* Manual rental estimates (Phase U-ME).
  *
  * Reads can also come from the manual_rental_estimates_public Supabase

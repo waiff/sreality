@@ -1294,6 +1294,7 @@ import type {
   CreateEstimationIn,
   EstimationListParams,
   ParseResult,
+  PipelineCard,
 } from './types';
 
 export const estimationKeys = {
@@ -1470,4 +1471,23 @@ export const curationKeys = {
     ['curation', 'property-notes', property_id] as const,
   manualEstimates: (sreality_id: number) =>
     ['curation', 'manual-estimates', sreality_id] as const,
+};
+
+/* Deal pipeline (migration 205). The "is this property bookmarked + at which   */
+/* stage" read pulls from property_pipeline_public via the anon key; writes go   */
+/* through the FastAPI service. Single-valued — at most one card per property.   */
+export const pipelineKeys = {
+  card: (property_id: number) => ['pipeline', 'card', property_id] as const,
+};
+
+export const fetchPropertyPipeline = async (
+  property_id: number,
+): Promise<PipelineCard | null> => {
+  const { data, error } = await supabase
+    .from('property_pipeline_public')
+    .select('property_id, stage_key, stage_label, stage_color, is_terminal, stage_position')
+    .eq('property_id', property_id)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as PipelineCard | null) ?? null;
 };
