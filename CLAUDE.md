@@ -566,7 +566,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
     forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
     priority order, stop at the first **High** verdict → auto-merge. **(E)**
-    everything else queues on the operator's `/dedup` review page. The visual layer's cached
+    everything else queues on the operator's `/dedup` review page.
+    **Self-healing queue (migration 198):** the engine doesn't only ADD to the review queue — each
+    run it RESOLVES stale proposed candidates so they don't pile up. Recall-neutral dismissals: a
+    pair the current rules now hard-reject, one the cross-source gate skips, or a candidate pointing
+    to a merged-away property (`_reconcile_stale_candidates`) is auto-dismissed; the now-mergeable
+    (e.g. exact-address pairs queued while the toggle was off) auto-merge. The one calibration-gated
+    dismissal: a confident visual **"different"** — `decide_visual_dismiss` auto-dismisses when NO
+    room reached High and a DISTINCTIVE room (kitchen/bathroom) is Low (operator toggle
+    `app_settings.dedup_visual_autodismiss_enabled`, default on; `--no-autodismiss` /
+    `--shadow` CLI overrides). Calibrated safe: the verdict is ~binary (High/Low), the High OR-gate
+    already rescues any same-property pair with one matching room, and 0/273 operator-merged pairs
+    carried a Low. Per-run counts land in `dedup_engine_runs.auto_dismissed`. The visual layer's cached
     LLM tools — `classify_listing_images` (migration 128), `compare_listings_visually`
     (migration 129), and `compare_listing_site_plans` (migration 171,
     `listing_site_plan_matches`) — are write-allowed exceptions (toolkit rule #5). A

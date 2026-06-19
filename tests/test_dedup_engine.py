@@ -17,12 +17,22 @@ from toolkit.dedup_engine import (
     ListingKey,
     classify_pair,
     decide_phash_fastpath,
+    decide_visual_dismiss,
     disposition_compatible,
     normalize_street,
     rooms_in_priority,
     street_group_keys,
     verdict_is_merge,
 )
+
+
+def _dismissed_pairs(conn: Any) -> set[tuple[int, int]]:
+    """Property pairs the run resolved to 'dismissed' (via _resolve_candidates)."""
+    out: set[tuple[int, int]] = set()
+    for _s, params in conn.resolved_status("dismissed"):
+        _status, los, his = params
+        out.update(zip(los, his))
+    return out
 
 
 def _key(
@@ -370,10 +380,15 @@ class _Cur:
             self._rows = [(4, 100, 5)]  # eligible, flagged_location, flagged_disposition
         elif "FROM listings l" in s and "l.street IS NOT NULL" in s:
             self._rows = list(self._conn.eligible_rows)
+        elif "count(*)" in s and "JOIN properties pl" in s:
+            self._rows = [(self._conn.stale_count,)]  # _reconcile_stale_candidates count
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
         elif "image_room_classifications" in s:
             self._rows = [(False,)]  # _both_have_site_plan default
+        elif "UPDATE property_identity_candidates" in s:
+            self._conn.resolved.append((s, params))  # reconcile / _resolve_candidates
+            self._rows = []
         elif "INSERT INTO property_identity_candidates" in s:
             self._conn.enqueued.append(params)
             self._rows = []
@@ -388,16 +403,26 @@ class _Cur:
 
 
 class _FakeConn:
-    def __init__(self, eligible_rows: list[tuple[Any, ...]]) -> None:
+    def __init__(self, eligible_rows: list[tuple[Any, ...]], stale_count: int = 0) -> None:
         self.eligible_rows = eligible_rows
+        self.stale_count = stale_count
         self.executed: list[str] = []
         self.enqueued: list[Any] = []
+        self.resolved: list[tuple[str, Any]] = []  # reconcile + _resolve_candidates UPDATEs
 
     def cursor(self) -> _Cur:
         return _Cur(self)
 
     def transaction(self) -> _Ctx:
         return _Ctx()
+
+    def resolved_status(self, status: str) -> list[tuple[str, Any]]:
+        """The _resolve_candidates UPDATEs that set candidates to `status`
+        (params = (status, los, his))."""
+        return [
+            (s, p) for s, p in self.resolved
+            if "FROM unnest(" in s and p and p[0] == status
+        ]
 
 
 def _row(sid: int, pid: int, *, street: str = "Nádražní",
@@ -622,7 +647,7 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
     assert merges == ["visual_match"]
     assert stats["vision_calls"] == 1
 
-    # Low verdict -> queue, no merge.
+    # Low verdict on a distinctive room (kitchen) -> AUTO-DISMISS, not queue.
     merges.clear()
     conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats2 = eng.run_engine(
@@ -631,8 +656,12 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
         max_vision_calls=10,
     )
     assert stats2["auto_visual"] == 0
-    assert stats2["queued"] == 1
+    assert stats2["auto_dismissed"] == 1
+    assert stats2["queued"] == 0
     assert merges == []
+    # the candidate pair is resolved to 'dismissed'
+    dismissed = _dismissed_pairs(conn2)
+    assert (101, 102) in dismissed
 
 
 def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
@@ -770,3 +799,171 @@ def test_run_engine_auto_merge_off_queues_candidate_without_vision(monkeypatch: 
     assert merges == []
     assert stats["queued"] == 1
     assert vision == []  # no forensic vision spent when off
+
+
+# --- decide_visual_dismiss (pure) -------------------------------------------
+
+def test_decide_visual_dismiss_distinctive_low() -> None:
+    assert decide_visual_dismiss({"kitchen": "Low"})
+    assert decide_visual_dismiss({"bathroom": "Low"})
+    assert decide_visual_dismiss({"kitchen": "Low", "bathroom": "Low"})
+    # a distinctive Low alongside a generic Low still dismisses
+    assert decide_visual_dismiss({"kitchen": "Low", "bedroom": "Low"})
+
+
+def test_decide_visual_dismiss_blocks_on_any_high() -> None:
+    # the OR-gate already merges on a High; never dismiss if any room matched
+    assert not decide_visual_dismiss({"kitchen": "Low", "bathroom": "High"})
+    assert not decide_visual_dismiss({"kitchen": "High"})
+
+
+def test_decide_visual_dismiss_needs_a_distinctive_room() -> None:
+    # only generic rooms compared -> keep for human review, don't dismiss
+    assert not decide_visual_dismiss({"bedroom": "Low"})
+    assert not decide_visual_dismiss({"living_room": "Low", "hallway": "Low"})
+    assert not decide_visual_dismiss({})
+
+
+def test_decide_visual_dismiss_blocks_on_distinctive_hedge() -> None:
+    # a Medium hedge on a distinctive room -> not confident; keep for review
+    assert not decide_visual_dismiss({"kitchen": "Medium"})
+    assert not decide_visual_dismiss({"kitchen": "Low", "bathroom": "Medium"})
+
+
+# --- run_engine: self-healing (reconcile / dismiss / dry-run) ---------------
+
+def test_run_engine_reject_dismisses_stale_candidate(monkeypatch: Any) -> None:
+    # A pair the current rules REJECT (floor gap >=2) dismisses any stale proposed
+    # candidate for it — recall-neutral queue hygiene.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+
+    conn = _FakeConn([_row(1, 101, floor=2), _row(2, 102, floor=8)])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+
+    assert stats["rejected"] == 1
+    assert (101, 102) in _dismissed_pairs(conn)
+
+
+def test_run_engine_same_source_gate_dismisses_stale_candidate(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="sreality"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+
+    assert stats["skipped_same_source"] == 1
+    assert (101, 102) in _dismissed_pairs(conn)
+
+
+def test_run_engine_visual_high_not_dismissed(monkeypatch: Any) -> None:
+    # kitchen High -> merge, never the dismiss path.
+    import scripts.dedup_engine as eng
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify,
+        compare_fn=lambda *a, **k: {"verdict": "High", "rationale": "same kitchen"},
+        max_vision_calls=10,
+    )
+    assert stats["auto_visual"] == 1 and stats["auto_dismissed"] == 0
+    assert (101, 102) not in _dismissed_pairs(conn)
+
+
+def test_run_engine_low_on_generic_room_queues_not_dismiss(monkeypatch: Any) -> None:
+    # Only a generic room (living_room) compared + Low -> queue for review, NOT dismiss.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "living_room"}]}}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify,
+        compare_fn=lambda *a, **k: {"verdict": "Low", "rationale": "different"},
+        max_vision_calls=10,
+    )
+    assert stats["auto_dismissed"] == 0
+    assert stats["queued"] == 1
+
+
+def test_run_engine_autodismiss_off_queues_low(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify,
+        compare_fn=lambda *a, **k: {"verdict": "Low", "rationale": "different"},
+        max_vision_calls=10, autodismiss=False,
+    )
+    assert stats["auto_dismissed"] == 0
+    assert stats["queued"] == 1
+
+
+def test_run_engine_reconcile_counts_stale(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    conn = _FakeConn([], stale_count=42)
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+    assert stats["reconciled"] == 42
+
+
+def test_run_engine_dry_run_writes_nothing(monkeypatch: Any) -> None:
+    # Shadow: counts the would-merge but performs no merge + no candidate writes.
+    import scripts.dedup_engine as eng
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda *a, **k: merges.append("x") or {"data": {}},
+    )
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # exact-address -> would merge
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0, dry_run=True)
+    assert stats["auto_address"] == 1   # counted
+    assert merges == []                 # but not merged
+    assert conn.resolved == []          # no candidate status writes
+    assert conn.enqueued == []
+
+
+def test_run_engine_partial_room_scan_does_not_dismiss(monkeypatch: Any) -> None:
+    # The OR-gate guard: if the room cap stops the scan before every common room is
+    # tried, a confident-Low distinctive room must NOT auto-dismiss — an untried
+    # room might still match. kitchen Low but bedroom (untried, cap=1) -> QUEUE.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "kitchen"},
+            {"image_id": sid * 10 + 2, "room_type": "bedroom"},
+        ]}}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify,
+        compare_fn=lambda *a, **k: {"verdict": "Low", "rationale": "different"},
+        max_vision_calls=10, max_room_attempts=1,  # stops after kitchen, bedroom untried
+    )
+    assert stats["auto_dismissed"] == 0
+    assert stats["queued"] == 1
+    assert (101, 102) not in _dismissed_pairs(conn)

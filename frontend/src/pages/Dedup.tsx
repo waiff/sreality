@@ -283,10 +283,11 @@ function AutomationDashboard({
             <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
-          <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-5 gap-2">
             <Stat label="By address" value={latest.auto_address} small />
             <Stat label="By photos" value={latest.auto_phash} small />
             <Stat label="By visual" value={latest.auto_visual} small />
+            <Stat label="Auto-dismissed" value={latest.auto_dismissed ?? 0} small />
             <Stat label="Queued" value={latest.queued} small />
           </div>
           {runs.length > 1 ? <RunTrend runs={runs} /> : null}
