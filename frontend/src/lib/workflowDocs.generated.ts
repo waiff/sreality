@@ -913,6 +913,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "shadow",
+        "description": "Run the full pipeline but WRITE NOTHING (preview merge/dismiss/reconcile counts)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
       }
     ],
     "secrets": [

@@ -57,6 +57,14 @@ on:
         options:
           - "false"
           - "true"
+      shadow:
+        description: Run the full pipeline but WRITE NOTHING (preview merge/dismiss/reconcile counts)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 concurrency:
   group: dedup-engine
@@ -95,5 +103,6 @@ jobs:
           ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
           ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS
