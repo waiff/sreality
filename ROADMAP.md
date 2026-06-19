@@ -2493,7 +2493,22 @@ to add/rename/reorder a stage (the curated-index precedent; rule #22).
   scripted fake conn (key derivation, append position, entry-crown demotes others,
   entry≠terminal reject, un-crown reject, reorder set-mismatch reject, archive
   entry/with-cards 409, soft-retire empty).
-- Next (remaining Phase 3 polish): drag-and-drop card moves on the kanban board.
+
+### Phase U-PIPE Phase 3c: Drag-and-drop card moves (done)
+The kanban board's "Trello" gesture — drag a card from one stage column to
+another (the deal-pipeline feature is now complete end-to-end).
+- `@dnd-kit/core` (already a dep): `Board` owns a `DndContext`; each column is a
+  `useDroppable`, each card a `useDraggable` with a ⠿ grip handle (`PointerSensor`
+  distance:6 so a click on the card's link/select doesn't start a drag;
+  `KeyboardSensor` for a11y). A `DragOverlay` renders the card ghost mid-drag.
+- The board owns ONE optimistic move mutation (card jumps instantly, rolls back on
+  error, reconciles on settle); drag-end AND the per-card `<select>` both call it.
+  The `<select>` is **kept as the keyboard/accessible fallback**, not removed.
+- Drag→move resolution is the pure, exported `planMove(activeId, overId, cards)`
+  (same column / dropped-outside-a-column / unknown card → no-op), unit-tested
+  directly + a board render/select-move smoke test (`Pipeline.test.tsx`, 7 cases)
+  — jsdom can't faithfully simulate the pointer drag, so the bug-prone resolution
+  is tested as a pure function. CLAUDE.md rule #22 updated.
 
 ### Phase U-ME: Manual rental estimates (next)
 
