@@ -373,3 +373,32 @@ def rooms_in_priority(common_rooms: set[str]) -> list[str]:
 def verdict_is_merge(verdict: str | None) -> bool:
     """Rule D / auto gate: only a High forensic verdict auto-merges."""
     return verdict == "High"
+
+
+# The most identifying interior rooms — a confident "different" on one of these
+# is the auto-DISMISS signal (operator policy: "kitchen/bathroom clearly differ").
+# Calibrated: 0 of 273 operator-merged pairs carried a Low verdict, and a same
+# property whose kitchen merely changed is rescued by the High OR-gate on another
+# room (so reaching auto-dismiss means NO room matched). Bedroom/exterior/etc. are
+# too generic to dismiss on alone.
+DISTINCTIVE_DISMISS_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom"})
+
+
+def decide_visual_dismiss(room_verdicts: dict[str, str]) -> bool:
+    """True iff the forensic room verdicts confidently say "different property".
+
+    Auto-dismiss (don't queue for the operator) only when:
+      * no room reached High (the merge OR-gate already fired otherwise), AND
+      * a DISTINCTIVE room (kitchen/bathroom) was compared and returned Low, AND
+      * no distinctive room is non-Low (no Medium/ambiguous hedge on kitchen/bath).
+    Everything else (a distinctive Medium, or only generic rooms compared) stays
+    queued for a human. room_verdicts maps room_type -> 'High'|'Medium'|'Low'.
+    """
+    if not room_verdicts:
+        return False
+    if any(v == "High" for v in room_verdicts.values()):
+        return False
+    distinctive = [v for r, v in room_verdicts.items() if r in DISTINCTIVE_DISMISS_ROOMS]
+    if not distinctive:
+        return False
+    return all(v == "Low" for v in distinctive)

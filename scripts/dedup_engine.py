@@ -48,6 +48,7 @@ from toolkit.dedup_engine import (
     ListingKey,
     classify_pair,
     decide_phash_fastpath,
+    decide_visual_dismiss,
     rooms_in_priority,
     street_group_keys,
     verdict_is_merge,
@@ -178,6 +179,56 @@ def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: d
         return False
 
 
+def _canon_pair(a: ListingKey, b: ListingKey) -> tuple[int, int] | None:
+    """Canonical (lo, hi) property pair, or None if either side is unlinked / same."""
+    if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
+        return None
+    return (min(a.property_id, b.property_id), max(a.property_id, b.property_id))
+
+
+def _reconcile_stale_candidates(conn: Any, *, dry_run: bool) -> int:
+    """Dismiss proposed candidates that point to a non-active property (a side has
+    since merged away / been retired) — pure queue hygiene, recall-neutral. Returns
+    the count affected (computed even on dry-run)."""
+    count_sql = (
+        "SELECT count(*) FROM property_identity_candidates c "
+        "JOIN properties pl ON pl.id = c.left_property_id "
+        "JOIN properties pr ON pr.id = c.right_property_id "
+        "WHERE c.status = 'proposed' AND (pl.status <> 'active' OR pr.status <> 'active')"
+    )
+    with conn.cursor() as cur:
+        cur.execute(count_sql)
+        n = int(cur.fetchone()[0])
+        if not dry_run and n:
+            cur.execute(
+                "UPDATE property_identity_candidates c "
+                "SET status = 'dismissed', reviewed_at = now() "
+                "FROM properties pl, properties pr "
+                "WHERE pl.id = c.left_property_id AND pr.id = c.right_property_id "
+                "AND c.status = 'proposed' AND (pl.status <> 'active' OR pr.status <> 'active')"
+            )
+    return n
+
+
+def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str) -> int:
+    """Set-based: mark every still-'proposed' candidate for these (lo, hi) pairs as
+    `new_status`. A no-op for pairs that have no proposed candidate. Returns rowcount."""
+    if not pairs:
+        return 0
+    los = [p[0] for p in pairs]
+    his = [p[1] for p in pairs]
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE property_identity_candidates c "
+            "SET status = %s, reviewed_at = now() "
+            "FROM (SELECT unnest(%s::bigint[]) AS lo, unnest(%s::bigint[]) AS hi) p "
+            "WHERE c.left_property_id = p.lo AND c.right_property_id = p.hi "
+            "AND c.status = 'proposed'",
+            (new_status, los, his),
+        )
+        return cur.rowcount or 0
+
+
 def _enqueue_candidate(conn: Any, a: ListingKey, b: ListingKey, markers: dict[str, Any]) -> None:
     from psycopg.types.json import Jsonb
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
@@ -254,11 +305,14 @@ def _resolve_visual(
     site_plan_fn: Any,
     vision_budget: list[int],
     max_room_attempts: int,
+    autodismiss: bool = True,
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
 
-    {action: 'auto_merge'|'queue', reason, room_type?, verdict?, rationale?}.
-    Mutates vision_budget[0] as forensic calls are spent.
+    {action: 'auto_merge'|'dismiss'|'queue', reason, room_type?, verdict?, rationale?}.
+    Mutates vision_budget[0] as forensic calls are spent. When `autodismiss` and the
+    room verdicts confidently say "different property" (decide_visual_dismiss), the
+    pair is auto-dismissed instead of queued for the operator.
     """
     imgs_a = _classify_or_none(classify_fn, a.sreality_id)
     imgs_b = _classify_or_none(classify_fn, b.sreality_id)
@@ -297,6 +351,8 @@ def _resolve_visual(
     tried = 0
     last_verdict = None
     last_rationale = None
+    room_verdicts: dict[str, str] = {}
+    room_rationales: dict[str, str | None] = {}
     for room in rooms_in_priority(common):
         if tried >= max_room_attempts or vision_budget[0] <= 0:
             break
@@ -306,11 +362,30 @@ def _resolve_visual(
         if verdict_obj is None:
             continue
         last_verdict, last_rationale = verdict_obj["verdict"], verdict_obj.get("rationale")
+        room_verdicts[room] = last_verdict
+        room_rationales[room] = last_rationale
         if verdict_is_merge(last_verdict):
             return {
                 "action": "auto_merge", "reason": "visual_match",
                 "room_type": room, "verdict": last_verdict, "rationale": last_rationale,
             }
+
+    # No High on any room. If a distinctive room (kitchen/bathroom) is confidently
+    # Low, the pair is a confident "different property" — auto-dismiss it from the
+    # operator queue (calibrated: 0/273 operator merges were Low; OR-gate above
+    # already rescued any same-property pair with one matching room). Otherwise
+    # (only generic rooms, or a hedge) leave it for human review.
+    if autodismiss and decide_visual_dismiss(room_verdicts):
+        room = next(
+            (r for r in rooms_in_priority(set(room_verdicts))
+             if room_verdicts[r] == "Low"),
+            None,
+        )
+        return {
+            "action": "dismiss", "reason": "visual_different",
+            "room_type": room, "verdict": "Low",
+            "rationale": room_rationales.get(room) if room else last_rationale,
+        }
 
     return {
         "action": "queue", "reason": "visual_inconclusive",
@@ -352,6 +427,8 @@ def run_engine(
     max_vision_calls: int = 200,
     max_room_attempts: int = 4,
     auto_merge_enabled: bool = True,
+    autodismiss: bool = True,
+    dry_run: bool = False,
     deadline: float | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
@@ -361,33 +438,57 @@ def run_engine(
     site_plan_fn(a, b, ids_a, ids_b) -> {verdict, rationale} | None (development
     guard: verdict ∈ same_unit|different_unit|inconclusive).
 
+    Self-healing: each run also RESOLVES stale proposed candidates rather than
+    letting them pile up in the operator queue — it dismisses a pair the current
+    rules reject (deterministic non-match), one the cross-source gate skips, or a
+    confident visual "different" (autodismiss); merges the now-mergeable; and
+    reconciles candidates pointing to a merged-away property.
+
     When auto_merge_enabled is False (the operator's /dedup toggle), the engine
     still finds candidates but queues every one for manual review instead of
     auto-merging — and skips the forensic vision step (no LLM spend).
+
+    dry_run computes every action + counter but writes nothing (no merges, no
+    candidate status changes) — a shadow preview of what a live run would do.
     """
     stats = _eligibility_counts(conn)
     stats.update({
         "pairs_considered": 0, "rejected": 0,
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
+        "auto_dismissed": 0, "reconciled": 0,
     })
+
+    stats["reconciled"] = _reconcile_stale_candidates(conn, dry_run=dry_run)
 
     keys = _load_eligible(conn)
     groups = _group_by_street(keys)
     vision_budget = [max_vision_calls]
     seen_property_pairs: set[tuple[int, int]] = set()
     seen_listing_pairs: set[tuple[int, int]] = set()
+    merged_pairs: set[tuple[int, int]] = set()
+    dismissed_pairs: set[tuple[int, int]] = set()
     pairs_left = max_pairs
+
+    def finalize() -> dict[str, int]:
+        # Resolve every candidate the engine acted on this run (no-op for pairs
+        # without a proposed row); a no-op set-based UPDATE when nothing collected.
+        if not dry_run:
+            _resolve_candidates(conn, merged_pairs, "merged")
+            _resolve_candidates(conn, dismissed_pairs, "dismissed")
+        return _finish(stats, vision_budget, max_vision_calls)
 
     for street_key, members in groups.items():
         if len(members) > MAX_GROUP_SIZE:
             LOG.info("SKIP large street group key=%s size=%d", street_key, len(members))
             continue
         for i in range(len(members)):
+            if pairs_left <= 0:
+                break
             for j in range(i + 1, len(members)):
                 if pairs_left <= 0:
                     LOG.info("PAIR cap reached; deferring remainder to next run")
-                    return _finish(stats, vision_budget, max_vision_calls)
+                    return finalize()
                 # Wall-clock budget: the cold-cache classification flood (one
                 # uncapped vision call per newly-eligible listing) can outrun the
                 # job timeout, which SIGKILLs the run before it writes results.
@@ -399,7 +500,7 @@ def run_engine(
                         "TIME budget reached; finalizing cleanly at pairs_considered=%d",
                         stats["pairs_considered"],
                     )
-                    return _finish(stats, vision_budget, max_vision_calls)
+                    return finalize()
                 a, b = members[i], members[j]
                 # Dual-keyed listings appear in their 'id:' AND 'name:' groups;
                 # classify each listing pair once (first group wins).
@@ -411,31 +512,37 @@ def run_engine(
                     continue
                 seen_listing_pairs.add(lpair)
                 decision = classify_pair(a, b)
+                cp = _canon_pair(a, b)
                 if decision.action == "reject":
                     stats["rejected"] += 1
+                    # A pair the current rules reject is a deterministic non-match:
+                    # dismiss any stale proposed candidate for it (recall-neutral).
+                    if cp is not None:
+                        dismissed_pairs.add(cp)
                     continue
 
                 # Re-pointing happens at the property grain; skip a property pair
                 # we already acted on this run (merges mutate property_id live).
-                if a.property_id is None or b.property_id is None:
+                if cp is None:
                     continue
-                ppair = tuple(sorted((a.property_id, b.property_id)))
-                if ppair in seen_property_pairs:
+                if cp in seen_property_pairs:
                     continue
-                seen_property_pairs.add(ppair)
+                seen_property_pairs.add(cp)
 
                 if decision.action == "auto_merge":  # rule B exact address
                     markers = {"reason": decision.reason, "confidence": 0.99,
                                "street_key": street_key, "house_number": a.house_number,
                                "floor": a.floor}
                     if auto_merge_enabled:
-                        if _merge_pair(conn, a, b, "address_exact", markers):
+                        if dry_run or _merge_pair(conn, a, b, "address_exact", markers):
                             stats["auto_address"] += 1
+                            merged_pairs.add(cp)
                     else:
-                        _enqueue_candidate(
-                            conn, a, b,
-                            {**markers, "reason": "auto_merge_off:address_exact"},
-                        )
+                        if not dry_run:
+                            _enqueue_candidate(
+                                conn, a, b,
+                                {**markers, "reason": "auto_merge_off:address_exact"},
+                            )
                         stats["queued"] += 1
                     continue
 
@@ -455,10 +562,12 @@ def run_engine(
                                "phash_pairs": phash_pairs, "street_key": street_key,
                                "confidence": 0.97}
                     if auto_merge_enabled:
-                        if _merge_pair(conn, a, b, "image_phash", markers):
+                        if dry_run or _merge_pair(conn, a, b, "image_phash", markers):
                             stats["auto_phash"] += 1
+                            merged_pairs.add(cp)
                     else:
-                        _enqueue_candidate(conn, a, b, {**markers, "reason": "auto_merge_off:image_phash"})
+                        if not dry_run:
+                            _enqueue_candidate(conn, a, b, {**markers, "reason": "auto_merge_off:image_phash"})
                         stats["queued"] += 1
                     continue
 
@@ -470,6 +579,10 @@ def run_engine(
                 # ~36% of candidate pairs off the visual stage at ~1.4% recall cost.
                 if a.source == b.source:
                     stats["skipped_same_source"] += 1
+                    # Same-source non-exact: the engine won't pursue this visually
+                    # (cross-source gate). Dismiss any stale proposed candidate for
+                    # it — recall-neutral per the gate's accepted tradeoff.
+                    dismissed_pairs.add(cp)
                     continue
 
                 # rule C candidate -> rule D visual
@@ -477,16 +590,18 @@ def run_engine(
                 stats["pairs_considered"] += 1
                 if not auto_merge_enabled:
                     # Auto-merge off: queue for manual review without spending vision.
-                    _enqueue_candidate(conn, a, b, {
-                        "tier": "street_disposition", "street_key": street_key,
-                        "reason": "auto_merge_off", "confidence": 0.6,
-                    })
+                    if not dry_run:
+                        _enqueue_candidate(conn, a, b, {
+                            "tier": "street_disposition", "street_key": street_key,
+                            "reason": "auto_merge_off", "confidence": 0.6,
+                        })
                     stats["queued"] += 1
                     continue
                 outcome = _resolve_visual(
                     conn, a, b, classify_fn=classify_fn, compare_fn=compare_fn,
                     site_plan_fn=site_plan_fn,
                     vision_budget=vision_budget, max_room_attempts=max_room_attempts,
+                    autodismiss=autodismiss,
                 )
                 markers = {
                     "tier": "street_disposition", "street_key": street_key,
@@ -496,15 +611,20 @@ def run_engine(
                     "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6,
                 }
                 # pHash already ran (pre-classify); the visual stage only auto-merges via
-                # a High forensic verdict.
+                # a High forensic verdict, and auto-dismisses on a confident "different".
                 if outcome["action"] == "auto_merge":
-                    if _merge_pair(conn, a, b, outcome["reason"], markers):
+                    if dry_run or _merge_pair(conn, a, b, outcome["reason"], markers):
                         stats["auto_visual"] += 1
+                        merged_pairs.add(cp)
+                elif outcome["action"] == "dismiss":
+                    stats["auto_dismissed"] += 1
+                    dismissed_pairs.add(cp)
                 else:
-                    _enqueue_candidate(conn, a, b, markers)
+                    if not dry_run:
+                        _enqueue_candidate(conn, a, b, markers)
                     stats["queued"] += 1
 
-    return _finish(stats, vision_budget, max_vision_calls)
+    return finalize()
 
 
 def _finish(stats: dict[str, int], vision_budget: list[int], max_vision_calls: int) -> dict[str, int]:
@@ -561,6 +681,24 @@ def _build_site_plan_fn(conn: Any) -> Any:
     return _fn
 
 
+def _visual_autodismiss_enabled(conn: Any) -> bool:
+    """Operator toggle for auto-dismissing confident visual 'different' verdicts
+    (app_settings.dedup_visual_autodismiss_enabled). Default on."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = 'dedup_visual_autodismiss_enabled'"
+        )
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        return True
+    v = row[0]
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(v)
+
+
 def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -568,10 +706,10 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
             INSERT INTO dedup_engine_runs (
                 ended_at, eligible, flagged_location, flagged_disposition,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
-                queued, vision_calls
+                queued, vision_calls, auto_dismissed
             ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
-                %(auto_visual)s, %(queued)s, %(vision_calls)s)
+                %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s)
             """,
             stats,
         )
@@ -590,6 +728,12 @@ def main() -> int:
                              "job timeout SIGKILLs the run (0 = no limit).")
     parser.add_argument("--dry-run", action="store_true",
                         help="Report eligible counts + street groups and exit without writing.")
+    parser.add_argument("--shadow", action="store_true",
+                        help="Run the full pipeline but WRITE NOTHING — a preview of "
+                             "what a live run would merge / dismiss / queue.")
+    parser.add_argument("--no-autodismiss", action="store_true",
+                        help="Disable auto-dismissing confident visual 'different' verdicts "
+                             "(overrides the app_settings toggle).")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -620,7 +764,11 @@ def main() -> int:
             return 0
 
         auto_merge_enabled = _auto_merge_enabled(conn)
-        LOG.info("ENGINE auto_merge_enabled=%s", auto_merge_enabled)
+        autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
+        LOG.info(
+            "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s",
+            auto_merge_enabled, autodismiss, args.shadow,
+        )
 
         classify_fn = None
         compare_fn = None
@@ -642,16 +790,21 @@ def main() -> int:
             max_pairs=args.max_pairs, max_vision_calls=args.max_vision_calls,
             max_room_attempts=args.max_room_attempts,
             auto_merge_enabled=auto_merge_enabled,
+            autodismiss=autodismiss,
+            dry_run=args.shadow,
             deadline=deadline,
         )
-        _write_run_row(conn, stats)
+        if not args.shadow:
+            _write_run_row(conn, stats)
 
     LOG.info(
-        "ENGINE done eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
-        "queued=%d rejected=%d skipped_same_source=%d pairs=%d vision_calls=%d",
+        "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
+        "auto_dismissed=%d reconciled=%d queued=%d rejected=%d skipped_same_source=%d "
+        "pairs=%d vision_calls=%d",
+        "shadow" if args.shadow else "done",
         stats["eligible"], stats["auto_address"], stats["auto_phash"],
-        stats["auto_visual"], stats["queued"], stats["rejected"],
-        stats.get("skipped_same_source", 0),
+        stats["auto_visual"], stats["auto_dismissed"], stats["reconciled"],
+        stats["queued"], stats["rejected"], stats.get("skipped_same_source", 0),
         stats["pairs_considered"], stats["vision_calls"],
     )
     return 0
