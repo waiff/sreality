@@ -2,6 +2,19 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  useDraggable,
+  useDroppable,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+  type DragStartEvent,
+} from '@dnd-kit/core';
+import { CSS } from '@dnd-kit/utilities';
+import {
   archivePipelineStage,
   createPipelineStage,
   movePipelineCard,
@@ -86,16 +99,7 @@ export default function Pipeline() {
           pipeline" na detailu inzerátu.
         </p>
       ) : (
-        <div className="mt-6 flex gap-4 overflow-x-auto pb-4">
-          {stages.map((s) => (
-            <StageColumn
-              key={s.id}
-              stage={s}
-              stages={stages}
-              cards={byStage.get(s.id) ?? []}
-            />
-          ))}
-        </div>
+        <Board stages={stages} cards={cards} byStage={byStage} />
       )}
     </div>
   );
@@ -105,6 +109,105 @@ function stageColor(stage: PipelineStage): string {
   return stage.color
     ? `var(--color-tag-${stage.color})`
     : 'var(--color-rule-strong)';
+}
+
+const CARD_PREFIX = 'card:';
+const STAGE_PREFIX = 'stage:';
+
+/* Pure: resolve a drag-end (active card, over column) into a stage move, or
+ * null for a no-op (same column / dropped outside a column / unknown card).
+ * Exported so the move-resolution logic is unit-tested without simulating DnD. */
+export function planMove(
+  activeId: string,
+  overId: string | null,
+  cards: PipelineBoardCard[],
+): { propertyId: number; stageId: number } | null {
+  if (!overId || !overId.startsWith(STAGE_PREFIX)) return null;
+  const propertyId = Number(activeId.slice(CARD_PREFIX.length));
+  const stageId = Number(overId.slice(STAGE_PREFIX.length));
+  if (!Number.isFinite(propertyId) || !Number.isFinite(stageId)) return null;
+  const card = cards.find((c) => c.property_id === propertyId);
+  if (!card || card.stage_id === stageId) return null;
+  return { propertyId, stageId };
+}
+
+function Board({
+  stages,
+  cards,
+  byStage,
+}: {
+  stages: PipelineStage[];
+  cards: PipelineBoardCard[];
+  byStage: Map<number, PipelineBoardCard[]>;
+}) {
+  const qc = useQueryClient();
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const sensors = useSensors(
+    // distance:6 so a click on the card's link/select doesn't start a drag.
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor),
+  );
+
+  const move = useMutation({
+    mutationFn: ({ propertyId, stageId }: { propertyId: number; stageId: number }) =>
+      movePipelineCard(propertyId, stageId),
+    // Optimistic: the card jumps to the new column instantly (Trello feel),
+    // rolled back on error, reconciled on settle.
+    onMutate: async ({ propertyId, stageId }) => {
+      await qc.cancelQueries({ queryKey: pipelineKeys.board });
+      const prev = qc.getQueryData<PipelineBoardCard[]>(pipelineKeys.board);
+      qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (old) =>
+        (old ?? []).map((c) =>
+          c.property_id === propertyId ? { ...c, stage_id: stageId } : c,
+        ),
+      );
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(pipelineKeys.board, ctx.prev);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: pipelineKeys.board }),
+  });
+
+  const activeCard = activeId
+    ? cards.find((c) => `${CARD_PREFIX}${c.property_id}` === activeId) ?? null
+    : null;
+
+  return (
+    <DndContext
+      sensors={sensors}
+      onDragStart={(e: DragStartEvent) => setActiveId(String(e.active.id))}
+      onDragCancel={() => setActiveId(null)}
+      onDragEnd={(e: DragEndEvent) => {
+        setActiveId(null);
+        const plan = planMove(
+          String(e.active.id),
+          e.over ? String(e.over.id) : null,
+          cards,
+        );
+        if (plan) move.mutate(plan);
+      }}
+    >
+      <div className="mt-6 flex gap-4 overflow-x-auto pb-4">
+        {stages.map((s) => (
+          <StageColumn
+            key={s.id}
+            stage={s}
+            stages={stages}
+            cards={byStage.get(s.id) ?? []}
+            onMove={(propertyId, stageId) => move.mutate({ propertyId, stageId })}
+          />
+        ))}
+      </div>
+      <DragOverlay>
+        {activeCard ? (
+          <div className="w-64 rounded-[var(--radius-md)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)] p-2.5 shadow-lg">
+            <CardFace card={activeCard} />
+          </div>
+        ) : null}
+      </DragOverlay>
+    </DndContext>
+  );
 }
 
 function StageManager({ stages }: { stages: PipelineStage[] }) {
@@ -325,11 +428,14 @@ function StageColumn({
   stage,
   stages,
   cards,
+  onMove,
 }: {
   stage: PipelineStage;
   stages: PipelineStage[];
   cards: PipelineBoardCard[];
+  onMove: (propertyId: number, stageId: number) => void;
 }) {
+  const { setNodeRef, isOver } = useDroppable({ id: `${STAGE_PREFIX}${stage.id}` });
   return (
     <div className="w-72 shrink-0">
       <div
@@ -346,13 +452,20 @@ function StageColumn({
           {cards.length}
         </span>
       </div>
-      <ul className="mt-3 space-y-2">
+      <ul
+        ref={setNodeRef}
+        className={`mt-3 min-h-24 space-y-2 rounded-[var(--radius-md)] p-1 transition-colors ${
+          isOver
+            ? 'bg-[var(--color-inset)] outline outline-1 outline-[var(--color-rule-strong)]'
+            : ''
+        }`}
+      >
         {cards.length === 0 ? (
-          <li className="px-1 text-sm text-[var(--color-ink-4)]">—</li>
+          <li className="px-1 py-2 text-sm text-[var(--color-ink-4)]">—</li>
         ) : (
           cards.map((c) => (
             <li key={c.property_id}>
-              <BoardCard card={c} stages={stages} />
+              <BoardCard card={c} stages={stages} onMove={onMove} />
             </li>
           ))
         )}
@@ -361,23 +474,11 @@ function StageColumn({
   );
 }
 
-function BoardCard({
-  card,
-  stages,
-}: {
-  card: PipelineBoardCard;
-  stages: PipelineStage[];
-}) {
-  const qc = useQueryClient();
-  const move = useMutation({
-    mutationFn: (stage_id: number) => movePipelineCard(card.property_id, stage_id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: pipelineKeys.board }),
-  });
-
+/* The card's visible content — reused by the in-column card and the drag ghost. */
+function CardFace({ card }: { card: PipelineBoardCard }) {
   const meta = [card.disposition, card.district].filter(Boolean).join(' · ');
-
   return (
-    <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-2.5">
+    <>
       {card.sreality_id != null ? (
         <Link
           to={listingPath(card.sreality_id)}
@@ -398,12 +499,53 @@ function BoardCard({
           {fmtArea(card.area_m2)}
         </p>
       )}
+    </>
+  );
+}
+
+function BoardCard({
+  card,
+  stages,
+  onMove,
+}: {
+  card: PipelineBoardCard;
+  stages: PipelineStage[];
+  onMove: (propertyId: number, stageId: number) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `${CARD_PREFIX}${card.property_id}`,
+  });
+  const style = {
+    transform: CSS.Translate.toString(transform),
+    opacity: isDragging ? 0.4 : undefined,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] p-2.5"
+    >
+      <div className="flex items-start gap-1.5">
+        <button
+          type="button"
+          {...attributes}
+          {...listeners}
+          aria-label="Přetáhnout kartu do jiné fáze"
+          className="shrink-0 cursor-grab touch-none pt-0.5 leading-none text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)] active:cursor-grabbing"
+        >
+          ⠿
+        </button>
+        <div className="min-w-0 flex-1">
+          <CardFace card={card} />
+        </div>
+      </div>
+      {/* Keyboard / accessible fallback for the drag move. */}
       <select
         value={card.stage_id}
-        onChange={(e) => move.mutate(Number(e.target.value))}
-        disabled={move.isPending}
+        onChange={(e) => onMove(card.property_id, Number(e.target.value))}
         aria-label="Přesunout do fáze"
-        className="mt-2 w-full px-2 py-1 text-[0.78rem] rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink-2)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-60"
+        className="mt-2 w-full px-2 py-1 text-[0.78rem] rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink-2)] focus:outline-none focus:border-[var(--color-rule-strong)]"
       >
         {stages.map((s) => (
           <option key={s.id} value={s.id}>

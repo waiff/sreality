@@ -722,7 +722,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
     `GET /pipeline/stages`); the `/pipeline` kanban board reads `property_pipeline_public` +
     `pipeline_stages_public` (membership/stages) hydrated against `properties_public`. Stage
-    moves are a per-card stage picker today; drag-and-drop is a deferred enhancement.
+    moves are **drag-and-drop** (`@dnd-kit`, `Pipeline.tsx`: each column is a `useDroppable`,
+    each card a `useDraggable` with a grip handle; the board owns one optimistic move mutation —
+    drag and the per-card `<select>` share it). The drag→move resolution is the pure, unit-tested
+    `planMove(activeId, overId, cards)` (same column / dropped-outside / unknown card → no-op).
+    The per-card stage `<select>` is **kept as the keyboard/accessible fallback**, not removed.
     **Stages are operator-curated from the board's "Spravovat fáze" panel** (`POST
     /pipeline/stages` create — the `key` slug is derived server-side from the label; `PATCH
     /pipeline/stages/{id}` rename/recolor/retag/crown-entry; `POST /pipeline/stages/reorder`
