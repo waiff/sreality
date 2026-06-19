@@ -105,7 +105,7 @@ def client(monkeypatch):
     )
     monkeypatch.setattr(
         api_curation, "get_collection",
-        lambda conn, cid: {"collection": {"id": cid}, "listings": []},
+        lambda conn, cid: {"collection": {"id": cid}, "properties": []},
     )
     monkeypatch.setattr(
         api_curation, "update_collection",
@@ -116,20 +116,20 @@ def client(monkeypatch):
         lambda conn, cid: {"deleted": True},
     )
     monkeypatch.setattr(
-        api_curation, "add_listings_to_collection",
-        lambda conn, cid, body: {"added": len(body.sreality_ids), "skipped": 0},
+        api_curation, "add_properties_to_collection",
+        lambda conn, cid, body: {"added": len(body.property_ids), "skipped": 0},
     )
     monkeypatch.setattr(
-        api_curation, "remove_listing_from_collection",
-        lambda conn, cid, sid: {"removed": True},
+        api_curation, "remove_property_from_collection",
+        lambda conn, cid, pid: {"removed": True},
     )
     monkeypatch.setattr(
         api_curation, "list_notes",
-        lambda conn, sid: {"data": []},
+        lambda conn, pid: {"data": []},
     )
     monkeypatch.setattr(
         api_curation, "create_note",
-        lambda conn, sid, body: {"id": 1, "sreality_id": sid, "body": body.body},
+        lambda conn, pid, body: {"id": 1, "property_id": pid, "body": body.body},
     )
     monkeypatch.setattr(
         api_curation, "list_tags",
@@ -195,7 +195,7 @@ _CREATE_ESTIMATION_BODY = {"spec": {"lat": 50.0, "lng": 14.0, "area_m2": 50.0}}
 _RESOLVE_BODY = {"label": "x", "lat": 50.0, "lng": 14.0}
 _CREATE_COLLECTION_BODY = {"name": "test"}
 _PATCH_COLLECTION_BODY = {"name": "renamed"}
-_ADD_LISTINGS_BODY = {"sreality_ids": [1]}
+_ADD_PROPERTIES_BODY = {"property_ids": [1]}
 _CREATE_NOTE_BODY = {"body": "smoke"}
 _CREATE_TAG_BODY = {"name": "hot", "color": "brick"}
 _PATCH_TAG_BODY = {"name": "renamed", "color": "sage"}
@@ -225,16 +225,16 @@ def _gated_calls(client) -> list:
         ("GET",    "/collections/1", None),
         ("PATCH",  "/collections/1", _PATCH_COLLECTION_BODY),
         ("DELETE", "/collections/1", None),
-        ("POST",   "/collections/1/listings", _ADD_LISTINGS_BODY),
-        ("DELETE", "/collections/1/listings/2", None),
-        ("GET",    "/listings/1/notes", None),
-        ("POST",   "/listings/1/notes", _CREATE_NOTE_BODY),
+        ("POST",   "/collections/1/properties", _ADD_PROPERTIES_BODY),
+        ("DELETE", "/collections/1/properties/2", None),
+        ("GET",    "/properties/1/notes", None),
+        ("POST",   "/properties/1/notes", _CREATE_NOTE_BODY),
         ("GET",    "/tags", None),
         ("POST",   "/tags", _CREATE_TAG_BODY),
         ("PATCH",  "/tags/1", _PATCH_TAG_BODY),
         ("DELETE", "/tags/1", None),
-        ("POST",   "/listings/1/tags", _ATTACH_TAG_BODY),
-        ("DELETE", "/listings/1/tags/1", None),
+        ("POST",   "/properties/1/tags", _ATTACH_TAG_BODY),
+        ("DELETE", "/properties/1/tags/1", None),
     ]
 
 

@@ -22,6 +22,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from scripts.recompute_property_stats import recompute_one
+from toolkit.operator_state import carry_operator_state_on_merge
 
 MergeSource = Literal["auto", "operator"]
 
@@ -48,9 +49,11 @@ def merge_properties(
     """Merge `retired_id` into `survivor_id`. One transaction, reversible.
 
     Re-points every child of the retired property onto the survivor, logs one
-    `property_merge_events` row per child, soft-retires the loser, marks any
-    matching candidate pair merged, and recomputes the survivor inline. Returns
-    the standard toolkit envelope with the new merge_group_id.
+    `property_merge_events` row per child, carries the retired property's
+    property-anchored operator state (collections/tags/notes/watchdog dispatches,
+    see `toolkit.operator_state`) onto the survivor, soft-retires the loser, marks
+    any matching candidate pair merged, and recomputes the survivor inline.
+    Returns the standard toolkit envelope with the new merge_group_id.
     """
     if survivor_id == retired_id:
         raise MergeError("survivor and retired must differ")
@@ -111,6 +114,12 @@ def merge_properties(
             cur.execute(
                 "UPDATE listings SET property_id = %s WHERE property_id = %s",
                 (survivor_id, retired_id),
+            )
+            # Property-anchored operator state (collections/tags/notes/watchdog
+            # dispatches) follows the property onto the survivor in this same
+            # transaction, so it never orphans onto the merged_away loser.
+            carry_operator_state_on_merge(
+                cur, retired_id=retired_id, survivor_id=survivor_id
             )
             cur.execute(
                 """

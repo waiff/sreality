@@ -515,12 +515,15 @@ class UpdateCollectionIn(BaseModel):
     description: str | None = None
 
 
-class AddListingsToCollectionIn(BaseModel):
-    sreality_ids: list[int] = Field(min_length=1, max_length=500)
+class AddPropertiesToCollectionIn(BaseModel):
+    property_ids: list[int] = Field(min_length=1, max_length=500)
 
 
 class CreateNoteIn(BaseModel):
     body: str = Field(min_length=1, max_length=4000)
+    # The advert the operator was viewing when they wrote the note — display
+    # provenance only ("written while viewing this advert"), not a grouping key.
+    origin_listing_id: int | None = None
 
 
 class CreateTagIn(BaseModel):

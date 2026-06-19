@@ -601,8 +601,10 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
     helper), so the two surfaces can never disagree on what a filter means. Dispatches are
     **property-grain** and append-only, deduped by `UNIQUE(subscription_id, property_id,
-    change_kind)`. Delivery is **in-app only today** (`channel='in_app'` CHECK); a free
-    email channel is planned (extend via ALTER, not a rewrite).
+    change_kind)`, and are re-pointed onto the survivor on a property merge by the
+    operator-state reconciler (rule #18, `toolkit/operator_state.py`) so they never orphan
+    onto a `merged_away` property. Delivery is **in-app only today** (`channel='in_app'`
+    CHECK); a free email channel is planned (extend via ALTER, not a rewrite).
 17. **City-quality indexes are a normalized, operator-curated time series.** `curated_cities`
     + `city_index_revisions` + `city_index_values` + `city_index_definitions` +
     `city_population` (migration 078 onward) store per-city indexes long-form, so a new index
@@ -611,10 +613,27 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     helper and the `listings_with_city_quality` RPC, and the filters are **agenda-gated to
     BROWSE + WATCHDOG only** (`toolkit/filter_registry.py`) — the estimation agent
     deliberately never sees them, preserving deterministic estimate semantics.
-18. **Collections are operator-curated many-to-many groupings of listings** (`collections` +
-    `collection_listings(collection_id, sreality_id)`, migration 022). Writes flow through
-    the FastAPI service; the browser never writes directly. Same no-hard-delete spirit as the
-    rest of the data model.
+18. **Operator curation is PROPERTY-grain and dedup-stable** (`collections` +
+    `collection_properties(collection_id, property_id)`, `tags` + `property_tags(property_id,
+    tag_id)`, `property_notes(property_id, body, origin_listing_id)`, migration 202 — was
+    listing-grain on `sreality_id` pre-202). A tag, collection membership, or note is a fact
+    about the real-world property, not one portal's advert, so it is keyed on `property_id`
+    and **follows the property across merge/unmerge/split**. `toolkit/operator_state.py`
+    (`carry_operator_state_on_merge` + `OPERATOR_STATE_TABLES`, the single registry of every
+    property-anchored operator-state table — collections, tags, notes, AND `notification_dispatches`)
+    re-points that state onto the survivor inside the `merge_properties` transaction (SET tables
+    union with collision-collapse; APPEND tables move every row), so no operator-state row can
+    ever orphan onto a `merged_away` property — the invariant holds by construction. Adding a
+    new property-anchored operator-state table = one registry line. Unmerge/split are deliberately
+    **best-effort**: state stays on the surviving/anchor property and the reactivated/detached
+    side starts clean (the operator re-curates — nothing is destroyed, it is on the survivor).
+    Notes carry `origin_listing_id` as display provenance only ("written while viewing this
+    advert"), never as a grouping key. The Browse tag filter resolves through
+    `properties_with_tags(tag_ids)` at property grain — a property matches if ANY of its
+    listings' property carries the tags, fixing the pre-202 bug where only the representative
+    listing's tags were matched. Writes flow through the FastAPI service (property-grain routes
+    `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
+    browser never writes directly. Same no-hard-delete spirit as the rest of the data model.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

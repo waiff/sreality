@@ -146,6 +146,39 @@ def test_merge_rejects_self_merge():
     assert conn.executed == []
 
 
+def test_merge_carries_operator_state_to_survivor():
+    # Property-anchored operator state follows the property onto the survivor in
+    # the same transaction, so it never orphans onto the merged_away loser.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
+    ])
+
+    merge_properties(
+        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+    )
+
+    for tbl in (
+        "collection_properties", "property_tags",
+        "property_notes", "notification_dispatches",
+    ):
+        up = _find(conn.executed, f"UPDATE {tbl} SET property_id =")
+        assert up is not None, f"{tbl} not re-pointed"
+        assert up[1] == {"retired": 20, "survivor": 10}, tbl
+    # set tables collision-collapse before re-point
+    assert _find(conn.executed, "DELETE FROM notification_dispatches r") is not None
+    # the carry happens BEFORE the loser is soft-retired (so no orphan window)
+    idx_carry = next(
+        i for i, e in enumerate(conn.executed)
+        if "UPDATE property_tags SET property_id" in e[0]
+    )
+    idx_retire = next(
+        i for i, e in enumerate(conn.executed) if "status = 'merged_away'" in e[0]
+    )
+    assert idx_carry < idx_retire
+
+
 # --- unmerge_group --------------------------------------------------------
 
 
