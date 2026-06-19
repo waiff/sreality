@@ -1482,6 +1482,20 @@ export const pipelineKeys = {
   card: (property_id: number) => ['pipeline', 'card', property_id] as const,
   board: ['pipeline', 'board'] as const,
   stages: ['pipeline', 'stages'] as const,
+  members: ['pipeline', 'members'] as const,
+};
+
+/* The set of property_ids currently in the pipeline — one cheap read shared
+ * (React Query dedupes the key) by every Browse-card bookmark toggle. */
+export const fetchPipelineMemberSet = async (): Promise<Set<number>> => {
+  const { data, error } = await supabase
+    .from('property_pipeline_public')
+    .select('property_id')
+    .range(0, 99999);
+  if (error) throw error;
+  return new Set(
+    ((data ?? []) as Array<{ property_id: number }>).map((r) => r.property_id),
+  );
 };
 
 export const fetchPropertyPipeline = async (
