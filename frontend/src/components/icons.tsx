@@ -5,11 +5,11 @@
 
 type IconProps = { className?: string; strokeWidth?: number };
 
-/* The app's "pipeline" mark — a horizontal filter / sliders glyph (three tracks
- * with knobs). `filled` = solid knobs (in pipeline / active / entry stage);
- * unfilled = ring knobs. The tracks are gapped around each knob so the state
- * reads crisply on any surface. */
-export function FilterIcon({
+/* The app's "pipeline" mark — a funnel with three arrows feeding into it (the
+ * deal-funnel metaphor). `filled` = solid funnel body (in pipeline / active /
+ * entry stage); unfilled = outline. The arrows stay outline in both states so
+ * the fill cleanly signals membership. */
+export function FunnelIcon({
   filled = false,
   className = 'h-4 w-4',
   strokeWidth = 1.75,
@@ -25,15 +25,18 @@ export function FilterIcon({
       strokeLinecap="round"
       strokeLinejoin="round"
     >
-      <line x1="3" y1="7" x2="12.7" y2="7" />
-      <line x1="17.3" y1="7" x2="21" y2="7" />
-      <line x1="3" y1="12" x2="6.7" y2="12" />
-      <line x1="11.3" y1="12" x2="21" y2="12" />
-      <line x1="3" y1="17" x2="13.7" y2="17" />
-      <line x1="18.3" y1="17" x2="21" y2="17" />
-      <circle cx="15" cy="7" r="2.4" fill={filled ? 'currentColor' : 'none'} />
-      <circle cx="9" cy="12" r="2.4" fill={filled ? 'currentColor' : 'none'} />
-      <circle cx="16" cy="17" r="2.4" fill={filled ? 'currentColor' : 'none'} />
+      {/* three arrows feeding the funnel */}
+      <line x1="7.5" y1="2" x2="7.5" y2="5.5" />
+      <polyline points="6.2,4 7.5,5.7 8.8,4" />
+      <line x1="12" y1="2" x2="12" y2="5.5" />
+      <polyline points="10.7,4 12,5.7 13.3,4" />
+      <line x1="16.5" y1="2" x2="16.5" y2="5.5" />
+      <polyline points="15.2,4 16.5,5.7 17.8,4" />
+      {/* funnel: wide rim → taper → short spout */}
+      <path
+        d="M4 8 H20 L13.5 15 V21 H10.5 V15 Z"
+        fill={filled ? 'currentColor' : 'none'}
+      />
     </svg>
   );
 }
