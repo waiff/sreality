@@ -875,8 +875,11 @@ def list_estimation_runs(
         cur.execute(list_sql, list_params)
         rows = cur.fetchall()
         total: int | None = None
-        # Count once, on the first page (no cursor, no legacy offset).
-        if cursor is None and offset == 0:
+        # Count on the first page only: any cursor'd page is page 2+ of an
+        # infinite scroll, where the cohort total hasn't changed and a fresh
+        # count is wasted. The legacy offset path (cursor None) still always
+        # returns a total, preserving its contract.
+        if cursor is None:
             count_params = {k: params[k] for k in params if k not in ("c_ts", "c_id")}
             cur.execute(
                 f"SELECT count(*) FROM estimation_runs er {filter_sql}", count_params

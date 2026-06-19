@@ -708,7 +708,9 @@ def list_dispatches(
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description] if cur.description else []
         total: int | None = None
-        if cursor is None and offset == 0:
+        # Count on the first page only (cursor None); legacy offset path keeps
+        # its total. See list_estimation_runs for the rationale.
+        if cursor is None:
             count_params = {k: params[k] for k in params if k not in ("c_ts", "c_id")}
             cur.execute(
                 "SELECT count(*) FROM notification_dispatches d "
