@@ -1372,6 +1372,16 @@ def post_pipeline_card(
     return pipeline_module.add_card(conn, body)
 
 
+@app.patch("/pipeline/cards/{property_id}")
+def patch_pipeline_card(
+    property_id: int,
+    body: s.MoveCardIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.move_card(conn, property_id, body)
+
+
 @app.delete("/pipeline/cards/{property_id}")
 def delete_pipeline_card(
     property_id: int,

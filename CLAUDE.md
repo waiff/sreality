@@ -712,9 +712,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     to the append-only `property_pipeline_events` ledger. Unmerge/split are best-effort today
     (the card stays on the surviving/anchor property); the lossless unmerge replay + a
     terminal-aware conflict policy (don't let a `lost` stage bury a live deal) are deferred to
-    a later phase. Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards`,
-    `GET /pipeline/stages`); membership reads via `property_pipeline_public`. The kanban board
-    + stage moves are a later phase; Phase 0 is the bookmark surface only.
+    a later phase. Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
+    bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
+    `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
+    `GET /pipeline/stages`); the `/pipeline` kanban board reads `property_pipeline_public` +
+    `pipeline_stages_public` (membership/stages) hydrated against `properties_public`. Stage
+    moves are a per-card stage picker today; drag-and-drop is a deferred enhancement.
 
 ## Toolkit and API rules
 

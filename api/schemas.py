@@ -548,6 +548,13 @@ class AddPipelineCardIn(BaseModel):
     property_id: int
 
 
+class MoveCardIn(BaseModel):
+    # Move to another stage and/or reorder within a stage. Both optional; an
+    # empty body is a no-op that returns the current card.
+    stage_id: int | None = None
+    board_position: float | None = None
+
+
 # --- manual rental estimates ---------------------------------------------
 # Operator-recorded point estimates attached to a listing (Phase U-ME).
 # See migration 046 and CLAUDE.md "Operator workflow track".

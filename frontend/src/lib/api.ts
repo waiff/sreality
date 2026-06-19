@@ -935,6 +935,19 @@ export const removePipelineCard = (
     method: 'DELETE',
   });
 
+export const movePipelineCard = (
+  property_id: number,
+  stage_id: number,
+  board_position?: number,
+): Promise<{ property_id: number; stage_id: number; stage_key: string }> =>
+  request<{ property_id: number; stage_id: number; stage_key: string }>(
+    `/pipeline/cards/${property_id}`,
+    {
+      method: 'PATCH',
+      json: board_position != null ? { stage_id, board_position } : { stage_id },
+    },
+  );
+
 /* Manual rental estimates (Phase U-ME).
  *
  * Reads can also come from the manual_rental_estimates_public Supabase

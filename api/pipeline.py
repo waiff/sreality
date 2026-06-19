@@ -92,6 +92,59 @@ def remove_card(
     return {"removed": True}
 
 
+def move_card(
+    conn: "psycopg.Connection", property_id: int, body: s.MoveCardIn,
+) -> dict[str, Any]:
+    """Move a card to another stage and/or reorder it within a stage.
+
+    A stage change stamps `entered_stage_at` and logs a `moved` event; a pure
+    within-stage reorder (only `board_position`) is not deal history, so it logs
+    nothing.
+    """
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT stage_id FROM property_pipeline WHERE property_id = %s FOR UPDATE",
+            (property_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "pipeline card not found")
+        from_stage_id = int(row[0])
+        stage_changed = body.stage_id is not None and body.stage_id != from_stage_id
+
+        sets: list[str] = []
+        params: list[Any] = []
+        if body.stage_id is not None:
+            sets.append("stage_id = %s")
+            params.append(body.stage_id)
+            if stage_changed:
+                sets.append("entered_stage_at = now()")
+        if body.board_position is not None:
+            sets.append("board_position = %s")
+            params.append(body.board_position)
+        if sets:
+            sets.append("updated_at = now()")
+            params.append(property_id)
+            try:
+                cur.execute(
+                    f"UPDATE property_pipeline SET {', '.join(sets)} "
+                    "WHERE property_id = %s",
+                    params,
+                )
+            except psycopg.errors.ForeignKeyViolation:
+                raise HTTPException(422, "stage not found")
+            if stage_changed:
+                cur.execute(
+                    "INSERT INTO property_pipeline_events "
+                    "  (property_id, from_stage_id, to_stage_id, reason) "
+                    "VALUES (%s, %s, %s, 'operator')",
+                    (property_id, from_stage_id, body.stage_id),
+                )
+    card = _fetch_card(conn, property_id)
+    assert card is not None
+    return card
+
+
 # --- helpers ---------------------------------------------------------------
 
 

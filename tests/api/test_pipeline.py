@@ -40,6 +40,12 @@ def client(monkeypatch):
         pipeline_module, "remove_card",
         lambda conn, pid: {"removed": True},
     )
+    monkeypatch.setattr(
+        pipeline_module, "move_card",
+        lambda conn, pid, body: {
+            "property_id": pid, "stage_id": body.stage_id, "stage_key": "offer",
+        },
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -68,6 +74,12 @@ def test_remove_card(client):
     res = client.delete("/pipeline/cards/42")
     assert res.status_code == 200
     assert res.json() == {"removed": True}
+
+
+def test_move_card_route(client):
+    res = client.patch("/pipeline/cards/42", json={"stage_id": 3})
+    assert res.status_code == 200
+    assert res.json()["stage_id"] == 3
 
 
 # --- add_card logic against a scripted fake connection ---------------------
@@ -151,3 +163,32 @@ def test_add_card_idempotent_returns_existing_stage_no_event():
     assert not any(
         "INSERT INTO property_pipeline_events" in e[0] for e in conn.executed
     )
+
+
+def test_move_card_to_new_stage_logs_event_and_stamps_entered():
+    conn = _FakeConn([
+        (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(1,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
+         [(42, 3, "offer", "Nabídka", 2, None, None, None)]),
+    ])
+    out = pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=3))
+    sqls = [q for q, _ in conn.executed]
+    assert any(
+        "UPDATE property_pipeline SET" in q and "entered_stage_at = now()" in q
+        for q in sqls
+    )
+    assert any("INSERT INTO property_pipeline_events" in q for q in sqls)
+    assert out["stage_key"] == "offer"
+
+
+def test_move_card_reorder_only_logs_no_event():
+    conn = _FakeConn([
+        (lambda q: "SELECT stage_id FROM property_pipeline WHERE property_id" in q, [(1,)]),
+        (lambda q: "FROM property_pipeline pp JOIN pipeline_stages" in q,
+         [(42, 1, "interested", "Zájem", 3, None, None, None)]),
+    ])
+    pipeline_module.move_card(conn, 42, s.MoveCardIn(stage_id=1, board_position=2.5))
+    sqls = [q for q, _ in conn.executed]
+    assert any("UPDATE property_pipeline SET" in q and "board_position" in q for q in sqls)
+    assert not any("entered_stage_at = now()" in q for q in sqls)
+    assert not any("INSERT INTO property_pipeline_events" in q for q in sqls)

@@ -831,6 +831,31 @@ export interface PipelineCard {
   stage_position: number;
 }
 
+/* The kanban columns (pipeline_stages_public, operator-curated). */
+export interface PipelineStage {
+  id: number;
+  key: string;
+  label: string;
+  position: number;
+  color: TagColor | null;
+  is_terminal: boolean;
+  is_entry: boolean;
+}
+
+/* A board card = the property_pipeline row joined to its property's display
+ * fields (from properties_public) for rendering on the kanban. */
+export interface PipelineBoardCard {
+  property_id: number;
+  stage_id: number;
+  board_position: number;
+  entered_stage_at: string;
+  sreality_id: number | null;
+  district: string | null;
+  disposition: string | null;
+  area_m2: number | null;
+  price_czk: number | null;
+}
+
 /* GET /collections/{id} embeds a slimmer property projection than
  * ListingPublic — see api/curation.get_collection. Each row carries the
  * property_id plus its representative listing's sreality_id (for

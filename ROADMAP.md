@@ -2430,6 +2430,21 @@ bookmark entry point; the kanban board and stage moves are the next phases.
 - Next: kanban board + drag stage-moves (Phase 1); lossless unmerge + terminal
   policy (Phase 2); Browse-card bookmark icons; stage management UI.
 
+### Phase U-PIPE Phase 1: Kanban board + stage moves (done)
+The `/pipeline` board itself — columns per stage, cards per property, move a
+card between stages.
+- `PATCH /pipeline/cards/{property_id}` ({stage_id, board_position?}) — moves a
+  card; a stage change stamps `entered_stage_at` and logs a `moved` event, a
+  pure within-stage reorder logs nothing (`api/pipeline.move_card`).
+- `Pipeline.tsx` (`/pipeline`, in the Shell nav): columns from
+  `pipeline_stages_public`, cards from `property_pipeline_public` hydrated
+  against `properties_public` (batched join by property_id); each card links to
+  its representative listing + a per-card stage picker that PATCHes the move.
+- Move UX is a stage-picker dropdown for now; drag-and-drop (`@dnd-kit`, already
+  a dep) is a deferred progressive enhancement.
+- Next: Phase 2 = lossless unmerge replay + terminal-aware merge policy;
+  Browse-card bookmark icons; operator stage-management UI (rename/reorder/add).
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and
