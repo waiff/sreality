@@ -1,8 +1,11 @@
-"""Persistence helpers for /collections, /listings/{id}/notes, /tags.
+"""Persistence helpers for /collections, /properties/{id}/notes, /tags.
 
-CRUD over the curation tables (migrations 022-024). Each handler is a
-plain function returning a dict; the FastAPI routes in api/main.py wrap
-them with the standard Depends(get_db_conn) + Depends(require_token).
+CRUD over the property-grain curation tables (migration 202): collection
+membership, tags and notes are keyed on `property_id` so operator curation
+describes the real-world property and is dedup-stable (it follows the property
+across merge/unmerge/split via toolkit.operator_state). Each handler is a plain
+function returning a dict; the FastAPI routes in api/main.py wrap them with the
+standard Depends(get_db_conn) + Depends(require_token).
 
 Pattern mirrors api/estimation_runs.py:
   - one transaction per write,
@@ -26,10 +29,12 @@ if TYPE_CHECKING:
 
 # --- collections -----------------------------------------------------------
 
+# `listing_count` is kept as the field name for API/UI stability; it now counts
+# member properties (the curation grain).
 _COLLECTION_FULL_PROJECTION = (
     "c.id, c.name, c.description, c.created_at, c.updated_at, "
-    "(SELECT count(*) FROM collection_listings cl "
-    " WHERE cl.collection_id = c.id) AS listing_count"
+    "(SELECT count(*) FROM collection_properties cp "
+    " WHERE cp.collection_id = c.id) AS listing_count"
 )
 
 
@@ -66,42 +71,42 @@ def list_collections(conn: "psycopg.Connection") -> dict[str, Any]:
 def get_collection(
     conn: "psycopg.Connection", collection_id: int,
 ) -> dict[str, Any]:
-    """Return the collection metadata + the full listing rows it holds.
+    """Return the collection metadata + the property rows it holds.
 
-    The embedded listings are joined from the `listings` table directly
-    (not `listings_public`); this endpoint runs server-side under the
-    service role, so projecting the same column set the SPA's table view
-    consumes is safe.
+    The embedded rows are the property rollups (joined server-side under the
+    service role); `sreality_id` is the property's representative listing so the
+    SPA can link to the detail page.
     """
     coll = _fetch_collection(conn, collection_id)
     if coll is None:
         raise HTTPException(404, "collection not found")
 
-    listings_sql = (
-        "SELECT l.sreality_id, l.district, l.disposition, l.area_m2, "
-        "       l.price_czk, l.last_seen_at, l.is_active, cl.added_at "
-        "FROM collection_listings cl "
-        "JOIN listings l ON l.sreality_id = cl.sreality_id "
-        "WHERE cl.collection_id = %s "
-        "ORDER BY cl.added_at DESC"
+    properties_sql = (
+        "SELECT cp.property_id, p.repr_listing_id, p.district, p.disposition, "
+        "       p.area_m2, p.current_price_czk, p.last_seen_at, p.is_active, cp.added_at "
+        "FROM collection_properties cp "
+        "JOIN properties p ON p.id = cp.property_id "
+        "WHERE cp.collection_id = %s "
+        "ORDER BY cp.added_at DESC"
     )
     with conn.cursor() as cur:
-        cur.execute(listings_sql, (collection_id,))
+        cur.execute(properties_sql, (collection_id,))
         rows = cur.fetchall()
-    listings = [
+    properties = [
         {
-            "sreality_id":  int(r[0]),
-            "district":     r[1],
-            "disposition":  r[2],
-            "area_m2":      float(r[3]) if r[3] is not None else None,
-            "price_czk":    r[4],
-            "last_seen_at": _iso(r[5]),
-            "is_active":    bool(r[6]),
-            "added_at":     _iso(r[7]),
+            "property_id":  int(r[0]),
+            "sreality_id":  int(r[1]) if r[1] is not None else None,
+            "district":     r[2],
+            "disposition":  r[3],
+            "area_m2":      float(r[4]) if r[4] is not None else None,
+            "price_czk":    r[5],
+            "last_seen_at": _iso(r[6]),
+            "is_active":    bool(r[7]),
+            "added_at":     _iso(r[8]),
         }
         for r in rows
     ]
-    return {"collection": coll, "listings": listings}
+    return {"collection": coll, "properties": properties}
 
 
 def update_collection(
@@ -148,23 +153,23 @@ def delete_collection(
     return {"deleted": True}
 
 
-def add_listings_to_collection(
+def add_properties_to_collection(
     conn: "psycopg.Connection",
     collection_id: int,
-    body: s.AddListingsToCollectionIn,
+    body: s.AddPropertiesToCollectionIn,
 ) -> dict[str, Any]:
-    """Insert a batch of (collection_id, sreality_id) rows.
+    """Insert a batch of (collection_id, property_id) rows.
 
     INSERT ... ON CONFLICT DO NOTHING — already-present pairs count as
-    skipped, listings that aren't in the listings table fail the FK
+    skipped, property_ids that aren't in the properties table fail the FK
     and are reported via 422. Bumps collections.updated_at on success.
     """
-    if not body.sreality_ids:
-        raise HTTPException(422, "sreality_ids must be non-empty")
+    if not body.property_ids:
+        raise HTTPException(422, "property_ids must be non-empty")
     sql = (
-        "INSERT INTO collection_listings (collection_id, sreality_id) "
+        "INSERT INTO collection_properties (collection_id, property_id) "
         "SELECT %s, unnest(%s::bigint[]) "
-        "ON CONFLICT (collection_id, sreality_id) DO NOTHING"
+        "ON CONFLICT (collection_id, property_id) DO NOTHING"
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
@@ -173,7 +178,7 @@ def add_listings_to_collection(
             )
             if cur.fetchone() is None:
                 raise HTTPException(404, "collection not found")
-            cur.execute(sql, (collection_id, body.sreality_ids))
+            cur.execute(sql, (collection_id, body.property_ids))
             added = cur.rowcount
             cur.execute(
                 "UPDATE collections SET updated_at = now() WHERE id = %s",
@@ -181,23 +186,23 @@ def add_listings_to_collection(
             )
     except psycopg.errors.ForeignKeyViolation as exc:
         raise HTTPException(
-            422, f"one or more sreality_ids do not exist: {exc}",
+            422, f"one or more property_ids do not exist: {exc}",
         )
-    skipped = len(body.sreality_ids) - added
+    skipped = len(body.property_ids) - added
     return {"added": added, "skipped": skipped}
 
 
-def remove_listing_from_collection(
+def remove_property_from_collection(
     conn: "psycopg.Connection",
     collection_id: int,
-    sreality_id: int,
+    property_id: int,
 ) -> dict[str, Any]:
     sql = (
-        "DELETE FROM collection_listings "
-        "WHERE collection_id = %s AND sreality_id = %s"
+        "DELETE FROM collection_properties "
+        "WHERE collection_id = %s AND property_id = %s"
     )
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute(sql, (collection_id, sreality_id))
+        cur.execute(sql, (collection_id, property_id))
         removed = cur.rowcount > 0
         if removed:
             cur.execute(
@@ -211,33 +216,35 @@ def remove_listing_from_collection(
 
 
 def list_notes(
-    conn: "psycopg.Connection", sreality_id: int,
+    conn: "psycopg.Connection", property_id: int,
 ) -> dict[str, Any]:
     sql = (
-        "SELECT id, sreality_id, body, created_at FROM listing_notes "
-        "WHERE sreality_id = %s ORDER BY created_at DESC, id DESC"
+        "SELECT id, property_id, body, origin_listing_id, created_at "
+        "FROM property_notes "
+        "WHERE property_id = %s ORDER BY created_at DESC, id DESC"
     )
     with conn.cursor() as cur:
-        cur.execute(sql, (sreality_id,))
+        cur.execute(sql, (property_id,))
         rows = cur.fetchall()
     return {"data": [_to_note(r) for r in rows]}
 
 
 def create_note(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    property_id: int,
     body: s.CreateNoteIn,
 ) -> dict[str, Any]:
     sql = (
-        "INSERT INTO listing_notes (sreality_id, body) VALUES (%s, %s) "
-        "RETURNING id, sreality_id, body, created_at"
+        "INSERT INTO property_notes (property_id, body, origin_listing_id) "
+        "VALUES (%s, %s, %s) "
+        "RETURNING id, property_id, body, origin_listing_id, created_at"
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
-            cur.execute(sql, (sreality_id, body.body))
+            cur.execute(sql, (property_id, body.body, body.origin_listing_id))
             row = cur.fetchone()
     except psycopg.errors.ForeignKeyViolation:
-        raise HTTPException(404, "listing not found")
+        raise HTTPException(404, "property not found")
     assert row is not None
     return _to_note(row)
 
@@ -246,7 +253,7 @@ def create_note(
 
 _TAG_FULL_PROJECTION = (
     "t.id, t.name, t.color, t.created_at, "
-    "(SELECT count(*) FROM listing_tags lt WHERE lt.tag_id = t.id) "
+    "(SELECT count(*) FROM property_tags pt WHERE pt.tag_id = t.id) "
     "  AS listing_count"
 )
 
@@ -281,8 +288,8 @@ def update_tag(
     tag_id: int,
     body: s.UpdateTagIn,
 ) -> dict[str, Any]:
-    """Rename and/or recolour a tag in place. Listing attachments are
-    untouched — the listing_tags rows join by tag_id, not name."""
+    """Rename and/or recolour a tag in place. Property attachments are
+    untouched — the property_tags rows join by tag_id, not name."""
     sets: list[str] = []
     params: list[Any] = []
     if body.name is not None:
@@ -322,35 +329,35 @@ def delete_tag(
 
 def attach_tag(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    property_id: int,
     body: s.AttachTagIn,
 ) -> dict[str, Any]:
-    """Attach a tag to a listing. Idempotent (ON CONFLICT DO NOTHING)."""
+    """Attach a tag to a property. Idempotent (ON CONFLICT DO NOTHING)."""
     sql = (
-        "INSERT INTO listing_tags (sreality_id, tag_id) VALUES (%s, %s) "
-        "ON CONFLICT (sreality_id, tag_id) DO NOTHING"
+        "INSERT INTO property_tags (property_id, tag_id) VALUES (%s, %s) "
+        "ON CONFLICT (property_id, tag_id) DO NOTHING"
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
-            cur.execute(sql, (sreality_id, body.tag_id))
+            cur.execute(sql, (property_id, body.tag_id))
             attached = cur.rowcount > 0
     except psycopg.errors.ForeignKeyViolation as exc:
         msg = str(exc).lower()
-        target = "tag" if "tag_id" in msg else "listing"
+        target = "tag" if "tag_id" in msg else "property"
         raise HTTPException(404, f"{target} not found")
     return {"attached": attached}
 
 
 def detach_tag(
     conn: "psycopg.Connection",
-    sreality_id: int,
+    property_id: int,
     tag_id: int,
 ) -> dict[str, Any]:
     sql = (
-        "DELETE FROM listing_tags WHERE sreality_id = %s AND tag_id = %s"
+        "DELETE FROM property_tags WHERE property_id = %s AND tag_id = %s"
     )
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute(sql, (sreality_id, tag_id))
+        cur.execute(sql, (property_id, tag_id))
         detached = cur.rowcount > 0
     return {"detached": detached}
 
@@ -409,10 +416,11 @@ def _to_collection_full(row: tuple[Any, ...]) -> dict[str, Any]:
 
 def _to_note(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
-        "id":          int(row[0]),
-        "sreality_id": int(row[1]),
-        "body":        row[2],
-        "created_at":  _iso(row[3]),
+        "id":                int(row[0]),
+        "property_id":       int(row[1]),
+        "body":              row[2],
+        "origin_listing_id": int(row[3]) if row[3] is not None else None,
+        "created_at":        _iso(row[4]),
     }
 
 

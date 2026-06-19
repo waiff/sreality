@@ -1,11 +1,15 @@
-/* Collections + tags + notes for a single listing. Wired into ListingDetail.
+/* Collections + tags + notes for a single PROPERTY. Wired into ListingDetail.
+ *
+ * Curation is property-grain (migration 202): a tag / collection membership /
+ * note describes the real-world property, so this block operates on the
+ * listing's `property_id`. The viewed `sreality_id` is recorded as a note's
+ * `origin_listing_id` (display provenance — "written while viewing this advert").
  *
  * Reads come from two places by design:
  *   - The "which collections / tags exist" indices use the bearer-gated
  *     FastAPI service so listing_count + ordering live in one place.
- *   - The "does THIS listing belong to X" reverse-index reads pull from the
- *     *_public Supabase views via the anon key — matches the rest of U1a's
- *     read pattern. Writes always go through the FastAPI service.
+ *   - The "does THIS property belong to X" reverse-index reads pull from the
+ *     *_public Supabase views via the anon key. Writes always go through the API.
  */
 
 import { useMemo, useRef, useState, useEffect } from 'react';
@@ -17,32 +21,38 @@ import {
 } from '@tanstack/react-query';
 import {
   ApiError,
-  addListingsToCollection,
+  addPropertiesToCollection,
   attachTag,
-  createListingNote,
+  createPropertyNote,
   createTag,
   detachTag,
   listCollections,
-  listListingNotes,
+  listPropertyNotes,
   listTags,
-  removeListingFromCollection,
+  removePropertyFromCollection,
 } from '@/lib/api';
 import {
   curationKeys,
-  fetchListingCollectionIds,
-  fetchListingTagIds,
+  fetchPropertyCollectionIds,
+  fetchPropertyTagIds,
 } from '@/lib/queries';
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
 import type { Collection, Note, Tag, TagColor } from '@/lib/types';
 import { TAG_COLORS } from '@/lib/types';
 import TagEditPopover from '@/components/curation/TagEditPopover';
 
-export default function CurationBlock({ sreality_id }: { sreality_id: number }) {
+export default function CurationBlock({
+  property_id,
+  sreality_id,
+}: {
+  property_id: number;
+  sreality_id: number;
+}) {
   return (
     <div className="space-y-7">
-      <CollectionsRow sreality_id={sreality_id} />
-      <TagsRow sreality_id={sreality_id} />
-      <NotesRow sreality_id={sreality_id} />
+      <CollectionsRow property_id={property_id} />
+      <TagsRow property_id={property_id} />
+      <NotesRow property_id={property_id} sreality_id={sreality_id} />
     </div>
   );
 }
@@ -59,7 +69,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 /* Collections                                                                */
 /* -------------------------------------------------------------------------- */
 
-function CollectionsRow({ sreality_id }: { sreality_id: number }) {
+function CollectionsRow({ property_id }: { property_id: number }) {
   const qc = useQueryClient();
 
   const allQ = useQuery({
@@ -69,8 +79,8 @@ function CollectionsRow({ sreality_id }: { sreality_id: number }) {
   });
 
   const membershipQ = useQuery({
-    queryKey: curationKeys.listingCollections(sreality_id),
-    queryFn: () => fetchListingCollectionIds(sreality_id),
+    queryKey: curationKeys.propertyCollections(property_id),
+    queryFn: () => fetchPropertyCollectionIds(property_id),
     staleTime: 30_000,
   });
 
@@ -83,10 +93,10 @@ function CollectionsRow({ sreality_id }: { sreality_id: number }) {
 
   const add = useMutation({
     mutationFn: (collection_id: number) =>
-      addListingsToCollection(collection_id, [sreality_id]),
+      addPropertiesToCollection(collection_id, [property_id]),
     onSuccess: (_, collection_id) => {
       qc.invalidateQueries({
-        queryKey: curationKeys.listingCollections(sreality_id),
+        queryKey: curationKeys.propertyCollections(property_id),
       });
       qc.invalidateQueries({ queryKey: curationKeys.collections });
       qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
@@ -95,10 +105,10 @@ function CollectionsRow({ sreality_id }: { sreality_id: number }) {
 
   const remove = useMutation({
     mutationFn: (collection_id: number) =>
-      removeListingFromCollection(collection_id, sreality_id),
+      removePropertyFromCollection(collection_id, property_id),
     onSuccess: (_, collection_id) => {
       qc.invalidateQueries({
-        queryKey: curationKeys.listingCollections(sreality_id),
+        queryKey: curationKeys.propertyCollections(property_id),
       });
       qc.invalidateQueries({ queryKey: curationKeys.collections });
       qc.invalidateQueries({ queryKey: curationKeys.collection(collection_id) });
@@ -192,7 +202,7 @@ function CollectionToggle({
 /* Tags                                                                       */
 /* -------------------------------------------------------------------------- */
 
-function TagsRow({ sreality_id }: { sreality_id: number }) {
+function TagsRow({ property_id }: { property_id: number }) {
   const qc = useQueryClient();
 
   const allQ = useQuery({
@@ -202,8 +212,8 @@ function TagsRow({ sreality_id }: { sreality_id: number }) {
   });
 
   const membershipQ = useQuery({
-    queryKey: curationKeys.listingTags(sreality_id),
-    queryFn: () => fetchListingTagIds(sreality_id),
+    queryKey: curationKeys.propertyTags(property_id),
+    queryFn: () => fetchPropertyTagIds(property_id),
     staleTime: 30_000,
   });
 
@@ -215,20 +225,20 @@ function TagsRow({ sreality_id }: { sreality_id: number }) {
   const tags = allQ.data?.data ?? [];
 
   const attach = useMutation({
-    mutationFn: (tag_id: number) => attachTag(sreality_id, tag_id),
+    mutationFn: (tag_id: number) => attachTag(property_id, tag_id),
     onSuccess: () => {
       qc.invalidateQueries({
-        queryKey: curationKeys.listingTags(sreality_id),
+        queryKey: curationKeys.propertyTags(property_id),
       });
       qc.invalidateQueries({ queryKey: curationKeys.tags });
     },
   });
 
   const detach = useMutation({
-    mutationFn: (tag_id: number) => detachTag(sreality_id, tag_id),
+    mutationFn: (tag_id: number) => detachTag(property_id, tag_id),
     onSuccess: () => {
       qc.invalidateQueries({
-        queryKey: curationKeys.listingTags(sreality_id),
+        queryKey: curationKeys.propertyTags(property_id),
       });
       qc.invalidateQueries({ queryKey: curationKeys.tags });
     },
@@ -492,24 +502,31 @@ function CreateTagForm({
 /* Notes                                                                      */
 /* -------------------------------------------------------------------------- */
 
-function NotesRow({ sreality_id }: { sreality_id: number }) {
+function NotesRow({
+  property_id,
+  sreality_id,
+}: {
+  property_id: number;
+  sreality_id: number;
+}) {
   const qc = useQueryClient();
   const [body, setBody] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   const notesQ = useQuery({
-    queryKey: curationKeys.listingNotes(sreality_id),
-    queryFn: () => listListingNotes(sreality_id),
+    queryKey: curationKeys.propertyNotes(property_id),
+    queryFn: () => listPropertyNotes(property_id),
     staleTime: 30_000,
   });
 
   const create = useMutation({
-    mutationFn: (text: string) => createListingNote(sreality_id, text),
+    mutationFn: (text: string) =>
+      createPropertyNote(property_id, text, sreality_id),
     onSuccess: () => {
       setBody('');
       setError(null);
       qc.invalidateQueries({
-        queryKey: curationKeys.listingNotes(sreality_id),
+        queryKey: curationKeys.propertyNotes(property_id),
       });
     },
     onError: (err: ApiError | Error) =>

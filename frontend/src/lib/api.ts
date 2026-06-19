@@ -14,7 +14,7 @@ import type {
   BuildingListResponse,
   BuildingRun,
   Collection,
-  CollectionWithListings,
+  CollectionWithProperties,
   ConfirmBuildingUnitsIn,
   CreateBuildingFromUrlIn,
   UpdateBuildingInputsIn,
@@ -812,11 +812,13 @@ export const setFilterVisibility = (
 
 /* ----- curation (U2.6) ---------------------------------------------------
  *
- * Collections, tags, and notes. Reads of `which tags / which collections
- * does listing X belong to` go through the *_public Supabase views (see
- * lib/queries.ts) — there is no per-listing GET on the API. Everything
- * else (list-by-domain, create, update, delete, attach, detach) goes
- * through the bearer-gated FastAPI endpoints wrapped below.
+ * Collections, tags, and notes — all PROPERTY-grain (a property groups one
+ * real-world listing across portals). Reads of `which tags / which
+ * collections does property X belong to` go through the *_public Supabase
+ * views (see lib/queries.ts) — there is no per-property GET on the API for
+ * those. Notes are read via the API only. Everything else (list-by-domain,
+ * create, update, delete, attach, detach) goes through the bearer-gated
+ * FastAPI endpoints wrapped below.
  */
 
 /* Collections */
@@ -824,8 +826,8 @@ export const setFilterVisibility = (
 export const listCollections = (): Promise<{ data: Collection[]; total: number }> =>
   request<{ data: Collection[]; total: number }>('/collections');
 
-export const getCollection = (id: number): Promise<CollectionWithListings> =>
-  request<CollectionWithListings>(`/collections/${id}`);
+export const getCollection = (id: number): Promise<CollectionWithProperties> =>
+  request<CollectionWithProperties>(`/collections/${id}`);
 
 export const createCollection = (input: {
   name: string;
@@ -842,21 +844,21 @@ export const updateCollection = (
 export const deleteCollection = (id: number): Promise<{ deleted: true }> =>
   request<{ deleted: true }>(`/collections/${id}`, { method: 'DELETE' });
 
-export const addListingsToCollection = (
+export const addPropertiesToCollection = (
   id: number,
-  sreality_ids: number[],
+  property_ids: number[],
 ): Promise<{ added: number; skipped: number }> =>
-  request<{ added: number; skipped: number }>(`/collections/${id}/listings`, {
+  request<{ added: number; skipped: number }>(`/collections/${id}/properties`, {
     method: 'POST',
-    json: { sreality_ids },
+    json: { property_ids },
   });
 
-export const removeListingFromCollection = (
+export const removePropertyFromCollection = (
   id: number,
-  sreality_id: number,
+  property_id: number,
 ): Promise<{ removed: boolean }> =>
   request<{ removed: boolean }>(
-    `/collections/${id}/listings/${sreality_id}`,
+    `/collections/${id}/properties/${property_id}`,
     { method: 'DELETE' },
   );
 
@@ -878,37 +880,41 @@ export const deleteTag = (id: number): Promise<{ deleted: true }> =>
   request<{ deleted: true }>(`/tags/${id}`, { method: 'DELETE' });
 
 export const attachTag = (
-  sreality_id: number,
+  property_id: number,
   tag_id: number,
 ): Promise<{ attached: boolean }> =>
-  request<{ attached: boolean }>(`/listings/${sreality_id}/tags`, {
+  request<{ attached: boolean }>(`/properties/${property_id}/tags`, {
     method: 'POST',
     json: { tag_id },
   });
 
 export const detachTag = (
-  sreality_id: number,
+  property_id: number,
   tag_id: number,
 ): Promise<{ detached: boolean }> =>
   request<{ detached: boolean }>(
-    `/listings/${sreality_id}/tags/${tag_id}`,
+    `/properties/${property_id}/tags/${tag_id}`,
     { method: 'DELETE' },
   );
 
-/* Notes (per-listing journal) */
+/* Notes (per-property journal) */
 
-export const listListingNotes = (
-  sreality_id: number,
+export const listPropertyNotes = (
+  property_id: number,
 ): Promise<{ data: Note[] }> =>
-  request<{ data: Note[] }>(`/listings/${sreality_id}/notes`);
+  request<{ data: Note[] }>(`/properties/${property_id}/notes`);
 
-export const createListingNote = (
-  sreality_id: number,
+export const createPropertyNote = (
+  property_id: number,
   body: string,
+  origin_listing_id?: number,
 ): Promise<Note> =>
-  request<Note>(`/listings/${sreality_id}/notes`, {
+  request<Note>(`/properties/${property_id}/notes`, {
     method: 'POST',
-    json: { body },
+    json:
+      origin_listing_id != null
+        ? { body, origin_listing_id }
+        : { body },
   });
 
 /* Manual rental estimates (Phase U-ME).

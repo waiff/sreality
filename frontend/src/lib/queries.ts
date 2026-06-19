@@ -293,13 +293,13 @@ export interface MapResult {
   capped: boolean;
 }
 
-/* Tags facet is composed of two server queries: (1) listings_with_tags RPC
- * resolves the ids matching ALL selected tag ids, (2) the regular listings
- * query gets .in('sreality_id', ids) appended. Returns null if no tags
- * are selected (skip the prefilter entirely), an empty array if none
- * match (caller should short-circuit to empty results), or the id list.
- * Declared as a hoistable function so the Map/Table fetchers below can
- * call it without forward-reference issues. */
+/* Tags facet is composed of two server queries: (1) properties_with_tags RPC
+ * resolves the PROPERTY ids matching ALL selected tag ids (property grain, so
+ * a property matches if any of its listings carries the tags), (2) the Browse
+ * query gets .in('property_id', ids) appended. Returns null if no tags are
+ * selected (skip the prefilter entirely), an empty array if none match (caller
+ * short-circuits to empty results), or the id list. Declared as a hoistable
+ * function so the Map/Table fetchers below can call it without forward-ref issues. */
 async function resolveTagPrefilter(
   f: ListingFilters,
 ): Promise<number[] | null> {
@@ -312,11 +312,11 @@ async function resolveTagPrefilter(
    * cap; the result is capped client-side instead, headroom for any
    * conceivable future cohort. */
   const { data, error } = await supabase
-    .rpc('listings_with_tags', { tag_ids: f.tags })
+    .rpc('properties_with_tags', { tag_ids: f.tags })
     .range(0, 99999);
   if (error) throw error;
-  return ((data ?? []) as Array<{ sreality_id: number }>).map(
-    (r) => r.sreality_id,
+  return ((data ?? []) as Array<{ property_id: number }>).map(
+    (r) => r.property_id,
   );
 }
 
@@ -432,27 +432,30 @@ const intersectPrefilters = (
  * matched nothing, so the caller can short-circuit to zero results without
  * issuing the main query. Shared by the Map / Table / Cards fetchers. */
 interface BrowsePrefilters {
-  srealityIds: number[] | null;   // tags ∩ city-quality
+  srealityIds: number[] | null;   // city-quality (representative-listing grain)
   obecIds: number[] | null;       // market growth (price-stats datasets)
-  propertyIds: number[] | null;   // with-estimates
+  propertyIds: number[] | null;   // tags ∩ with-estimates (property grain)
   empty: boolean;
 }
 
 async function resolveBrowsePrefilters(
   f: ListingFilters,
 ): Promise<BrowsePrefilters> {
-  const [tagIds, cityIds, growthObec, estimateProps] = await Promise.all([
+  const [tagProps, cityIds, growthObec, estimateProps] = await Promise.all([
     resolveTagPrefilter(f),
     resolveCityQualityPrefilter(f),
     resolvePriceGrowthPrefilter(f),
     resolveEstimatesPrefilter(f),
   ]);
-  const srealityIds = intersectPrefilters(tagIds, cityIds);
+  // Tags are now property-grain (properties_with_tags) — intersect them with the
+  // with-estimates property prefilter and apply via .in('property_id', …).
+  // City-quality stays representative-listing grain (.in('sreality_id', …)).
+  const propertyIds = intersectPrefilters(tagProps, estimateProps);
   const empty =
-    (srealityIds != null && srealityIds.length === 0)
+    (cityIds != null && cityIds.length === 0)
     || (growthObec != null && growthObec.length === 0)
-    || (estimateProps != null && estimateProps.length === 0);
-  return { srealityIds, obecIds: growthObec, propertyIds: estimateProps, empty };
+    || (propertyIds != null && propertyIds.length === 0);
+  return { srealityIds: cityIds, obecIds: growthObec, propertyIds, empty };
 }
 
 const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
@@ -1357,49 +1360,33 @@ export const useUrlPreview = (): UseMutationResult<
 /* The "list collections / tags / notes" indices go through the bearer-gated  */
 /* FastAPI service (lib/api.ts) so listing_count + ordering live in one      */
 /* place. The reverse-index queries below — "which tags / collections does    */
-/* listing X belong to" — read directly from the *_public views via the anon  */
-/* key, matching the same read-only pattern Browse / Region already use. The  */
-/* `listings_with_tags(tag_ids)` RPC powers the Browse "tags" facet:          */
-/* AND-semantics across the supplied ids, capped at 5000 rows on the server.  */
+/* property X belong to" — read directly from the property-grain *_public      */
+/* views via the anon key, matching the read-only pattern Browse / Region use. */
+/* The `properties_with_tags(tag_ids)` RPC powers the Browse "tags" facet:     */
+/* AND-semantics across the supplied ids, capped at 5000 rows on the server.   */
 /* -------------------------------------------------------------------------- */
 
-export const fetchListingTagIds = async (
-  sreality_id: number,
+export const fetchPropertyTagIds = async (
+  property_id: number,
 ): Promise<number[]> => {
   const { data, error } = await supabase
-    .from('listing_tags_public')
+    .from('property_tags_public')
     .select('tag_id')
-    .eq('sreality_id', sreality_id);
+    .eq('property_id', property_id);
   if (error) throw error;
   return ((data ?? []) as Array<{ tag_id: number }>).map((r) => r.tag_id);
 };
 
-export const fetchListingCollectionIds = async (
-  sreality_id: number,
+export const fetchPropertyCollectionIds = async (
+  property_id: number,
 ): Promise<number[]> => {
   const { data, error } = await supabase
-    .from('collection_listings_public')
+    .from('collection_properties_public')
     .select('collection_id')
-    .eq('sreality_id', sreality_id);
+    .eq('property_id', property_id);
   if (error) throw error;
   return ((data ?? []) as Array<{ collection_id: number }>).map(
     (r) => r.collection_id,
-  );
-};
-
-export const fetchListingIdsWithAllTags = async (
-  tag_ids: number[],
-): Promise<number[]> => {
-  if (tag_ids.length === 0) return [];
-  /* `.range` bypasses PostgREST's default 1,000-row cap so a widely-
-   * matched tag set doesn't silently truncate. Mirrors the same
-   * fix in `resolveTagPrefilter` / `resolveCityQualityPrefilter`. */
-  const { data, error } = await supabase
-    .rpc('listings_with_tags', { tag_ids })
-    .range(0, 99999);
-  if (error) throw error;
-  return ((data ?? []) as Array<{ sreality_id: number }>).map(
-    (r) => r.sreality_id,
   );
 };
 
@@ -1475,12 +1462,12 @@ export const curationKeys = {
   collections: ['curation', 'collections'] as const,
   collection: (id: number) => ['curation', 'collection', id] as const,
   tags: ['curation', 'tags'] as const,
-  listingTags: (sreality_id: number) =>
-    ['curation', 'listing-tags', sreality_id] as const,
-  listingCollections: (sreality_id: number) =>
-    ['curation', 'listing-collections', sreality_id] as const,
-  listingNotes: (sreality_id: number) =>
-    ['curation', 'listing-notes', sreality_id] as const,
+  propertyTags: (property_id: number) =>
+    ['curation', 'property-tags', property_id] as const,
+  propertyCollections: (property_id: number) =>
+    ['curation', 'property-collections', property_id] as const,
+  propertyNotes: (property_id: number) =>
+    ['curation', 'property-notes', property_id] as const,
   manualEstimates: (sreality_id: number) =>
     ['curation', 'manual-estimates', sreality_id] as const,
 };

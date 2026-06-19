@@ -1927,7 +1927,7 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "int_list",
       "pg_column": null,
       "default": null,
-      "description": "Operator-curated tag ids. AND-semantics — a listing matches only if it carries every tag in the list. Tag ids are stable across renames.",
+      "description": "Operator-curated tag ids. AND-semantics — a property matches only if it carries every tag in the list. Tag ids are stable across renames.",
       "category": "Curation",
       "ui_control": "multiselect",
       "agendas": [

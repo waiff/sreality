@@ -1331,10 +1331,10 @@ def _build_registry() -> dict[str, FilterDef]:
         FilterDef(
             id="tags",
             type=FilterType.INT_LIST,
-            pg_column=None,  # joined via listing_tags
+            pg_column=None,  # resolved via property_tags (property grain)
             default=None,
             description=(
-                "Operator-curated tag ids. AND-semantics — a listing "
+                "Operator-curated tag ids. AND-semantics — a property "
                 "matches only if it carries every tag in the list. "
                 "Tag ids are stable across renames."
             ),

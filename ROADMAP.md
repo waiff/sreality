@@ -2382,6 +2382,35 @@ notes — end-to-end.
     rename / recolour / delete into both tag pickers — the
     CurationBlock matches list and the Browse Filters "Add" rows.
 
+### Phase U2.6b: Curation made dedup-stable — property grain (done)
+Re-keyed all operator curation from listing grain (`sreality_id`) to
+PROPERTY grain (`property_id`) so a tag / collection membership / note
+describes the real-world property and survives the daily dedup engine,
+and built the unified operator-state reconciler that the multi-portal
+pipeline (Phase U-PIPE) plugs into next.
+- Migration 202 (`collection_properties`, `property_tags`,
+  `property_notes(+origin_listing_id)` + `*_public` views +
+  `properties_with_tags(tag_ids)` RPC), 203 (retire the listing-grain
+  tables; repoint `browse_stats_properties`' tag clause to
+  `property_tags`), 204 (one-time repair of watchdog dispatches
+  orphaned onto merged_away properties — **pending operator approval to
+  apply**, destructive data migration). Curation tables were empty in
+  prod, so the re-key needed no backfill.
+- `toolkit/operator_state.py` — `OPERATOR_STATE_TABLES` registry +
+  `carry_operator_state_on_merge`, called inside `merge_properties`
+  (the single merge chokepoint). On merge it re-points every
+  property-anchored operator-state row (collections, tags, notes, AND
+  `notification_dispatches`) onto the survivor (SET tables union with
+  collision-collapse; APPEND moves all), so nothing orphans onto a
+  merged_away property — invariant by construction. Unmerge/split are
+  best-effort (state stays on the surviving/anchor property). Adding a
+  future property-anchored operator-state table = one registry line.
+- API re-keyed to property grain: `/collections/{id}/properties`,
+  `/properties/{id}/tags`, `/properties/{id}/notes`. Frontend Browse
+  tag filter + CurationBlock + CollectionDetail operate on
+  `property_id`. Design validated by adversarial red-team before build
+  (CLAUDE.md rule #18, #16).
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

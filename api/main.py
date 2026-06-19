@@ -1175,25 +1175,25 @@ def delete_collection(
     return curation.delete_collection(conn, collection_id)
 
 
-@app.post("/collections/{collection_id}/listings")
-def post_collection_listings(
+@app.post("/collections/{collection_id}/properties")
+def post_collection_properties(
     collection_id: int,
-    body: s.AddListingsToCollectionIn,
+    body: s.AddPropertiesToCollectionIn,
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return curation.add_listings_to_collection(conn, collection_id, body)
+    return curation.add_properties_to_collection(conn, collection_id, body)
 
 
-@app.delete("/collections/{collection_id}/listings/{sreality_id}")
-def delete_collection_listing(
+@app.delete("/collections/{collection_id}/properties/{property_id}")
+def delete_collection_property(
     collection_id: int,
-    sreality_id: int,
+    property_id: int,
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return curation.remove_listing_from_collection(
-        conn, collection_id, sreality_id,
+    return curation.remove_property_from_collection(
+        conn, collection_id, property_id,
     )
 
 
@@ -1275,23 +1275,23 @@ def get_price_stat_city_series(
     return price_stats_module.dataset_city_series(conn, dataset_id, entity_type, entity_id)
 
 
-@app.get("/listings/{sreality_id}/notes")
-def get_listing_notes(
-    sreality_id: int,
+@app.get("/properties/{property_id}/notes")
+def get_property_notes(
+    property_id: int,
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return curation.list_notes(conn, sreality_id)
+    return curation.list_notes(conn, property_id)
 
 
-@app.post("/listings/{sreality_id}/notes")
-def post_listing_note(
-    sreality_id: int,
+@app.post("/properties/{property_id}/notes")
+def post_property_note(
+    property_id: int,
     body: s.CreateNoteIn,
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return curation.create_note(conn, sreality_id, body)
+    return curation.create_note(conn, property_id, body)
 
 
 @app.get("/tags")
@@ -1330,24 +1330,24 @@ def delete_tag(
     return curation.delete_tag(conn, tag_id)
 
 
-@app.post("/listings/{sreality_id}/tags")
+@app.post("/properties/{property_id}/tags")
 def post_attach_tag(
-    sreality_id: int,
+    property_id: int,
     body: s.AttachTagIn,
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return curation.attach_tag(conn, sreality_id, body)
+    return curation.attach_tag(conn, property_id, body)
 
 
-@app.delete("/listings/{sreality_id}/tags/{tag_id}")
-def delete_listing_tag(
-    sreality_id: int,
+@app.delete("/properties/{property_id}/tags/{tag_id}")
+def delete_property_tag(
+    property_id: int,
     tag_id: int,
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return curation.detach_tag(conn, sreality_id, tag_id)
+    return curation.detach_tag(conn, property_id, tag_id)
 
 
 # --- Skill refinements (Phase AI slice C) ---------------------------------

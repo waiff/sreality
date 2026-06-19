@@ -1,5 +1,8 @@
 """Tests for the curation endpoints (collections, notes, tags).
 
+Curation is PROPERTY-grain (migration 202): collection membership, notes and
+tags key on property_id so operator curation is dedup-stable.
+
 Hermetic — overrides get_db_conn so no real DB is hit, and patches the
 persistence helpers in api.curation to in-memory dicts. Pydantic
 validation tests run unmodified through the route layer; CHECK
@@ -35,12 +38,12 @@ def store(monkeypatch):
     state: dict[str, Any] = {
         "collections":      {},
         "next_collection":  1,
-        "memberships":      set(),
+        "memberships":      set(),   # (collection_id, property_id)
         "notes":            {},
         "next_note":        1,
         "tags":             {},
         "next_tag":         1,
-        "tag_links":        set(),
+        "tag_links":        set(),   # (property_id, tag_id)
     }
 
     def _coll_to_dict(cid: int) -> dict[str, Any]:
@@ -78,17 +81,17 @@ def store(monkeypatch):
         if cid not in state["collections"]:
             from fastapi import HTTPException
             raise HTTPException(404, "collection not found")
-        listings = [
+        properties = [
             {
-                "sreality_id": sid, "district": None, "disposition": None,
-                "area_m2": None, "price_czk": None,
+                "property_id": pid, "sreality_id": pid, "district": None,
+                "disposition": None, "area_m2": None, "price_czk": None,
                 "last_seen_at": "2026-05-10T00:00:00+00:00",
                 "is_active": True,
                 "added_at": "2026-05-10T00:00:00+00:00",
             }
-            for (cc, sid) in state["memberships"] if cc == cid
+            for (cc, pid) in state["memberships"] if cc == cid
         ]
-        return {"collection": _coll_to_dict(cid), "listings": listings}
+        return {"collection": _coll_to_dict(cid), "properties": properties}
 
     def fake_update_collection(conn, cid, body):
         if cid not in state["collections"]:
@@ -110,40 +113,41 @@ def store(monkeypatch):
             raise HTTPException(404, "collection not found")
         del state["collections"][cid]
         state["memberships"] = {
-            (cc, sid) for (cc, sid) in state["memberships"] if cc != cid
+            (cc, pid) for (cc, pid) in state["memberships"] if cc != cid
         }
         return {"deleted": True}
 
-    def fake_add_listings(conn, cid, body):
+    def fake_add_properties(conn, cid, body):
         if cid not in state["collections"]:
             from fastapi import HTTPException
             raise HTTPException(404, "collection not found")
         added = 0
-        for sid in body.sreality_ids:
-            key = (cid, sid)
+        for pid in body.property_ids:
+            key = (cid, pid)
             if key not in state["memberships"]:
                 state["memberships"].add(key)
                 added += 1
-        return {"added": added, "skipped": len(body.sreality_ids) - added}
+        return {"added": added, "skipped": len(body.property_ids) - added}
 
-    def fake_remove_listing(conn, cid, sid):
-        key = (cid, sid)
+    def fake_remove_property(conn, cid, pid):
+        key = (cid, pid)
         removed = key in state["memberships"]
         state["memberships"].discard(key)
         return {"removed": removed}
 
-    def fake_list_notes(conn, sid):
-        items = [n for n in state["notes"].values() if n["sreality_id"] == sid]
+    def fake_list_notes(conn, pid):
+        items = [n for n in state["notes"].values() if n["property_id"] == pid]
         items.sort(key=lambda n: (n["created_at"], n["id"]), reverse=True)
         return {"data": items}
 
-    def fake_create_note(conn, sid, body):
+    def fake_create_note(conn, pid, body):
         nid = state["next_note"]
         state["next_note"] += 1
         note = {
             "id": nid,
-            "sreality_id": sid,
+            "property_id": pid,
             "body": body.body,
+            "origin_listing_id": body.origin_listing_id,
             "created_at": f"2026-05-10T00:00:0{nid}+00:00",
         }
         state["notes"][nid] = note
@@ -175,7 +179,7 @@ def store(monkeypatch):
             raise HTTPException(404, "tag not found")
         del state["tags"][tid]
         state["tag_links"] = {
-            (sid, tt) for (sid, tt) in state["tag_links"] if tt != tid
+            (pid, tt) for (pid, tt) in state["tag_links"] if tt != tid
         }
         return {"deleted": True}
 
@@ -193,17 +197,17 @@ def store(monkeypatch):
             state["tags"][tid]["color"] = body.color
         return _tag_to_dict(tid)
 
-    def fake_attach_tag(conn, sid, body):
+    def fake_attach_tag(conn, pid, body):
         if body.tag_id not in state["tags"]:
             from fastapi import HTTPException
             raise HTTPException(404, "tag not found")
-        key = (sid, body.tag_id)
+        key = (pid, body.tag_id)
         attached = key not in state["tag_links"]
         state["tag_links"].add(key)
         return {"attached": attached}
 
-    def fake_detach_tag(conn, sid, tid):
-        key = (sid, tid)
+    def fake_detach_tag(conn, pid, tid):
+        key = (pid, tid)
         detached = key in state["tag_links"]
         state["tag_links"].discard(key)
         return {"detached": detached}
@@ -214,10 +218,10 @@ def store(monkeypatch):
     monkeypatch.setattr(curation, "update_collection", fake_update_collection)
     monkeypatch.setattr(curation, "delete_collection", fake_delete_collection)
     monkeypatch.setattr(
-        curation, "add_listings_to_collection", fake_add_listings,
+        curation, "add_properties_to_collection", fake_add_properties,
     )
     monkeypatch.setattr(
-        curation, "remove_listing_from_collection", fake_remove_listing,
+        curation, "remove_property_from_collection", fake_remove_property,
     )
     monkeypatch.setattr(curation, "list_notes", fake_list_notes)
     monkeypatch.setattr(curation, "create_note", fake_create_note)
@@ -257,7 +261,7 @@ def test_create_collection_blank_name_422(client, store):
 def test_list_collections_includes_listing_count(client, store):
     client.post("/collections", json={"name": "a"})
     client.post("/collections", json={"name": "b"})
-    client.post("/collections/1/listings", json={"sreality_ids": [10, 11]})
+    client.post("/collections/1/properties", json={"property_ids": [10, 11]})
 
     res = client.get("/collections")
     assert res.status_code == 200
@@ -273,14 +277,14 @@ def test_get_collection_404_when_missing(client, store):
     assert res.status_code == 404
 
 
-def test_get_collection_returns_metadata_and_listings(client, store):
+def test_get_collection_returns_metadata_and_properties(client, store):
     client.post("/collections", json={"name": "shortlist"})
-    client.post("/collections/1/listings", json={"sreality_ids": [42, 43]})
+    client.post("/collections/1/properties", json={"property_ids": [42, 43]})
     res = client.get("/collections/1")
     assert res.status_code == 200
     body = res.json()
     assert body["collection"]["name"] == "shortlist"
-    assert {l["sreality_id"] for l in body["listings"]} == {42, 43}
+    assert {p["property_id"] for p in body["properties"]} == {42, 43}
 
 
 def test_patch_rename_collection(client, store):
@@ -310,76 +314,88 @@ def test_delete_collection_succeeds(client, store):
     assert client.get("/collections/1").status_code == 404
 
 
-# --- collection_listings ---------------------------------------------------
+# --- collection_properties -------------------------------------------------
 
-def test_add_listings_returns_added_skipped(client, store):
+def test_add_properties_returns_added_skipped(client, store):
     client.post("/collections", json={"name": "x"})
     res = client.post(
-        "/collections/1/listings", json={"sreality_ids": [1, 2, 3]},
+        "/collections/1/properties", json={"property_ids": [1, 2, 3]},
     )
     assert res.status_code == 200
     assert res.json() == {"added": 3, "skipped": 0}
 
     # Re-adding 2 + new is skipped+added.
     res = client.post(
-        "/collections/1/listings", json={"sreality_ids": [2, 3, 4]},
+        "/collections/1/properties", json={"property_ids": [2, 3, 4]},
     )
     assert res.json() == {"added": 1, "skipped": 2}
 
 
-def test_add_listings_empty_body_422(client, store):
+def test_add_properties_empty_body_422(client, store):
     client.post("/collections", json={"name": "x"})
     res = client.post(
-        "/collections/1/listings", json={"sreality_ids": []},
+        "/collections/1/properties", json={"property_ids": []},
     )
     assert res.status_code == 422
 
 
-def test_add_listings_to_missing_collection_404(client, store):
+def test_add_properties_to_missing_collection_404(client, store):
     res = client.post(
-        "/collections/999/listings", json={"sreality_ids": [1]},
+        "/collections/999/properties", json={"property_ids": [1]},
     )
     assert res.status_code == 404
 
 
-def test_remove_listing_from_collection(client, store):
+def test_remove_property_from_collection(client, store):
     client.post("/collections", json={"name": "x"})
-    client.post("/collections/1/listings", json={"sreality_ids": [10, 11]})
-    res = client.delete("/collections/1/listings/10")
+    client.post("/collections/1/properties", json={"property_ids": [10, 11]})
+    res = client.delete("/collections/1/properties/10")
     assert res.status_code == 200
     assert res.json() == {"removed": True}
-    res = client.delete("/collections/1/listings/10")  # idempotent
+    res = client.delete("/collections/1/properties/10")  # idempotent
     assert res.json() == {"removed": False}
 
 
 # --- notes -----------------------------------------------------------------
 
 def test_create_note_round_trip(client, store):
-    res = client.post("/listings/12345/notes", json={"body": "first"})
+    res = client.post("/properties/12345/notes", json={"body": "first"})
     assert res.status_code == 200
     assert res.json()["body"] == "first"
-    client.post("/listings/12345/notes", json={"body": "second"})
+    client.post("/properties/12345/notes", json={"body": "second"})
 
-    res = client.get("/listings/12345/notes")
+    res = client.get("/properties/12345/notes")
     assert res.status_code == 200
     bodies = [n["body"] for n in res.json()["data"]]
     assert bodies == ["second", "first"]  # newest first
 
 
+def test_create_note_records_origin_listing(client, store):
+    res = client.post(
+        "/properties/12345/notes",
+        json={"body": "from the bazos ad", "origin_listing_id": 777},
+    )
+    assert res.status_code == 200
+    assert res.json()["origin_listing_id"] == 777
+    # Omitting it defaults to null.
+    res = client.post("/properties/12345/notes", json={"body": "no origin"})
+    assert res.json()["origin_listing_id"] is None
+
+
 def test_create_note_blank_body_422(client, store):
-    res = client.post("/listings/12345/notes", json={"body": ""})
+    res = client.post("/properties/12345/notes", json={"body": ""})
     assert res.status_code == 422
 
 
 def test_create_note_too_long_422(client, store):
     res = client.post(
-        "/listings/12345/notes", json={"body": "x" * 4001},
+        "/properties/12345/notes", json={"body": "x" * 4001},
     )
     assert res.status_code == 422
 
 
-def test_notes_for_unknown_listing_returns_empty(client, store):
-    res = client.get("/listings/0/notes")
+def test_notes_for_unknown_property_returns_empty(client, store):
+    res = client.get("/properties/0/notes")
     assert res.status_code == 200
     assert res.json() == {"data": []}
 
@@ -419,31 +435,31 @@ def test_list_tags_alphabetic(client, store):
 
 def test_attach_tag_idempotent(client, store):
     client.post("/tags", json={"name": "hot", "color": "brick"})
-    res = client.post("/listings/42/tags", json={"tag_id": 1})
+    res = client.post("/properties/42/tags", json={"tag_id": 1})
     assert res.status_code == 200
     assert res.json() == {"attached": True}
-    res = client.post("/listings/42/tags", json={"tag_id": 1})
+    res = client.post("/properties/42/tags", json={"tag_id": 1})
     assert res.json() == {"attached": False}
 
 
 def test_attach_unknown_tag_404(client, store):
-    res = client.post("/listings/42/tags", json={"tag_id": 999})
+    res = client.post("/properties/42/tags", json={"tag_id": 999})
     assert res.status_code == 404
 
 
 def test_detach_tag(client, store):
     client.post("/tags", json={"name": "hot", "color": "brick"})
-    client.post("/listings/42/tags", json={"tag_id": 1})
-    res = client.delete("/listings/42/tags/1")
+    client.post("/properties/42/tags", json={"tag_id": 1})
+    res = client.delete("/properties/42/tags/1")
     assert res.status_code == 200
     assert res.json() == {"detached": True}
-    res = client.delete("/listings/42/tags/1")
+    res = client.delete("/properties/42/tags/1")
     assert res.json() == {"detached": False}
 
 
 def test_delete_tag_cascades_attachments(client, store):
     client.post("/tags", json={"name": "hot", "color": "brick"})
-    client.post("/listings/42/tags", json={"tag_id": 1})
+    client.post("/properties/42/tags", json={"tag_id": 1})
     res = client.delete("/tags/1")
     assert res.status_code == 200
     assert res.json() == {"deleted": True}
@@ -475,7 +491,7 @@ def test_patch_tag_recolour(client, store):
 
 def test_patch_tag_preserves_attachments(client, store):
     client.post("/tags", json={"name": "hot", "color": "brick"})
-    client.post("/listings/42/tags", json={"tag_id": 1})
+    client.post("/properties/42/tags", json={"tag_id": 1})
     res = client.patch("/tags/1", json={"name": "scorching", "color": "sage"})
     assert res.status_code == 200
     assert res.json()["listing_count"] == 1
@@ -576,9 +592,10 @@ def test_create_tag_helper_409_on_unique_violation():
 
 def test_list_notes_helper_orders_newest_first():
     conn = _FakeConn(results=[[
-        (2, 42, "second", "2026-05-10T00:00:02+00:00"),
-        (1, 42, "first",  "2026-05-10T00:00:01+00:00"),
+        (2, 42, "second", None, "2026-05-10T00:00:02+00:00"),
+        (1, 42, "first",  777,  "2026-05-10T00:00:01+00:00"),
     ]])
-    out = curation.list_notes(conn, sreality_id=42)
+    out = curation.list_notes(conn, property_id=42)
     assert [n["body"] for n in out["data"]] == ["second", "first"]
+    assert out["data"][1]["origin_listing_id"] == 777
     assert "ORDER BY created_at DESC" in conn.executions[0][0]
