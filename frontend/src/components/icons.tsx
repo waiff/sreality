@@ -6,11 +6,12 @@
  * The funnel is the app's "pipeline" mark (a sales funnel) — verified to NOT
  * collide with any filter UI, which uses no funnel icon. */
 
-type IconProps = { className?: string };
+type IconProps = { className?: string; strokeWidth?: number };
 
 export function FunnelIcon({
   filled = false,
   className = 'h-4 w-4',
+  strokeWidth = 1.75,
 }: IconProps & { filled?: boolean }) {
   return (
     <svg
@@ -19,7 +20,7 @@ export function FunnelIcon({
       aria-hidden
       fill={filled ? 'currentColor' : 'none'}
       stroke="currentColor"
-      strokeWidth="1.75"
+      strokeWidth={strokeWidth}
       strokeLinecap="round"
       strokeLinejoin="round"
     >
@@ -28,7 +29,7 @@ export function FunnelIcon({
   );
 }
 
-export function TrashIcon({ className = 'h-4 w-4' }: IconProps) {
+export function TrashIcon({ className = 'h-4 w-4', strokeWidth = 1.6 }: IconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -36,7 +37,7 @@ export function TrashIcon({ className = 'h-4 w-4' }: IconProps) {
       aria-hidden
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.75"
+      strokeWidth={strokeWidth}
       strokeLinecap="round"
       strokeLinejoin="round"
     >
@@ -49,7 +50,7 @@ export function TrashIcon({ className = 'h-4 w-4' }: IconProps) {
   );
 }
 
-export function InfoIcon({ className = 'h-3.5 w-3.5' }: IconProps) {
+export function InfoIcon({ className = 'h-3.5 w-3.5', strokeWidth = 1.75 }: IconProps) {
   return (
     <svg
       viewBox="0 0 24 24"
@@ -57,7 +58,7 @@ export function InfoIcon({ className = 'h-3.5 w-3.5' }: IconProps) {
       aria-hidden
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.75"
+      strokeWidth={strokeWidth}
       strokeLinecap="round"
       strokeLinejoin="round"
     >

@@ -461,7 +461,7 @@ function Hint({ text }: { text: string }) {
       role="img"
       aria-label={text}
       title={text}
-      className="cursor-help text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]"
+      className="cursor-help text-[var(--color-ink-3)] hover:text-[var(--color-ink)]"
     >
       <InfoIcon className="h-3.5 w-3.5" />
     </span>
@@ -618,7 +618,7 @@ function BoardCard({
           aria-label="Odebrat z pipeline"
           aria-expanded={confirming}
           title="Odebrat z pipeline"
-          className="shrink-0 pt-0.5 text-[var(--color-ink-4)] hover:text-[var(--color-brick)]"
+          className="shrink-0 rounded-[var(--radius-xs)] pt-0.5 text-[var(--color-ink-4)] hover:text-[var(--color-brick)] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-1 focus-visible:outline-[var(--color-rule-strong)]"
         >
           <TrashIcon className="h-3.5 w-3.5" />
         </button>
@@ -642,7 +642,7 @@ function BoardCard({
           <button
             type="button"
             onClick={() => setConfirming(false)}
-            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]"
+            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:bg-[var(--color-rule-soft)]"
           >
             Zrušit
           </button>

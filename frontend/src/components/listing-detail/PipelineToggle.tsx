@@ -58,19 +58,16 @@ export default function PipelineToggle({ property_id }: { property_id: number })
       title={inPipeline ? 'Odebrat z pipeline' : 'Přidat do pipeline'}
       className={[
         'inline-flex items-center gap-1.5 px-3 py-1.5 text-[0.8rem] rounded-[var(--radius-sm)] border transition-colors disabled:opacity-60',
+        // Out of pipeline: a copper-outline CTA (icon + label + border all copper,
+        // so the funnel inherits one consistent colour and disabled dims the whole
+        // pill). In pipeline: a filled pill tinted with the current stage colour.
         inPipeline
           ? ''
-          : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
+          : 'bg-[var(--color-paper-2)] border-[var(--color-copper)] text-[var(--color-copper)] hover:bg-[var(--color-copper-soft)]',
       ].join(' ')}
       style={inPipeline ? { background: bg, color: fg, borderColor: fg } : undefined}
     >
-      <span
-        aria-hidden
-        className="inline-flex leading-none"
-        style={inPipeline ? undefined : { color: 'var(--color-copper)' }}
-      >
-        <FunnelIcon filled={inPipeline} className="h-4 w-4" />
-      </span>
+      <FunnelIcon filled={inPipeline} className="h-4 w-4 shrink-0" />
       <span>{inPipeline ? (card?.stage_label ?? 'V pipeline') : 'Přidat do pipeline'}</span>
     </button>
   );
