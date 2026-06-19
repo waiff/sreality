@@ -13,6 +13,7 @@ import Outreach from './pages/Outreach';
 import OutreachDetail from './pages/OutreachDetail';
 import Collections from './pages/Collections';
 import CollectionDetail from './pages/CollectionDetail';
+import Pipeline from './pages/Pipeline';
 import Datasets from './pages/Datasets';
 import Settings from './pages/Settings';
 import Scrapers from './pages/Scrapers';
@@ -48,6 +49,7 @@ export const routes: RouteObject[] = [
       { path: 'building/:id', element: <BuildingDetail /> },
       { path: 'collections', element: <Collections /> },
       { path: 'collection/:id', element: <CollectionDetail /> },
+      { path: 'pipeline', element: <Pipeline /> },
       { path: 'datasets', element: <Datasets /> },
       { path: 'watchdog', element: <Watchdog /> },
       { path: 'watchdog/manage', element: <WatchdogManage /> },

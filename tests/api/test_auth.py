@@ -171,6 +171,10 @@ def client(monkeypatch):
     monkeypatch.setattr(
         api_pipeline, "remove_card", lambda conn, pid: {"removed": True},
     )
+    monkeypatch.setattr(
+        api_pipeline, "move_card",
+        lambda conn, pid, body: {"property_id": pid, "stage_id": body.stage_id},
+    )
 
     monkeypatch.setattr(api_maps, "suggest", lambda *a, **kw: {"items": []})
     monkeypatch.setattr(
@@ -249,6 +253,7 @@ def _gated_calls(client) -> list:
         ("DELETE", "/properties/1/tags/1", None),
         ("GET",    "/pipeline/stages", None),
         ("POST",   "/pipeline/cards", _PIPELINE_CARD_BODY),
+        ("PATCH",  "/pipeline/cards/1", {"stage_id": 1}),
         ("DELETE", "/pipeline/cards/1", None),
     ]
 

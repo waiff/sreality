@@ -1294,7 +1294,9 @@ import type {
   CreateEstimationIn,
   EstimationListParams,
   ParseResult,
+  PipelineBoardCard,
   PipelineCard,
+  PipelineStage,
 } from './types';
 
 export const estimationKeys = {
@@ -1478,6 +1480,8 @@ export const curationKeys = {
 /* through the FastAPI service. Single-valued — at most one card per property.   */
 export const pipelineKeys = {
   card: (property_id: number) => ['pipeline', 'card', property_id] as const,
+  board: ['pipeline', 'board'] as const,
+  stages: ['pipeline', 'stages'] as const,
 };
 
 export const fetchPropertyPipeline = async (
@@ -1490,4 +1494,59 @@ export const fetchPropertyPipeline = async (
     .maybeSingle();
   if (error) throw error;
   return (data as PipelineCard | null) ?? null;
+};
+
+export const fetchPipelineStages = async (): Promise<PipelineStage[]> => {
+  const { data, error } = await supabase
+    .from('pipeline_stages_public')
+    .select('id, key, label, position, color, is_terminal, is_entry')
+    .order('position');
+  if (error) throw error;
+  return (data ?? []) as PipelineStage[];
+};
+
+/* The kanban payload: every card joined to its property's display fields. Two
+ * anon reads (property_pipeline_public + properties_public) joined client-side
+ * by property_id — the same batched-hydration pattern Browse uses. */
+export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
+  const { data: cards, error: cErr } = await supabase
+    .from('property_pipeline_public')
+    .select('property_id, stage_id, board_position, entered_stage_at')
+    .order('board_position');
+  if (cErr) throw cErr;
+  const rows = (cards ?? []) as Array<{
+    property_id: number;
+    stage_id: number;
+    board_position: number;
+    entered_stage_at: string;
+  }>;
+  if (rows.length === 0) return [];
+
+  const ids = rows.map((r) => r.property_id);
+  const { data: props, error: pErr } = await supabase
+    .from('properties_public')
+    .select('property_id, sreality_id, district, disposition, area_m2, price_czk')
+    .in('property_id', ids);
+  if (pErr) throw pErr;
+  const byId = new Map(
+    ((props ?? []) as Array<Record<string, unknown>>).map((p) => [
+      p.property_id as number,
+      p,
+    ]),
+  );
+
+  return rows.map((r) => {
+    const p = byId.get(r.property_id);
+    return {
+      property_id: r.property_id,
+      stage_id: r.stage_id,
+      board_position: r.board_position,
+      entered_stage_at: r.entered_stage_at,
+      sreality_id: (p?.sreality_id as number | null) ?? null,
+      district: (p?.district as string | null) ?? null,
+      disposition: (p?.disposition as string | null) ?? null,
+      area_m2: (p?.area_m2 as number | null) ?? null,
+      price_czk: (p?.price_czk as number | null) ?? null,
+    };
+  });
 };
