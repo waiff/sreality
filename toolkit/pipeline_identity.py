@@ -1,15 +1,25 @@
-"""Carry the single-valued deal-pipeline stage across a property merge.
+"""Carry the single-valued deal-pipeline stage across a property merge/unmerge.
 
 `property_pipeline` is single-valued (PK on property_id), so the generic
 operator-state reconciler (toolkit.operator_state, which re-points SET/APPEND
 rows) cannot carry it — a plain re-point would violate the PK when both the
-survivor and the retired property hold a card. This dedicated reconciler runs in
-the same `merge_properties` transaction and resolves the conflict by keeping the
-MOST-ADVANCED stage on the survivor (max stage position; tie → later updated_at),
-logging the retired card to the append-only ledger first so a later phase's
-unmerge can restore it. Like the curation reconciler, unmerge/split are
-best-effort today (the card stays on the surviving/anchor property); the lossless
-unmerge replay + terminal-aware conflict policy are a later phase.
+survivor and the retired property hold a card. These dedicated reconcilers run in
+the `merge_properties` / `unmerge_group` transactions:
+
+  - on merge: snapshot BOTH sides' pre-merge cards to the append-only
+    `property_pipeline_events` ledger, then keep the MOST-ADVANCED stage on the
+    survivor (TERMINAL-AWARE: an active stage always beats a closed/terminal one,
+    so a `lost`/`won` card can never bury a live deal; within the same terminality
+    the higher position wins, tie → later updated_at) and drop the retired card.
+  - on unmerge: restore the reactivated retired property's card from its
+    snapshot (lossless); in the move-if-empty case (survivor had no pre-merge
+    card) drop the card the survivor absorbed so the restore isn't duplicated.
+
+The survivor's own stage is NOT force-restored on unmerge — that would clobber a
+later merge's effect in a chained merge/unmerge. The retired side (the
+reactivated property, the thing that mattered) is always lossless; a survivor
+that absorbed the retired's stage in a both-cards merge keeps it until the
+operator adjusts (documented best-effort).
 """
 
 from __future__ import annotations
@@ -20,10 +30,19 @@ import psycopg
 def reconcile_pipeline_on_merge(
     cur: psycopg.Cursor, *, retired_id: int, survivor_id: int, merge_group_id: str
 ) -> None:
-    """Keep the most-advanced pipeline card on the survivor; drop the retired one."""
+    """Keep the most-advanced (terminal-aware) card on the survivor; snapshot both."""
     params = {"r": retired_id, "s": survivor_id, "g": merge_group_id}
 
-    # (1) survivor has no card -> simply move the retired card over.
+    # (0) snapshot BOTH sides' pre-merge cards so unmerge can restore losslessly.
+    cur.execute(
+        "INSERT INTO property_pipeline_events "
+        "  (property_id, to_stage_id, reason, merge_group_id, note_snapshot) "
+        "SELECT property_id, stage_id, 'merge_absorb', %(g)s, note "
+        "FROM property_pipeline WHERE property_id IN (%(r)s, %(s)s)",
+        params,
+    )
+
+    # (1) survivor has no card -> move the retired card over as-is.
     cur.execute(
         "UPDATE property_pipeline SET property_id = %(s)s "
         "WHERE property_id = %(r)s "
@@ -31,17 +50,10 @@ def reconcile_pipeline_on_merge(
         params,
     )
 
-    # (2) both held a card -> log the retired card (for a future lossless unmerge),
-    #     keep whichever stage is most-advanced on the survivor, then drop the loser.
-    cur.execute(
-        "INSERT INTO property_pipeline_events "
-        "  (property_id, from_stage_id, to_stage_id, reason, merge_group_id, note_snapshot) "
-        "SELECT %(r)s, r.stage_id, r.stage_id, 'merge_absorb', %(g)s, r.note "
-        "FROM property_pipeline r "
-        "WHERE r.property_id = %(r)s "
-        "  AND EXISTS (SELECT 1 FROM property_pipeline WHERE property_id = %(s)s)",
-        params,
-    )
+    # (2) both held a card -> keep the most-advanced stage on the survivor.
+    #     Terminal-aware: a non-terminal (live) stage beats a terminal (closed)
+    #     one, so merging never buries a live deal under 'lost'/'won'; within the
+    #     same terminality the higher position wins (tie -> later updated_at).
     cur.execute(
         "UPDATE property_pipeline s "
         "SET stage_id = r.stage_id, board_position = r.board_position, "
@@ -50,10 +62,47 @@ def reconcile_pipeline_on_merge(
         "FROM property_pipeline r, pipeline_stages ss, pipeline_stages rs "
         "WHERE s.property_id = %(s)s AND r.property_id = %(r)s "
         "  AND ss.id = s.stage_id AND rs.id = r.stage_id "
-        "  AND (rs.position > ss.position "
-        "       OR (rs.position = ss.position AND r.updated_at > s.updated_at))",
+        "  AND ((NOT rs.is_terminal AND ss.is_terminal) "
+        "       OR (rs.is_terminal = ss.is_terminal "
+        "           AND (rs.position > ss.position "
+        "                OR (rs.position = ss.position AND r.updated_at > s.updated_at))))",
         params,
     )
+
+    # (3) drop the retired card (its pre-merge state is preserved in the ledger).
     cur.execute(
         "DELETE FROM property_pipeline WHERE property_id = %(r)s", params,
+    )
+
+
+def reconcile_pipeline_on_unmerge(
+    cur: psycopg.Cursor, *, merge_group_id: str, survivor_id: int
+) -> None:
+    """Restore the reactivated retired property's pipeline card from the snapshot."""
+    params = {"g": merge_group_id, "s": survivor_id}
+
+    # restore each retired (non-survivor) snapshot onto its now-active property.
+    cur.execute(
+        "INSERT INTO property_pipeline (property_id, stage_id, note) "
+        "SELECT e.property_id, e.to_stage_id, e.note_snapshot "
+        "FROM property_pipeline_events e "
+        "WHERE e.merge_group_id = %(g)s AND e.reason = 'merge_absorb' "
+        "  AND e.property_id <> %(s)s AND e.to_stage_id IS NOT NULL "
+        "  AND EXISTS (SELECT 1 FROM properties p "
+        "              WHERE p.id = e.property_id AND p.status = 'active') "
+        "ON CONFLICT (property_id) DO UPDATE "
+        "  SET stage_id = excluded.stage_id, note = excluded.note, "
+        "      entered_stage_at = now(), updated_at = now()",
+        params,
+    )
+
+    # move-if-empty cleanup: if the survivor had no pre-merge card (no snapshot),
+    # drop the card it absorbed so the restored retired card isn't duplicated.
+    cur.execute(
+        "DELETE FROM property_pipeline "
+        "WHERE property_id = %(s)s "
+        "  AND NOT EXISTS (SELECT 1 FROM property_pipeline_events e "
+        "    WHERE e.merge_group_id = %(g)s AND e.reason = 'merge_absorb' "
+        "      AND e.property_id = %(s)s)",
+        params,
     )

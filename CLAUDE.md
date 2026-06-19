@@ -707,12 +707,17 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `property_pipeline` row == the property is in the pipeline. Single-valued-ness is why it
     can't live at advert grain (unlike the m2m curation of rule #18) — so it gets its OWN
     merge reconciler, `toolkit/pipeline_identity.reconcile_pipeline_on_merge`, called in the
-    `merge_properties` transaction alongside the curation carry: it keeps the MOST-ADVANCED
-    stage on the survivor (max `position`; tie → later `updated_at`) and logs the dropped card
-    to the append-only `property_pipeline_events` ledger. Unmerge/split are best-effort today
-    (the card stays on the surviving/anchor property); the lossless unmerge replay + a
-    terminal-aware conflict policy (don't let a `lost` stage bury a live deal) are deferred to
-    a later phase. Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
+    `merge_properties` transaction alongside the curation carry: it snapshots BOTH sides'
+    pre-merge cards to the append-only `property_pipeline_events` ledger, then keeps the
+    most-advanced stage on the survivor — **TERMINAL-AWARE**: a live (non-terminal) stage
+    always beats a closed/terminal one, so a merge never buries a live deal under `lost`/`won`;
+    within the same terminality the higher `position` wins (tie → later `updated_at`).
+    `reconcile_pipeline_on_unmerge` restores the reactivated retired property's card from that
+    snapshot (**lossless**: the reactivated property gets its pre-merge stage back, and in the
+    move-if-empty case the survivor's absorbed card is dropped so it isn't duplicated); the
+    survivor's own stage is left as-is — a chained-merge-safe best-effort, so a survivor that
+    absorbed the retired's stage keeps it until the operator adjusts. Split stays best-effort
+    (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
     `GET /pipeline/stages`); the `/pipeline` kanban board reads `property_pipeline_public` +

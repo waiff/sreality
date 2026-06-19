@@ -2445,6 +2445,24 @@ card between stages.
 - Next: Phase 2 = lossless unmerge replay + terminal-aware merge policy;
   Browse-card bookmark icons; operator stage-management UI (rename/reorder/add).
 
+### Phase U-PIPE Phase 2: Lossless unmerge + terminal-aware merge (done)
+Hardens the merge reconciler against the cases the design red-team flagged.
+- TERMINAL-AWARE merge keep (`reconcile_pipeline_on_merge`): a live (non-
+  terminal) stage always beats a closed/terminal one, so merging an active deal
+  into a `lost`/`won` property never buries the live deal; within the same
+  terminality, higher position wins (tie → updated_at). No new schema — uses
+  `pipeline_stages.is_terminal`.
+- LOSSLESS unmerge (`reconcile_pipeline_on_unmerge`, wired into `unmerge_group`):
+  the merge now snapshots BOTH sides' pre-merge cards to `property_pipeline_events`;
+  on unmerge the reactivated retired property's card is restored from its
+  snapshot, and in the move-if-empty case the survivor's absorbed card is dropped
+  so it isn't duplicated. The survivor's own stage is left as-is (chained-merge-
+  safe best-effort — documented).
+- Verified on temp tables via MCP (active Offer not buried by Lost; Offer wins
+  over Viewing). Hermetic SQL-shape tests for both reconcilers + the unmerge
+  integration. CLAUDE.md rule #22 updated.
+- Next: Browse-card bookmark icons; operator stage-management UI; drag-and-drop.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and
