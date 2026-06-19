@@ -638,10 +638,25 @@ async function onTogglePipeline(): Promise<void> {
   if (l == null || l.property_id == null) return;
   const propertyId = l.property_id;
   const wasIn = l.pipeline?.in_pipeline ?? false;
+  const priorStageKey = l.pipeline?.stage_key ?? null;
+  const priorStageLabel = l.pipeline?.stage_label ?? null;
 
-  setState((prev) => withPipeline(
-    { ...prev, pipelineBusy: true, errorMessage: null },
+  /* Apply a membership update only if the panel STILL represents the property
+   * the toggle was started for. The panel state is a single module global that
+   * openPanel() replaces wholesale — re-opening for a different card (an index
+   * badge, a MutationObserver re-pass) mid-request would otherwise bleed this
+   * listing's result onto that one. Network writes target the captured
+   * propertyId regardless; this guard only protects the display. */
+  const applyIfSame = (
+    membership: PortalListing['pipeline'], patch: Partial<PanelState>,
+  ) => (prev: PanelState): PanelState =>
+    prev.listing?.property_id === propertyId
+      ? withPipeline({ ...prev, ...patch }, membership)
+      : prev;
+
+  setState(applyIfSame(
     { in_pipeline: !wasIn, stage_key: null, stage_label: null },
+    { pipelineBusy: true, errorMessage: null },
   ));
 
   const res = await call<PipelineCardResult>({
@@ -650,19 +665,14 @@ async function onTogglePipeline(): Promise<void> {
   });
 
   if (!res.ok) {
-    setState((prev) => withPipeline(
-      {
-        ...prev, pipelineBusy: false,
-        errorMessage: `Uložení do pipeline selhalo: ${res.detail}`,
-      },
-      { in_pipeline: wasIn, stage_key: l.pipeline?.stage_key ?? null,
-        stage_label: l.pipeline?.stage_label ?? null },
+    setState(applyIfSame(
+      { in_pipeline: wasIn, stage_key: priorStageKey, stage_label: priorStageLabel },
+      { pipelineBusy: false, errorMessage: `Uložení do pipeline selhalo: ${res.detail}` },
     ));
     return;
   }
 
-  setState((prev) => withPipeline(
-    { ...prev, pipelineBusy: false },
+  setState(applyIfSame(
     wasIn
       ? { in_pipeline: false, stage_key: null, stage_label: null }
       : {
@@ -670,6 +680,7 @@ async function onTogglePipeline(): Promise<void> {
           stage_key: res.data.stage_key ?? null,
           stage_label: res.data.stage_label ?? null,
         },
+    { pipelineBusy: false },
   ));
 }
 
