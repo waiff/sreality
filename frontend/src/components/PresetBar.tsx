@@ -6,11 +6,33 @@
  * Save / rename / delete go through the bearer-gated FastAPI service
  * (migration 151) — a preset never fires a notification, unlike a Watchdog.
  *
+ * The chips are drag-reorderable (each carries a grip handle). Order is
+ * operator-controlled and server-persisted via `position` (migration 198):
+ * a drag optimistically rewrites the cached order, then PUTs the full id-list
+ * to /filter-presets/reorder, rolling back to the server's truth on error.
+ *
  * The whole bar hides when the API base URL isn't configured (presets need the
  * service to read or write). */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 import {
   ApiError,
@@ -18,6 +40,7 @@ import {
   deleteFilterPreset,
   isApiConfigured,
   listFilterPresets,
+  reorderFilterPresets,
   updateFilterPreset,
 } from '@/lib/api';
 import {
@@ -48,6 +71,11 @@ type ModalState =
   | { mode: 'save' }
   | { mode: 'update'; preset: FilterPreset }
   | { mode: 'rename'; preset: FilterPreset };
+
+type PresetsResponse = { data: FilterPreset[]; total: number };
+
+const chipBase =
+  'inline-flex items-center rounded-[var(--radius-sm)] border text-[0.8rem] transition-colors';
 
 export default function PresetBar({
   filters,
@@ -137,6 +165,34 @@ export default function PresetBar({
     },
   });
 
+  /* Persist a new order. The drag already wrote the optimistic order into the
+   * cache; adopt the server's canonical list on success, roll back on error. */
+  const reorderMut = useMutation({
+    mutationFn: (ids: string[]) => reorderFilterPresets(ids),
+    onSuccess: (res) => qc.setQueryData(filterPresetKeys.all, res),
+    onError: invalidate,
+  });
+
+  const sensors = useSensors(
+    /* A small activation distance keeps a click on the grip from registering
+     * as a drag; the keyboard sensor makes reordering accessible. */
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active: dragged, over } = event;
+    if (!over || dragged.id === over.id) return;
+    const oldIndex = presets.findIndex((p) => p.id === dragged.id);
+    const newIndex = presets.findIndex((p) => p.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    const reordered = arrayMove(presets, oldIndex, newIndex);
+    qc.setQueryData<PresetsResponse>(filterPresetKeys.all, (prev) =>
+      prev ? { ...prev, data: reordered } : prev,
+    );
+    reorderMut.mutate(reordered.map((p) => p.id));
+  };
+
   if (!enabled) return null;
 
   const errMsg = (e: unknown): string | null =>
@@ -158,8 +214,7 @@ export default function PresetBar({
     }
   };
 
-  const chipBase =
-    'inline-flex items-center rounded-[var(--radius-sm)] border text-[0.8rem] transition-colors';
+  const reorderable = presets.length > 1;
 
   return (
     <div ref={barRef} className="flex items-center gap-2 flex-wrap">
@@ -169,91 +224,41 @@ export default function PresetBar({
         </span>
       ) : null}
 
-      {presets.map((p) => {
-        const isActive = p.id === activePresetId;
-        return (
-          <div key={p.id} className="relative">
-            <div
-              className={[
-                chipBase,
-                isActive
-                  ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-                  : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
-              ].join(' ')}
-            >
-              <button
-                type="button"
-                onClick={() => onLoad(p)}
-                className="px-2.5 py-1 max-w-[16rem] truncate"
-                title={`Load preset: ${p.name}`}
-              >
-                {p.name}
-                {isActive && dirty ? (
-                  <span
-                    className="ml-1 text-[var(--color-copper)]"
-                    title="Edited since loaded — use Update to save changes"
-                    aria-label="edited"
-                  >
-                    •
-                  </span>
-                ) : null}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setConfirmDeleteId(null);
-                  setMenuId((cur) => (cur === p.id ? null : p.id));
-                }}
-                className="px-1.5 py-1 border-l border-[var(--color-rule)] opacity-60 hover:opacity-100"
-                aria-haspopup="menu"
-                aria-expanded={menuId === p.id}
-                title="Preset options"
-              >
-                ⋯
-              </button>
-            </div>
-
-            {menuId === p.id ? (
-              <div
-                role="menu"
-                className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[10rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] py-1 shadow-lg"
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setModal({ mode: 'rename', preset: p });
-                    closeMenu();
-                  }}
-                  className="block w-full px-3 py-1.5 text-left text-[0.8rem] text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-ink)]"
-                >
-                  Rename…
-                </button>
-                {confirmDeleteId === p.id ? (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => deleteMut.mutate(p.id)}
-                    disabled={deleteMut.isPending}
-                    className="block w-full px-3 py-1.5 text-left text-[0.8rem] text-[var(--color-brick)] hover:bg-[var(--color-brick-soft)] disabled:opacity-50"
-                  >
-                    {deleteMut.isPending ? 'Deleting…' : 'Confirm delete'}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => setConfirmDeleteId(p.id)}
-                    className="block w-full px-3 py-1.5 text-left text-[0.8rem] text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-brick)]"
-                  >
-                    Delete…
-                  </button>
-                )}
-              </div>
-            ) : null}
-          </div>
-        );
-      })}
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragStart={closeMenu}
+        onDragEnd={handleDragEnd}
+      >
+        <SortableContext
+          items={presets.map((p) => p.id)}
+          strategy={rectSortingStrategy}
+        >
+          {presets.map((p) => (
+            <SortablePresetChip
+              key={p.id}
+              preset={p}
+              reorderable={reorderable}
+              isActive={p.id === activePresetId}
+              dirty={dirty}
+              menuOpen={menuId === p.id}
+              confirmingDelete={confirmDeleteId === p.id}
+              deleting={deleteMut.isPending}
+              onLoad={onLoad}
+              onToggleMenu={(id) => {
+                setConfirmDeleteId(null);
+                setMenuId((cur) => (cur === id ? null : id));
+              }}
+              onRename={(preset) => {
+                setModal({ mode: 'rename', preset });
+                closeMenu();
+              }}
+              onAskDelete={(id) => setConfirmDeleteId(id)}
+              onConfirmDelete={(id) => deleteMut.mutate(id)}
+            />
+          ))}
+        </SortableContext>
+      </DndContext>
 
       {active && dirty ? (
         <button
@@ -305,5 +310,161 @@ export default function PresetBar({
         />
       ) : null}
     </div>
+  );
+}
+
+interface SortablePresetChipProps {
+  preset: FilterPreset;
+  reorderable: boolean;
+  isActive: boolean;
+  dirty: boolean;
+  menuOpen: boolean;
+  confirmingDelete: boolean;
+  deleting: boolean;
+  onLoad: (preset: FilterPreset) => void;
+  onToggleMenu: (id: string) => void;
+  onRename: (preset: FilterPreset) => void;
+  onAskDelete: (id: string) => void;
+  onConfirmDelete: (id: string) => void;
+}
+
+function SortablePresetChip({
+  preset,
+  reorderable,
+  isActive,
+  dirty,
+  menuOpen,
+  confirmingDelete,
+  deleting,
+  onLoad,
+  onToggleMenu,
+  onRename,
+  onAskDelete,
+  onConfirmDelete,
+}: SortablePresetChipProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: preset.id, disabled: !reorderable });
+
+  const style: CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    zIndex: isDragging ? 30 : undefined,
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={`relative ${isDragging ? 'opacity-90' : ''}`}
+    >
+      <div
+        className={[
+          chipBase,
+          isDragging ? 'shadow-md' : '',
+          isActive
+            ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
+            : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
+        ].join(' ')}
+      >
+        {reorderable ? (
+          <button
+            type="button"
+            ref={setActivatorNodeRef}
+            {...attributes}
+            {...listeners}
+            className="flex items-center self-stretch px-1.5 cursor-grab touch-none text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)] active:cursor-grabbing"
+            aria-label={`Reorder preset: ${preset.name}`}
+            title="Drag to reorder"
+          >
+            <GripIcon />
+          </button>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => onLoad(preset)}
+          className={`${reorderable ? 'pl-0.5' : 'pl-2.5'} pr-2.5 py-1 max-w-[16rem] truncate`}
+          title={`Load preset: ${preset.name}`}
+        >
+          {preset.name}
+          {isActive && dirty ? (
+            <span
+              className="ml-1 text-[var(--color-copper)]"
+              title="Edited since loaded — use Update to save changes"
+              aria-label="edited"
+            >
+              •
+            </span>
+          ) : null}
+        </button>
+        <button
+          type="button"
+          onClick={() => onToggleMenu(preset.id)}
+          className="px-1.5 py-1 border-l border-[var(--color-rule)] opacity-60 hover:opacity-100"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          title="Preset options"
+        >
+          ⋯
+        </button>
+      </div>
+
+      {menuOpen ? (
+        <div
+          role="menu"
+          className="absolute left-0 top-[calc(100%+4px)] z-30 min-w-[10rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] py-1 shadow-lg"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => onRename(preset)}
+            className="block w-full px-3 py-1.5 text-left text-[0.8rem] text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-ink)]"
+          >
+            Rename…
+          </button>
+          {confirmingDelete ? (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => onConfirmDelete(preset.id)}
+              disabled={deleting}
+              className="block w-full px-3 py-1.5 text-left text-[0.8rem] text-[var(--color-brick)] hover:bg-[var(--color-brick-soft)] disabled:opacity-50"
+            >
+              {deleting ? 'Deleting…' : 'Confirm delete'}
+            </button>
+          ) : (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => onAskDelete(preset.id)}
+              className="block w-full px-3 py-1.5 text-left text-[0.8rem] text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-brick)]"
+            >
+              Delete…
+            </button>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* Six-dot grip — the standard "drag me" affordance, dim at rest and
+ * brightening on hover (mirrors the ResizeHandle idiom). */
+function GripIcon() {
+  return (
+    <svg width="9" height="14" viewBox="0 0 9 14" fill="currentColor" aria-hidden>
+      <circle cx="2" cy="3" r="1.1" />
+      <circle cx="7" cy="3" r="1.1" />
+      <circle cx="2" cy="7" r="1.1" />
+      <circle cx="7" cy="7" r="1.1" />
+      <circle cx="2" cy="11" r="1.1" />
+      <circle cx="7" cy="11" r="1.1" />
+    </svg>
   );
 }

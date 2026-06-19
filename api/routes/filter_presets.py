@@ -32,6 +32,13 @@ class UpdatePresetIn(BaseModel):
     filter_spec: dict[str, Any] | None = None
 
 
+class ReorderPresetsIn(BaseModel):
+    # `str`, not `UUID`: every other route here types the id as a plain string
+    # and lets the DB's uuid cast be the format guard (a malformed id is a
+    # cast error, not a real client scenario — the SPA only sends stored ids).
+    ids: list[str] = Field(..., min_length=1)
+
+
 @router.get("")
 def get_presets(
     conn: Any = Depends(deps.get_db_conn),
@@ -48,6 +55,18 @@ def post_preset(
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return fp.create_preset(conn, name=body.name, filter_spec=body.filter_spec)
+
+
+# Declared before the `/{preset_id}` routes so PUT /filter-presets/reorder is
+# matched here, not captured by `/{preset_id}` with preset_id="reorder".
+@router.put("/reorder")
+def reorder_presets(
+    body: ReorderPresetsIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    rows = fp.reorder_presets(conn, body.ids)
+    return {"data": rows, "total": len(rows)}
 
 
 @router.get("/{preset_id}")

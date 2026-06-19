@@ -1070,6 +1070,16 @@ export const deleteFilterPreset = (id: string): Promise<{ deleted: true }> =>
     method: 'DELETE',
   });
 
+/* Persist a new display order (full ordered id-list, 0 = first). Returns the
+ * canonical list so the caller can adopt the server's view. */
+export const reorderFilterPresets = (
+  ids: string[],
+): Promise<{ data: FilterPreset[]; total: number }> =>
+  request<{ data: FilterPreset[]; total: number }>('/filter-presets/reorder', {
+    method: 'PUT',
+    json: { ids },
+  });
+
 /* ----- Cross-source dedup review (multi-portal PR3b) --------------------- */
 
 export interface ListDedupCandidatesParams {

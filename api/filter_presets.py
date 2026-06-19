@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import psycopg
 
-_COLS = "id, name, filter_spec, created_at, updated_at"
+_COLS = "id, name, filter_spec, created_at, updated_at, position"
 
 
 @dataclass
@@ -26,6 +26,7 @@ class PresetRow:
     filter_spec: dict[str, Any]
     created_at: str
     updated_at: str
+    position: int
 
 
 def _row_to_preset(row: tuple[Any, ...]) -> PresetRow:
@@ -35,12 +36,16 @@ def _row_to_preset(row: tuple[Any, ...]) -> PresetRow:
         filter_spec=row[2] or {},
         created_at=row[3].isoformat() if row[3] else "",
         updated_at=row[4].isoformat() if row[4] else "",
+        position=row[5],
     )
 
 
 def list_presets(conn: "psycopg.Connection") -> list[dict[str, Any]]:
     with conn.cursor() as cur:
-        cur.execute(f"SELECT {_COLS} FROM filter_presets ORDER BY created_at DESC")
+        cur.execute(
+            f"SELECT {_COLS} FROM filter_presets "
+            "ORDER BY position ASC, created_at DESC"
+        )
         rows = cur.fetchall()
     return [_row_to_preset(r).__dict__ for r in rows]
 
@@ -60,8 +65,10 @@ def create_preset(
 ) -> dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO filter_presets (name, filter_spec) "
-            "VALUES (%s, %s::jsonb) RETURNING id",
+            "INSERT INTO filter_presets (name, filter_spec, position) "
+            "VALUES (%s, %s::jsonb, "
+            "(SELECT COALESCE(MAX(position), -1) + 1 FROM filter_presets)) "
+            "RETURNING id",
             (name, json.dumps(filter_spec)),
         )
         row = cur.fetchone()
@@ -101,3 +108,20 @@ def delete_preset(conn: "psycopg.Connection", preset_id: str) -> bool:
     with conn.cursor() as cur:
         cur.execute("DELETE FROM filter_presets WHERE id = %s", (preset_id,))
         return cur.rowcount > 0
+
+
+def reorder_presets(
+    conn: "psycopg.Connection", ids: list[str]
+) -> list[dict[str, Any]]:
+    """Rewrite `position` to match the given id order (0 = first). Ids not in
+    the list keep their old position; the canonical list is returned."""
+    if ids:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE filter_presets fp SET position = v.pos "
+                "FROM (SELECT id, (ord - 1) AS pos "
+                "FROM unnest(%s::uuid[]) WITH ORDINALITY AS t(id, ord)) v "
+                "WHERE fp.id = v.id",
+                (ids,),
+            )
+    return list_presets(conn)
