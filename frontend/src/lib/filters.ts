@@ -46,6 +46,19 @@ export interface CenterRadius {
 
 export type LocationMode = 'viewport' | 'center_radius';
 
+/* A WGS84 bounding box roughly `km` kilometres across (half-extent each
+ * side), centred on (lat, lng). Longitude degrees shrink with latitude so
+ * the east/west extent scales by cos(lat). Used to frame the map AND seed
+ * the viewport cohort when opening Browse focused on a single point (the
+ * "Explore area" modal) — the same `bounds` value both fits the camera and
+ * narrows the cohort, so no separate flyTo is needed. */
+export const bboxAround = (lat: number, lng: number, km: number): MapBounds => {
+  const half = km / 2;
+  const dLat = half / 111.32;
+  const dLng = half / (111.32 * Math.max(Math.cos((lat * Math.PI) / 180), 0.01));
+  return { west: lng - dLng, south: lat - dLat, east: lng + dLng, north: lat + dLat };
+};
+
 /* Phase QUAL — one entry in `cityIndexRules`. Snake_case keys mirror
  * the wire shape consumed by the `listings_with_city_quality` RPC
  * and `api/notifications._build_match_clauses`, so the same picker

@@ -1295,6 +1295,16 @@ export default function ListingMap({
     didInitialFitRef.current = true;
   }, [flyTo, ready]);
 
+  /* Defensive resize once the map is ready. MapLibre observes its container,
+   * but a map mounted into a container that settles its size after first paint
+   * (e.g. the "Explore area" modal panel) can initialise mis-sized; a single
+   * next-frame resize covers that. No-op on the Browse page (already sized). */
+  useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const id = requestAnimationFrame(() => mapRef.current?.resize());
+    return () => cancelAnimationFrame(id);
+  }, [ready]);
+
   /* Project the shared hoveredIds set onto maplibre's feature-state so the
    * 'point' layer paint expressions light up. Extracted to a shared hook so the
    * estimation comparables map rides the same mechanism; `rows` re-applies the

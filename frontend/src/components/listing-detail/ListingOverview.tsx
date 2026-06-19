@@ -27,6 +27,7 @@ export function ListingOverview({
   imagesLoading = false,
   showStatus = true,
   headerExtras,
+  mapFooter,
   estimatesSlot,
 }: {
   listing: ListingPublic;
@@ -37,6 +38,11 @@ export function ListingOverview({
    * header's left column — inside the grid, so the map column starts at the
    * very top instead of below a stack of full-width rows. */
   headerExtras?: React.ReactNode;
+  /* Rendered directly UNDER the header map (right column), only when the
+   * listing has coordinates. The Listing Detail page fills it with the
+   * "Explore area" button; Estimation Detail leaves it empty (so the button
+   * doesn't appear on the estimation subject). */
+  mapFooter?: React.ReactNode;
   /* The estimation chapter, rendered between description and gallery — the
    * listing page passes its EstimationsBlock here so the estimates sit in
    * the prime slot the location map used to occupy (the map lives in the
@@ -45,7 +51,7 @@ export function ListingOverview({
 }) {
   return (
     <>
-      <Header listing={listing} showStatus={showStatus} extras={headerExtras} />
+      <Header listing={listing} showStatus={showStatus} extras={headerExtras} mapFooter={mapFooter} />
       <KeyFactsBlock listing={listing} />
       <DescriptionBlock listing={listing} />
       {estimatesSlot}
@@ -83,10 +89,12 @@ function Header({
   listing,
   showStatus,
   extras,
+  mapFooter,
 }: {
   listing: ListingPublic;
   showStatus: boolean;
   extras?: React.ReactNode;
+  mapFooter?: React.ReactNode;
 }) {
   const disposition = listing.disposition ?? '—';
   const area = fmtArea(listing.area_m2);
@@ -186,6 +194,7 @@ function Header({
             No coordinates recorded
           </div>
         )}
+        {hasMap && mapFooter && <div className="mt-2">{mapFooter}</div>}
       </div>
     </div>
   );

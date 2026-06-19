@@ -1,6 +1,7 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import type { ReactNode } from 'react';
 import { NewEstimationProvider } from './NewEstimationModal';
+import { ExploreAreaProvider } from './ExploreAreaModal';
 
 type NavItem =
   | { kind: 'link'; to: string; label: string; disabled?: boolean }
@@ -24,13 +25,15 @@ const navItems: ReadonlyArray<NavItem> = [
 export default function Shell() {
   return (
     <NewEstimationProvider>
-      <div className="min-h-dvh flex flex-col bg-[var(--color-paper)] text-[var(--color-ink)]">
-        <TopBar />
-        <main className="flex-1">
-          <Outlet />
-        </main>
-        <Footer />
-      </div>
+      <ExploreAreaProvider>
+        <div className="min-h-dvh flex flex-col bg-[var(--color-paper)] text-[var(--color-ink)]">
+          <TopBar />
+          <main className="flex-1">
+            <Outlet />
+          </main>
+          <Footer />
+        </div>
+      </ExploreAreaProvider>
     </NewEstimationProvider>
   );
 }
