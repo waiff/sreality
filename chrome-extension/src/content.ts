@@ -105,22 +105,18 @@ function parseNumber(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/* The SPA's <FilterIcon> (icons.tsx) hand-reproduced as inline SVG — the shared
- * "pipeline" glyph on every surface (filled knobs = in-pipeline). The extension
- * can't import the SPA's React component (separate territory, classic content
- * script), so this mirrors it by value, like the palette in styles.css. */
-function filterIconSvg(filled: boolean): string {
+/* The SPA's <BookmarkIcon> (icons.tsx) hand-reproduced as inline SVG — the shared
+ * "pipeline" glyph on every surface (filled = in-pipeline; the entry stage is
+ * literally "bookmark / interested"). The extension can't import the SPA's React
+ * component (separate territory, classic content script), so this mirrors it by
+ * value, like the palette in styles.css. */
+function bookmarkIconSvg(filled: boolean): string {
   const f = filled ? 'currentColor' : 'none';
   return (
-    '<svg class="pipeline-icon" viewBox="0 0 24 24" fill="none" ' +
-    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
-    'stroke-linejoin="round" aria-hidden="true">' +
-    '<line x1="3" y1="7" x2="12.7" y2="7"/><line x1="17.3" y1="7" x2="21" y2="7"/>' +
-    '<line x1="3" y1="12" x2="6.7" y2="12"/><line x1="11.3" y1="12" x2="21" y2="12"/>' +
-    '<line x1="3" y1="17" x2="13.7" y2="17"/><line x1="18.3" y1="17" x2="21" y2="17"/>' +
-    `<circle cx="15" cy="7" r="2.4" fill="${f}"/>` +
-    `<circle cx="9" cy="12" r="2.4" fill="${f}"/>` +
-    `<circle cx="16" cy="17" r="2.4" fill="${f}"/></svg>`
+    '<svg class="pipeline-icon" viewBox="0 0 24 24" ' +
+    `fill="${f}" stroke="currentColor" stroke-width="1.75" ` +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>'
   );
 }
 
@@ -334,7 +330,7 @@ function mountPanel(): {
     btn.disabled = state.pipelineBusy;
     btn.setAttribute('aria-pressed', String(inPipe));
     btn.title = inPipe ? 'Odebrat z pipeline' : 'Přidat do pipeline';
-    btn.innerHTML = filterIconSvg(inPipe);
+    btn.innerHTML = bookmarkIconSvg(inPipe);
     const label = document.createElement('span');
     label.textContent = inPipe
       ? (l.pipeline?.stage_label ?? 'V pipeline')

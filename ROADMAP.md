@@ -2544,11 +2544,13 @@ Closes the two items 3d deferred / the operator flagged.
   of the app) with a native-title hover carrying firm + phone + email. NULL-safe (private
   bazos sellers have no resolved broker → line omitted). No new endpoint, no migration —
   both views were already anon-readable.
-- **Filter icon, not a funnel.** The funnel read ambiguously, so the shared pipeline mark
-  became a **horizontal filter / sliders glyph** (`FilterIcon`, gapped tracks + knobs;
-  filled knobs = in-pipeline / entry). Applied on all three pipeline surfaces — header
-  toggle, Browse cards, AND the stage-manager entry-stage indicator (was a ★/☆) — so the
-  "into the pipeline" concept reads as one icon everywhere. Rule #22 updated.
+- **Pipeline icon — settled on a bookmark.** The funnel read ambiguously and a
+  filter/sliders glyph risked reading as the Browse "filters", so the shared pipeline
+  mark is a **bookmark ribbon** (`BookmarkIcon`, filled = in-pipeline / entry) — it
+  matches the data model (the entry stage IS "bookmark / interested", rule #22). Applied
+  on all three pipeline surfaces — header toggle, Browse cards, AND the stage-manager
+  entry-stage indicator (was a ★/☆) — so the concept reads as one icon everywhere.
+  (Iterated star → funnel → sliders → bookmark.) Rule #22 updated.
 
 ### Phase U-ME: Manual rental estimates (next)
 

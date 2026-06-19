@@ -30,7 +30,7 @@ import {
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
 import TagColorPicker from '@/components/TagColorPicker';
-import { FilterIcon, InfoIcon, TrashIcon } from '@/components/icons';
+import { BookmarkIcon, InfoIcon, TrashIcon } from '@/components/icons';
 import {
   type PipelineBoardCard,
   type PipelineCardBroker,
@@ -415,7 +415,7 @@ function StageEditorRow({
             className="flex w-5 justify-center disabled:cursor-default"
             style={{ color: stage.is_entry ? 'var(--color-copper)' : 'var(--color-ink-4)' }}
           >
-            <FilterIcon filled={stage.is_entry} className="h-4 w-4" />
+            <BookmarkIcon filled={stage.is_entry} className="h-4 w-4" />
           </button>
           <Hint text={'Vstupní fáze: sem se nemovitost přidá jako záložka („Přidat do pipeline“). Právě jedna fáze může být vstupní.'} />
         </span>

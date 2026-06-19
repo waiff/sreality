@@ -726,16 +726,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
-    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FilterIcon>`
-    (a horizontal filter / sliders glyph, filled knobs = in-pipeline) used on EVERY pipeline
-    surface — the listing-detail header (`PipelineToggle`, in the top action bar next to "New
-    estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`), the
-    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), AND the
-    Chrome-extension panel (the glyph reproduced by value in vanilla TS — separate territory,
-    no React import) — so the "into the pipeline" concept reads as one icon everywhere.** The
-    extension bookmarks property-grain like every other surface: it reads `property_id` +
-    membership off the batched `POST /listings/lookup` and writes through these same
-    `POST/DELETE /pipeline/cards` routes (no extension-specific write path, no second secret). The `/pipeline` kanban board reads
+    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<BookmarkIcon>`
+    (a bookmark ribbon, filled = in-pipeline — the entry stage is literally "bookmark / interested")
+    used on EVERY pipeline surface — the listing-detail header (`PipelineToggle`, in the top action
+    bar next to "New estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`),
+    the stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), AND the
+    Chrome-extension panel (the same bookmark glyph reproduced by value in vanilla TS — separate
+    territory, no React import) — so the "into the pipeline" concept reads as one icon everywhere.**
+    (Iterated star → funnel → sliders → bookmark; the bookmark matches the data model and never
+    reads as a Browse filter.) The extension bookmarks property-grain like every other surface: it
+    reads `property_id` + membership off the batched `POST /listings/lookup` and writes through these
+    same `POST/DELETE /pipeline/cards` routes (no extension-specific write path, no second secret).
+    The `/pipeline` kanban board reads
     `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
     (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via

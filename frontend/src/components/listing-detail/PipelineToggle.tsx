@@ -14,7 +14,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { addPipelineCard, removePipelineCard } from '@/lib/api';
 import { fetchPropertyPipeline, pipelineKeys } from '@/lib/queries';
-import { FilterIcon } from '@/components/icons';
+import { BookmarkIcon } from '@/components/icons';
 
 export default function PipelineToggle({ property_id }: { property_id: number }) {
   const qc = useQueryClient();
@@ -67,7 +67,7 @@ export default function PipelineToggle({ property_id }: { property_id: number })
       ].join(' ')}
       style={inPipeline ? { background: bg, color: fg, borderColor: fg } : undefined}
     >
-      <FilterIcon filled={inPipeline} className="h-4 w-4 shrink-0" />
+      <BookmarkIcon filled={inPipeline} className="h-4 w-4 shrink-0" />
       <span>{inPipeline ? (card?.stage_label ?? 'V pipeline') : 'Přidat do pipeline'}</span>
     </button>
   );

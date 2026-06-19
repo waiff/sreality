@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import ImageCarousel from '@/components/ImageCarousel';
 import InfiniteSentinel from '@/components/InfiniteSentinel';
 import Spinner from '@/components/Spinner';
-import { FilterIcon } from '@/components/icons';
+import { BookmarkIcon } from '@/components/icons';
 import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import {
   fetchPipelineMemberSet,
@@ -228,7 +228,7 @@ function BookmarkButton({ property_id }: { property_id: number }) {
           : 'bg-[var(--color-paper-3)]/85 border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-copper)] hover:border-[var(--color-copper)]',
       ].join(' ')}
     >
-      <FilterIcon filled={inPipeline} className="h-3.5 w-3.5" />
+      <BookmarkIcon filled={inPipeline} className="h-3.5 w-3.5" />
     </button>
   );
 }
