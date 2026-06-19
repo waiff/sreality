@@ -258,14 +258,17 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* "Open in our app" deep-link — shown for any listing we have. */
-.app-link-row {
+/* Top action row: pipeline bookmark (left) + "open in our app" link (right). */
+.top-actions {
   display: flex;
-  justify-content: flex-end;
-  margin: 0 0 0.5rem;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0 0 0.6rem;
 }
 
 .app-link {
+  margin-left: auto;  /* right-align whether or not the toggle is present */
   color: var(--copper);
   text-decoration: none;
   font-size: 0.72rem;
@@ -276,3 +279,37 @@
 }
 
 .app-link:hover { color: #9a4b25; border-color: #9a4b25; }
+
+/* Deal-pipeline bookmark — mirrors the SPA's PipelineToggle: copper-outline
+ * "Přidat do pipeline" out of pipeline, copper-filled pill (stage label) in. */
+.pipeline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.55rem;
+  font: inherit;
+  font-size: 0.72rem;
+  line-height: 1;
+  cursor: pointer;
+  background: #fff;
+  color: var(--copper);
+  border: 1px solid var(--copper);
+}
+
+.pipeline-toggle:hover { background: var(--copper-soft); }
+
+.pipeline-toggle--in {
+  background: var(--copper);
+  color: #fff;
+  border-color: var(--copper);
+}
+
+.pipeline-toggle--in:hover { background: #9a4b25; }
+
+.pipeline-toggle:disabled { opacity: 0.6; cursor: wait; }
+
+.pipeline-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex-shrink: 0;
+}

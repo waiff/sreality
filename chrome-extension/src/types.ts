@@ -51,10 +51,32 @@ export interface YieldScenarioUpdate {
   price_czk?: number | null;
 }
 
+/* Deal-pipeline membership for the listing's property (rule #22). Null when the
+ * listing has no property yet (not in our DB, or the ~5-min straggler-attach
+ * lag). `in_pipeline` is the bookmark state; stage_* describe the current stage
+ * when bookmarked. */
+export interface PipelineMembership {
+  in_pipeline: boolean;
+  stage_key: string | null;
+  stage_label: string | null;
+}
+
+/* Response of POST /pipeline/cards (add) and DELETE /pipeline/cards/{id}
+ * (remove). Add returns the card (incl. its entry-stage label); remove returns
+ * `{removed}`. We only read the few fields the toggle reflects. */
+export interface PipelineCardResult {
+  property_id?: number;
+  stage_key?: string | null;
+  stage_label?: string | null;
+  added?: boolean;
+  removed?: boolean;
+}
+
 /* One entry from POST /listings/lookup — our scraped facts for a portal
  * listing keyed by (source, native id), including the precomputed MF
  * reference rent + "Výnos MF" gross yield (the same figures Browse cards
- * show), and a handle on any existing successful estimation. */
+ * show), a handle on any existing successful estimation, and the property's
+ * deal-pipeline membership. */
 export interface PortalListing {
   source: string;
   source_id: string;
@@ -62,6 +84,9 @@ export interface PortalListing {
   /* App-wide listing identity (negative for non-sreality portals); the SPA
    * page is /listing/{sreality_id}. Null when not in our DB (no app page). */
   sreality_id: number | null;
+  /* The grouping property (the pipeline + dedup grain). Null when not in our
+   * DB or not yet attached to a property. */
+  property_id: number | null;
   category_main: string | null;
   category_type: string | null;
   area_m2: number | null;
@@ -78,6 +103,7 @@ export interface PortalListing {
     estimate_kind: 'rent' | 'sale' | null;
     gross_yield_pct: number | null;
   } | null;
+  pipeline: PipelineMembership | null;
 }
 
 export interface PortalLookupResponse {
@@ -97,7 +123,9 @@ export type ApiMessage =
   | { type: 'lookup_listings'; items: PortalLookupItem[] }
   | { type: 'patch_scenario'; run_id: number; body: YieldScenarioUpdate }
   | { type: 'create_estimation'; url: string }
-  | { type: 'get_estimation'; run_id: number };
+  | { type: 'get_estimation'; run_id: number }
+  | { type: 'add_pipeline_card'; property_id: number }
+  | { type: 'remove_pipeline_card'; property_id: number };
 
 export interface ApiResponse<T> {
   ok: true;

@@ -31,12 +31,15 @@ def _mk_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, 
     """One dict row keyed by the SELECT aliases (defaults null)."""
     row: dict[str, Any] = {
         "source": source, "source_id": source_id, "found": found,
-        "sreality_id": None, "category_main": None, "category_type": None,
+        "sreality_id": None, "property_id": None,
+        "category_main": None, "category_type": None,
         "area_m2": None, "price_czk": None, "disposition": None,
         "district": None, "locality": None, "is_active": None,
         "last_seen_at": None, "mf_reference_rent_czk": None,
         "mf_gross_yield_pct": None, "estimation_id": None,
         "estimation_kind": None, "estimation_yield": None,
+        "in_pipeline": False, "pipeline_stage_key": None,
+        "pipeline_stage_label": None,
     }
     row.update(cols)
     return row
@@ -77,16 +80,21 @@ def _items(*pairs: tuple[str, str]) -> list[s.PortalLookupItem]:
 
 def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     rows = [
-        # sreality: found, has MF + a successful estimation; positive sreality_id
+        # sreality: found, has MF + a successful estimation; positive sreality_id;
+        # bookmarked in the deal pipeline (entry stage)
         _mk_row("sreality", "1184977484", True, sreality_id=1184977484,
-                category_main="byt", category_type="prodej", area_m2=Decimal("65.0"),
+                property_id=501, category_main="byt", category_type="prodej",
+                area_m2=Decimal("65.0"),
                 price_czk=4_800_000, disposition="2+kk", district="Praha 5",
                 locality="Praha 5 - Smíchov", is_active=True, last_seen_at=_TS,
                 mf_reference_rent_czk=21_840, mf_gross_yield_pct=Decimal("5.46"),
                 estimation_id=99, estimation_kind="rent",
-                estimation_yield=Decimal("5.46")),
-        # bazos: found, NEGATIVE synthetic sreality_id, no MF, no estimation
-        _mk_row("bazos", "220291221", True, sreality_id=-187691,
+                estimation_yield=Decimal("5.46"),
+                in_pipeline=True, pipeline_stage_key="interested",
+                pipeline_stage_label="Zájem"),
+        # bazos: found, NEGATIVE synthetic sreality_id, no MF, no estimation;
+        # has a property but is NOT in the pipeline
+        _mk_row("bazos", "220291221", True, sreality_id=-187691, property_id=777,
                 category_main="byt", category_type="prodej", price_czk=7_700_000,
                 disposition="3+kk", district="okres Pardubice", is_active=True),
         # idnes: not found → sreality_id null
@@ -103,22 +111,33 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     sr = data[0]
     assert sr["found"] is True
     assert sr["sreality_id"] == 1184977484  # positive for sreality
+    assert sr["property_id"] == 501
     assert sr["area_m2"] == 65.0  # Decimal → float
     assert sr["mf_gross_yield_pct"] == 5.46
     assert sr["last_seen_at"] == _TS.isoformat()  # datetime → iso8601
     assert sr["latest_estimation"] == {
         "estimation_id": 99, "estimate_kind": "rent", "gross_yield_pct": 5.46,
     }
+    assert sr["pipeline"] == {  # bookmarked → entry-stage membership
+        "in_pipeline": True, "stage_key": "interested", "stage_label": "Zájem",
+    }
 
     bz = data[1]
     assert bz["found"] is True
     assert bz["sreality_id"] == -187691  # negative synthetic for non-sreality
     assert bz["latest_estimation"] is None
+    assert bz["property_id"] == 777
+    # has a property but no card → in_pipeline false (still toggle-able)
+    assert bz["pipeline"] == {
+        "in_pipeline": False, "stage_key": None, "stage_label": None,
+    }
 
     idn = data[2]
     assert idn["found"] is False
     assert idn["sreality_id"] is None  # not in our DB → no app page
     assert idn["latest_estimation"] is None
+    assert idn["property_id"] is None
+    assert idn["pipeline"] is None  # no property → nothing to bookmark
 
 
 def test_lookup_binds_one_value_pair_per_item() -> None:
