@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from api import filter_presets as fp
+from api.schemas import TagColor
 
 router = APIRouter(prefix="/filter-presets", tags=["filter-presets"])
 
@@ -25,11 +26,14 @@ router = APIRouter(prefix="/filter-presets", tags=["filter-presets"])
 class CreatePresetIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     filter_spec: dict[str, Any]
+    # Shared tag palette (api.schemas.TagColor); None = neutral default chip.
+    color: TagColor | None = None
 
 
 class UpdatePresetIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     filter_spec: dict[str, Any] | None = None
+    color: TagColor | None = None
 
 
 class ReorderPresetsIn(BaseModel):
@@ -54,7 +58,9 @@ def post_preset(
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return fp.create_preset(conn, name=body.name, filter_spec=body.filter_spec)
+    return fp.create_preset(
+        conn, name=body.name, filter_spec=body.filter_spec, color=body.color
+    )
 
 
 # Declared before the `/{preset_id}` routes so PUT /filter-presets/reorder is
@@ -88,12 +94,12 @@ def put_preset(
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    row = fp.update_preset(
-        conn,
-        preset_id,
-        name=body.name,
-        filter_spec=body.filter_spec,
-    )
+    # Only pass `color` when the client actually sent it, so an omitted color
+    # leaves it untouched while an explicit `null` clears it (fp._UNSET default).
+    kwargs: dict[str, Any] = {"name": body.name, "filter_spec": body.filter_spec}
+    if "color" in body.model_fields_set:
+        kwargs["color"] = body.color
+    row = fp.update_preset(conn, preset_id, **kwargs)
     if row is None:
         raise HTTPException(status_code=404, detail="preset not found")
     return row

@@ -1195,6 +1195,8 @@ export interface FilterPreset {
    * endpoint already returns rows in this order, so the UI relies on array
    * order; this field is the canonical source it persists via reorder. */
   position: number;
+  /* Optional chip colour from the shared tag palette; null = neutral default. */
+  color: TagColor | null;
 }
 
 export interface WatchdogDispatch {

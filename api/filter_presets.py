@@ -16,7 +16,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import psycopg
 
-_COLS = "id, name, filter_spec, created_at, updated_at, position"
+_COLS = "id, name, filter_spec, created_at, updated_at, position, color"
+
+# Sentinel distinguishing "field omitted" from "set to NULL" in update_preset:
+# `color=None` clears the colour, `color=_UNSET` leaves it untouched.
+_UNSET: Any = object()
 
 
 @dataclass
@@ -27,6 +31,7 @@ class PresetRow:
     created_at: str
     updated_at: str
     position: int
+    color: str | None
 
 
 def _row_to_preset(row: tuple[Any, ...]) -> PresetRow:
@@ -37,6 +42,7 @@ def _row_to_preset(row: tuple[Any, ...]) -> PresetRow:
         created_at=row[3].isoformat() if row[3] else "",
         updated_at=row[4].isoformat() if row[4] else "",
         position=row[5],
+        color=row[6],
     )
 
 
@@ -62,14 +68,15 @@ def create_preset(
     *,
     name: str,
     filter_spec: dict[str, Any],
+    color: str | None = None,
 ) -> dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO filter_presets (name, filter_spec, position) "
-            "VALUES (%s, %s::jsonb, "
+            "INSERT INTO filter_presets (name, filter_spec, color, position) "
+            "VALUES (%s, %s::jsonb, %s, "
             "(SELECT COALESCE(MAX(position), -1) + 1 FROM filter_presets)) "
             "RETURNING id",
-            (name, json.dumps(filter_spec)),
+            (name, json.dumps(filter_spec), color),
         )
         row = cur.fetchone()
     assert row is not None
@@ -82,6 +89,7 @@ def update_preset(
     *,
     name: str | None = None,
     filter_spec: dict[str, Any] | None = None,
+    color: str | None | Any = _UNSET,
 ) -> dict[str, Any] | None:
     sets: list[str] = []
     params: list[Any] = []
@@ -91,6 +99,9 @@ def update_preset(
     if filter_spec is not None:
         sets.append("filter_spec = %s::jsonb")
         params.append(json.dumps(filter_spec))
+    if color is not _UNSET:
+        sets.append("color = %s")
+        params.append(color)
     if not sets:
         return get_preset(conn, preset_id)
     params.append(preset_id)

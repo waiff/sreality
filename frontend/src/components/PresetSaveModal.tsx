@@ -1,29 +1,35 @@
-/* Name-prompt dialog for saving / updating / renaming a Browse filter preset.
+/* Name + colour dialog for saving / updating / editing a Browse filter preset.
  *
- * One small modal serves all three flows (Browse owns which one is open and
- * what to do on submit). When a map area is currently applied it offers an
- * "Include current map area" toggle so the operator can decide whether the
- * viewport bounding box is part of the preset; rename hides it (filters are
- * untouched). Modelled on CreateWatchdogModal for visual consistency. */
+ * One small modal serves all flows (Browse owns which one is open and what to
+ * do on submit). The colour swatches reuse the shared tag palette (TAG_COLORS)
+ * so presets and tags speak one colour vocabulary. When a map area is currently
+ * applied it offers an "Include current map area" toggle so the operator can
+ * decide whether the viewport bounding box is part of the preset; the
+ * metadata-only edit flow hides it (filters are untouched). Modelled on
+ * CreateWatchdogModal for visual consistency. */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+
+import { TAG_COLORS, type TagColor } from '@/lib/types';
 
 export interface PresetSaveModalProps {
   title: string;
   initialName: string;
+  initialColor: TagColor | null;
   submitLabel: string;
   /* Show the "Include current map area" toggle (a map area must be applied). */
   showMapAreaToggle: boolean;
   initialIncludeMapArea: boolean;
   busy: boolean;
   error: string | null;
-  onSubmit: (name: string, includeMapArea: boolean) => void;
+  onSubmit: (name: string, includeMapArea: boolean, color: TagColor | null) => void;
   onClose: () => void;
 }
 
 export default function PresetSaveModal({
   title,
   initialName,
+  initialColor,
   submitLabel,
   showMapAreaToggle,
   initialIncludeMapArea,
@@ -34,6 +40,7 @@ export default function PresetSaveModal({
 }: PresetSaveModalProps) {
   const [name, setName] = useState(initialName);
   const [includeMapArea, setIncludeMapArea] = useState(initialIncludeMapArea);
+  const [color, setColor] = useState<TagColor | null>(initialColor);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -52,8 +59,14 @@ export default function PresetSaveModal({
   const trimmed = name.trim();
   const submit = () => {
     if (trimmed.length === 0 || busy) return;
-    onSubmit(trimmed, includeMapArea);
+    onSubmit(trimmed, includeMapArea, color);
   };
+
+  // Swatch styling mirrors the tag-colour picker (TagEditPopover): soft fill +
+  // solid colour border, a Tailwind ring on the selected one.
+  const swatchBase = 'h-6 w-6 shrink-0 rounded-full border transition-shadow';
+  const ringIfSelected = (selected: boolean) =>
+    selected ? 'ring-2 ring-offset-1 ring-offset-[var(--color-paper)]' : '';
 
   return (
     <div
@@ -94,6 +107,55 @@ export default function PresetSaveModal({
             className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-copper)]"
           />
         </label>
+
+        <div className="mt-4">
+          <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            Color
+          </span>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setColor(null)}
+              aria-pressed={color === null}
+              aria-label="No color"
+              title="No color"
+              style={
+                {
+                  background: 'var(--color-paper-2)',
+                  borderColor: 'var(--color-rule-strong)',
+                  ['--tw-ring-color' as string]: 'var(--color-ink-3)',
+                } as CSSProperties
+              }
+              className={`${swatchBase} ${ringIfSelected(color === null)} flex items-center justify-center`}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="h-3.5 w-3.5 text-[var(--color-ink-4)]"
+                aria-hidden
+              >
+                <line x1="5" y1="19" x2="19" y2="5" stroke="currentColor" strokeWidth="2" />
+              </svg>
+            </button>
+            {TAG_COLORS.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setColor(c)}
+                aria-pressed={color === c}
+                aria-label={c}
+                title={c}
+                style={
+                  {
+                    background: `var(--color-tag-${c}-soft)`,
+                    borderColor: `var(--color-tag-${c})`,
+                    ['--tw-ring-color' as string]: `var(--color-tag-${c})`,
+                  } as CSSProperties
+                }
+                className={`${swatchBase} ${ringIfSelected(color === c)}`}
+              />
+            ))}
+          </div>
+        </div>
 
         {showMapAreaToggle ? (
           <button
