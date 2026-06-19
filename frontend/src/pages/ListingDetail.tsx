@@ -251,7 +251,12 @@ export default function ListingDetail() {
       </Suspense>
       <Hairline />
       <Suspense fallback={null}>
-        <CurationBlock sreality_id={listing.sreality_id} />
+        {sourcesQ.data?.property_id != null && (
+          <CurationBlock
+            property_id={sourcesQ.data.property_id}
+            sreality_id={listing.sreality_id}
+          />
+        )}
       </Suspense>
       <Hairline />
       <ListingHistoryBlock listing={listing} sources={sources} snapshots={snapshots} />

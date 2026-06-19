@@ -9,7 +9,7 @@ import {
   ApiError,
   deleteCollection,
   getCollection,
-  removeListingFromCollection,
+  removePropertyFromCollection,
   updateCollection,
 } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
@@ -23,15 +23,15 @@ import {
 } from '@/lib/format';
 import type {
   Collection,
-  CollectionListingRow,
-  CollectionWithListings,
+  CollectionPropertyRow,
+  CollectionWithProperties,
 } from '@/lib/types';
 
 export default function CollectionDetail() {
   const { id: idParam } = useParams();
   const id = idParam && /^\d+$/.test(idParam) ? Number(idParam) : null;
 
-  const q = useQuery<CollectionWithListings, Error>({
+  const q = useQuery<CollectionWithProperties, Error>({
     queryKey: id != null ? curationKeys.collection(id) : ['curation', 'collection', 'invalid'],
     queryFn: () => getCollection(id as number),
     enabled: id != null,
@@ -70,7 +70,7 @@ export default function CollectionDetail() {
     return <NotFoundState reason="missing" id={String(id)} />;
   }
 
-  const { collection, listings } = q.data;
+  const { collection, properties } = q.data;
   return (
     <Page>
       <Crumb />
@@ -78,7 +78,7 @@ export default function CollectionDetail() {
       <Hairline />
       <EditBlock collection={collection} />
       <Hairline />
-      <ListingsBlock collectionId={collection.id} listings={listings} />
+      <PropertiesBlock collectionId={collection.id} properties={properties} />
     </Page>
   );
 }
@@ -132,7 +132,7 @@ function Header({ collection }: { collection: Collection }) {
         <span className="font-mono tabular-nums text-[var(--color-ink-3)]">
           {fmtCount(collection.listing_count)}
         </span>{' '}
-        {collection.listing_count === 1 ? 'listing' : 'listings'} · updated{' '}
+        {collection.listing_count === 1 ? 'property' : 'properties'} · updated{' '}
         <span className="cursor-help" title={fmtAbsolute(collection.updated_at)}>
           {fmtRelative(collection.updated_at)}
         </span>
@@ -253,21 +253,21 @@ function EditBlock({ collection }: { collection: Collection }) {
 /* Listings table                                                             */
 /* -------------------------------------------------------------------------- */
 
-function ListingsBlock({
+function PropertiesBlock({
   collectionId,
-  listings,
+  properties,
 }: {
   collectionId: number;
-  listings: CollectionListingRow[];
+  properties: CollectionPropertyRow[];
 }) {
   return (
     <div>
       <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
-        Listings
+        Properties
       </p>
-      {listings.length === 0 ? (
+      {properties.length === 0 ? (
         <p className="mt-3 text-sm text-[var(--color-ink-3)]">
-          No listings yet. Use the "Add to collection" picker on a listing's
+          No properties yet. Use the "Add to collection" picker on a listing's
           detail page to put something here.
         </p>
       ) : (
@@ -288,9 +288,9 @@ function ListingsBlock({
                 </tr>
               </thead>
               <tbody>
-                {listings.map((row) => (
-                  <ListingRowView
-                    key={row.sreality_id}
+                {properties.map((row) => (
+                  <PropertyRowView
+                    key={row.property_id}
                     row={row}
                     collectionId={collectionId}
                   />
@@ -324,22 +324,22 @@ function Th({
   );
 }
 
-function ListingRowView({
+function PropertyRowView({
   row,
   collectionId,
 }: {
-  row: CollectionListingRow;
+  row: CollectionPropertyRow;
   collectionId: number;
 }) {
   const qc = useQueryClient();
 
   const remove = useMutation({
-    mutationFn: () => removeListingFromCollection(collectionId, row.sreality_id),
+    mutationFn: () => removePropertyFromCollection(collectionId, row.property_id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: curationKeys.collection(collectionId) });
       qc.invalidateQueries({ queryKey: curationKeys.collections });
       qc.invalidateQueries({
-        queryKey: curationKeys.listingCollections(row.sreality_id),
+        queryKey: curationKeys.propertyCollections(row.property_id),
       });
     },
   });

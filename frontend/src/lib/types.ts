@@ -811,15 +811,21 @@ export interface Tag {
 
 export interface Note {
   id: number;
-  sreality_id: number;
+  property_id: number;
   body: string;
+  /* The advert the operator was viewing when the note was written, kept for
+   * provenance. Null on notes created outside a specific listing context. */
+  origin_listing_id: number | null;
   created_at: string;
 }
 
-/* GET /collections/{id} embeds a slimmer listing projection than
- * ListingPublic — see api/curation.get_collection. Renderers expand
- * with fetchListingsByIds() when more detail is needed. */
-export interface CollectionListingRow {
+/* GET /collections/{id} embeds a slimmer property projection than
+ * ListingPublic — see api/curation.get_collection. Each row carries the
+ * property_id plus its representative listing's sreality_id (for
+ * /listing/{sreality_id} links). Renderers expand with fetchListingsByIds()
+ * when more detail is needed. */
+export interface CollectionPropertyRow {
+  property_id: number;
   sreality_id: number;
   district: string | null;
   disposition: string | null;
@@ -830,9 +836,9 @@ export interface CollectionListingRow {
   added_at: string;
 }
 
-export interface CollectionWithListings {
+export interface CollectionWithProperties {
   collection: Collection;
-  listings: CollectionListingRow[];
+  properties: CollectionPropertyRow[];
 }
 
 /* --------------------------------------------------------------------
