@@ -16,3 +16,7 @@ create or replace view dedup_engine_runs_public as
          pairs_considered, rejected, auto_address, auto_phash, auto_visual,
          queued, vision_calls, cost_usd, auto_dismissed
   from dedup_engine_runs;
+
+-- CREATE OR REPLACE preserves the existing grant, but state it explicitly for
+-- auditability (the convention for *_public views the anon dashboard reads).
+grant select on dedup_engine_runs_public to anon;

@@ -421,7 +421,7 @@ class _FakeConn:
         (params = (status, los, his))."""
         return [
             (s, p) for s, p in self.resolved
-            if "FROM (SELECT unnest" in s and p and p[0] == status
+            if "FROM unnest(" in s and p and p[0] == status
         ]
 
 
@@ -942,3 +942,28 @@ def test_run_engine_dry_run_writes_nothing(monkeypatch: Any) -> None:
     assert merges == []                 # but not merged
     assert conn.resolved == []          # no candidate status writes
     assert conn.enqueued == []
+
+
+def test_run_engine_partial_room_scan_does_not_dismiss(monkeypatch: Any) -> None:
+    # The OR-gate guard: if the room cap stops the scan before every common room is
+    # tried, a confident-Low distinctive room must NOT auto-dismiss — an untried
+    # room might still match. kitchen Low but bedroom (untried, cap=1) -> QUEUE.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "kitchen"},
+            {"image_id": sid * 10 + 2, "room_type": "bedroom"},
+        ]}}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify,
+        compare_fn=lambda *a, **k: {"verdict": "Low", "rationale": "different"},
+        max_vision_calls=10, max_room_attempts=1,  # stops after kitchen, bedroom untried
+    )
+    assert stats["auto_dismissed"] == 0
+    assert stats["queued"] == 1
+    assert (101, 102) not in _dismissed_pairs(conn)

@@ -219,9 +219,11 @@ def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str)
     his = [p[1] for p in pairs]
     with conn.cursor() as cur:
         cur.execute(
+            # Two-arg unnest zips the arrays element-wise into (lo, hi) rows — the
+            # canonical, unambiguous parallel-unnest form.
             "UPDATE property_identity_candidates c "
             "SET status = %s, reviewed_at = now() "
-            "FROM (SELECT unnest(%s::bigint[]) AS lo, unnest(%s::bigint[]) AS hi) p "
+            "FROM unnest(%s::bigint[], %s::bigint[]) AS p(lo, hi) "
             "WHERE c.left_property_id = p.lo AND c.right_property_id = p.hi "
             "AND c.status = 'proposed'",
             (new_status, los, his),
@@ -348,13 +350,16 @@ def _resolve_visual(
     by_room_a = _group_ids_by_room(imgs_a)
     by_room_b = _group_ids_by_room(imgs_b)
 
+    priority = rooms_in_priority(common)
     tried = 0
     last_verdict = None
     last_rationale = None
     room_verdicts: dict[str, str] = {}
     room_rationales: dict[str, str | None] = {}
-    for room in rooms_in_priority(common):
+    broke_early = False
+    for room in priority:
         if tried >= max_room_attempts or vision_budget[0] <= 0:
+            broke_early = True  # rooms remain untried — any could still be a match
             break
         tried += 1
         vision_budget[0] -= 1
@@ -370,12 +375,13 @@ def _resolve_visual(
                 "room_type": room, "verdict": last_verdict, "rationale": last_rationale,
             }
 
-    # No High on any room. If a distinctive room (kitchen/bathroom) is confidently
-    # Low, the pair is a confident "different property" — auto-dismiss it from the
-    # operator queue (calibrated: 0/273 operator merges were Low; OR-gate above
-    # already rescued any same-property pair with one matching room). Otherwise
-    # (only generic rooms, or a hedge) leave it for human review.
-    if autodismiss and decide_visual_dismiss(room_verdicts):
+    # No High on any COMPARED room. Only auto-dismiss when we examined EVERY common
+    # room without a High (`not broke_early`): if the room cap / vision budget
+    # stopped us early, an untried room might still match — the OR-gate "rescue"
+    # only covers rooms actually compared, so leave that pair for human review.
+    # Then dismiss only on a confident distinctive-room Low (decide_visual_dismiss);
+    # calibrated: 0/273 operator merges were Low. Otherwise queue.
+    if autodismiss and not broke_early and decide_visual_dismiss(room_verdicts):
         room = next(
             (r for r in rooms_in_priority(set(room_verdicts))
              if room_verdicts[r] == "Low"),
@@ -727,10 +733,11 @@ def main() -> int:
                         help="Wall-clock budget; stop + finalize cleanly before the "
                              "job timeout SIGKILLs the run (0 = no limit).")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Report eligible counts + street groups and exit without writing.")
+                        help="Cheap: report eligible counts + street groups and EXIT "
+                             "(no funnel). For the full preview use --shadow.")
     parser.add_argument("--shadow", action="store_true",
-                        help="Run the full pipeline but WRITE NOTHING — a preview of "
-                             "what a live run would merge / dismiss / queue.")
+                        help="Run the FULL pipeline (funnel + vision) but WRITE NOTHING "
+                             "— previews what a live run would merge / dismiss / reconcile / queue.")
     parser.add_argument("--no-autodismiss", action="store_true",
                         help="Disable auto-dismissing confident visual 'different' verdicts "
                              "(overrides the app_settings toggle).")
