@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { imageSrc } from './imageUrl';
+import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { ListingDetailLite } from './dedupDiff';
 import {
   type CenterRadius,
@@ -1559,10 +1560,19 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
     .filter((x): x is number => x != null);
   const imagesById = await fetchImagesByListingIds(srealityIds, 1);
 
+  // Canonical broker per card (name + firm + contact for the hover box), two
+  // batched reads (listing→broker, then broker→contact) — no N+1.
+  const listingBrokers = await fetchListingBrokersByIds(srealityIds);
+  const brokerContacts = await fetchBrokersByIds([
+    ...new Set([...listingBrokers.values()].map((b) => b.broker_id)),
+  ]);
+
   return rows.map((r) => {
     const p = byId.get(r.property_id);
     const sid = (p?.sreality_id as number | null) ?? null;
     const firstImage = sid != null ? imagesById.get(sid)?.[0] : undefined;
+    const lb = sid != null ? listingBrokers.get(sid) : undefined;
+    const contact = lb ? brokerContacts.get(lb.broker_id) : undefined;
     return {
       property_id: r.property_id,
       stage_id: r.stage_id,
@@ -1576,6 +1586,15 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       price_czk: (p?.price_czk as number | null) ?? null,
       mf_gross_yield_pct: (p?.mf_gross_yield_pct as number | null) ?? null,
       image_url: firstImage ? imageSrc(firstImage) : null,
+      broker: lb
+        ? {
+            broker_id: lb.broker_id,
+            display_name: lb.broker_display_name,
+            firm_label: lb.broker_firm_label,
+            email: contact?.primary_email ?? null,
+            phone: contact?.primary_phone ?? null,
+          }
+        : null,
     };
   });
 };

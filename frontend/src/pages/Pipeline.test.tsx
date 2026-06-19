@@ -49,6 +49,13 @@ const CARDS: PipelineBoardCard[] = [
     price_czk: 5_000_000,
     mf_gross_yield_pct: 4.3,
     image_url: null,
+    broker: {
+      broker_id: 7,
+      display_name: 'Jan Novák',
+      firm_label: 'RE/MAX',
+      email: 'jan@remax.cz',
+      phone: '+420 777 123 456',
+    },
   },
 ];
 
@@ -116,9 +123,12 @@ describe('<Pipeline> board', () => {
     // Both stage columns render their header label.
     expect(screen.getByText('Zájem')).toBeInTheDocument();
     expect(screen.getByText('Nabídka')).toBeInTheDocument();
-    // Enriched card content: street + MF yield.
+    // Enriched card content: street + MF yield + broker name linking to the broker page.
     expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
     expect(screen.getByText(/MF\s*4,3\s*%/)).toBeInTheDocument();
+    const broker = screen.getByText('Jan Novák');
+    expect(broker).toBeInTheDocument();
+    expect(broker.closest('a')).toHaveAttribute('href', '/brokers/7');
   });
 
   it('trash → confirm removes the card via removePipelineCard', async () => {

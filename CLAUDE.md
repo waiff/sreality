@@ -720,14 +720,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
-    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FunnelIcon>`
-    (a sales-funnel, filled = in-pipeline) used on BOTH surfaces — the listing-detail header
-    (`PipelineToggle`, in the top action bar next to "New estimation", NOT buried in CurationBlock)
-    and every Browse card (`BookmarkButton`) — so the same action reads the same icon everywhere.**
-    The `/pipeline` kanban board reads `property_pipeline_public` + `pipeline_stages_public`
-    hydrated against `properties_public` (street + `mf_gross_yield_pct` from the view; one
-    thumbnail per card via the shared `fetchImagesByListingIds` + `imageSrc()` Browse helpers —
-    broker is a deferred follow-up needing a batched canonical-broker lookup). Stage moves are
+    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FilterIcon>`
+    (a horizontal filter / sliders glyph, filled knobs = in-pipeline) used on EVERY pipeline
+    surface — the listing-detail header (`PipelineToggle`, in the top action bar next to "New
+    estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`), AND the
+    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage) — so the
+    "into the pipeline" concept reads as one icon everywhere.** The `/pipeline` kanban board reads
+    `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
+    (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
+    `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
+    two batched anon reads — `fetchListingBrokersByIds` (`listing_broker_public`) + `fetchBrokersByIds`
+    (`brokers_public` contact), NOT the raw drift-prone `properties_public.broker_*` — the name links
+    to `/brokers/{id}`, contact in a native-title hover). Stage moves are
     **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a
     `useDraggable` with a grip handle; one optimistic move mutation; keyboard moves via the
     `KeyboardSensor`). The drag→move resolution is the pure, unit-tested `planMove(activeId,
