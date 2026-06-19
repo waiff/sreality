@@ -30,8 +30,13 @@ import {
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
 import TagColorPicker from '@/components/TagColorPicker';
-import { InfoIcon, TrashIcon } from '@/components/icons';
-import { type PipelineBoardCard, type PipelineStage, type TagColor } from '@/lib/types';
+import { FilterIcon, InfoIcon, TrashIcon } from '@/components/icons';
+import {
+  type PipelineBoardCard,
+  type PipelineCardBroker,
+  type PipelineStage,
+  type TagColor,
+} from '@/lib/types';
 
 export default function Pipeline() {
   const [manage, setManage] = useState(false);
@@ -407,10 +412,10 @@ function StageEditorRow({
             disabled={stage.is_entry}
             title={stage.is_entry ? 'Vstupní fáze' : 'Nastavit jako vstupní'}
             aria-label="Vstupní fáze"
-            className="w-5 text-center text-[0.85rem] disabled:cursor-default"
+            className="flex w-5 justify-center disabled:cursor-default"
             style={{ color: stage.is_entry ? 'var(--color-copper)' : 'var(--color-ink-4)' }}
           >
-            {stage.is_entry ? '★' : '☆'}
+            <FilterIcon filled={stage.is_entry} className="h-4 w-4" />
           </button>
           <Hint text={'Vstupní fáze: sem se nemovitost přidá jako záložka („Přidat do pipeline“). Právě jedna fáze může být vstupní.'} />
         </span>
@@ -572,8 +577,32 @@ function CardFace({ card }: { card: PipelineBoardCard }) {
             </span>
           )}
         </div>
+        {card.broker && (
+          <p className="mt-0.5 truncate text-[0.7rem] text-[var(--color-ink-3)]">
+            <Link
+              to={`/brokers/${card.broker.broker_id}`}
+              title={brokerHoverTitle(card.broker)}
+              className="hover:text-[var(--color-copper)] hover:underline underline-offset-2"
+            >
+              {card.broker.display_name ?? 'Makléř'}
+            </Link>
+            {card.broker.firm_label && (
+              <span className="text-[var(--color-ink-4)]"> · {card.broker.firm_label}</span>
+            )}
+          </p>
+        )}
       </div>
     </div>
+  );
+}
+
+/* Native-title hover box for a card's broker — name, firm, and contact on one
+ * line (the codebase's tooltip convention). The name itself links to the broker
+ * page for the full record. */
+function brokerHoverTitle(b: PipelineCardBroker): string {
+  return (
+    [b.display_name, b.firm_label, b.phone, b.email].filter(Boolean).join(' · ') ||
+    'Zobrazit makléře'
   );
 }
 

@@ -2520,10 +2520,10 @@ Then six refinements:
   inline-duplicated in the filter-preset save modal, the two tag pickers, AND the
   stage editor) into ONE shared component; all four now render it. The stage colour
   is no longer a native `<select>` of colour names.
-- **Funnel = pipeline.** Added `components/icons.tsx` (FunnelIcon/TrashIcon/InfoIcon
-  — first reusable SVG-icon module; repo has no icon library by design). The
-  "Přidat do pipeline" ★ became a funnel (filled = in-pipeline) on BOTH the header
-  toggle and the Browse cards.
+- **Pipeline mark.** Added `components/icons.tsx` (first reusable SVG-icon module;
+  repo has no icon library by design). The "Přidat do pipeline" ★ became a shared
+  icon on BOTH the header toggle and the Browse cards. (The glyph was a funnel here;
+  superseded by a horizontal filter/sliders glyph in 3e — funnels read ambiguously.)
 - **Card trash + confirm.** Each kanban card carries a trash → inline two-step
   confirm → optimistic remove-from-pipeline (the app's destructive-action pattern).
 - **(i) hints.** The stage-editor entry-star and "konec" (terminal) controls carry
@@ -2532,9 +2532,23 @@ Then six refinements:
   `KeyboardSensor`). Rule #22 + the test updated for the removed select.
 - **Richer card.** Cards now show a thumbnail + street + MF gross yield (image via
   the shared `fetchImagesByListingIds` + `imageSrc()` Browse helpers; street + yield
-  off `properties_public`). Broker name + hover contact is a deferred follow-up —
-  it needs a batched canonical-broker lookup (`POST /brokers/by-listings`) rather
-  than the raw per-portal `broker_name` (drift) or an N+1 per card.
+  off `properties_public`). Broker name + hover contact landed in 3e.
+
+### Phase U-PIPE Phase 3e: Card broker + filter icon (done)
+Closes the two items 3d deferred / the operator flagged.
+- **Broker on the card** — the **canonical resolved broker** (not the drift-prone raw
+  `properties_public.broker_*`), fetched **batched** (no N+1) via two new anon reads in
+  `lib/brokers.ts`: `fetchListingBrokersByIds` (`listing_broker_public` → name + firm +
+  `broker_id`) + `fetchBrokersByIds` (`brokers_public` → primary email/phone). Folded into
+  `fetchPipelineBoard`; the card shows the name linking to `/brokers/{id}` (like the rest
+  of the app) with a native-title hover carrying firm + phone + email. NULL-safe (private
+  bazos sellers have no resolved broker → line omitted). No new endpoint, no migration —
+  both views were already anon-readable.
+- **Filter icon, not a funnel.** The funnel read ambiguously, so the shared pipeline mark
+  became a **horizontal filter / sliders glyph** (`FilterIcon`, gapped tracks + knobs;
+  filled knobs = in-pipeline / entry). Applied on all three pipeline surfaces — header
+  toggle, Browse cards, AND the stage-manager entry-stage indicator (was a ★/☆) — so the
+  "into the pipeline" concept reads as one icon everywhere. Rule #22 updated.
 
 ### Phase U-ME: Manual rental estimates (next)
 

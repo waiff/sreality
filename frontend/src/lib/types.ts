@@ -842,6 +842,17 @@ export interface PipelineStage {
   is_entry: boolean;
 }
 
+/* The canonical (resolved) broker for a card, with the contact the hover box
+ * shows. broker_id links to the broker page. NULL when the listing has no
+ * resolved broker (e.g. private bazos sellers). */
+export interface PipelineCardBroker {
+  broker_id: number;
+  display_name: string | null;
+  firm_label: string | null;
+  email: string | null;
+  phone: string | null;
+}
+
 /* A board card = the property_pipeline row joined to its property's display
  * fields (from properties_public) for rendering on the kanban. */
 export interface PipelineBoardCard {
@@ -857,6 +868,7 @@ export interface PipelineBoardCard {
   price_czk: number | null;
   mf_gross_yield_pct: number | null;
   image_url: string | null;
+  broker: PipelineCardBroker | null;
 }
 
 /* GET /collections/{id} embeds a slimmer property projection than

@@ -180,6 +180,38 @@ export async function fetchListingBroker(srealityId: number): Promise<ListingBro
   return (data as ListingBroker) ?? null;
 }
 
+// Batched canonical-broker lookup for many listings at once (the pipeline board
+// hydrates N cards in one round-trip — no N+1). Returns sreality_id → broker.
+export async function fetchListingBrokersByIds(
+  srealityIds: ReadonlyArray<number>,
+): Promise<Map<number, ListingBroker>> {
+  if (srealityIds.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('listing_broker_public')
+    .select('sreality_id, broker_id, broker_display_name, broker_firm_label')
+    .in('sreality_id', srealityIds as number[]);
+  if (error) throw error;
+  const out = new Map<number, ListingBroker>();
+  for (const r of (data ?? []) as ListingBroker[]) out.set(r.sreality_id, r);
+  return out;
+}
+
+// Batched canonical-broker contact lookup by broker_id (primary email/phone +
+// firm) — pairs with fetchListingBrokersByIds to fill a card's hover contact box.
+export async function fetchBrokersByIds(
+  brokerIds: ReadonlyArray<number>,
+): Promise<Map<number, BrokerPublic>> {
+  if (brokerIds.length === 0) return new Map();
+  const { data, error } = await supabase
+    .from('brokers_public')
+    .select('*')
+    .in('broker_id', brokerIds as number[]);
+  if (error) throw error;
+  const out = new Map<number, BrokerPublic>();
+  for (const r of (data ?? []) as BrokerPublic[]) out.set(r.broker_id, r);
+  return out;
+}
+
 export async function fetchBroker(brokerId: number): Promise<BrokerPublic | null> {
   const { data, error } = await supabase
     .from('brokers_public')
