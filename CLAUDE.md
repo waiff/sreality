@@ -228,7 +228,7 @@ rules. Identify which one a task belongs to before you start.
   (rule #22): `POST /listings/lookup` returns the listing's `property_id` + pipeline
   membership, and the toggle writes through the SAME bearer-gated
   `POST/DELETE /pipeline/cards` the SPA's `PipelineToggle` uses — one write path, one
-  `<FilterIcon>` glyph everywhere. Reachable from index/search pages too: the per-card
+  `<FunnelIcon>` glyph everywhere. Reachable from index/search pages too: the per-card
   badge opens this same panel.
   **Index/search pages** get per-card badges via anchor-href scanning (no per-portal card
   selectors — robust to markup changes). The default display is a **read** through
@@ -726,8 +726,8 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
-    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FilterIcon>`
-    (a horizontal filter / sliders glyph, filled knobs = in-pipeline) used on EVERY pipeline
+    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FunnelIcon>`
+    (a funnel with three arrows, filled body = in-pipeline) used on EVERY pipeline
     surface — the listing-detail header (`PipelineToggle`, in the top action bar next to "New
     estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`), the
     stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), AND the

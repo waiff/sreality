@@ -2,19 +2,19 @@
  * header action bar (next to "New estimation").
  *
  * "Bookmark / interested" == the entry stage (rule #22): presence of a card ==
- * the property is in the pipeline. Out of pipeline → a copper ☆ "Přidat do
+ * the property is in the pipeline. Out of pipeline → a copper funnel "Přidat do
  * pipeline" (the app's one accent, marking THE deal-tracking verb); in pipeline
- * → a ★ pill tinted with the current stage's colour, showing the stage label.
- * Clicking toggles add/remove — the same contract as the Browse-card ★, so the
- * star means the same thing on every surface. Reads the single card (for the
- * stage label); the Browse cards read a shared members-set instead, so a toggle
- * here invalidates both keys to keep the two surfaces in sync.
+ * → a filled-funnel pill tinted with the current stage's colour, showing the
+ * stage label. Clicking toggles add/remove — the same contract as the Browse-card
+ * funnel, so the funnel means the same thing on every surface. Reads the single
+ * card (for the stage label); the Browse cards read a shared members-set instead,
+ * so a toggle here invalidates both keys to keep the two surfaces in sync.
  */
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { addPipelineCard, removePipelineCard } from '@/lib/api';
 import { fetchPropertyPipeline, pipelineKeys } from '@/lib/queries';
-import { FilterIcon } from '@/components/icons';
+import { FunnelIcon } from '@/components/icons';
 
 export default function PipelineToggle({ property_id }: { property_id: number }) {
   const qc = useQueryClient();
@@ -29,7 +29,7 @@ export default function PipelineToggle({ property_id }: { property_id: number })
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: pipelineKeys.card(property_id) });
-    // Keep the Browse-card ★ (shared members-set) in sync with this toggle.
+    // Keep the Browse-card funnel (shared members-set) in sync with this toggle.
     qc.invalidateQueries({ queryKey: pipelineKeys.members });
   };
   const add = useMutation({
@@ -67,7 +67,7 @@ export default function PipelineToggle({ property_id }: { property_id: number })
       ].join(' ')}
       style={inPipeline ? { background: bg, color: fg, borderColor: fg } : undefined}
     >
-      <FilterIcon filled={inPipeline} className="h-4 w-4 shrink-0" />
+      <FunnelIcon filled={inPipeline} className="h-4 w-4 shrink-0" />
       <span>{inPipeline ? (card?.stage_label ?? 'V pipeline') : 'Přidat do pipeline'}</span>
     </button>
   );
