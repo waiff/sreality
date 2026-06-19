@@ -723,6 +723,16 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `GET /pipeline/stages`); the `/pipeline` kanban board reads `property_pipeline_public` +
     `pipeline_stages_public` (membership/stages) hydrated against `properties_public`. Stage
     moves are a per-card stage picker today; drag-and-drop is a deferred enhancement.
+    **Stages are operator-curated from the board's "Spravovat fáze" panel** (`POST
+    /pipeline/stages` create — the `key` slug is derived server-side from the label; `PATCH
+    /pipeline/stages/{id}` rename/recolor/retag/crown-entry; `POST /pipeline/stages/reorder`
+    rewrite left-to-right order; `DELETE /pipeline/stages/{id}` soft-archive via `archived_at`).
+    Two invariants the API enforces (not just the DB): a stage can't be **both** the entry and
+    terminal, and `is_entry` may only be **set** (you re-home the single-entry crown by crowning
+    another stage, never by un-crowning the only one — the partial unique index needs exactly one).
+    Archive is refused (409) for the entry stage or any stage still holding cards — the FK is
+    `ON DELETE RESTRICT`, so cards must be moved off a stage before it retires; archived stages
+    drop out of `pipeline_stages_public` but their `property_pipeline_events` history survives.
 
 ## Toolkit and API rules
 

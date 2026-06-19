@@ -2471,8 +2471,29 @@ Toggling adds/removes the property at the pipeline entry stage via
 `fetchPipelineMemberSet()` (React Query dedupes `pipelineKeys.members` across all
 cards → one query), and the toggle invalidates it. Lets the operator bookmark
 straight from the search results, not just the listing-detail page.
-- Next (remaining Phase 3 polish): operator stage-management UI (rename / reorder
-  / add / recolor stages); drag-and-drop card moves on the kanban board.
+
+### Phase U-PIPE Phase 3b: Operator stage-management UI (done)
+The operator now curates the kanban columns from the board itself — no migration
+to add/rename/reorder a stage (the curated-index precedent; rule #22).
+- API stage CRUD (`api/pipeline.py`): `POST /pipeline/stages` (create — the `key`
+  slug derived server-side from the label via `_slugify`, deduped), `PATCH
+  /pipeline/stages/{id}` (rename / recolor / retag terminal / crown-entry), `POST
+  /pipeline/stages/reorder` (rewrite left-to-right; `ordered_ids` must be exactly
+  the live set), `DELETE /pipeline/stages/{id}` (soft-archive via `archived_at`).
+- Two invariants enforced in the handler, not just the DB: a stage can't be both
+  entry and terminal; `is_entry` may only be SET (re-home the single-entry crown
+  by crowning another, never un-crown the only one). Archive is refused (409) for
+  the entry stage or a stage still holding cards (FK `ON DELETE RESTRICT`).
+- Frontend: a "Spravovat fáze" panel on `/pipeline` (`StageManager` /
+  `StageEditorRow` in `Pipeline.tsx`) — per-row rename (save on blur), color
+  picker (the 8 `TAG_COLORS`), terminal checkbox, ★ entry crown, ▲▼ reorder, ✕
+  archive, plus an add-stage row. Mutations invalidate the `['pipeline']` key
+  prefix so the board, stages, and membership all refresh.
+- Hermetic tests (`tests/api/test_pipeline.py`): route smoke + logic against the
+  scripted fake conn (key derivation, append position, entry-crown demotes others,
+  entry≠terminal reject, un-crown reject, reorder set-mismatch reject, archive
+  entry/with-cards 409, soft-retire empty).
+- Next (remaining Phase 3 polish): drag-and-drop card moves on the kanban board.
 
 ### Phase U-ME: Manual rental estimates (next)
 
