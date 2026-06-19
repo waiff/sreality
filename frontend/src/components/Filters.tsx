@@ -34,6 +34,10 @@ interface SidebarProps {
   /* Operator-resizable width in px (Browse persists it). Optional so
    * other consumers keep the default 320px sidebar. */
   width?: number;
+  /* 'page' (default): sticky, pinned under the top bar, full-viewport height.
+   * 'modal': plain full-height scroll column inside a dialog (no sticky/top
+   * offset, which would mis-position it within a modal panel). */
+  layout?: 'page' | 'modal';
 }
 
 /* Which `ListingFilters` keys live in each collapsible band. Used only to
@@ -89,7 +93,7 @@ const bandActive = (
     return value !== def;
   });
 
-export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }: SidebarProps) {
+export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, layout = 'page' }: SidebarProps) {
   // <FilterForm> reads snake_case registry ids; Browse keeps the
   // camelCase `ListingFilters` shape its queries / URL serialisation
   // already use. The adapter in lib/filters bridges both directions
@@ -137,7 +141,11 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320 }
   return (
     <aside
       style={{ width }}
-      className="shrink-0 border-r border-[var(--color-rule)] sticky top-14 self-start max-h-[calc(100dvh-3.5rem)] overflow-y-auto"
+      className={
+        layout === 'modal'
+          ? 'shrink-0 border-r border-[var(--color-rule)] h-full overflow-y-auto'
+          : 'shrink-0 border-r border-[var(--color-rule)] sticky top-14 self-start max-h-[calc(100dvh-3.5rem)] overflow-y-auto'
+      }
     >
       <div className="px-5 py-4 flex items-center justify-between border-b border-[var(--color-rule-soft)]">
         <h2 className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
