@@ -29,17 +29,30 @@ class PropertySetAction(BaseModel):
     property_ids: list[int]
 
 
+@router.get("/summary")
+def get_summary(
+    status: str = "proposed",
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Cumulative review backlog + breakdown by reason (drives the dashboard)."""
+    return dedup.summary(conn, status=status)
+
+
 @router.get("/candidates")
 def get_candidates(
     status: str | None = "proposed",
     tier: str | None = None,
+    reason: str | None = None,
+    verdict: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return dedup.list_candidates(
-        conn, status=status, tier=tier, limit=limit, offset=offset,
+        conn, status=status, tier=tier, reason=reason, verdict=verdict,
+        limit=limit, offset=offset,
     )
 
 

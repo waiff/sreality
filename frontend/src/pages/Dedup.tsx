@@ -10,6 +10,7 @@ import {
 import {
   dismissDedupCluster,
   getAppSetting,
+  getDedupSummary,
   isApiConfigured,
   listDedupCandidates,
   listDedupMerges,
@@ -41,6 +42,8 @@ import { listingPath, propertyListingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
   DedupPropertySide,
+  DedupSummaryBucket,
+  DedupSummaryResponse,
   ImagePublic,
   MergeGroup,
   MergesResponse,
@@ -48,6 +51,11 @@ import type {
 } from '@/lib/types';
 
 const POLL_MS = 60_000;
+/* API sentinel: filter candidates whose markers_matched.verdict IS NULL (most
+ * buckets), so clicking a (reason, no-verdict) backlog bucket drills in exactly. */
+const NULL_VERDICT = '(none)';
+
+type Bucket = { reason: string; verdict: string | null };
 const BTN = 'px-3 py-1.5 text-sm rounded-[var(--radius-sm)] transition-colors disabled:opacity-50';
 
 type ImagesMap = Map<number, ImagePublic[]>;
@@ -57,9 +65,29 @@ type DetailMap = Map<number, ListingDetailLite>;
 export default function Dedup() {
   const qc = useQueryClient();
 
+  // Which backlog bucket the operator drilled into (null = the whole queue).
+  const [bucket, setBucket] = useState<Bucket | null>(null);
+
+  const summaryQ = useQuery<DedupSummaryResponse, Error>({
+    queryKey: dedupKeys.summary('proposed'),
+    queryFn: () => getDedupSummary('proposed'),
+    placeholderData: keepPreviousData,
+    refetchInterval: POLL_MS,
+  });
+
   const candidatesQ = useQuery<DedupCandidatesResponse, Error>({
-    queryKey: dedupKeys.candidates({ status: 'proposed' }),
-    queryFn: () => listDedupCandidates({ status: 'proposed', limit: 100 }),
+    queryKey: dedupKeys.candidates({
+      status: 'proposed',
+      reason: bucket?.reason ?? null,
+      verdict: bucket ? bucket.verdict ?? NULL_VERDICT : null,
+    }),
+    queryFn: () => listDedupCandidates({
+      status: 'proposed',
+      limit: 100,
+      ...(bucket
+        ? { reason: bucket.reason, verdict: bucket.verdict ?? NULL_VERDICT }
+        : {}),
+    }),
     placeholderData: keepPreviousData,
     refetchInterval: POLL_MS,
   });
@@ -141,24 +169,40 @@ export default function Dedup() {
     mergeSetMut.isPending
     && (mergeSetMut.variables ?? []).every((id) => memberIds.includes(id));
 
+  const filteredTotal = candidatesQ.data?.total ?? 0;
+  const returned = candidatesQ.data?.returned ?? candidates.length;
+
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">
-      <Header proposed={candidates.length} />
+      <Header proposed={summaryQ.data?.data.total ?? candidates.length} />
 
       <AutoDedupToggle />
 
       <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
 
+      <ReviewBacklog
+        summary={summaryQ.data?.data}
+        loading={summaryQ.isLoading}
+        selected={bucket}
+        onSelect={setBucket}
+      />
+
       <Section
         title="Needs review"
-        eyebrow="Proposed matches"
+        eyebrow={
+          bucket
+            ? `${bucketLabel(bucket.reason, bucket.verdict).label} · ${fmtCount(filteredTotal)}${returned < filteredTotal ? ` (showing ${fmtCount(returned)})` : ''}`
+            : 'Proposed matches'
+        }
         isEmpty={candidates.length === 0}
         empty={
           candidatesQ.isLoading
             ? 'Loading…'
             : candidatesQ.error
               ? `Failed to load: ${candidatesQ.error.message}`
-              : 'Nothing awaiting review. The engine queues a pair here only when two listings share a street and disposition but it can’t confidently confirm they’re the same property by photos.'
+              : bucket
+                ? 'Nothing in this bucket.'
+                : 'Nothing awaiting review. The engine queues a pair here only when two listings share a street and disposition but it can’t confidently confirm they’re the same property by photos.'
         }
       >
         <div className="space-y-3">
@@ -306,6 +350,145 @@ function RunTrend({ runs }: { runs: DedupEngineRun[] }) {
         );
       })}
     </div>
+  );
+}
+
+/* Human label + hint + tone for a backlog bucket (reason × verdict). Maps each
+ * "why this queued" to an operator-actionable category; unknown reasons fall back
+ * to the raw key so a future engine reason still shows up (just unlabelled). */
+function bucketLabel(
+  reason: string,
+  verdict: string | null,
+): { label: string; hint: string; tone: 'sage' | 'brick' | 'copper' | 'muted' } {
+  if (reason === 'auto_merge_off:address_exact')
+    return { label: 'Mergeable now', hint: 'exact address; queued while auto-merge was off', tone: 'sage' };
+  if (reason === 'auto_merge_off:image_phash')
+    return { label: 'Mergeable now (photos)', hint: 'identical photos; queued while auto-merge was off', tone: 'sage' };
+  if (reason === 'auto_merge_off')
+    return { label: 'Auto-merge was off', hint: 'queued without a photo check', tone: 'muted' };
+  if (reason === 'no_images')
+    return { label: 'No photos compared', hint: 'classify didn’t run — retryable', tone: 'muted' };
+  if (reason === 'vision_unavailable')
+    return { label: 'No visual check', hint: 'vision tools were unavailable — retryable', tone: 'muted' };
+  if (reason === 'visual_inconclusive' && verdict === 'Low')
+    return { label: 'Compared — different', hint: 'photos clearly differ', tone: 'brick' };
+  if (reason === 'visual_inconclusive' && verdict === 'Medium')
+    return { label: 'Compared — ambiguous', hint: 'needs your eye', tone: 'copper' };
+  if (reason === 'visual_inconclusive')
+    return { label: 'Compared — inconclusive', hint: 'no clear verdict', tone: 'muted' };
+  if (reason === 'site_plan_different_unit')
+    return { label: 'Different unit (site plan)', hint: 'development guard', tone: 'brick' };
+  if (reason === 'visual_match')
+    return { label: 'Visual match', hint: 'High verdict', tone: 'sage' };
+  if (reason === 'image_phash')
+    return { label: 'Identical photos', hint: '', tone: 'sage' };
+  if (reason === '(legacy)')
+    return { label: 'Legacy (no reason)', hint: 'from an older engine version', tone: 'muted' };
+  return { label: reason, hint: '', tone: 'muted' };
+}
+
+const TONE_DOT: Record<'sage' | 'brick' | 'copper' | 'muted', string> = {
+  sage: 'bg-[var(--color-sage)]',
+  brick: 'bg-[var(--color-brick)]',
+  copper: 'bg-[var(--color-copper)]',
+  muted: 'bg-[var(--color-ink-4)]',
+};
+
+/* The WHOLE pending queue + what it's made of — so the operator sees the real
+ * backlog (not just the page of cards) and can drill into any bucket. Reads
+ * /dedup/summary. Clicking a bucket filters "Needs review"; "All" clears it. */
+function ReviewBacklog({
+  summary,
+  loading,
+  selected,
+  onSelect,
+}: {
+  summary: DedupSummaryResponse['data'] | undefined;
+  loading: boolean;
+  selected: Bucket | null;
+  onSelect: (b: Bucket | null) => void;
+}) {
+  const buckets = summary?.buckets ?? [];
+  const isSel = (b: DedupSummaryBucket) =>
+    selected != null && selected.reason === b.reason && selected.verdict === b.verdict;
+  return (
+    <section className="mt-8">
+      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        Backlog
+      </p>
+      <h2 className="mt-1 text-xl" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
+        Review queue · {fmtCount(summary?.total ?? 0)}
+      </h2>
+      {summary == null ? (
+        <div className="mt-3 px-6 py-8 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
+          {loading ? 'Loading…' : 'No pending candidates.'}
+        </div>
+      ) : (
+        <div className="mt-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
+          <BacklogRow
+            label="All pending"
+            hint="clear the filter"
+            count={summary.total}
+            active={selected == null}
+            tone="muted"
+            onClick={() => onSelect(null)}
+          />
+          {buckets.map((b) => {
+            const meta = bucketLabel(b.reason, b.verdict);
+            return (
+              <BacklogRow
+                key={`${b.reason}:${b.verdict ?? ''}`}
+                label={meta.label}
+                hint={meta.hint}
+                count={b.count}
+                active={isSel(b)}
+                tone={meta.tone}
+                onClick={() => onSelect({ reason: b.reason, verdict: b.verdict })}
+              />
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function BacklogRow({
+  label,
+  hint,
+  count,
+  active,
+  tone,
+  onClick,
+}: {
+  label: string;
+  hint: string;
+  count: number;
+  active: boolean;
+  tone: 'sage' | 'brick' | 'copper' | 'muted';
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        'w-full flex items-center justify-between gap-3 px-4 py-2.5 text-left',
+        'border-b border-[var(--color-rule-soft)] last:border-b-0 transition-colors',
+        active ? 'bg-[var(--color-paper-3)]' : 'hover:bg-[var(--color-paper)]',
+      ].join(' ')}
+    >
+      <span className="flex items-center gap-2 min-w-0">
+        <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${TONE_DOT[tone]}`} />
+        <span className="text-sm text-[var(--color-ink)] truncate">{label}</span>
+        {hint ? (
+          <span className="text-[0.72rem] text-[var(--color-ink-4)] truncate hidden sm:inline">· {hint}</span>
+        ) : null}
+      </span>
+      <span className={`font-mono tabular-nums text-sm shrink-0 ${active ? 'text-[var(--color-copper-2)]' : 'text-[var(--color-ink-2)]'}`}>
+        {fmtCount(count)}
+      </span>
+    </button>
   );
 }
 
