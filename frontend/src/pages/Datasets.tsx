@@ -253,7 +253,12 @@ export default function Datasets() {
 
   // The same shared helper Browse/Brokers use: split the chips into per-level
   // stable-id sets, then keep an obec iff it (or its okres/kraj ancestor) is
-  // selected. Empty selection ⇒ keep everything (no filter).
+  // selected. Empty selection ⇒ keep everything (no filter). Datasets is
+  // obec-id-keyed: it matches ONLY by stable admin id via the picker tree, with
+  // no name-ILIKE fallback (Browse/Watchdog have one on place_search_text). So an
+  // unresolved chip (id==null — e.g. /maps/resolve down, or a pick Mapy can't PIP)
+  // can't narrow here and is a deliberate fail-open no-op, surfaced by the hint
+  // under the Location box rather than silently showing the whole dataset.
   const geo = useMemo(() => chipsToGeoArrays(districts), [districts]);
   const loc = useMemo(() => ({
     obec: new Set(geo.obecIds),
@@ -535,6 +540,12 @@ export default function Datasets() {
               <span className="mt-2 shrink-0 text-xs uppercase tracking-[0.14em] text-[var(--color-ink-3)]">Location</span>
               <div className="w-full sm:max-w-sm">
                 <LocationTypeahead value={districts} onChange={(n) => setDistricts(n ?? [])} />
+                {districts.length > 0 && !loc.active && (
+                  <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
+                    Couldn’t resolve this location, so the filter isn’t applied. Datasets matches
+                    by municipality — try picking a town, district, or region.
+                  </p>
+                )}
               </div>
             </div>
           </div>
