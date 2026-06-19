@@ -362,10 +362,14 @@ function bucketLabel(
 ): { label: string; hint: string; tone: 'sage' | 'brick' | 'copper' | 'muted' } {
   if (reason === 'auto_merge_off:address_exact')
     return { label: 'Mergeable now', hint: 'exact address; queued while auto-merge was off', tone: 'sage' };
+  if (reason === 'auto_merge_off:image_phash')
+    return { label: 'Mergeable now (photos)', hint: 'identical photos; queued while auto-merge was off', tone: 'sage' };
   if (reason === 'auto_merge_off')
     return { label: 'Auto-merge was off', hint: 'queued without a photo check', tone: 'muted' };
   if (reason === 'no_images')
     return { label: 'No photos compared', hint: 'classify didn’t run — retryable', tone: 'muted' };
+  if (reason === 'vision_unavailable')
+    return { label: 'No visual check', hint: 'vision tools were unavailable — retryable', tone: 'muted' };
   if (reason === 'visual_inconclusive' && verdict === 'Low')
     return { label: 'Compared — different', hint: 'photos clearly differ', tone: 'brick' };
   if (reason === 'visual_inconclusive' && verdict === 'Medium')
