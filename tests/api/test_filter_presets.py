@@ -35,7 +35,7 @@ def store(monkeypatch):
     def _to_dict(pid: str) -> dict[str, Any]:
         return dict(state["presets"][pid])
 
-    def fake_create_preset(conn, *, name, filter_spec):
+    def fake_create_preset(conn, *, name, filter_spec, color=None):
         pid = str(state["next_id"])
         state["next_id"] += 1
         state["presets"][pid] = {
@@ -49,6 +49,7 @@ def store(monkeypatch):
                 (p["position"] for p in state["presets"].values()), default=-1
             )
             + 1,
+            "color": color,
         }
         return _to_dict(pid)
 
@@ -60,13 +61,15 @@ def store(monkeypatch):
     def fake_get_preset(conn, pid):
         return _to_dict(pid) if pid in state["presets"] else None
 
-    def fake_update_preset(conn, pid, *, name=None, filter_spec=None):
+    def fake_update_preset(conn, pid, *, name=None, filter_spec=None, color=fp._UNSET):
         if pid not in state["presets"]:
             return None
         if name is not None:
             state["presets"][pid]["name"] = name
         if filter_spec is not None:
             state["presets"][pid]["filter_spec"] = filter_spec
+        if color is not fp._UNSET:
+            state["presets"][pid]["color"] = color
         return _to_dict(pid)
 
     def fake_delete_preset(conn, pid):
@@ -98,6 +101,48 @@ def test_create_preset_returns_row(client, store):
     assert body["id"] == "1"
     assert body["name"] == "Praha pod 6M"
     assert body["filter_spec"] == SPEC
+
+
+def test_create_preset_defaults_color_null(client, store):
+    body = client.post(
+        "/filter-presets", json={"name": "p", "filter_spec": SPEC}
+    ).json()
+    assert body["color"] is None
+
+
+def test_create_preset_with_color(client, store):
+    body = client.post(
+        "/filter-presets", json={"name": "p", "filter_spec": SPEC, "color": "plum"}
+    ).json()
+    assert body["color"] == "plum"
+
+
+def test_create_preset_invalid_color_422(client, store):
+    res = client.post(
+        "/filter-presets",
+        json={"name": "p", "filter_spec": SPEC, "color": "fuchsia"},
+    )
+    assert res.status_code == 422
+
+
+def test_update_preset_sets_and_clears_color(client, store):
+    client.post(
+        "/filter-presets", json={"name": "p", "filter_spec": SPEC, "color": "sage"}
+    )
+    # Recolour.
+    assert client.put("/filter-presets/1", json={"color": "teal"}).json()["color"] == "teal"
+    # Explicit null clears it.
+    assert client.put("/filter-presets/1", json={"color": None}).json()["color"] is None
+
+
+def test_update_preset_omitting_color_leaves_it(client, store):
+    client.post(
+        "/filter-presets", json={"name": "p", "filter_spec": SPEC, "color": "brick"}
+    )
+    # A name-only update must not wipe the colour (omitted != cleared).
+    body = client.put("/filter-presets/1", json={"name": "renamed"}).json()
+    assert body["name"] == "renamed"
+    assert body["color"] == "brick"
 
 
 def test_create_preset_blank_name_422(client, store):

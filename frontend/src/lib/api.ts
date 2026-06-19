@@ -1055,12 +1055,13 @@ export const listFilterPresets = (): Promise<{
 export const createFilterPreset = (input: {
   name: string;
   filter_spec: PresetSpec;
+  color?: TagColor | null;
 }): Promise<FilterPreset> =>
   request<FilterPreset>('/filter-presets', { method: 'POST', json: input });
 
 export const updateFilterPreset = (
   id: string,
-  patch: { name?: string; filter_spec?: PresetSpec },
+  patch: { name?: string; filter_spec?: PresetSpec; color?: TagColor | null },
 ): Promise<FilterPreset> =>
   request<FilterPreset>(`/filter-presets/${encodeURIComponent(id)}`, {
     method: 'PUT',

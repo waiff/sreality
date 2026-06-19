@@ -3,8 +3,10 @@
  * A preset is a named filter set + sort order. Clicking a chip restores both
  * (Browse owns the URL write via `onLoad`); the active chip is highlighted and,
  * once the operator edits a filter or the sort, an "Update" button appears.
- * Save / rename / delete go through the bearer-gated FastAPI service
+ * Save / edit / delete go through the bearer-gated FastAPI service
  * (migration 151) — a preset never fires a notification, unlike a Watchdog.
+ * Each preset can carry a colour from the shared tag palette (migration 201);
+ * the chip then renders in that colour (copper/neutral when uncolored).
  *
  * The chips are drag-reorderable (each carries a grip handle). Order is
  * operator-controlled and server-persisted via `position` (migration 198):
@@ -56,7 +58,7 @@ import {
   type ListingFilters,
   type PresetSpec,
 } from '@/lib/filters';
-import type { FilterPreset } from '@/lib/types';
+import type { FilterPreset, TagColor } from '@/lib/types';
 import PresetSaveModal from '@/components/PresetSaveModal';
 
 export interface PresetBarProps {
@@ -70,7 +72,7 @@ export interface PresetBarProps {
 type ModalState =
   | { mode: 'save' }
   | { mode: 'update'; preset: FilterPreset }
-  | { mode: 'rename'; preset: FilterPreset };
+  | { mode: 'edit'; preset: FilterPreset };
 
 type PresetsResponse = { data: FilterPreset[]; total: number };
 
@@ -135,7 +137,7 @@ export default function PresetBar({
   const invalidate = () => qc.invalidateQueries({ queryKey: filterPresetKeys.all });
 
   const createMut = useMutation({
-    mutationFn: (input: { name: string; filter_spec: PresetSpec }) =>
+    mutationFn: (input: { name: string; filter_spec: PresetSpec; color: TagColor | null }) =>
       createFilterPreset(input),
     onSuccess: (created) => {
       invalidate();
@@ -149,7 +151,13 @@ export default function PresetBar({
       id: string;
       name?: string;
       filter_spec?: PresetSpec;
-    }) => updateFilterPreset(input.id, { name: input.name, filter_spec: input.filter_spec }),
+      color?: TagColor | null;
+    }) =>
+      updateFilterPreset(input.id, {
+        name: input.name,
+        filter_spec: input.filter_spec,
+        color: input.color,
+      }),
     onSuccess: () => {
       invalidate();
       setModal(null);
@@ -198,19 +206,24 @@ export default function PresetBar({
   const errMsg = (e: unknown): string | null =>
     e instanceof ApiError ? e.message : e ? 'Something went wrong.' : null;
 
-  const handleSubmit = (name: string, includeMapArea: boolean) => {
+  const handleSubmit = (
+    name: string,
+    includeMapArea: boolean,
+    color: TagColor | null,
+  ) => {
     if (modal == null) return;
-    // Save / Update capture the current filters AND the current sort.
+    // Save / Update capture the current filters AND the current sort; Edit only
+    // touches metadata (name + colour), leaving the stored filters intact.
     const spec: PresetSpec = {
       filters: filtersForPreset(filters, includeMapArea),
       sort: sortParam,
     };
     if (modal.mode === 'save') {
-      createMut.mutate({ name, filter_spec: spec });
+      createMut.mutate({ name, filter_spec: spec, color });
     } else if (modal.mode === 'update') {
-      updateMut.mutate({ id: modal.preset.id, name, filter_spec: spec });
+      updateMut.mutate({ id: modal.preset.id, name, filter_spec: spec, color });
     } else {
-      updateMut.mutate({ id: modal.preset.id, name });
+      updateMut.mutate({ id: modal.preset.id, name, color });
     }
   };
 
@@ -249,8 +262,8 @@ export default function PresetBar({
                 setConfirmDeleteId(null);
                 setMenuId((cur) => (cur === id ? null : id));
               }}
-              onRename={(preset) => {
-                setModal({ mode: 'rename', preset });
+              onEdit={(preset) => {
+                setModal({ mode: 'edit', preset });
                 closeMenu();
               }}
               onAskDelete={(id) => setConfirmDeleteId(id)}
@@ -287,17 +300,18 @@ export default function PresetBar({
               ? 'Save filters as a preset'
               : modal.mode === 'update'
                 ? 'Update preset'
-                : 'Rename preset'
+                : 'Edit preset'
           }
           initialName={modal.mode === 'save' ? '' : modal.preset.name}
+          initialColor={modal.mode === 'save' ? null : modal.preset.color}
           submitLabel={
             modal.mode === 'save'
               ? 'Save preset'
               : modal.mode === 'update'
                 ? 'Update preset'
-                : 'Rename'
+                : 'Save'
           }
-          showMapAreaToggle={modal.mode !== 'rename' && hasMapArea}
+          showMapAreaToggle={modal.mode !== 'edit' && hasMapArea}
           initialIncludeMapArea={
             modal.mode === 'update'
               ? readPresetSpec(modal.preset.filter_spec).filters.bounds != null
@@ -323,7 +337,7 @@ interface SortablePresetChipProps {
   deleting: boolean;
   onLoad: (preset: FilterPreset) => void;
   onToggleMenu: (id: string) => void;
-  onRename: (preset: FilterPreset) => void;
+  onEdit: (preset: FilterPreset) => void;
   onAskDelete: (id: string) => void;
   onConfirmDelete: (id: string) => void;
 }
@@ -338,7 +352,7 @@ function SortablePresetChip({
   deleting,
   onLoad,
   onToggleMenu,
-  onRename,
+  onEdit,
   onAskDelete,
   onConfirmDelete,
 }: SortablePresetChipProps) {
@@ -352,10 +366,22 @@ function SortablePresetChip({
     isDragging,
   } = useSortable({ id: preset.id, disabled: !reorderable });
 
+  /* The chip's accent comes from its colour (shared tag palette) or copper when
+   * uncolored — exposed as CSS vars so active/hover states reuse one source.
+   * Uncolored chips render exactly as before (copper active, neutral inactive). */
+  const accent = preset.color
+    ? `var(--color-tag-${preset.color})`
+    : 'var(--color-copper)';
+  const accentSoft = preset.color
+    ? `var(--color-tag-${preset.color}-soft)`
+    : 'var(--color-copper-soft)';
+
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
     zIndex: isDragging ? 30 : undefined,
+    ['--preset-accent' as string]: accent,
+    ['--preset-accent-soft' as string]: accentSoft,
   };
 
   return (
@@ -369,8 +395,10 @@ function SortablePresetChip({
           chipBase,
           isDragging ? 'shadow-md' : '',
           isActive
-            ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-            : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
+            ? 'border-[var(--preset-accent)] bg-[var(--preset-accent-soft)] text-[var(--preset-accent)]'
+            : preset.color
+              ? 'border-[var(--preset-accent)] text-[var(--preset-accent)] hover:bg-[var(--preset-accent-soft)]'
+              : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
         ].join(' ')}
       >
         {reorderable ? (
@@ -395,7 +423,7 @@ function SortablePresetChip({
           {preset.name}
           {isActive && dirty ? (
             <span
-              className="ml-1 text-[var(--color-copper)]"
+              className="ml-1 text-[var(--preset-accent)]"
               title="Edited since loaded — use Update to save changes"
               aria-label="edited"
             >
@@ -423,10 +451,10 @@ function SortablePresetChip({
           <button
             type="button"
             role="menuitem"
-            onClick={() => onRename(preset)}
+            onClick={() => onEdit(preset)}
             className="block w-full px-3 py-1.5 text-left text-[0.8rem] text-[var(--color-ink-2)] hover:bg-[var(--color-paper-2)] hover:text-[var(--color-ink)]"
           >
-            Rename…
+            Edit…
           </button>
           {confirmingDelete ? (
             <button
