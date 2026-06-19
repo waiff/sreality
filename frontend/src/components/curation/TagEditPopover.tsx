@@ -14,7 +14,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { deleteTag, updateTag } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
 import type { Tag, TagColor } from '@/lib/types';
-import { TAG_COLORS } from '@/lib/types';
+import TagColorPicker from '@/components/TagColorPicker';
 
 interface Props {
   tag: Tag;
@@ -156,28 +156,7 @@ function Popover({
         className="mt-1.5 w-full px-2.5 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)]"
       />
       <div className="mt-2 flex items-center gap-1 flex-wrap">
-        {TAG_COLORS.map((c) => (
-          <button
-            key={c}
-            type="button"
-            onClick={() => setColor(c)}
-            aria-label={c}
-            aria-pressed={color === c}
-            className={[
-              'w-5 h-5 rounded-full border transition-shadow',
-              color === c
-                ? 'ring-2 ring-offset-1 ring-offset-[var(--color-paper-3)]'
-                : '',
-            ].join(' ')}
-            style={
-              {
-                background: `var(--color-tag-${c}-soft)`,
-                borderColor: `var(--color-tag-${c})`,
-                ['--tw-ring-color' as string]: `var(--color-tag-${c})`,
-              } as React.CSSProperties
-            }
-          />
-        ))}
+        <TagColorPicker value={color} onChange={(c) => c && setColor(c)} size="sm" />
       </div>
       {dup && (
         <p className="mt-1.5 text-[0.7rem] text-[var(--color-brick)]">

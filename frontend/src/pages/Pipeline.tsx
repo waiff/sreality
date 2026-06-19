@@ -18,6 +18,7 @@ import {
   archivePipelineStage,
   createPipelineStage,
   movePipelineCard,
+  removePipelineCard,
   reorderPipelineStages,
   updatePipelineStage,
 } from '@/lib/api';
@@ -28,7 +29,9 @@ import {
 } from '@/lib/queries';
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
-import { TAG_COLORS, type PipelineBoardCard, type PipelineStage, type TagColor } from '@/lib/types';
+import TagColorPicker from '@/components/TagColorPicker';
+import { InfoIcon, TrashIcon } from '@/components/icons';
+import { type PipelineBoardCard, type PipelineStage, type TagColor } from '@/lib/types';
 
 export default function Pipeline() {
   const [manage, setManage] = useState(false);
@@ -169,6 +172,28 @@ function Board({
     onSettled: () => qc.invalidateQueries({ queryKey: pipelineKeys.board }),
   });
 
+  // Remove a property from the pipeline entirely (the trash action on a card).
+  // Optimistic: drop it from the board immediately; reconcile board + the
+  // shared members-set (Browse-card funnels) on settle.
+  const remove = useMutation({
+    mutationFn: (propertyId: number) => removePipelineCard(propertyId),
+    onMutate: async (propertyId) => {
+      await qc.cancelQueries({ queryKey: pipelineKeys.board });
+      const prev = qc.getQueryData<PipelineBoardCard[]>(pipelineKeys.board);
+      qc.setQueryData<PipelineBoardCard[]>(pipelineKeys.board, (old) =>
+        (old ?? []).filter((c) => c.property_id !== propertyId),
+      );
+      return { prev };
+    },
+    onError: (_e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(pipelineKeys.board, ctx.prev);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: pipelineKeys.board });
+      qc.invalidateQueries({ queryKey: pipelineKeys.members });
+    },
+  });
+
   const activeCard = activeId
     ? cards.find((c) => `${CARD_PREFIX}${c.property_id}` === activeId) ?? null
     : null;
@@ -193,9 +218,8 @@ function Board({
           <StageColumn
             key={s.id}
             stage={s}
-            stages={stages}
             cards={byStage.get(s.id) ?? []}
-            onMove={(propertyId, stageId) => move.mutate({ propertyId, stageId })}
+            onRemove={(propertyId) => remove.mutate(propertyId)}
           />
         ))}
       </div>
@@ -338,106 +362,120 @@ function StageEditorRow({
   };
 
   return (
-    <li className="flex items-center gap-2">
-      <span
-        className="h-4 w-1 shrink-0 rounded-full"
-        style={{ background: stageColor(stage) }}
-        aria-hidden
-      />
-      <div className="flex shrink-0 flex-col leading-none">
+    <li className="space-y-2 py-1">
+      <div className="flex items-center gap-2">
+        <span
+          className="h-4 w-1 shrink-0 rounded-full"
+          style={{ background: stageColor(stage) }}
+          aria-hidden
+        />
+        <div className="flex shrink-0 flex-col leading-none">
+          <button
+            type="button"
+            onClick={() => onMove(-1)}
+            disabled={isFirst}
+            aria-label="Posunout nahoru"
+            className="text-[0.6rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] disabled:opacity-25"
+          >
+            ▲
+          </button>
+          <button
+            type="button"
+            onClick={() => onMove(1)}
+            disabled={isLast}
+            aria-label="Posunout dolů"
+            className="text-[0.6rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] disabled:opacity-25"
+          >
+            ▼
+          </button>
+        </div>
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          onBlur={saveLabel}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+          }}
+          maxLength={80}
+          aria-label="Název fáze"
+          className="flex-1 min-w-0 px-2 py-1 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-transparent hover:border-[var(--color-rule)] focus:border-[var(--color-rule-strong)] focus:outline-none text-[var(--color-ink)]"
+        />
+        <span className="flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            onClick={() => !stage.is_entry && update.mutate({ is_entry: true })}
+            disabled={stage.is_entry}
+            title={stage.is_entry ? 'Vstupní fáze' : 'Nastavit jako vstupní'}
+            aria-label="Vstupní fáze"
+            className="w-5 text-center text-[0.85rem] disabled:cursor-default"
+            style={{ color: stage.is_entry ? 'var(--color-copper)' : 'var(--color-ink-4)' }}
+          >
+            {stage.is_entry ? '★' : '☆'}
+          </button>
+          <Hint text={'Vstupní fáze: sem se nemovitost přidá jako záložka („Přidat do pipeline“). Právě jedna fáze může být vstupní.'} />
+        </span>
+        <span className="flex shrink-0 items-center gap-0.5 text-[0.68rem] text-[var(--color-ink-3)]">
+          <label className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={stage.is_terminal}
+              onChange={(e) => update.mutate({ is_terminal: e.target.checked })}
+              disabled={stage.is_entry}
+            />
+            konec
+          </label>
+          <Hint text={'Koncová fáze: uzavřený obchod (např. Koupeno / Zamítnuto). Při slučování duplicit nepřebije živý (otevřený) obchod.'} />
+        </span>
         <button
           type="button"
-          onClick={() => onMove(-1)}
-          disabled={isFirst}
-          aria-label="Posunout nahoru"
-          className="text-[0.6rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] disabled:opacity-25"
+          onClick={() => archive.mutate()}
+          disabled={stage.is_entry || archive.isPending}
+          title={
+            stage.is_entry
+              ? 'Vstupní fázi nelze archivovat'
+              : 'Archivovat fázi (musí být prázdná)'
+          }
+          aria-label="Archivovat fázi"
+          className="shrink-0 w-6 text-center text-[var(--color-ink-4)] hover:text-[var(--color-brick)] disabled:opacity-25"
         >
-          ▲
-        </button>
-        <button
-          type="button"
-          onClick={() => onMove(1)}
-          disabled={isLast}
-          aria-label="Posunout dolů"
-          className="text-[0.6rem] text-[var(--color-ink-3)] hover:text-[var(--color-ink)] disabled:opacity-25"
-        >
-          ▼
+          ✕
         </button>
       </div>
-      <input
-        value={label}
-        onChange={(e) => setLabel(e.target.value)}
-        onBlur={saveLabel}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-        }}
-        maxLength={80}
-        aria-label="Název fáze"
-        className="flex-1 min-w-0 px-2 py-1 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-transparent hover:border-[var(--color-rule)] focus:border-[var(--color-rule-strong)] focus:outline-none text-[var(--color-ink)]"
-      />
-      <select
-        value={stage.color ?? ''}
-        onChange={(e) =>
-          update.mutate({ color: (e.target.value || null) as TagColor | null })
-        }
-        aria-label="Barva fáze"
-        className="shrink-0 px-1.5 py-1 text-[0.72rem] rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink-2)] focus:outline-none"
-      >
-        <option value="">—</option>
-        {TAG_COLORS.map((c) => (
-          <option key={c} value={c}>
-            {c}
-          </option>
-        ))}
-      </select>
-      <button
-        type="button"
-        onClick={() => !stage.is_entry && update.mutate({ is_entry: true })}
-        disabled={stage.is_entry}
-        title={stage.is_entry ? 'Vstupní fáze (záložka)' : 'Nastavit jako vstupní'}
-        aria-label="Vstupní fáze"
-        className="shrink-0 text-[0.85rem] w-6 text-center disabled:cursor-default"
-        style={{ color: stage.is_entry ? 'var(--color-copper)' : 'var(--color-ink-4)' }}
-      >
-        {stage.is_entry ? '★' : '☆'}
-      </button>
-      <label className="shrink-0 flex items-center gap-1 text-[0.68rem] text-[var(--color-ink-3)]">
-        <input
-          type="checkbox"
-          checked={stage.is_terminal}
-          onChange={(e) => update.mutate({ is_terminal: e.target.checked })}
-          disabled={stage.is_entry}
+      <div className="flex flex-wrap items-center gap-1 pl-[1.4rem]">
+        <TagColorPicker
+          value={stage.color ?? null}
+          onChange={(c) => update.mutate({ color: c })}
+          showNull
+          size="sm"
         />
-        konec
-      </label>
-      <button
-        type="button"
-        onClick={() => archive.mutate()}
-        disabled={stage.is_entry || archive.isPending}
-        title={
-          stage.is_entry
-            ? 'Vstupní fázi nelze archivovat'
-            : 'Archivovat fázi (musí být prázdná)'
-        }
-        aria-label="Archivovat fázi"
-        className="shrink-0 w-6 text-center text-[var(--color-ink-4)] hover:text-[var(--color-brick)] disabled:opacity-25"
-      >
-        ✕
-      </button>
+      </div>
     </li>
+  );
+}
+
+/* Small (i) help glyph — native title hover box (the codebase's tooltip
+ * convention) + aria-label so it reads to assistive tech. */
+function Hint({ text }: { text: string }) {
+  return (
+    <span
+      role="img"
+      aria-label={text}
+      title={text}
+      className="cursor-help text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]"
+    >
+      <InfoIcon className="h-3.5 w-3.5" />
+    </span>
   );
 }
 
 function StageColumn({
   stage,
-  stages,
   cards,
-  onMove,
+  onRemove,
 }: {
   stage: PipelineStage;
-  stages: PipelineStage[];
   cards: PipelineBoardCard[];
-  onMove: (propertyId: number, stageId: number) => void;
+  onRemove: (propertyId: number) => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: `${STAGE_PREFIX}${stage.id}` });
   return (
@@ -469,7 +507,7 @@ function StageColumn({
         ) : (
           cards.map((c) => (
             <li key={c.property_id}>
-              <BoardCard card={c} stages={stages} onMove={onMove} />
+              <BoardCard card={c} onRemove={onRemove} />
             </li>
           ))
         )}
@@ -478,47 +516,78 @@ function StageColumn({
   );
 }
 
-/* The card's visible content — reused by the in-column card and the drag ghost. */
+function CardThumb({ url }: { url: string | null }) {
+  const cls =
+    'h-12 w-12 shrink-0 rounded-[var(--radius-sm)] border border-[var(--color-rule)]';
+  if (!url) return <div className={`${cls} bg-[var(--color-inset)]`} aria-hidden />;
+  return <img src={url} alt="" loading="lazy" className={`${cls} object-cover`} />;
+}
+
+/* The card's visible content — reused by the in-column card and the drag ghost.
+ * Thumbnail + price + street/district + disposition·area + MF gross yield. The
+ * image + yield reuse the same resolution/format Browse cards use (broker is a
+ * deferred follow-up — needs a batched canonical-broker lookup). */
 function CardFace({ card }: { card: PipelineBoardCard }) {
-  const meta = [card.disposition, card.district].filter(Boolean).join(' · ');
+  const place = [card.street, card.district].filter(Boolean).join(', ');
+  const dims = [
+    card.disposition,
+    card.area_m2 != null ? fmtArea(card.area_m2) : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return (
-    <>
-      {card.sreality_id != null ? (
-        <Link
-          to={listingPath(card.sreality_id)}
-          className="font-mono tabular-nums text-sm text-[var(--color-ink)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
-        >
-          {fmtCzk(card.price_czk)}
-        </Link>
-      ) : (
-        <span className="font-mono tabular-nums text-sm text-[var(--color-ink)]">
-          {fmtCzk(card.price_czk)}
-        </span>
-      )}
-      <p className="mt-0.5 text-xs text-[var(--color-ink-2)]">
-        {meta || <span className="text-[var(--color-ink-4)]">—</span>}
-      </p>
-      {card.area_m2 != null && (
-        <p className="text-xs text-[var(--color-ink-4)] font-mono tabular-nums">
-          {fmtArea(card.area_m2)}
-        </p>
-      )}
-    </>
+    <div className="flex gap-2.5">
+      <CardThumb url={card.image_url} />
+      <div className="min-w-0 flex-1">
+        {card.sreality_id != null ? (
+          <Link
+            to={listingPath(card.sreality_id)}
+            className="font-mono tabular-nums text-sm text-[var(--color-ink)] hover:text-[var(--color-copper)] hover:underline underline-offset-2"
+          >
+            {fmtCzk(card.price_czk)}
+          </Link>
+        ) : (
+          <span className="font-mono tabular-nums text-sm text-[var(--color-ink)]">
+            {fmtCzk(card.price_czk)}
+          </span>
+        )}
+        {place && (
+          <p className="mt-0.5 truncate text-xs text-[var(--color-ink-2)]">{place}</p>
+        )}
+        <div className="mt-0.5 flex items-center justify-between gap-2">
+          <span className="truncate font-mono tabular-nums text-xs text-[var(--color-ink-4)]">
+            {dims || '—'}
+          </span>
+          {card.mf_gross_yield_pct != null && (
+            <span
+              className="shrink-0 font-mono tabular-nums text-[0.68rem] text-[var(--color-ink-3)]"
+              title="Hrubý výnos dle cenové mapy nájemného MF"
+            >
+              MF{' '}
+              {card.mf_gross_yield_pct.toLocaleString('cs-CZ', {
+                minimumFractionDigits: 1,
+                maximumFractionDigits: 1,
+              })}{' '}
+              %
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
 function BoardCard({
   card,
-  stages,
-  onMove,
+  onRemove,
 }: {
   card: PipelineBoardCard;
-  stages: PipelineStage[];
-  onMove: (propertyId: number, stageId: number) => void;
+  onRemove: (propertyId: number) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `${CARD_PREFIX}${card.property_id}`,
   });
+  const [confirming, setConfirming] = useState(false);
   const style = {
     transform: CSS.Translate.toString(transform),
     opacity: isDragging ? 0.4 : undefined,
@@ -543,20 +612,42 @@ function BoardCard({
         <div className="min-w-0 flex-1">
           <CardFace card={card} />
         </div>
+        <button
+          type="button"
+          onClick={() => setConfirming((v) => !v)}
+          aria-label="Odebrat z pipeline"
+          aria-expanded={confirming}
+          title="Odebrat z pipeline"
+          className="shrink-0 pt-0.5 text-[var(--color-ink-4)] hover:text-[var(--color-brick)]"
+        >
+          <TrashIcon className="h-3.5 w-3.5" />
+        </button>
       </div>
-      {/* Keyboard / accessible fallback for the drag move. */}
-      <select
-        value={card.stage_id}
-        onChange={(e) => onMove(card.property_id, Number(e.target.value))}
-        aria-label="Přesunout do fáze"
-        className="mt-2 w-full px-2 py-1 text-[0.78rem] rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink-2)] focus:outline-none focus:border-[var(--color-rule-strong)]"
-      >
-        {stages.map((s) => (
-          <option key={s.id} value={s.id}>
-            {s.label}
-          </option>
-        ))}
-      </select>
+      {/* Inline two-step confirm (the app's destructive-action pattern) — removing
+          a property from the pipeline drops the card entirely. Stage moves are
+          drag-only now; the select fallback was removed. */}
+      {confirming && (
+        <div className="mt-2 flex items-center gap-2 border-t border-[var(--color-rule-soft)] pt-2 text-[0.72rem]">
+          <span className="mr-auto text-[var(--color-ink-3)]">Odebrat z pipeline?</span>
+          <button
+            type="button"
+            onClick={() => {
+              setConfirming(false);
+              onRemove(card.property_id);
+            }}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-brick)] px-2 py-0.5 text-[var(--color-brick)] hover:bg-[var(--color-brick)]/10"
+          >
+            Odebrat
+          </button>
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] px-2 py-0.5 text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]"
+          >
+            Zrušit
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -14,6 +14,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { addPipelineCard, removePipelineCard } from '@/lib/api';
 import { fetchPropertyPipeline, pipelineKeys } from '@/lib/queries';
+import { FunnelIcon } from '@/components/icons';
 
 export default function PipelineToggle({ property_id }: { property_id: number }) {
   const qc = useQueryClient();
@@ -65,10 +66,10 @@ export default function PipelineToggle({ property_id }: { property_id: number })
     >
       <span
         aria-hidden
-        className="leading-none"
+        className="inline-flex leading-none"
         style={inPipeline ? undefined : { color: 'var(--color-copper)' }}
       >
-        {inPipeline ? '★' : '☆'}
+        <FunnelIcon filled={inPipeline} className="h-4 w-4" />
       </span>
       <span>{inPipeline ? (card?.stage_label ?? 'V pipeline') : 'Přidat do pipeline'}</span>
     </button>

@@ -850,10 +850,13 @@ export interface PipelineBoardCard {
   board_position: number;
   entered_stage_at: string;
   sreality_id: number | null;
+  street: string | null;
   district: string | null;
   disposition: string | null;
   area_m2: number | null;
   price_czk: number | null;
+  mf_gross_yield_pct: number | null;
+  image_url: string | null;
 }
 
 /* GET /collections/{id} embeds a slimmer property projection than

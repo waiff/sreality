@@ -3,8 +3,8 @@
  * The real DnD gesture (pointer drag across columns) can't be faithfully
  * simulated in jsdom, so the bug-prone part — resolving a drag-end into a
  * stage move — is extracted into the pure `planMove` and unit-tested directly.
- * A render smoke test then pins the board's columns and the accessible
- * select-fallback move (which shares the same mutation as drag).
+ * A render smoke test then pins the board's columns and the trash → confirm →
+ * remove flow (stage moves are drag-only; the select fallback was removed).
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
@@ -19,7 +19,11 @@ import * as queries from '@/lib/queries';
 
 vi.mock('@/lib/api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/api')>();
-  return { ...actual, movePipelineCard: vi.fn() };
+  return {
+    ...actual,
+    movePipelineCard: vi.fn(),
+    removePipelineCard: vi.fn(),
+  };
 });
 
 vi.mock('@/lib/queries', async (importOriginal) => {
@@ -38,10 +42,13 @@ const CARDS: PipelineBoardCard[] = [
     board_position: 0,
     entered_stage_at: '2026-06-01T00:00:00Z',
     sreality_id: 111,
+    street: 'Sadová',
     district: 'Praha',
     disposition: '2+kk',
     area_m2: 55,
     price_czk: 5_000_000,
+    mf_gross_yield_pct: 4.3,
+    image_url: null,
   },
 ];
 
@@ -97,24 +104,32 @@ describe('<Pipeline> board', () => {
       stage_id: 3,
       stage_key: 'offer',
     });
+    vi.mocked(api.removePipelineCard).mockResolvedValue({ removed: true });
   });
 
-  it('renders draggable cards with a drag handle', async () => {
+  it('renders draggable cards with a drag handle + enriched content', async () => {
     renderBoard();
     // One card → one grip handle; proves the column + draggable card mounted.
     expect(
       await screen.findByLabelText('Přetáhnout kartu do jiné fáze'),
     ).toBeInTheDocument();
-    // Both stage columns render (label appears as a header AND a select option).
-    expect(screen.getAllByText('Nabídka').length).toBeGreaterThanOrEqual(1);
+    // Both stage columns render their header label.
+    expect(screen.getByText('Zájem')).toBeInTheDocument();
+    expect(screen.getByText('Nabídka')).toBeInTheDocument();
+    // Enriched card content: street + MF yield.
+    expect(screen.getByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText(/MF\s*4,3\s*%/)).toBeInTheDocument();
   });
 
-  it('the select fallback moves a card via movePipelineCard', async () => {
+  it('trash → confirm removes the card via removePipelineCard', async () => {
     renderBoard();
-    const select = await screen.findByLabelText('Přesunout do fáze');
-    fireEvent.change(select, { target: { value: '3' } });
+    const trash = await screen.findByLabelText('Odebrat z pipeline');
+    fireEvent.click(trash);
+    // Inline two-step confirm appears; nothing removed until confirmed.
+    expect(api.removePipelineCard).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Odebrat'));
     await waitFor(() =>
-      expect(api.movePipelineCard).toHaveBeenCalledWith(42, 3),
+      expect(api.removePipelineCard).toHaveBeenCalledWith(42),
     );
   });
 });
