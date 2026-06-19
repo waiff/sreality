@@ -8,9 +8,10 @@
  * metadata-only edit flow hides it (filters are untouched). Modelled on
  * CreateWatchdogModal for visual consistency. */
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { TAG_COLORS, type TagColor } from '@/lib/types';
+import { type TagColor } from '@/lib/types';
+import TagColorPicker from '@/components/TagColorPicker';
 
 export interface PresetSaveModalProps {
   title: string;
@@ -62,12 +63,6 @@ export default function PresetSaveModal({
     onSubmit(trimmed, includeMapArea, color);
   };
 
-  // Swatch styling mirrors the tag-colour picker (TagEditPopover): soft fill +
-  // solid colour border, a Tailwind ring on the selected one.
-  const swatchBase = 'h-6 w-6 shrink-0 rounded-full border transition-shadow';
-  const ringIfSelected = (selected: boolean) =>
-    selected ? 'ring-2 ring-offset-1 ring-offset-[var(--color-paper)]' : '';
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center bg-[var(--color-ink)]/40 px-4 pt-[15vh]"
@@ -113,47 +108,13 @@ export default function PresetSaveModal({
             Color
           </span>
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setColor(null)}
-              aria-pressed={color === null}
-              aria-label="No color"
-              title="No color"
-              style={
-                {
-                  background: 'var(--color-paper-2)',
-                  borderColor: 'var(--color-rule-strong)',
-                  ['--tw-ring-color' as string]: 'var(--color-ink-3)',
-                } as CSSProperties
-              }
-              className={`${swatchBase} ${ringIfSelected(color === null)} flex items-center justify-center`}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                className="h-3.5 w-3.5 text-[var(--color-ink-4)]"
-                aria-hidden
-              >
-                <line x1="5" y1="19" x2="19" y2="5" stroke="currentColor" strokeWidth="2" />
-              </svg>
-            </button>
-            {TAG_COLORS.map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setColor(c)}
-                aria-pressed={color === c}
-                aria-label={c}
-                title={c}
-                style={
-                  {
-                    background: `var(--color-tag-${c}-soft)`,
-                    borderColor: `var(--color-tag-${c})`,
-                    ['--tw-ring-color' as string]: `var(--color-tag-${c})`,
-                  } as CSSProperties
-                }
-                className={`${swatchBase} ${ringIfSelected(color === c)}`}
-              />
-            ))}
+            <TagColorPicker
+              value={color}
+              onChange={setColor}
+              showNull
+              size="md"
+              ringOffsetVar="var(--color-paper)"
+            />
           </div>
         </div>
 

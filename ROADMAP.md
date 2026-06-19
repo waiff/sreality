@@ -2510,6 +2510,32 @@ another (the deal-pipeline feature is now complete end-to-end).
   — jsdom can't faithfully simulate the pointer drag, so the bug-prone resolution
   is tested as a pure function. CLAUDE.md rule #22 updated.
 
+### Phase U-PIPE Phase 3d: Card-surface polish + unified colour picker (done)
+Operator-feedback refinements once the pipeline was in real use. Two bugs first:
+the bookmark was hoisted from a buried CurationBlock row to the listing-detail
+header action bar (`PipelineToggle`, next to "New estimation") — the operator
+couldn't find it; and the drag fly-back was killed (`DragOverlay dropAnimation={null}`).
+Then six refinements:
+- **Unified colour picker.** Extracted `<TagColorPicker>` (the swatch grid that was
+  inline-duplicated in the filter-preset save modal, the two tag pickers, AND the
+  stage editor) into ONE shared component; all four now render it. The stage colour
+  is no longer a native `<select>` of colour names.
+- **Funnel = pipeline.** Added `components/icons.tsx` (FunnelIcon/TrashIcon/InfoIcon
+  — first reusable SVG-icon module; repo has no icon library by design). The
+  "Přidat do pipeline" ★ became a funnel (filled = in-pipeline) on BOTH the header
+  toggle and the Browse cards.
+- **Card trash + confirm.** Each kanban card carries a trash → inline two-step
+  confirm → optimistic remove-from-pipeline (the app's destructive-action pattern).
+- **(i) hints.** The stage-editor entry-star and "konec" (terminal) controls carry
+  `<InfoIcon>` (i) hints (native `title=`).
+- **Stage `<select>` removed** from the card; stage moves are drag-only (keyboard via
+  `KeyboardSensor`). Rule #22 + the test updated for the removed select.
+- **Richer card.** Cards now show a thumbnail + street + MF gross yield (image via
+  the shared `fetchImagesByListingIds` + `imageSrc()` Browse helpers; street + yield
+  off `properties_public`). Broker name + hover contact is a deferred follow-up —
+  it needs a batched canonical-broker lookup (`POST /brokers/by-listings`) rather
+  than the raw per-portal `broker_name` (drift) or an N+1 per card.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and

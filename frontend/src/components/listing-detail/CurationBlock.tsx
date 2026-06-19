@@ -21,7 +21,6 @@ import {
 } from '@tanstack/react-query';
 import {
   ApiError,
-  addPipelineCard,
   addPropertiesToCollection,
   attachTag,
   createPropertyNote,
@@ -30,19 +29,16 @@ import {
   listCollections,
   listPropertyNotes,
   listTags,
-  removePipelineCard,
   removePropertyFromCollection,
 } from '@/lib/api';
 import {
   curationKeys,
   fetchPropertyCollectionIds,
-  fetchPropertyPipeline,
   fetchPropertyTagIds,
-  pipelineKeys,
 } from '@/lib/queries';
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
 import type { Collection, Note, Tag, TagColor } from '@/lib/types';
-import { TAG_COLORS } from '@/lib/types';
+import TagColorPicker from '@/components/TagColorPicker';
 import TagEditPopover from '@/components/curation/TagEditPopover';
 
 export default function CurationBlock({
@@ -54,73 +50,13 @@ export default function CurationBlock({
 }) {
   return (
     <div className="space-y-7">
-      <PipelineRow property_id={property_id} />
+      {/* The pipeline bookmark moved to the listing-detail header action bar
+          (PipelineToggle) — a deal-stage verb belongs at the top, next to
+          "New estimation", not buried below the estimates. This block keeps
+          the secondary curation: collections, tags, notes. */}
       <CollectionsRow property_id={property_id} />
       <TagsRow property_id={property_id} />
       <NotesRow property_id={property_id} sreality_id={sreality_id} />
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/* Pipeline (bookmark / interested = the entry stage)                         */
-/* -------------------------------------------------------------------------- */
-
-function PipelineRow({ property_id }: { property_id: number }) {
-  const qc = useQueryClient();
-
-  const cardQ = useQuery({
-    queryKey: pipelineKeys.card(property_id),
-    queryFn: () => fetchPropertyPipeline(property_id),
-    staleTime: 30_000,
-  });
-  const card = cardQ.data ?? null;
-  const inPipeline = card != null;
-
-  const invalidate = () =>
-    qc.invalidateQueries({ queryKey: pipelineKeys.card(property_id) });
-
-  const add = useMutation({
-    mutationFn: () => addPipelineCard(property_id),
-    onSuccess: invalidate,
-  });
-  const remove = useMutation({
-    mutationFn: () => removePipelineCard(property_id),
-    onSuccess: invalidate,
-  });
-  const pending = add.isPending || remove.isPending;
-
-  const fg = card?.stage_color
-    ? `var(--color-tag-${card.stage_color})`
-    : 'var(--color-copper)';
-  const bg = card?.stage_color
-    ? `var(--color-tag-${card.stage_color}-soft)`
-    : 'var(--color-copper-soft)';
-
-  return (
-    <div>
-      <SectionLabel>Pipeline</SectionLabel>
-      <div className="mt-3">
-        <button
-          type="button"
-          onClick={() => (inPipeline ? remove.mutate() : add.mutate())}
-          disabled={pending || cardQ.isLoading}
-          aria-pressed={inPipeline}
-          title={inPipeline ? 'Odebrat z pipeline' : 'Přidat do pipeline'}
-          className={[
-            'inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.78rem] rounded-[var(--radius-sm)] border transition-colors disabled:opacity-60',
-            inPipeline ? '' : 'bg-[var(--color-paper-2)] border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]',
-          ].join(' ')}
-          style={
-            inPipeline
-              ? { background: bg, color: fg, borderColor: fg }
-              : undefined
-          }
-        >
-          <span aria-hidden className="leading-none">{inPipeline ? '★' : '☆'}</span>
-          <span>{inPipeline ? (card?.stage_label ?? 'V pipeline') : 'Přidat do pipeline'}</span>
-        </button>
-      </div>
     </div>
   );
 }
@@ -530,26 +466,7 @@ function CreateTagForm({
         Create "{name}"
       </p>
       <div className="flex items-center gap-1 flex-wrap">
-        {TAG_COLORS.map((c) => (
-          <button
-            key={c}
-            type="button"
-            onClick={() => setColor(c)}
-            aria-label={c}
-            aria-pressed={color === c}
-            className={[
-              'w-5 h-5 rounded-full border transition-shadow',
-              color === c ? 'ring-2 ring-offset-1 ring-offset-[var(--color-paper-3)]' : '',
-            ].join(' ')}
-            style={
-              {
-                background: `var(--color-tag-${c}-soft)`,
-                borderColor: `var(--color-tag-${c})`,
-                ['--tw-ring-color' as string]: `var(--color-tag-${c})`,
-              } as React.CSSProperties
-            }
-          />
-        ))}
+        <TagColorPicker value={color} onChange={(c) => c && setColor(c)} size="sm" />
         <button
           type="button"
           onClick={() => create.mutate()}

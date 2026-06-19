@@ -1539,7 +1539,9 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const ids = rows.map((r) => r.property_id);
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
-    .select('property_id, sreality_id, district, disposition, area_m2, price_czk')
+    .select(
+      'property_id, sreality_id, street, district, disposition, area_m2, price_czk, mf_gross_yield_pct',
+    )
     .in('property_id', ids);
   if (pErr) throw pErr;
   const byId = new Map(
@@ -1549,18 +1551,31 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
     ]),
   );
 
+  // One thumbnail per card — the same batched image hydration Browse cards use
+  // (images are keyed on sreality_id, not on the property), resolved through the
+  // shared imageSrc() helper so the board and Browse render identical URLs.
+  const srealityIds = rows
+    .map((r) => byId.get(r.property_id)?.sreality_id as number | null | undefined)
+    .filter((x): x is number => x != null);
+  const imagesById = await fetchImagesByListingIds(srealityIds, 1);
+
   return rows.map((r) => {
     const p = byId.get(r.property_id);
+    const sid = (p?.sreality_id as number | null) ?? null;
+    const firstImage = sid != null ? imagesById.get(sid)?.[0] : undefined;
     return {
       property_id: r.property_id,
       stage_id: r.stage_id,
       board_position: r.board_position,
       entered_stage_at: r.entered_stage_at,
-      sreality_id: (p?.sreality_id as number | null) ?? null,
+      sreality_id: sid,
+      street: (p?.street as string | null) ?? null,
       district: (p?.district as string | null) ?? null,
       disposition: (p?.disposition as string | null) ?? null,
       area_m2: (p?.area_m2 as number | null) ?? null,
       price_czk: (p?.price_czk as number | null) ?? null,
+      mf_gross_yield_pct: (p?.mf_gross_yield_pct as number | null) ?? null,
+      image_url: firstImage ? imageSrc(firstImage) : null,
     };
   });
 };

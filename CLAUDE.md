@@ -720,13 +720,22 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (the card rides the anchor property). Writes go through the bearer-gated API (`POST/DELETE /pipeline/cards` to
     bookmark/un-bookmark, `PATCH /pipeline/cards/{id}` to move stage — a stage change stamps
     `entered_stage_at` and logs a `moved` event, a pure within-stage reorder logs nothing;
-    `GET /pipeline/stages`); the `/pipeline` kanban board reads `property_pipeline_public` +
-    `pipeline_stages_public` (membership/stages) hydrated against `properties_public`. Stage
-    moves are **drag-and-drop** (`@dnd-kit`, `Pipeline.tsx`: each column is a `useDroppable`,
-    each card a `useDraggable` with a grip handle; the board owns one optimistic move mutation —
-    drag and the per-card `<select>` share it). The drag→move resolution is the pure, unit-tested
-    `planMove(activeId, overId, cards)` (same column / dropped-outside / unknown card → no-op).
-    The per-card stage `<select>` is **kept as the keyboard/accessible fallback**, not removed.
+    `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FunnelIcon>`
+    (a sales-funnel, filled = in-pipeline) used on BOTH surfaces — the listing-detail header
+    (`PipelineToggle`, in the top action bar next to "New estimation", NOT buried in CurationBlock)
+    and every Browse card (`BookmarkButton`) — so the same action reads the same icon everywhere.**
+    The `/pipeline` kanban board reads `property_pipeline_public` + `pipeline_stages_public`
+    hydrated against `properties_public` (street + `mf_gross_yield_pct` from the view; one
+    thumbnail per card via the shared `fetchImagesByListingIds` + `imageSrc()` Browse helpers —
+    broker is a deferred follow-up needing a batched canonical-broker lookup). Stage moves are
+    **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a
+    `useDraggable` with a grip handle; one optimistic move mutation; keyboard moves via the
+    `KeyboardSensor`). The drag→move resolution is the pure, unit-tested `planMove(activeId,
+    overId, cards)` (same column / dropped-outside / unknown card → no-op). The per-card stage
+    `<select>` was **removed** (the card instead carries a trash → inline two-step confirm →
+    optimistic remove-from-pipeline, the app's destructive-action pattern). `<DragOverlay
+    dropAnimation={null}>` so the released card doesn't fly back to origin before the optimistic
+    move lands it in the target column.
     **Stages are operator-curated from the board's "Spravovat fáze" panel** (`POST
     /pipeline/stages` create — the `key` slug is derived server-side from the label; `PATCH
     /pipeline/stages/{id}` rename/recolor/retag/crown-entry; `POST /pipeline/stages/reorder`
@@ -737,6 +746,10 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     Archive is refused (409) for the entry stage or any stage still holding cards — the FK is
     `ON DELETE RESTRICT`, so cards must be moved off a stage before it retires; archived stages
     drop out of `pipeline_stages_public` but their `property_pipeline_events` history survives.
+    Stage colour uses the shared **`<TagColorPicker>`** swatch grid (the one component behind the
+    filter-preset save modal, the tag pickers, and this stage editor — the single colour-picking
+    control app-wide; don't re-inline a swatch grid), and the entry-star / "konec" (terminal)
+    controls carry `<InfoIcon>` (i) hints (native `title=`, the codebase's tooltip convention).
 
 ## Toolkit and API rules
 
