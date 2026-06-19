@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from api import curation
+from api import pipeline as pipeline_module
 from api import price_stats as price_stats_module
 from api import manual_estimates as me
 from api import dependencies as deps
@@ -1348,6 +1349,36 @@ def delete_property_tag(
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     return curation.detach_tag(conn, property_id, tag_id)
+
+
+# --- deal pipeline (migration 205) ----------------------------------------
+# Phase 0: bookmark a property into the pipeline (entry stage) / remove it.
+# Membership reads go through property_pipeline_public via the anon key.
+
+@app.get("/pipeline/stages")
+def get_pipeline_stages(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.list_stages(conn)
+
+
+@app.post("/pipeline/cards")
+def post_pipeline_card(
+    body: s.AddPipelineCardIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.add_card(conn, body)
+
+
+@app.delete("/pipeline/cards/{property_id}")
+def delete_pipeline_card(
+    property_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.remove_card(conn, property_id)
 
 
 # --- Skill refinements (Phase AI slice C) ---------------------------------

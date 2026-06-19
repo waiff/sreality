@@ -179,6 +179,32 @@ def test_merge_carries_operator_state_to_survivor():
     assert idx_carry < idx_retire
 
 
+def test_merge_reconciles_pipeline_stage():
+    # The single-valued deal-pipeline stage is reconciled (keep most-advanced)
+    # in the same merge transaction, before the loser is soft-retired.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
+    ])
+
+    merge_properties(
+        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+    )
+
+    keep = _find(conn.executed, "UPDATE property_pipeline s SET stage_id = r.stage_id")
+    drop = _find(conn.executed, "DELETE FROM property_pipeline WHERE property_id =")
+    assert keep is not None and drop is not None
+    idx_pipeline = next(
+        i for i, e in enumerate(conn.executed)
+        if "DELETE FROM property_pipeline WHERE property_id =" in e[0]
+    )
+    idx_retire = next(
+        i for i, e in enumerate(conn.executed) if "status = 'merged_away'" in e[0]
+    )
+    assert idx_pipeline < idx_retire
+
+
 # --- unmerge_group --------------------------------------------------------
 
 

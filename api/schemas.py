@@ -540,6 +540,14 @@ class AttachTagIn(BaseModel):
     tag_id: int
 
 
+# --- deal pipeline (migration 205) ----------------------------------------
+# A property is "bookmarked / interested" iff it has a property_pipeline row
+# (starting at the entry stage). Single-valued; property grain.
+
+class AddPipelineCardIn(BaseModel):
+    property_id: int
+
+
 # --- manual rental estimates ---------------------------------------------
 # Operator-recorded point estimates attached to a listing (Phase U-ME).
 # See migration 046 and CLAUDE.md "Operator workflow track".

@@ -18,6 +18,7 @@ from api import curation as api_curation
 from api import dependencies as deps
 from api import main as api_main
 from api import maps as api_maps
+from api import pipeline as api_pipeline
 from scraper import url_parser as scraper_url_parser
 
 
@@ -160,6 +161,16 @@ def client(monkeypatch):
         api_curation, "detach_tag",
         lambda conn, sid, tid: {"detached": True},
     )
+    monkeypatch.setattr(
+        api_pipeline, "list_stages", lambda conn: {"data": []},
+    )
+    monkeypatch.setattr(
+        api_pipeline, "add_card",
+        lambda conn, body: {"property_id": body.property_id, "added": True},
+    )
+    monkeypatch.setattr(
+        api_pipeline, "remove_card", lambda conn, pid: {"removed": True},
+    )
 
     monkeypatch.setattr(api_maps, "suggest", lambda *a, **kw: {"items": []})
     monkeypatch.setattr(
@@ -200,6 +211,7 @@ _CREATE_NOTE_BODY = {"body": "smoke"}
 _CREATE_TAG_BODY = {"name": "hot", "color": "brick"}
 _PATCH_TAG_BODY = {"name": "renamed", "color": "sage"}
 _ATTACH_TAG_BODY = {"tag_id": 1}
+_PIPELINE_CARD_BODY = {"property_id": 1}
 
 
 def _gated_calls(client) -> list:
@@ -235,6 +247,9 @@ def _gated_calls(client) -> list:
         ("DELETE", "/tags/1", None),
         ("POST",   "/properties/1/tags", _ATTACH_TAG_BODY),
         ("DELETE", "/properties/1/tags/1", None),
+        ("GET",    "/pipeline/stages", None),
+        ("POST",   "/pipeline/cards", _PIPELINE_CARD_BODY),
+        ("DELETE", "/pipeline/cards/1", None),
     ]
 
 
