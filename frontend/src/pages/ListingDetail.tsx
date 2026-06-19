@@ -43,6 +43,7 @@ import {
 import { portalShort, srealityListingUrl } from '@/lib/portals';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { ListingOverview } from '@/components/listing-detail/ListingOverview';
+import PipelineToggle from '@/components/listing-detail/PipelineToggle';
 import { listingPath } from '@/lib/listingUrl';
 
 const PriceLineChart = lazy(
@@ -214,7 +215,16 @@ export default function ListingDetail() {
     <Page>
       <div className="flex items-center justify-between gap-3">
         <Crumb />
-        <NewEstimationButton prefill={newEstimationPrefill} />
+        {/* The two page-level deal verbs, grouped top-right: track this deal in
+            the pipeline (the ★, same contract as the Browse-card bookmark) and
+            run a new estimation. The pipeline toggle needs the property_id,
+            which resolves from the sources query. */}
+        <div className="flex items-center gap-2">
+          {sourcesQ.data?.property_id != null && (
+            <PipelineToggle property_id={sourcesQ.data.property_id} />
+          )}
+          <NewEstimationButton prefill={newEstimationPrefill} />
+        </div>
       </div>
       <ListingOverview
         listing={listing}

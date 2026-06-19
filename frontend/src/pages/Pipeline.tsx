@@ -199,7 +199,11 @@ function Board({
           />
         ))}
       </div>
-      <DragOverlay>
+      {/* dropAnimation={null}: the optimistic move already places the card in
+          the target column on release, so the default "fly back to origin"
+          drop animation would show the ghost sliding home before the card
+          reappears — a visible jump back. Vanish the overlay instantly. */}
+      <DragOverlay dropAnimation={null}>
         {activeCard ? (
           <div className="w-64 rounded-[var(--radius-md)] border border-[var(--color-rule-strong)] bg-[var(--color-paper-2)] p-2.5 shadow-lg">
             <CardFace card={activeCard} />
