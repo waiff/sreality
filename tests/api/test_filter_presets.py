@@ -44,12 +44,17 @@ def store(monkeypatch):
             "filter_spec": filter_spec,
             "created_at": f"2026-06-03T00:00:0{pid}+00:00",
             "updated_at": f"2026-06-03T00:00:0{pid}+00:00",
+            # Append at end: one past the current max position.
+            "position": max(
+                (p["position"] for p in state["presets"].values()), default=-1
+            )
+            + 1,
         }
         return _to_dict(pid)
 
     def fake_list_presets(conn):
         rows = [_to_dict(pid) for pid in state["presets"]]
-        rows.sort(key=lambda r: r["created_at"], reverse=True)
+        rows.sort(key=lambda r: (r["position"], r["created_at"]))
         return rows
 
     def fake_get_preset(conn, pid):
@@ -67,11 +72,18 @@ def store(monkeypatch):
     def fake_delete_preset(conn, pid):
         return state["presets"].pop(pid, None) is not None
 
+    def fake_reorder_presets(conn, ids):
+        for pos, pid in enumerate(ids):
+            if pid in state["presets"]:
+                state["presets"][pid]["position"] = pos
+        return fake_list_presets(conn)
+
     monkeypatch.setattr(fp, "create_preset", fake_create_preset)
     monkeypatch.setattr(fp, "list_presets", fake_list_presets)
     monkeypatch.setattr(fp, "get_preset", fake_get_preset)
     monkeypatch.setattr(fp, "update_preset", fake_update_preset)
     monkeypatch.setattr(fp, "delete_preset", fake_delete_preset)
+    monkeypatch.setattr(fp, "reorder_presets", fake_reorder_presets)
 
     return state
 
@@ -98,14 +110,44 @@ def test_create_preset_missing_spec_422(client, store):
     assert res.status_code == 422
 
 
-def test_list_presets_newest_first(client, store):
-    client.post("/filter-presets", json={"name": "a", "filter_spec": SPEC})
-    client.post("/filter-presets", json={"name": "b", "filter_spec": SPEC})
-    res = client.get("/filter-presets")
+def test_create_preset_appends_at_end(client, store):
+    """New presets append at MAX(position)+1, so list order is save order."""
+    for name in ("a", "b", "c"):
+        client.post("/filter-presets", json={"name": name, "filter_spec": SPEC})
+    body = client.get("/filter-presets").json()
+    assert body["total"] == 3
+    assert [r["name"] for r in body["data"]] == ["a", "b", "c"]
+    assert [r["position"] for r in body["data"]] == [0, 1, 2]
+
+
+def test_reorder_presets_rewrites_order(client, store):
+    for name in ("a", "b", "c"):
+        client.post("/filter-presets", json={"name": name, "filter_spec": SPEC})
+    # Move "c" (id 3) to the front, then "a" (id 1), then "b" (id 2).
+    res = client.put("/filter-presets/reorder", json={"ids": ["3", "1", "2"]})
     assert res.status_code == 200
     body = res.json()
-    assert body["total"] == 2
-    assert [r["name"] for r in body["data"]] == ["b", "a"]
+    assert body["total"] == 3
+    assert [r["name"] for r in body["data"]] == ["c", "a", "b"]
+    assert [r["position"] for r in body["data"]] == [0, 1, 2]
+    # Order persists on a fresh list.
+    assert [r["name"] for r in client.get("/filter-presets").json()["data"]] == [
+        "c",
+        "a",
+        "b",
+    ]
+
+
+def test_reorder_unknown_id_is_noop_for_missing(client, store):
+    client.post("/filter-presets", json={"name": "a", "filter_spec": SPEC})
+    res = client.put("/filter-presets/reorder", json={"ids": ["999", "1"]})
+    assert res.status_code == 200
+    # The one real preset still resolves; the unknown id is ignored.
+    assert [r["name"] for r in res.json()["data"]] == ["a"]
+
+
+def test_reorder_presets_empty_422(client, store):
+    assert client.put("/filter-presets/reorder", json={"ids": []}).status_code == 422
 
 
 def test_get_preset_404_when_missing(client, store):

@@ -1191,6 +1191,10 @@ export interface FilterPreset {
   filter_spec: PresetSpec | ListingFilters;
   created_at: string;
   updated_at: string;
+  /* Operator-controlled display order (ascending, 0 = first). The list
+   * endpoint already returns rows in this order, so the UI relies on array
+   * order; this field is the canonical source it persists via reorder. */
+  position: number;
 }
 
 export interface WatchdogDispatch {
