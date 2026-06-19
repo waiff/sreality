@@ -956,6 +956,8 @@ export interface ListWatchdogDispatchesParams {
   seen?: WatchdogSeenFilter;
   limit?: number;
   offset?: number;
+  /* Keyset cursor (the prior page's next_cursor). */
+  cursor?: string;
 }
 
 export const listWatchdogSubscriptions = (

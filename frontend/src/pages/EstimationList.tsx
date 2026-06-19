@@ -1,11 +1,12 @@
-import { useMemo } from 'react';
+import { useMutation } from '@tanstack/react-query';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { useMutation, useQuery, keepPreviousData } from '@tanstack/react-query';
 import {
   estimationKeys,
   fetchEstimationsList,
   submitEstimation,
 } from '@/lib/queries';
+import { useInfiniteList } from '@/lib/useInfiniteList';
+import InfiniteSentinel from '@/components/InfiniteSentinel';
 import {
   fmtAbsolute,
   fmtArea,
@@ -17,7 +18,6 @@ import {
 } from '@/lib/format';
 import type {
   Confidence,
-  EstimationListResponse,
   EstimationRun,
   EstimationSource,
   EstimationStatus,
@@ -29,6 +29,12 @@ import { ControlGroup } from '@/components/controls';
 import { useNewEstimationModal } from '@/components/NewEstimationModal';
 import { listingPath } from '@/lib/listingUrl';
 
+interface EstimationPage {
+  rows: EstimationRun[];
+  nextCursor?: string;
+  total: number | null;
+}
+
 const PAGE_SIZE = 50;
 
 const SOURCES: ReadonlyArray<EstimationSource> = ['ui', 'api', 'clickup'];
@@ -39,46 +45,44 @@ export default function EstimationList() {
 
   const source = (params.get('source') as EstimationSource | null) ?? null;
   const status = (params.get('status') as EstimationStatus | null) ?? null;
-  const page = Math.max(1, parseInt(params.get('page') ?? '1', 10) || 1);
 
-  const offset = (page - 1) * PAGE_SIZE;
-  const queryParams = useMemo(
-    () => ({
+  /* Keyset infinite list over GET /estimations (newest-first, cursor on
+   * (created_at, id) — dup/skip-free as new runs prepend). Keyed on the
+   * filters only; a filter change starts a fresh accumulation. */
+  const runs = useInfiniteList<EstimationRun, EstimationPage>({
+    queryKey: estimationKeys.list({
       source: source ?? undefined,
       status: status ?? undefined,
-      limit: PAGE_SIZE,
-      offset,
     }),
-    [source, status, offset],
-  );
-
-  const listQ = useQuery<EstimationListResponse, Error>({
-    queryKey: estimationKeys.list(queryParams),
-    queryFn: () => fetchEstimationsList(queryParams),
-    placeholderData: keepPreviousData,
-    staleTime: 30_000,
-    refetchInterval: (q) => {
-      const rows = q.state.data?.data ?? [];
-      return rows.some(
-        (r) => r.status === 'pending' || r.status === 'running',
-      )
-        ? 3000
-        : false;
+    queryFn: async (cursor) => {
+      const resp = await fetchEstimationsList({
+        source: source ?? undefined,
+        status: status ?? undefined,
+        limit: PAGE_SIZE,
+        cursor: (cursor as string | null) ?? undefined,
+      });
+      return {
+        rows: resp.data,
+        nextCursor: resp.next_cursor ?? undefined,
+        total: resp.total,
+      };
     },
+    pageSize: PAGE_SIZE,
+    getRowId: (r) => r.id,
+    staleTime: 30_000,
+    /* Poll while any loaded run (across all pages) is still non-terminal,
+     * so a run that finishes far up the list still flips. */
+    refetchInterval: (rows) =>
+      rows.some((r) => r.status === 'pending' || r.status === 'running')
+        ? 3000
+        : false,
   });
+  const total = runs.firstPage?.total ?? null;
 
   const setFilter = (key: 'source' | 'status', value: string | null) => {
     const sp = new URLSearchParams(params);
     if (value == null) sp.delete(key);
     else sp.set(key, value);
-    sp.delete('page');
-    setParams(sp, { replace: false });
-  };
-
-  const setPage = (next: number) => {
-    const sp = new URLSearchParams(params);
-    if (next <= 1) sp.delete('page');
-    else sp.set('page', String(next));
     setParams(sp, { replace: false });
   };
 
@@ -95,20 +99,21 @@ export default function EstimationList() {
       </div>
 
       <div className="mt-6">
-        {listQ.isLoading && !listQ.data ? (
+        {runs.isLoading ? (
           <div className="text-sm text-[var(--color-ink-3)]">Loading…</div>
-        ) : listQ.error ? (
+        ) : runs.isError ? (
           <div className="text-sm text-[var(--color-brick)]">
-            Failed to load: {listQ.error.message}
+            Failed to load: {runs.error?.message}
           </div>
-        ) : !listQ.data || listQ.data.data.length === 0 ? (
+        ) : runs.rows.length === 0 ? (
           <EmptyState filtered={source != null || status != null} />
         ) : (
           <RunsTable
-            rows={listQ.data.data}
-            total={listQ.data.total}
-            page={page}
-            onPage={setPage}
+            rows={runs.rows}
+            total={total}
+            isFetchingNextPage={runs.isFetchingNextPage}
+            hasNextPage={runs.hasNextPage}
+            onReachEnd={runs.fetchNextPage}
           />
         )}
       </div>
@@ -235,18 +240,16 @@ function Pill({
 function RunsTable({
   rows,
   total,
-  page,
-  onPage,
+  isFetchingNextPage,
+  hasNextPage,
+  onReachEnd,
 }: {
   rows: EstimationRun[];
-  total: number;
-  page: number;
-  onPage: (n: number) => void;
+  total: number | null;
+  isFetchingNextPage: boolean;
+  hasNextPage: boolean;
+  onReachEnd: () => void;
 }) {
-  const totalPages = total > 0 ? Math.ceil(total / PAGE_SIZE) : 1;
-  const start = (page - 1) * PAGE_SIZE + 1;
-  const end = Math.min(start + rows.length - 1, total);
-
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
       <div className="overflow-x-auto">
@@ -271,13 +274,18 @@ function RunsTable({
           </tbody>
         </table>
       </div>
+      <InfiniteSentinel
+        onReach={onReachEnd}
+        hasNextPage={hasNextPage}
+        isFetchingNextPage={isFetchingNextPage}
+        loadedCount={rows.length}
+        total={total}
+      />
       <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-t border-[var(--color-rule)] bg-[var(--color-paper)]">
         <p className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-          {total === 0
-            ? 'No runs'
-            : <>Showing <span className="text-[var(--color-ink-2)]">{fmtCount(start)}–{fmtCount(end)}</span> of <span className="text-[var(--color-ink-2)]">{fmtCount(total)}</span></>}
+          Showing <span className="text-[var(--color-ink-2)]">{fmtCount(rows.length)}</span>
+          {total != null && <> of <span className="text-[var(--color-ink-2)]">{fmtCount(total)}</span></>}
         </p>
-        <Pagination page={page} totalPages={totalPages} onPage={onPage} disabled={total === 0} />
       </div>
     </div>
   );
@@ -540,60 +548,8 @@ function statusTone(status: EstimationStatus): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Pagination + empty state                                                   */
+/* Empty state                                                                */
 /* -------------------------------------------------------------------------- */
-
-function Pagination({
-  page,
-  totalPages,
-  onPage,
-  disabled,
-}: {
-  page: number;
-  totalPages: number;
-  onPage: (n: number) => void;
-  disabled: boolean;
-}) {
-  const prev = disabled || page <= 1;
-  const next = disabled || page >= totalPages;
-  return (
-    <nav className="flex items-center gap-1" aria-label="List pagination">
-      <PageBtn onClick={() => onPage(page - 1)} disabled={prev} ariaLabel="Previous">
-        ←
-      </PageBtn>
-      <span className="px-2 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-        page <span className="text-[var(--color-ink-2)]">{page}</span> / {totalPages}
-      </span>
-      <PageBtn onClick={() => onPage(page + 1)} disabled={next} ariaLabel="Next">
-        →
-      </PageBtn>
-    </nav>
-  );
-}
-
-function PageBtn({
-  onClick,
-  disabled,
-  ariaLabel,
-  children,
-}: {
-  onClick: () => void;
-  disabled: boolean;
-  ariaLabel: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={ariaLabel}
-      className="w-7 h-7 inline-flex items-center justify-center rounded-[var(--radius-xs)] text-sm text-[var(--color-ink-2)] hover:bg-[var(--color-copper-soft)] hover:text-[var(--color-copper)] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
-    >
-      {children}
-    </button>
-  );
-}
 
 function EmptyState({ filtered }: { filtered: boolean }) {
   const { open } = useNewEstimationModal();

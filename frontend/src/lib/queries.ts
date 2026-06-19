@@ -14,6 +14,13 @@ import {
   OWNERSHIP_CANONICAL,
 } from './filters';
 import { applyRegistryFilters } from './registryQueryBuilder';
+import {
+  applyKeyset,
+  nextCursorFrom,
+  withKeysetColumns,
+  type KeysetBuilder,
+  type KeysetCursor,
+} from './keyset';
 import { fetchGrowth } from './priceStats';
 import type {
   CategoryTrend,
@@ -493,6 +500,8 @@ export const fetchListingsForMap = async (
 };
 
 export interface TableRow {
+  /* Property-grain tiebreaker for keyset paging + row de-dup. */
+  property_id: number;
   sreality_id: number;
   district: string | null;
   locality: string | null;
@@ -515,34 +524,54 @@ export interface TableRow {
   building_type: string | null;
 }
 
+/* A page of the keyset-paginated infinite list (see lib/keyset.ts).
+ * `nextCursor` anchors the page that follows; the cohort total is fetched
+ * separately, once, by fetchBrowseCount (it doesn't change per page). */
 export interface TableResult {
   rows: TableRow[];
-  total: number | null;
+  nextCursor: KeysetCursor | null;
 }
 
 export const fetchListingsForTable = async (
   f: ListingFilters,
   sort: SortSpec,
-  page: number,
+  cursor: KeysetCursor | null,
 ): Promise<TableResult> => {
   const pre = await resolveBrowsePrefilters(f);
-  if (pre.empty) return { rows: [], total: 0 };
-  const from = (page - 1) * TABLE_PAGE_SIZE;
-  const to = from + TABLE_PAGE_SIZE - 1;
+  if (pre.empty) return { rows: [], nextCursor: null };
   const base = supabase
     .from('properties_public')
-    .select(TABLE_COLS, { count: 'exact' });
+    .select(withKeysetColumns(TABLE_COLS, sort));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
-  const sorted = scoped.order(sort.field, {
-    ascending: sort.direction === 'asc',
-    nullsFirst: false,
-  });
-  const { data, count, error } = await sorted.range(from, to);
+  const keyed = applyKeyset(
+    scoped as unknown as KeysetBuilder,
+    sort,
+    cursor,
+  ) as unknown as typeof scoped;
+  const { data, error } = await keyed.limit(TABLE_PAGE_SIZE);
   if (error) throw error;
+  const rows = (data ?? []) as unknown as TableRow[];
   return {
-    rows: (data ?? []) as unknown as TableRow[],
-    total: count ?? null,
+    rows,
+    nextCursor: nextCursorFrom(rows as unknown as Record<string, unknown>[], sort),
   };
+};
+
+/* The cohort total for the infinite-scroll progress label. Fetched ONCE per
+ * filter set (keyed on filters, not on the cursor) via a head-only exact
+ * count — measured ~80-110ms on properties_public, well under the anon 3s
+ * budget, and the LEFT JOIN to listings is absent from a count plan. Serves
+ * both the cards and the table tab (same cohort, same filters). */
+export const fetchBrowseCount = async (f: ListingFilters): Promise<number> => {
+  const pre = await resolveBrowsePrefilters(f);
+  if (pre.empty) return 0;
+  const base = supabase
+    .from('properties_public')
+    .select('property_id', { count: 'exact', head: true });
+  const scoped = applyPrefilters(applyFilters(base, f), pre);
+  const { count, error } = await scoped;
+  if (error) throw error;
+  return count ?? 0;
 };
 
 /* -------------------------------------------------------------------------- */
@@ -583,30 +612,33 @@ export interface CardRow {
 
 export interface CardsResult {
   rows: CardRow[];
-  total: number | null;
+  nextCursor: KeysetCursor | null;
 }
 
 export const fetchListingsForCards = async (
   f: ListingFilters,
   sort: SortSpec,
-  page: number,
+  cursor: KeysetCursor | null,
 ): Promise<CardsResult> => {
   const pre = await resolveBrowsePrefilters(f);
-  if (pre.empty) return { rows: [], total: 0 };
-  const from = (page - 1) * CARD_PAGE_SIZE;
-  const to = from + CARD_PAGE_SIZE - 1;
+  if (pre.empty) return { rows: [], nextCursor: null };
   const base = supabase
     .from('properties_public')
-    .select(CARD_COLS, { count: 'exact' });
+    .select(withKeysetColumns(CARD_COLS, sort));
   const scoped = applyPrefilters(applyFilters(base, f), pre);
-  const sorted = scoped.order(sort.field, {
-    ascending: sort.direction === 'asc',
-    nullsFirst: false,
-  });
-  const { data, count, error } = await sorted.range(from, to);
+  const keyed = applyKeyset(
+    scoped as unknown as KeysetBuilder,
+    sort,
+    cursor,
+  ) as unknown as typeof scoped;
+  const { data, error } = await keyed.limit(CARD_PAGE_SIZE);
   if (error) throw error;
   const baseRows = (data ?? []) as unknown as Omit<CardRow, 'image_urls'>[];
-  if (baseRows.length === 0) return { rows: [], total: count ?? 0 };
+  const nextCursor = nextCursorFrom(
+    baseRows as unknown as Record<string, unknown>[],
+    sort,
+  );
+  if (baseRows.length === 0) return { rows: [], nextCursor };
   /* fetchImagesByListingIds already pulls every image row for the
    * visible ids over the wire; perId is a client-side retention cap.
    * 50 comfortably covers any sreality listing (typical max ~25) so
@@ -623,7 +655,7 @@ export const fetchListingsForCards = async (
       image_urls: imgs.map(imageSrc),
     };
   });
-  return { rows, total: count ?? null };
+  return { rows, nextCursor };
 };
 
 

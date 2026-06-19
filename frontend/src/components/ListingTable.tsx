@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
+import InfiniteSentinel from '@/components/InfiniteSentinel';
 import {
-  TABLE_PAGE_SIZE,
   type TableRow,
   type SortSpec,
   type SortField,
@@ -38,36 +38,35 @@ const COLUMNS: ReadonlyArray<Column> = [
 interface Props {
   rows: TableRow[] | null;
   total: number | null;
-  page: number;
   sort: SortSpec;
   isLoading: boolean;
+  isFetchingNextPage: boolean;
+  hasNextPage: boolean;
+  onReachEnd: () => void;
   hasFilters: boolean;
   hoveredIds: ReadonlySet<number>;
   onHover: (ids: ReadonlyArray<number> | null) => void;
   onSort: (field: SortField) => void;
-  onPage: (page: number) => void;
   onClearFilters: () => void;
 }
 
 export default function ListingTable({
   rows,
   total,
-  page,
   sort,
   isLoading,
+  isFetchingNextPage,
+  hasNextPage,
+  onReachEnd,
   hasFilters,
   hoveredIds,
   onHover,
   onSort,
-  onPage,
   onClearFilters,
 }: Props) {
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && rows != null && rows.length === 0;
-
-  const totalPages = total != null && total > 0 ? Math.ceil(total / TABLE_PAGE_SIZE) : 1;
-  const start = (page - 1) * TABLE_PAGE_SIZE + 1;
-  const end = Math.min(start + (rows?.length ?? 0) - 1, total ?? 0);
+  const loaded = rows?.length ?? 0;
 
   return (
     <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
@@ -101,15 +100,24 @@ export default function ListingTable({
         </table>
       </div>
 
+      {!showSkeleton && !isEmpty && (
+        <InfiniteSentinel
+          onReach={onReachEnd}
+          hasNextPage={hasNextPage}
+          isFetchingNextPage={isFetchingNextPage}
+          loadedCount={loaded}
+          total={total}
+        />
+      )}
+
       <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-t border-[var(--color-rule)] bg-[var(--color-paper)]">
         <p className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
           {total == null
             ? <>—</>
             : total === 0
               ? <>No listings</>
-              : <>Showing <span className="text-[var(--color-ink-2)]">{fmtCount(start)}–{fmtCount(end)}</span> of <span className="text-[var(--color-ink-2)]">{fmtCount(total)}</span></>}
+              : <>Showing <span className="text-[var(--color-ink-2)]">{fmtCount(loaded)}</span> of <span className="text-[var(--color-ink-2)]">{fmtCount(total)}</span></>}
         </p>
-        <Pagination page={page} totalPages={totalPages} onPage={onPage} disabled={total == null || total === 0} />
       </div>
     </div>
   );
@@ -316,52 +324,3 @@ function EmptyRow({
   );
 }
 
-/* -------------------------------------------------------------------------- */
-
-function Pagination({
-  page,
-  totalPages,
-  onPage,
-  disabled,
-}: {
-  page: number;
-  totalPages: number;
-  onPage: (n: number) => void;
-  disabled: boolean;
-}) {
-  const prevDisabled = disabled || page <= 1;
-  const nextDisabled = disabled || page >= totalPages;
-  return (
-    <nav className="flex items-center gap-1" aria-label="Table pagination">
-      <PageBtn onClick={() => onPage(page - 1)} disabled={prevDisabled} ariaLabel="Previous page">←</PageBtn>
-      <span className="px-2 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-        page <span className="text-[var(--color-ink-2)]">{page}</span> / {totalPages}
-      </span>
-      <PageBtn onClick={() => onPage(page + 1)} disabled={nextDisabled} ariaLabel="Next page">→</PageBtn>
-    </nav>
-  );
-}
-
-function PageBtn({
-  onClick,
-  disabled,
-  ariaLabel,
-  children,
-}: {
-  onClick: () => void;
-  disabled: boolean;
-  ariaLabel: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={ariaLabel}
-      className="w-7 h-7 inline-flex items-center justify-center rounded-[var(--radius-xs)] text-sm text-[var(--color-ink-2)] hover:bg-[var(--color-copper-soft)] hover:text-[var(--color-copper)] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
-    >
-      {children}
-    </button>
-  );
-}

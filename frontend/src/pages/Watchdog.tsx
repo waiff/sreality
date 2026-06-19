@@ -1,11 +1,10 @@
-import { useMemo } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
 import {
-  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
+  type InfiniteData,
 } from '@tanstack/react-query';
+import { Link, useSearchParams } from 'react-router-dom';
 
 import {
   kickoffWatchdogDispatchEstimate,
@@ -15,6 +14,8 @@ import {
   runWatchdogMatcher,
 } from '@/lib/api';
 import { watchdogKeys } from '@/lib/queries';
+import { useInfiniteList } from '@/lib/useInfiniteList';
+import InfiniteSentinel from '@/components/InfiniteSentinel';
 import {
   fmtAbsolute,
   fmtCount,
@@ -25,12 +26,17 @@ import { portalListingUrl, portalShort } from '@/lib/portals';
 import { listingPath } from '@/lib/listingUrl';
 import type {
   WatchdogDispatch,
-  WatchdogDispatchesResponse,
   WatchdogSeenFilter,
   WatchdogSubscription,
 } from '@/lib/types';
 
 const PAGE_SIZE = 50;
+
+interface WatchdogPage {
+  rows: WatchdogDispatch[];
+  nextCursor?: string;
+  total: number | null;
+}
 /* Two-tier polling: feed cadence (new dispatches from the background
  * matcher) is decoupled from estimation cadence (status refresh for
  * a kicked-off run). The matcher itself ticks every 5 min, so 30 s
@@ -48,33 +54,42 @@ export default function Watchdog() {
   const [params, setParams] = useSearchParams();
   const subscriptionId = params.get('subscription') ?? null;
   const seen = (params.get('seen') as WatchdogSeenFilter | null) ?? 'all';
-  const page = Math.max(1, parseInt(params.get('page') ?? '1', 10) || 1);
-  const offset = (page - 1) * PAGE_SIZE;
 
-  const queryParams = useMemo(
-    () => ({
+  /* Keyset infinite feed over GET /notifications/dispatches (newest-first,
+   * cursor on (dispatched_at, id) — dup/skip-free as the background matcher
+   * prepends new dispatches). Keyed on the (subscription, seen) partition. */
+  const dispatches = useInfiniteList<WatchdogDispatch, WatchdogPage>({
+    queryKey: watchdogKeys.dispatches({
       subscription_id: subscriptionId ?? undefined,
       seen,
-      limit: PAGE_SIZE,
-      offset,
     }),
-    [subscriptionId, seen, offset],
-  );
-
-  const dispatchesQ = useQuery<WatchdogDispatchesResponse, Error>({
-    queryKey: watchdogKeys.dispatches(queryParams),
-    queryFn: () => listWatchdogDispatches(queryParams),
-    placeholderData: keepPreviousData,
-    refetchInterval: (query) => {
-      const rows = query.state.data?.data ?? [];
-      const hasPending = rows.some(
+    queryFn: async (cursor) => {
+      const resp = await listWatchdogDispatches({
+        subscription_id: subscriptionId ?? undefined,
+        seen,
+        limit: PAGE_SIZE,
+        cursor: (cursor as string | null) ?? undefined,
+      });
+      return {
+        rows: resp.data,
+        nextCursor: resp.next_cursor ?? undefined,
+        total: resp.total,
+      };
+    },
+    pageSize: PAGE_SIZE,
+    getRowId: (r) => r.id,
+    /* Two-tier poll over ALL loaded pages, so a kicked-off run finishing on
+     * a row scrolled far up still flips, and new dispatches surface. */
+    refetchInterval: (rows) =>
+      rows.some(
         (d) =>
           d.estimation_status === 'pending'
           || d.estimation_status === 'running',
-      );
-      return hasPending ? POLL_INTERVAL_ESTIMATION_MS : POLL_INTERVAL_FEED_MS;
-    },
+      )
+        ? POLL_INTERVAL_ESTIMATION_MS
+        : POLL_INTERVAL_FEED_MS,
   });
+  const total = dispatches.firstPage?.total ?? null;
 
   const subscriptionsQ = useQuery<
     { data: WatchdogSubscription[]; total: number },
@@ -85,19 +100,52 @@ export default function Watchdog() {
     staleTime: 30_000,
   });
 
+  /* Surgical update of one dispatch across every loaded page of every
+   * dispatches infinite query — so mark-seen / kickoff don't blow the cache
+   * and reset the scroll position (the old invalidate(all) did). The mutation
+   * responses already carry the updated row. The callback is partition-aware
+   * (it sees each cached query's `seen` filter) so marking a row seen DROPS
+   * it from the 'unseen' view instead of leaving a now-read row lingering. */
+  const updateDispatchCaches = (
+    fn: (
+      rows: WatchdogDispatch[],
+      seenFilter: WatchdogSeenFilter | undefined,
+    ) => WatchdogDispatch[],
+  ) => {
+    const entries = qc.getQueriesData<InfiniteData<WatchdogPage>>({
+      queryKey: ['watchdog', 'dispatches'],
+    });
+    for (const [key, data] of entries) {
+      if (!data) continue;
+      const params = key[2] as { seen?: WatchdogSeenFilter } | undefined;
+      qc.setQueryData<InfiniteData<WatchdogPage>>(key, {
+        ...data,
+        pages: data.pages.map((pg) => ({
+          ...pg,
+          rows: fn(pg.rows, params?.seen),
+        })),
+      });
+    }
+  };
+
+  const patchDispatch = (updated: WatchdogDispatch) =>
+    updateDispatchCaches((rows) =>
+      rows.map((r) => (r.id === updated.id ? updated : r)),
+    );
+
   const matcherMut = useMutation({
     mutationFn: runWatchdogMatcher,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: watchdogKeys.all });
+      // New matches prepend; refetch the loaded pages in place (dedup by id
+      // in the hook keeps the seam clean).
+      qc.invalidateQueries({ queryKey: ['watchdog', 'dispatches'] });
     },
   });
 
   const estimateMut = useMutation({
     mutationFn: (dispatchId: string) =>
       kickoffWatchdogDispatchEstimate(dispatchId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: watchdogKeys.all });
-    },
+    onSuccess: (updated) => patchDispatch(updated),
     onError: (err: Error) => {
       // Surface the failure instead of silently reverting the button — a
       // server-side error here previously looked like "nothing happens".
@@ -107,31 +155,21 @@ export default function Watchdog() {
 
   const markSeenMut = useMutation({
     mutationFn: (dispatchId: string) => markWatchdogDispatchSeen(dispatchId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: watchdogKeys.all });
-    },
+    onSuccess: (updated) =>
+      updateDispatchCaches((rows, seenFilter) =>
+        seenFilter === 'unseen'
+          ? rows.filter((r) => r.id !== updated.id)
+          : rows.map((r) => (r.id === updated.id ? updated : r)),
+      ),
   });
 
   const setFilter = (key: 'subscription' | 'seen', value: string | null) => {
     const sp = new URLSearchParams(params);
     if (value == null || value === '' || value === 'all') sp.delete(key);
     else sp.set(key, value);
-    sp.delete('page');
     setParams(sp, { replace: false });
   };
 
-  const setPage = (next: number) => {
-    const sp = new URLSearchParams(params);
-    if (next <= 1) sp.delete('page');
-    else sp.set('page', String(next));
-    setParams(sp, { replace: false });
-  };
-
-  const data = dispatchesQ.data;
-  const total = data?.total ?? 0;
-  const totalPages = total > 0 ? Math.ceil(total / PAGE_SIZE) : 1;
-  const start = (page - 1) * PAGE_SIZE + 1;
-  const end = Math.min(start + (data?.data.length ?? 0) - 1, total);
   const subscriptions = subscriptionsQ.data?.data ?? [];
 
   return (
@@ -152,26 +190,24 @@ export default function Watchdog() {
       </div>
 
       <div className="mt-6">
-        {dispatchesQ.isLoading && !data ? (
+        {dispatches.isLoading ? (
           <div className="text-sm text-[var(--color-ink-3)]">Loading…</div>
-        ) : dispatchesQ.error ? (
+        ) : dispatches.isError ? (
           <div className="text-sm text-[var(--color-brick)]">
-            Failed to load: {dispatchesQ.error.message}
+            Failed to load: {dispatches.error?.message}
           </div>
-        ) : !data || data.data.length === 0 ? (
+        ) : dispatches.rows.length === 0 ? (
           <EmptyState
             filtered={subscriptionId != null || seen !== 'all'}
             hasAnyWatchdog={subscriptions.length > 0}
           />
         ) : (
           <DispatchesTable
-            rows={data.data}
+            rows={dispatches.rows}
             total={total}
-            start={start}
-            end={end}
-            page={page}
-            totalPages={totalPages}
-            onPage={setPage}
+            isFetchingNextPage={dispatches.isFetchingNextPage}
+            hasNextPage={dispatches.hasNextPage}
+            onReachEnd={dispatches.fetchNextPage}
             onKickoff={(id) => estimateMut.mutate(id)}
             onMarkSeen={(id) => markSeenMut.mutate(id)}
             kickoffPending={estimateMut.isPending ? estimateMut.variables ?? null : null}
@@ -334,22 +370,18 @@ function SeenFilter({
 function DispatchesTable({
   rows,
   total,
-  start,
-  end,
-  page,
-  totalPages,
-  onPage,
+  isFetchingNextPage,
+  hasNextPage,
+  onReachEnd,
   onKickoff,
   onMarkSeen,
   kickoffPending,
 }: {
   rows: WatchdogDispatch[];
-  total: number;
-  start: number;
-  end: number;
-  page: number;
-  totalPages: number;
-  onPage: (n: number) => void;
+  total: number | null;
+  isFetchingNextPage: boolean;
+  hasNextPage: boolean;
+  onReachEnd: () => void;
   onKickoff: (dispatchId: string) => void;
   onMarkSeen: (dispatchId: string) => void;
   kickoffPending: string | null;
@@ -384,27 +416,21 @@ function DispatchesTable({
           </tbody>
         </table>
       </div>
+      <InfiniteSentinel
+        onReach={onReachEnd}
+        hasNextPage={hasNextPage}
+        isFetchingNextPage={isFetchingNextPage}
+        loadedCount={rows.length}
+        total={total}
+      />
       <div className="flex items-center justify-between gap-4 px-4 py-2.5 border-t border-[var(--color-rule)] bg-[var(--color-paper)]">
         <p className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-          {total === 0 ? (
-            'No notifications'
-          ) : (
-            <>
-              Showing{' '}
-              <span className="text-[var(--color-ink-2)]">
-                {fmtCount(start)}–{fmtCount(end)}
-              </span>{' '}
-              of{' '}
-              <span className="text-[var(--color-ink-2)]">{fmtCount(total)}</span>
-            </>
+          Showing{' '}
+          <span className="text-[var(--color-ink-2)]">{fmtCount(rows.length)}</span>
+          {total != null && (
+            <> of <span className="text-[var(--color-ink-2)]">{fmtCount(total)}</span></>
           )}
         </p>
-        <Pagination
-          page={page}
-          totalPages={totalPages}
-          onPage={onPage}
-          disabled={total === 0}
-        />
       </div>
     </div>
   );
@@ -682,7 +708,7 @@ function KickoffButton({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Empty + pagination                                                         */
+/* Empty state                                                                */
 /* -------------------------------------------------------------------------- */
 
 function EmptyState({
@@ -716,54 +742,3 @@ function EmptyState({
   );
 }
 
-function Pagination({
-  page,
-  totalPages,
-  onPage,
-  disabled,
-}: {
-  page: number;
-  totalPages: number;
-  onPage: (n: number) => void;
-  disabled: boolean;
-}) {
-  const prev = disabled || page <= 1;
-  const next = disabled || page >= totalPages;
-  return (
-    <nav className="flex items-center gap-1" aria-label="Feed pagination">
-      <PageBtn onClick={() => onPage(page - 1)} disabled={prev} ariaLabel="Previous">
-        ←
-      </PageBtn>
-      <span className="px-2 text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-        page <span className="text-[var(--color-ink-2)]">{page}</span> / {totalPages}
-      </span>
-      <PageBtn onClick={() => onPage(page + 1)} disabled={next} ariaLabel="Next">
-        →
-      </PageBtn>
-    </nav>
-  );
-}
-
-function PageBtn({
-  onClick,
-  disabled,
-  ariaLabel,
-  children,
-}: {
-  onClick: () => void;
-  disabled: boolean;
-  ariaLabel: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={ariaLabel}
-      className="w-7 h-7 inline-flex items-center justify-center rounded-[var(--radius-xs)] text-sm text-[var(--color-ink-2)] hover:bg-[var(--color-copper-soft)] hover:text-[var(--color-copper)] disabled:opacity-30 disabled:hover:bg-transparent disabled:cursor-not-allowed transition-colors"
-    >
-      {children}
-    </button>
-  );
-}

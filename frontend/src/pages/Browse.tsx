@@ -2,6 +2,7 @@ import {
   Suspense,
   lazy,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -52,14 +53,17 @@ import {
   fetchListingsForCards,
   fetchListingsForMap,
   fetchListingsForTable,
+  fetchBrowseCount,
   fetchBrowseStats,
   fetchRentMapChoropleth,
   fetchRentMapKraje,
   parseSort,
   sortToParam,
+  CARD_PAGE_SIZE,
+  TABLE_PAGE_SIZE,
   DEFAULT_SORT,
   type BrowseStats,
-  type CardsResult,
+  type CardRow,
   type CityIndexDefinition,
   type CityIndexValue,
   type CityPolygon,
@@ -69,8 +73,10 @@ import {
   type RentMapPolygon,
   type SortField,
   type SortSpec,
-  type TableResult,
+  type TableRow,
 } from '@/lib/queries';
+import { useInfiniteList } from '@/lib/useInfiniteList';
+import type { KeysetCursor } from '@/lib/keyset';
 
 const ListingMap = lazy(() => import('@/components/ListingMap'));
 
@@ -83,7 +89,6 @@ export default function Browse() {
     () => parseSort(searchParams.get('sort')),
     [searchParams],
   );
-  const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10) || 1);
   const tabFromUrl = (searchParams.get('tab') ?? 'map') as TabKey;
   /* Phase QUAL — map-overlay UI state. Not part of the filter spec
    * (these don't narrow the cohort, they just paint city pins). Held
@@ -126,9 +131,10 @@ export default function Browse() {
 
   /* Copy URL keys that live outside `toSearchParams` (tab, sort, the
    * city-overlay knobs). Used by every URL rewriter on this page so
-   * `setBounds` / `setFilters` / `writeSort` / `setPage` can't drop
-   * them by accident. `page` is deliberately omitted — callers that
-   * want to reset paging should not call `preserveExtras`. */
+   * `setBounds` / `setFilters` / `writeSort` can't drop them by accident.
+   * There is no paging param: infinite scroll resets to the top whenever
+   * the cohort changes, because the cards/table infinite queries are keyed
+   * on (filters, sort) — a changed key starts a fresh accumulation. */
   const preserveExtras = useCallback(
     (sp: URLSearchParams): URLSearchParams => {
       for (const key of ['tab', 'sort', 'cities', 'colorby', 'rentmap', 'rentvk', 'kraje', 'preset']) {
@@ -190,7 +196,8 @@ export default function Browse() {
   const setFilters = useCallback(
     (next: ListingFilters) => {
       const sp = preserveExtras(toSearchParams(next));
-      // page is intentionally dropped — new filter set, reset to first page.
+      // New filter set → new infinite-query key → accumulation resets to the
+      // top automatically (and the cards scroll position resets via its key).
       setSearchParams(sp, { replace: false });
     },
     [preserveExtras, setSearchParams],
@@ -230,13 +237,11 @@ export default function Browse() {
     const sp = new URLSearchParams(searchParams);
     if (next === 'map') sp.delete('tab');
     else sp.set('tab', next);
-    sp.delete('page');
     setSearchParams(sp, { replace: true });
   };
 
   const writeSort = (next: SortSpec) => {
     const sp = new URLSearchParams(searchParams);
-    sp.delete('page');
     if (sortToParam(next) === sortToParam(DEFAULT_SORT)) sp.delete('sort');
     else sp.set('sort', sortToParam(next));
     setSearchParams(sp, { replace: false });
@@ -250,13 +255,6 @@ export default function Browse() {
         ? { field, direction: sort.direction === 'asc' ? 'desc' : 'asc' }
         : { field, direction: defaultDirectionFor(field) };
     writeSort(next);
-  };
-
-  const setPage = (next: number) => {
-    const sp = new URLSearchParams(searchParams);
-    if (next <= 1) sp.delete('page');
-    else sp.set('page', String(next));
-    setSearchParams(sp, { replace: false });
   };
 
   /* Map flyTo command. Set when the operator picks a place in the
@@ -495,42 +493,111 @@ export default function Browse() {
     [psSeriesQuery.data, growthMetric],
   );
 
-  const cardsQuery = useQuery<CardsResult, Error>({
-    queryKey: ['cards', filters, sort, page],
-    queryFn: () => fetchListingsForCards(filters, sort, page),
-    placeholderData: (prev) => prev,
+  /* Browse cards + table are KEYSET-paginated infinite lists over
+   * properties_public (lib/keyset.ts): correct under the scraper's
+   * last_seen_at churn (offset would dup/skip) and flat in latency at any
+   * depth. The cohort total is a separate one-shot count (it doesn't change
+   * per page) shared by both tabs. Keyed on (filters, sort) only — a
+   * changed cohort starts a fresh accumulation from the top. */
+  const cards = useInfiniteList<CardRow>({
+    queryKey: ['cards', filters, sort],
+    queryFn: (cursor) =>
+      fetchListingsForCards(filters, sort, cursor as KeysetCursor | null),
+    pageSize: CARD_PAGE_SIZE,
+    getRowId: (r) => r.property_id,
     enabled: tabFromUrl === 'map',
+    gcTime: 10 * 60_000,
   });
+
+  const browseCountQuery = useQuery<number, Error>({
+    queryKey: ['browse-count', filters],
+    queryFn: () => fetchBrowseCount(filters),
+    enabled: tabFromUrl === 'map' || tabFromUrl === 'table',
+    placeholderData: (prev) => prev,
+    staleTime: 60_000,
+  });
+  const browseTotal = browseCountQuery.data ?? null;
+
+  /* Stable per-cohort key for the cards column's scroll restoration. Keyed
+   * on (filters, sort) only — NOT the volatile map-overlay knobs — so
+   * toggling a city/rent overlay doesn't reset the scroll, while a genuine
+   * filter/sort change does (new key → reset to top). */
+  const cardsRestorationKey = useMemo(() => {
+    const sp = toSearchParams(filters);
+    sp.set('sort', sortToParam(sort));
+    return `cards:${sp.toString()}`;
+  }, [filters, sort]);
 
   /* On-card estimate: latest rent estimate per visible listing, plus a
    * trigger that runs the standard (agent) rental estimate for one card.
    * Distinct from the card's statistical mf_gross_yield_pct — this is an
    * actual estimation_runs result. */
   const cardIds = useMemo(
-    () => (cardsQuery.data?.rows ?? []).map((r) => r.sreality_id),
-    [cardsQuery.data],
+    () => cards.rows.map((r) => r.sreality_id),
+    [cards.rows],
   );
   const [estimatingIds, setEstimatingIds] = useState<ReadonlySet<number>>(
     () => new Set(),
   );
-  const estimatesQuery = useQuery<Record<number, ListingEstimate>, Error>({
-    queryKey: ['card-estimates', cardIds],
-    queryFn: () => latestEstimationsByListing(cardIds),
-    enabled: tabFromUrl === 'map' && isApiConfigured() && cardIds.length > 0,
-    placeholderData: (prev) => prev,
-    refetchInterval: (query) => {
-      const data = query.state.data as
-        | Record<number, ListingEstimate>
-        | undefined;
-      const anyRunning =
-        estimatingIds.size > 0 ||
-        (data != null &&
-          Object.values(data).some(
-            (e) => e.status === 'pending' || e.status === 'running',
-          ));
-      return anyRunning ? 4000 : false;
-    },
-  });
+  /* On-card estimates accumulate as you scroll: each newly-loaded card's
+   * latest rent estimate is fetched ONCE (infinite scroll makes cardIds grow
+   * unbounded — re-requesting the whole set would blow the GET URL length and
+   * be O(n²) over a session). Still-running runs are polled on their small id
+   * set until they settle. */
+  const [estimates, setEstimates] = useState<Record<number, ListingEstimate>>(
+    {},
+  );
+  const requestedEstIdsRef = useRef<Set<number>>(new Set());
+  const estimatesEnabled = tabFromUrl === 'map' && isApiConfigured();
+
+  // A genuinely new cohort (filters/sort) is a different card set — drop the
+  // accumulated chips so they don't bleed across. Keyed on the stable cohort
+  // signature, NOT raw searchParams, so a map-overlay toggle doesn't reset.
+  useEffect(() => {
+    setEstimates({});
+    requestedEstIdsRef.current = new Set();
+  }, [cardsRestorationKey]);
+
+  // Fetch estimates for the DELTA of newly-loaded cards (≤ one page of ids,
+  // so the request URL stays bounded).
+  useEffect(() => {
+    if (!estimatesEnabled) return;
+    const fresh = cardIds.filter((id) => !requestedEstIdsRef.current.has(id));
+    if (fresh.length === 0) return;
+    fresh.forEach((id) => requestedEstIdsRef.current.add(id));
+    let cancelled = false;
+    latestEstimationsByListing(fresh)
+      .then((map) => {
+        if (!cancelled) setEstimates((prev) => ({ ...prev, ...map }));
+      })
+      .catch(() => {
+        /* best-effort chip — a failed lookup just leaves the card chip-less */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cardIds, estimatesEnabled]);
+
+  // Poll only the small set of still-running estimates (optimistic + any
+  // pending/running in the accumulator) until they terminate.
+  const pendingEstIds = useMemo(
+    () => [
+      ...estimatingIds,
+      ...Object.values(estimates)
+        .filter((e) => e.status === 'pending' || e.status === 'running')
+        .map((e) => e.sreality_id),
+    ],
+    [estimatingIds, estimates],
+  );
+  useEffect(() => {
+    if (!estimatesEnabled || pendingEstIds.length === 0) return;
+    const timer = setInterval(() => {
+      latestEstimationsByListing(pendingEstIds)
+        .then((map) => setEstimates((prev) => ({ ...prev, ...map })))
+        .catch(() => {});
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [estimatesEnabled, pendingEstIds]);
   const estimateMut = useMutation({
     mutationFn: (srealityId: number) =>
       createEstimation({
@@ -545,21 +612,18 @@ export default function Browse() {
       setEstimatingIds((prev) => new Set(prev).add(srealityId));
     },
     onSuccess: (run, srealityId) => {
-      queryClient.setQueriesData<Record<number, ListingEstimate>>(
-        { queryKey: ['card-estimates'] },
-        (prev) => ({
-          ...(prev ?? {}),
-          [srealityId]: {
-            sreality_id: srealityId,
-            run_id: run.id,
-            status: run.status,
-            estimate_kind: run.estimate_kind,
-            gross_yield_pct: run.gross_yield_pct,
-            estimated_monthly_rent_czk: run.estimated_monthly_rent_czk,
-            created_at: run.created_at,
-          },
-        }),
-      );
+      setEstimates((prev) => ({
+        ...prev,
+        [srealityId]: {
+          sreality_id: srealityId,
+          run_id: run.id,
+          status: run.status,
+          estimate_kind: run.estimate_kind,
+          gross_yield_pct: run.gross_yield_pct,
+          estimated_monthly_rent_czk: run.estimated_monthly_rent_czk,
+          created_at: run.created_at,
+        },
+      }));
     },
     onSettled: (_run, _err, srealityId) => {
       setEstimatingIds((prev) => {
@@ -570,11 +634,14 @@ export default function Browse() {
     },
   });
 
-  const tableQuery = useQuery<TableResult, Error>({
-    queryKey: ['table', filters, sort, page],
-    queryFn: () => fetchListingsForTable(filters, sort, page),
-    placeholderData: (prev) => prev,
+  const table = useInfiniteList<TableRow>({
+    queryKey: ['table', filters, sort],
+    queryFn: (cursor) =>
+      fetchListingsForTable(filters, sort, cursor as KeysetCursor | null),
+    pageSize: TABLE_PAGE_SIZE,
+    getRowId: (r) => r.property_id,
     enabled: tabFromUrl === 'table',
+    gcTime: 10 * 60_000,
   });
 
   const statsQuery = useQuery<BrowseStats, Error>({
@@ -689,12 +756,14 @@ export default function Browse() {
     filters.maxCityPopulation,
   ]);
 
+  /* Cohort size for the tab badge + FilterSummary. Map/Listings + Table
+   * both read the one-shot browse count (the exact cohort total, incl.
+   * listings without coordinates that the map cap can't show); Stats has
+   * its own aggregate total. */
   const totalForBadge =
-    tabFromUrl === 'table'
-      ? tableQuery.data?.total ?? null
-      : tabFromUrl === 'stats'
-        ? statsQuery.data?.total ?? null
-        : mapQuery.data?.total ?? null;
+    tabFromUrl === 'stats'
+      ? statsQuery.data?.total ?? null
+      : browseTotal;
 
   const tabs: ReadonlyArray<Tab<TabKey>> = [
     { key: 'map',   label: 'Listings', badge: totalForBadge != null ? totalForBadge.toLocaleString('cs-CZ') : undefined },
@@ -703,8 +772,8 @@ export default function Browse() {
   ];
 
   const activeError =
-    tabFromUrl === 'map'   ? mapQuery.error ?? cardsQuery.error :
-    tabFromUrl === 'table' ? tableQuery.error :
+    tabFromUrl === 'map'   ? mapQuery.error ?? cards.error :
+    tabFromUrl === 'table' ? table.error :
     tabFromUrl === 'stats' ? statsQuery.error :
     null;
 
@@ -739,8 +808,8 @@ export default function Browse() {
             filters={filters}
             count={totalForBadge}
             loading={
-              tabFromUrl === 'map'   ? mapQuery.isLoading || cardsQuery.isLoading :
-              tabFromUrl === 'table' ? tableQuery.isLoading :
+              tabFromUrl === 'map'   ? mapQuery.isLoading || cards.isLoading :
+              tabFromUrl === 'table' ? table.isLoading :
               tabFromUrl === 'stats' ? statsQuery.isLoading :
               false
             }
@@ -787,24 +856,26 @@ export default function Browse() {
               }
             >
               <ListingCards
-                rows={cardsQuery.data?.rows ?? null}
-                total={cardsQuery.data?.total ?? null}
-                page={page}
+                rows={cards.isLoading ? null : cards.rows}
+                total={browseTotal}
                 sort={sort}
-                isLoading={cardsQuery.isLoading}
+                isLoading={cards.isLoading}
+                isFetchingNextPage={cards.isFetchingNextPage}
+                hasNextPage={cards.hasNextPage}
+                onReachEnd={cards.fetchNextPage}
+                restorationKey={cardsRestorationKey}
                 hasFilters={!isDefault(filters)}
                 hasBounds={filters.bounds != null}
                 hoveredIds={hoveredIds}
                 hoverOrigin={hoverState.origin}
                 onHover={setHoveredFromList}
-                onPage={setPage}
                 onSort={writeSort}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
                 onClearBounds={() => setBounds(null)}
                 mergeMode={mergeMode}
                 selectedPropertyIds={selectedForMerge}
                 onToggleSelect={toggleSelectForMerge}
-                estimates={estimatesQuery.data}
+                estimates={estimates}
                 estimatingIds={estimatingIds}
                 onEstimate={(srealityId) => estimateMut.mutate(srealityId)}
               />
@@ -876,16 +947,17 @@ export default function Browse() {
           <div className="px-6 pt-5 pb-8">
             {tabFromUrl === 'table' && (
               <ListingTable
-                rows={tableQuery.data?.rows ?? null}
-                total={tableQuery.data?.total ?? null}
-                page={page}
+                rows={table.isLoading ? null : table.rows}
+                total={browseTotal}
                 sort={sort}
-                isLoading={tableQuery.isLoading}
+                isLoading={table.isLoading}
+                isFetchingNextPage={table.isFetchingNextPage}
+                hasNextPage={table.hasNextPage}
+                onReachEnd={table.fetchNextPage}
                 hasFilters={!isDefault(filters)}
                 hoveredIds={hoveredIds}
                 onHover={setHoveredFromList}
                 onSort={setSortByField}
-                onPage={setPage}
                 onClearFilters={() => setFilters(DEFAULT_FILTERS)}
               />
             )}

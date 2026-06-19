@@ -1018,7 +1018,9 @@ class _FakeConn:
 def test_list_no_filters_builds_naked_sql():
     conn = _FakeConn(results=[[], (0,)])
     res = er.list_estimation_runs(conn, limit=20, offset=5)
-    assert res == {"data": [], "total": 0, "limit": 20, "offset": 5}
+    assert res == {
+        "data": [], "total": 0, "limit": 20, "offset": 5, "next_cursor": None,
+    }
     list_sql, list_params = conn.executions[0]
     count_sql, count_params = conn.executions[1]
     # No outer WHERE clause — every filter predicate is gated behind

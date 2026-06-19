@@ -45,6 +45,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from api.cursor import decode_cursor, encode_cursor
+
 from psycopg.types.json import Jsonb
 
 from api import schemas as s
@@ -821,7 +823,15 @@ def list_estimation_runs(
     source_kind: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
+    """Newest-first list, KEYSET-paginated on (created_at, id) DESC.
+
+    `cursor` is the opaque token returned as `next_cursor`; pass it for the
+    next page. `offset` remains for any legacy caller (used only when no
+    cursor is given). `total` is computed once — on the first page — and is
+    null on cursor'd pages (it doesn't change as you scroll).
+    """
     where: list[str] = []
     params: dict[str, Any] = {}
     if source is not None:
@@ -842,25 +852,54 @@ def list_estimation_runs(
         where.append("er.source_kind = %(source_kind)s")
         params["source_kind"] = source_kind
 
-    where_sql = "WHERE " + " AND ".join(where) if where else ""
+    filter_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    page_where = list(where)
+    if cursor is not None:
+        c_ts, c_id = decode_cursor(cursor)
+        page_where.append(
+            "(er.created_at, er.id) < (%(c_ts)s::timestamptz, %(c_id)s::bigint)"
+        )
+        params["c_ts"] = c_ts
+        params["c_id"] = c_id
+    page_where_sql = "WHERE " + " AND ".join(page_where) if page_where else ""
+
     list_sql = (
-        f"SELECT {_LIST_PROJECTION} FROM {_LIST_FROM} {where_sql} "
-        f"ORDER BY er.created_at DESC LIMIT %(limit)s OFFSET %(offset)s"
+        f"SELECT {_LIST_PROJECTION} FROM {_LIST_FROM} {page_where_sql} "
+        f"ORDER BY er.created_at DESC, er.id DESC LIMIT %(limit)s OFFSET %(offset)s"
     )
-    count_sql = f"SELECT count(*) FROM estimation_runs er {where_sql}"
-    list_params = {**params, "limit": limit, "offset": offset}
+    # Keyset pages ignore offset; only the legacy no-cursor path uses it.
+    list_params = {**params, "limit": limit, "offset": 0 if cursor else offset}
 
     with conn.cursor() as cur:
         cur.execute(list_sql, list_params)
         rows = cur.fetchall()
-        cur.execute(count_sql, params)
-        total_row = cur.fetchone()
-    total = int(total_row[0]) if total_row else 0
+        total: int | None = None
+        # Count on the first page only: any cursor'd page is page 2+ of an
+        # infinite scroll, where the cohort total hasn't changed and a fresh
+        # count is wasted. The legacy offset path (cursor None) still always
+        # returns a total, preserving its contract.
+        if cursor is None:
+            count_params = {k: params[k] for k in params if k not in ("c_ts", "c_id")}
+            cur.execute(
+                f"SELECT count(*) FROM estimation_runs er {filter_sql}", count_params
+            )
+            total_row = cur.fetchone()
+            total = int(total_row[0]) if total_row else 0
+
+    id_idx = _LIST_COLUMNS.index("id")
+    created_idx = _LIST_COLUMNS.index("created_at")
+    next_cursor: str | None = None
+    if len(rows) == limit and rows:
+        last = rows[-1]
+        next_cursor = encode_cursor([last[created_idx].isoformat(), last[id_idx]])
+
     return {
         "data": [_row_to_dict(_LIST_COLUMNS_OUT, r) for r in rows],
         "total": total,
         "limit": limit,
         "offset": offset,
+        "next_cursor": next_cursor,
     }
 
 
