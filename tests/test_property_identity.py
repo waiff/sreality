@@ -227,6 +227,9 @@ def test_unmerge_replays_ledger_and_reactivates():
     assert _find(conn.executed, "undone_at = now()") is not None
     assert _find(conn.executed, "SET status = 'proposed'") is not None
     assert _find(conn.executed, "WITH batch AS") is not None
+    # the reactivated retired property's pipeline card is restored from the ledger
+    assert _find(conn.executed, "INSERT INTO property_pipeline") is not None
+    assert _find(conn.executed, "merge_absorb") is not None
 
 
 def test_unmerge_conflict_when_child_repointed_elsewhere():

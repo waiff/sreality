@@ -23,7 +23,10 @@ from psycopg.types.json import Jsonb
 
 from scripts.recompute_property_stats import recompute_one
 from toolkit.operator_state import carry_operator_state_on_merge
-from toolkit.pipeline_identity import reconcile_pipeline_on_merge
+from toolkit.pipeline_identity import (
+    reconcile_pipeline_on_merge,
+    reconcile_pipeline_on_unmerge,
+)
 
 MergeSource = Literal["auto", "operator"]
 
@@ -328,6 +331,12 @@ def unmerge_group(
                 WHERE id = ANY(%s)
                 """,
                 (list(retired_ids),),
+            )
+            # Reactivated retired properties get their pre-merge pipeline card
+            # back from the snapshot (lossless); runs after the reactivation so
+            # the restore targets active properties.
+            reconcile_pipeline_on_unmerge(
+                cur, merge_group_id=merge_group_id, survivor_id=survivor_id
             )
             cur.execute(
                 """
