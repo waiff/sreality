@@ -38,8 +38,15 @@ global top-48 exactly (0 overlap, 0 skip), incl. the NULLS-LAST tail crossing fo
   row in-place (scroll-preserving) instead of invalidating the whole cache.
 - **Not converted (deliberate):** Stats (aggregate), Collections / WatchdogManage / Datasets /
   Health / Dedup (already load-everything or operator review queues).
-- **Next:** if PostgREST ever supports SQL row-value comparison, the unfiltered page-2 BitmapOr
-  (272ms) collapses to a bounded index range scan; until then it's well within budget.
+- **Next (focused follow-up PR): row-value keyset RPC.** The PostgREST `.or()` keyset is a
+  BitmapOr — correct but the unfiltered page-2 worst case is ~272ms (invisible behind the 700px
+  prefetch, well under the 3s budget, faster as you filter/scroll). A true row-value comparison
+  `(col, id) < (X, N)` is a bounded index scan (measured **0.5ms**, flat as the table grows), but
+  PostgREST can't emit it — it needs a Postgres RPC reimplementing the Browse filter set in SQL
+  (a sibling of `browse_stats_properties`). Deferred to its own PR + review (a dynamic-SQL bug
+  there = silent dup/skip). Also deferred: composite indexes for the Table's text/secondary sort
+  lanes (district/disposition/estate_area/usable_area/parking_lots — currently ~750ms seq-scan,
+  under budget) — add when one becomes hot or restrict the sortable set.
 
 ### 2026-06: Dedup vision cost — async batch warm-up lane (50% off, recall-identical)
 
