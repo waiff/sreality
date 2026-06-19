@@ -555,6 +555,34 @@ class MoveCardIn(BaseModel):
     board_position: float | None = None
 
 
+# Stage management (operator-curated columns; the curated-index precedent). The
+# `key` is derived server-side from the label — operators name a column, not a slug.
+PIPELINE_STAGE_COLORS = (
+    "copper", "sage", "brick", "ochre", "slate", "plum", "teal", "sand",
+)
+
+
+class CreateStageIn(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
+    color: str | None = None
+    is_terminal: bool = False
+
+
+class UpdateStageIn(BaseModel):
+    # All optional; an absent field is left unchanged. `is_entry` may only be
+    # set True (move the entry crown to this stage) — you re-home the entry by
+    # crowning another, never by un-crowning the only one.
+    label: str | None = Field(default=None, min_length=1, max_length=80)
+    color: str | None = None
+    is_terminal: bool | None = None
+    is_entry: bool | None = None
+
+
+class ReorderStagesIn(BaseModel):
+    # The complete set of non-archived stage ids in their new left-to-right order.
+    ordered_ids: list[int]
+
+
 # --- manual rental estimates ---------------------------------------------
 # Operator-recorded point estimates attached to a listing (Phase U-ME).
 # See migration 046 and CLAUDE.md "Operator workflow track".

@@ -8,6 +8,8 @@ through the bearer-gated API, reads (membership) via property_pipeline_public.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from datetime import datetime
 from typing import Any
 
@@ -26,6 +28,142 @@ def list_stages(conn: "psycopg.Connection") -> dict[str, Any]:
         cur.execute(sql)
         rows = cur.fetchall()
     return {"data": [_to_stage(r) for r in rows]}
+
+
+def create_stage(
+    conn: "psycopg.Connection", body: s.CreateStageIn,
+) -> dict[str, Any]:
+    """Append a new column to the right. New stages are never the entry stage."""
+    _validate_color(body.color)
+    with conn.transaction(), conn.cursor() as cur:
+        key = _unique_key(cur, body.label)
+        cur.execute("SELECT coalesce(max(position), 0) + 1 FROM pipeline_stages")
+        position = int(cur.fetchone()[0])
+        cur.execute(
+            "INSERT INTO pipeline_stages (key, label, position, color, is_terminal) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "RETURNING id, key, label, position, color, is_terminal, is_entry",
+            (key, body.label, position, body.color, body.is_terminal),
+        )
+        row = cur.fetchone()
+    return _to_stage(row)
+
+
+def update_stage(
+    conn: "psycopg.Connection", stage_id: int, body: s.UpdateStageIn,
+) -> dict[str, Any]:
+    """Rename / recolor / retag a stage, or move the entry crown onto it."""
+    _validate_color(body.color)
+    if body.is_entry is False:
+        raise HTTPException(
+            422, "re-home the entry stage by crowning another, not by un-crowning",
+        )
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_entry, is_terminal FROM pipeline_stages WHERE id = %s",
+            (stage_id,),
+        )
+        cur_row = cur.fetchone()
+        if cur_row is None:
+            raise HTTPException(404, "stage not found")
+        cur_entry, cur_terminal = bool(cur_row[0]), bool(cur_row[1])
+
+        final_entry = body.is_entry if body.is_entry is not None else cur_entry
+        final_terminal = (
+            body.is_terminal if body.is_terminal is not None else cur_terminal
+        )
+        if final_entry and final_terminal:
+            raise HTTPException(422, "the entry stage cannot also be terminal")
+
+        if body.is_entry:  # move the single-entry crown onto this stage
+            cur.execute(
+                "UPDATE pipeline_stages SET is_entry = false, updated_at = now() "
+                "WHERE is_entry AND id <> %s",
+                (stage_id,),
+            )
+
+        sets: list[str] = []
+        params: list[Any] = []
+        if body.label is not None:
+            sets += ["label = %s"]
+            params += [body.label]
+        if "color" in body.model_fields_set:
+            sets += ["color = %s"]
+            params += [body.color]
+        if body.is_terminal is not None:
+            sets += ["is_terminal = %s"]
+            params += [body.is_terminal]
+        if body.is_entry is not None:
+            sets += ["is_entry = %s"]
+            params += [body.is_entry]
+        if sets:
+            sets += ["updated_at = now()"]
+            params += [stage_id]
+            cur.execute(
+                f"UPDATE pipeline_stages SET {', '.join(sets)} WHERE id = %s "
+                "RETURNING id, key, label, position, color, is_terminal, is_entry",
+                params,
+            )
+            row = cur.fetchone()
+        else:
+            cur.execute(
+                "SELECT id, key, label, position, color, is_terminal, is_entry "
+                "FROM pipeline_stages WHERE id = %s",
+                (stage_id,),
+            )
+            row = cur.fetchone()
+    return _to_stage(row)
+
+
+def reorder_stages(
+    conn: "psycopg.Connection", body: s.ReorderStagesIn,
+) -> dict[str, Any]:
+    """Rewrite left-to-right order. `ordered_ids` must be exactly the live set."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT id FROM pipeline_stages WHERE archived_at IS NULL",
+        )
+        live = {int(r[0]) for r in cur.fetchall()}
+        if set(body.ordered_ids) != live or len(body.ordered_ids) != len(live):
+            raise HTTPException(
+                422, "ordered_ids must list every active stage exactly once",
+            )
+        for pos, sid in enumerate(body.ordered_ids, start=1):
+            cur.execute(
+                "UPDATE pipeline_stages SET position = %s, updated_at = now() "
+                "WHERE id = %s",
+                (pos, sid),
+            )
+    return list_stages(conn)
+
+
+def archive_stage(
+    conn: "psycopg.Connection", stage_id: int,
+) -> dict[str, Any]:
+    """Soft-retire a stage. Refused if it is the entry stage or still holds cards."""
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_entry, archived_at FROM pipeline_stages WHERE id = %s",
+            (stage_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "stage not found")
+        if bool(row[0]):
+            raise HTTPException(409, "crown another stage as entry before archiving this one")
+        if row[1] is not None:
+            return {"archived": False, "stage_id": stage_id}
+        cur.execute(
+            "SELECT 1 FROM property_pipeline WHERE stage_id = %s LIMIT 1", (stage_id,),
+        )
+        if cur.fetchone() is not None:
+            raise HTTPException(409, "stage still holds cards; move them first")
+        cur.execute(
+            "UPDATE pipeline_stages SET archived_at = now(), updated_at = now() "
+            "WHERE id = %s",
+            (stage_id,),
+        )
+    return {"archived": True, "stage_id": stage_id}
 
 
 def add_card(
@@ -146,6 +284,29 @@ def move_card(
 
 
 # --- helpers ---------------------------------------------------------------
+
+
+def _validate_color(color: str | None) -> None:
+    if color is not None and color not in s.PIPELINE_STAGE_COLORS:
+        raise HTTPException(422, f"invalid color; pick one of {s.PIPELINE_STAGE_COLORS}")
+
+
+def _slugify(label: str) -> str:
+    norm = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "_", norm.lower()).strip("_")
+    return slug or "stage"
+
+
+def _unique_key(cur: "psycopg.Cursor", label: str) -> str:
+    base = _slugify(label)
+    cur.execute("SELECT lower(key) FROM pipeline_stages")
+    taken = {r[0] for r in cur.fetchall()}
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base}_{n}" in taken:
+        n += 1
+    return f"{base}_{n}"
 
 
 def _fetch_card(

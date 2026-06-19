@@ -1363,6 +1363,43 @@ def get_pipeline_stages(
     return pipeline_module.list_stages(conn)
 
 
+@app.post("/pipeline/stages")
+def post_pipeline_stage(
+    body: s.CreateStageIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.create_stage(conn, body)
+
+
+@app.post("/pipeline/stages/reorder")
+def post_pipeline_stages_reorder(
+    body: s.ReorderStagesIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.reorder_stages(conn, body)
+
+
+@app.patch("/pipeline/stages/{stage_id}")
+def patch_pipeline_stage(
+    stage_id: int,
+    body: s.UpdateStageIn,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.update_stage(conn, stage_id, body)
+
+
+@app.delete("/pipeline/stages/{stage_id}")
+def delete_pipeline_stage(
+    stage_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    return pipeline_module.archive_stage(conn, stage_id)
+
+
 @app.post("/pipeline/cards")
 def post_pipeline_card(
     body: s.AddPipelineCardIn,

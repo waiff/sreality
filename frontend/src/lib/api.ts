@@ -31,6 +31,7 @@ import type {
   UpdateManualEstimateIn,
   Note,
   ParseResult,
+  PipelineStage,
   SkillRefinement,
   SourceKind,
   Tag,
@@ -946,6 +947,46 @@ export const movePipelineCard = (
       method: 'PATCH',
       json: board_position != null ? { stage_id, board_position } : { stage_id },
     },
+  );
+
+/* Stage management — operator-curated kanban columns (rename / recolor / add /
+ * reorder / archive). The `key` slug is derived server-side from the label. */
+
+export const createPipelineStage = (input: {
+  label: string;
+  color?: TagColor | null;
+  is_terminal?: boolean;
+}): Promise<PipelineStage> =>
+  request<PipelineStage>('/pipeline/stages', { method: 'POST', json: input });
+
+export const updatePipelineStage = (
+  stage_id: number,
+  patch: {
+    label?: string;
+    color?: TagColor | null;
+    is_terminal?: boolean;
+    is_entry?: boolean;
+  },
+): Promise<PipelineStage> =>
+  request<PipelineStage>(`/pipeline/stages/${stage_id}`, {
+    method: 'PATCH',
+    json: patch,
+  });
+
+export const reorderPipelineStages = (
+  ordered_ids: number[],
+): Promise<{ data: PipelineStage[] }> =>
+  request<{ data: PipelineStage[] }>('/pipeline/stages/reorder', {
+    method: 'POST',
+    json: { ordered_ids },
+  });
+
+export const archivePipelineStage = (
+  stage_id: number,
+): Promise<{ archived: boolean; stage_id: number }> =>
+  request<{ archived: boolean; stage_id: number }>(
+    `/pipeline/stages/${stage_id}`,
+    { method: 'DELETE' },
   );
 
 /* Manual rental estimates (Phase U-ME).

@@ -46,6 +46,29 @@ def client(monkeypatch):
             "property_id": pid, "stage_id": body.stage_id, "stage_key": "offer",
         },
     )
+    monkeypatch.setattr(
+        pipeline_module, "create_stage",
+        lambda conn, body: {
+            "id": 9, "key": "due_diligence", "label": body.label, "position": 6,
+            "color": body.color, "is_terminal": body.is_terminal, "is_entry": False,
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_module, "update_stage",
+        lambda conn, sid, body: {
+            "id": sid, "key": "viewing", "label": body.label or "Prohlídka",
+            "position": 2, "color": body.color, "is_terminal": False,
+            "is_entry": bool(body.is_entry),
+        },
+    )
+    monkeypatch.setattr(
+        pipeline_module, "reorder_stages",
+        lambda conn, body: {"data": [{"id": i} for i in body.ordered_ids]},
+    )
+    monkeypatch.setattr(
+        pipeline_module, "archive_stage",
+        lambda conn, sid: {"archived": True, "stage_id": sid},
+    )
     yield TestClient(api_main.app)
     api_main.app.dependency_overrides.clear()
 
@@ -109,6 +132,9 @@ class _Cur:
 
     def fetchone(self) -> Any:
         return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
 
 
 class _Tx:
@@ -192,3 +218,145 @@ def test_move_card_reorder_only_logs_no_event():
     assert any("UPDATE property_pipeline SET" in q and "board_position" in q for q in sqls)
     assert not any("entered_stage_at = now()" in q for q in sqls)
     assert not any("INSERT INTO property_pipeline_events" in q for q in sqls)
+
+
+# --- stage-management routes ----------------------------------------------
+
+def test_create_stage_route(client):
+    res = client.post("/pipeline/stages", json={"label": "Due diligence", "color": "plum"})
+    assert res.status_code == 200
+    body = res.json()
+    assert body["label"] == "Due diligence"
+    assert body["color"] == "plum"
+    assert body["is_entry"] is False
+
+
+def test_create_stage_rejects_bad_color_via_pydantic(client):
+    # color is free-form in the schema; the persistence layer validates the palette.
+    # An over-long label is rejected by pydantic before the handler runs.
+    res = client.post("/pipeline/stages", json={"label": "x" * 81})
+    assert res.status_code == 422
+
+
+def test_update_stage_route(client):
+    res = client.patch("/pipeline/stages/2", json={"label": "Viewing", "is_entry": True})
+    assert res.status_code == 200
+    assert res.json()["is_entry"] is True
+
+
+def test_reorder_stages_route(client):
+    res = client.post("/pipeline/stages/reorder", json={"ordered_ids": [3, 1, 2]})
+    assert res.status_code == 200
+    assert [d["id"] for d in res.json()["data"]] == [3, 1, 2]
+
+
+def test_archive_stage_route(client):
+    res = client.delete("/pipeline/stages/5")
+    assert res.status_code == 200
+    assert res.json() == {"archived": True, "stage_id": 5}
+
+
+# --- stage-management logic against the scripted fake connection -----------
+
+def test_slugify_strips_diacritics_and_punctuation():
+    assert pipeline_module._slugify("Důležité — Nabídka!") == "dulezite_nabidka"
+    assert pipeline_module._slugify("🏠🏠") == "stage"
+
+
+def test_create_stage_derives_key_and_appends_position():
+    stage_row = (9, "due_diligence", "Due diligence", 6, "plum", False, False)
+    conn = _FakeConn([
+        (lambda q: "SELECT lower(key) FROM pipeline_stages" in q,
+         [("interested",), ("viewing",)]),
+        (lambda q: "coalesce(max(position), 0) + 1" in q, [(6,)]),
+        (lambda q: "INSERT INTO pipeline_stages" in q, [stage_row]),
+    ])
+    out = pipeline_module.create_stage(
+        conn, s.CreateStageIn(label="Due diligence", color="plum"),
+    )
+    assert out["key"] == "due_diligence"
+    assert out["position"] == 6
+    ins = next(p for q, p in conn.executed if "INSERT INTO pipeline_stages" in q)
+    assert ins[0] == "due_diligence"  # the derived key is passed first
+
+
+def test_create_stage_rejects_palette_violation():
+    conn = _FakeConn([])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.create_stage(conn, s.CreateStageIn(label="X", color="neon"))
+    assert ei.value.status_code == 422
+
+
+def test_update_stage_crowning_entry_demotes_the_others():
+    updated = (2, "viewing", "Prohlídka", 2, "ochre", False, True)
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, is_terminal FROM pipeline_stages WHERE id" in q,
+         [(False, False)]),
+        (lambda q: "UPDATE pipeline_stages SET" in q and "RETURNING" in q, [updated]),
+    ])
+    out = pipeline_module.update_stage(conn, 2, s.UpdateStageIn(is_entry=True))
+    assert out["is_entry"] is True
+    sqls = [q for q, _ in conn.executed]
+    assert any(
+        "UPDATE pipeline_stages SET is_entry = false" in q and "WHERE is_entry AND id <> %s" in q
+        for q in sqls
+    )
+
+
+def test_update_stage_rejects_uncrowning_entry():
+    conn = _FakeConn([])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.update_stage(conn, 1, s.UpdateStageIn(is_entry=False))
+    assert ei.value.status_code == 422
+
+
+def test_update_stage_rejects_entry_that_is_terminal():
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, is_terminal FROM pipeline_stages WHERE id" in q,
+         [(False, True)]),  # already terminal
+    ])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.update_stage(conn, 4, s.UpdateStageIn(is_entry=True))
+    assert ei.value.status_code == 422
+
+
+def test_reorder_rejects_set_mismatch():
+    conn = _FakeConn([
+        (lambda q: "SELECT id FROM pipeline_stages WHERE archived_at IS NULL" in q,
+         [(1,), (2,), (3,)]),
+    ])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.reorder_stages(conn, s.ReorderStagesIn(ordered_ids=[1, 2]))
+    assert ei.value.status_code == 422
+
+
+def test_archive_refuses_entry_stage():
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, archived_at FROM pipeline_stages WHERE id" in q,
+         [(True, None)]),
+    ])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.archive_stage(conn, 1)
+    assert ei.value.status_code == 409
+
+
+def test_archive_refuses_stage_with_cards():
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, archived_at FROM pipeline_stages WHERE id" in q,
+         [(False, None)]),
+        (lambda q: "SELECT 1 FROM property_pipeline WHERE stage_id" in q, [(1,)]),
+    ])
+    with pytest.raises(fastapi.HTTPException) as ei:
+        pipeline_module.archive_stage(conn, 3)
+    assert ei.value.status_code == 409
+
+
+def test_archive_soft_retires_empty_stage():
+    conn = _FakeConn([
+        (lambda q: "SELECT is_entry, archived_at FROM pipeline_stages WHERE id" in q,
+         [(False, None)]),
+        (lambda q: "SELECT 1 FROM property_pipeline WHERE stage_id" in q, []),
+    ])
+    out = pipeline_module.archive_stage(conn, 3)
+    assert out == {"archived": True, "stage_id": 3}
+    assert any("SET archived_at = now()" in q for q, _ in conn.executed)
