@@ -4,10 +4,12 @@
  * post messages here; we route them to the api helpers. */
 
 import {
+  addPipelineCard,
   createEstimation,
   getEstimation,
   lookupListings,
   patchScenario,
+  removePipelineCard,
 } from './api';
 import type { ApiMessage, ApiResult } from './types';
 
@@ -47,5 +49,9 @@ async function handleMessage(
       return createEstimation(message.url);
     case 'get_estimation':
       return getEstimation(message.run_id);
+    case 'add_pipeline_card':
+      return addPipelineCard(message.property_id);
+    case 'remove_pipeline_card':
+      return removePipelineCard(message.property_id);
   }
 }

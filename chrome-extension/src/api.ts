@@ -6,6 +6,7 @@
 import type {
   ApiResult,
   EstimationRun,
+  PipelineCardResult,
   PortalListing,
   PortalLookupItem,
   PortalLookupResponse,
@@ -131,4 +132,26 @@ export async function getEstimation(
   run_id: number,
 ): Promise<ApiResult<EstimationRun>> {
   return request<EstimationRun>(`/estimations/${run_id}`);
+}
+
+/* POST /pipeline/cards — bookmark a property into the deal pipeline (rule #22),
+ * landing it at the entry stage. The SAME bearer-gated endpoint the SPA's
+ * BookmarkButton / PipelineToggle use — one write path, idempotent server-side
+ * (ON CONFLICT DO NOTHING). Returns the card incl. its entry-stage label. */
+export async function addPipelineCard(
+  property_id: number,
+): Promise<ApiResult<PipelineCardResult>> {
+  return request<PipelineCardResult>('/pipeline/cards', {
+    method: 'POST',
+    body: JSON.stringify({ property_id }),
+  });
+}
+
+/* DELETE /pipeline/cards/:property_id — un-bookmark (drop the card, ledger-logged). */
+export async function removePipelineCard(
+  property_id: number,
+): Promise<ApiResult<PipelineCardResult>> {
+  return request<PipelineCardResult>(`/pipeline/cards/${property_id}`, {
+    method: 'DELETE',
+  });
 }

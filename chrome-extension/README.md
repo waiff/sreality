@@ -7,12 +7,21 @@ across **every portal we scrape** (sreality, bazos, bezrealitky, idnes,
 maxima, remax, mmreality, ceskereality).
 
 - **Detail pages** get a floating panel (closed shadow root). For **any**
-  listing we have, it shows an **"Otevřít v aplikaci"** deep-link to that
-  listing's page in our app (`/listing/{sreality_id}`) plus its subject facts.
-  For **apartments for sale** it additionally shows the Výnos MF headline + MF
-  reference rent, with a comparables-based estimation as the deeper tool /
-  fallback. (MF + estimation are gated to byt+prodej; the app link + facts are
-  not.) Listings not in our DB show a short "není v databázi" note.
+  listing we have, it shows a **"Přidat do pipeline"** deal-pipeline bookmark
+  toggle + an **"Otevřít v aplikaci"** deep-link to that listing's page in our
+  app (`/listing/{sreality_id}`) plus its subject facts. For **apartments for
+  sale** it additionally shows the Výnos MF headline + MF reference rent, with a
+  comparables-based estimation as the deeper tool / fallback. (MF + estimation
+  are gated to byt+prodej; the bookmark + app link + facts are not.) Listings
+  not in our DB show a short "není v databázi" note.
+  - The **pipeline bookmark** is property-grain (the deal pipeline, rule #22):
+    clicking it inserts the listing's property at the pipeline's entry stage
+    ("Zájem"), the same as the SPA's Browse-card ★ / listing-detail toggle. It
+    flips to a filled pill showing the current stage; clicking again removes it.
+    Writes go through the same bearer-gated `POST/DELETE /pipeline/cards` the
+    SPA uses; membership comes back on the `POST /listings/lookup` response, so
+    the toggle already knows its state. Hidden only while a freshly-scraped
+    listing has no property yet (a few minutes).
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
   on-demand estimation by that card's own URL.
@@ -123,11 +132,14 @@ request will be blocked.
 **On a listing detail page** (any supported portal):
 
 1. A floating panel appears bottom-right.
-2. For a **sale apartment** we have, it shows **Výnos MF X.X %** + the MF
+2. At the top, for **any** listing we have: a **Přidat do pipeline** bookmark
+   (click to add the property to the deal pipeline / again to remove — it fills
+   in and shows the current stage) and an **Otevřít v aplikaci** link.
+3. For a **sale apartment** we have, it shows **Výnos MF X.X %** + the MF
    reference rent (per month and per m²) and the subject facts.
-3. For anything that isn't an apartment for sale, the panel is **visibly
-   deactivated** with a short note.
-4. Below the MF headline, the **comparables estimation** block: if a
+4. For anything that isn't an apartment for sale, the MF/estimation block is
+   **visibly deactivated** with a short note (the bookmark + app link still show).
+5. Below the MF headline, the **comparables estimation** block: if a
    successful estimation exists it loads the editable yield scenario; if not,
    a **Spustit odhad** button `POST`s to `/estimations` and polls until done.
    Edits to the three fields debounce 500 ms and PATCH the scenario back —

@@ -218,12 +218,18 @@ rules. Identify which one a task belongs to before you start.
   bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality) — widen `matches`
   (and the registry in `src/portals.ts`) as new portals come online; `host_permissions`
   stays broad `https://*/*` for the background fetch. **Detail pages** get a floating
-  panel (closed shadow root). For ANY listing we have it shows an "Otevřít v aplikaci"
-  deep-link to the SPA page (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide
-  identity every SPA surface uses, negative for non-sreality portals) + subject facts; for
-  sale apartments it ALSO shows the precomputed `mf_reference_rent_czk` +
-  `mf_gross_yield_pct` ("Výnos MF") with the comparables estimation as the deeper
-  tool/fallback (MF + estimation gated to byt+prodej, the link + facts are not).
+  panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
+  deal-pipeline bookmark toggle + an "Otevřít v aplikaci" deep-link to the SPA page
+  (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
+  uses, negative for non-sreality portals) + subject facts; for sale apartments it ALSO
+  shows the precomputed `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") with
+  the comparables estimation as the deeper tool/fallback (MF + estimation gated to
+  byt+prodej, the bookmark + link + facts are not). The bookmark is property-grain
+  (rule #22): `POST /listings/lookup` returns the listing's `property_id` + pipeline
+  membership, and the toggle writes through the SAME bearer-gated
+  `POST/DELETE /pipeline/cards` the SPA's `PipelineToggle` uses — one write path, one
+  `<FilterIcon>` glyph everywhere. Reachable from index/search pages too: the per-card
+  badge opens this same panel.
   **Index/search pages** get per-card badges via anchor-href scanning (no per-portal card
   selectors — robust to markup changes). The default display is a **read** through
   `POST /listings/lookup`, which maps a card's on-page `(source, native id)` to our row +
@@ -723,9 +729,13 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `GET /pipeline/stages`). **The "Přidat do pipeline" affordance is the shared `<FilterIcon>`
     (a horizontal filter / sliders glyph, filled knobs = in-pipeline) used on EVERY pipeline
     surface — the listing-detail header (`PipelineToggle`, in the top action bar next to "New
-    estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`), AND the
-    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage) — so the
-    "into the pipeline" concept reads as one icon everywhere.** The `/pipeline` kanban board reads
+    estimation", NOT buried in CurationBlock), every Browse card (`BookmarkButton`), the
+    stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), AND the
+    Chrome-extension panel (the glyph reproduced by value in vanilla TS — separate territory,
+    no React import) — so the "into the pipeline" concept reads as one icon everywhere.** The
+    extension bookmarks property-grain like every other surface: it reads `property_id` +
+    membership off the batched `POST /listings/lookup` and writes through these same
+    `POST/DELETE /pipeline/cards` routes (no extension-specific write path, no second secret). The `/pipeline` kanban board reads
     `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
     (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via

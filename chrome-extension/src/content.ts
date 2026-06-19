@@ -17,6 +17,7 @@ import type {
   ApiMessage,
   ApiResult,
   EstimationRun,
+  PipelineCardResult,
   PortalListing,
   YieldScenarioUpdate,
 } from './types';
@@ -57,6 +58,8 @@ interface PanelState {
   price: number | null;
   /* True while an estimation is being created/polled. */
   busy: boolean;
+  /* True while a pipeline add/remove is in flight (disables the toggle). */
+  pipelineBusy: boolean;
   errorMessage: string | null;
 }
 
@@ -100,6 +103,33 @@ function parseNumber(raw: string): number | null {
   if (trimmed === '') return null;
   const n = Number(trimmed);
   return Number.isFinite(n) ? n : null;
+}
+
+/* The SPA's <FilterIcon> (icons.tsx) hand-reproduced as inline SVG — the shared
+ * "pipeline" glyph on every surface (filled knobs = in-pipeline). The extension
+ * can't import the SPA's React component (separate territory, classic content
+ * script), so this mirrors it by value, like the palette in styles.css. */
+function filterIconSvg(filled: boolean): string {
+  const f = filled ? 'currentColor' : 'none';
+  return (
+    '<svg class="pipeline-icon" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    '<line x1="3" y1="7" x2="12.7" y2="7"/><line x1="17.3" y1="7" x2="21" y2="7"/>' +
+    '<line x1="3" y1="12" x2="6.7" y2="12"/><line x1="11.3" y1="12" x2="21" y2="12"/>' +
+    '<line x1="3" y1="17" x2="13.7" y2="17"/><line x1="18.3" y1="17" x2="21" y2="17"/>' +
+    `<circle cx="15" cy="7" r="2.4" fill="${f}"/>` +
+    `<circle cx="9" cy="12" r="2.4" fill="${f}"/>` +
+    `<circle cx="16" cy="17" r="2.4" fill="${f}"/></svg>`
+  );
+}
+
+/* Immutably set the listing's pipeline membership on a state update. */
+function withPipeline(
+  prev: PanelState, membership: PortalListing['pipeline'],
+): PanelState {
+  if (prev.listing == null) return prev;
+  return { ...prev, listing: { ...prev.listing, pipeline: membership } };
 }
 
 // ----------------------------------------------------------------------
@@ -223,9 +253,10 @@ function mountPanel(): {
       return;
     }
 
-    /* active — the "open in our app" link + subject facts show for ANY listing
-     * we have; the MF headline + estimation are gated to apartments for sale. */
-    renderAppLink(body, state);
+    /* active — the pipeline bookmark + "open in our app" link + subject facts
+     * show for ANY listing we have; the MF headline + estimation are gated to
+     * apartments for sale. */
+    renderTopActions(body, state);
     if (state.isSaleApt !== false) {
       renderMfBlock(body, state);
       renderSubjectFacts(body, state);
@@ -263,19 +294,54 @@ function mountPanel(): {
     return p;
   }
 
-  function renderAppLink(body: HTMLElement, state: PanelState): void {
+  /* The two "this listing ↔ our app" affordances in one row: the deal-pipeline
+   * bookmark (left) + the "open in our app" deep-link (right). Either may be
+   * absent (no property yet / no SPA base configured); the row appears only if
+   * something landed in it. */
+  function renderTopActions(body: HTMLElement, state: PanelState): void {
+    const row = document.createElement('div');
+    row.className = 'top-actions';
+    renderPipelineToggle(row, state);
+    renderAppLink(row, state);
+    if (row.childElementCount > 0) body.appendChild(row);
+  }
+
+  function renderAppLink(container: HTMLElement, state: PanelState): void {
     const sid = state.listing?.sreality_id;
     if (sid == null || !APP_BASE_URL) return;  // not in our DB, or base unset
-    const row = document.createElement('div');
-    row.className = 'app-link-row';
     const a = document.createElement('a');
     a.className = 'app-link';
     a.href = `${APP_BASE_URL}/listing/${sid}`;  // same template as every SPA surface
     a.target = '_blank';
     a.rel = 'noopener';
     a.textContent = 'Otevřít v aplikaci →';
-    row.appendChild(a);
-    body.appendChild(row);
+    container.appendChild(a);
+  }
+
+  /* Deal-pipeline bookmark for the listing's property (rule #22). Same contract
+   * as the SPA's PipelineToggle / Browse-card ★: out of pipeline → a copper
+   * "Přidat do pipeline"; in pipeline → a filled pill showing the stage label;
+   * click toggles add/remove. Property-grain — shown for ANY listing we have a
+   * property for (not gated to sale apartments), hidden during the brief window
+   * a freshly-scraped row has no property_id yet. */
+  function renderPipelineToggle(container: HTMLElement, state: PanelState): void {
+    const l = state.listing;
+    if (l == null || !l.found || l.property_id == null) return;
+    const inPipe = l.pipeline?.in_pipeline ?? false;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pipeline-toggle' + (inPipe ? ' pipeline-toggle--in' : '');
+    btn.disabled = state.pipelineBusy;
+    btn.setAttribute('aria-pressed', String(inPipe));
+    btn.title = inPipe ? 'Odebrat z pipeline' : 'Přidat do pipeline';
+    btn.innerHTML = filterIconSvg(inPipe);
+    const label = document.createElement('span');
+    label.textContent = inPipe
+      ? (l.pipeline?.stage_label ?? 'V pipeline')
+      : 'Přidat do pipeline';
+    btn.appendChild(label);
+    btn.onclick = () => { void onTogglePipeline(); };
+    container.appendChild(btn);
   }
 
   function renderMfBlock(body: HTMLElement, state: PanelState): void {
@@ -562,6 +628,51 @@ async function onCreateRun(): Promise<void> {
   setState((prev) => seedFromRun({ ...prev, busy: false }, row));
 }
 
+/* Bookmark / un-bookmark the listing's property into the deal pipeline. The
+ * UI flips optimistically (one re-render), then reconciles from the server:
+ * an add returns the entry-stage label to display; a remove clears membership.
+ * On failure we revert and surface the reason. Reuses the SAME bearer-gated
+ * /pipeline/cards endpoints the SPA writes through. */
+async function onTogglePipeline(): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null) return;
+  const propertyId = l.property_id;
+  const wasIn = l.pipeline?.in_pipeline ?? false;
+
+  setState((prev) => withPipeline(
+    { ...prev, pipelineBusy: true, errorMessage: null },
+    { in_pipeline: !wasIn, stage_key: null, stage_label: null },
+  ));
+
+  const res = await call<PipelineCardResult>({
+    type: wasIn ? 'remove_pipeline_card' : 'add_pipeline_card',
+    property_id: propertyId,
+  });
+
+  if (!res.ok) {
+    setState((prev) => withPipeline(
+      {
+        ...prev, pipelineBusy: false,
+        errorMessage: `Uložení do pipeline selhalo: ${res.detail}`,
+      },
+      { in_pipeline: wasIn, stage_key: l.pipeline?.stage_key ?? null,
+        stage_label: l.pipeline?.stage_label ?? null },
+    ));
+    return;
+  }
+
+  setState((prev) => withPipeline(
+    { ...prev, pipelineBusy: false },
+    wasIn
+      ? { in_pipeline: false, stage_key: null, stage_label: null }
+      : {
+          in_pipeline: true,
+          stage_key: res.data.stage_key ?? null,
+          stage_label: res.data.stage_label ?? null,
+        },
+  ));
+}
+
 /* Mounts/refreshes the floating panel for one listing. Used by the detail-page
  * entry AND by index-card badges (which pass the card's ref + href + the
  * already-fetched listing so no second lookup is needed). */
@@ -575,7 +686,8 @@ export async function openPanel(
   state = {
     phase: 'loading', listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
-    rent: null, costPerM2: null, price: null, busy: false, errorMessage: null,
+    rent: null, costPerM2: null, price: null, busy: false,
+    pipelineBusy: false, errorMessage: null,
   };
   render(state);
 
