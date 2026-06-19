@@ -42,6 +42,7 @@ import type {
   WatchdogSubscription,
   FilterPreset,
   DedupCandidatesResponse,
+  DedupSummaryResponse,
   MergesResponse,
 } from './types';
 import type { PresetSpec } from './filters';
@@ -1074,6 +1075,8 @@ export const deleteFilterPreset = (id: string): Promise<{ deleted: true }> =>
 export interface ListDedupCandidatesParams {
   status?: string;
   tier?: string;
+  reason?: string;
+  verdict?: string;
   limit?: number;
   offset?: number;
 }
@@ -1103,6 +1106,11 @@ export const listDedupCandidates = (
   request<DedupCandidatesResponse>('/dedup/candidates', {
     query: params as Record<string, QueryValue>,
   });
+
+export const getDedupSummary = (
+  status = 'proposed',
+): Promise<DedupSummaryResponse> =>
+  request<DedupSummaryResponse>('/dedup/summary', { query: { status } });
 
 export const mergeDedupCandidate = (candidateId: number): Promise<MergeResult> =>
   request<MergeResult>(

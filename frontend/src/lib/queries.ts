@@ -1392,6 +1392,7 @@ export const dedupKeys = {
     ['dedup', 'candidates', params] as const,
   merges: (params: Record<string, unknown>) =>
     ['dedup', 'merges', params] as const,
+  summary: (status: string) => ['dedup', 'summary', status] as const,
   sources: (propertyIds: ReadonlyArray<number>) =>
     ['dedup', 'sources', sortedIds(propertyIds)] as const,
   images: (srealityIds: ReadonlyArray<number>) =>

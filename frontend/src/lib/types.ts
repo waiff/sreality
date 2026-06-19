@@ -1351,7 +1351,22 @@ export interface DedupCandidate {
 
 export interface DedupCandidatesResponse {
   data: DedupCandidate[];
-  total: number;
+  total: number;       // total matching the filter (the page is capped by `limit`)
+  returned?: number;   // rows on this page
+}
+
+export interface DedupSummaryBucket {
+  reason: string;          // markers_matched.reason, or "(legacy)" for pre-reason rows
+  verdict: string | null;  // markers_matched.verdict (visual buckets)
+  count: number;
+}
+
+export interface DedupSummaryResponse {
+  data: {
+    status: string;
+    total: number;
+    buckets: DedupSummaryBucket[];
+  };
 }
 
 export interface MergeGroup {

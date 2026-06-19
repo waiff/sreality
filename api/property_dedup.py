@@ -36,39 +36,76 @@ _PROP_SIDE_SQL = """
 """
 
 
-def list_candidates(
-    conn: psycopg.Connection,
-    *,
-    status: str | None = "proposed",
-    tier: str | None = None,
-    limit: int = 50,
-    offset: int = 0,
-) -> dict[str, Any]:
+# Sentinel reason for candidates from an older engine version that never wrote a
+# `reason` into markers_matched — the operator filters these as one bucket.
+LEGACY_REASON = "(legacy)"
+# Sentinel verdict for "no verdict recorded" (most buckets), so a bucket keyed on
+# (reason, NULL verdict) drills in exactly rather than mixing verdicts.
+NULL_VERDICT = "(none)"
+
+
+def _candidate_filters(
+    status: str | None, tier: str | None, reason: str | None, verdict: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Shared WHERE for list_candidates + its COUNT (so the page total is real)."""
     clauses: list[str] = []
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    params: dict[str, Any] = {}
     if status is not None:
         clauses.append("c.status = %(status)s")
         params["status"] = status
     if tier is not None:
         clauses.append("c.tier = %(tier)s")
         params["tier"] = tier
+    if reason == LEGACY_REASON:
+        clauses.append("c.markers_matched->>'reason' IS NULL")
+    elif reason is not None:
+        clauses.append("c.markers_matched->>'reason' = %(reason)s")
+        params["reason"] = reason
+    if verdict == NULL_VERDICT:
+        clauses.append("c.markers_matched->>'verdict' IS NULL")
+    elif verdict is not None:
+        clauses.append("c.markers_matched->>'verdict' = %(verdict)s")
+        params["verdict"] = verdict
     where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where_sql, params
 
-    sql = f"""
-        SELECT
-          c.id, c.tier, c.status, c.confidence, c.markers_matched,
-          c.auto_merged, c.merge_group_id::text, c.created_at, c.reviewed_at,
-          {_PROP_SIDE_SQL.format(p="l")} AS left_property,
-          {_PROP_SIDE_SQL.format(p="r")} AS right_property
-        FROM property_identity_candidates c
-        JOIN properties l ON l.id = c.left_property_id
-        JOIN properties r ON r.id = c.right_property_id
-        {where_sql}
-        ORDER BY c.created_at DESC, c.id DESC
-        LIMIT %(limit)s OFFSET %(offset)s
-    """
+
+def list_candidates(
+    conn: psycopg.Connection,
+    *,
+    status: str | None = "proposed",
+    tier: str | None = None,
+    reason: str | None = None,
+    verdict: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    where_sql, params = _candidate_filters(status, tier, reason, verdict)
+
     with conn.cursor() as cur:
-        cur.execute(sql, params)
+        # Real total for THIS filter (the page is capped at `limit`), so the UI
+        # can show the full backlog size + paginate — not just the page count.
+        cur.execute(
+            f"SELECT count(*) FROM property_identity_candidates c {where_sql}", params,
+        )
+        total = int(cur.fetchone()[0])
+
+        cur.execute(
+            f"""
+            SELECT
+              c.id, c.tier, c.status, c.confidence, c.markers_matched,
+              c.auto_merged, c.merge_group_id::text, c.created_at, c.reviewed_at,
+              {_PROP_SIDE_SQL.format(p="l")} AS left_property,
+              {_PROP_SIDE_SQL.format(p="r")} AS right_property
+            FROM property_identity_candidates c
+            JOIN properties l ON l.id = c.left_property_id
+            JOIN properties r ON r.id = c.right_property_id
+            {where_sql}
+            ORDER BY c.created_at DESC, c.id DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            {**params, "limit": limit, "offset": offset},
+        )
         rows = cur.fetchall()
 
     data = [
@@ -87,7 +124,36 @@ def list_candidates(
         }
         for r in rows
     ]
-    return {"data": data, "total": len(data)}
+    return {"data": data, "total": total, "returned": len(data)}
+
+
+def summary(conn: psycopg.Connection, *, status: str = "proposed") -> dict[str, Any]:
+    """Cumulative review backlog + its composition by reason (why each pair queued).
+
+    The /dedup dashboard reads this so the operator sees the WHOLE pending queue
+    and what it's made of — not just the page of cards on screen. `reason` /
+    `verdict` are the filter keys list_candidates accepts to drill into a bucket
+    (legacy rows — no recorded reason — bucket under LEGACY_REASON).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              coalesce(markers_matched->>'reason', %(legacy)s) AS reason,
+              markers_matched->>'verdict' AS verdict,
+              count(*) AS n
+            FROM property_identity_candidates
+            WHERE status = %(status)s
+            GROUP BY 1, 2
+            ORDER BY n DESC
+            """,
+            {"status": status, "legacy": LEGACY_REASON},
+        )
+        buckets = [
+            {"reason": r[0], "verdict": r[1], "count": int(r[2])}
+            for r in cur.fetchall()
+        ]
+    return {"data": {"status": status, "total": sum(b["count"] for b in buckets), "buckets": buckets}}
 
 
 def merge_candidate(
