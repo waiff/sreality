@@ -6,6 +6,41 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: App-wide keyset infinite scroll (Browse + Estimations + Watchdog)
+
+Replaced offset pagination with **keyset-paginated infinite scroll** on every scrolled list
+surface, built on one shared primitive. Offset was both a correctness and a latency bug here:
+the default Browse lane sorts by `last_seen_at DESC` — the column the scraper bumps every cycle
+— so under offset a bumped row jumps to the top, shifting every later window and silently
+**duplicating one row + skipping another** mid-scroll; and `OFFSET 50000` on the 317k-active-row
+`properties_public` view measured **3.7s**, over the anon 3s timeout. Keyset anchors each page to
+`(sort value, property_id)` — correct under mutation, and 14× faster (worst-case unfiltered page-2
+= 272ms, faster as you filter/scroll deeper). Validated end-to-end on prod: page-1 ∪ page-2 == the
+global top-48 exactly (0 overlap, 0 skip), incl. the NULLS-LAST tail crossing for nullable sorts.
+
+- **Shared primitive:** `lib/keyset.ts` (cursor + the PostgREST `.or()` predicate builder, incl.
+  the two-phase NULLS-LAST boundary, emitted only for nullable columns so NOT-NULL lanes keep
+  their index; 18 unit tests), `lib/useInfiniteList.ts` (React Query v5 `useInfiniteQuery` wrapper
+  — flatten + dedup by stable id, `firstPage`, rows-based poll), `components/InfiniteSentinel.tsx`
+  (IntersectionObserver; scroll root parameterized: cards = the overflow column, table/feeds =
+  viewport), `lib/useScrollRestoration.ts` (restores the cards column's inner scrollTop on
+  "open a card → Back").
+- **Browse:** cards + table both keyset over `properties_public`; cohort `total` fetched once per
+  filter set (head count), not per page; `?page` removed (cohort change → new key → reset to top).
+- **migration 198** — denormalized `mf_gross_yield_pct` + `mf_reference_rent_czk` onto `properties`
+  (the one join-sourced sort lane → now keyset-cheap; `recompute_mf_gross_yields()` mirrors them
+  from the representative listing) + composite `(col, id)` keyset indexes (default lane verified
+  sub-ms index scan).
+- **API feeds:** `GET /estimations` + `/notifications/dispatches` gained an opaque `cursor`
+  (`api/cursor.py`, ordered `(created_at|dispatched_at, id) DESC`, `next_cursor` in the response,
+  `total` on first page only; legacy offset path preserved). **migration 199** indexes both.
+  EstimationList + Watchdog use the shared primitive; Watchdog's mark-seen / kickoff now patch the
+  row in-place (scroll-preserving) instead of invalidating the whole cache.
+- **Not converted (deliberate):** Stats (aggregate), Collections / WatchdogManage / Datasets /
+  Health / Dedup (already load-everything or operator review queues).
+- **Next:** if PostgREST ever supports SQL row-value comparison, the unfiltered page-2 BitmapOr
+  (272ms) collapses to a bounded index range scan; until then it's well within budget.
+
 ### 2026-06: Dedup vision cost — async batch warm-up lane (50% off, recall-identical)
 
 The last recall-safe lever in the dedup-vision cost program (after the cross-source gate,
