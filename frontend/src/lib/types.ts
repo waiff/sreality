@@ -708,13 +708,18 @@ export interface EstimationListParams {
   source_kind?: SourceKind;
   limit?: number;
   offset?: number;
+  /* Keyset cursor (the prior page's next_cursor). Newest-first feed paged
+   * on (created_at, id) — dup/skip-free under live inserts. */
+  cursor?: string;
 }
 
 export interface EstimationListResponse {
   data: EstimationRun[];
-  total: number;
+  /* Cohort total — present on the first page only (null on cursor'd pages). */
+  total: number | null;
   limit: number;
   offset: number;
+  next_cursor: string | null;
 }
 
 /* POST /estimations/preview response (estimation-4). Routes any URL
@@ -1236,9 +1241,11 @@ export interface WatchdogDispatch {
 
 export interface WatchdogDispatchesResponse {
   data: WatchdogDispatch[];
-  total: number;
+  /* Cohort total — present on the first page only (null on cursor'd pages). */
+  total: number | null;
   limit: number;
   offset: number;
+  next_cursor: string | null;
 }
 
 export type WatchdogSeenFilter = 'all' | 'seen' | 'unseen';

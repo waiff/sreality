@@ -849,6 +849,7 @@ def list_estimations(
     ] | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description="Keyset cursor (next_cursor)"),
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
@@ -862,16 +863,20 @@ def list_estimations(
                 ids.append(int(part))
             except ValueError:
                 continue
-    return list_estimation_runs(
-        conn,
-        source=source,
-        status=status,
-        sreality_id=sreality_id,
-        sreality_ids=ids[:50] or None,
-        source_kind=source_kind,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        return list_estimation_runs(
+            conn,
+            source=source,
+            status=status,
+            sreality_id=sreality_id,
+            sreality_ids=ids[:50] or None,
+            source_kind=source_kind,
+            limit=limit,
+            offset=offset,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/listings/lookup")

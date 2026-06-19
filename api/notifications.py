@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from api.cursor import decode_cursor, encode_cursor
 from scraper import db as scraper_db
 
 if TYPE_CHECKING:
@@ -644,8 +645,9 @@ def list_dispatches(
     seen: Literal["all", "seen", "unseen"] = "all",
     limit: int = 50,
     offset: int = 0,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
-    """Return the notification feed.
+    """Return the notification feed, KEYSET-paginated on (dispatched_at, id).
 
     One row per `notification_dispatches` × `listings` join; rows that
     fired against multiple subscriptions are grouped client-side by the
@@ -653,6 +655,11 @@ def list_dispatches(
     canonical (dispatch, listing) pair so the table renders one line
     per dispatch and the UI dedups (sreality_id → list of subscriptions)
     when it wants the "fired by N watchdogs" presentation.
+
+    The feed is append-only and grows under the background matcher; keyset
+    on (dispatched_at, id) keeps a live scroll dup/skip-free (offset would
+    shift as new dispatches prepend). `id` is a uuid — fine as a
+    deterministic tiebreaker. `total` is computed once, on the first page.
     """
     where: list[str] = []
     params: dict[str, Any] = {}
@@ -663,7 +670,17 @@ def list_dispatches(
         where.append("d.seen_at IS NOT NULL")
     elif seen == "unseen":
         where.append("d.seen_at IS NULL")
-    where_sql = "WHERE " + " AND ".join(where) if where else ""
+    filter_sql = "WHERE " + " AND ".join(where) if where else ""
+
+    page_where = list(where)
+    if cursor is not None:
+        c_ts, c_id = decode_cursor(cursor)
+        page_where.append(
+            "(d.dispatched_at, d.id) < (%(c_ts)s::timestamptz, %(c_id)s::uuid)"
+        )
+        params["c_ts"] = c_ts
+        params["c_id"] = c_id
+    page_where_sql = "WHERE " + " AND ".join(page_where) if page_where else ""
 
     sql = (
         "SELECT d.id, d.subscription_id, s.name AS subscription_name, "
@@ -680,29 +697,41 @@ def list_dispatches(
         "JOIN notification_subscriptions s ON s.id = d.subscription_id "
         "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
         "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
-        f"{where_sql} "
-        "ORDER BY d.dispatched_at DESC "
+        f"{page_where_sql} "
+        "ORDER BY d.dispatched_at DESC, d.id DESC "
         "LIMIT %(limit)s OFFSET %(offset)s"
     )
-    count_sql = (
-        "SELECT count(*) FROM notification_dispatches d "
-        "JOIN notification_subscriptions s ON s.id = d.subscription_id "
-        f"{where_sql}"
-    )
-    list_params = {**params, "limit": limit, "offset": offset}
+    list_params = {**params, "limit": limit, "offset": 0 if cursor else offset}
 
     with conn.cursor() as cur:
         cur.execute(sql, list_params)
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description] if cur.description else []
-        cur.execute(count_sql, params)
-        total_row = cur.fetchone()
-    total = int(total_row[0]) if total_row else 0
+        total: int | None = None
+        if cursor is None and offset == 0:
+            count_params = {k: params[k] for k in params if k not in ("c_ts", "c_id")}
+            cur.execute(
+                "SELECT count(*) FROM notification_dispatches d "
+                "JOIN notification_subscriptions s ON s.id = d.subscription_id "
+                f"{filter_sql}",
+                count_params,
+            )
+            total_row = cur.fetchone()
+            total = int(total_row[0]) if total_row else 0
+
+    next_cursor: str | None = None
+    if len(rows) == limit and rows:
+        ts_idx = cols.index("dispatched_at")
+        id_idx = cols.index("id")
+        last = rows[-1]
+        next_cursor = encode_cursor([last[ts_idx].isoformat(), str(last[id_idx])])
+
     return {
         "data": [_dispatch_row_to_dict(cols, r) for r in rows],
         "total": total,
         "limit": limit,
         "offset": offset,
+        "next_cursor": next_cursor,
     }
 
 

@@ -125,16 +125,21 @@ def get_dispatches(
     seen: Literal["all", "seen", "unseen"] = "all",
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description="Keyset cursor (next_cursor)"),
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    return nf.list_dispatches(
-        conn,
-        subscription_id=subscription_id,
-        seen=seen,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        return nf.list_dispatches(
+            conn,
+            subscription_id=subscription_id,
+            seen=seen,
+            limit=limit,
+            offset=offset,
+            cursor=cursor,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/dispatches/{dispatch_id}/mark-seen")

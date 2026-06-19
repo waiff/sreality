@@ -22,15 +22,21 @@ export interface InfiniteListPage<TRow> {
   nextCursor?: unknown;
 }
 
-type RefetchInterval =
+/* Caller-facing poll decider: receives the flattened loaded rows so a feed
+ * can keep polling while any row is still pending/running, across ALL loaded
+ * pages (not just the first). Returns the interval ms, or false to stop. */
+type RefetchInterval<TRow> =
   | number
   | false
-  | ((query: { state: { data?: unknown } }) => number | false);
+  | ((rows: TRow[]) => number | false);
 
-export interface UseInfiniteListOptions<TRow> {
+export interface UseInfiniteListOptions<
+  TRow,
+  TPage extends InfiniteListPage<TRow> = InfiniteListPage<TRow>,
+> {
   queryKey: QueryKey;
   /* Receives the cursor for the page to load (null for the first page). */
-  queryFn: (cursor: unknown | null) => Promise<InfiniteListPage<TRow>>;
+  queryFn: (cursor: unknown | null) => Promise<TPage>;
   pageSize: number;
   getRowId: (row: TRow) => string | number;
   enabled?: boolean;
@@ -40,12 +46,18 @@ export interface UseInfiniteListOptions<TRow> {
    * which is what lets native/explicit scroll restoration land correctly).
    * Defaults to React Query's 5 min if unset. */
   gcTime?: number;
-  refetchInterval?: RefetchInterval;
+  refetchInterval?: RefetchInterval<TRow>;
 }
 
-export interface InfiniteListResult<TRow> {
+export interface InfiniteListResult<
+  TRow,
+  TPage extends InfiniteListPage<TRow> = InfiniteListPage<TRow>,
+> {
   rows: TRow[];
   loadedCount: number;
+  /* The first page object verbatim — lets a caller read page-level fields
+   * the flattened rows drop (e.g. a `total` the API returns once). */
+  firstPage: TPage | undefined;
   /* First page in flight with nothing yet to show (render a skeleton). */
   isLoading: boolean;
   isFetchingNextPage: boolean;
@@ -56,9 +68,12 @@ export interface InfiniteListResult<TRow> {
   refetch: () => void;
 }
 
-export function useInfiniteList<TRow>(
-  opts: UseInfiniteListOptions<TRow>,
-): InfiniteListResult<TRow> {
+export function useInfiniteList<
+  TRow,
+  TPage extends InfiniteListPage<TRow> = InfiniteListPage<TRow>,
+>(
+  opts: UseInfiniteListOptions<TRow, TPage>,
+): InfiniteListResult<TRow, TPage> {
   const {
     queryKey,
     queryFn,
@@ -70,18 +85,29 @@ export function useInfiniteList<TRow>(
     refetchInterval,
   } = opts;
 
+  /* Translate the rows-based poll decider into React Query's query-based
+   * one, flattening every loaded page so a row that finishes far up the
+   * feed still updates. */
+  const rqRefetchInterval =
+    typeof refetchInterval === 'function'
+      ? (q: { state: { data?: { pages?: TPage[] } } }) => {
+          const pages = q.state.data?.pages ?? [];
+          return refetchInterval(pages.flatMap((p) => p.rows));
+        }
+      : refetchInterval;
+
   const query = useInfiniteQuery({
     queryKey,
     queryFn: ({ pageParam }) => queryFn((pageParam as unknown) ?? null),
     initialPageParam: null as unknown,
-    getNextPageParam: (lastPage: InfiniteListPage<TRow>) =>
+    getNextPageParam: (lastPage: TPage) =>
       lastPage.rows.length < pageSize
         ? undefined
         : (lastPage.nextCursor ?? undefined),
     enabled,
     staleTime,
     gcTime,
-    refetchInterval: refetchInterval as never,
+    refetchInterval: rqRefetchInterval as never,
     placeholderData: keepPreviousData,
   });
 
@@ -114,6 +140,7 @@ export function useInfiniteList<TRow>(
   return {
     rows,
     loadedCount: rows.length,
+    firstPage: query.data?.pages?.[0] as TPage | undefined,
     isLoading: enabled && query.isLoading,
     isFetchingNextPage: query.isFetchingNextPage,
     hasNextPage: query.hasNextPage,
