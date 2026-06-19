@@ -1,8 +1,10 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ImageCarousel from '@/components/ImageCarousel';
+import InfiniteSentinel from '@/components/InfiniteSentinel';
+import Spinner from '@/components/Spinner';
+import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import {
-  CARD_PAGE_SIZE,
   sortToParam,
   type CardRow,
   type SortSpec,
@@ -20,9 +22,17 @@ import { listingPath } from '@/lib/listingUrl';
 interface Props {
   rows: CardRow[] | null;
   total: number | null;
-  page: number;
   sort: SortSpec;
   isLoading: boolean;
+  /* Infinite scroll: the next page is in flight, there are more pages, and
+   * the trigger to load them. The cohort total above drives the progress
+   * label; these drive the bottom sentinel. */
+  isFetchingNextPage: boolean;
+  hasNextPage: boolean;
+  onReachEnd: () => void;
+  /* Stable per-cohort key (filters + sort) used to save/restore the card
+   * column's scroll position across "open a card → Back". */
+  restorationKey: string;
   hasFilters: boolean;
   /* Truthy whenever the operator has narrowed by map area. Drives the
    * "0 in this map area — Show all" empty state. */
@@ -39,7 +49,6 @@ interface Props {
    * operator's own pointer) must not dim or scroll the very grid
    * they're sweeping. */
   hoverOrigin?: 'map' | 'list' | null;
-  onPage: (page: number) => void;
   onSort: (next: SortSpec) => void;
   onClearFilters: () => void;
   onClearBounds: () => void;
@@ -61,15 +70,17 @@ interface Props {
 export default function ListingCards({
   rows,
   total,
-  page,
   sort,
   isLoading,
+  isFetchingNextPage,
+  hasNextPage,
+  onReachEnd,
+  restorationKey,
   hasFilters,
   hasBounds,
   hoveredIds,
   onHover,
   hoverOrigin = null,
-  onPage,
   onSort,
   onClearFilters,
   onClearBounds,
@@ -83,6 +94,16 @@ export default function ListingCards({
   const showSkeleton = isLoading && rows == null;
   const isEmpty = !showSkeleton && rows != null && rows.length === 0;
 
+  /* The card column is an independently-scrolling fixed-height element
+   * (overflow-y-auto below); the infinite sentinel observes it as its root
+   * and scroll restoration saves/restores its scrollTop. */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useScrollRestoration(
+    scrollRef,
+    restorationKey,
+    !showSkeleton && rows != null && rows.length > 0,
+  );
+
   /* Map-origin hover: dim the rest of the grid only when the map is
    * pointing at something actually on this page — otherwise a far-off
    * cluster hover would grey the whole grid with nothing lit. */
@@ -93,10 +114,8 @@ export default function ListingCards({
   const mapHover = hoveredOnPage.length > 0;
   const firstHoveredId = mapHover ? hoveredOnPage[0].sreality_id : null;
 
-  const totalPages =
-    total != null && total > 0 ? Math.ceil(total / CARD_PAGE_SIZE) : 1;
-  const start = (page - 1) * CARD_PAGE_SIZE + 1;
-  const end = Math.min(start + (rows?.length ?? 0) - 1, total ?? 0);
+  /* "N of total" — N is what has accumulated so far via infinite scroll. */
+  const loaded = rows?.length ?? 0;
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -108,15 +127,14 @@ export default function ListingCards({
               ? '—'
               : total === 0
                 ? '0 listings'
-                : `${start.toLocaleString('cs-CZ')}–${end.toLocaleString('cs-CZ')} of ${total.toLocaleString('cs-CZ')}`}
+                : `${loaded.toLocaleString('cs-CZ')} of ${total.toLocaleString('cs-CZ')}`}
         </span>
         <div className="flex items-center gap-2 shrink-0">
           <SortDropdown sort={sort} onChange={onSort} />
-          <Pager page={page} totalPages={totalPages} onPage={onPage} />
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto pr-1">
         {showSkeleton && <SkeletonGrid />}
         {isEmpty && (
           <EmptyState
@@ -127,30 +145,36 @@ export default function ListingCards({
           />
         )}
         {!showSkeleton && rows && rows.length > 0 && (
-          <ul className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
-            {rows.map((r) => (
-              <li key={r.sreality_id}>
-                <Card
-                  r={r}
-                  hovered={hoveredIds.has(r.sreality_id)}
-                  dimmed={mapHover && !hoveredIds.has(r.sreality_id)}
-                  scrollOnHover={mapHover && r.sreality_id === firstHoveredId}
-                  onHover={onHover}
-                  mergeMode={mergeMode}
-                  selected={selectedPropertyIds.has(r.property_id)}
-                  onToggleSelect={onToggleSelect}
-                  estimate={estimates?.[r.sreality_id]}
-                  estimating={estimatingIds.has(r.sreality_id)}
-                  onEstimate={onEstimate}
-                />
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
+              {rows.map((r) => (
+                <li key={r.sreality_id}>
+                  <Card
+                    r={r}
+                    hovered={hoveredIds.has(r.sreality_id)}
+                    dimmed={mapHover && !hoveredIds.has(r.sreality_id)}
+                    scrollOnHover={mapHover && r.sreality_id === firstHoveredId}
+                    onHover={onHover}
+                    mergeMode={mergeMode}
+                    selected={selectedPropertyIds.has(r.property_id)}
+                    onToggleSelect={onToggleSelect}
+                    estimate={estimates?.[r.sreality_id]}
+                    estimating={estimatingIds.has(r.sreality_id)}
+                    onEstimate={onEstimate}
+                  />
+                </li>
+              ))}
+            </ul>
+            <InfiniteSentinel
+              onReach={onReachEnd}
+              hasNextPage={hasNextPage}
+              isFetchingNextPage={isFetchingNextPage}
+              loadedCount={loaded}
+              total={total}
+              rootRef={scrollRef}
+            />
+          </>
         )}
-      </div>
-
-      <div className="pt-3 flex items-center justify-end">
-        <Pager page={page} totalPages={totalPages} onPage={onPage} />
       </div>
     </div>
   );
@@ -494,27 +518,6 @@ function EstimateCorner({
   );
 }
 
-function Spinner() {
-  return (
-    <svg
-      className="animate-spin"
-      width="11"
-      height="11"
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden
-    >
-      <circle
-        cx="12" cy="12" r="9"
-        stroke="currentColor" strokeWidth="3" strokeOpacity="0.25"
-      />
-      <path
-        d="M21 12a9 9 0 0 0-9-9"
-        stroke="currentColor" strokeWidth="3" strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 /* -------------------------------------------------------------------------- */
 /* CardBadge — the building block of the metadata stack on the right margin of */
@@ -601,55 +604,6 @@ function SortDropdown({
         ))}
       </select>
     </label>
-  );
-}
-
-function Pager({
-  page,
-  totalPages,
-  onPage,
-}: {
-  page: number;
-  totalPages: number;
-  onPage: (p: number) => void;
-}) {
-  if (totalPages <= 1) return null;
-  return (
-    <div className="flex items-center gap-1">
-      <PagerButton onClick={() => onPage(Math.max(1, page - 1))} disabled={page <= 1}>
-        ‹
-      </PagerButton>
-      <span className="px-1 text-[0.7rem] text-[var(--color-ink-3)] tabular-nums">
-        {page} / {totalPages}
-      </span>
-      <PagerButton
-        onClick={() => onPage(Math.min(totalPages, page + 1))}
-        disabled={page >= totalPages}
-      >
-        ›
-      </PagerButton>
-    </div>
-  );
-}
-
-function PagerButton({
-  onClick,
-  disabled,
-  children,
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="w-7 h-7 inline-flex items-center justify-center rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm leading-none"
-    >
-      {children}
-    </button>
   );
 }
 
