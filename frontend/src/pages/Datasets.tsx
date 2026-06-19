@@ -34,6 +34,9 @@ import { PINNED_SLUGS, indexLabel } from '@/lib/cityIndexes';
 import DatasetMap, { METRICS, type DatasetMetric } from '@/components/DatasetMap';
 import CityPicker from '@/components/CityPicker';
 import { buildHoverData } from '@/lib/growthChoropleth';
+import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
+import { chipsToGeoArrays } from '@/lib/brokers';
+import type { DistrictChip } from '@/lib/filters';
 
 const METRIC_ORDER: DatasetMetric[] = ['rent_cagr_pct', 'sale_cagr_pct', 'yield_change_pp_pa'];
 const MIN_ACTIVE = 3;
@@ -143,6 +146,7 @@ export default function Datasets() {
   const [metric, setMetric] = useState<DatasetMetric>('rent_cagr_pct');
   const [from, setFrom] = useState(`${FIRST_YEAR}-01`);
   const [to, setTo] = useState(CUR_YM);
+  const [districts, setDistricts] = useState<DistrictChip[]>([]);
   const [showNew, setShowNew] = useState(false);
   const [showExpand, setShowExpand] = useState(false);
   const [chartOnHover, setChartOnHover] = useState(false);
@@ -226,6 +230,55 @@ export default function Datasets() {
     }
     return m;
   }, [obecTreeQ.data]);
+  // obec_id → its okres id + kraj id (STABLE admin ids), via the picker tree's
+  // parent_id walk — the lookup behind the location filter. These are the same
+  // admin_boundaries ids `/maps/resolve` returns for a chip, so a kraj/okres
+  // chip matches an obec's ancestor exactly (no name collisions).
+  const adminIdsByObec = useMemo(() => {
+    const nodes = obecTreeQ.data ?? [];
+    const byId = new Map(nodes.map((n) => [n.id, n] as const));
+    const okresId = new Map<number, number>();
+    const krajId = new Map<number, number>();
+    for (const n of nodes) {
+      if (n.level !== 'obec' || n.parent_id == null) continue;
+      const okres = byId.get(n.parent_id);
+      if (okres?.level !== 'okres') continue;
+      okresId.set(n.id, okres.id);
+      if (okres.parent_id != null && byId.get(okres.parent_id)?.level === 'kraj') {
+        krajId.set(n.id, okres.parent_id);
+      }
+    }
+    return { okresId, krajId };
+  }, [obecTreeQ.data]);
+
+  // The same shared helper Browse/Brokers use: split the chips into per-level
+  // stable-id sets, then keep an obec iff it (or its okres/kraj ancestor) is
+  // selected. Empty selection ⇒ keep everything (no filter).
+  const geo = useMemo(() => chipsToGeoArrays(districts), [districts]);
+  const loc = useMemo(() => ({
+    obec: new Set(geo.obecIds),
+    okres: new Set(geo.okresIds),
+    region: new Set(geo.regionIds),
+    active: geo.obecIds.length + geo.okresIds.length + geo.regionIds.length > 0,
+  }), [geo]);
+  const keepObec = useMemo(() => {
+    const { obec, okres, region, active } = loc;
+    const { okresId, krajId } = adminIdsByObec;
+    return (obecId: number): boolean => {
+      if (!active) return true;
+      if (obec.has(obecId)) return true;
+      const ok = okresId.get(obecId);
+      if (ok != null && okres.has(ok)) return true;
+      const kr = krajId.get(obecId);
+      return kr != null && region.has(kr);
+    };
+  }, [loc, adminIdsByObec]);
+
+  const filteredRows = useMemo(
+    () => (loc.active ? rows.filter((r) => keepObec(r.obec_id)) : rows),
+    [rows, loc.active, keepObec],
+  );
+
   const nameToCityId = useMemo(() => {
     const m = new Map<string, number>();
     for (const c of citiesQ.data ?? []) m.set(normName(c.name), c.city_id);
@@ -240,10 +293,10 @@ export default function Datasets() {
   // Growth rows + the checked-but-empty municipalities (as null-valued rows),
   // so the table lists "insufficient data" obce greyed out alongside real data.
   const combinedRows = useMemo(() => {
-    const withData = rows.map((r) => ({ ...r, noData: false }));
-    const dataIds = new Set(rows.map((r) => r.obec_id));
+    const withData = filteredRows.map((r) => ({ ...r, noData: false }));
+    const dataIds = new Set(filteredRows.map((r) => r.obec_id));
     const empties = (noDataQ.data ?? [])
-      .filter((n) => !dataIds.has(n.obec_id))
+      .filter((n) => !dataIds.has(n.obec_id) && keepObec(n.obec_id))
       .map((n) => ({
         obec_id: n.obec_id, locality_name: n.locality_name, geojson: '',
         sale_latest_price: null, sale_cagr_pct: null, sale_min_active: null,
@@ -251,7 +304,7 @@ export default function Datasets() {
         gross_yield_pct: null, yield_change_pp_pa: null, noData: true,
       }));
     return [...withData, ...empties];
-  }, [rows, noDataQ.data]);
+  }, [filteredRows, noDataQ.data, keepObec]);
 
   const enrichedRows: TableRow[] = useMemo(() => {
     const nameCount = new Map<string, number>();
@@ -330,11 +383,23 @@ export default function Datasets() {
   );
 
   const summary = useMemo(() => ({
-    rent: median(rows.map((r) => r.rent_cagr_pct ?? NaN)),
-    sale: median(rows.map((r) => r.sale_cagr_pct ?? NaN)),
-    yield: median(rows.map((r) => r.gross_yield_pct ?? NaN)),
-    count: rows.length,
-  }), [rows]);
+    rent: median(filteredRows.map((r) => r.rent_cagr_pct ?? NaN)),
+    sale: median(filteredRows.map((r) => r.sale_cagr_pct ?? NaN)),
+    yield: median(filteredRows.map((r) => r.gross_yield_pct ?? NaN)),
+    count: filteredRows.length,
+  }), [filteredRows]);
+
+  // Infopanel completeness counts, narrowed to the active location (so "X of N
+  // scraped" reads as coverage WITHIN the selected place, not the whole dataset).
+  const noDataInScope = useMemo(
+    () => (noDataQ.data ?? []).filter((n) => keepObec(n.obec_id)).length,
+    [noDataQ.data, keepObec],
+  );
+  const selectedInScope = useMemo(() => {
+    const ids = active?.obec_ids;
+    if (!ids) return null;
+    return loc.active ? ids.filter((id) => keepObec(id)).length : ids.length;
+  }, [active, loc.active, keepObec]);
 
   const activeSort: { col: string; dir: 'asc' | 'desc' } = sort ?? { col: metric, dir: 'desc' };
 
@@ -447,7 +512,7 @@ export default function Datasets() {
         />
       )}
 
-      {active && <FilterChips dataset={active} count={summary.count} noDataCount={noDataQ.data?.length ?? 0} />}
+      {active && <FilterChips dataset={active} count={summary.count} noDataCount={noDataInScope} selected={selectedInScope} />}
 
       {datasetsQ.isLoading ? (
         <p className="mt-10 text-sm text-[var(--color-ink-3)]">Loading datasets…</p>
@@ -455,14 +520,22 @@ export default function Datasets() {
         <EmptyDatasets />
       ) : (
         <>
-          <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3">
-            <WindowControl from={from} to={to} onFrom={setFrom} onTo={setTo} />
-            <div className="flex items-center gap-4">
-              <label className="inline-flex items-center gap-1.5 text-sm text-[var(--color-ink-2)] cursor-pointer">
-                <input type="checkbox" checked={chartOnHover} onChange={(e) => setChartOnHover(e.target.checked)} />
-                Chart on hover
-              </label>
-              <MetricToggle metric={metric} onChange={setMetric} />
+          <div className="mt-6 border border-[var(--color-rule)] rounded-[var(--radius-md)] bg-[var(--color-paper-2)] px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <WindowControl from={from} to={to} onFrom={setFrom} onTo={setTo} />
+              <div className="flex items-center gap-4">
+                <label className="inline-flex items-center gap-1.5 text-sm text-[var(--color-ink-2)] cursor-pointer">
+                  <input type="checkbox" checked={chartOnHover} onChange={(e) => setChartOnHover(e.target.checked)} />
+                  Chart on hover
+                </label>
+                <MetricToggle metric={metric} onChange={setMetric} />
+              </div>
+            </div>
+            <div className="mt-3 pt-3 border-t border-[var(--color-rule-soft)] flex items-start gap-2.5">
+              <span className="mt-2 shrink-0 text-xs uppercase tracking-[0.14em] text-[var(--color-ink-3)]">Location</span>
+              <div className="w-full sm:max-w-sm">
+                <LocationTypeahead value={districts} onChange={(n) => setDistricts(n ?? [])} />
+              </div>
             </div>
           </div>
 
@@ -473,12 +546,14 @@ export default function Datasets() {
           <div className="mt-6">
             {rows.length === 0 && !growthQ.isLoading ? (
               <EmptyData run={runQ.data ?? null} />
+            ) : loc.active && filteredRows.length === 0 ? (
+              <NoLocationMatch onClear={() => setDistricts([])} />
             ) : (
-              <DatasetMap rows={rows} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
+              <DatasetMap rows={filteredRows} metric={metric} chartOnHover={chartOnHover} hoverData={hoverData} />
             )}
           </div>
 
-          {rows.length > 0 && (
+          {rows.length > 0 && sortedRows.length > 0 && (
             <>
               <ColumnToggles
                 columns={allColumns}
@@ -705,7 +780,16 @@ const COND: Record<string, string> = {
 const CONSTR: Record<string, string> = { '5': 'panel', '2': 'cihla', '10': 'ostatní' };
 const OWN: Record<string, string> = { '1': 'osobní', '2': 'družstevní', '3': 'státní' };
 
-function FilterChips({ dataset, count, noDataCount }: { dataset: PriceStatDataset; count: number; noDataCount: number }) {
+function FilterChips({
+  dataset, count, noDataCount, selected,
+}: {
+  dataset: PriceStatDataset;
+  count: number;
+  noDataCount: number;
+  // Municipalities the dataset selects, narrowed to the active location filter
+  // (null = dataset uses the default "all standard cities" set, no obec_ids).
+  selected: number | null;
+}) {
   const chips: string[] = [];
   if (dataset.building_condition) chips.push(COND[dataset.building_condition] ?? `stav ${dataset.building_condition}`);
   if (dataset.building_type) chips.push(CONSTR[dataset.building_type] ?? `konstr. ${dataset.building_type}`);
@@ -716,7 +800,6 @@ function FilterChips({ dataset, count, noDataCount }: { dataset: PriceStatDatase
 
   // Coverage (not part of the definition): the scrape window.
   const window = dataset.start_ym && dataset.end_ym ? `${dataset.start_ym} → ${dataset.end_ym}` : null;
-  const selected = dataset.obec_ids?.length ?? null;
 
   return (
     <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-[var(--color-ink-3)]">
@@ -968,6 +1051,22 @@ function EmptyData({ run }: { run: PriceStatRun | null }) {
           It populates on the next <code>scrape_price_stats</code> run.
         </p>
       )}
+    </div>
+  );
+}
+
+function NoLocationMatch({ onClear }: { onClear: () => void }) {
+  return (
+    <div className="border border-dashed border-[var(--color-rule-strong)] rounded-[var(--radius-md)] p-8 text-center">
+      <p className="text-sm text-[var(--color-ink-2)]">
+        No municipalities in this dataset match the selected location.
+      </p>
+      <button
+        onClick={onClear}
+        className="mt-2 text-xs text-[var(--color-copper)] hover:underline"
+      >
+        Clear location filter
+      </button>
     </div>
   );
 }
