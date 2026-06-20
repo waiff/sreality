@@ -57,6 +57,7 @@ SELECT
     e.id AS estimation_id, e.estimate_kind AS estimation_kind,
     e.gross_yield_pct AS estimation_yield,
     (pp.property_id IS NOT NULL) AS in_pipeline,
+    pp.stage_id AS pipeline_stage_id,
     ps.key   AS pipeline_stage_key,
     ps.label AS pipeline_stage_label
 FROM req
@@ -127,6 +128,7 @@ def lookup_portal_listings(
         entry["pipeline"] = (
             {
                 "in_pipeline": bool(row["in_pipeline"]),
+                "stage_id": row["pipeline_stage_id"],
                 "stage_key": row["pipeline_stage_key"],
                 "stage_label": row["pipeline_stage_label"],
             }

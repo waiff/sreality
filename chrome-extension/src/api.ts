@@ -7,6 +7,7 @@ import type {
   ApiResult,
   EstimationRun,
   PipelineCardResult,
+  PipelineStage,
   PortalListing,
   PortalLookupItem,
   PortalLookupResponse,
@@ -154,4 +155,25 @@ export async function removePipelineCard(
   return request<PipelineCardResult>(`/pipeline/cards/${property_id}`, {
     method: 'DELETE',
   });
+}
+
+/* PATCH /pipeline/cards/:property_id — change the deal stage. The SAME audited
+ * write the SPA's PipelineToggle + the kanban use: it stamps `entered_stage_at`
+ * and logs a `moved` event to property_pipeline_events. Returns the moved card. */
+export async function movePipelineCard(
+  property_id: number,
+  stage_id: number,
+): Promise<ApiResult<PipelineCardResult>> {
+  return request<PipelineCardResult>(`/pipeline/cards/${property_id}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ stage_id }),
+  });
+}
+
+/* GET /pipeline/stages — the operator-curated stage list, to populate the stage
+ * `<select>`. Returns `{data:[...]}`; we unwrap to the array. */
+export async function listPipelineStages(): Promise<ApiResult<PipelineStage[]>> {
+  const res = await request<{ data: PipelineStage[] }>('/pipeline/stages');
+  if (!res.ok) return res;
+  return { ok: true, data: res.data.data };
 }
