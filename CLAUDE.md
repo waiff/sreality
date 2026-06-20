@@ -220,7 +220,9 @@ rules. Identify which one a task belongs to before you start.
   stays broad `https://*/*` for the background fetch. **Detail pages** get a floating
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
   deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
-  + an "Otevřít v aplikaci" deep-link to the SPA page
+  + a monitoring/collection toggle (rule #18) + **operator notes** (list existing + add a new
+  one via `GET`/`POST /properties/{id}/notes`, property-grain, the viewed advert recorded as
+  the note's `origin_listing_id`) + an "Otevřít v aplikaci" deep-link to the SPA page
   (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
   uses, negative for non-sreality portals) + subject facts; for sale apartments it ALSO
   shows the precomputed `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") with
@@ -674,6 +676,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     renamed or deleted) ships monitoring on. The "add to collection" affordance lives on the
     Browse card (a layers control ADJACENT to the pipeline funnel — rule #22 keeps the funnel the
     sole pipeline affordance), the listing-detail `CurationBlock`, and the Chrome-extension panel.**
+    **Adding notes is reachable from the Chrome-extension panel too** — it lists the property's
+    existing notes + an add box, writing through the SAME `POST /properties/{id}/notes` the
+    `CurationBlock` uses (the viewed advert's `sreality_id` as `origin_listing_id`); notes are
+    NOT batched into `POST /listings/lookup` (too heavy per index card) — the panel fetches them
+    lazily via `GET /properties/{id}/notes` on open. Tags are the one curation surface the
+    extension does not yet expose.
     Same no-hard-delete spirit as the rest of the data model.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`

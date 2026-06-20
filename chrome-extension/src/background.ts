@@ -4,11 +4,13 @@
  * post messages here; we route them to the api helpers. */
 
 import {
+  addNote,
   addPipelineCard,
   addToCollection,
   createEstimation,
   getEstimation,
   listCollections,
+  listNotes,
   listPipelineStages,
   lookupListings,
   movePipelineCard,
@@ -68,5 +70,9 @@ async function handleMessage(
       return addToCollection(message.collection_id, message.property_id);
     case 'remove_from_collection':
       return removeFromCollection(message.collection_id, message.property_id);
+    case 'list_notes':
+      return listNotes(message.property_id);
+    case 'add_note':
+      return addNote(message.property_id, message.body, message.origin_listing_id);
   }
 }

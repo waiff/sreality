@@ -499,6 +499,78 @@
 .btn-primary:hover { background: var(--copper-deep); }
 .btn-primary:disabled { background: var(--ink-4); cursor: wait; }
 
+/* ---- operator notes (per-property, rule #18) ------------------------ */
+
+.notes {
+  margin-top: 0.85rem;
+  padding: 0.7rem 0.75rem 0.75rem;
+  background: var(--bg-sunk);
+  border: 1px solid var(--rule);
+}
+
+.notes-eyebrow {
+  margin: 0 0 0.55rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--ink-3);
+}
+
+.notes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-height: 8.5rem;
+  overflow-y: auto;
+  margin-bottom: 0.55rem;
+}
+
+.note-item {
+  padding: 0.4rem 0.5rem;
+  background: var(--paper);
+  border: 1px solid var(--rule);
+}
+
+.note-body {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.note-date {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.6rem;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.note-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 2.6rem;
+  padding: 0.4rem 0.55rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.note-input:focus {
+  outline: none;
+  border-color: var(--copper);
+  box-shadow: 0 0 0 2px var(--copper-soft);
+}
+
+.note-input::placeholder { color: var(--ink-4); }
+
+.note-save { margin-top: 0.5rem; }
+
 /* ---- notes / states ------------------------------------------------- */
 
 .note {
