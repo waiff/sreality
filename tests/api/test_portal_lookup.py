@@ -40,6 +40,9 @@ def _mk_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, 
         "estimation_kind": None, "estimation_yield": None,
         "in_pipeline": False, "pipeline_stage_id": None,
         "pipeline_stage_key": None, "pipeline_stage_label": None,
+        # The SQL coalesces to an empty array (never NULL); the Python layer
+        # nulls it for no-property rows.
+        "collection_ids": [],
     }
     row.update(cols)
     return row
@@ -91,7 +94,8 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
                 estimation_id=99, estimation_kind="rent",
                 estimation_yield=Decimal("5.46"),
                 in_pipeline=True, pipeline_stage_id=3,
-                pipeline_stage_key="interested", pipeline_stage_label="Zájem"),
+                pipeline_stage_key="interested", pipeline_stage_label="Zájem",
+                collection_ids=[7, 9]),
         # bazos: found, NEGATIVE synthetic sreality_id, no MF, no estimation;
         # has a property but is NOT in the pipeline
         _mk_row("bazos", "220291221", True, sreality_id=-187691, property_id=777,
@@ -122,6 +126,7 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
         "in_pipeline": True, "stage_id": 3,
         "stage_key": "interested", "stage_label": "Zájem",
     }
+    assert sr["collection_ids"] == [7, 9]  # property-grain memberships
 
     bz = data[1]
     assert bz["found"] is True
@@ -133,6 +138,7 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
         "in_pipeline": False, "stage_id": None,
         "stage_key": None, "stage_label": None,
     }
+    assert bz["collection_ids"] == []  # has a property, in no collection
 
     idn = data[2]
     assert idn["found"] is False
@@ -140,6 +146,7 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     assert idn["latest_estimation"] is None
     assert idn["property_id"] is None
     assert idn["pipeline"] is None  # no property → nothing to bookmark
+    assert idn["collection_ids"] is None  # no property → null, not []
 
 
 def test_lookup_binds_one_value_pair_per_item() -> None:

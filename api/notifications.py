@@ -1484,7 +1484,8 @@ _MONITORED_CTE = (
     "         c.notify_channels "
     "  FROM collection_properties cp "
     "  JOIN collections c ON c.id = cp.collection_id AND c.monitoring_enabled = true "
-    "  JOIN properties p ON p.id = cp.property_id AND p.status = 'active'"
+    "  JOIN properties p ON p.id = cp.property_id AND p.status = 'active' "
+    "                   AND p.repr_listing_id IS NOT NULL"
     ")"
 )
 

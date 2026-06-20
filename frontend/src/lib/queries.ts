@@ -1394,6 +1394,30 @@ export const fetchPropertyCollectionIds = async (
   );
 };
 
+/* All (property_id → collection_ids) memberships in ONE read, shared (React
+ * Query dedupes the key) by every Browse-card collection control — the
+ * collection analogue of fetchPipelineMemberSet, so Browse fires one query
+ * instead of one-per-card. */
+export const fetchPropertyCollectionMemberSet = async (): Promise<
+  Map<number, number[]>
+> => {
+  const { data, error } = await supabase
+    .from('collection_properties_public')
+    .select('property_id, collection_id')
+    .range(0, 99999);
+  if (error) throw error;
+  const map = new Map<number, number[]>();
+  for (const r of (data ?? []) as Array<{
+    property_id: number;
+    collection_id: number;
+  }>) {
+    const arr = map.get(r.property_id);
+    if (arr) arr.push(r.collection_id);
+    else map.set(r.property_id, [r.collection_id]);
+  }
+  return map;
+};
+
 export const watchdogKeys = {
   all: ['watchdog'] as const,
   subscriptions: ['watchdog', 'subscriptions'] as const,
@@ -1478,6 +1502,7 @@ export const curationKeys = {
     ['curation', 'property-tags', property_id] as const,
   propertyCollections: (property_id: number) =>
     ['curation', 'property-collections', property_id] as const,
+  propertyCollectionMembers: ['curation', 'property-collection-members'] as const,
   propertyNotes: (property_id: number) =>
     ['curation', 'property-notes', property_id] as const,
   manualEstimates: (sreality_id: number) =>

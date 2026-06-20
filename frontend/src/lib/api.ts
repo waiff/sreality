@@ -1040,6 +1040,9 @@ export const deleteManualEstimate = (
 
 export interface ListWatchdogDispatchesParams {
   subscription_id?: string;
+  /* Scope to one producer. The Watchdog page passes 'watchdog' so the unified
+   * feed's collection_monitor rows (subscription_id NULL) don't leak onto it. */
+  source_kind?: NotificationSourceKind | 'all';
   seen?: WatchdogSeenFilter;
   limit?: number;
   offset?: number;

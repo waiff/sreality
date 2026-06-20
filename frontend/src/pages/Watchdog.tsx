@@ -61,11 +61,15 @@ export default function Watchdog() {
   const dispatches = useInfiniteList<WatchdogDispatch, WatchdogPage>({
     queryKey: watchdogKeys.dispatches({
       subscription_id: subscriptionId ?? undefined,
+      source_kind: 'watchdog',
       seen,
     }),
     queryFn: async (cursor) => {
       const resp = await listWatchdogDispatches({
         subscription_id: subscriptionId ?? undefined,
+        // This page is watchdog-only; the unified /notifications feed shows
+        // collection_monitor events (which carry no subscription_name).
+        source_kind: 'watchdog',
         seen,
         limit: PAGE_SIZE,
         cursor: (cursor as string | null) ?? undefined,

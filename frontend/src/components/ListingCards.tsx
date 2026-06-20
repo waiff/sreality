@@ -9,7 +9,7 @@ import { useScrollRestoration } from '@/lib/useScrollRestoration';
 import {
   curationKeys,
   fetchPipelineMemberSet,
-  fetchPropertyCollectionIds,
+  fetchPropertyCollectionMemberSet,
   pipelineKeys,
   sortToParam,
   type CardRow,
@@ -266,16 +266,20 @@ function CollectionSaveButton({ property_id }: { property_id: number }) {
     staleTime: 30_000,
     enabled: open,
   });
-  const membershipQ = useQuery({
-    queryKey: curationKeys.propertyCollections(property_id),
-    queryFn: () => fetchPropertyCollectionIds(property_id),
+  // One shared read across ALL cards (React Query dedupes the key), mirroring
+  // the pipeline BookmarkButton — avoids one anon query per card on Browse.
+  const membersQ = useQuery({
+    queryKey: curationKeys.propertyCollectionMembers,
+    queryFn: fetchPropertyCollectionMemberSet,
     staleTime: 30_000,
   });
 
-  const memberIds = new Set(membershipQ.data ?? []);
+  const memberIds = new Set(membersQ.data?.get(property_id) ?? []);
   const inAny = memberIds.size > 0;
 
   const invalidate = () => {
+    qc.invalidateQueries({ queryKey: curationKeys.propertyCollectionMembers });
+    // Keep the per-property key (the listing-detail CurationBlock) consistent.
     qc.invalidateQueries({
       queryKey: curationKeys.propertyCollections(property_id),
     });
