@@ -547,7 +547,7 @@ def test_match_once_uses_per_subscription_cursor() -> None:
         # Active subscriptions query
         (
             lambda s: "FROM notification_subscriptions WHERE is_active" in s,
-            [(sub_id, {"category_main": "byt", "category_type": "pronajem", "districts": ["Praha"]}, cursor_ts)],
+            [(sub_id, {"category_main": "byt", "category_type": "pronajem", "districts": ["Praha"]}, cursor_ts, ["email", "in_app"])],
             1,
         ),
         # Window upper-bound query
@@ -589,14 +589,18 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     assert "l.district ILIKE %(district_name_0)s" in sql
 
     # The 'new' dispatch INSERT writes the unified event shape: source_kind,
-    # a per-property dedupe_key, and ON CONFLICT on that key (migration 206).
-    insert_sql = next(
-        sql for sql, _ in conn.executed
+    # a per-property dedupe_key, ON CONFLICT on that key (migration 206), and the
+    # producer-stamped target_channels (migration 208) — the subscription's
+    # channels minus the always-implicit 'in_app'.
+    insert_sql, insert_params = next(
+        (sql, p) for sql, p in conn.executed
         if "INSERT INTO notification_dispatches" in sql
     )
     assert "'watchdog'" in insert_sql
     assert ":new:' || l.property_id::text" in insert_sql
     assert "ON CONFLICT (dedupe_key)" in insert_sql
+    assert "%(target_channels)s::text[]" in insert_sql
+    assert insert_params["target_channels"] == ["email"]
 
 
 def test_collection_monitor_noop_when_nothing_monitored() -> None:
@@ -682,7 +686,7 @@ def test_match_once_skips_subscription_with_no_listings() -> None:
         (lambda s: "FROM app_settings" in s, [], 0),
         (
             lambda s: "FROM notification_subscriptions WHERE is_active" in s,
-            [(sub_id, {}, cursor_ts)],
+            [(sub_id, {}, cursor_ts, [])],
             1,
         ),
         # Window query returns (NULL, 0) — no fresh listings.
@@ -716,9 +720,9 @@ def test_match_once_skips_invalid_filter_spec() -> None:
             lambda s: "FROM notification_subscriptions WHERE is_active" in s,
             [
                 # Invalid: partial spatial filter (no radius).
-                (bad_id, {"lat": 50.0, "lng": 14.0}, cursor_ts),
+                (bad_id, {"lat": 50.0, "lng": 14.0}, cursor_ts, []),
                 # Valid spec
-                (good_id, {}, cursor_ts),
+                (good_id, {}, cursor_ts, []),
             ],
             2,
         ),
@@ -760,7 +764,7 @@ def test_match_changes_once_emits_price_drop_for_matching_subs() -> None:
         # active subscriptions
         (
             lambda s: "FROM notification_subscriptions WHERE is_active" in s,
-            [(sub_id, {"category_main": "byt", "category_type": "pronajem"})],
+            [(sub_id, {"category_main": "byt", "category_type": "pronajem"}, ["email"])],
             1,
         ),
         # INSERT price_drop dispatches — 2 inserted
@@ -788,6 +792,10 @@ def test_match_changes_once_emits_price_drop_for_matching_subs() -> None:
     assert insert_params["drop_sids"] == [5001, 5002]
     assert insert_params["drop_prices"] == [4_900_000, 2_400_000]
     assert insert_params["drop_prevs"] == [5_000_000, 2_500_000]
+    # Producer-stamped delivery routing (migration 208) — subscription channels
+    # minus the always-implicit 'in_app'.
+    assert "%(target_channels)s::text[]" in insert_sql
+    assert insert_params["target_channels"] == ["email"]
 
 
 def test_match_changes_once_noops_when_no_recent_drops() -> None:

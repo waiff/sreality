@@ -667,7 +667,7 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     listings' property carries the tags, fixing the pre-202 bug where only the representative
     listing's tags were matched. Writes flow through the FastAPI service (property-grain routes
     `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
-    browser never writes directly. **Collections carry monitoring (Sprint C, migration 208):
+    browser never writes directly. **Collections carry monitoring (Sprint C, migration 211):
     `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
     rule #16) and `notify_channels` is its delivery-channel pick (folded into the dispatch's
     `target_channels`); a protected default "monitoring" collection (`is_system=true`, can't be

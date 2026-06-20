@@ -291,5 +291,5 @@ Sprint C is built on PR A's table. Where reality differs from the original sketc
 - **Merge reconciler unchanged** — PR A already registered `notification_dispatches`
   (with `collection_id`) in `OPERATOR_STATE_TABLES`; the collection-scoped
   `dedupe_key` means cross-collection rows never falsely collapse on a merge.
-- **Migrations:** 208 (collections monitoring + default collection), 209
+- **Migrations:** 211 (collections monitoring + default collection), 209
   (`change_kind` CHECK → 7 kinds), 210 (monitor cadence/window app_settings).

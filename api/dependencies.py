@@ -91,11 +91,15 @@ def _build_transports() -> dict[str, Any]:
     mirror for notification delivery). Each transport reads its own secret
     lazily and raises only on `send()`, so a missing key never fails boot.
 
-    PR 1 ships DARK: no transports registered, so the outbox is a no-op and
-    ChannelClient.send() raises a clear TransportError for any channel. PR 2
-    adds Resend (email); PR 3 adds Telegram — one new entry each.
+    Each transport reads its own secret lazily and raises only on `send()`, so
+    a missing key never fails boot; `is_configured()` lets a caller skip an
+    unconfigured channel. Email (Resend) is registered here from PR 2 — but it
+    only sends once `RESEND_API_KEY` + `EMAIL_FROM` are set AND a watchdog opts
+    into the 'email' channel (so `target_channels` is non-empty). PR 3 adds
+    Telegram as a second entry.
     """
-    return {}
+    from api.transports.email_resend import ResendEmail
+    return {"email": ResendEmail()}
 
 
 def get_transports() -> dict[str, Any]:
