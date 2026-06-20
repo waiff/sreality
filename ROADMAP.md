@@ -6,6 +6,31 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Notification email send-plumbing (Sprint N PR 2 — ships dark)
+
+The data + transport plumbing toward email alerts (builds on PR 1's ledger/transport).
+Sends nothing yet — no outbox task, and email is dark until Resend is provisioned AND a
+watchdog opts into the `email` channel; the always-on outbox is split into PR 3 so it
+lands paired with live Resend provisioning rather than blind.
+- Migration 208: `notification_subscriptions.channels text[] default '{}'` — per-watchdog
+  delivery-channel opt-in (a delivery preference, kept OUT of `filter_spec` so Browse↔Watchdog
+  filter lockstep is untouched).
+- `api/transports/email_resend.py` — the Resend transport (requests-only, single api-key POST;
+  `is_configured()` on `RESEND_API_KEY`+`EMAIL_FROM`; HTTP/network failures map to a `failed`
+  `SendResult`, never raise). Registered in `_build_transports`. Transactional/self-notification
+  scope only (Resend AUP forbids cold outreach + US data residency → outreach gets a separate EU
+  vendor later).
+- The matcher (`match_once` + `match_changes_once`) reads `channels` and stamps
+  `notification_dispatches.target_channels` (channels minus the implicit `in_app`); subscription
+  CRUD + the `/notifications/subscriptions` API carry `channels`.
+- Hermetic tests: Resend transport (mocked HTTP), `target_channels` stamping on both passes,
+  channels CRUD.
+
+**Next:** PR 3 — the outbox lifespan loop (drains `notification_dispatches × target_channels`
+via `ChannelClient`, gated to start only when a transport is configured) + `compose_notification_message`
++ recipient resolution + `SPA_BASE_URL` + the Delivery UI; operator provisions Resend
+(`RESEND_API_KEY`/`EMAIL_FROM` + SPF/DKIM/DMARC DNS). Then PR 4 Telegram, PR 5 outreach unification.
+
 ### 2026-06: Notification channel-delivery foundation (Sprint N PR 1 — ships dark)
 
 The delivery half of the unified-notifications work (builds on PR A's event model).

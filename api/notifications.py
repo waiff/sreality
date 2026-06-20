@@ -506,10 +506,11 @@ class SubscriptionRow:
     is_active: bool
     created_at: str
     updated_at: str
+    channels: list[str]
     dispatch_count: int
 
 
-_SUB_COLS = "id, name, filter_spec, is_active, created_at, updated_at"
+_SUB_COLS = "id, name, filter_spec, is_active, created_at, updated_at, channels"
 
 
 def _row_to_sub(row: tuple[Any, ...], dispatch_count: int) -> SubscriptionRow:
@@ -520,6 +521,7 @@ def _row_to_sub(row: tuple[Any, ...], dispatch_count: int) -> SubscriptionRow:
         is_active=bool(row[3]),
         created_at=row[4].isoformat() if row[4] else "",
         updated_at=row[5].isoformat() if row[5] else "",
+        channels=list(row[6]) if row[6] else [],
         dispatch_count=dispatch_count,
     )
 
@@ -570,12 +572,14 @@ def create_subscription(
     name: str,
     filter_spec: WatchdogFilterSpec,
     is_active: bool = True,
+    channels: list[str] | None = None,
 ) -> dict[str, Any]:
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO notification_subscriptions (name, filter_spec, is_active) "
-            "VALUES (%s, %s::jsonb, %s) RETURNING id",
-            (name, json.dumps(filter_spec.model_dump()), is_active),
+            "INSERT INTO notification_subscriptions "
+            "  (name, filter_spec, is_active, channels) "
+            "VALUES (%s, %s::jsonb, %s, %s::text[]) RETURNING id",
+            (name, json.dumps(filter_spec.model_dump()), is_active, channels or []),
         )
         row = cur.fetchone()
     assert row is not None
@@ -589,6 +593,7 @@ def update_subscription(
     name: str | None = None,
     filter_spec: WatchdogFilterSpec | None = None,
     is_active: bool | None = None,
+    channels: list[str] | None = None,
 ) -> dict[str, Any] | None:
     sets: list[str] = []
     params: list[Any] = []
@@ -601,6 +606,9 @@ def update_subscription(
     if is_active is not None:
         sets.append("is_active = %s")
         params.append(is_active)
+    if channels is not None:
+        sets.append("channels = %s::text[]")
+        params.append(channels)
     if not sets:
         return get_subscription(conn, subscription_id)
     params.append(subscription_id)
@@ -1145,7 +1153,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, filter_spec, last_matched_first_seen_at "
+            "SELECT id, filter_spec, last_matched_first_seen_at, channels "
             "FROM notification_subscriptions "
             "WHERE is_active = true"
         )
@@ -1155,7 +1163,7 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     total_listings_in_window = 0
     cursors_advanced = 0
 
-    for sub_id, raw_spec, cursor_ts in sub_rows:
+    for sub_id, raw_spec, cursor_ts, channels in sub_rows:
         try:
             spec = WatchdogFilterSpec(**(raw_spec or {}))
         except Exception as exc:  # noqa: BLE001 — bad spec, skip but keep loop alive
@@ -1207,14 +1215,19 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
                 **params,
                 "upper": upper,
                 "subscription_id": str(sub_id),
+                # Delivery routing stamped on the event for the outbox; in_app is
+                # implicit (the feed reads the row), so it's never in target_channels.
+                "target_channels": [c for c in (channels or []) if c != "in_app"],
             }
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO notification_dispatches "
                     "  (subscription_id, source_kind, property_id, sreality_id, "
-                    "   change_kind, status, channel, trigger_price_czk, dedupe_key) "
+                    "   change_kind, status, channel, trigger_price_czk, "
+                    "   target_channels, dedupe_key) "
                     "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
                     "       'new', 'sent', 'in_app', l.price_czk, "
+                    "       %(target_channels)s::text[], "
                     "       'wd:' || %(subscription_id)s || ':new:' || l.property_id::text "
                     "FROM properties_public l "
                     f"WHERE {' AND '.join(insert_where)} "
@@ -1329,13 +1342,13 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
 
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, filter_spec FROM notification_subscriptions "
+            "SELECT id, filter_spec, channels FROM notification_subscriptions "
             "WHERE is_active = true"
         )
         sub_rows = cur.fetchall()
 
     total_inserted = 0
-    for sub_id, raw_spec in sub_rows:
+    for sub_id, raw_spec, channels in sub_rows:
         try:
             spec = WatchdogFilterSpec(**(raw_spec or {}))
         except Exception as exc:  # noqa: BLE001 — bad spec, skip but keep loop alive
@@ -1353,6 +1366,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
             params["drop_sids"] = drop_sids
             params["drop_prices"] = drop_prices
             params["drop_prevs"] = drop_prevs
+            params["target_channels"] = [c for c in (channels or []) if c != "in_app"]
             with conn.cursor() as cur:
                 # One dispatch per (matching property x in-window drop snapshot).
                 # The unnest JOIN restricts to dropped properties; the spec WHERE
@@ -1360,10 +1374,10 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
                 cur.execute(
                     "INSERT INTO notification_dispatches "
                     "  (subscription_id, source_kind, property_id, sreality_id, "
-                    "   change_kind, status, channel, "
+                    "   change_kind, status, channel, target_channels, "
                     "   trigger_snapshot_id, trigger_price_czk, prev_price_czk, dedupe_key) "
                     "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
-                    "       'price_drop', 'sent', 'in_app', "
+                    "       'price_drop', 'sent', 'in_app', %(target_channels)s::text[], "
                     "       d.snapshot_id, d.price_czk, d.prev_price, "
                     "       'wd:' || %(subscription_id)s || ':price_drop:' || d.snapshot_id::text "
                     "FROM properties_public l "
