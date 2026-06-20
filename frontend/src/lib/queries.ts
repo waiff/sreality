@@ -1402,6 +1402,14 @@ export const watchdogKeys = {
     ['watchdog', 'dispatches', params] as const,
 };
 
+/* Unified notifications feed (watchdog matches + collection-monitor events). */
+export const notificationKeys = {
+  all: ['notifications'] as const,
+  feed: (params: Record<string, unknown>) =>
+    ['notifications', 'feed', params] as const,
+  unreadCount: ['notifications', 'unread-count'] as const,
+};
+
 export const filterPresetKeys = {
   all: ['filter-presets'] as const,
 };
