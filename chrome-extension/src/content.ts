@@ -832,18 +832,33 @@ async function onMoveStage(stageId: number): Promise<void> {
 
 /* The operator-curated stage list, loaded once per page and cached at module
  * scope (stages change rarely — same staleness posture as the SPA's 60s cache).
- * Reused across panel re-opens so changing cards never re-fetches. */
+ * Reused across panel re-opens so changing cards never re-fetches. A transient
+ * failure retries a few times (bounded) so a single network blip can't strip
+ * stage-changing for the page view; a persistent failure leaves the select on its
+ * current-stage fallback and self-heals on the next panel open. */
 let cachedStages: PipelineStage[] | null = null;
+let stagesLoading = false;
 
 async function loadStages(): Promise<void> {
   if (cachedStages != null) {
     if (state.stages == null) setState((prev) => ({ ...prev, stages: cachedStages }));
     return;
   }
-  const res = await call<PipelineStage[]>({ type: 'list_pipeline_stages' });
-  if (!res.ok) return;  // the select falls back to the single current stage
-  cachedStages = res.data;
-  setState((prev) => ({ ...prev, stages: cachedStages }));
+  if (stagesLoading) return;  // a load is already in flight — dedupe across opens
+  stagesLoading = true;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await call<PipelineStage[]>({ type: 'list_pipeline_stages' });
+      if (res.ok) {
+        cachedStages = res.data;
+        setState((prev) => ({ ...prev, stages: cachedStages }));
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1500));  // transient blip → back off + retry
+    }
+  } finally {
+    stagesLoading = false;
+  }
 }
 
 /* Mounts/refreshes the floating panel for one listing. Used by the detail-page
