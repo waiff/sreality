@@ -1125,8 +1125,8 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
 
     Cheap to call directly — used by both the lifespan loop and the
     operator-facing "run matcher now" button. Idempotent against the
-    (subscription_id, property_id, change_kind) UNIQUE constraint;
-    emits change_kind='new'.
+    `dedupe_key` UNIQUE (`wd:{sub}:new:{property_id}` — once ever per
+    property); emits change_kind='new'.
 
     Property grain (Slice 2b): the matcher walks `properties_public`, so a
     property listed on several portals fires once, not once per source. The
@@ -1211,13 +1211,14 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO notification_dispatches "
-                    "  (subscription_id, property_id, sreality_id, "
-                    "   change_kind, status, channel) "
-                    "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
-                    "       'new', 'sent', 'in_app' "
+                    "  (subscription_id, source_kind, property_id, sreality_id, "
+                    "   change_kind, status, channel, trigger_price_czk, dedupe_key) "
+                    "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
+                    "       'new', 'sent', 'in_app', l.price_czk, "
+                    "       'wd:' || %(subscription_id)s || ':new:' || l.property_id::text "
                     "FROM properties_public l "
                     f"WHERE {' AND '.join(insert_where)} "
-                    "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
+                    "ON CONFLICT (dedupe_key) DO NOTHING",
                     insert_params,
                 )
                 total_inserted += cur.rowcount or 0
@@ -1249,21 +1250,22 @@ def match_once(conn: "psycopg.Connection") -> dict[str, int]:
     }
 
 
-def _recent_price_drop_property_ids(
+def _recent_price_drops(
     conn: "psycopg.Connection", *, window_days: int,
-) -> list[int]:
-    """Property ids whose combined snapshot history shows a price decrease
-    whose later snapshot landed inside the window.
+) -> list[tuple[int, int, int, int]]:
+    """Per-snapshot price decreases observed inside the window.
 
-    The window function runs over the full per-property price series (so the
-    `prev` of an in-window snapshot is correct even if it predates the
-    window), but the candidate set is pre-narrowed to properties touched in
-    the window so the scan stays bounded.
+    Returns one `(property_id, snapshot_id, price_czk, prev_price_czk)` tuple
+    PER in-window drop step — not one per property — so each genuine price cut
+    is its own notification event (the per-snapshot dedup grain). The window
+    function runs over the full per-property price series (so `prev` is correct
+    even when it predates the window); the candidate set is pre-narrowed to
+    properties touched in the window so the scan stays bounded.
     """
     with conn.cursor() as cur:
         cur.execute(
             "WITH steps AS ("
-            "  SELECT c.property_id, s.scraped_at, s.price_czk, "
+            "  SELECT c.property_id, s.id AS snapshot_id, s.scraped_at, s.price_czk, "
             "         lag(s.price_czk) OVER w AS prev "
             "  FROM listing_snapshots s "
             "  JOIN listings c ON c.sreality_id = s.sreality_id "
@@ -1276,12 +1278,16 @@ def _recent_price_drop_property_ids(
             "    ) "
             "  WINDOW w AS (PARTITION BY c.property_id ORDER BY s.scraped_at, s.id)"
             ") "
-            "SELECT DISTINCT property_id FROM steps "
+            "SELECT property_id, snapshot_id, price_czk, prev FROM steps "
             "WHERE prev IS NOT NULL AND price_czk < prev "
-            "  AND scraped_at > now() - %(win)s::interval",
+            "  AND scraped_at > now() - %(win)s::interval "
+            "ORDER BY property_id, snapshot_id",
             {"win": f"{window_days} days"},
         )
-        return [int(r[0]) for r in cur.fetchall()]
+        return [
+            (int(r[0]), int(r[1]), int(r[2]), int(r[3]))
+            for r in cur.fetchall()
+        ]
 
 
 def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
@@ -1290,27 +1296,36 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
     Emits `change_kind='price_drop'` dispatches for properties that had a
     price decrease observed within the lookback window
     (`notifications_price_drop_window_days`, default 2) AND match an active
-    subscription's spec. Deduped on (subscription_id, property_id,
-    change_kind), so a property fires `price_drop` at most once per
-    subscription. Reuses `_build_match_clauses` against properties_public so
-    Browse / Watchdog stay in lockstep on what every filter means.
+    subscription's spec. Dedup grain is PER-SNAPSHOT (`dedupe_key` =
+    `wd:{sub}:price_drop:{snapshot_id}`): each genuine price cut is its own
+    event, so a property that keeps dropping fires once per drop — re-scans of
+    the same window stay idempotent because the snapshot id is stable. Each
+    dispatch carries its trigger provenance (snapshot id + new/previous price)
+    so "why was I pinged" survives latest-wins. Reuses `_build_match_clauses`
+    against properties_public so Browse / Watchdog stay in lockstep on what
+    every filter means.
 
     Distinct from `match_once` (`change_kind='new'`, fires on newly-seen
     properties via the first_seen_at cursor): this fires on EXISTING
     properties that change, so it has no cursor — the window bounds the scan
-    and the UNIQUE constraint makes re-scans idempotent. Meant to run on a
-    ~daily cadence; the matcher loop gates it.
+    and the dedupe_key makes re-scans idempotent. Meant to run on a ~daily
+    cadence; the matcher loop gates it.
     """
     window_days = _read_int_setting(
         conn, "notifications_price_drop_window_days", default=2,
     )
-    drop_ids = _recent_price_drop_property_ids(conn, window_days=window_days)
-    if not drop_ids:
+    drops = _recent_price_drops(conn, window_days=window_days)
+    if not drops:
         return {
             "subscriptions_evaluated": 0,
             "price_drops_in_window": 0,
             "changes_inserted": 0,
         }
+
+    drop_pids = [d[0] for d in drops]
+    drop_sids = [d[1] for d in drops]
+    drop_prices = [d[2] for d in drops]
+    drop_prevs = [d[3] for d in drops]
 
     with conn.cursor() as cur:
         cur.execute(
@@ -1334,17 +1349,31 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
             where, params = _build_match_clauses(spec)
             joined_where = " AND ".join(where) if where else "true"
             params["subscription_id"] = str(sub_id)
-            params["drop_ids"] = drop_ids
+            params["drop_pids"] = drop_pids
+            params["drop_sids"] = drop_sids
+            params["drop_prices"] = drop_prices
+            params["drop_prevs"] = drop_prevs
             with conn.cursor() as cur:
+                # One dispatch per (matching property x in-window drop snapshot).
+                # The unnest JOIN restricts to dropped properties; the spec WHERE
+                # matches against current property state (lockstep with Browse).
                 cur.execute(
                     "INSERT INTO notification_dispatches "
-                    "  (subscription_id, property_id, sreality_id, "
-                    "   change_kind, status, channel) "
-                    "SELECT %(subscription_id)s, l.property_id, l.sreality_id, "
-                    "       'price_drop', 'sent', 'in_app' "
+                    "  (subscription_id, source_kind, property_id, sreality_id, "
+                    "   change_kind, status, channel, "
+                    "   trigger_snapshot_id, trigger_price_czk, prev_price_czk, dedupe_key) "
+                    "SELECT %(subscription_id)s, 'watchdog', l.property_id, l.sreality_id, "
+                    "       'price_drop', 'sent', 'in_app', "
+                    "       d.snapshot_id, d.price_czk, d.prev_price, "
+                    "       'wd:' || %(subscription_id)s || ':price_drop:' || d.snapshot_id::text "
                     "FROM properties_public l "
-                    f"WHERE l.property_id = ANY(%(drop_ids)s) AND {joined_where} "
-                    "ON CONFLICT (subscription_id, property_id, change_kind) DO NOTHING",
+                    "JOIN unnest("
+                    "       %(drop_pids)s::bigint[], %(drop_sids)s::bigint[], "
+                    "       %(drop_prices)s::int[], %(drop_prevs)s::int[]"
+                    "     ) AS d(property_id, snapshot_id, price_czk, prev_price) "
+                    "  ON d.property_id = l.property_id "
+                    f"WHERE {joined_where} "
+                    "ON CONFLICT (dedupe_key) DO NOTHING",
                     params,
                 )
                 total_inserted += cur.rowcount or 0
@@ -1357,7 +1386,7 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
 
     return {
         "subscriptions_evaluated": len(sub_rows),
-        "price_drops_in_window": len(drop_ids),
+        "price_drops_in_window": len(drops),
         "changes_inserted": total_inserted,
     }
 

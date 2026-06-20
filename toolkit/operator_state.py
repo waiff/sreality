@@ -31,7 +31,18 @@ OPERATOR_STATE_TABLES: list[tuple[str, list[str], str]] = [
     ("collection_properties", ["collection_id"], "set"),
     ("property_tags", ["tag_id"], "set"),
     ("property_notes", [], "append"),
-    ("notification_dispatches", ["subscription_id", "change_kind"], "set"),
+    # notification_dispatches is the unified event table (migration 206). Its
+    # per-event identity spans BOTH sources (subscription_id XOR collection_id,
+    # each nullable) and the per-snapshot change grain (trigger_snapshot_id,
+    # NULL for 'new'), so the merge-collapse key includes all four and uses
+    # NULL-safe equality below: re-pointing two properties' 'new' rows for one
+    # subscription collapses to one, while their distinct price_drop snapshots
+    # are each preserved.
+    (
+        "notification_dispatches",
+        ["subscription_id", "collection_id", "change_kind", "trigger_snapshot_id"],
+        "set",
+    ),
 ]
 
 
@@ -41,7 +52,13 @@ def carry_operator_state_on_merge(
     """Re-point every property-anchored operator-state row retired -> survivor."""
     for table, dedup_cols, shape in OPERATOR_STATE_TABLES:
         if shape == "set" and dedup_cols:
-            join = " AND ".join(f"s.{c} = r.{c}" for c in dedup_cols)
+            # NULL-safe equality: dedup cols are nullable on the unified
+            # notification_dispatches (a NULL must collapse against a NULL, which
+            # plain `=` never does). Equivalent to `=` for the non-null cols of
+            # the other set tables.
+            join = " AND ".join(
+                f"s.{c} IS NOT DISTINCT FROM r.{c}" for c in dedup_cols
+            )
             cur.execute(
                 f"DELETE FROM {table} r "
                 f"WHERE r.property_id = %(retired)s AND EXISTS ("
