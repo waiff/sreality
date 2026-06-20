@@ -7,21 +7,23 @@ across **every portal we scrape** (sreality, bazos, bezrealitky, idnes,
 maxima, remax, mmreality, ceskereality).
 
 - **Detail pages** get a floating panel (closed shadow root). For **any**
-  listing we have, it shows a **"Přidat do pipeline"** deal-pipeline bookmark
-  toggle + an **"Otevřít v aplikaci"** deep-link to that listing's page in our
+  listing we have, it shows a **deal-pipeline control** (bookmark, then change
+  stage / remove) + an **"Otevřít v aplikaci"** deep-link to that listing's page in our
   app (`/listing/{sreality_id}`) plus its subject facts. For **apartments for
   sale** it additionally shows the Výnos MF headline + MF reference rent, with a
   comparables-based estimation as the deeper tool / fallback. (MF + estimation
   are gated to byt+prodej; the bookmark + app link + facts are not.) Listings
   not in our DB show a short "není v databázi" note.
-  - The **pipeline bookmark** is property-grain (the deal pipeline, rule #22):
-    clicking it inserts the listing's property at the pipeline's entry stage
-    ("Zájem"), the same as the SPA's Browse-card ★ / listing-detail toggle. It
-    flips to a filled pill showing the current stage; clicking again removes it.
-    Writes go through the same bearer-gated `POST/DELETE /pipeline/cards` the
-    SPA uses; membership comes back on the `POST /listings/lookup` response, so
-    the toggle already knows its state. Hidden only while a freshly-scraped
-    listing has no property yet (a few minutes).
+  - The **pipeline control** is property-grain (the deal pipeline, rule #22),
+    the same as the SPA's listing-detail control. Out of pipeline → a
+    **"Přidat do pipeline"** button that inserts the property at the entry stage.
+    In pipeline → a pill with a stage **`<select>`** (change the deal stage) and a
+    **`✕`** (remove). Writes go through the same bearer-gated
+    `POST/DELETE /pipeline/cards` (bookmark/remove) + `PATCH /pipeline/cards/{id}`
+    (change stage — stamps `entered_stage_at`, logs a `moved` event) the SPA uses;
+    membership (incl. the current `stage_id`) comes back on the
+    `POST /listings/lookup` response and the stage list from `GET /pipeline/stages`.
+    Hidden only while a freshly-scraped listing has no property yet (a few minutes).
 - **Index / search pages** get a small per-card badge: `Výnos MF X.X %` when
   we have it, otherwise a clickable **Odhadnout výnos** badge that runs one
   on-demand estimation by that card's own URL.

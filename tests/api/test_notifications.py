@@ -583,6 +583,16 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     assert "district_ctx_0" not in params  # null context = no narrow
     assert "l.district ILIKE %(district_name_0)s" in sql
 
+    # The 'new' dispatch INSERT writes the unified event shape: source_kind,
+    # a per-property dedupe_key, and ON CONFLICT on that key (migration 206).
+    insert_sql = next(
+        sql for sql, _ in conn.executed
+        if "INSERT INTO notification_dispatches" in sql
+    )
+    assert "'watchdog'" in insert_sql
+    assert ":new:' || l.property_id::text" in insert_sql
+    assert "ON CONFLICT (dedupe_key)" in insert_sql
+
 
 def test_match_once_skips_subscription_with_no_listings() -> None:
     """An empty window (no listings past the cursor) is the steady
@@ -656,15 +666,20 @@ from api.notifications import match_changes_once
 
 
 def test_match_changes_once_emits_price_drop_for_matching_subs() -> None:
-    """The change matcher resolves recently-dropped property ids once, then
-    fires a `price_drop` dispatch per matching active subscription, scoped to
-    those ids and deduped by the (sub, property, change_kind) constraint."""
+    """The change matcher resolves recent per-snapshot price drops once, then
+    fires a `price_drop` dispatch per (matching subscription x drop snapshot),
+    deduped by the per-snapshot dedupe_key so each genuine cut is its own
+    event. Provenance (snapshot id + new/prev price) rides the unnest join."""
     sub_id = UUID("12121212-1212-1212-1212-121212121212")
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         # window-days app_settings read → default
         (lambda s: "FROM app_settings" in s, [], 0),
-        # recent price-drop property ids
-        (lambda s: "SELECT DISTINCT property_id FROM steps" in s, [(101,), (102,)], 0),
+        # recent price-drop steps: (property_id, snapshot_id, price, prev)
+        (
+            lambda s: "FROM steps" in s,
+            [(101, 5001, 4_900_000, 5_000_000), (102, 5002, 2_400_000, 2_500_000)],
+            0,
+        ),
         # active subscriptions
         (
             lambda s: "FROM notification_subscriptions WHERE is_active" in s,
@@ -687,16 +702,22 @@ def test_match_changes_once_emits_price_drop_for_matching_subs() -> None:
         if "INSERT INTO notification_dispatches" in sql
     )
     assert "'price_drop'" in insert_sql
-    assert "l.property_id = ANY(%(drop_ids)s)" in insert_sql
-    assert "ON CONFLICT (subscription_id, property_id, change_kind)" in insert_sql
-    assert insert_params["drop_ids"] == [101, 102]
+    # Per-snapshot dedup + the unnest provenance join replace the old
+    # ANY(drop_ids) + composite ON CONFLICT.
+    assert "ON CONFLICT (dedupe_key)" in insert_sql
+    assert ":price_drop:' || d.snapshot_id::text" in insert_sql
+    assert "JOIN unnest(" in insert_sql
+    assert insert_params["drop_pids"] == [101, 102]
+    assert insert_params["drop_sids"] == [5001, 5002]
+    assert insert_params["drop_prices"] == [4_900_000, 2_400_000]
+    assert insert_params["drop_prevs"] == [5_000_000, 2_500_000]
 
 
 def test_match_changes_once_noops_when_no_recent_drops() -> None:
     """No recent price drops → no subscription scan, no inserts."""
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (lambda s: "FROM app_settings" in s, [], 0),
-        (lambda s: "SELECT DISTINCT property_id FROM steps" in s, [], 0),
+        (lambda s: "FROM steps" in s, [], 0),
     ]
     conn = _FakeConn(script)
 

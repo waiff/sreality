@@ -18,6 +18,7 @@ import type {
   ApiResult,
   EstimationRun,
   PipelineCardResult,
+  PipelineStage,
   PortalListing,
   YieldScenarioUpdate,
 } from './types';
@@ -58,8 +59,10 @@ interface PanelState {
   price: number | null;
   /* True while an estimation is being created/polled. */
   busy: boolean;
-  /* True while a pipeline add/remove is in flight (disables the toggle). */
+  /* True while a pipeline add/remove/move is in flight (disables the control). */
   pipelineBusy: boolean;
+  /* Operator-curated stage list for the stage `<select>` (null = not loaded). */
+  stages: PipelineStage[] | null;
   errorMessage: string | null;
 }
 
@@ -332,30 +335,74 @@ function mountPanel(): {
     container.appendChild(a);
   }
 
-  /* Deal-pipeline bookmark for the listing's property (rule #22). Same contract
-   * as the SPA's PipelineToggle / Browse-card ★: out of pipeline → a copper
-   * "Přidat do pipeline"; in pipeline → a filled pill showing the stage label;
-   * click toggles add/remove. Property-grain — shown for ANY listing we have a
-   * property for (not gated to sale apartments), hidden during the brief window
-   * a freshly-scraped row has no property_id yet. */
+  /* Deal-pipeline control for the listing's property (rule #22). Mirrors the
+   * SPA's PipelineToggle: out of pipeline → a copper "Přidat do pipeline" button
+   * (add → entry stage); in pipeline → a filled pill with a stage `<select>` (the
+   * app's single-choice control — change stage via the SAME audited move PATCH)
+   * + a `✕` to remove. Property-grain — shown for ANY listing we have a property
+   * for, hidden during the brief window a freshly-scraped row has no property_id. */
   function renderPipelineToggle(container: HTMLElement, state: PanelState): void {
     const l = state.listing;
     if (l == null || !l.found || l.property_id == null) return;
     const inPipe = l.pipeline?.in_pipeline ?? false;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'pipeline-toggle' + (inPipe ? ' pipeline-toggle--in' : '');
-    btn.disabled = state.pipelineBusy;
-    btn.setAttribute('aria-pressed', String(inPipe));
-    btn.title = inPipe ? 'Odebrat z pipeline' : 'Přidat do pipeline';
-    btn.innerHTML = funnelIconSvg(inPipe);
-    const label = document.createElement('span');
-    label.textContent = inPipe
-      ? (l.pipeline?.stage_label ?? 'V pipeline')
-      : 'Přidat do pipeline';
-    btn.appendChild(label);
-    btn.onclick = () => { void onTogglePipeline(); };
-    container.appendChild(btn);
+
+    if (!inPipe) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'pipeline-toggle';
+      btn.disabled = state.pipelineBusy;
+      btn.setAttribute('aria-pressed', 'false');
+      btn.title = 'Přidat do pipeline';
+      btn.innerHTML = funnelIconSvg(false);
+      const label = document.createElement('span');
+      label.textContent = 'Přidat do pipeline';
+      btn.appendChild(label);
+      btn.onclick = () => { void onTogglePipeline(); };
+      container.appendChild(btn);
+      return;
+    }
+
+    const pill = document.createElement('div');
+    pill.className = 'pipeline-pill' + (state.pipelineBusy ? ' pipeline-pill--busy' : '');
+
+    const icon = document.createElement('span');
+    icon.className = 'pipeline-pill-icon';
+    icon.innerHTML = funnelIconSvg(true);
+    pill.appendChild(icon);
+
+    /* The stage selector. Options come from the loaded stage list; until it
+     * arrives, a single option (the current stage) keeps the label visible. */
+    const select = document.createElement('select');
+    select.className = 'pipeline-select';
+    select.disabled = state.pipelineBusy;
+    select.title = 'Změnit fázi';
+    select.setAttribute('aria-label', 'Fáze v pipeline');
+    const stages = state.stages
+      ?? (l.pipeline?.stage_id != null
+        ? [{ id: l.pipeline.stage_id, label: l.pipeline.stage_label ?? 'V pipeline' }]
+        : []);
+    if (state.stages == null) select.disabled = true;  // not loaded yet
+    for (const s of stages) {
+      const opt = document.createElement('option');
+      opt.value = String(s.id);
+      opt.textContent = s.label;
+      if (s.id === l.pipeline?.stage_id) opt.selected = true;
+      select.appendChild(opt);
+    }
+    select.onchange = () => { void onMoveStage(Number(select.value)); };
+    pill.appendChild(select);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'pipeline-remove';
+    remove.disabled = state.pipelineBusy;
+    remove.title = 'Odebrat z pipeline';
+    remove.setAttribute('aria-label', 'Odebrat z pipeline');
+    remove.textContent = '✕';
+    remove.onclick = () => { void onTogglePipeline(); };
+    pill.appendChild(remove);
+
+    container.appendChild(pill);
   }
 
   /* The stamped valuation: eyebrow → big copper yield figure → a hairline-ruled
@@ -678,29 +725,31 @@ async function onCreateRun(): Promise<void> {
  * an add returns the entry-stage label to display; a remove clears membership.
  * On failure we revert and surface the reason. Reuses the SAME bearer-gated
  * /pipeline/cards endpoints the SPA writes through. */
+/* Apply a pipeline-membership update only if the panel STILL represents the
+ * property the write was started for. The panel state is a single module global
+ * that openPanel() replaces wholesale — re-opening for a different card (an index
+ * badge, a MutationObserver re-pass) mid-request would otherwise bleed this
+ * listing's result onto that one. Network writes target the captured propertyId
+ * regardless; this guard only protects the display. */
+function applyMembershipIf(
+  propertyId: number, membership: PortalListing['pipeline'], patch: Partial<PanelState>,
+): (prev: PanelState) => PanelState {
+  return (prev) =>
+    prev.listing?.property_id === propertyId
+      ? withPipeline({ ...prev, ...patch }, membership)
+      : prev;
+}
+
 async function onTogglePipeline(): Promise<void> {
   const l = state.listing;
   if (l == null || l.property_id == null) return;
   const propertyId = l.property_id;
   const wasIn = l.pipeline?.in_pipeline ?? false;
-  const priorStageKey = l.pipeline?.stage_key ?? null;
-  const priorStageLabel = l.pipeline?.stage_label ?? null;
+  const prior = l.pipeline;
 
-  /* Apply a membership update only if the panel STILL represents the property
-   * the toggle was started for. The panel state is a single module global that
-   * openPanel() replaces wholesale — re-opening for a different card (an index
-   * badge, a MutationObserver re-pass) mid-request would otherwise bleed this
-   * listing's result onto that one. Network writes target the captured
-   * propertyId regardless; this guard only protects the display. */
-  const applyIfSame = (
-    membership: PortalListing['pipeline'], patch: Partial<PanelState>,
-  ) => (prev: PanelState): PanelState =>
-    prev.listing?.property_id === propertyId
-      ? withPipeline({ ...prev, ...patch }, membership)
-      : prev;
-
-  setState(applyIfSame(
-    { in_pipeline: !wasIn, stage_key: null, stage_label: null },
+  setState(applyMembershipIf(
+    propertyId,
+    { in_pipeline: !wasIn, stage_id: null, stage_key: null, stage_label: null },
     { pipelineBusy: true, errorMessage: null },
   ));
 
@@ -710,23 +759,106 @@ async function onTogglePipeline(): Promise<void> {
   });
 
   if (!res.ok) {
-    setState(applyIfSame(
-      { in_pipeline: wasIn, stage_key: priorStageKey, stage_label: priorStageLabel },
+    setState(applyMembershipIf(
+      propertyId,
+      wasIn
+        ? { in_pipeline: true, stage_id: prior?.stage_id ?? null,
+            stage_key: prior?.stage_key ?? null, stage_label: prior?.stage_label ?? null }
+        : { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null },
       { pipelineBusy: false, errorMessage: `Uložení do pipeline selhalo: ${res.detail}` },
     ));
     return;
   }
 
-  setState(applyIfSame(
+  setState(applyMembershipIf(
+    propertyId,
     wasIn
-      ? { in_pipeline: false, stage_key: null, stage_label: null }
+      ? { in_pipeline: false, stage_id: null, stage_key: null, stage_label: null }
       : {
           in_pipeline: true,
+          stage_id: res.data.stage_id ?? null,
           stage_key: res.data.stage_key ?? null,
           stage_label: res.data.stage_label ?? null,
         },
     { pipelineBusy: false },
   ));
+}
+
+/* Change the deal stage of the in-pipeline property. The SAME audited PATCH the
+ * SPA's PipelineToggle + the kanban use (stamps `entered_stage_at`, logs a
+ * `moved` event). Optimistic: recolour/reselect from the chosen stage, then
+ * reconcile from the server; revert on failure. Identity-guarded like the toggle. */
+async function onMoveStage(stageId: number): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null || l.pipeline == null) return;
+  if (l.pipeline.stage_id === stageId) return;  // no-op (already there)
+  const propertyId = l.property_id;
+  const prior = l.pipeline;
+  const target = state.stages?.find((s) => s.id === stageId) ?? null;
+
+  setState(applyMembershipIf(
+    propertyId,
+    {
+      in_pipeline: true, stage_id: stageId,
+      stage_key: target?.key ?? prior.stage_key,
+      stage_label: target?.label ?? prior.stage_label,
+    },
+    { pipelineBusy: true, errorMessage: null },
+  ));
+
+  const res = await call<PipelineCardResult>({
+    type: 'move_pipeline_card', property_id: propertyId, stage_id: stageId,
+  });
+
+  if (!res.ok) {
+    setState(applyMembershipIf(
+      propertyId, prior,
+      { pipelineBusy: false, errorMessage: `Změna fáze selhala: ${res.detail}` },
+    ));
+    return;
+  }
+
+  setState(applyMembershipIf(
+    propertyId,
+    {
+      in_pipeline: true,
+      stage_id: res.data.stage_id ?? stageId,
+      stage_key: res.data.stage_key ?? target?.key ?? prior.stage_key,
+      stage_label: res.data.stage_label ?? target?.label ?? prior.stage_label,
+    },
+    { pipelineBusy: false },
+  ));
+}
+
+/* The operator-curated stage list, loaded once per page and cached at module
+ * scope (stages change rarely — same staleness posture as the SPA's 60s cache).
+ * Reused across panel re-opens so changing cards never re-fetches. A transient
+ * failure retries a few times (bounded) so a single network blip can't strip
+ * stage-changing for the page view; a persistent failure leaves the select on its
+ * current-stage fallback and self-heals on the next panel open. */
+let cachedStages: PipelineStage[] | null = null;
+let stagesLoading = false;
+
+async function loadStages(): Promise<void> {
+  if (cachedStages != null) {
+    if (state.stages == null) setState((prev) => ({ ...prev, stages: cachedStages }));
+    return;
+  }
+  if (stagesLoading) return;  // a load is already in flight — dedupe across opens
+  stagesLoading = true;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await call<PipelineStage[]>({ type: 'list_pipeline_stages' });
+      if (res.ok) {
+        cachedStages = res.data;
+        setState((prev) => ({ ...prev, stages: cachedStages }));
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1500));  // transient blip → back off + retry
+    }
+  } finally {
+    stagesLoading = false;
+  }
 }
 
 /* Mounts/refreshes the floating panel for one listing. Used by the detail-page
@@ -743,7 +875,7 @@ export async function openPanel(
     phase: 'loading', listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
     rent: null, costPerM2: null, price: null, busy: false,
-    pipelineBusy: false, errorMessage: null,
+    pipelineBusy: false, stages: cachedStages, errorMessage: null,
   };
   render(state);
 
@@ -776,6 +908,10 @@ export async function openPanel(
     listing, isSaleApt: saleApt,
   }));
   if (!active) return;
+
+  /* For a property we have, load the stage list so the in-pipeline control can
+   * offer stage changes (non-blocking; cached across panel opens). */
+  if (listing?.found && listing.property_id != null) void loadStages();
 
   /* Lazily load an existing estimation so the editable yield block appears
    * without blocking the MF headline (only the estimation section uses it). */

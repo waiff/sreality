@@ -219,7 +219,8 @@ rules. Identify which one a task belongs to before you start.
   (and the registry in `src/portals.ts`) as new portals come online; `host_permissions`
   stays broad `https://*/*` for the background fetch. **Detail pages** get a floating
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
-  deal-pipeline bookmark toggle + an "Otevřít v aplikaci" deep-link to the SPA page
+  deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
+  + an "Otevřít v aplikaci" deep-link to the SPA page
   (`{VITE_APP_BASE_URL}/listing/{sreality_id}` — the app-wide identity every SPA surface
   uses, negative for non-sreality portals) + subject facts; for sale apartments it ALSO
   shows the precomputed `mf_reference_rent_czk` + `mf_gross_yield_pct` ("Výnos MF") with
@@ -605,12 +606,24 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     in `notification_subscriptions` (migration 056); the background matcher in
     `api/notifications.py` builds its WHERE clauses from the **same** logic Browse uses
     (`toolkit/comparables._shared_filter_where` + the shared `_city_quality_clauses`
-    helper), so the two surfaces can never disagree on what a filter means. Dispatches are
-    **property-grain** and append-only, deduped by `UNIQUE(subscription_id, property_id,
-    change_kind)`, and are re-pointed onto the survivor on a property merge by the
-    operator-state reconciler (rule #18, `toolkit/operator_state.py`) so they never orphan
-    onto a `merged_away` property. Delivery is **in-app only today** (`channel='in_app'`
-    CHECK); a free email channel is planned (extend via ALTER, not a rewrite).
+    helper), so the two surfaces can never disagree on what a filter means.
+    `notification_dispatches` is the **unified notification event table** (migration 206 —
+    physical name kept; conceptually "notifications"): one source-generic, **property-grain**,
+    append-only event row per `(source_kind ∈ {watchdog, collection_monitor}, subject, change_kind)`,
+    deduped by a single per-event **`dedupe_key`** (`wd:{sub}:new:{property_id}` once-ever;
+    `wd:{sub}:price_drop:{snapshot_id}` **per-snapshot**, so a property that keeps dropping fires
+    once per real cut — and so does the collection-monitor producer). Each row carries provenance
+    (`trigger_price_czk` / `prev_price_czk` / `trigger_snapshot_id`) and producer-stamped
+    `target_channels` (the delivery-layer contract, see `docs/design/notifications-unified.md`).
+    Rows are re-pointed onto the survivor on a property merge by the operator-state reconciler
+    (rule #18, `toolkit/operator_state.py`, collapse key `(subscription_id, collection_id,
+    change_kind, trigger_snapshot_id)`, NULL-safe) so they never orphan onto a `merged_away`
+    property. **Delivery and detection are SEPARATE:** in-app delivery is the event row itself
+    (`channel='in_app'`); external channels (email/Telegram, Sprint N) deliver via a dedicated
+    `channel_sends` ledger draining `target_channels` — NOT a `channel`-column widen. (The old
+    migration-057 comment claiming a new channel was "a one-line ALTER" was **false**: migration
+    096 dropped `channel` from the dedup key, so the grain could never carry a second channel —
+    which is why delivery gets its own ledger.)
 17. **City-quality indexes are a normalized, operator-curated time series.** `curated_cities`
     + `city_index_revisions` + `city_index_values` + `city_index_definitions` +
     `city_population` (migration 078 onward) store per-city indexes long-form, so a new index
@@ -733,9 +746,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     stage-manager's entry-stage indicator (`is_entry` — filled = the entry stage), AND the
     Chrome-extension panel (the glyph reproduced by value in vanilla TS — separate territory,
     no React import) — so the "into the pipeline" concept reads as one icon everywhere.** The
-    extension bookmarks property-grain like every other surface: it reads `property_id` +
-    membership off the batched `POST /listings/lookup` and writes through these same
-    `POST/DELETE /pipeline/cards` routes (no extension-specific write path, no second secret). The `/pipeline` kanban board reads
+    extension bookmarks AND changes stage property-grain like every other surface: it reads
+    `property_id` + membership (incl. `stage_id`) off the batched `POST /listings/lookup` (and
+    `GET /pipeline/stages` for the select options) and writes through these same
+    `POST/DELETE /pipeline/cards` (bookmark/remove) + `PATCH /pipeline/cards/{id}` (move) routes —
+    no extension-specific write path, no second secret. The `/pipeline` kanban board reads
     `property_pipeline_public` + `pipeline_stages_public` hydrated against `properties_public`
     (street + `mf_gross_yield_pct` from the view; one thumbnail per card via the shared
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
@@ -756,7 +771,9 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     move lands it in the target column. **On the listing-detail header** (a record page, no board
     to drag onto) `PipelineToggle` changes the stage with a native `<select>` (the app's
     single-choice control) tinted the stage colour + a remove `✕`, and the not-yet-in-pipeline
-    state is the funnel "Přidat do pipeline". Both surfaces call the SAME `movePipelineCard` PATCH
+    state is the funnel "Přidat do pipeline". The **Chrome-extension panel** mirrors this exactly
+    (a native `<select>` + remove `✕` in a soft-tinted pill, vanilla TS). All three surfaces
+    (kanban drag, listing-detail select, extension select) call the SAME `movePipelineCard` PATCH
     (stamps `entered_stage_at`, logs the `moved` event) with the same optimistic-update shape — one
     audited write, never a second-grade path. `PipelineCard` (`property_pipeline_public`) exposes
     `stage_id` for the select's value.

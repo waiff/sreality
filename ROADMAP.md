@@ -6,6 +6,57 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Notification channel-delivery foundation (Sprint N PR 1 — ships dark)
+
+The delivery half of the unified-notifications work (builds on PR A's event model).
+Adds the audited delivery ledger + the pluggable transport abstraction, mirroring the
+`api/providers/` + `LLMClient` pattern, with **zero runtime change** (no transport
+registered, no background task — an unconfigured channel raises `TransportError`).
+- Migration 207: `channel_sends` — append-only, one row per send attempt to one
+  external channel (the `llm_calls` of delivery). Shared by watchdog /
+  collection_monitor / outreach via a `consumer` discriminator + exactly-one-origin-FK
+  CHECK (`notification_id` uuid → `notification_dispatches`, or `outreach_message_id`
+  → `outreach_messages`); per-(event,channel) `dedupe_key` UNIQUE; denormalized
+  `source_kind`/`source_id` + `category` for telemetry; `next_attempt_at` for the
+  outbox retry pass. Purely additive, unused until PR 2.
+- `api/transports/base.py` (`ChannelTransport` Protocol + `RenderedMessage` /
+  `SendResult` / `TransportError`), `api/channel_client.py` (claim-by-INSERT-ON-CONFLICT
+  → send → finalize, never raises on a transport failure — the failed row is the audit
+  trail), DI in `api/dependencies.py` (`_build_transports()` → `{}`, `get_channel_client`).
+  Hermetic `ChannelClient` tests (idempotent re-claim, unconfigured-channel, transport
+  exception, telemetry params).
+
+**Next:** PR 2 — `email_resend.py` + the outbox lifespan loop (drains
+`notification_dispatches × target_channels`) + `compose_notification_message` +
+`SPA_BASE_URL` + Resend DNS + Delivery UI. Then PR 3 Telegram, PR 4 outreach unification.
+
+### 2026-06: Unified notification event model (PR A — notifications + collections + channels foundation)
+
+Foundation for two parallel sprints (multi-channel notification delivery + collections-driven
+monitoring): generalize the watchdog-only `notification_dispatches` into the **unified
+notification event table** that the watchdog matcher AND a forthcoming collection-monitor producer
+both write, the one in-app Notifications feed reads, and the channel-delivery layer (Sprint N)
+drains. Migration 206 (additive ALTERs + one operator-approved dedup-primitive swap):
+- `source_kind` (`watchdog` | `collection_monitor`) + nullable `subscription_id` + `collection_id`
+  FK — one event row, two producers.
+- Single per-event **`dedupe_key`** replaces `UNIQUE(subscription_id, property_id, change_kind)`:
+  `wd:{sub}:new:{property_id}` (once-ever) and `wd:{sub}:price_drop:{snapshot_id}`
+  (**per-snapshot** — fixes the latent "fire once ever" limitation; a property that keeps cutting
+  price now fires per cut, and the collection monitor inherits the same grain).
+- Provenance columns (`trigger_price_czk` / `prev_price_czk` / `trigger_snapshot_id`) so "why was
+  I pinged" survives latest-wins; `target_channels[]` is the producer-stamped delivery contract.
+- `toolkit/operator_state.py` merge reconciler extended to the dual-source + per-snapshot collapse
+  key (NULL-safe). `api/notifications.py` matchers ported (`_recent_price_drops` now per-snapshot).
+- Corrected a load-bearing doc error: migration 057's "a new channel is a one-line ALTER" was
+  **false** (migration 096 dropped `channel` from the dedup key); CLAUDE.md rule #16 + the design
+  doc now record that delivery gets its own ledger. Shared contract:
+  `docs/design/notifications-unified.md`; channel layer: `docs/design/notification-channels.md`.
+
+**Next (the two sprints this unblocks):** Sprint N — `channel_sends` ledger + transports (Resend
+email, Telegram) + outbox loop. Sprint C — ungrey collections + default "monitoring" collection +
+add-to-collection (card/detail/extension) + the collection-monitor producer + the unified
+in-app Notifications area + unread badge.
+
 ### 2026-06: App-wide keyset infinite scroll (Browse + Estimations + Watchdog)
 
 Replaced offset pagination with **keyset-paginated infinite scroll** on every scrolled list

@@ -1018,3 +1018,40 @@ def test_run_engine_missing_room_verdict_blocks_dismiss(monkeypatch: Any) -> Non
     )
     assert stats["auto_dismissed"] == 0
     assert stats["queued"] == 1
+
+
+def test_run_engine_free_mode_skips_unresolved(monkeypatch: Any) -> None:
+    # Free mode ($0): an un-vision'd cross-source candidate is SKIPPED, not queued
+    # as a 'no photos compared' placeholder (so the review queue doesn't inflate).
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=None, compare_fn=None, max_vision_calls=0,
+        enqueue_unresolved=False,
+    )
+    assert stats["skipped_unresolved"] == 1
+    assert stats["queued"] == 0
+    assert conn.enqueued == []  # no placeholder written
+
+
+def test_run_engine_free_mode_phash_still_merges(monkeypatch: Any) -> None:
+    # Free mode still harvests the free pHash merges.
+    import scripts.dedup_engine as eng
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=None, compare_fn=None, max_vision_calls=0,
+        enqueue_unresolved=False,
+    )
+    assert stats["auto_phash"] == 1
+    assert merges == ["image_phash"]

@@ -7,7 +7,9 @@ import {
   addPipelineCard,
   createEstimation,
   getEstimation,
+  listPipelineStages,
   lookupListings,
+  movePipelineCard,
   patchScenario,
   removePipelineCard,
 } from './api';
@@ -53,5 +55,9 @@ async function handleMessage(
       return addPipelineCard(message.property_id);
     case 'remove_pipeline_card':
       return removePipelineCard(message.property_id);
+    case 'move_pipeline_card':
+      return movePipelineCard(message.property_id, message.stage_id);
+    case 'list_pipeline_stages':
+      return listPipelineStages();
   }
 }

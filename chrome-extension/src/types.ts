@@ -57,15 +57,30 @@ export interface YieldScenarioUpdate {
  * when bookmarked. */
 export interface PipelineMembership {
   in_pipeline: boolean;
+  /* The current stage's id — the `<select>` value when changing stage. */
+  stage_id: number | null;
   stage_key: string | null;
   stage_label: string | null;
 }
 
-/* Response of POST /pipeline/cards (add) and DELETE /pipeline/cards/{id}
- * (remove). Add returns the card (incl. its entry-stage label); remove returns
- * `{removed}`. We only read the few fields the toggle reflects. */
+/* One operator-curated pipeline stage (GET /pipeline/stages). Mirrors the SPA's
+ * stage shape; the extension reads id + label to populate the stage `<select>`. */
+export interface PipelineStage {
+  id: number;
+  key: string;
+  label: string;
+  position: number;
+  color: string | null;
+  is_terminal: boolean;
+  is_entry: boolean;
+}
+
+/* Response of the pipeline-card writes: POST /pipeline/cards (add) and
+ * PATCH /pipeline/cards/{id} (move) both return the card (incl. its stage);
+ * DELETE returns `{removed}`. We only read the few fields the control reflects. */
 export interface PipelineCardResult {
   property_id?: number;
+  stage_id?: number;
   stage_key?: string | null;
   stage_label?: string | null;
   added?: boolean;
@@ -125,7 +140,9 @@ export type ApiMessage =
   | { type: 'create_estimation'; url: string }
   | { type: 'get_estimation'; run_id: number }
   | { type: 'add_pipeline_card'; property_id: number }
-  | { type: 'remove_pipeline_card'; property_id: number };
+  | { type: 'remove_pipeline_card'; property_id: number }
+  | { type: 'move_pipeline_card'; property_id: number; stage_id: number }
+  | { type: 'list_pipeline_stages' };
 
 export interface ApiResponse<T> {
   ok: true;

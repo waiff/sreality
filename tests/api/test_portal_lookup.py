@@ -38,8 +38,8 @@ def _mk_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, 
         "last_seen_at": None, "mf_reference_rent_czk": None,
         "mf_gross_yield_pct": None, "estimation_id": None,
         "estimation_kind": None, "estimation_yield": None,
-        "in_pipeline": False, "pipeline_stage_key": None,
-        "pipeline_stage_label": None,
+        "in_pipeline": False, "pipeline_stage_id": None,
+        "pipeline_stage_key": None, "pipeline_stage_label": None,
     }
     row.update(cols)
     return row
@@ -90,8 +90,8 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
                 mf_reference_rent_czk=21_840, mf_gross_yield_pct=Decimal("5.46"),
                 estimation_id=99, estimation_kind="rent",
                 estimation_yield=Decimal("5.46"),
-                in_pipeline=True, pipeline_stage_key="interested",
-                pipeline_stage_label="Zájem"),
+                in_pipeline=True, pipeline_stage_id=3,
+                pipeline_stage_key="interested", pipeline_stage_label="Zájem"),
         # bazos: found, NEGATIVE synthetic sreality_id, no MF, no estimation;
         # has a property but is NOT in the pipeline
         _mk_row("bazos", "220291221", True, sreality_id=-187691, property_id=777,
@@ -119,7 +119,8 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
         "estimation_id": 99, "estimate_kind": "rent", "gross_yield_pct": 5.46,
     }
     assert sr["pipeline"] == {  # bookmarked → entry-stage membership
-        "in_pipeline": True, "stage_key": "interested", "stage_label": "Zájem",
+        "in_pipeline": True, "stage_id": 3,
+        "stage_key": "interested", "stage_label": "Zájem",
     }
 
     bz = data[1]
@@ -129,7 +130,8 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
     assert bz["property_id"] == 777
     # has a property but no card → in_pipeline false (still toggle-able)
     assert bz["pipeline"] == {
-        "in_pipeline": False, "stage_key": None, "stage_label": None,
+        "in_pipeline": False, "stage_id": None,
+        "stage_key": None, "stage_label": None,
     }
 
     idn = data[2]

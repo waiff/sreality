@@ -212,17 +212,6 @@
 
 .pipeline-toggle:hover { background: var(--copper-soft); }
 
-.pipeline-toggle--in {
-  color: #fff;
-  background: var(--copper);
-  border-color: var(--copper);
-}
-
-.pipeline-toggle--in:hover {
-  background: var(--copper-deep);
-  border-color: var(--copper-deep);
-}
-
 .pipeline-toggle:disabled { opacity: 0.55; cursor: wait; }
 
 .pipeline-icon {
@@ -230,6 +219,61 @@
   height: 0.9rem;
   flex-shrink: 0;
 }
+
+/* In-pipeline: a soft-tinted pill carrying the funnel + a stage <select> + a
+ * remove ✕ — mirrors the SPA's PipelineToggle (the app's single-choice control). */
+.pipeline-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.18rem 0.2rem 0.18rem 0.45rem;
+  color: var(--copper);
+  background: var(--copper-soft);
+  border: 1px solid var(--copper);
+}
+
+.pipeline-pill--busy { opacity: 0.6; }
+
+.pipeline-pill-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.pipeline-select {
+  max-width: 9rem;
+  padding: 0.12rem 0.1rem;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--copper);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.pipeline-select:focus { outline: none; }
+.pipeline-select:disabled { cursor: default; }
+/* The open option list is OS-rendered — force legible dark-on-white. */
+.pipeline-select option { color: var(--ink); background: #fff; }
+
+.pipeline-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--copper);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.pipeline-remove:hover { color: #b34730; }  /* brick — destructive hint */
+.pipeline-remove:disabled { cursor: wait; opacity: 0.6; }
 
 .app-link {
   margin-left: auto;  /* right-aligned whether or not the toggle is present */

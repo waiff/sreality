@@ -41,10 +41,13 @@ def test_set_tables_collision_collapse_then_repoint():
     sqls = [s for s, _ in cur.executed]
 
     expected = {
-        "collection_properties": "s.collection_id = r.collection_id",
-        "property_tags": "s.tag_id = r.tag_id",
+        "collection_properties": "s.collection_id IS NOT DISTINCT FROM r.collection_id",
+        "property_tags": "s.tag_id IS NOT DISTINCT FROM r.tag_id",
         "notification_dispatches":
-            "s.subscription_id = r.subscription_id AND s.change_kind = r.change_kind",
+            "s.subscription_id IS NOT DISTINCT FROM r.subscription_id "
+            "AND s.collection_id IS NOT DISTINCT FROM r.collection_id "
+            "AND s.change_kind IS NOT DISTINCT FROM r.change_kind "
+            "AND s.trigger_snapshot_id IS NOT DISTINCT FROM r.trigger_snapshot_id",
     }
     for tbl, join in expected.items():
         dels = [s for s in sqls if s.startswith(f"DELETE FROM {tbl} r")]
