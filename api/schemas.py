@@ -506,13 +506,17 @@ TagColor = Literal[
 
 
 class CreateCollectionIn(BaseModel):
-    name:        str = Field(min_length=1, max_length=200)
-    description: str | None = None
+    name:               str = Field(min_length=1, max_length=200)
+    description:        str | None = None
+    monitoring_enabled: bool = False
+    notify_channels:    list[str] = Field(default_factory=list)
 
 
 class UpdateCollectionIn(BaseModel):
-    name:        str | None = Field(default=None, min_length=1, max_length=200)
-    description: str | None = None
+    name:               str | None = Field(default=None, min_length=1, max_length=200)
+    description:        str | None = None
+    monitoring_enabled: bool | None = None
+    notify_channels:    list[str] | None = None
 
 
 class AddPropertiesToCollectionIn(BaseModel):

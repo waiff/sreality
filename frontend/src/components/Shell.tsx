@@ -17,8 +17,7 @@ const navItems: ReadonlyArray<NavItem> = [
   { kind: 'link', to: '/datasets',    label: 'Datasets' },
   { kind: 'link', to: '/outreach',    label: 'Outreach', disabled: true,
     title: 'Outreach is paused — not available yet.' },
-  { kind: 'link', to: '/collections', label: 'Collections', disabled: true,
-    title: 'Collections is being reworked — not available yet.' },
+  { kind: 'link', to: '/collections', label: 'Collections' },
   { kind: 'divider' },
   // Everything past this divider lives under Settings.
   { kind: 'section', label: 'Settings' },

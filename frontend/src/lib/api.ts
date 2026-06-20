@@ -833,12 +833,19 @@ export const getCollection = (id: number): Promise<CollectionWithProperties> =>
 export const createCollection = (input: {
   name: string;
   description?: string | null;
+  monitoring_enabled?: boolean;
+  notify_channels?: string[];
 }): Promise<Collection> =>
   request<Collection>('/collections', { method: 'POST', json: input });
 
 export const updateCollection = (
   id: number,
-  input: { name?: string | null; description?: string | null },
+  input: {
+    name?: string | null;
+    description?: string | null;
+    monitoring_enabled?: boolean;
+    notify_channels?: string[];
+  },
 ): Promise<Collection> =>
   request<Collection>(`/collections/${id}`, { method: 'PATCH', json: input });
 

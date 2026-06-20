@@ -799,6 +799,14 @@ export interface Collection {
   created_at: string;
   updated_at: string;
   listing_count: number;
+  /* Monitored collections raise in-app change alerts on their member
+   * properties (price moves, delisting). `notify_channels` is the source's
+   * channel pick that the producer folds into notifications.target_channels —
+   * empty means in-app only. `is_system` marks the protected default
+   * "monitoring" collection (can't be renamed or deleted). */
+  monitoring_enabled: boolean;
+  notify_channels: string[];
+  is_system: boolean;
 }
 
 export interface Tag {

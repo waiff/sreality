@@ -70,7 +70,8 @@ function Header({ total }: { total: number | null }) {
         Curated lists
       </h1>
       <p className="mt-2 text-sm text-[var(--color-ink-2)]">
-        Named groups of listings. A listing can live in many collections.{' '}
+        Named groups of properties. A property can live in many collections; a
+        monitored one alerts you when its price changes or it is delisted.{' '}
         {total != null && total > 0 && (
           <span className="text-[var(--color-ink-3)]">
             {fmtCount(total)} {total === 1 ? 'collection' : 'collections'}.
@@ -94,14 +95,19 @@ function NewCollectionForm({
 }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [monitor, setMonitor] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const mut = useMutation({
-    mutationFn: (input: { name: string; description: string | null }) =>
-      createCollection(input),
+    mutationFn: (input: {
+      name: string;
+      description: string | null;
+      monitoring_enabled: boolean;
+    }) => createCollection(input),
     onSuccess: () => {
       setName('');
       setDescription('');
+      setMonitor(false);
       setError(null);
       onCreated();
     },
@@ -122,6 +128,7 @@ function NewCollectionForm({
         mut.mutate({
           name: trimmed,
           description: description.trim() === '' ? null : description.trim(),
+          monitoring_enabled: monitor,
         });
       }}
       className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-4 py-4"
@@ -156,6 +163,15 @@ function NewCollectionForm({
           {mut.isPending ? 'Creating…' : 'Create'}
         </button>
       </div>
+      <label className="mt-3 flex items-center gap-2 w-fit text-[0.78rem] text-[var(--color-ink-2)] cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={monitor}
+          onChange={(e) => setMonitor(e.target.checked)}
+          className="accent-[var(--color-copper)]"
+        />
+        <span>Monitor changes — alert me when a property here changes price or is delisted</span>
+      </label>
       {dup && (
         <p className="mt-2 text-[0.75rem] text-[var(--color-brick)]">
           A collection named "{trimmed}" already exists.
@@ -198,12 +214,15 @@ function CollectionRow({ c }: { c: Collection }) {
   return (
     <div className="py-4 flex items-baseline gap-5">
       <div className="min-w-0 flex-1">
-        <Link
-          to={`/collection/${c.id}`}
-          className="block text-base text-[var(--color-ink)] hover:text-[var(--color-copper)] hover:underline underline-offset-2 truncate"
-        >
-          {c.name}
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            to={`/collection/${c.id}`}
+            className="text-base text-[var(--color-ink)] hover:text-[var(--color-copper)] hover:underline underline-offset-2 truncate"
+          >
+            {c.name}
+          </Link>
+          {c.monitoring_enabled && <MonitorPill />}
+        </div>
         {c.description && (
           <p className="mt-1 text-sm text-[var(--color-ink-3)] truncate">
             {c.description}
@@ -225,7 +244,14 @@ function CollectionRow({ c }: { c: Collection }) {
         </p>
       </div>
       <div className="shrink-0">
-        {confirming ? (
+        {c.is_system ? (
+          <span
+            title="The default monitoring collection can't be deleted."
+            className="px-2.5 py-1 text-[0.65rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)] select-none"
+          >
+            Default
+          </span>
+        ) : confirming ? (
           <div className="flex items-center gap-2">
             <button
               type="button"
@@ -260,6 +286,32 @@ function CollectionRow({ c }: { c: Collection }) {
 /* -------------------------------------------------------------------------- */
 /* Empty                                                                      */
 /* -------------------------------------------------------------------------- */
+
+function MonitorPill() {
+  return (
+    <span
+      title="Monitoring — changes to properties here raise alerts"
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[0.62rem] tracking-[0.1em] uppercase rounded-[var(--radius-xs)] bg-[var(--color-copper-soft)] text-[var(--color-copper)] shrink-0"
+    >
+      <BellIcon />
+      <span>Monitoring</span>
+    </span>
+  );
+}
+
+function BellIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 1.5a3.5 3.5 0 0 0-3.5 3.5c0 3-1.5 4-1.5 4h10s-1.5-1-1.5-4A3.5 3.5 0 0 0 8 1.5ZM6.5 12.5a1.5 1.5 0 0 0 3 0"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
 
 function EmptyState() {
   return (
