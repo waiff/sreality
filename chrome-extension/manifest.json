@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Realitní výnos (MF) panel",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Overlays our MF reference rent + Výnos MF gross yield on listing detail and search pages across every portal we scrape, deep-links to the app, and bookmarks a property into the deal pipeline.",
   "permissions": ["storage"],
   "host_permissions": ["https://*/*"],
