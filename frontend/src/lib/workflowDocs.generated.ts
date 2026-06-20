@@ -935,6 +935,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "free",
+        "description": "FREE mode ($0) — pHash + rule merges + reconcile only, no vision, no placeholders",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
       }
     ],
     "secrets": [
