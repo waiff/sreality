@@ -17,6 +17,7 @@ import {
 } from '@/lib/types';
 import { FilterForm } from '@/components/FilterForm';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
+import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
 import {
   LocationControl,
   LocationTypeahead,
@@ -39,6 +40,7 @@ export default function WatchdogEdit() {
     DEFAULT_WATCHDOG_FILTER_SPEC,
   );
   const [isActive, setIsActive] = useState(true);
+  const [channels, setChannels] = useState<string[]>([]);
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
@@ -46,6 +48,7 @@ export default function WatchdogEdit() {
       setName(existingQ.data.name);
       setSpec({ ...DEFAULT_WATCHDOG_FILTER_SPEC, ...existingQ.data.filter_spec });
       setIsActive(existingQ.data.is_active);
+      setChannels(existingQ.data.channels ?? []);
       setHydrated(true);
     }
   }, [existingQ.data, hydrated]);
@@ -56,6 +59,7 @@ export default function WatchdogEdit() {
         name,
         filter_spec: spec,
         is_active: isActive,
+        channels,
       }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: watchdogKeys.all });
@@ -99,6 +103,12 @@ export default function WatchdogEdit() {
               labelOn="Active"
               labelOff="Paused"
             />
+          </Row>
+        </Section>
+
+        <Section title="Delivery">
+          <Row label="Channels">
+            <DeliveryChannelsPicker value={channels} onChange={setChannels} />
           </Row>
         </Section>
 

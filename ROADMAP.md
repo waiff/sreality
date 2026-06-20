@@ -6,7 +6,28 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
-### 2026-06: Telegram notification channel (Sprint N PR 4)
+### 2026-06: Delivery UI — channel opt-in + recipient config (Sprint N PR 5)
+
+The operator-facing surface that turns the channel stack on from the app (no API/SQL).
+One shared control, civic-archive native (copper chips, borders-only), reused everywhere:
+- `components/DeliveryChannelsPicker.tsx` — the single "where do these alerts go" control
+  (static "In-app · always" chip + Email/Telegram toggle chips; footnote links to
+  Settings → Delivery and never fails silently). Used by BOTH watchdogs and collections —
+  one vocabulary.
+- Watchdog opt-in: a "Delivery" block in `CreateWatchdogModal` + a "Delivery" section in
+  `WatchdogEdit`, wired to `notification_subscriptions.channels` (the type + create/update
+  API now carry `channels`).
+- Collection opt-in: `CollectionDetail`'s `MonitoringBlock` now shows the picker (wired to
+  `collections.notify_channels` via the existing `updateCollection`) when monitoring is on —
+  completing Sprint C's "delivery configured separately" placeholder.
+- Settings → **Delivery** section: friendly recipient fields (email + Telegram chat_id) over
+  the existing `app_settings` read/write (`notification_email_to` /
+  `notification_telegram_chat_id`), so a non-technical operator never edits raw JSON.
+
+UI copy is English (matches the app chrome; data stays Czech). No migration — the `channels`
+field was already returned by the backend (PR 2). **Deferred:** a per-channel delivery-status
+column on the Notifications feed (needs a backend feed-query join to `channel_sends` —
+observability polish, separate PR).
 
 The mobile-native channel — the abstraction's payoff: **one file + one registry line**, no
 migration (the `channel_sends.channel` CHECK already allowed `'telegram'` from migration 207,

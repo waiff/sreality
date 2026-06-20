@@ -14,6 +14,7 @@ import {
 } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
 import { listingPath } from '@/lib/listingUrl';
+import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
 import {
   fmtAbsolute,
   fmtArea,
@@ -265,14 +266,23 @@ function MonitoringBlock({ collection }: { collection: Collection }) {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
 
+  const invalidate = () => {
+    setError(null);
+    qc.invalidateQueries({ queryKey: curationKeys.collection(collection.id) });
+    qc.invalidateQueries({ queryKey: curationKeys.collections });
+  };
+
   const toggle = useMutation({
     mutationFn: (next: boolean) =>
       updateCollection(collection.id, { monitoring_enabled: next }),
-    onSuccess: () => {
-      setError(null);
-      qc.invalidateQueries({ queryKey: curationKeys.collection(collection.id) });
-      qc.invalidateQueries({ queryKey: curationKeys.collections });
-    },
+    onSuccess: invalidate,
+    onError: (err: Error) => setError(err.message || 'Failed to update'),
+  });
+
+  const channels = useMutation({
+    mutationFn: (next: string[]) =>
+      updateCollection(collection.id, { notify_channels: next }),
+    onSuccess: invalidate,
     onError: (err: Error) => setError(err.message || 'Failed to update'),
   });
 
@@ -309,11 +319,24 @@ function MonitoringBlock({ collection }: { collection: Collection }) {
               : 'Off — properties here are not monitored for changes.'}
           </p>
           <p className="mt-1 text-[0.78rem] text-[var(--color-ink-4)]">
-            Alerts appear in Notifications. Delivery to other channels (email,
-            Telegram) is configured separately.
+            Alerts always appear in the in-app Notifications feed.
           </p>
         </div>
       </div>
+      {on && (
+        <div className="mt-4 max-w-2xl">
+          <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+            Delivery
+          </p>
+          <div className="mt-2">
+            <DeliveryChannelsPicker
+              value={collection.notify_channels ?? []}
+              onChange={(next) => channels.mutate(next)}
+              disabled={channels.isPending}
+            />
+          </div>
+        </div>
+      )}
       {error && (
         <p className="mt-2 text-[0.75rem] text-[var(--color-brick)]">{error}</p>
       )}
