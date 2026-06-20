@@ -214,15 +214,25 @@ function mountPanel(): {
 
   let lastFocusedKey: 'rent' | 'cost' | 'price' | null = null;
 
-  function header(text: string): HTMLElement {
+  /* The ledger header band: a small copper index-mark + product wordmark, and
+   * the close control. Neutral wordmark (not "Výnos MF") so it reads honestly
+   * for non-apartment listings where no yield is shown. */
+  function header(): HTMLElement {
     const h = document.createElement('div');
-    h.className = 'panel-header';
-    const title = document.createElement('p');
-    title.className = 'panel-title';
-    title.textContent = text;
-    h.appendChild(title);
+    h.className = 'p-head';
+    const mark = document.createElement('div');
+    mark.className = 'p-mark';
+    const tick = document.createElement('span');
+    tick.className = 'p-tick';
+    mark.appendChild(tick);
+    const word = document.createElement('span');
+    word.className = 'p-word';
+    word.textContent = 'Realitní výnos';
+    mark.appendChild(word);
+    h.appendChild(mark);
     const close = document.createElement('button');
-    close.className = 'close-btn';
+    close.className = 'p-close';
+    close.type = 'button';
     close.textContent = '×';
     close.title = 'Skrýt panel';
     close.onclick = () => host.remove();
@@ -234,13 +244,13 @@ function mountPanel(): {
     panel.innerHTML = '';
     panel.classList.toggle('panel--muted', state.phase === 'deactivated');
 
-    panel.appendChild(header('Výnos MF'));
+    panel.appendChild(header());
     const body = document.createElement('div');
-    body.className = 'panel-body';
+    body.className = 'p-body';
     panel.appendChild(body);
 
     if (state.phase === 'loading') {
-      body.appendChild(note('Načítám data…'));
+      body.appendChild(note('Načítám data…', 'note--loading'));
       return;
     }
     if (state.phase === 'error') {
@@ -248,20 +258,20 @@ function mountPanel(): {
       return;
     }
     if (state.phase === 'deactivated') {
-      body.appendChild(note('Tato nemovitost není v naší databázi.'));
+      body.appendChild(note('Tato nemovitost zatím není v naší databázi.'));
       return;
     }
 
-    /* active — the pipeline bookmark + "open in our app" link + subject facts
-     * show for ANY listing we have; the MF headline + estimation are gated to
-     * apartments for sale. */
-    renderTopActions(body, state);
+    /* active — read top-down: WHAT it is (subject) → the stamped MF yield →
+     * act on it (bookmark / open in app) → the deeper estimate. MF + estimate
+     * are gated to apartments for sale; the subject + actions are not. */
+    renderSubjectFacts(body, state);
     if (state.isSaleApt !== false) {
       renderMfBlock(body, state);
-      renderSubjectFacts(body, state);
+      renderActionsBar(body, state);
       renderEstimation(body, state);
     } else {
-      renderSubjectFacts(body, state);
+      renderActionsBar(body, state);
       body.appendChild(note('Výnos MF a odhad jsou jen u bytů na prodej.'));
     }
     if (state.errorMessage != null) body.appendChild(errorLine(state.errorMessage));
@@ -279,16 +289,16 @@ function mountPanel(): {
     }
   };
 
-  function note(text: string): HTMLElement {
+  function note(text: string, variant = ''): HTMLElement {
     const p = document.createElement('p');
-    p.className = 'muted-note';
+    p.className = 'note' + (variant ? ` ${variant}` : '');
     p.textContent = text;
     return p;
   }
 
   function errorLine(text: string): HTMLElement {
     const p = document.createElement('p');
-    p.className = 'error';
+    p.className = 'note note--error';
     p.textContent = text;
     return p;
   }
@@ -297,9 +307,9 @@ function mountPanel(): {
    * bookmark (left) + the "open in our app" deep-link (right). Either may be
    * absent (no property yet / no SPA base configured); the row appears only if
    * something landed in it. */
-  function renderTopActions(body: HTMLElement, state: PanelState): void {
+  function renderActionsBar(body: HTMLElement, state: PanelState): void {
     const row = document.createElement('div');
-    row.className = 'top-actions';
+    row.className = 'actions-bar';
     renderPipelineToggle(row, state);
     renderAppLink(row, state);
     if (row.childElementCount > 0) body.appendChild(row);
@@ -313,7 +323,12 @@ function mountPanel(): {
     a.href = `${APP_BASE_URL}/listing/${sid}`;  // same template as every SPA surface
     a.target = '_blank';
     a.rel = 'noopener';
-    a.textContent = 'Otevřít v aplikaci →';
+    const txt = document.createElement('span');
+    txt.textContent = 'Otevřít v aplikaci';
+    const arrow = document.createElement('span');
+    arrow.className = 'app-link-arrow';
+    arrow.textContent = '→';
+    a.append(txt, ' ', arrow);
     container.appendChild(a);
   }
 
@@ -343,75 +358,103 @@ function mountPanel(): {
     container.appendChild(btn);
   }
 
+  /* The stamped valuation: eyebrow → big copper yield figure → a hairline-ruled
+   * ledger line carrying the MF reference rent (the signature of the panel). */
   function renderMfBlock(body: HTMLElement, state: PanelState): void {
     const l = state.listing;
-    const ydisp = document.createElement('div');
-    ydisp.className = 'yield-display';
-    const ylabel = document.createElement('p');
-    ylabel.className = 'yield-label';
-    ylabel.textContent = 'Výnos MF (hrubý)';
-    ylabel.title = 'Hrubý výnos dle cenové mapy nájemného MF (nájem ÷ cena)';
-    ydisp.appendChild(ylabel);
-    const yval = document.createElement('p');
+    const mf = document.createElement('div');
+    mf.className = 'mf';
+
+    const eyebrow = document.createElement('p');
+    eyebrow.className = 'mf-eyebrow';
+    eyebrow.textContent = 'Výnos MF (hrubý)';
+    eyebrow.title = 'Hrubý výnos dle cenové mapy nájemného MF (nájem ÷ cena)';
+    mf.appendChild(eyebrow);
+
     const pct = l?.mf_gross_yield_pct ?? null;
-    yval.className = 'yield-value' + (pct == null ? ' muted' : '');
-    yval.textContent = fmtPct(pct);
-    ydisp.appendChild(yval);
-    body.appendChild(ydisp);
+    const figure = document.createElement('p');
+    figure.className = 'mf-figure' + (pct == null ? ' mf-figure--muted' : '');
+    figure.textContent = fmtPct(pct);
+    mf.appendChild(figure);
 
     if (l?.mf_reference_rent_czk != null) {
       const area = l.area_m2 ?? null;
       const perM2 = area && area > 0 ? Math.round(l.mf_reference_rent_czk / area) : null;
-      const row = document.createElement('div');
-      row.className = 'ref-rent';
-      const rl = document.createElement('span');
-      rl.className = 'ref-rent-label';
-      rl.textContent = 'MF nájem';
-      const rv = document.createElement('span');
-      rv.className = 'ref-rent-value';
-      rv.textContent =
+      const ledger = document.createElement('div');
+      ledger.className = 'mf-ledger';
+      const lab = document.createElement('span');
+      lab.className = 'mf-ledger-label';
+      lab.textContent = 'MF nájem';
+      const val = document.createElement('span');
+      val.className = 'mf-ledger-value';
+      val.textContent =
         `${fmtCzk(l.mf_reference_rent_czk)}/měs` +
         (perM2 != null ? ` · ${perM2.toLocaleString('cs-CZ')} Kč/m²` : '');
-      row.appendChild(rl);
-      row.appendChild(rv);
-      body.appendChild(row);
+      ledger.appendChild(lab);
+      ledger.appendChild(val);
+      mf.appendChild(ledger);
     } else if (l?.found) {
-      body.appendChild(note('MF nájem nedostupný (chybí území nebo cena).'));
+      mf.appendChild(note('MF nájem nedostupný (chybí území nebo cena).'));
     } else {
-      body.appendChild(note('Tato nemovitost není v naší databázi.'));
+      mf.appendChild(note('Tato nemovitost zatím není v naší databázi.'));
     }
+    body.appendChild(mf);
   }
 
+  /* The catalog subject line: the disposition as the headword, area + price as
+   * tabular metadata, the place on a quiet second line. Left-aligned, like an
+   * archive entry — grounds the operator before the yield figure. */
   function renderSubjectFacts(body: HTMLElement, state: PanelState): void {
     const l = state.listing;
     if (l == null || !l.found) return;
-    const parts: string[] = [];
-    if (l.disposition) parts.push(l.disposition);
-    if (l.area_m2 != null) parts.push(`${Math.round(l.area_m2)} m²`);
-    if (l.price_czk != null) parts.push(fmtCzk(l.price_czk));
-    if (l.district || l.locality) parts.push((l.district ?? l.locality) as string);
-    if (parts.length === 0) return;
-    const p = document.createElement('p');
-    p.className = 'subject-facts';
-    p.textContent = parts.join(' · ');
-    body.appendChild(p);
+    const subject = document.createElement('div');
+    subject.className = 'subject';
+
+    const line = document.createElement('div');
+    line.className = 'subject-line';
+    if (l.disposition) {
+      const disp = document.createElement('span');
+      disp.className = 'subject-disp';
+      disp.textContent = l.disposition;
+      line.appendChild(disp);
+    }
+    const meta: string[] = [];
+    if (l.area_m2 != null) meta.push(`${Math.round(l.area_m2)} m²`);
+    if (l.price_czk != null) meta.push(fmtCzk(l.price_czk));
+    if (meta.length > 0) {
+      const m = document.createElement('span');
+      m.className = 'subject-meta';
+      m.textContent = meta.join(' · ');
+      line.appendChild(m);
+    }
+    if (line.childElementCount > 0) subject.appendChild(line);
+
+    const place = l.district ?? l.locality;
+    if (place) {
+      const p = document.createElement('p');
+      p.className = 'subject-place';
+      p.textContent = place;
+      subject.appendChild(p);
+    }
+    if (subject.childElementCount > 0) body.appendChild(subject);
   }
 
   function renderEstimation(body: HTMLElement, state: PanelState): void {
     const sec = document.createElement('div');
-    sec.className = 'est-section';
+    sec.className = 'est';
     const head = document.createElement('p');
-    head.className = 'section-label';
+    head.className = 'est-eyebrow';
     head.textContent = 'Odhad výnosu (komparativní)';
     sec.appendChild(head);
 
     /* No estimation yet (or one is running). */
     if (state.run == null) {
       if (state.busy) {
-        sec.appendChild(note('Odhad probíhá… (~10–30 s)'));
+        sec.appendChild(note('Odhad probíhá… (~10–30 s)', 'note--loading'));
       } else {
         const btn = document.createElement('button');
         btn.className = 'btn-primary';
+        btn.type = 'button';
         btn.textContent = 'Spustit odhad';
         btn.onclick = () => onCreateRun();
         sec.appendChild(btn);
@@ -425,6 +468,7 @@ function mountPanel(): {
       sec.appendChild(errorLine(state.run.error_message ?? 'Odhad selhal.'));
       const btn = document.createElement('button');
       btn.className = 'btn-primary';
+      btn.type = 'button';
       btn.textContent = state.busy ? 'Počítám…' : 'Spustit znovu';
       btn.disabled = state.busy;
       btn.onclick = () => onCreateRun();
@@ -463,6 +507,7 @@ function mountPanel(): {
     const yieldRow = document.createElement('div');
     yieldRow.className = 'est-yield';
     const yl = document.createElement('span');
+    yl.className = 'est-yield-label';
     yl.textContent = 'Výnos z odhadu';
     const yv = document.createElement('span');
     yv.className = 'est-yield-value';
@@ -471,13 +516,13 @@ function mountPanel(): {
     yieldRow.appendChild(yv);
     sec.appendChild(yieldRow);
 
-    const actions = document.createElement('div');
-    actions.className = 'actions';
+    const foot = document.createElement('div');
+    foot.className = 'est-foot';
     const status = document.createElement('span');
     status.className = 'est-status';
     const hasOverrides = state.rentTouched || state.costTouched || state.priceTouched;
     status.textContent = hasOverrides ? 'upraveno · uloženo' : 'živý výpočet';
-    actions.appendChild(status);
+    foot.appendChild(status);
     /* Reset is always present (toggled), so onEdit can reveal it in place
      * without a full re-render — see onEdit / overridesChanged. */
     const reset = document.createElement('a');
@@ -485,8 +530,8 @@ function mountPanel(): {
     reset.textContent = 'Reset';
     reset.style.display = hasOverrides ? '' : 'none';
     reset.onclick = (e) => { e.preventDefault(); onReset(); };
-    actions.appendChild(reset);
-    sec.appendChild(actions);
+    foot.appendChild(reset);
+    sec.appendChild(foot);
     body.appendChild(sec);
   }
 
@@ -498,6 +543,7 @@ function mountPanel(): {
     onInput: (v: number | null) => void;
   }): HTMLElement {
     const wrap = document.createElement('div');
+    wrap.className = 'field';
     const label = document.createElement('label');
     label.className = 'field-label';
     label.textContent = opts.label;

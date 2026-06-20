@@ -1,315 +1,403 @@
-/* Scoped via shadow DOM; safe to use raw selectors without worrying
- * about sreality.cz's own CSS. Visual tokens approximate the SPA's
- * civic-archive palette so the panel reads as part of the same
- * product family without bringing Tailwind along for the ride. */
+/* Scoped via the closed shadow DOM, so raw selectors are safe from the host
+ * portal's CSS. The palette mirrors the SPA's civic-archive tokens by value
+ * (no Tailwind, no @theme import): aged paper surfaces, ink text, hairline
+ * pencil rules, and a single oxidised-copper accent. Depth is borders-only;
+ * the one shadow is the float-lift that detaches the panel from the busy host
+ * page. The panel reads as a valuation slip clipped to the corner. */
 
 :host {
-  --bg: #f7f3ec;
-  --ink: #1c1c1c;
-  --ink-3: #555;
-  --ink-4: #8a8a8a;
-  --rule: #d8d3c5;
-  --rule-strong: #1c1c1c;
-  --copper: #b3592d;
-  --copper-soft: #f3eadf;
+  /* Mirrored civic-archive tokens (keep aligned with the SPA). */
+  --bg: #f7f3ec;          /* aged paper — the panel surface */
+  --ink: #1c1c1c;         /* primary text + the card edge */
+  --ink-3: #555;          /* secondary text */
+  --ink-4: #8a8a8a;       /* tertiary / metadata */
+  --rule: #d8d3c5;        /* hairline pencil rule */
+  --rule-strong: #1c1c1c; /* the archival card border */
+  --copper: #b3592d;      /* the one accent — yield, actions, the index-mark */
+  --copper-soft: #f3eadf; /* copper wash — the header band */
+  /* Derived shades (extension-only). */
+  --bg-sunk: #f1ebde;     /* a hair darker paper — groups the estimate slip */
+  --paper: #fffdf8;       /* fresh near-white paper — input fields */
+  --copper-deep: #9a4b25; /* copper hover */
   all: initial;
 }
 
+@keyframes panelPulse {
+  0%, 100% { opacity: 0.5; }
+  50%      { opacity: 1; }
+}
+
+/* ---- frame ---------------------------------------------------------- */
+
 .panel {
   position: fixed;
-  right: 1.5rem;
-  bottom: 1.5rem;
-  width: 22rem;
-  max-width: calc(100vw - 3rem);
+  right: 1.25rem;
+  bottom: 1.25rem;
+  width: 21rem;
+  max-width: calc(100vw - 2.5rem);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-size: 0.82rem;
+  line-height: 1.45;
   color: var(--ink);
   background: var(--bg);
   border: 1px solid var(--rule-strong);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  /* a 2px copper "filed" edge inside the top + a warm float-lift shadow */
+  box-shadow:
+    inset 0 2px 0 0 var(--copper),
+    0 10px 34px -10px rgba(28, 20, 10, 0.30);
   z-index: 2147483646;
-  font-size: 0.85rem;
 }
 
-.panel-header {
+/* ---- header band ---------------------------------------------------- */
+
+.p-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--rule);
+  padding: 0.6rem 0.85rem 0.55rem;
   background: var(--copper-soft);
+  border-bottom: 1px solid var(--rule);
 }
 
-.panel-title {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--ink-3);
-  margin: 0;
+.p-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
 }
 
-.panel-body {
-  padding: 0.85rem 1rem 1rem;
+.p-tick {
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--copper);
+  flex-shrink: 0;
 }
 
-.yield-display {
-  text-align: center;
-  padding: 0.5rem 0 0.85rem;
-}
-
-.yield-label {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: var(--ink-3);
-  margin: 0;
-}
-
-.yield-value {
-  font-family: 'Inter', system-ui, sans-serif;
-  font-size: 2.25rem;
+.p-word {
+  font-size: 0.64rem;
   font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  line-height: 1.1;
-  margin: 0.25rem 0 0;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
   color: var(--copper);
 }
 
-.yield-value.muted {
+.p-close {
+  background: transparent;
+  border: 0;
+  margin: -0.2rem -0.3rem -0.2rem 0;
+  padding: 0 0.2rem;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--ink-4);
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.p-close:hover { color: var(--ink); }
+
+/* ---- body ----------------------------------------------------------- */
+
+.p-body { padding: 0.8rem 0.85rem 0.9rem; }
+
+/* ---- subject (catalog line) ----------------------------------------- */
+
+.subject { margin-bottom: 0.7rem; }
+
+.subject-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.subject-disp {
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+.subject-meta {
+  font-size: 0.82rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.subject-place {
+  margin: 0.2rem 0 0;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
   color: var(--ink-4);
 }
 
-.ref-rent {
+/* ---- MF hero (the stamped valuation) -------------------------------- */
+
+.mf {
+  text-align: center;
+  margin: 0.35rem 0 0.85rem;
+}
+
+.mf-eyebrow {
+  margin: 0;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--ink-3);
+}
+
+.mf-figure {
+  margin: 0.1rem 0 0;
+  font-size: 2.5rem;
+  font-weight: 600;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--copper);
+  font-variant-numeric: tabular-nums;
+}
+
+.mf-figure--muted { color: var(--ink-4); }
+
+.mf-ledger {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.4rem 0;
-  margin-bottom: 0.6rem;
+  gap: 0.6rem;
+  margin-top: 0.7rem;
+  padding: 0.4rem 0.1rem;
+  text-align: left;
   border-top: 1px solid var(--rule);
   border-bottom: 1px solid var(--rule);
 }
 
-.ref-rent-label {
-  font-size: 0.7rem;
+.mf-ledger-label {
+  font-size: 0.64rem;
   text-transform: uppercase;
   letter-spacing: 0.14em;
   color: var(--ink-3);
 }
 
-.ref-rent-value {
-  font-variant-numeric: tabular-nums;
+.mf-ledger-value {
+  font-size: 0.78rem;
   font-weight: 600;
+  text-align: right;
   color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- action bar (bookmark + open in app) ---------------------------- */
+
+.actions-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.pipeline-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.55rem;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  color: var(--copper);
+  background: var(--paper);
+  border: 1px solid var(--copper);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.pipeline-toggle:hover { background: var(--copper-soft); }
+
+.pipeline-toggle--in {
+  color: #fff;
+  background: var(--copper);
+  border-color: var(--copper);
+}
+
+.pipeline-toggle--in:hover {
+  background: var(--copper-deep);
+  border-color: var(--copper-deep);
+}
+
+.pipeline-toggle:disabled { opacity: 0.55; cursor: wait; }
+
+.pipeline-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+}
+
+.app-link {
+  margin-left: auto;  /* right-aligned whether or not the toggle is present */
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--copper);
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.app-link:hover { color: var(--copper-deep); }
+
+.app-link-arrow { transition: transform 120ms ease; }
+
+.app-link:hover .app-link-arrow { transform: translateX(2px); }
+
+/* ---- estimate slip (the working calculator) ------------------------- */
+
+.est {
+  margin-top: 0.85rem;
+  padding: 0.7rem 0.75rem 0.75rem;
+  background: var(--bg-sunk);
+  border: 1px solid var(--rule);
+}
+
+.est-eyebrow {
+  margin: 0 0 0.55rem;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--ink-3);
 }
 
 .fields {
   display: grid;
-  gap: 0.6rem;
-  margin-top: 0.25rem;
+  gap: 0.5rem;
 }
 
 .field-label {
   display: block;
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--ink-3);
   margin-bottom: 0.2rem;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-4);
 }
 
 .field-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
 .field-input {
   flex: 1;
   min-width: 0;
   padding: 0.4rem 0.55rem;
-  border: 1px solid var(--rule);
-  background: #fff;
   font: inherit;
-  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
   color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  font-variant-numeric: tabular-nums;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .field-input:focus {
   outline: none;
-  border-color: var(--rule-strong);
+  border-color: var(--copper);
+  box-shadow: 0 0 0 2px var(--copper-soft);
 }
 
 .field-suffix {
-  font-size: 0.75rem;
+  min-width: 2.6rem;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--ink-4);
   font-variant-numeric: tabular-nums;
-  min-width: 3rem;
-}
-
-.actions {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 0.85rem;
-  font-size: 0.7rem;
-  color: var(--ink-4);
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-}
-
-.actions a {
-  color: var(--copper);
-  text-decoration: none;
-  cursor: pointer;
-}
-
-.actions a:hover { text-decoration: underline; }
-
-.empty-state {
-  padding: 1rem 0.25rem 0.5rem;
-  text-align: center;
-}
-
-.empty-state p {
-  margin: 0 0 0.85rem;
-  color: var(--ink-3);
-  font-size: 0.85rem;
-}
-
-.btn-primary {
-  background: var(--copper);
-  color: #fff;
-  border: 0;
-  padding: 0.55rem 1rem;
-  font: inherit;
-  font-size: 0.85rem;
-  cursor: pointer;
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-}
-
-.btn-primary:hover { background: #9a4b25; }
-.btn-primary:disabled { background: var(--ink-4); cursor: wait; }
-
-.close-btn {
-  background: transparent;
-  border: 0;
-  color: var(--ink-4);
-  cursor: pointer;
-  font-size: 1rem;
-  line-height: 1;
-  padding: 0 0.25rem;
-}
-
-.close-btn:hover { color: var(--ink); }
-
-.error {
-  color: #b34730;
-  font-size: 0.78rem;
-  margin: 0.5rem 0 0;
-}
-
-/* Deactivated panel (non-apartment / not-for-sale listing). */
-.panel--muted { opacity: 0.92; }
-.panel--muted .panel-header { background: var(--bg); }
-
-.muted-note {
-  color: var(--ink-3);
-  font-size: 0.8rem;
-  text-align: center;
-  margin: 0.35rem 0;
-}
-
-.subject-facts {
-  color: var(--ink-3);
-  font-size: 0.72rem;
-  text-align: center;
-  margin: 0.5rem 0 0;
-  font-variant-numeric: tabular-nums;
-}
-
-/* Comparables-estimation section, below the MF headline. */
-.est-section {
-  margin-top: 0.85rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid var(--rule);
-}
-
-.section-label {
-  font-size: 0.65rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--ink-4);
-  margin: 0 0 0.5rem;
 }
 
 .est-yield {
   display: flex;
-  justify-content: space-between;
   align-items: baseline;
-  margin-top: 0.6rem;
-  font-size: 0.78rem;
+  justify-content: space-between;
+  margin-top: 0.7rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--rule);
+}
+
+.est-yield-label {
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
   color: var(--ink-3);
 }
 
 .est-yield-value {
+  font-size: 1.05rem;
   font-weight: 600;
   color: var(--copper);
   font-variant-numeric: tabular-nums;
 }
 
-/* Top action row: pipeline bookmark (left) + "open in our app" link (right). */
-.top-actions {
+.est-foot {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.5rem;
-  flex-wrap: wrap;
-  margin: 0 0 0.6rem;
+  margin-top: 0.5rem;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-4);
 }
 
-.app-link {
-  margin-left: auto;  /* right-align whether or not the toggle is present */
+.est-reset {
   color: var(--copper);
   text-decoration: none;
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
-  border-bottom: 1px solid var(--copper);
-  padding-bottom: 1px;
+  cursor: pointer;
+  transition: color 120ms ease;
 }
 
-.app-link:hover { color: #9a4b25; border-color: #9a4b25; }
+.est-reset:hover {
+  color: var(--copper-deep);
+  text-decoration: underline;
+}
 
-/* Deal-pipeline bookmark — mirrors the SPA's PipelineToggle: copper-outline
- * "Přidat do pipeline" out of pipeline, copper-filled pill (stage label) in. */
-.pipeline-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.3rem 0.55rem;
+/* ---- primary button (Spustit odhad) --------------------------------- */
+
+.btn-primary {
+  width: 100%;
+  padding: 0.5rem 0.9rem;
   font: inherit;
   font-size: 0.72rem;
-  line-height: 1;
-  cursor: pointer;
-  background: #fff;
-  color: var(--copper);
-  border: 1px solid var(--copper);
-}
-
-.pipeline-toggle:hover { background: var(--copper-soft); }
-
-.pipeline-toggle--in {
-  background: var(--copper);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
   color: #fff;
-  border-color: var(--copper);
+  background: var(--copper);
+  border: 0;
+  cursor: pointer;
+  transition: background 120ms ease;
 }
 
-.pipeline-toggle--in:hover { background: #9a4b25; }
+.btn-primary:hover { background: var(--copper-deep); }
+.btn-primary:disabled { background: var(--ink-4); cursor: wait; }
 
-.pipeline-toggle:disabled { opacity: 0.6; cursor: wait; }
+/* ---- notes / states ------------------------------------------------- */
 
-.pipeline-icon {
-  width: 0.95rem;
-  height: 0.95rem;
-  flex-shrink: 0;
+.note {
+  margin: 0.35rem 0;
+  font-size: 0.76rem;
+  text-align: center;
+  color: var(--ink-3);
 }
+
+.note--error { color: #b34730; }
+
+.note--loading { animation: panelPulse 1.2s ease-in-out infinite; }
+
+/* ---- deactivated (not-in-DB) ---------------------------------------- */
+
+.panel--muted .p-head { background: var(--bg); }
+.panel--muted .p-tick { background: var(--ink-4); }
+.panel--muted .p-word { color: var(--ink-4); }
