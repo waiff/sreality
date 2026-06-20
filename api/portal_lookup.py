@@ -64,7 +64,7 @@ SELECT
     pp.stage_id AS pipeline_stage_id,
     ps.key   AS pipeline_stage_key,
     ps.label AS pipeline_stage_label,
-    (SELECT coalesce(array_agg(cp.collection_id ORDER BY cp.collection_id), '{}')
+    (SELECT coalesce(array_agg(cp.collection_id ORDER BY cp.collection_id), array[]::bigint[])
        FROM collection_properties cp
       WHERE cp.property_id = l.property_id) AS collection_ids
 FROM req
