@@ -223,6 +223,7 @@ export interface YieldScenarioUpdate {
   rent_czk?: number | null;
   fond_per_m2_czk?: number | null;
   price_czk?: number | null;
+  renovation_czk?: number | null;
 }
 
 export const patchEstimationScenario = (

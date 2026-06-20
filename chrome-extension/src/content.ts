@@ -26,6 +26,7 @@ import type {
 } from './types';
 
 const DEFAULT_FOND_CZK_PER_M2 = 10;
+const DEFAULT_RENOVATION_CZK = 0;
 const PATCH_DEBOUNCE_MS = 500;
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;
@@ -56,9 +57,12 @@ interface PanelState {
   rentTouched: boolean;
   costTouched: boolean;
   priceTouched: boolean;
+  renovationTouched: boolean;
   rent: number | null;
   costPerM2: number | null;
   price: number | null;
+  /* Flat one-off renovation budget, added to price for the yield denominator. */
+  renovation: number | null;
   /* True while an estimation is being created/polled. */
   busy: boolean;
   /* True while a pipeline add/remove/move is in flight (disables the control). */
@@ -203,11 +207,15 @@ function defaultRent(state: PanelState): number | null {
 }
 
 function computeYield(state: PanelState): number | null {
-  const { rent, costPerM2, price } = state;
+  const { rent, costPerM2, price, renovation } = state;
   const area = subjectArea(state);
   const fond = costPerM2 != null && area != null ? costPerM2 * area : null;
-  if (rent == null || fond == null || price == null || price <= 0) return null;
-  return ((rent - fond) * 12) / price * 100;
+  /* Total acquisition cost = listing price + one-off renovation budget. */
+  const acquisition = price != null ? price + (renovation ?? 0) : null;
+  if (rent == null || fond == null || acquisition == null || acquisition <= 0) {
+    return null;
+  }
+  return ((rent - fond) * 12) / acquisition * 100;
 }
 
 function bodyFromState(state: PanelState): YieldScenarioUpdate {
@@ -215,6 +223,7 @@ function bodyFromState(state: PanelState): YieldScenarioUpdate {
     rent_czk: state.rentTouched ? state.rent : null,
     fond_per_m2_czk: state.costTouched ? state.costPerM2 : null,
     price_czk: state.priceTouched ? state.price : null,
+    renovation_czk: state.renovationTouched ? state.renovation : null,
   };
 }
 
@@ -227,9 +236,11 @@ function seedFromRun(state: PanelState, run: EstimationRun): PanelState {
     rentTouched: sc?.rent_czk != null,
     costTouched: sc?.fond_per_m2_czk != null,
     priceTouched: sc?.price_czk != null,
+    renovationTouched: sc?.renovation_czk != null,
     rent: sc?.rent_czk ?? defaultRent(next),
     costPerM2: sc?.fond_per_m2_czk ?? DEFAULT_FOND_CZK_PER_M2,
     price: sc?.price_czk ?? defaultPrice(next),
+    renovation: sc?.renovation_czk ?? DEFAULT_RENOVATION_CZK,
   };
 }
 
@@ -257,7 +268,7 @@ function mountPanel(): {
   panel.className = 'panel';
   shadow.appendChild(panel);
 
-  let lastFocusedKey: 'rent' | 'cost' | 'price' | null = null;
+  let lastFocusedKey: 'rent' | 'cost' | 'price' | 'renovation' | null = null;
 
   /* The ledger header band: a small copper index-mark + product wordmark, and
    * the close control. Neutral wordmark (not "Výnos MF") so it reads honestly
@@ -648,6 +659,10 @@ function mountPanel(): {
       key: 'price', label: 'Cena', suffix: 'Kč',
       value: state.price, onInput: (v) => onEdit('price', v),
     }));
+    fields.appendChild(buildField({
+      key: 'renovation', label: 'Rekonstrukce', suffix: 'Kč',
+      value: state.renovation, onInput: (v) => onEdit('renovation', v),
+    }));
     sec.appendChild(fields);
 
     const yieldRow = document.createElement('div');
@@ -666,7 +681,9 @@ function mountPanel(): {
     foot.className = 'est-foot';
     const status = document.createElement('span');
     status.className = 'est-status';
-    const hasOverrides = state.rentTouched || state.costTouched || state.priceTouched;
+    const hasOverrides =
+      state.rentTouched || state.costTouched || state.priceTouched
+      || state.renovationTouched;
     status.textContent = hasOverrides ? 'upraveno · uloženo' : 'živý výpočet';
     foot.appendChild(status);
     /* Reset is always present (toggled), so onEdit can reveal it in place
@@ -682,7 +699,7 @@ function mountPanel(): {
   }
 
   function buildField(opts: {
-    key: 'rent' | 'cost' | 'price';
+    key: 'rent' | 'cost' | 'price' | 'renovation';
     label: string;
     suffix: string;
     value: number | null;
@@ -764,11 +781,15 @@ function schedulePatch(): void {
 
 /* Edits update state + the derived display IN PLACE — never a full re-render,
  * which would rebuild the inputs and drop focus mid-keystroke. */
-function onEdit(axis: 'rent' | 'cost' | 'price', value: number | null): void {
+function onEdit(
+  axis: 'rent' | 'cost' | 'price' | 'renovation', value: number | null,
+): void {
   switch (axis) {
     case 'rent': state.rent = value; state.rentTouched = true; break;
     case 'cost': state.costPerM2 = value; state.costTouched = true; break;
     case 'price': state.price = value; state.priceTouched = true; break;
+    case 'renovation':
+      state.renovation = value; state.renovationTouched = true; break;
   }
   const yv = panelShadow?.querySelector<HTMLElement>('.est-yield-value');
   if (yv != null) yv.textContent = fmtPct(computeYield(state));
@@ -785,7 +806,9 @@ function onReset(): void {
     rent: defaultRent(prev),
     costPerM2: DEFAULT_FOND_CZK_PER_M2,
     price: defaultPrice(prev),
+    renovation: DEFAULT_RENOVATION_CZK,
     rentTouched: false, costTouched: false, priceTouched: false,
+    renovationTouched: false,
   }));
   schedulePatch();
 }
@@ -1056,7 +1079,8 @@ export async function openPanel(
   state = {
     phase: 'loading', listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
-    rent: null, costPerM2: null, price: null, busy: false,
+    renovationTouched: false,
+    rent: null, costPerM2: null, price: null, renovation: null, busy: false,
     pipelineBusy: false, stages: cachedStages,
     collections: cachedCollections, collectionBusy: false, errorMessage: null,
   };
