@@ -556,6 +556,7 @@ function mountPanel(): {
     const ta = document.createElement('textarea');
     ta.className = 'note-input';
     ta.rows = 2;
+    ta.maxLength = 4000;  // mirror the server's CreateNoteIn cap + the SPA's textarea
     ta.placeholder = 'Přidat poznámku…';
     ta.value = noteDraft;
     ta.dataset.key = 'note';
@@ -1121,29 +1122,28 @@ async function loadCollections(): Promise<void> {
  * triggers a re-render — the textarea reads it on render, writes it on input;
  * reset per panel open so one listing's draft never bleeds onto another. */
 let noteDraft = '';
-let notesLoading = false;
 
 /* Notes are PER-PROPERTY (not global like stages/collections), so they're fetched
- * fresh per panel open and held in panel state — never module-cached. Lazy,
- * retried on a transient blip, identity-guarded so a mid-flight panel re-open
- * can't apply one property's notes onto another. */
+ * fresh per panel open and held in panel state — never module-cached. The dedup
+ * is the per-panel `state.notes == null` guard, NOT a page-wide in-flight flag: a
+ * page-wide flag would early-return (and strand) a DIFFERENT property opened while
+ * the first's fetch is still in flight (stages/collections survive that only via
+ * their module cache re-apply, which notes deliberately don't have). A duplicate
+ * fetch from a rapid same-property re-open is harmless (idempotent, identity-
+ * guarded apply). Retried on a transient blip; identity-guarded so a mid-flight
+ * panel re-open can't apply one property's notes onto another. */
 async function loadNotes(): Promise<void> {
   const l = state.listing;
-  if (l == null || l.property_id == null || state.notes != null || notesLoading) return;
+  if (l == null || l.property_id == null || state.notes != null) return;
   const propertyId = l.property_id;
-  notesLoading = true;
-  try {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const res = await call<ExtNote[]>({ type: 'list_notes', property_id: propertyId });
-      if (res.ok) {
-        setState((prev) =>
-          prev.listing?.property_id === propertyId ? { ...prev, notes: res.data } : prev);
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 1500));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await call<ExtNote[]>({ type: 'list_notes', property_id: propertyId });
+    if (res.ok) {
+      setState((prev) =>
+        prev.listing?.property_id === propertyId ? { ...prev, notes: res.data } : prev);
+      return;
     }
-  } finally {
-    notesLoading = false;
+    await new Promise((r) => setTimeout(r, 1500));
   }
 }
 
@@ -1168,7 +1168,9 @@ async function onAddNote(): Promise<void> {
     }));
     return;
   }
-  noteDraft = '';
+  // Clear the draft only if the panel still shows this property — identity-guarded
+  // like the prepend, so a mid-request re-open can't wipe another listing's draft.
+  if (state.listing?.property_id === propertyId) noteDraft = '';
   setState((prev) =>
     prev.listing?.property_id === propertyId
       ? { ...prev, noteBusy: false, notes: [res.data, ...(prev.notes ?? [])] }
