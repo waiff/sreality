@@ -13,18 +13,21 @@ name: Dedup engine (street + disposition)
 # Every auto-merge is reversible (property_merge_events ledger + one-click Undo).
 # A per-run dedup_engine_runs row powers the /dedup automation dashboard.
 #
-# Cadence: every 6h. The engine is also the cost-efficient VISION payer for the
-# backlog drain — its forensic compare stops at the first High room (so ~75% of
-# real dups cost ONE call, cheaper than the batch warmer's all-rooms warming), and
-# the per-run cold budget (max_vision_calls) caps NEW paid comparisons while warm
-# cache hits are free (so each run applies all already-paid-for verdicts at $0 and
-# spends its budget only on new pairs). Total backlog cost ≈ #cold pairs × ~$0.04;
-# cadence sets speed, not total cost. (--cache-only dispatch = $0 consume of warm
-# cache only; the dedup_batches warmer is disabled — less cost-efficient here.)
+# Cadence: every 6h. The SCHEDULED run is FREE (--free, $0, no LLM): pHash +
+# exact-address merges + reconcile + reject/gate dismissals only; un-vision'd
+# cross-source pairs are skipped (not queued as placeholders). It captures every
+# dup that SHARES a photo (pHash, whose coverage keeps growing) plus all free
+# cleanup, for $0 — the operator-chosen cost posture. Different-photo dups are
+# left un-found until vision is explicitly enabled.
 #
-# Required GitHub secret: SUPABASE_DB_URL; the visual layer additionally needs
-# ANTHROPIC_API_KEY + R2_* for image bytes (absent these, the engine still does
-# rule A/B/C + the free pHash fast-path and degrades the visual layer to a skip).
+# Paid VISION is dispatch-only: workflow_dispatch with max_vision_calls>0 runs the
+# forensic compare (stop-at-first-High; warm cache hits are free via the cold-only
+# budget), cache_only=true does a $0 consume of already-warmed verdicts, shadow=true
+# previews with no writes. (The dedup_batches warmer is disabled — for stop-at-
+# first-High dedup the engine's own sync is cheaper than all-rooms batch warming.)
+#
+# Required GitHub secret: SUPABASE_DB_URL; paid vision additionally needs
+# ANTHROPIC_API_KEY + R2_* for image bytes.
 
 on:
   schedule:
@@ -75,6 +78,14 @@ on:
         options:
           - "false"
           - "true"
+      free:
+        description: FREE mode ($0) — pHash + rule merges + reconcile only, no vision, no placeholders
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 concurrency:
   group: dedup-engine
@@ -108,14 +119,20 @@ jobs:
 
       - name: Run dedup engine
         run: |
-          # Scheduled run: examine many pairs (apply warm cache free) under a
-          # bounded COLD vision budget (the $ dial). Dispatch can override.
-          ARGS="--max-pairs ${{ inputs.max_pairs || '20000' }}"
-          ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '300' }}"
-          ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
-          ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
-          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
-          if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            # SCHEDULED = FREE ($0): pHash + rule merges + reconcile, no vision,
+            # no placeholders. The operator-chosen cost posture.
+            ARGS="--free --max-pairs 200000 --max-seconds 4800"
+          else
+            # Dispatch: paid vision / cache-only / free / shadow per inputs.
+            ARGS="--max-pairs ${{ inputs.max_pairs || '20000' }}"
+            ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '300' }}"
+            ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
+            ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+            if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
+            if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
+            if [ "${{ inputs.free }}" = "true" ]; then ARGS="$ARGS --free"; fi
+          fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS
