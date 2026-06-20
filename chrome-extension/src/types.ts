@@ -107,6 +107,17 @@ export interface CollectionWriteResult {
   removed?: boolean;
 }
 
+/* One operator note about a PROPERTY (rule #18). `origin_listing_id` is the
+ * advert the operator was viewing when they wrote it — display provenance only,
+ * not a grouping key. Read via GET /properties/{id}/notes (most-recent-first). */
+export interface ExtNote {
+  id: number;
+  property_id: number;
+  body: string;
+  origin_listing_id: number | null;
+  created_at: string;
+}
+
 /* One entry from POST /listings/lookup — our scraped facts for a portal
  * listing keyed by (source, native id), including the precomputed MF
  * reference rent + "Výnos MF" gross yield (the same figures Browse cards
@@ -168,7 +179,9 @@ export type ApiMessage =
   | { type: 'list_pipeline_stages' }
   | { type: 'list_collections' }
   | { type: 'add_to_collection'; collection_id: number; property_id: number }
-  | { type: 'remove_from_collection'; collection_id: number; property_id: number };
+  | { type: 'remove_from_collection'; collection_id: number; property_id: number }
+  | { type: 'list_notes'; property_id: number }
+  | { type: 'add_note'; property_id: number; body: string; origin_listing_id: number | null };
 
 export interface ApiResponse<T> {
   ok: true;

@@ -19,6 +19,7 @@ import type {
   CollectionWriteResult,
   EstimationRun,
   ExtCollection,
+  ExtNote,
   PipelineCardResult,
   PipelineStage,
   PortalListing,
@@ -69,6 +70,10 @@ interface PanelState {
   collections: ExtCollection[] | null;
   /* True while a collection add/remove is in flight (disables the control). */
   collectionBusy: boolean;
+  /* The property's operator notes (null = not loaded). Per-property, not cached. */
+  notes: ExtNote[] | null;
+  /* True while a note save is in flight (disables the add box). */
+  noteBusy: boolean;
   errorMessage: string | null;
 }
 
@@ -94,6 +99,13 @@ export function call<T>(message: ApiMessage): Promise<ApiResult<T>> {
 
 function fmtCzk(n: number | null | undefined): string {
   return n == null ? '—' : `${Math.round(n).toLocaleString('cs-CZ')} Kč`;
+}
+
+/* A note's timestamp as a compact cs-CZ date (full datetime in the title attr). */
+function fmtNoteDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric' });
 }
 
 function fmtPct(n: number | null | undefined): string {
@@ -257,7 +269,7 @@ function mountPanel(): {
   panel.className = 'panel';
   shadow.appendChild(panel);
 
-  let lastFocusedKey: 'rent' | 'cost' | 'price' | null = null;
+  let lastFocusedKey: 'rent' | 'cost' | 'price' | 'note' | null = null;
 
   /* The ledger header band: a small copper index-mark + product wordmark, and
    * the close control. Neutral wordmark (not "Výnos MF") so it reads honestly
@@ -319,12 +331,14 @@ function mountPanel(): {
       renderActionsBar(body, state);
       body.appendChild(note('Výnos MF a odhad jsou jen u bytů na prodej.'));
     }
+    renderNotes(body, state);  // any listing we have a property for
     if (state.errorMessage != null) body.appendChild(errorLine(state.errorMessage));
 
-    /* Restore focus after a full re-render so typing isn't interrupted. */
+    /* Restore focus after a full re-render so typing isn't interrupted (the
+     * estimation inputs AND the note textarea both carry data-key). */
     if (lastFocusedKey != null) {
-      const target = shadow.querySelector<HTMLInputElement>(
-        `input[data-key="${lastFocusedKey}"]`,
+      const target = shadow.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        `[data-key="${lastFocusedKey}"]`,
       );
       if (target != null) {
         target.focus();
@@ -502,6 +516,66 @@ function mountPanel(): {
     pill.appendChild(remove);
 
     container.appendChild(pill);
+  }
+
+  /* Operator notes for the listing's property (rule #18) — shown for ANY listing
+   * we have a property for: the existing notes (most-recent-first) + an add box.
+   * A saved note carries the viewed advert as origin provenance. */
+  function renderNotes(body: HTMLElement, state: PanelState): void {
+    const l = state.listing;
+    if (l == null || !l.found || l.property_id == null) return;
+    const sec = document.createElement('div');
+    sec.className = 'notes';
+
+    const eyebrow = document.createElement('p');
+    eyebrow.className = 'notes-eyebrow';
+    const count = state.notes?.length ?? 0;
+    eyebrow.textContent = count > 0 ? `Poznámky (${count})` : 'Poznámky';
+    sec.appendChild(eyebrow);
+
+    if (state.notes != null && state.notes.length > 0) {
+      const list = document.createElement('div');
+      list.className = 'notes-list';
+      for (const n of state.notes) {
+        const item = document.createElement('div');
+        item.className = 'note-item';
+        const bodyEl = document.createElement('p');
+        bodyEl.className = 'note-body';
+        bodyEl.textContent = n.body;
+        const date = document.createElement('span');
+        date.className = 'note-date';
+        date.textContent = fmtNoteDate(n.created_at);
+        date.title = n.created_at;
+        item.appendChild(bodyEl);
+        item.appendChild(date);
+        list.appendChild(item);
+      }
+      sec.appendChild(list);
+    }
+
+    const ta = document.createElement('textarea');
+    ta.className = 'note-input';
+    ta.rows = 2;
+    ta.placeholder = 'Přidat poznámku…';
+    ta.value = noteDraft;
+    ta.dataset.key = 'note';
+    ta.disabled = state.noteBusy;
+    ta.addEventListener('focus', () => { lastFocusedKey = 'note'; });
+    ta.addEventListener('blur', () => { if (lastFocusedKey === 'note') lastFocusedKey = null; });
+    ta.addEventListener('input', (e) => {
+      noteDraft = (e.target as HTMLTextAreaElement).value;
+    });
+    sec.appendChild(ta);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-primary note-save';
+    btn.textContent = state.noteBusy ? 'Ukládám…' : 'Uložit poznámku';
+    btn.disabled = state.noteBusy;
+    btn.onclick = () => { void onAddNote(); };
+    sec.appendChild(btn);
+
+    body.appendChild(sec);
   }
 
   /* The stamped valuation: eyebrow → big copper yield figure → a hairline-ruled
@@ -1043,6 +1117,64 @@ async function loadCollections(): Promise<void> {
   }
 }
 
+/* The note add-box draft. A module global (not panel state) so editing it never
+ * triggers a re-render — the textarea reads it on render, writes it on input;
+ * reset per panel open so one listing's draft never bleeds onto another. */
+let noteDraft = '';
+let notesLoading = false;
+
+/* Notes are PER-PROPERTY (not global like stages/collections), so they're fetched
+ * fresh per panel open and held in panel state — never module-cached. Lazy,
+ * retried on a transient blip, identity-guarded so a mid-flight panel re-open
+ * can't apply one property's notes onto another. */
+async function loadNotes(): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null || state.notes != null || notesLoading) return;
+  const propertyId = l.property_id;
+  notesLoading = true;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await call<ExtNote[]>({ type: 'list_notes', property_id: propertyId });
+      if (res.ok) {
+        setState((prev) =>
+          prev.listing?.property_id === propertyId ? { ...prev, notes: res.data } : prev);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  } finally {
+    notesLoading = false;
+  }
+}
+
+/* Save the draft as a note on the listing's property. `origin_listing_id` is the
+ * viewed advert's sreality_id (display provenance, rule #18). The new note is
+ * prepended (the list is most-recent-first); the draft clears. Identity-guarded
+ * like the other writes; reuses the SAME POST the SPA's CurationBlock uses. */
+async function onAddNote(): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null) return;
+  const body = noteDraft.trim();
+  if (body === '') return;
+  const propertyId = l.property_id;
+  setState((prev) => ({ ...prev, noteBusy: true, errorMessage: null }));
+  const res = await call<ExtNote>({
+    type: 'add_note', property_id: propertyId, body,
+    origin_listing_id: l.sreality_id ?? null,
+  });
+  if (!res.ok) {
+    setState((prev) => ({
+      ...prev, noteBusy: false, errorMessage: `Uložení poznámky selhalo: ${res.detail}`,
+    }));
+    return;
+  }
+  noteDraft = '';
+  setState((prev) =>
+    prev.listing?.property_id === propertyId
+      ? { ...prev, noteBusy: false, notes: [res.data, ...(prev.notes ?? [])] }
+      : { ...prev, noteBusy: false });
+}
+
 /* Mounts/refreshes the floating panel for one listing. Used by the detail-page
  * entry AND by index-card badges (which pass the card's ref + href + the
  * already-fetched listing so no second lookup is needed). */
@@ -1053,12 +1185,14 @@ export async function openPanel(
   const panel = mountPanel();
   render = panel.render;
   panelShadow = panel.shadow;
+  noteDraft = '';  // a fresh panel starts with an empty note draft
   state = {
     phase: 'loading', listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
     rent: null, costPerM2: null, price: null, busy: false,
     pipelineBusy: false, stages: cachedStages,
-    collections: cachedCollections, collectionBusy: false, errorMessage: null,
+    collections: cachedCollections, collectionBusy: false,
+    notes: null, noteBusy: false, errorMessage: null,
   };
   render(state);
 
@@ -1098,6 +1232,7 @@ export async function openPanel(
   if (listing?.found && listing.property_id != null) {
     void loadStages();
     void loadCollections();
+    void loadNotes();  // the property's existing notes (per-property, lazy)
   }
 
   /* Lazily load an existing estimation so the editable yield block appears

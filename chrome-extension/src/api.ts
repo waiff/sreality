@@ -8,6 +8,7 @@ import type {
   CollectionWriteResult,
   EstimationRun,
   ExtCollection,
+  ExtNote,
   PipelineCardResult,
   PipelineStage,
   PortalListing,
@@ -212,4 +213,26 @@ export async function removeFromCollection(
     `/collections/${collection_id}/properties/${property_id}`,
     { method: 'DELETE' },
   );
+}
+
+/* GET /properties/:id/notes — the property's operator notes (rule #18),
+ * most-recent-first. Returns `{data:[...]}`; we unwrap to the array. */
+export async function listNotes(property_id: number): Promise<ApiResult<ExtNote[]>> {
+  const res = await request<{ data: ExtNote[] }>(`/properties/${property_id}/notes`);
+  if (!res.ok) return res;
+  return { ok: true, data: res.data.data };
+}
+
+/* POST /properties/:id/notes — add an operator note to the property. The SAME
+ * bearer-gated route the SPA's CurationBlock uses; `origin_listing_id` records
+ * the advert being viewed (display provenance only). Returns the created note. */
+export async function addNote(
+  property_id: number,
+  body: string,
+  origin_listing_id: number | null,
+): Promise<ApiResult<ExtNote>> {
+  return request<ExtNote>(`/properties/${property_id}/notes`, {
+    method: 'POST',
+    body: JSON.stringify({ body, origin_listing_id }),
+  });
 }
