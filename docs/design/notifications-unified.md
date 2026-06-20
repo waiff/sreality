@@ -1,8 +1,8 @@
 # Unified notifications — event model + delivery channels (shared contract)
 
-> **Status: DESIGN PROPOSAL (2026-06-20), NOT YET BUILT. Four decisions
-> pending operator ratification (§6).** This document is the **shared
-> contract** between two parallel sprints that meet at one place — the
+> **Status: DESIGN PROPOSAL (2026-06-20), NOT YET BUILT. Two decisions
+> resolved, two pending operator ratification (§6).** This document is the
+> **shared contract** between two parallel sprints that meet at one place — the
 > notification *event model*:
 >
 > - **Sprint C (collections + in-app notifications):** ungrey collections,
@@ -186,42 +186,48 @@ once attached.
 - **Fold the collection's channel choice into `target_channels`** at event
   creation (from `collections.notify_channels`, gated by `monitoring_enabled`).
 
-## 6. Decisions pending ratification
+## 6. Decisions
 
-These four cross both sprints' code and must be agreed before PR A:
+Status as of 2026-06-20. Two resolved, two pending.
 
-1. **Generalize `notification_dispatches` → `notifications`** (recommended) vs
-   keep two tables + a union view. Generalizing gives one feed query, one badge,
-   one delivery path. *Coordinated migration: renames/reshapes the existing
-   watchdog table and updates its matcher + tests.*
-2. **Dedup grain for change events: per-snapshot (recommended) vs once-ever.**
-   Today the watchdog fires `price_drop` **once ever** per `(sub, property)` via
-   `UNIQUE(subscription_id, property_id, change_kind)`. Monitoring needs to fire
-   on **every** change. A single per-event `dedupe_key` that includes the
-   snapshot transition for change events handles both and *fixes* the watchdog's
-   latent "once ever" limitation:
+1. **PENDING — Generalize `notification_dispatches` → `notifications`**
+   (recommended) vs keep two tables + a union view. Generalizing gives one feed
+   query, one badge, one delivery path. *Coordinated migration: renames/reshapes
+   the existing watchdog table and updates its matcher + tests.* Operator
+   reviewing a product-level explanation of both options before sign-off.
+2. **PENDING — Dedup grain for change events: per-snapshot (recommended) vs
+   once-ever.** Today the watchdog fires `price_drop` **once ever** per
+   `(sub, property)` via `UNIQUE(subscription_id, property_id, change_kind)`.
+   Monitoring needs to fire on **every** change. A single per-event `dedupe_key`
+   that includes the snapshot transition for change events handles both and
+   *fixes* the watchdog's latent "once ever" limitation:
    - `new`: `wd:{sub}:{property}:new` (once ever — unchanged)
    - change: `cm:{collection}:{property}:price_drop:{snapshot_id}` /
      `wd:{sub}:{property}:price_drop:{snapshot_id}` /
      `cm:{collection}:{property}:inactive:{inactive_at_epoch}`
    *This replaces the existing composite UNIQUE — the one place watchdog behavior
-   changes; it needs a test update.*
-3. **Monitor at property grain (recommended) vs listing grain** — §4.
-4. **`target_channels[]` stamped by producers (recommended) vs resolved at
-   delivery time** from source config. Stamping fully decouples the delivery
-   layer; the only cost is a value going slightly stale if channels are toggled
-   in the seconds before delivery (negligible at this volume).
+   changes; it needs a test update.* Note: event **identity** (this grain) is
+   orthogonal to **materiality** (whether a change is big enough to notify — a
+   per-source threshold filter added without touching the grain), so per-snapshot
+   identity does not imply higher notification volume.
+3. **RESOLVED ✓ — Monitor at the property grain** (§4). Collection members
+   (`sreality_id`) resolve to `property_id`; the monitor watches the property's
+   price/active rollup.
+4. **RESOLVED ✓ — `target_channels[]` stamped by producers.** Producers fold the
+   source's channel choice into the event row at creation; the delivery layer
+   reads only that column (no join to subscriptions/collections).
 
 ## 7. Sequencing
 
 Because the `notifications` table is foundational to *both* the in-app feed and
 the delivery layer, it ships first.
 
-- **PR A — JOINT, foundation.** The unified `notifications` table (generalize
-  `notification_dispatches`: `source_kind`, nullable `subscription_id`, new
-  `collection_id`, `change_kind` enum growth, provenance cols, `target_channels`,
-  single `dedupe_key`). Migrate the watchdog matcher onto it. Decide an owner —
-  **build once.** Unblocks both sprints.
+- **PR A — foundation, owned by the notification-channels session (Sprint N).**
+  The unified `notifications` table (generalize `notification_dispatches`:
+  `source_kind`, nullable `subscription_id`, new `collection_id`, `change_kind`
+  enum growth, provenance cols, `target_channels`, single `dedupe_key`). Migrate
+  the watchdog matcher onto it. **Built once, here** — Sprint C builds against it,
+  does not re-create it. Unblocks both sprints.
 - **Sprint C PRs** — collections ungrey + default "monitoring" + add-to-collection
   (card/detail/extension); the collection-monitor matcher writing `notifications`;
   the unified Notifications area + unread badge; per-collection

@@ -54,7 +54,7 @@ create table channel_sends (
   category      text not null default 'transactional'
                   check (category in ('transactional','commercial')),
 
-  transport     text,                  -- 'brevo' | 'telegram'
+  transport     text,                  -- vendor: 'resend' (transactional email) | 'telegram' | <eu vendor> (outreach)
   provider_message_id text,
   status        text not null default 'queued'
                   check (status in ('queued','sent','failed')),  -- +delivered/bounced in the webhook PR
@@ -89,11 +89,18 @@ Adding a channel can never re-fire an event or suppress another channel's send.
 ## 2. Transport abstraction — mirror `api/providers/` + `LLMClient`
 
 ```
-api/transports/base.py        # ChannelTransport Protocol + RenderedMessage/SendResult dataclasses + TransportError
-api/transports/email_brevo.py # Brevo: requests-only, single api-key header
-api/transports/telegram.py    # Telegram Bot API: requests-only, one POST to sendMessage
-api/channel_client.py         # ChannelClient: audited send orchestrator (the LLMClient analog)
+api/transports/base.py         # ChannelTransport Protocol + RenderedMessage/SendResult dataclasses + TransportError
+api/transports/email_resend.py # Resend: requests-only, single api-key header (transactional / self-notification)
+api/transports/telegram.py     # Telegram Bot API: requests-only, one POST to sendMessage
+api/channel_client.py          # ChannelClient: audited send orchestrator (the LLMClient analog)
 ```
+
+> Email is a *channel* with a pluggable *vendor*. Resend serves the
+> transactional (self-notification) stream; the broker-outreach (commercial)
+> stream — deferred — will add a second EU-hosted vendor impl behind the same
+> Protocol (Resend's AUP forbids cold outreach + stores account data in the US;
+> see §6/§9). `channel_sends.transport` records which vendor served each send, so
+> mixing vendors per stream is the abstraction working, not patchwork.
 
 ```python
 class ChannelTransport(Protocol):
@@ -166,7 +173,7 @@ Notifications go to the **operator**, always. Destination endpoints live in
 
 Transport secrets live in Railway env, referenced by name (never `VITE_`):
 
-- `BREVO_API_KEY`, `EMAIL_FROM`, telegram `BOT_TOKEN`, and a genuinely-missing
+- `RESEND_API_KEY`, `EMAIL_FROM`, telegram `BOT_TOKEN`, and a genuinely-missing
   `SPA_BASE_URL` (no SPA-origin var exists today).
 
 **Which** channels an event uses is decided per-source (a watchdog
@@ -197,25 +204,33 @@ so the alert text matches Browse. Degrade gracefully (`locality → district →
 
 `api/notifications.py` (watchdog + collection_monitor) and `api/outreach.py`
 (broker outreach, on `origin/main`, "sends" via `mailto:` today with a planned
-"real email provider") both route real email through the **same** `EmailTransport`
-+ the **same** `channel_sends` ledger. What stays **per-consumer** is the real
-asymmetry — **consent/suppression**:
+"real email provider") both route real email through the **same** transport
+*Protocol* + the **same** `channel_sends` ledger + the **same** outbox runtime.
+What stays **per-consumer** is the real asymmetry — **consent/suppression** — and,
+because of vendor policy, **the concrete email vendor**:
 
-| Shared (the transport) | Per-consumer (never centralized) |
+| Shared (the layer) | Per-consumer (never centralized) |
 |---|---|
-| `EmailTransport` (Brevo) | consent / suppression / targeting |
-| `channel_sends` audit ledger | outreach's `broker_outreach_suppression` (broker-keyed GDPR) |
+| `ChannelTransport` Protocol + `ChannelClient` | consent / suppression / targeting |
+| `channel_sends` audit ledger + outbox loop | outreach's `broker_outreach_suppression` (broker-keyed GDPR) |
 | retry/backoff, cost capture, key reading | message composition (different voice) |
 | `RenderedMessage` neutral type | `category` (`commercial` for outreach) |
+|  | **email vendor**: `resend` (transactional) vs an EU-hosted vendor (commercial) |
 
 The transport must **never** apply a single suppression check — doing so would
-either wrongly gate operator self-mail or wrongly bypass broker GDPR
-suppression. Outreach wiring: `outreach.send_message` → `ChannelClient.send(
-'email', …, consumer='outreach', category='commercial')`; stamps `sent_via='email'`
-+ `provider_message_id`; activates RFC 8058 `List-Unsubscribe` + the suppression
-pre-send gate for `commercial`. `mailto` stays a fallback. Note:
-`outreach_messages.status` reserves `bounced`/`replied` but not `delivered` — an
-additive CHECK ALTER if delivered-feedback is wanted there.
+either wrongly gate operator self-mail or wrongly bypass broker GDPR suppression.
+**Vendor split (intentional, not a compromise):** Resend's AUP forbids cold
+outreach and its account data is US-resident, so it serves the *transactional*
+stream only; the deferred outreach stream adds an EU-hosted, outreach-permissible
+vendor as a second `ChannelTransport` impl. The Protocol, ledger, outbox, and
+audit are shared; only the leaf vendor impl differs, and `channel_sends.transport`
+records which served each send. Outreach wiring (when built):
+`outreach.send_message` → `ChannelClient.send('email', …, consumer='outreach',
+category='commercial')`; stamps `sent_via='email'` + `provider_message_id`;
+activates RFC 8058 `List-Unsubscribe` + the suppression pre-send gate for
+`commercial`. `mailto` stays a fallback. Note: `outreach_messages.status` reserves
+`bounced`/`replied` but not `delivered` — an additive CHECK ALTER if
+delivered-feedback is wanted there.
 
 ## 7. Data quality / observability
 
@@ -236,15 +251,20 @@ carries only the cheap `category` discriminator. The consent / suppression /
 (itself blocked on a Czech-qualified review, human-in-the-loop) — wired in the
 outreach PR, not the foundation.
 
-## 9. Channel picks
+## 9. Channel picks (decided 2026-06-20)
 
-- **Email → Brevo (Sendinblue).** EU-hosted (clean GDPR for a Czech operator,
-  carries into outreach), permanent 300/day free tier, single api-key JSON POST
-  (no SDK, fits `requests`-only). Only candidate spanning alerts-now +
-  outreach-later. **Fallback: Postmark** for the transactional stream (best
-  inbox placement) — never for outreach (US-hosted, AUP forbids cold/bulk).
-  Reject Resend (US residency once holding broker PII) and SES (SigV4 forces
-  boto3).
+- **Email → Resend.** Cleanest transactional API for the self-notification
+  stream, fits `requests`-only (single api-key JSON POST, no SDK), free tier
+  3,000/mo + 100/day (far beyond a personal alert feed), strong transactional
+  deliverability. **Scope: transactional / self-notification only.** Resend's
+  Acceptable Use Policy forbids cold/unsolicited outreach, and although it can
+  *send* from an EU region it **stores account data/logs in the US** — both
+  disqualifying for broker-outreach (third-party PII + cold B2B), neither an
+  issue for emailing the operator. So the **outreach (commercial) email vendor is
+  deferred and will be a separate EU-hosted, outreach-permissible provider**
+  (e.g. Brevo / a dedicated outreach ESP) behind the same `ChannelTransport`
+  Protocol (§6). **Fallback for the transactional stream: Postmark** (best inbox
+  placement, same requests-only ergonomics).
 - **Mobile-native → Telegram Bot API.** Free, one `requests.post`, native push,
   no number provisioning / template approval, near-zero maintenance. Setup =
   one DM to the bot to capture `chat_id`. Runner-up: Pushover (~$5 one-time).
@@ -266,9 +286,10 @@ All branches off `origin/main` (carries the outreach CRM).
   false "one-line ALTER" claim in **CLAUDE.md rule #16 + ROADMAP** (not by
   editing migration 057 — migrations are append-only; the correction rides in
   the new migration's comment). Tests for ledger idempotency + composer.
-- **PR 2 — Email (Brevo) live.** Transport + Railway env + SPF/DKIM/DMARC DNS
-  (10-min operator step) + email templates + UI (Delivery section in watchdog/
-  collection config, delivery-status column on the feed, Settings → Delivery).
+- **PR 2 — Email (Resend) live.** Transport + Railway env (`RESEND_API_KEY`,
+  `EMAIL_FROM`) + SPF/DKIM/DMARC DNS (10-min operator step) + email templates +
+  UI (Delivery section in watchdog/collection config, delivery-status column on
+  the feed, Settings → Delivery).
 - **PR 3 — Telegram.** One file + one registry line + CHECK ALTER + `chat_id`
   capture. Proves the abstraction.
 - **PR 4 — Outreach unification.** §6.
