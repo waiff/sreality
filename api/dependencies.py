@@ -93,13 +93,14 @@ def _build_transports() -> dict[str, Any]:
 
     Each transport reads its own secret lazily and raises only on `send()`, so
     a missing key never fails boot; `is_configured()` lets a caller skip an
-    unconfigured channel. Email (Resend) is registered here from PR 2 — but it
-    only sends once `RESEND_API_KEY` + `EMAIL_FROM` are set AND a watchdog opts
-    into the 'email' channel (so `target_channels` is non-empty). PR 3 adds
-    Telegram as a second entry.
+    unconfigured channel. A transport only delivers once its secret is set AND a
+    watchdog/collection opts into its channel (so `target_channels` is non-empty):
+    email = Resend (`RESEND_API_KEY` + `EMAIL_FROM`), telegram = Bot API
+    (`TELEGRAM_BOT_TOKEN`). Adding a channel is one import + one entry here.
     """
     from api.transports.email_resend import ResendEmail
-    return {"email": ResendEmail()}
+    from api.transports.telegram import Telegram
+    return {"email": ResendEmail(), "telegram": Telegram()}
 
 
 def get_transports() -> dict[str, Any]:

@@ -6,6 +6,23 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Telegram notification channel (Sprint N PR 4)
+
+The mobile-native channel — the abstraction's payoff: **one file + one registry line**, no
+migration (the `channel_sends.channel` CHECK already allowed `'telegram'` from migration 207,
+the outbox already routes the `chat_id` recipient from `app_settings.notification_telegram_chat_id`).
+- `api/transports/telegram.py` — Bot API `sendMessage` (requests-only; `is_configured()` on
+  `TELEGRAM_BOT_TOKEN`; HTTP / `ok:false` / network failures → `failed` SendResult, never raise).
+  Registered in `_build_transports` alongside Resend. Hermetic tests (mocked HTTP).
+- CLAUDE.md "Auth and secrets" now documents the Sprint-N delivery env vars
+  (`RESEND_API_KEY`/`EMAIL_FROM`/`TELEGRAM_BOT_TOKEN`/`SPA_BASE_URL`/`OUTBOX_DRAIN_DISABLED`) +
+  the operator-destination `app_settings` rows.
+
+Dark until `TELEGRAM_BOT_TOKEN` is set + a watchdog/collection opts into the `telegram` channel.
+**Operator go-live:** create a bot via @BotFather → `TELEGRAM_BOT_TOKEN` Railway env → DM the bot
+→ set `notification_telegram_chat_id`. **Remaining:** PR 5 outreach unification; the Delivery UI
+(channel toggles in WatchdogEdit + collection config + a delivery-status column on the feed).
+
 ### 2026-06: Notification delivery outbox (Sprint N PR 3 — dark until provisioned)
 
 The delivery runtime that turns stamped `target_channels` into real sends — source-agnostic,
