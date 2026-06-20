@@ -441,6 +441,7 @@ def run_engine(
     max_room_attempts: int = 4,
     auto_merge_enabled: bool = True,
     autodismiss: bool = True,
+    enqueue_unresolved: bool = True,
     dry_run: bool = False,
     deadline: float | None = None,
 ) -> dict[str, int]:
@@ -469,7 +470,7 @@ def run_engine(
         "pairs_considered": 0, "rejected": 0,
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
-        "auto_dismissed": 0, "reconciled": 0,
+        "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
     })
 
     stats["reconciled"] = _reconcile_stale_candidates(conn, dry_run=dry_run)
@@ -632,10 +633,16 @@ def run_engine(
                 elif outcome["action"] == "dismiss":
                     stats["auto_dismissed"] += 1
                     dismissed_pairs.add(cp)
-                else:
+                elif enqueue_unresolved:
                     if not dry_run:
                         _enqueue_candidate(conn, a, b, markers)
                     stats["queued"] += 1
+                else:
+                    # Free mode: don't pile un-vision'd pairs into the review queue
+                    # (they'd just be 'no photos compared' placeholders). pHash /
+                    # rule-B / reconcile already ran; this pair is left for a future
+                    # run (free pHash as coverage grows, or vision if re-enabled).
+                    stats["skipped_unresolved"] += 1
 
     return finalize()
 
@@ -792,6 +799,12 @@ def main() -> int:
                         help="Consume only ALREADY-WARMED vision verdicts (no LLM, $0): "
                              "applies cached merge/dismiss results the batch lane paid for; "
                              "un-warmed pairs stay queued. The cost-efficient drain half.")
+    parser.add_argument("--free", action="store_true",
+                        help="FREE mode ($0, no LLM at all): pHash + exact-address merges + "
+                             "reconcile + reject/gate dismissals only. Un-vision'd cross-source "
+                             "pairs are skipped (NOT queued as placeholders), so the review queue "
+                             "doesn't inflate. Captures every photo-sharing dup; different-photo "
+                             "dups are left for a future run (more free pHash, or vision if enabled).")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -824,14 +837,18 @@ def main() -> int:
         auto_merge_enabled = _auto_merge_enabled(conn)
         autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
         LOG.info(
-            "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s cache_only=%s",
-            auto_merge_enabled, autodismiss, args.shadow, args.cache_only,
+            "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s cache_only=%s free=%s",
+            auto_merge_enabled, autodismiss, args.shadow, args.cache_only, args.free,
         )
 
         classify_fn = None
         compare_fn = None
         site_plan_fn = None
-        if auto_merge_enabled and args.cache_only:
+        if args.free:
+            # FREE mode: no vision fns at all -> pHash / rule-B / reconcile /
+            # reject-gate only ($0); un-vision'd pairs are skipped, not queued.
+            pass
+        elif auto_merge_enabled and args.cache_only:
             # Cost-efficient consume: read warm caches only, never call the LLM.
             classify_fn, compare_fn, site_plan_fn = _build_cache_only_fns(conn)
         elif auto_merge_enabled and args.max_vision_calls > 0:
@@ -857,6 +874,7 @@ def main() -> int:
             max_room_attempts=eff_max_rooms,
             auto_merge_enabled=auto_merge_enabled,
             autodismiss=autodismiss,
+            enqueue_unresolved=not args.free,
             dry_run=args.shadow,
             deadline=deadline,
         )
@@ -865,12 +883,13 @@ def main() -> int:
 
     LOG.info(
         "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
-        "auto_dismissed=%d reconciled=%d queued=%d rejected=%d skipped_same_source=%d "
-        "pairs=%d vision_calls=%d",
+        "auto_dismissed=%d reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
+        "skipped_same_source=%d pairs=%d vision_calls=%d",
         "shadow" if args.shadow else "done",
         stats["eligible"], stats["auto_address"], stats["auto_phash"],
         stats["auto_visual"], stats["auto_dismissed"], stats["reconciled"],
-        stats["queued"], stats["rejected"], stats.get("skipped_same_source", 0),
+        stats["queued"], stats["skipped_unresolved"], stats["rejected"],
+        stats.get("skipped_same_source", 0),
         stats["pairs_considered"], stats["vision_calls"],
     )
     return 0
