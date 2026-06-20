@@ -42,6 +42,7 @@ const CARDS: PipelineBoardCard[] = [
     board_position: 0,
     entered_stage_at: '2026-06-01T00:00:00Z',
     sreality_id: 111,
+    category_main: 'byt',
     street: 'Sadová',
     district: 'Praha',
     disposition: '2+kk',
@@ -58,6 +59,24 @@ const CARDS: PipelineBoardCard[] = [
     },
   },
 ];
+
+// A second card of a different property type, for the type-filter test.
+const CARD_DUM: PipelineBoardCard = {
+  property_id: 43,
+  stage_id: 3,
+  board_position: 0,
+  entered_stage_at: '2026-06-02T00:00:00Z',
+  sreality_id: 222,
+  category_main: 'dum',
+  street: 'Lesní',
+  district: 'Brno',
+  disposition: '4+1',
+  area_m2: 140,
+  price_czk: 9_000_000,
+  mf_gross_yield_pct: null,
+  image_url: null,
+  broker: null,
+};
 
 describe('planMove', () => {
   it('resolves a cross-column drop into a stage move', () => {
@@ -129,6 +148,22 @@ describe('<Pipeline> board', () => {
     const broker = screen.getByText('Jan Novák');
     expect(broker).toBeInTheDocument();
     expect(broker.closest('a')).toHaveAttribute('href', '/brokers/7');
+  });
+
+  it('filters the board by property type', async () => {
+    vi.mocked(queries.fetchPipelineBoard).mockResolvedValue([CARDS[0], CARD_DUM]);
+    renderBoard();
+    // Both cards render; the type chips appear (≥2 types present).
+    expect(await screen.findByText('Sadová, Praha')).toBeInTheDocument();
+    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
+    const domy = screen.getByRole('button', { name: 'Domy' });
+    expect(screen.getByRole('button', { name: 'Byty' })).toBeInTheDocument();
+    // Filter to Domy → only the dům card remains.
+    fireEvent.click(domy);
+    await waitFor(() =>
+      expect(screen.queryByText('Sadová, Praha')).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText('Lesní, Brno')).toBeInTheDocument();
   });
 
   it('trash → confirm removes the card via removePipelineCard', async () => {

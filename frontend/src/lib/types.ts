@@ -862,6 +862,7 @@ export interface PipelineBoardCard {
   board_position: number;
   entered_stage_at: string;
   sreality_id: number | null;
+  category_main: string | null;
   street: string | null;
   district: string | null;
   disposition: string | null;
