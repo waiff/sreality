@@ -291,17 +291,26 @@ All branches off `origin/main` (carries the outreach CRM).
   migration 206.) The **outbox lifespan loop**, `compose_notification_message`, and
   `SPA_BASE_URL` move to PR 2, where they're end-to-end testable against the first
   real transport.
-- **PR 2 — Email (Resend) live + the outbox.** `api/transports/email_resend.py` +
-  register in `_build_transports`; the outbox lifespan loop (drains
-  `notification_dispatches × unnest(target_channels)` via `ChannelClient`);
-  `compose_notification_message` + widened `_LISTING_PROJECTION` + cover-image read;
-  Railway env (`RESEND_API_KEY`, `EMAIL_FROM`, `SPA_BASE_URL`) + SPF/DKIM/DMARC DNS
-  (10-min operator step) + email templates; UI (Delivery section in watchdog/
-  collection config, delivery-status column on the feed, Settings → Delivery).
-- **PR 3 — Telegram.** One file + one registry line + CHECK ALTER + `chat_id`
+- **PR 2 — Send plumbing (Resend transport + channel opt-in), ships dark. ✅ BUILT
+  (migration 208).** `api/transports/email_resend.py` (requests-only, env-gated
+  `is_configured`) + registered in `_build_transports`; `notification_subscriptions.channels`
+  + the matcher stamps `target_channels` (channels minus `in_app`) on both event
+  passes; subscription CRUD + API carry `channels`. Hermetic tests (transport
+  mock, stamping, CRUD). **No runtime change** — no outbox task yet, and email
+  sends nothing until both `RESEND_API_KEY`/`EMAIL_FROM` are set AND a watchdog
+  opts into the `email` channel. (The always-on outbox is split into PR 3 so it
+  lands paired with live Resend provisioning rather than blind.)
+- **PR 3 — The outbox + email goes live.** The outbox lifespan loop (gated to start
+  only when a transport `is_configured`; drains `notification_dispatches × unnest(target_channels)`
+  via `ChannelClient`; first-attempt + a `next_attempt_at` retry pass);
+  `compose_notification_message` + recipient resolution from `app_settings`
+  (`notification_email_to`); `SPA_BASE_URL`; operator provisions Resend
+  (account + `RESEND_API_KEY`/`EMAIL_FROM` env + SPF/DKIM/DMARC DNS) + Delivery UI
+  (channel toggles in watchdog config, delivery-status column on the feed).
+- **PR 4 — Telegram.** One file + one registry line + CHECK ALTER + `chat_id`
   capture. Proves the abstraction.
-- **PR 4 — Outreach unification.** §6.
-- **PR 5 (optional) — Delivery feedback webhook.** Brevo bounce/delivered →
+- **PR 5 — Outreach unification.** §6.
+- **PR 6 (optional) — Delivery feedback webhook.** Resend bounce/delivered →
   `record_status_update` → flips `channel_sends` (+ `outreach_messages`). Scope
   it or explicitly defer; don't leave `delivered`/`bounced` as dead enum values.
 

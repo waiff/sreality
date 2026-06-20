@@ -39,12 +39,15 @@ class CreateSubscriptionIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     filter_spec: WatchdogFilterSpec
     is_active: bool = True
+    # Non-in_app delivery channels (e.g. ['email']). in_app is always implicit.
+    channels: list[str] = Field(default_factory=list)
 
 
 class UpdateSubscriptionIn(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     filter_spec: WatchdogFilterSpec | None = None
     is_active: bool | None = None
+    channels: list[str] | None = None
 
 
 # --- subscriptions --------------------------------------------------------
@@ -71,6 +74,7 @@ def post_subscription(
         name=body.name,
         filter_spec=body.filter_spec,
         is_active=body.is_active,
+        channels=body.channels,
     )
 
 
@@ -99,6 +103,7 @@ def put_subscription(
         name=body.name,
         filter_spec=body.filter_spec,
         is_active=body.is_active,
+        channels=body.channels,
     )
     if row is None:
         raise HTTPException(status_code=404, detail="subscription not found")
