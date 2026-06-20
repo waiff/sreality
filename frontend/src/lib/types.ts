@@ -824,6 +824,7 @@ export interface Note {
  * property_pipeline_public; single-valued (one card per property). */
 export interface PipelineCard {
   property_id: number;
+  stage_id: number;
   stage_key: string;
   stage_label: string;
   stage_color: TagColor | null;
