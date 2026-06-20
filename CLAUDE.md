@@ -741,15 +741,21 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
     two batched anon reads — `fetchListingBrokersByIds` (`listing_broker_public`) + `fetchBrokersByIds`
     (`brokers_public` contact), NOT the raw drift-prone `properties_public.broker_*` — the name links
-    to `/brokers/{id}`, contact in a native-title hover). Stage moves are
+    to `/brokers/{id}`, contact in a native-title hover). **On the kanban board** stage moves are
     **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a
     `useDraggable` with a grip handle; one optimistic move mutation; keyboard moves via the
     `KeyboardSensor`). The drag→move resolution is the pure, unit-tested `planMove(activeId,
     overId, cards)` (same column / dropped-outside / unknown card → no-op). The per-card stage
-    `<select>` was **removed** (the card instead carries a trash → inline two-step confirm →
+    `<select>` was **removed** there (the card instead carries a trash → inline two-step confirm →
     optimistic remove-from-pipeline, the app's destructive-action pattern). `<DragOverlay
     dropAnimation={null}>` so the released card doesn't fly back to origin before the optimistic
-    move lands it in the target column.
+    move lands it in the target column. **On the listing-detail header** (a record page, no board
+    to drag onto) `PipelineToggle` changes the stage with a native `<select>` (the app's
+    single-choice control) tinted the stage colour + a remove `✕`, and the not-yet-in-pipeline
+    state is the funnel "Přidat do pipeline". Both surfaces call the SAME `movePipelineCard` PATCH
+    (stamps `entered_stage_at`, logs the `moved` event) with the same optimistic-update shape — one
+    audited write, never a second-grade path. `PipelineCard` (`property_pipeline_public`) exposes
+    `stage_id` for the select's value.
     **Stages are operator-curated from the board's "Spravovat fáze" panel** (`POST
     /pipeline/stages` create — the `key` slug is derived server-side from the label; `PATCH
     /pipeline/stages/{id}` rename/recolor/retag/crown-entry; `POST /pipeline/stages/reorder`

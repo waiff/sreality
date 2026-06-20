@@ -1504,7 +1504,7 @@ export const fetchPropertyPipeline = async (
 ): Promise<PipelineCard | null> => {
   const { data, error } = await supabase
     .from('property_pipeline_public')
-    .select('property_id, stage_key, stage_label, stage_color, is_terminal, stage_position')
+    .select('property_id, stage_id, stage_key, stage_label, stage_color, is_terminal, stage_position')
     .eq('property_id', property_id)
     .maybeSingle();
   if (error) throw error;
