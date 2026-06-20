@@ -1,9 +1,10 @@
 # Unified notifications — event model + delivery channels (shared contract)
 
-> **Status: DESIGN PROPOSAL (2026-06-20), NOT YET BUILT. Two decisions
-> resolved, two pending operator ratification (§6).** This document is the
-> **shared contract** between two parallel sprints that meet at one place — the
-> notification *event model*:
+> **Status: ALL FOUR DECISIONS RESOLVED (2026-06-20, §6). The foundation
+> (PR A) is BUILT on this branch — migration 206 generalizes the event table +
+> ports the watchdog matcher; apply at deploy (see migration header).** This
+> document is the **shared contract** between two parallel sprints that meet at
+> one place — the notification *event model*:
 >
 > - **Sprint C (collections + in-app notifications):** ungrey collections,
 >   a default "monitoring" collection, add-to-collection on Browse card /
@@ -176,7 +177,7 @@ once attached.
 ## 5. Data-quality rules for the collection-monitor producer (Sprint C)
 
 - **Reuse the watchdog's snapshot-diff logic** (`match_changes_once` /
-  `_recent_price_drop_property_ids` in `api/notifications.py`) for price events,
+  `_recent_price_drops` in `api/notifications.py`) for price events,
   plus an `inactive` detector off `properties.is_active` / `inactive_at`. Do not
   fork a second definition of "a price change" — that's the rule-#16 disease one
   layer down.
@@ -188,28 +189,33 @@ once attached.
 
 ## 6. Decisions
 
-Status as of 2026-06-20. Two resolved, two pending.
+All four resolved 2026-06-20. PR A (migration 206 + matcher port) implements 1 & 2
+on this branch.
 
-1. **PENDING — Generalize `notification_dispatches` → `notifications`**
-   (recommended) vs keep two tables + a union view. Generalizing gives one feed
-   query, one badge, one delivery path. *Coordinated migration: renames/reshapes
-   the existing watchdog table and updates its matcher + tests.* Operator
-   reviewing a product-level explanation of both options before sign-off.
-2. **PENDING — Dedup grain for change events: per-snapshot (recommended) vs
-   once-ever.** Today the watchdog fires `price_drop` **once ever** per
-   `(sub, property)` via `UNIQUE(subscription_id, property_id, change_kind)`.
-   Monitoring needs to fire on **every** change. A single per-event `dedupe_key`
-   that includes the snapshot transition for change events handles both and
-   *fixes* the watchdog's latent "once ever" limitation:
-   - `new`: `wd:{sub}:{property}:new` (once ever — unchanged)
-   - change: `cm:{collection}:{property}:price_drop:{snapshot_id}` /
-     `wd:{sub}:{property}:price_drop:{snapshot_id}` /
-     `cm:{collection}:{property}:inactive:{inactive_at_epoch}`
-   *This replaces the existing composite UNIQUE — the one place watchdog behavior
-   changes; it needs a test update.* Note: event **identity** (this grain) is
-   orthogonal to **materiality** (whether a change is big enough to notify — a
-   per-source threshold filter added without touching the grain), so per-snapshot
-   identity does not imply higher notification volume.
+1. **RESOLVED ✓ — Generalize the event table (one table, not two).** Built by
+   migration 206. **The physical table KEEPS the name `notification_dispatches`**
+   (not renamed to `notifications`): every reference is contained to
+   `api/notifications.py` (no view / RPC / frontend touches it), so a rename buys
+   only a deploy-window where feed reads 500. Conceptually it is the unified
+   "notifications" event table; the schema in §3 is realized as additive ALTERs on
+   `notification_dispatches`.
+2. **RESOLVED ✓ — Dedup grain for change events: per-snapshot.** A single
+   per-event `dedupe_key TEXT UNIQUE` (migration 206) replaces the composite
+   UNIQUE and *fixes* the watchdog's latent "once ever" limitation:
+   - `new`: `wd:{sub}:new:{property_id}` (once ever per property — unchanged)
+   - change: `wd:{sub}:price_drop:{snapshot_id}` (Sprint C:
+     `cm:{collection}:{change_kind}:{snapshot_id}`). **Change-event keys are
+     keyed on the snapshot, NOT the property** — a snapshot belongs to one
+     property, so the key is property-derivable AND stays stable when a merge
+     re-points `property_id`. That keeps the merge reconciler
+     (`toolkit/operator_state.py`) simple: it re-points + collapses on
+     `(subscription_id, collection_id, change_kind, trigger_snapshot_id)` with
+     NULL-safe equality, so two pre-merge `new` rows for one subscription
+     collapse to one while distinct price-drop snapshots are each preserved.
+   Note: event **identity** (this grain) is orthogonal to **materiality**
+   (whether a change is big enough to notify — a per-source threshold filter
+   added without touching the grain), so per-snapshot identity does not imply
+   higher notification volume.
 3. **RESOLVED ✓ — Monitor at the property grain** (§4). Collection members
    (`sreality_id`) resolve to `property_id`; the monitor watches the property's
    price/active rollup.
