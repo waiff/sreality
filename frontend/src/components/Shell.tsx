@@ -4,19 +4,24 @@ import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
 
 type NavItem =
-  | { kind: 'link'; to: string; label: string; disabled?: boolean }
-  | { kind: 'divider' };
+  | { kind: 'link'; to: string; label: string; disabled?: boolean; title?: string }
+  | { kind: 'divider' }
+  | { kind: 'section'; label: string };
 
 const navItems: ReadonlyArray<NavItem> = [
   { kind: 'link', to: '/browse',      label: 'Browse' },
-  { kind: 'link', to: '/datasets',    label: 'Datasets' },
-  { kind: 'link', to: '/watchdog',    label: 'Watchdog' },
-  { kind: 'link', to: '/estimations', label: 'Estimations' },
-  { kind: 'link', to: '/brokers',     label: 'Brokers' },
-  { kind: 'link', to: '/outreach',    label: 'Outreach' },
   { kind: 'link', to: '/pipeline',    label: 'Pipeline' },
-  { kind: 'link', to: '/collections', label: 'Collections', disabled: true },
+  { kind: 'link', to: '/estimations', label: 'Estimations' },
+  { kind: 'link', to: '/watchdog',    label: 'Watchdogs' },
+  { kind: 'link', to: '/brokers',     label: 'Brokers' },
+  { kind: 'link', to: '/datasets',    label: 'Datasets' },
+  { kind: 'link', to: '/outreach',    label: 'Outreach', disabled: true,
+    title: 'Outreach is paused — not available yet.' },
+  { kind: 'link', to: '/collections', label: 'Collections', disabled: true,
+    title: 'Collections is being reworked — not available yet.' },
   { kind: 'divider' },
+  // Everything past this divider lives under Settings.
+  { kind: 'section', label: 'Settings' },
   { kind: 'link', to: '/dedup',       label: 'Dedup' },
   { kind: 'link', to: '/health',      label: 'Health' },
   { kind: 'link', to: '/scrapers',    label: 'Scrapers' },
@@ -55,11 +60,21 @@ function TopBar() {
                 />
               );
             }
+            if (item.kind === 'section') {
+              return (
+                <span
+                  key={`section-${i}`}
+                  className="mr-1 pl-1 text-[0.6rem] tracking-[0.18em] uppercase text-[var(--color-ink-4)] select-none"
+                >
+                  {item.label}
+                </span>
+              );
+            }
             if (item.disabled) {
               return (
                 <span
                   key={item.to}
-                  title="Collections is being reworked — not available yet."
+                  title={item.title}
                   aria-disabled="true"
                   className="relative px-3 py-1.5 text-sm tracking-wide text-[var(--color-ink-4)] opacity-50 cursor-not-allowed select-none"
                 >
