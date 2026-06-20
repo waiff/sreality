@@ -51,6 +51,13 @@ class ChannelClient:
                 f"available: {sorted(self._transports)}"
             ) from exc
 
+    def configured_channels(self) -> set[str]:
+        """Channels whose transport has its secrets set — the outbox skips the
+        rest rather than piling up `failed` rows for an unprovisioned channel."""
+        return {
+            name for name, t in self._transports.items() if t.is_configured()
+        }
+
     def send(
         self,
         *,
@@ -172,12 +179,17 @@ class ChannelClient:
         cost_usd: float | None = None,
         duration_ms: int | None = None,
     ) -> None:
+        # On failure schedule a retry with linear backoff (5 min × the new
+        # attempt count); on success clear the cursor. The outbox retry pass
+        # picks up failed rows whose next_attempt_at is due (and attempts < max).
         sql = (
             "UPDATE channel_sends SET "
             "  status = %s, error_message = %s, provider_message_id = %s, "
             "  transport = COALESCE(%s, transport), cost_usd = %s, duration_ms = %s, "
             "  attempts = attempts + 1, "
-            "  sent_at = CASE WHEN %s = 'sent' THEN now() ELSE sent_at END "
+            "  sent_at = CASE WHEN %s = 'sent' THEN now() ELSE sent_at END, "
+            "  next_attempt_at = CASE WHEN %s = 'failed' "
+            "    THEN now() + ((attempts + 1) * interval '5 minutes') ELSE NULL END "
             "WHERE id = %s"
         )
         with self._conn.transaction(), self._conn.cursor() as cur:
@@ -191,6 +203,40 @@ class ChannelClient:
                     cost_usd,
                     duration_ms,
                     status,
+                    status,
                     claim_id,
                 ),
             )
+
+    def retry(
+        self,
+        *,
+        send_id: int,
+        channel: str,
+        recipient: str,
+        message: RenderedMessage,
+    ) -> dict[str, Any]:
+        """Re-attempt an existing `failed` channel_sends row (the outbox retry
+        pass). No claim — the row exists; re-run the transport and re-finalize
+        (attempts + next_attempt_at advance). Never raises on a send failure."""
+        transport = self.transport(channel)
+        mono = time.monotonic()
+        try:
+            result = transport.send(recipient=recipient, message=message)
+        except Exception as exc:  # noqa: BLE001 — the failed row IS the audit trail
+            self._finalize(
+                send_id, status="failed",
+                error=f"{type(exc).__name__}: {exc}"[:1000],
+                duration_ms=int((time.monotonic() - mono) * 1000),
+            )
+            return {"status": "failed", "id": send_id, "error": str(exc)}
+        self._finalize(
+            send_id,
+            status=result.status,
+            error=result.error,
+            provider_message_id=result.provider_message_id,
+            transport=transport.transport,
+            cost_usd=result.cost_usd,
+            duration_ms=int((time.monotonic() - mono) * 1000),
+        )
+        return {"status": result.status, "id": send_id}

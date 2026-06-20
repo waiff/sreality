@@ -140,18 +140,33 @@ async def _lifespan(_app: FastAPI) -> "AsyncIterator[None]":
         )
 
     stop_event: asyncio.Event = asyncio.Event()
-    task: asyncio.Task[None] | None = None
+    tasks: list[asyncio.Task[None]] = []
     if not os.environ.get("NOTIFICATIONS_MATCHER_DISABLED"):
-        task = asyncio.create_task(
+        tasks.append(asyncio.create_task(
             nf_module.matcher_loop(stop_event), name="notifications-matcher",
-        )
+        ))
+
+    # Delivery outbox (Sprint N): only start it when a transport is actually
+    # configured (e.g. RESEND_API_KEY set) — otherwise it would query every
+    # interval to do nothing. So it is a true no-op (no task) until the operator
+    # provisions a channel and redeploys. OUTBOX_DRAIN_DISABLED force-disables it.
+    if not os.environ.get("OUTBOX_DRAIN_DISABLED") and any(
+        t.is_configured() for t in deps.get_transports().values()
+    ):
+        from api import notification_outbox
+        tasks.append(asyncio.create_task(
+            notification_outbox.outbox_loop(stop_event), name="notification-outbox",
+        ))
+        logging.info("notification outbox started (a transport is configured)")
+
     try:
         yield
     finally:
-        if task is not None:
+        if tasks:
             stop_event.set()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await asyncio.wait_for(task, timeout=10.0)
+            for t in tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await asyncio.wait_for(t, timeout=10.0)
 
 
 app = FastAPI(title="sreality toolkit API", version="0.3.0", lifespan=_lifespan)

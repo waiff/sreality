@@ -6,6 +6,29 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Notification delivery outbox (Sprint N PR 3 — dark until provisioned)
+
+The delivery runtime that turns stamped `target_channels` into real sends — source-agnostic,
+so it delivers BOTH watchdog and collection-monitor events (Sprint C) through one path.
+- `api/notification_outbox.py` — `drain_once` (NEW un-sent `(event, channel)` pairs via the
+  `notif:{dispatch}:{channel}` dedupe_key LEFT JOIN + a RETRY pass for due `failed` rows) +
+  `compose_message` (channel-agnostic subject/body/deep-link from already-joined columns, 7
+  change-kind labels, `SPA_BASE_URL`) + recipient resolution from `app_settings`
+  (`notification_email_to` / `notification_telegram_chat_id`) + `outbox_loop` (a 2nd lifespan
+  asyncio task mirroring `matcher_loop`).
+- `ChannelClient` gains `configured_channels()`, a `retry()` path, and linear backoff
+  (`next_attempt_at`) in `_finalize`.
+- Migration 212: `app_settings` recipient endpoints + `notifications_outbox_interval_seconds`.
+- Gated DARK: the outbox task only starts when a transport `is_configured()` (so it's a true
+  no-op in prod until `RESEND_API_KEY`/`EMAIL_FROM` are set + redeploy); an unconfigured channel
+  or unset recipient is skipped (no `failed` pile-up). Hermetic tests (compose, routing, gating,
+  retry).
+
+**Operator step to go live:** create a Resend account → set `RESEND_API_KEY` + `EMAIL_FROM` +
+`SPA_BASE_URL` Railway env + SPF/DKIM/DMARC DNS, then opt a watchdog/collection into `email`.
+**Next:** PR 4 — Telegram transport (`channel_sends.channel` CHECK ALTER + `BOT_TOKEN` + capture
+`chat_id`); PR 5 — outreach unification; the Delivery UI (channel toggles + feed delivery-status).
+
 ### 2026-06: Collections monitoring + unified Notifications (Sprint C)
 
 Built on PR A's unified event model. Turns the inert Collections feature into a
