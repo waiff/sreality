@@ -29,6 +29,7 @@ import {
 } from '@/lib/queries';
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
+import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import TagColorPicker from '@/components/TagColorPicker';
 import { FunnelIcon, InfoIcon, TrashIcon } from '@/components/icons';
 import {
@@ -38,8 +39,19 @@ import {
   type TagColor,
 } from '@/lib/types';
 
+/* Property-type (category_main) options for the pipeline filter — the SAME
+ * canonical source as Browse's TYPE tabs (the generated filter registry), so the
+ * Byty/Domy/Komerční/… labels never drift from one hardcode to another. */
+const CATEGORY_MAIN_ENUM =
+  FILTER_REGISTRY.filters.find((f) => f.id === 'category_main')?.enum_values ?? [];
+const CATEGORY_MAIN_ORDER: string[] = CATEGORY_MAIN_ENUM.map((o) => String(o.value));
+const CATEGORY_MAIN_LABEL: Record<string, string> = Object.fromEntries(
+  CATEGORY_MAIN_ENUM.map((o) => [String(o.value), o.label_cs]),
+);
+
 export default function Pipeline() {
   const [manage, setManage] = useState(false);
+  const [types, setTypes] = useState<Set<string>>(new Set());
   const stagesQ = useQuery({
     queryKey: pipelineKeys.stages,
     queryFn: fetchPipelineStages,
@@ -54,15 +66,31 @@ export default function Pipeline() {
   const stages = stagesQ.data ?? [];
   const cards = boardQ.data ?? [];
 
+  // Property types actually present in the pipeline (registry order) — the chip
+  // set. Depends on the stable query reference (not the per-render `cards`).
+  const presentTypes = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of boardQ.data ?? []) if (c.category_main) set.add(c.category_main);
+    return CATEGORY_MAIN_ORDER.filter((t) => set.has(t));
+  }, [boardQ.data]);
+
+  // Client-side filter (the board is small): empty selection = all types.
+  const filteredCards = useMemo(() => {
+    const all = boardQ.data ?? [];
+    return types.size === 0
+      ? all
+      : all.filter((c) => c.category_main != null && types.has(c.category_main));
+  }, [boardQ.data, types]);
+
   const byStage = useMemo(() => {
     const m = new Map<number, PipelineBoardCard[]>();
     for (const s of stagesQ.data ?? []) m.set(s.id, []);
-    for (const c of boardQ.data ?? []) {
+    for (const c of filteredCards) {
       const bucket = m.get(c.stage_id);
       if (bucket) bucket.push(c);
     }
     return m;
-  }, [stagesQ.data, boardQ.data]);
+  }, [stagesQ.data, filteredCards]);
 
   return (
     <div className="px-6 py-8">
@@ -80,7 +108,10 @@ export default function Pipeline() {
         </div>
         <div className="flex items-center gap-4">
           <p className="text-[0.75rem] tracking-wide text-[var(--color-ink-3)] font-mono tabular-nums">
-            {cards.length} nemovitostí
+            {types.size > 0
+              ? `${filteredCards.length} z ${cards.length}`
+              : cards.length}{' '}
+            nemovitostí
           </p>
           <button
             type="button"
@@ -95,6 +126,52 @@ export default function Pipeline() {
 
       {manage && stages.length > 0 && <StageManager stages={stages} />}
 
+      {/* Basic filtering by property type — only shown when the pipeline holds
+          more than one type (a single-type filter is pointless). Multi-select
+          chips; empty = all. */}
+      {presentTypes.length >= 2 && (
+        <div className="mt-5 flex flex-wrap items-center gap-1.5">
+          <span className="mr-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            Typ
+          </span>
+          {presentTypes.map((t) => {
+            const active = types.has(t);
+            return (
+              <button
+                key={t}
+                type="button"
+                aria-pressed={active}
+                onClick={() =>
+                  setTypes((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(t)) next.delete(t);
+                    else next.add(t);
+                    return next;
+                  })
+                }
+                className={[
+                  'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.78rem] transition-colors',
+                  active
+                    ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
+                    : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
+                ].join(' ')}
+              >
+                {CATEGORY_MAIN_LABEL[t] ?? t}
+              </button>
+            );
+          })}
+          {types.size > 0 && (
+            <button
+              type="button"
+              onClick={() => setTypes(new Set())}
+              className="ml-1 text-[0.72rem] text-[var(--color-ink-3)] underline underline-offset-2 hover:text-[var(--color-ink)]"
+            >
+              Vše
+            </button>
+          )}
+        </div>
+      )}
+
       {stagesQ.isLoading || boardQ.isLoading ? (
         <p className="mt-8 text-sm text-[var(--color-ink-3)]">Načítání…</p>
       ) : stagesQ.error || boardQ.error ? (
@@ -107,7 +184,7 @@ export default function Pipeline() {
           pipeline" na detailu inzerátu.
         </p>
       ) : (
-        <Board stages={stages} cards={cards} byStage={byStage} />
+        <Board stages={stages} cards={filteredCards} byStage={byStage} />
       )}
     </div>
   );

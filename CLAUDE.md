@@ -741,7 +741,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `fetchImagesByListingIds` + `imageSrc()` Browse helpers; the **canonical broker** per card via
     two batched anon reads — `fetchListingBrokersByIds` (`listing_broker_public`) + `fetchBrokersByIds`
     (`brokers_public` contact), NOT the raw drift-prone `properties_public.broker_*` — the name links
-    to `/brokers/{id}`, contact in a native-title hover). **On the kanban board** stage moves are
+    to `/brokers/{id}`, contact in a native-title hover). The board offers basic **property-type
+    filtering** — multi-select `category_main` chips (Byty / Domy / Komerční / …) whose labels come
+    from the SAME generated filter registry as Browse's TYPE tabs (`FILTER_REGISTRY`, never a parallel
+    hardcode); only the types actually present in the pipeline get a chip, and the filter is
+    client-side (the board is small). **On the kanban board** stage moves are
     **drag-and-drop ONLY** (`@dnd-kit`, `Pipeline.tsx`: each column a `useDroppable`, each card a
     `useDraggable` with a grip handle; one optimistic move mutation; keyboard moves via the
     `KeyboardSensor`). The drag→move resolution is the pure, unit-tested `planMove(activeId,

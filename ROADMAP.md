@@ -2552,6 +2552,17 @@ Closes the two items 3d deferred / the operator flagged.
   entry-stage indicator, AND the Chrome-extension panel (reproduced by value in vanilla TS)
   — so the "into the pipeline" concept reads as one icon everywhere. Rule #22 updated.
 
+### Phase U-PIPE Phase 3f: Board property-type filter (done)
+Basic filtering of the kanban board by property type (`category_main`).
+- Multi-select chips (Byty / Domy / Komerční / Pozemky / Ostatní) above the board;
+  empty = all, client-side filter (the board is small). Only the types actually
+  present in the pipeline get a chip; the chip row hides entirely with <2 types.
+- The chip labels come from the **same generated filter registry as Browse's TYPE
+  tabs** (`FILTER_REGISTRY` `category_main` enum_values) — no parallel hardcode.
+- `category_main` added to `fetchPipelineBoard`'s `properties_public` select +
+  `PipelineBoardCard` (the column was already on the view). `Pipeline.test.tsx`
+  gains a filter case. Rule #22 updated.
+
 ### Phase U-ME: Manual rental estimates (next)
 
 Capture operator-judgement rent figures as first-class data and
