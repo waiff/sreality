@@ -474,7 +474,12 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
-from api.notifications import match_once
+from api.notifications import (
+    get_unread_count,
+    mark_all_seen,
+    match_monitored_collections_once,
+    match_once,
+)
 
 
 class _FakeCursor:
@@ -592,6 +597,78 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     assert "'watchdog'" in insert_sql
     assert ":new:' || l.property_id::text" in insert_sql
     assert "ON CONFLICT (dedupe_key)" in insert_sql
+
+
+def test_collection_monitor_noop_when_nothing_monitored() -> None:
+    """No monitored collection → cheap early-out, no INSERT attempted."""
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "FROM collections WHERE monitoring_enabled = true" in s, [(0,)], 0),
+    ]
+    conn = _FakeConn(script)
+    stats = match_monitored_collections_once(conn)  # type: ignore[arg-type]
+    assert stats == {"monitored_collections": 0, "events_inserted": 0}
+    assert not any(
+        "INSERT INTO notification_dispatches" in s for s, _ in conn.executed
+    )
+
+
+def test_collection_monitor_emits_the_five_clean_kinds() -> None:
+    """One set-based INSERT per detector across all monitored collections;
+    every dispatch is source_kind='collection_monitor', collection-scoped
+    dedupe, ON CONFLICT idempotent. broker_change is reserved, not emitted."""
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "FROM collections WHERE monitoring_enabled = true" in s, [(2,)], 0),
+        (lambda s: "FROM app_settings" in s, [], 0),  # window default
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 2),
+    ]
+    conn = _FakeConn(script)
+    stats = match_monitored_collections_once(conn)  # type: ignore[arg-type]
+    assert stats["monitored_collections"] == 2
+    assert stats["events_inserted"] == 10  # 5 detectors x rowcount 2
+
+    inserts = [
+        sql for sql, _ in conn.executed
+        if "INSERT INTO notification_dispatches" in sql
+    ]
+    assert len(inserts) == 5
+    joined = " ".join(inserts)
+    assert "'collection_monitor'" in joined
+    for kind in ("'price_drop'", "'price_rise'", "'inactive'", "'reactivated'", "'new_source'"):
+        assert kind in joined
+    assert "'cm:'" in joined                       # collection-scoped dedupe prefix
+    assert "ON CONFLICT (dedupe_key)" in joined
+    assert joined.count("ON CONFLICT (dedupe_key)") == 5
+    assert "'broker_change'" not in joined          # reserved, no clean signal yet
+
+
+def test_get_unread_count_breaks_down_by_source() -> None:
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (
+            lambda s: "GROUP BY source_kind" in s,
+            [("watchdog", 4), ("collection_monitor", 3)],
+            0,
+        ),
+    ]
+    conn = _FakeConn(script)
+    out = get_unread_count(conn)  # type: ignore[arg-type]
+    assert out == {
+        "watchdog": 4, "collection_monitor": 3, "total": 7, "unread_count": 7,
+    }
+    scoped = get_unread_count(conn, source_kind="collection_monitor")  # type: ignore[arg-type]
+    assert scoped["unread_count"] == 3
+
+
+def test_mark_all_seen_scoped_filters_by_source() -> None:
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "UPDATE notification_dispatches SET seen_at" in s, [], 5),
+    ]
+    conn = _FakeConn(script)
+    assert mark_all_seen(conn) == 5  # type: ignore[arg-type]
+    assert mark_all_seen(conn, source_kind="watchdog") == 5  # type: ignore[arg-type]
+    scoped_sql = [
+        s for s, _ in conn.executed if "UPDATE notification_dispatches" in s
+    ][-1]
+    assert "AND source_kind = %s" in scoped_sql
 
 
 def test_match_once_skips_subscription_with_no_listings() -> None:

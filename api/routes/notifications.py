@@ -122,6 +122,8 @@ def delete_subscription(
 @router.get("/dispatches")
 def get_dispatches(
     subscription_id: str | None = None,
+    collection_id: int | None = None,
+    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
     seen: Literal["all", "seen", "unseen"] = "all",
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -133,6 +135,8 @@ def get_dispatches(
         return nf.list_dispatches(
             conn,
             subscription_id=subscription_id,
+            collection_id=collection_id,
+            source_kind=source_kind,
             seen=seen,
             limit=limit,
             offset=offset,
@@ -140,6 +144,30 @@ def get_dispatches(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/unread-count")
+def get_unread_count(
+    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, int]:
+    """Unseen dispatch counts for the nav badge.
+
+    Returns `{watchdog, collection_monitor, total, unread_count}` — `unread_count`
+    is the total (or the scoped count when `source_kind` is set).
+    """
+    return nf.get_unread_count(conn, source_kind=source_kind)
+
+
+@router.post("/mark-all-seen")
+def post_mark_all_seen(
+    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, int]:
+    """Mark every unseen dispatch (optionally scoped to a source) as seen."""
+    return {"updated": nf.mark_all_seen(conn, source_kind=source_kind)}
 
 
 @router.post("/dispatches/{dispatch_id}/mark-seen")
@@ -203,4 +231,9 @@ def post_matcher_run(
     """
     stats = nf.match_once(conn)
     change_stats = nf.match_changes_once(conn)
-    return {"data": stats, "change_data": change_stats}
+    monitor_stats = nf.match_monitored_collections_once(conn)
+    return {
+        "data": stats,
+        "change_data": change_stats,
+        "monitor_data": monitor_stats,
+    }
