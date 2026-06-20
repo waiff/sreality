@@ -645,11 +645,42 @@ _LISTING_PROJECTION = (
     "l.source, l.source_url"
 )
 
+# The unified feed projection + FROM, shared by list_dispatches + _fetch_dispatch
+# so the two never diverge. LEFT JOINs (not INNER): a collection_monitor row has
+# subscription_id NULL, so an INNER join to subscriptions would silently drop it.
+# Exposes the source discriminator + provenance the watchdog feed never needed.
+_DISPATCH_SELECT = (
+    "d.id, d.source_kind, "
+    "d.subscription_id, s.name AS subscription_name, "
+    "d.collection_id, c.name AS collection_name, "
+    "d.sreality_id, d.property_id, d.change_kind, "
+    "d.dispatched_at, d.seen_at, "
+    "d.trigger_price_czk, d.prev_price_czk, d.trigger_snapshot_id, "
+    "d.target_channels, "
+    "d.estimation_run_id, "
+    "er.status AS estimation_status, "
+    "er.estimate_kind AS estimation_kind, "
+    "er.estimated_monthly_rent_czk, "
+    "er.estimated_sale_price_czk, "
+    "er.gross_yield_pct, er.confidence, "
+    f"{_LISTING_PROJECTION}"
+)
+
+_DISPATCH_FROM = (
+    "FROM notification_dispatches d "
+    "LEFT JOIN notification_subscriptions s ON s.id = d.subscription_id "
+    "LEFT JOIN collections c ON c.id = d.collection_id "
+    "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
+    "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
+)
+
 
 def list_dispatches(
     conn: "psycopg.Connection",
     *,
     subscription_id: str | None = None,
+    collection_id: int | None = None,
+    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
     seen: Literal["all", "seen", "unseen"] = "all",
     limit: int = 50,
     offset: int = 0,
@@ -674,6 +705,12 @@ def list_dispatches(
     if subscription_id is not None:
         where.append("d.subscription_id = %(subscription_id)s")
         params["subscription_id"] = subscription_id
+    if collection_id is not None:
+        where.append("d.collection_id = %(collection_id)s")
+        params["collection_id"] = collection_id
+    if source_kind != "all":
+        where.append("d.source_kind = %(source_kind)s")
+        params["source_kind"] = source_kind
     if seen == "seen":
         where.append("d.seen_at IS NOT NULL")
     elif seen == "unseen":
@@ -691,20 +728,8 @@ def list_dispatches(
     page_where_sql = "WHERE " + " AND ".join(page_where) if page_where else ""
 
     sql = (
-        "SELECT d.id, d.subscription_id, s.name AS subscription_name, "
-        "       d.sreality_id, d.property_id, d.change_kind, "
-        "       d.dispatched_at, d.seen_at, "
-        "       d.estimation_run_id, "
-        "       er.status AS estimation_status, "
-        "       er.estimate_kind AS estimation_kind, "
-        "       er.estimated_monthly_rent_czk, "
-        "       er.estimated_sale_price_czk, "
-        "       er.gross_yield_pct, er.confidence, "
-        f"      {_LISTING_PROJECTION} "
-        "FROM notification_dispatches d "
-        "JOIN notification_subscriptions s ON s.id = d.subscription_id "
-        "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
-        "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
+        f"SELECT {_DISPATCH_SELECT} "
+        f"{_DISPATCH_FROM}"
         f"{page_where_sql} "
         "ORDER BY d.dispatched_at DESC, d.id DESC "
         "LIMIT %(limit)s OFFSET %(offset)s"
@@ -721,9 +746,7 @@ def list_dispatches(
         if cursor is None:
             count_params = {k: params[k] for k in params if k not in ("c_ts", "c_id")}
             cur.execute(
-                "SELECT count(*) FROM notification_dispatches d "
-                "JOIN notification_subscriptions s ON s.id = d.subscription_id "
-                f"{filter_sql}",
+                f"SELECT count(*) FROM notification_dispatches d {filter_sql}",
                 count_params,
             )
             total_row = cur.fetchone()
@@ -780,20 +803,8 @@ def _fetch_dispatch(
     conn: "psycopg.Connection", dispatch_id: str,
 ) -> dict[str, Any] | None:
     sql = (
-        "SELECT d.id, d.subscription_id, s.name AS subscription_name, "
-        "       d.sreality_id, d.property_id, d.change_kind, "
-        "       d.dispatched_at, d.seen_at, "
-        "       d.estimation_run_id, "
-        "       er.status AS estimation_status, "
-        "       er.estimate_kind AS estimation_kind, "
-        "       er.estimated_monthly_rent_czk, "
-        "       er.estimated_sale_price_czk, "
-        "       er.gross_yield_pct, er.confidence, "
-        f"      {_LISTING_PROJECTION} "
-        "FROM notification_dispatches d "
-        "JOIN notification_subscriptions s ON s.id = d.subscription_id "
-        "LEFT JOIN listings l ON l.sreality_id = d.sreality_id "
-        "LEFT JOIN estimation_runs er ON er.id = d.estimation_run_id "
+        f"SELECT {_DISPATCH_SELECT} "
+        f"{_DISPATCH_FROM}"
         "WHERE d.id = %s"
     )
     with conn.cursor() as cur:
@@ -803,6 +814,55 @@ def _fetch_dispatch(
     if row is None:
         return None
     return _dispatch_row_to_dict(cols, row)
+
+
+def get_unread_count(
+    conn: "psycopg.Connection",
+    *,
+    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+) -> dict[str, int]:
+    """Unseen dispatch counts — drives the nav unread badge.
+
+    Always returns the per-source breakdown plus `unread_count` (the total, or
+    the scoped count when `source_kind` is set) so one call powers both a
+    combined badge and any per-surface count.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT source_kind, count(*) FROM notification_dispatches "
+            "WHERE seen_at IS NULL GROUP BY source_kind"
+        )
+        counts = {r[0]: int(r[1]) for r in cur.fetchall()}
+    watchdog = counts.get("watchdog", 0)
+    monitor = counts.get("collection_monitor", 0)
+    total = watchdog + monitor
+    return {
+        "watchdog": watchdog,
+        "collection_monitor": monitor,
+        "total": total,
+        "unread_count": total if source_kind == "all" else counts.get(source_kind, 0),
+    }
+
+
+def mark_all_seen(
+    conn: "psycopg.Connection",
+    *,
+    source_kind: Literal["watchdog", "collection_monitor", "all"] = "all",
+) -> int:
+    """Mark every unseen dispatch (optionally scoped to a source) as seen."""
+    with conn.cursor() as cur:
+        if source_kind == "all":
+            cur.execute(
+                "UPDATE notification_dispatches SET seen_at = now() "
+                "WHERE seen_at IS NULL"
+            )
+        else:
+            cur.execute(
+                "UPDATE notification_dispatches SET seen_at = now() "
+                "WHERE seen_at IS NULL AND source_kind = %s",
+                (source_kind,),
+            )
+        return cur.rowcount or 0
 
 
 # --- estimation kickoff ---------------------------------------------------
@@ -1405,6 +1465,230 @@ def match_changes_once(conn: "psycopg.Connection") -> dict[str, int]:
     }
 
 
+# --- collection monitor producer (Sprint C) -------------------------------
+
+
+def _read_monitor_window_days(conn: "psycopg.Connection") -> int:
+    return max(1, _read_int_setting(
+        conn, "notifications_monitor_window_days", default=7,
+    ))
+
+
+# The monitored-membership CTE shared by every detector below: each property in
+# a collection with monitoring_enabled, carrying the collection's notify_channels
+# (which become the dispatch's target_channels). status='active' skips
+# merged-away properties.
+_MONITORED_CTE = (
+    "monitored AS ("
+    "  SELECT cp.collection_id, p.id AS property_id, p.repr_listing_id, "
+    "         c.notify_channels "
+    "  FROM collection_properties cp "
+    "  JOIN collections c ON c.id = cp.collection_id AND c.monitoring_enabled = true "
+    "  JOIN properties p ON p.id = cp.property_id AND p.status = 'active' "
+    "                   AND p.repr_listing_id IS NOT NULL"
+    ")"
+)
+
+
+def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, int]:
+    """One pass of the collection-monitor producer (Sprint C).
+
+    For every property in a collection with `monitoring_enabled = true`, emit
+    `source_kind='collection_monitor'` dispatches for the changes the operator
+    watches: price_drop / price_rise (per-snapshot), inactive / reactivated
+    (lifecycle), and new_source (a sibling listing appeared on another portal).
+    Each dispatch carries `collection_id` (the source, required by source_ck) and
+    a per-event `dedupe_key` (`cm:{collection}:{kind}:{discriminator}`) so re-runs
+    over an overlapping window are idempotent and a 2nd real change is its own
+    event. `target_channels` is stamped from the collection's `notify_channels`
+    (the Sprint N outbox reads only that column). Set-based: one INSERT...SELECT
+    per kind across ALL monitored collections — no per-collection Python loop.
+
+    A property in N monitored collections fires N times (once per collection):
+    the source_ck requires a collection_id, so monitoring is per-collection by
+    design (the operator chose which collections alert).
+
+    `broker_change` is intentionally NOT emitted yet: there is no property-level
+    broker nor a broker-change timestamp to key a stable, non-fragile event off
+    (`listing_broker_public` is current-state only). The change_kind is reserved
+    (migration 209); the detector lands when a broker-change signal exists. See
+    docs/design/notifications-unified.md.
+    """
+    # Cheap early-out: nothing monitored, nothing to do.
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM collections WHERE monitoring_enabled = true"
+        )
+        row = cur.fetchone()
+    if not row or not row[0]:
+        return {"monitored_collections": 0, "events_inserted": 0}
+    monitored_collections = int(row[0])
+
+    win = f"{_read_monitor_window_days(conn)} days"
+    inserted = 0
+
+    with conn.cursor() as cur:
+        # 1+2) price_drop / price_rise — per-snapshot transitions on the
+        # property's listings, replicated per monitored collection so each
+        # collection alerts independently. Snapshot grain == the watchdog's.
+        cur.execute(
+            f"WITH {_MONITORED_CTE}, "
+            "steps AS ("
+            "  SELECT m.collection_id, m.notify_channels, l.property_id, "
+            "         l.sreality_id, s.id AS snapshot_id, s.scraped_at, s.price_czk, "
+            "         lag(s.price_czk) OVER ("
+            "           PARTITION BY m.collection_id, l.property_id "
+            "           ORDER BY s.scraped_at, s.id) AS prev "
+            "  FROM monitored m "
+            "  JOIN listings l ON l.property_id = m.property_id "
+            "  JOIN listing_snapshots s ON s.sreality_id = l.sreality_id "
+            "  WHERE s.price_czk IS NOT NULL"
+            ") "
+            "INSERT INTO notification_dispatches "
+            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "   status, target_channels, trigger_snapshot_id, trigger_price_czk, "
+            "   prev_price_czk, dedupe_key) "
+            "SELECT 'collection_monitor', st.collection_id, st.property_id, st.sreality_id, "
+            "       CASE WHEN st.price_czk < st.prev THEN 'price_drop' ELSE 'price_rise' END, "
+            "       'sent', st.notify_channels, st.snapshot_id, st.price_czk, st.prev, "
+            "       'cm:' || st.collection_id::text || ':' || "
+            "         CASE WHEN st.price_czk < st.prev THEN 'price_drop' ELSE 'price_rise' END || "
+            "         ':' || st.snapshot_id::text "
+            "FROM steps st "
+            "WHERE st.prev IS NOT NULL AND st.price_czk <> st.prev "
+            "  AND st.scraped_at > now() - %(win)s::interval "
+            "ON CONFLICT (dedupe_key) DO NOTHING",
+            {"win": win},
+        )
+        inserted += cur.rowcount or 0
+
+        # 3) inactive — the property went inactive (every listing delisted). No
+        # snapshot; key on the epoch of the latest child inactive_at (set on the
+        # flip, cleared on reactivation, so a re-inactivation is a fresh event).
+        cur.execute(
+            f"WITH {_MONITORED_CTE}, "
+            "gone AS ("
+            "  SELECT m.collection_id, m.property_id, m.repr_listing_id, "
+            "         m.notify_channels, max(l.inactive_at) AS inactive_at "
+            "  FROM monitored m "
+            "  JOIN properties p ON p.id = m.property_id AND p.is_active = false "
+            "  JOIN listings l ON l.property_id = m.property_id "
+            "  GROUP BY m.collection_id, m.property_id, m.repr_listing_id, m.notify_channels "
+            "  HAVING max(l.inactive_at) > now() - %(win)s::interval"
+            ") "
+            "INSERT INTO notification_dispatches "
+            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "   status, target_channels, dedupe_key) "
+            "SELECT 'collection_monitor', g.collection_id, g.property_id, g.repr_listing_id, "
+            "       'inactive', 'sent', g.notify_channels, "
+            "       'cm:' || g.collection_id::text || ':inactive:' || g.property_id::text || ':' || "
+            "         floor(extract(epoch FROM g.inactive_at))::bigint::text "
+            "FROM gone g "
+            "ON CONFLICT (dedupe_key) DO NOTHING",
+            {"win": win},
+        )
+        inserted += cur.rowcount or 0
+
+        # 4) reactivated — a property we ALREADY alerted as inactive came back
+        # active. The prior 'inactive' dispatch is the durable "was dead" marker
+        # (listings.inactive_at is cleared on reactivation, so we can't read it).
+        cur.execute(
+            f"WITH {_MONITORED_CTE}, "
+            "back AS ("
+            "  SELECT m.collection_id, m.property_id, m.repr_listing_id, m.notify_channels, "
+            "         nd.dispatched_at AS inactive_at "
+            "  FROM monitored m "
+            "  JOIN properties p ON p.id = m.property_id "
+            "       AND p.is_active = true "
+            "       AND p.last_seen_at > now() - %(win)s::interval "
+            "  JOIN LATERAL ("
+            "    SELECT dispatched_at FROM notification_dispatches "
+            "    WHERE source_kind = 'collection_monitor' "
+            "      AND collection_id = m.collection_id "
+            "      AND property_id = m.property_id "
+            "      AND change_kind = 'inactive' "
+            "    ORDER BY dispatched_at DESC LIMIT 1"
+            "  ) nd ON p.last_seen_at > nd.dispatched_at "
+            "  WHERE NOT EXISTS ("
+            "    SELECT 1 FROM notification_dispatches r "
+            "    WHERE r.source_kind = 'collection_monitor' "
+            "      AND r.collection_id = m.collection_id "
+            "      AND r.property_id = m.property_id "
+            "      AND r.change_kind = 'reactivated' "
+            "      AND r.dispatched_at > nd.dispatched_at"
+            "  )"
+            ") "
+            "INSERT INTO notification_dispatches "
+            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "   status, target_channels, dedupe_key) "
+            "SELECT 'collection_monitor', b.collection_id, b.property_id, b.repr_listing_id, "
+            "       'reactivated', 'sent', b.notify_channels, "
+            "       'cm:' || b.collection_id::text || ':reactivated:' || b.property_id::text || ':' || "
+            "         floor(extract(epoch FROM b.inactive_at))::bigint::text "
+            "FROM back b "
+            "ON CONFLICT (dedupe_key) DO NOTHING",
+            {"win": win},
+        )
+        inserted += cur.rowcount or 0
+
+        # 5) new_source — a sibling listing introduced a NEW portal to the
+        # property (a cross-source sighting the dedup engine grouped in). Key on
+        # the introducing listing id. Limitation: fires only when that listing's
+        # first_seen_at is inside the window (the common "a portal just listed
+        # it" case); a merge of an OLD listing won't fire.
+        cur.execute(
+            f"WITH {_MONITORED_CTE}, "
+            "src AS ("
+            "  SELECT m.collection_id, m.notify_channels, l.property_id, l.sreality_id, "
+            "         l.first_seen_at, "
+            "         row_number() OVER (PARTITION BY m.collection_id, l.property_id, l.source "
+            "                            ORDER BY l.first_seen_at, l.sreality_id) AS rn, "
+            "         min(l.first_seen_at) OVER (PARTITION BY m.collection_id, l.property_id) AS prop_first, "
+            "         count(DISTINCT l.source) OVER (PARTITION BY m.collection_id, l.property_id) AS n_sources "
+            "  FROM monitored m "
+            "  JOIN listings l ON l.property_id = m.property_id"
+            ") "
+            "INSERT INTO notification_dispatches "
+            "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
+            "   status, target_channels, dedupe_key) "
+            "SELECT 'collection_monitor', src.collection_id, src.property_id, src.sreality_id, "
+            "       'new_source', 'sent', src.notify_channels, "
+            "       'cm:' || src.collection_id::text || ':new_source:' || src.sreality_id::text "
+            "FROM src "
+            "WHERE src.rn = 1 AND src.n_sources >= 2 "
+            "  AND src.first_seen_at > src.prop_first "
+            "  AND src.first_seen_at > now() - %(win)s::interval "
+            "ON CONFLICT (dedupe_key) DO NOTHING",
+            {"win": win},
+        )
+        inserted += cur.rowcount or 0
+
+    return {
+        "monitored_collections": monitored_collections,
+        "events_inserted": inserted,
+    }
+
+
+def _read_monitor_interval_seconds() -> int:
+    conn = scraper_db.connect()
+    try:
+        return _read_int_setting(
+            conn, "notifications_monitor_interval_seconds", default=86400,
+        )
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _match_monitored_in_thread() -> dict[str, int]:
+    conn = scraper_db.connect()
+    try:
+        return match_monitored_collections_once(conn)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
 async def matcher_loop(stop_event: asyncio.Event) -> None:
     """The forever-running async matcher. Reads its own DB connection
     each pass; idle waits respect `notifications_matcher_interval_seconds`
@@ -1421,6 +1705,8 @@ async def matcher_loop(stop_event: asyncio.Event) -> None:
     # monotonic timestamp of the last property-change pass; 0 => run on the
     # first pass after (re)start.
     last_change_run = 0.0
+    # same for the collection-monitor producer.
+    last_monitor_run = 0.0
     while not stop_event.is_set():
         # Read interval each pass so live edits to app_settings take
         # effect without a restart.
@@ -1464,6 +1750,26 @@ async def matcher_loop(stop_event: asyncio.Event) -> None:
                     LOG.debug("notification change matcher: %s", cstats)
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("notification change matcher pass failed: %s", exc)
+
+        # Collection-monitor producer (Sprint C), gated to its own cadence
+        # (`notifications_monitor_interval_seconds`, default daily). Same
+        # in-memory monotonic gate as the change matcher; a restart re-runs it
+        # once (the dedupe_key UNIQUE absorbs the overlap).
+        monitor_interval = 86400
+        try:
+            monitor_interval = await asyncio.to_thread(_read_monitor_interval_seconds)
+        except Exception as exc:  # noqa: BLE001
+            LOG.warning("monitor matcher: failed to read interval: %s", exc)
+        if monitor_interval > 0 and (time.monotonic() - last_monitor_run) >= monitor_interval:
+            try:
+                mstats = await asyncio.to_thread(_match_monitored_in_thread)
+                last_monitor_run = time.monotonic()
+                if mstats.get("events_inserted", 0) > 0:
+                    LOG.info("collection monitor matcher: %s", mstats)
+                else:
+                    LOG.debug("collection monitor matcher: %s", mstats)
+            except Exception as exc:  # noqa: BLE001
+                LOG.exception("collection monitor matcher pass failed: %s", exc)
 
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=float(interval))

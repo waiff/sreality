@@ -623,7 +623,22 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `channel_sends` ledger draining `target_channels` — NOT a `channel`-column widen. (The old
     migration-057 comment claiming a new channel was "a one-line ALTER" was **false**: migration
     096 dropped `channel` from the dedup key, so the grain could never carry a second channel —
-    which is why delivery gets its own ledger.)
+    which is why delivery gets its own ledger.) **A SECOND producer is live (Sprint C):
+    `match_monitored_collections_once` (api/notifications.py, own daily cadence
+    `notifications_monitor_interval_seconds` + window `notifications_monitor_window_days`) emits
+    `source_kind='collection_monitor'` dispatches for every property in a `monitoring_enabled`
+    collection — `price_drop`/`price_rise` (per-snapshot), `inactive`/`reactivated` (lifecycle;
+    `reactivated` reads the prior `inactive` dispatch as the durable "was dead" marker since
+    `listings.inactive_at` is cleared on reactivation), and `new_source` (a sibling listing on a
+    new portal). It is set-based (one `INSERT…SELECT` per kind across all monitored collections),
+    collection-scoped dedupe (`cm:{collection}:{kind}:{discriminator}`), `target_channels` stamped
+    from the collection's `notify_channels`. `broker_change` is in the `change_kind` CHECK
+    (migration 209) but NOT yet emitted — `listing_broker_public` is current-state-only with no
+    change signal; the kind is reserved for when one exists. The unified in-app **Notifications**
+    page (`/notifications`) reads BOTH producers off one LEFT-join feed (the watchdog-only INNER
+    join became a LEFT join + a `collections` join so monitor rows aren't dropped), and a red nav
+    unread badge polls `GET /notifications/unread-count`; `POST /notifications/mark-all-seen`
+    clears it.)
 17. **City-quality indexes are a normalized, operator-curated time series.** `curated_cities`
     + `city_index_revisions` + `city_index_values` + `city_index_definitions` +
     `city_population` (migration 078 onward) store per-city indexes long-form, so a new index
@@ -652,7 +667,14 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     listings' property carries the tags, fixing the pre-202 bug where only the representative
     listing's tags were matched. Writes flow through the FastAPI service (property-grain routes
     `/collections/{id}/properties`, `/properties/{id}/tags`, `/properties/{id}/notes`); the
-    browser never writes directly. Same no-hard-delete spirit as the rest of the data model.
+    browser never writes directly. **Collections carry monitoring (Sprint C, migration 211):
+    `monitoring_enabled` opts a collection into change alerts (the collection-monitor producer,
+    rule #16) and `notify_channels` is its delivery-channel pick (folded into the dispatch's
+    `target_channels`); a protected default "monitoring" collection (`is_system=true`, can't be
+    renamed or deleted) ships monitoring on. The "add to collection" affordance lives on the
+    Browse card (a layers control ADJACENT to the pipeline funnel — rule #22 keeps the funnel the
+    sole pipeline affordance), the listing-detail `CurationBlock`, and the Chrome-extension panel.**
+    Same no-hard-delete spirit as the rest of the data model.
 19. **The sreality scrape is split by cadence (Phase 2): a fast index-walk feeds an async
     batched detail-drain through `listing_detail_queue` (migration 105).** `index_walk.yml`
     (`scraper.main --index-only`, `run_type='index'`) walks the full index, `touch_listings` +

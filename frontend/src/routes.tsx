@@ -20,6 +20,7 @@ import Scrapers from './pages/Scrapers';
 import Watchdog from './pages/Watchdog';
 import WatchdogManage from './pages/WatchdogManage';
 import WatchdogEdit from './pages/WatchdogEdit';
+import Notifications from './pages/Notifications';
 import Dedup from './pages/Dedup';
 // TODO(estimation-5 Part C1): remove DevConfidencePreview + its route
 // once design is approved and the indicator is in real use.
@@ -54,6 +55,7 @@ export const routes: RouteObject[] = [
       { path: 'watchdog', element: <Watchdog /> },
       { path: 'watchdog/manage', element: <WatchdogManage /> },
       { path: 'watchdog/:id/edit', element: <WatchdogEdit /> },
+      { path: 'notifications', element: <Notifications /> },
       { path: 'dedup', element: <Dedup /> },
       { path: 'settings', element: <Settings /> },
       { path: 'scrapers', element: <Scrapers /> },

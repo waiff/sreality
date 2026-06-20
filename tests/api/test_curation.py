@@ -563,12 +563,38 @@ class _FakeConn:
 def test_create_collection_helper_inserts_and_returns():
     from api import schemas as s
     conn = _FakeConn(results=[
-        (1, "x", None, "2026-05-10T00:00:00+00:00", "2026-05-10T00:00:00+00:00"),
+        (1, "x", None, "2026-05-10T00:00:00+00:00", "2026-05-10T00:00:00+00:00",
+         False, [], False),
     ])
     out = curation.create_collection(conn, s.CreateCollectionIn(name="x"))
     assert out["id"] == 1
     assert out["listing_count"] == 0
+    assert out["monitoring_enabled"] is False
+    assert out["is_system"] is False
     assert "INSERT INTO collections" in conn.executions[0][0]
+
+
+def test_delete_system_collection_is_refused_409():
+    from fastapi import HTTPException
+    conn = _FakeConn(results=[(True,)])  # SELECT is_system -> system collection
+    with pytest.raises(HTTPException) as exc:
+        curation.delete_collection(conn, collection_id=1)
+    assert exc.value.status_code == 409
+
+
+def test_rename_system_collection_is_refused_409():
+    from api import schemas as s
+    from fastapi import HTTPException
+    # _fetch_collection returns the full projection (9 cols); is_system is True.
+    full = (1, "monitoring", None,
+            "2026-05-10T00:00:00+00:00", "2026-05-10T00:00:00+00:00",
+            0, True, [], True)
+    conn = _FakeConn(results=[full])
+    with pytest.raises(HTTPException) as exc:
+        curation.update_collection(
+            conn, collection_id=1, body=s.UpdateCollectionIn(name="renamed"),
+        )
+    assert exc.value.status_code == 409
 
 
 def test_create_tag_helper_409_on_unique_violation():

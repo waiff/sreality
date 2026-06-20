@@ -15,7 +15,11 @@ It also returns the listing's `property_id` + its **deal-pipeline membership**
 (rule #22) so the panel's "Přidat do pipeline" toggle knows its state in the
 one call it already makes — the toggle then writes through the existing
 bearer-gated `POST/DELETE /pipeline/cards` (the same path the SPA uses). The
-pipeline is property-grain, so membership is read off `l.property_id`.
+pipeline is property-grain, so membership is read off `l.property_id`. It
+likewise returns the property's **collection memberships** (`collection_ids`,
+rule #18) so the panel's one-click monitoring toggle knows whether the property
+is already in the monitoring collection, writing through the existing
+bearer-gated `POST/DELETE /collections/{id}/properties`.
 
 Rows come back keyed by column name (dict_row) — no positional index math, so
 projecting one more column is a one-line change that can't silently misalign.
@@ -59,7 +63,10 @@ SELECT
     (pp.property_id IS NOT NULL) AS in_pipeline,
     pp.stage_id AS pipeline_stage_id,
     ps.key   AS pipeline_stage_key,
-    ps.label AS pipeline_stage_label
+    ps.label AS pipeline_stage_label,
+    (SELECT coalesce(array_agg(cp.collection_id ORDER BY cp.collection_id), array[]::bigint[])
+       FROM collection_properties cp
+      WHERE cp.property_id = l.property_id) AS collection_ids
 FROM req
 LEFT JOIN listings l
     ON l.source = req.source AND l.source_id_native = req.source_id
@@ -135,10 +142,15 @@ def lookup_portal_listings(
             if row["property_id"] is not None
             else None
         )
+        # Collection memberships are property-grain (rule #18) — same NULL-until-
+        # attached posture as pipeline above; the panel's monitoring toggle reads it.
+        entry["collection_ids"] = (
+            list(row["collection_ids"]) if row["property_id"] is not None else None
+        )
         by_key[(row["source"], row["source_id"])] = entry
 
     fallback = lambda it: {  # noqa: E731 — tiny shape for the (rare) missing row
         "source": it.source, "source_id": it.source_id, "found": False,
-        "latest_estimation": None, "pipeline": None,
+        "latest_estimation": None, "pipeline": None, "collection_ids": None,
     }
     return {"data": [by_key.get((it.source, it.source_id), fallback(it)) for it in items]}

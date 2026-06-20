@@ -1,5 +1,8 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { getNotificationUnreadCount } from '@/lib/api';
+import { notificationKeys } from '@/lib/queries';
 import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
 
@@ -13,12 +16,12 @@ const navItems: ReadonlyArray<NavItem> = [
   { kind: 'link', to: '/pipeline',    label: 'Pipeline' },
   { kind: 'link', to: '/estimations', label: 'Estimations' },
   { kind: 'link', to: '/watchdog',    label: 'Watchdogs' },
+  { kind: 'link', to: '/notifications', label: 'Notifications' },
   { kind: 'link', to: '/brokers',     label: 'Brokers' },
   { kind: 'link', to: '/datasets',    label: 'Datasets' },
   { kind: 'link', to: '/outreach',    label: 'Outreach', disabled: true,
     title: 'Outreach is paused — not available yet.' },
-  { kind: 'link', to: '/collections', label: 'Collections', disabled: true,
-    title: 'Collections is being reworked — not available yet.' },
+  { kind: 'link', to: '/collections', label: 'Collections' },
   { kind: 'divider' },
   // Everything past this divider lives under Settings.
   { kind: 'section', label: 'Settings' },
@@ -45,6 +48,13 @@ export default function Shell() {
 }
 
 function TopBar() {
+  const unreadQ = useQuery({
+    queryKey: notificationKeys.unreadCount,
+    queryFn: () => getNotificationUnreadCount(),
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+  });
+  const unread = unreadQ.data?.unread_count ?? 0;
   return (
     <header className="border-b border-[var(--color-rule)] bg-[var(--color-paper)] sticky top-0 z-30">
       <div className="px-6 h-14 flex items-center gap-8">
@@ -96,7 +106,17 @@ function TopBar() {
                 }
               >
                 {({ isActive }) => (
-                  <NavLabel active={isActive}>{item.label}</NavLabel>
+                  <NavLabel active={isActive}>
+                    {item.label}
+                    {item.to === '/notifications' && unread > 0 && (
+                      <span
+                        className="ml-1.5 inline-flex items-center justify-center min-w-[1.05rem] h-[1.05rem] px-1 rounded-full bg-[var(--color-brick)] text-white text-[0.6rem] font-medium tabular-nums"
+                        aria-label={`${unread} unread notifications`}
+                      >
+                        {unread > 99 ? '99+' : unread}
+                      </span>
+                    )}
+                  </NavLabel>
                 )}
               </NavLink>
             );

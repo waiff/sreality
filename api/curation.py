@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 _COLLECTION_FULL_PROJECTION = (
     "c.id, c.name, c.description, c.created_at, c.updated_at, "
     "(SELECT count(*) FROM collection_properties cp "
-    " WHERE cp.collection_id = c.id) AS listing_count"
+    " WHERE cp.collection_id = c.id) AS listing_count, "
+    "c.monitoring_enabled, c.notify_channels, c.is_system"
 )
 
 
@@ -42,12 +43,18 @@ def create_collection(
     conn: "psycopg.Connection", body: s.CreateCollectionIn,
 ) -> dict[str, Any]:
     sql = (
-        "INSERT INTO collections (name, description) VALUES (%s, %s) "
-        "RETURNING id, name, description, created_at, updated_at"
+        "INSERT INTO collections (name, description, monitoring_enabled, notify_channels) "
+        "VALUES (%s, %s, %s, %s) "
+        "RETURNING id, name, description, created_at, updated_at, "
+        "          monitoring_enabled, notify_channels, is_system"
     )
     try:
         with conn.transaction(), conn.cursor() as cur:
-            cur.execute(sql, (body.name, body.description))
+            cur.execute(
+                sql,
+                (body.name, body.description,
+                 body.monitoring_enabled, body.notify_channels),
+            )
             row = cur.fetchone()
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "collection name already exists")
@@ -122,11 +129,27 @@ def update_collection(
     if body.description is not None:
         sets.append("description = %s")
         params.append(body.description)
+    if body.monitoring_enabled is not None:
+        sets.append("monitoring_enabled = %s")
+        params.append(body.monitoring_enabled)
+    if body.notify_channels is not None:
+        sets.append("notify_channels = %s")
+        params.append(body.notify_channels)
     if not sets:
         coll = _fetch_collection(conn, collection_id)
         if coll is None:
             raise HTTPException(404, "collection not found")
         return coll
+
+    existing = _fetch_collection(conn, collection_id)
+    if existing is None:
+        raise HTTPException(404, "collection not found")
+    if (
+        body.name is not None
+        and existing["is_system"]
+        and body.name != existing["name"]
+    ):
+        raise HTTPException(409, "the system collection cannot be renamed")
 
     sets.append("updated_at = now()")
     params.append(collection_id)
@@ -147,9 +170,15 @@ def delete_collection(
     conn: "psycopg.Connection", collection_id: int,
 ) -> dict[str, Any]:
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute("DELETE FROM collections WHERE id = %s", (collection_id,))
-        if cur.rowcount == 0:
+        cur.execute(
+            "SELECT is_system FROM collections WHERE id = %s", (collection_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
             raise HTTPException(404, "collection not found")
+        if row[0]:
+            raise HTTPException(409, "the system collection cannot be deleted")
+        cur.execute("DELETE FROM collections WHERE id = %s", (collection_id,))
     return {"deleted": True}
 
 
@@ -394,23 +423,29 @@ def _fetch_tag(
 
 def _to_collection(row: tuple[Any, ...], *, listing_count: int) -> dict[str, Any]:
     return {
-        "id":            int(row[0]),
-        "name":          row[1],
-        "description":   row[2],
-        "created_at":    _iso(row[3]),
-        "updated_at":    _iso(row[4]),
-        "listing_count": listing_count,
+        "id":                 int(row[0]),
+        "name":               row[1],
+        "description":        row[2],
+        "created_at":         _iso(row[3]),
+        "updated_at":         _iso(row[4]),
+        "listing_count":      listing_count,
+        "monitoring_enabled": bool(row[5]),
+        "notify_channels":    list(row[6]) if row[6] is not None else [],
+        "is_system":          bool(row[7]),
     }
 
 
 def _to_collection_full(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
-        "id":            int(row[0]),
-        "name":          row[1],
-        "description":   row[2],
-        "created_at":    _iso(row[3]),
-        "updated_at":    _iso(row[4]),
-        "listing_count": int(row[5]),
+        "id":                 int(row[0]),
+        "name":               row[1],
+        "description":        row[2],
+        "created_at":         _iso(row[3]),
+        "updated_at":         _iso(row[4]),
+        "listing_count":      int(row[5]),
+        "monitoring_enabled": bool(row[6]),
+        "notify_channels":    list(row[7]) if row[7] is not None else [],
+        "is_system":          bool(row[8]),
     }
 
 

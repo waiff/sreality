@@ -275,6 +275,78 @@
 .pipeline-remove:hover { color: #b34730; }  /* brick — destructive hint */
 .pipeline-remove:disabled { cursor: wait; opacity: 0.6; }
 
+/* ---- monitoring toggle (collections) -------------------------------- */
+/* A SEPARATE, adjacent affordance to the pipeline funnel (rule #22). Mirrors
+   the .pipeline-toggle / .pipeline-pill rules by value — same copper accent +
+   sizing — distinguished only by the bell glyph + "Sledovat" wording. */
+
+.collection-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.55rem;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  color: var(--copper);
+  background: var(--paper);
+  border: 1px solid var(--copper);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.collection-toggle:hover { background: var(--copper-soft); }
+
+.collection-toggle:disabled { opacity: 0.55; cursor: wait; }
+
+.collection-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+}
+
+/* Being-monitored: a soft-tinted pill carrying the bell + label + a remove ✕. */
+.collection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.3rem 0.18rem 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--copper);
+  background: var(--copper-soft);
+  border: 1px solid var(--copper);
+}
+
+.collection-pill--busy { opacity: 0.6; }
+
+.collection-pill-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.collection-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  padding: 0;
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--copper);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.collection-remove:hover { color: #b34730; }  /* brick — destructive hint */
+.collection-remove:disabled { cursor: wait; opacity: 0.6; }
+
 .app-link {
   margin-left: auto;  /* right-aligned whether or not the toggle is present */
   display: inline-flex;

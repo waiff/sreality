@@ -799,6 +799,14 @@ export interface Collection {
   created_at: string;
   updated_at: string;
   listing_count: number;
+  /* Monitored collections raise in-app change alerts on their member
+   * properties (price moves, delisting). `notify_channels` is the source's
+   * channel pick that the producer folds into notifications.target_channels —
+   * empty means in-app only. `is_system` marks the protected default
+   * "monitoring" collection (can't be renamed or deleted). */
+  monitoring_enabled: boolean;
+  notify_channels: string[];
+  is_system: boolean;
 }
 
 export interface Tag {
@@ -1259,10 +1267,17 @@ export interface FilterPreset {
   color: TagColor | null;
 }
 
+export type NotificationSourceKind = 'watchdog' | 'collection_monitor';
+
 export interface WatchdogDispatch {
   id: string;
-  subscription_id: string;
-  subscription_name: string;
+  /* Unified event model (migration 206). `source_kind` says which producer
+   * fired this row; exactly one of subscription_id / collection_id is set. */
+  source_kind: NotificationSourceKind;
+  subscription_id: string | null;
+  subscription_name: string | null;
+  collection_id: number | null;
+  collection_name: string | null;
   sreality_id: number;
   /* Property grain (Slice 2b). `property_id` is the canonical property;
    * `change_kind` is why this dispatch fired ('new' = newly matched the
@@ -1272,6 +1287,14 @@ export interface WatchdogDispatch {
   change_kind: string;
   dispatched_at: string;
   seen_at: string | null;
+  /* Change provenance — collection-monitor price events carry these so "why was
+   * I pinged" survives latest-wins: the trigger snapshot + new/previous price. */
+  trigger_price_czk: number | null;
+  prev_price_czk: number | null;
+  trigger_snapshot_id: number | null;
+  /* Non-in_app delivery channels the producer stamped (the Sprint N outbox
+   * reads this column); empty = in-app only. */
+  target_channels: string[];
   estimation_run_id: number | null;
   estimation_status: EstimationStatus | null;
   estimation_kind: 'rent' | 'sale' | null;
@@ -1312,6 +1335,15 @@ export interface WatchdogDispatchesResponse {
   limit: number;
   offset: number;
   next_cursor: string | null;
+}
+
+/* Unseen dispatch counts (GET /notifications/unread-count). `unread_count` is
+ * the total, or the scoped count when a source_kind is requested. */
+export interface NotificationUnreadCount {
+  watchdog: number;
+  collection_monitor: number;
+  total: number;
+  unread_count: number;
 }
 
 export type WatchdogSeenFilter = 'all' | 'seen' | 'unseen';

@@ -5,12 +5,15 @@
 
 import {
   addPipelineCard,
+  addToCollection,
   createEstimation,
   getEstimation,
+  listCollections,
   listPipelineStages,
   lookupListings,
   movePipelineCard,
   patchScenario,
+  removeFromCollection,
   removePipelineCard,
 } from './api';
 import type { ApiMessage, ApiResult } from './types';
@@ -59,5 +62,11 @@ async function handleMessage(
       return movePipelineCard(message.property_id, message.stage_id);
     case 'list_pipeline_stages':
       return listPipelineStages();
+    case 'list_collections':
+      return listCollections();
+    case 'add_to_collection':
+      return addToCollection(message.collection_id, message.property_id);
+    case 'remove_from_collection':
+      return removeFromCollection(message.collection_id, message.property_id);
   }
 }

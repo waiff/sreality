@@ -16,7 +16,9 @@ import { runIndexOverlay } from './index_overlay';
 import type {
   ApiMessage,
   ApiResult,
+  CollectionWriteResult,
   EstimationRun,
+  ExtCollection,
   PipelineCardResult,
   PipelineStage,
   PortalListing,
@@ -63,6 +65,10 @@ interface PanelState {
   pipelineBusy: boolean;
   /* Operator-curated stage list for the stage `<select>` (null = not loaded). */
   stages: PipelineStage[] | null;
+  /* Operator-curated collection list for the monitoring toggle (null = not loaded). */
+  collections: ExtCollection[] | null;
+  /* True while a collection add/remove is in flight (disables the control). */
+  collectionBusy: boolean;
   errorMessage: string | null;
 }
 
@@ -132,6 +138,42 @@ function withPipeline(
 ): PanelState {
   if (prev.listing == null) return prev;
   return { ...prev, listing: { ...prev.listing, pipeline: membership } };
+}
+
+/* Immutably set the listing's collection memberships on a state update. */
+function withCollections(
+  prev: PanelState, collection_ids: PortalListing['collection_ids'],
+): PanelState {
+  if (prev.listing == null) return prev;
+  return { ...prev, listing: { ...prev.listing, collection_ids } };
+}
+
+/* Pick the single collection the one-click monitoring toggle targets: the
+ * system "monitoring" collection if present (`is_system`), else the first
+ * monitoring-enabled collection. null = the operator hasn't set monitoring up,
+ * so the toggle renders nothing. */
+function monitoringTarget(collections: ExtCollection[] | null): ExtCollection | null {
+  if (collections == null) return null;
+  return (
+    collections.find((c) => c.is_system)
+    ?? collections.find((c) => c.monitoring_enabled)
+    ?? null
+  );
+}
+
+/* A bell glyph for the monitoring affordance — DISTINCT from the funnel so the
+ * two adjacent controls read differently (the funnel = deal pipeline, the bell =
+ * watch / monitoring). Filled body = being monitored. Hand-coded inline SVG (no
+ * React import — separate territory), like funnelIconSvg above. */
+function bellIconSvg(filled: boolean): string {
+  const f = filled ? 'currentColor' : 'none';
+  return (
+    '<svg class="collection-icon" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="1.75" stroke-linecap="round" ' +
+    'stroke-linejoin="round" aria-hidden="true">' +
+    `<path d="M6 9 a6 6 0 0 1 12 0 c0 5 1.5 6.5 2.5 7.5 H3.5 C4.5 15.5 6 14 6 9 Z" fill="${f}"/>` +
+    '<path d="M10 20 a2 2 0 0 0 4 0"/></svg>'
+  );
 }
 
 // ----------------------------------------------------------------------
@@ -313,7 +355,8 @@ function mountPanel(): {
   function renderActionsBar(body: HTMLElement, state: PanelState): void {
     const row = document.createElement('div');
     row.className = 'actions-bar';
-    renderPipelineToggle(row, state);
+    renderPipelineToggle(row, state);       // the funnel — sole pipeline affordance (rule #22)
+    renderMonitoringToggle(row, state);     // separate, adjacent collections/monitoring control
     renderAppLink(row, state);
     if (row.childElementCount > 0) body.appendChild(row);
   }
@@ -400,6 +443,62 @@ function mountPanel(): {
     remove.setAttribute('aria-label', 'Odebrat z pipeline');
     remove.textContent = '✕';
     remove.onclick = () => { void onTogglePipeline(); };
+    pill.appendChild(remove);
+
+    container.appendChild(pill);
+  }
+
+  /* Collections / monitoring control for the listing's property (rule #18) — a
+   * SEPARATE, adjacent affordance to the pipeline funnel (rule #22: the funnel
+   * is the sole pipeline control, never merged with this). One-click monitoring:
+   * out of the monitoring collection → a "Sledovat" bell button; in → a filled
+   * "Sledováno" pill with a ✕ to stop. Property-grain, shown only when we have a
+   * property AND the operator has a monitoring collection set up. */
+  function renderMonitoringToggle(container: HTMLElement, state: PanelState): void {
+    const l = state.listing;
+    if (l == null || !l.found || l.property_id == null) return;
+    const target = monitoringTarget(state.collections);
+    if (target == null) return;  // not loaded yet, or no monitoring collection
+    const inColl = l.collection_ids?.includes(target.id) ?? false;
+
+    if (!inColl) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'collection-toggle';
+      btn.disabled = state.collectionBusy;
+      btn.setAttribute('aria-pressed', 'false');
+      btn.title = `Sledovat (${target.name})`;
+      btn.innerHTML = bellIconSvg(false);
+      const label = document.createElement('span');
+      label.textContent = 'Sledovat';
+      btn.appendChild(label);
+      btn.onclick = () => { void onToggleMonitoring(); };
+      container.appendChild(btn);
+      return;
+    }
+
+    const pill = document.createElement('div');
+    pill.className = 'collection-pill' + (state.collectionBusy ? ' collection-pill--busy' : '');
+    pill.title = `Sledováno (${target.name})`;
+
+    const icon = document.createElement('span');
+    icon.className = 'collection-pill-icon';
+    icon.innerHTML = bellIconSvg(true);
+    pill.appendChild(icon);
+
+    const label = document.createElement('span');
+    label.className = 'collection-pill-label';
+    label.textContent = 'Sledováno';
+    pill.appendChild(label);
+
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'collection-remove';
+    remove.disabled = state.collectionBusy;
+    remove.title = 'Přestat sledovat';
+    remove.setAttribute('aria-label', 'Přestat sledovat');
+    remove.textContent = '✕';
+    remove.onclick = () => { void onToggleMonitoring(); };
     pill.appendChild(remove);
 
     container.appendChild(pill);
@@ -784,6 +883,58 @@ async function onTogglePipeline(): Promise<void> {
   ));
 }
 
+/* Apply a collection-membership update only if the panel STILL represents the
+ * property the write was started for — the same identity guard as the pipeline
+ * toggle (the panel state is a module global that openPanel replaces wholesale,
+ * so a re-open for a different card mid-request must not bleed this result). */
+function applyCollectionsIf(
+  propertyId: number,
+  collection_ids: PortalListing['collection_ids'],
+  patch: Partial<PanelState>,
+): (prev: PanelState) => PanelState {
+  return (prev) =>
+    prev.listing?.property_id === propertyId
+      ? withCollections({ ...prev, ...patch }, collection_ids)
+      : prev;
+}
+
+/* Add / remove the listing's property to/from the monitoring collection (rule
+ * #18). Optimistic flip → reconcile from the server; revert + surface the reason
+ * on failure. Mirrors onTogglePipeline's flow + error handling. Writes through
+ * the SAME bearer-gated /collections/{id}/properties routes the SPA uses. */
+async function onToggleMonitoring(): Promise<void> {
+  const l = state.listing;
+  if (l == null || l.property_id == null) return;
+  const target = monitoringTarget(state.collections);
+  if (target == null) return;
+  const propertyId = l.property_id;
+  const prior = l.collection_ids ?? [];
+  const wasIn = prior.includes(target.id);
+  const optimistic = wasIn
+    ? prior.filter((id) => id !== target.id)
+    : [...prior, target.id];
+
+  setState(applyCollectionsIf(
+    propertyId, optimistic, { collectionBusy: true, errorMessage: null },
+  ));
+
+  const res = await call<CollectionWriteResult>({
+    type: wasIn ? 'remove_from_collection' : 'add_to_collection',
+    collection_id: target.id,
+    property_id: propertyId,
+  });
+
+  if (!res.ok) {
+    setState(applyCollectionsIf(
+      propertyId, prior,
+      { collectionBusy: false, errorMessage: `Sledování se nepodařilo uložit: ${res.detail}` },
+    ));
+    return;
+  }
+
+  setState(applyCollectionsIf(propertyId, optimistic, { collectionBusy: false }));
+}
+
 /* Change the deal stage of the in-pipeline property. The SAME audited PATCH the
  * SPA's PipelineToggle + the kanban use (stamps `entered_stage_at`, logs a
  * `moved` event). Optimistic: recolour/reselect from the chosen stage, then
@@ -861,6 +1012,37 @@ async function loadStages(): Promise<void> {
   }
 }
 
+/* The operator-curated collection list — loaded once per page, cached at module
+ * scope and reused across panel re-opens, exactly like loadStages above (the
+ * monitoring toggle needs it to pick a target collection). Same bounded retry +
+ * self-heal-on-next-open posture. */
+let cachedCollections: ExtCollection[] | null = null;
+let collectionsLoading = false;
+
+async function loadCollections(): Promise<void> {
+  if (cachedCollections != null) {
+    if (state.collections == null) {
+      setState((prev) => ({ ...prev, collections: cachedCollections }));
+    }
+    return;
+  }
+  if (collectionsLoading) return;  // a load is already in flight — dedupe across opens
+  collectionsLoading = true;
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res = await call<ExtCollection[]>({ type: 'list_collections' });
+      if (res.ok) {
+        cachedCollections = res.data;
+        setState((prev) => ({ ...prev, collections: cachedCollections }));
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1500));  // transient blip → back off + retry
+    }
+  } finally {
+    collectionsLoading = false;
+  }
+}
+
 /* Mounts/refreshes the floating panel for one listing. Used by the detail-page
  * entry AND by index-card badges (which pass the card's ref + href + the
  * already-fetched listing so no second lookup is needed). */
@@ -875,7 +1057,8 @@ export async function openPanel(
     phase: 'loading', listing: null, isSaleApt: null, run: null,
     rentTouched: false, costTouched: false, priceTouched: false,
     rent: null, costPerM2: null, price: null, busy: false,
-    pipelineBusy: false, stages: cachedStages, errorMessage: null,
+    pipelineBusy: false, stages: cachedStages,
+    collections: cachedCollections, collectionBusy: false, errorMessage: null,
   };
   render(state);
 
@@ -910,8 +1093,12 @@ export async function openPanel(
   if (!active) return;
 
   /* For a property we have, load the stage list so the in-pipeline control can
-   * offer stage changes (non-blocking; cached across panel opens). */
-  if (listing?.found && listing.property_id != null) void loadStages();
+   * offer stage changes, and the collection list so the monitoring toggle can
+   * pick a target (both non-blocking; cached across panel opens). */
+  if (listing?.found && listing.property_id != null) {
+    void loadStages();
+    void loadCollections();
+  }
 
   /* Lazily load an existing estimation so the editable yield block appears
    * without blocking the MF headline (only the estimation section uses it). */

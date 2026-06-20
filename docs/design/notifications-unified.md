@@ -253,3 +253,43 @@ the delivery layer, it ships first.
 - Multi-recipient / per-user identity — single-operator platform; user
   management stays out of scope. Channels select *how* the operator is reached,
   not *who*.
+
+## 8. Sprint C — SHIPPED (what differs from the sketch above)
+
+Sprint C is built on PR A's table. Where reality differs from the original sketch:
+
+- **§4 grain is moot** — collections were ALREADY property-grain by the time
+  Sprint C ran (migrations 202/203, `collection_properties(collection_id,
+  property_id)`), so the monitor reads explicit membership, NOT a `filter_spec`
+  (collections have none): the monitored set is `collection_properties JOIN
+  collections WHERE monitoring_enabled`, not a `_build_match_clauses` filter.
+- **Producer** `api/notifications.py:match_monitored_collections_once` — one
+  set-based `INSERT…SELECT` per kind across all monitored collections (no
+  per-collection Python loop). Own daily cadence
+  (`notifications_monitor_interval_seconds`) + window
+  (`notifications_monitor_window_days`), migration 210.
+- **Kinds:** `price_drop` / `price_rise` (per-snapshot, `cm:{coll}:{kind}:{snapshot_id}`),
+  `inactive` / `reactivated` (lifecycle), `new_source` (sibling on a new portal).
+  `reactivated` keys off the prior `inactive` **dispatch** (the durable "was
+  dead" marker — `listings.inactive_at` is cleared on reactivation, and there is
+  no property-level `inactive_at`). `new_source` keys on the introducing listing
+  id and fires only when its `first_seen_at` is inside the window (the common "a
+  portal just listed it" case; a dedup-merge of an OLD listing won't fire —
+  documented limitation).
+- **`broker_change` deferred (5 of 6 kinds built).** The `change_kind` CHECK
+  carries all 7 (migration 209) but the producer does NOT emit `broker_change`:
+  `listing_broker_public` is current-state-only and `properties` has no broker
+  column nor a broker-change timestamp, so there is no stable, non-fragile
+  signal. Follow-up: a resolver-stamped `listing_broker_changed_at` (or a
+  monitor-local broker tracker) lights it up with zero schema churn.
+- **Feed:** the watchdog-only INNER join to `notification_subscriptions` became
+  a LEFT join + a `collections` join (else monitor rows, `subscription_id` NULL,
+  vanish). Exposes `source_kind` / `collection_id` / `collection_name` / the
+  provenance + `target_channels`. New `GET /notifications/unread-count` (red nav
+  badge) + `POST /notifications/mark-all-seen`; `/dispatches` gained
+  `collection_id` + `source_kind` filters. New unified `/notifications` SPA page.
+- **Merge reconciler unchanged** — PR A already registered `notification_dispatches`
+  (with `collection_id`) in `OPERATOR_STATE_TABLES`; the collection-scoped
+  `dedupe_key` means cross-collection rows never falsely collapse on a merge.
+- **Migrations:** 211 (collections monitoring + default collection), 209
+  (`change_kind` CHECK → 7 kinds), 210 (monitor cadence/window app_settings).

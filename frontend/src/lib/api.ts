@@ -36,6 +36,8 @@ import type {
   SourceKind,
   Tag,
   TagColor,
+  NotificationSourceKind,
+  NotificationUnreadCount,
   WatchdogDispatch,
   WatchdogDispatchesResponse,
   WatchdogFilterSpec,
@@ -833,12 +835,19 @@ export const getCollection = (id: number): Promise<CollectionWithProperties> =>
 export const createCollection = (input: {
   name: string;
   description?: string | null;
+  monitoring_enabled?: boolean;
+  notify_channels?: string[];
 }): Promise<Collection> =>
   request<Collection>('/collections', { method: 'POST', json: input });
 
 export const updateCollection = (
   id: number,
-  input: { name?: string | null; description?: string | null },
+  input: {
+    name?: string | null;
+    description?: string | null;
+    monitoring_enabled?: boolean;
+    notify_channels?: string[];
+  },
 ): Promise<Collection> =>
   request<Collection>(`/collections/${id}`, { method: 'PATCH', json: input });
 
@@ -1031,6 +1040,9 @@ export const deleteManualEstimate = (
 
 export interface ListWatchdogDispatchesParams {
   subscription_id?: string;
+  /* Scope to one producer. The Watchdog page passes 'watchdog' so the unified
+   * feed's collection_monitor rows (subscription_id NULL) don't leak onto it. */
+  source_kind?: NotificationSourceKind | 'all';
   seen?: WatchdogSeenFilter;
   limit?: number;
   offset?: number;
@@ -1121,6 +1133,42 @@ export const runWatchdogMatcher = (): Promise<{
       listings_in_window: number;
     };
   }>('/notifications/matcher/run', { method: 'POST' });
+
+/* ----- Unified notifications feed (Sprint C) ---------------------------- */
+
+export interface ListNotificationsParams {
+  source_kind?: NotificationSourceKind | 'all';
+  change_kind?: string;
+  collection_id?: number;
+  seen?: WatchdogSeenFilter;
+  limit?: number;
+  cursor?: string;
+}
+
+/* The unified feed: watchdog matches AND collection-monitor change events.
+ * Same endpoint + row shape as the watchdog dispatches, just unscoped by
+ * source (the LEFT-join feed serves both). */
+export const listNotifications = (
+  params: ListNotificationsParams = {},
+): Promise<WatchdogDispatchesResponse> =>
+  request<WatchdogDispatchesResponse>('/notifications/dispatches', {
+    query: params as Record<string, QueryValue>,
+  });
+
+export const getNotificationUnreadCount = (
+  source_kind: NotificationSourceKind | 'all' = 'all',
+): Promise<NotificationUnreadCount> =>
+  request<NotificationUnreadCount>('/notifications/unread-count', {
+    query: { source_kind },
+  });
+
+export const markAllNotificationsSeen = (
+  source_kind: NotificationSourceKind | 'all' = 'all',
+): Promise<{ updated: number }> =>
+  request<{ updated: number }>('/notifications/mark-all-seen', {
+    method: 'POST',
+    query: { source_kind },
+  });
 
 /* ----- Saved Browse filter presets (migration 151) ---------------------- */
 

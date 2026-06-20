@@ -78,6 +78,8 @@ export default function CollectionDetail() {
       <Hairline />
       <EditBlock collection={collection} />
       <Hairline />
+      <MonitoringBlock collection={collection} />
+      <Hairline />
       <PropertiesBlock collectionId={collection.id} properties={properties} />
     </Page>
   );
@@ -193,7 +195,9 @@ function EditBlock({ collection }: { collection: Collection }) {
           onChange={(e) => setName(e.target.value)}
           maxLength={200}
           placeholder="Name"
-          className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+          disabled={collection.is_system}
+          title={collection.is_system ? "The default collection can't be renamed." : undefined}
+          className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-rule-strong)] disabled:opacity-50 disabled:cursor-not-allowed"
         />
         <input
           type="text"
@@ -212,7 +216,11 @@ function EditBlock({ collection }: { collection: Collection }) {
             {save.isPending ? 'Saving…' : 'Save changes'}
           </button>
           <div className="ml-auto">
-            {confirmingDelete ? (
+            {collection.is_system ? (
+              <span className="text-[0.72rem] text-[var(--color-ink-4)]">
+                Default collection — can't be renamed or deleted.
+              </span>
+            ) : confirmingDelete ? (
               <div className="flex items-center gap-2">
                 <button
                   type="button"
@@ -245,6 +253,70 @@ function EditBlock({ collection }: { collection: Collection }) {
           <p className="text-[0.75rem] text-[var(--color-brick)]">{error}</p>
         )}
       </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Monitoring toggle                                                          */
+/* -------------------------------------------------------------------------- */
+
+function MonitoringBlock({ collection }: { collection: Collection }) {
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = useMutation({
+    mutationFn: (next: boolean) =>
+      updateCollection(collection.id, { monitoring_enabled: next }),
+    onSuccess: () => {
+      setError(null);
+      qc.invalidateQueries({ queryKey: curationKeys.collection(collection.id) });
+      qc.invalidateQueries({ queryKey: curationKeys.collections });
+    },
+    onError: (err: Error) => setError(err.message || 'Failed to update'),
+  });
+
+  const on = collection.monitoring_enabled;
+
+  return (
+    <div>
+      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)] font-medium">
+        Monitoring
+      </p>
+      <div className="mt-3 flex items-start gap-3 max-w-2xl">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={on}
+          disabled={toggle.isPending}
+          onClick={() => toggle.mutate(!on)}
+          className={[
+            'mt-0.5 relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-50',
+            on ? 'bg-[var(--color-copper)]' : 'bg-[var(--color-rule-strong)]',
+          ].join(' ')}
+        >
+          <span
+            className={[
+              'inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform',
+              on ? 'translate-x-[1.15rem]' : 'translate-x-[0.15rem]',
+            ].join(' ')}
+          />
+        </button>
+        <div className="text-sm text-[var(--color-ink-2)]">
+          <p>
+            {on
+              ? 'On — a property in this collection raises an alert when its price changes or it is delisted.'
+              : 'Off — properties here are not monitored for changes.'}
+          </p>
+          <p className="mt-1 text-[0.78rem] text-[var(--color-ink-4)]">
+            Alerts appear in Notifications. Delivery to other channels (email,
+            Telegram) is configured separately.
+          </p>
+        </div>
+      </div>
+      {error && (
+        <p className="mt-2 text-[0.75rem] text-[var(--color-brick)]">{error}</p>
+      )}
     </div>
   );
 }
