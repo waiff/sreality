@@ -6,6 +6,32 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Collections monitoring + unified Notifications (Sprint C)
+
+Built on PR A's unified event model. Turns the inert Collections feature into a
+live "watch these properties" surface and adds the in-app notifications area.
+
+- **Collections usable + monitored** (migration 208): ungreyed; per-collection
+  `monitoring_enabled` + `notify_channels` + a protected default "monitoring"
+  collection; create/edit UI + system-collection guards.
+- **Collection-monitor producer** (`match_monitored_collections_once`,
+  api/notifications.py): a 2nd notification producer alongside the watchdog
+  matcher. Set-based emission of `collection_monitor` dispatches for monitored
+  members — `price_drop`/`price_rise` (per-snapshot), `inactive`/`reactivated`
+  (lifecycle), `new_source` (sibling on a new portal); own daily cadence +
+  window (migration 210). `broker_change` reserved in the CHECK (migration 209)
+  but not emitted — no clean change signal yet.
+- **Unified Notifications feed** (`/notifications`): watchdog matches AND
+  collection-monitor events from one LEFT-join endpoint (+ `unread-count` /
+  `mark-all-seen`), with a **red unread nav badge**.
+- **Add-to-collection** on Browse cards (adjacent to the pipeline funnel,
+  rule #22), listing-detail CurationBlock, and the Chrome-extension panel.
+
+Next (deferred, scoped): a `broker_change` signal (a resolver-stamped
+`listing_broker_changed_at` or a monitor-local broker tracker) to light up the
+reserved 7th kind; the channels session's outbox then carries monitor events to
+email/Telegram for free (they read `target_channels`).
+
 ### 2026-06: Notification channel-delivery foundation (Sprint N PR 1 — ships dark)
 
 The delivery half of the unified-notifications work (builds on PR A's event model).
