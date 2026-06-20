@@ -407,8 +407,7 @@ function CollectionGlyph({ filled }: { filled: boolean }) {
       strokeLinejoin="round"
       aria-hidden
     >
-      <path d="M8 2.4 14.5 5.5 8 8.6 1.5 5.5 8 2.4Z" />
-      <path d="M2 9 8 12 14 9" fill="none" />
+      <path d="M4 2.5 H12 V13.5 L8 10.75 L4 13.5 Z" strokeLinecap="round" />
     </svg>
   );
 }
