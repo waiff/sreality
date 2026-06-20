@@ -624,20 +624,20 @@ def test_collection_monitor_emits_the_five_clean_kinds() -> None:
     conn = _FakeConn(script)
     stats = match_monitored_collections_once(conn)  # type: ignore[arg-type]
     assert stats["monitored_collections"] == 2
-    assert stats["events_inserted"] == 10  # 5 detectors x rowcount 2
+    # 4 INSERT statements (price_drop + price_rise share one CASE insert) x rowcount 2.
+    assert stats["events_inserted"] == 8
 
     inserts = [
         sql for sql, _ in conn.executed
         if "INSERT INTO notification_dispatches" in sql
     ]
-    assert len(inserts) == 5
+    assert len(inserts) == 4
     joined = " ".join(inserts)
     assert "'collection_monitor'" in joined
     for kind in ("'price_drop'", "'price_rise'", "'inactive'", "'reactivated'", "'new_source'"):
         assert kind in joined
     assert "'cm:'" in joined                       # collection-scoped dedupe prefix
-    assert "ON CONFLICT (dedupe_key)" in joined
-    assert joined.count("ON CONFLICT (dedupe_key)") == 5
+    assert joined.count("ON CONFLICT (dedupe_key)") == 4
     assert "'broker_change'" not in joined          # reserved, no clean signal yet
 
 
