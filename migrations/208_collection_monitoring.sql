@@ -1,4 +1,4 @@
--- 206: per-collection monitoring config — opt a collection into change alerts.
+-- 208: per-collection monitoring config — opt a collection into change alerts.
 --
 -- Sprint C (unified notifications): a collection can be MONITORED — its member
 -- properties' price/lifecycle changes raise notifications (the collection-monitor
