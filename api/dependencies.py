@@ -83,6 +83,35 @@ def get_llm_client(conn: Any = Depends(get_db_conn)) -> Any:
     return LLMClient(conn, providers=get_providers())
 
 
+_TRANSPORTS: dict[str, Any] | None = None
+
+
+def _build_transports() -> dict[str, Any]:
+    """Construct channel-transport singletons once (the `_build_providers`
+    mirror for notification delivery). Each transport reads its own secret
+    lazily and raises only on `send()`, so a missing key never fails boot.
+
+    PR 1 ships DARK: no transports registered, so the outbox is a no-op and
+    ChannelClient.send() raises a clear TransportError for any channel. PR 2
+    adds Resend (email); PR 3 adds Telegram — one new entry each.
+    """
+    return {}
+
+
+def get_transports() -> dict[str, Any]:
+    global _TRANSPORTS
+    if _TRANSPORTS is None:
+        _TRANSPORTS = _build_transports()
+    return _TRANSPORTS
+
+
+def get_channel_client(conn: Any = Depends(get_db_conn)) -> Any:
+    """Per-request ChannelClient bound to the request's DB connection (the
+    `get_llm_client` mirror). Imported lazily to keep import-time light."""
+    from api.channel_client import ChannelClient
+    return ChannelClient(conn, transports=get_transports())
+
+
 def require_token(authorization: str | None = Header(default=None)) -> None:
     """Bearer-token gate. No-op if API_TOKEN env var is unset (local dev)."""
     expected = os.environ.get("API_TOKEN")

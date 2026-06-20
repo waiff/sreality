@@ -280,16 +280,24 @@ outreach PR, not the foundation.
 
 All branches off `origin/main` (carries the outreach CRM).
 
-- **PR 1 — Foundation, ships dark.** `channel_sends` ledger; transports `base.py`
-  + `channel_client.py` + DI; `compose_notification_message`; outbox lifespan
-  loop (no transports registered → no-op); `SPA_BASE_URL`. Doc fix: correct the
-  false "one-line ALTER" claim in **CLAUDE.md rule #16 + ROADMAP** (not by
-  editing migration 057 — migrations are append-only; the correction rides in
-  the new migration's comment). Tests for ledger idempotency + composer.
-- **PR 2 — Email (Resend) live.** Transport + Railway env (`RESEND_API_KEY`,
-  `EMAIL_FROM`) + SPF/DKIM/DMARC DNS (10-min operator step) + email templates +
-  UI (Delivery section in watchdog/collection config, delivery-status column on
-  the feed, Settings → Delivery).
+- **PR 1 — Foundation, ships dark. ✅ BUILT (migration 207).** `channel_sends`
+  ledger + `api/transports/base.py` (`ChannelTransport` Protocol + `RenderedMessage`
+  / `SendResult` / `TransportError`) + `api/channel_client.py` (the audited
+  `LLMClient`-analog orchestrator: claim-by-INSERT-ON-CONFLICT → send → finalize) +
+  DI (`_build_transports()` returns `{}`, `get_channel_client`). Hermetic
+  `ChannelClient` tests. **Zero runtime change** — no transport registered, no
+  background task; an unconfigured channel raises a clear `TransportError`. (The
+  CLAUDE.md #16 + migration-057 "one-line ALTER" doc correction shipped with PR A /
+  migration 206.) The **outbox lifespan loop**, `compose_notification_message`, and
+  `SPA_BASE_URL` move to PR 2, where they're end-to-end testable against the first
+  real transport.
+- **PR 2 — Email (Resend) live + the outbox.** `api/transports/email_resend.py` +
+  register in `_build_transports`; the outbox lifespan loop (drains
+  `notification_dispatches × unnest(target_channels)` via `ChannelClient`);
+  `compose_notification_message` + widened `_LISTING_PROJECTION` + cover-image read;
+  Railway env (`RESEND_API_KEY`, `EMAIL_FROM`, `SPA_BASE_URL`) + SPF/DKIM/DMARC DNS
+  (10-min operator step) + email templates; UI (Delivery section in watchdog/
+  collection config, delivery-status column on the feed, Settings → Delivery).
 - **PR 3 — Telegram.** One file + one registry line + CHECK ALTER + `chat_id`
   capture. Proves the abstraction.
 - **PR 4 — Outreach unification.** §6.
