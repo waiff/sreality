@@ -984,6 +984,21 @@ API service:
   startup sweep of stuck estimation/building runs, and the background watchdog matcher loop,
   respectively. Default: both enabled.
 
+Notification delivery (Sprint N — `channel_sends` ledger + `api/transports/` + the outbox loop,
+rule #16; all OPTIONAL, dark until set):
+- `RESEND_API_KEY` + `EMAIL_FROM` — the Resend email transport (`api/transports/email_resend.py`).
+  Both required for `is_configured()`; transactional/self-notification scope only (Resend AUP
+  forbids cold outreach — outreach gets a separate EU vendor). Railway API env.
+- `TELEGRAM_BOT_TOKEN` — the Telegram Bot API transport (`api/transports/telegram.py`). Railway
+  API env. The recipient `chat_id` lives in `app_settings.notification_telegram_chat_id`.
+- `SPA_BASE_URL` — SPA origin for notification deep links (`{SPA_BASE_URL}/listing/{id}`).
+- `OUTBOX_DRAIN_DISABLED` (flag) — force-off the delivery outbox loop. The loop ALSO only starts
+  when ≥1 transport `is_configured()`, so it's a true no-op until a key above is set + redeploy.
+- Operator destinations are `app_settings` rows (operator-editable, history-tracked):
+  `notification_email_to`, `notification_telegram_chat_id` (empty = that channel skipped);
+  `notifications_outbox_interval_seconds` paces the loop. A watchdog opts in via
+  `notification_subscriptions.channels`, a collection via `collections.notify_channels`.
+
 Scraper orchestration:
 - `SREALITY_COUNTRY_ID` (optional, default `112` = Czech Republic).
 - `SCRAPE_CHAIN_TOKEN` (optional fine-grained PAT: this repo, Actions read+write) — lets the
