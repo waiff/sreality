@@ -291,6 +291,8 @@ def _classify_or_none(classify_fn: Any, sreality_id: int) -> list[dict[str, Any]
         return None
     try:
         res = classify_fn(sreality_id)
+        if res is None:  # cache-only: not fully warmed yet -> wait for the batch lane
+            return None
         return res["data"]["images"]
     except Exception as exc:  # noqa: BLE001 - one bad listing must not kill the run
         LOG.warning("classify %s failed: %s", sreality_id, exc)
@@ -329,8 +331,9 @@ def _resolve_visual(
     site_a = [i["image_id"] for i in imgs_a if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     site_b = [i["image_id"] for i in imgs_b if i["room_type"] == SITE_PLAN_ROOM_TYPE]
     if site_a and site_b and site_plan_fn is not None and vision_budget[0] > 0:
-        vision_budget[0] -= 1
         sp = site_plan_fn(a.sreality_id, b.sreality_id, site_a, site_b)
+        if sp is not None and not sp.get("cache_hit"):
+            vision_budget[0] -= 1  # only a COLD (paid) call consumes the budget
         if sp is not None and sp.get("verdict") == "different_unit":
             return {
                 "action": "queue", "reason": "site_plan_different_unit",
@@ -356,16 +359,18 @@ def _resolve_visual(
     last_rationale = None
     room_verdicts: dict[str, str] = {}
     room_rationales: dict[str, str | None] = {}
-    broke_early = False
     for room in priority:
         if tried >= max_room_attempts or vision_budget[0] <= 0:
-            broke_early = True  # rooms remain untried — any could still be a match
-            break
+            break  # rooms remain untried — captured by the all-rooms-verdicted guard
         tried += 1
-        vision_budget[0] -= 1
         verdict_obj = compare_fn(a.sreality_id, b.sreality_id, room, by_room_a[room], by_room_b[room])
         if verdict_obj is None:
             continue
+        # Only a COLD (cache-miss) call consumes the budget — a warm cache hit is
+        # free, so a run can apply unlimited already-paid-for verdicts while still
+        # capping NEW paid comparisons. (Cache-only consume passes a huge budget.)
+        if not verdict_obj.get("cache_hit"):
+            vision_budget[0] -= 1
         last_verdict, last_rationale = verdict_obj["verdict"], verdict_obj.get("rationale")
         room_verdicts[room] = last_verdict
         room_rationales[room] = last_rationale
@@ -375,13 +380,15 @@ def _resolve_visual(
                 "room_type": room, "verdict": last_verdict, "rationale": last_rationale,
             }
 
-    # No High on any COMPARED room. Only auto-dismiss when we examined EVERY common
-    # room without a High (`not broke_early`): if the room cap / vision budget
-    # stopped us early, an untried room might still match — the OR-gate "rescue"
-    # only covers rooms actually compared, so leave that pair for human review.
-    # Then dismiss only on a confident distinctive-room Low (decide_visual_dismiss);
-    # calibrated: 0/273 operator merges were Low. Otherwise queue.
-    if autodismiss and not broke_early and decide_visual_dismiss(room_verdicts):
+    # No High on any COMPARED room. Only auto-dismiss when EVERY common room produced
+    # a verdict (`len(room_verdicts) == len(priority)`): if the room cap / vision
+    # budget stopped us early, OR a room was un-warmed (cache-only) / its compare
+    # failed, an unseen room might still match — the OR-gate "rescue" only covers
+    # rooms actually verdicted, so leave that pair for human review. Then dismiss only
+    # on a confident distinctive-room Low (decide_visual_dismiss); calibrated: 0/273
+    # operator merges were Low. Otherwise queue.
+    all_rooms_verdicted = len(room_verdicts) == len(priority)
+    if autodismiss and all_rooms_verdicted and decide_visual_dismiss(room_verdicts):
         room = next(
             (r for r in rooms_in_priority(set(room_verdicts))
              if room_verdicts[r] == "Low"),
@@ -687,6 +694,46 @@ def _build_site_plan_fn(conn: Any) -> Any:
     return _fn
 
 
+def _build_cache_only_fns(conn: Any) -> tuple[Any, Any, Any]:
+    """classify/compare/site-plan fns that ONLY READ the warm caches (the ones the
+    batch lane filled at 50% off) and NEVER call the LLM — so the engine applies
+    already-paid-for verdicts for $0. Un-warmed listings/rooms return None and the
+    pair stays queued until the batch lane warms it. This is the cost-efficient
+    consume half: the batch lane is the sole (discounted) payer."""
+    from api.llm_client import LLMClient
+    from api.providers.anthropic import AnthropicProvider
+    from toolkit.image_classification import cached_classification
+    from toolkit.visual_match import cached_site_plan_verdict, cached_visual_verdict
+
+    llm = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
+    classify_model = llm.resolve_model("llm_room_classify_model")
+    compare_model = llm.resolve_model("llm_visual_match_model")
+    site_plan_model = llm.resolve_model("llm_site_plan_match_model")
+
+    def classify_fn(sreality_id: int) -> dict[str, Any] | None:
+        state, rooms = cached_classification(
+            conn, sreality_id=sreality_id, model=classify_model)
+        if state != "classified" or rooms is None:
+            return None  # not fully warmed -> wait for the batch lane
+        images = [
+            {"image_id": iid, "room_type": rt}
+            for rt, ids in rooms.items() for iid in ids
+        ]
+        return {"data": {"images": images}}
+
+    def compare_fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        v = cached_visual_verdict(
+            conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type, model=compare_model)
+        return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
+
+    def site_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        v = cached_site_plan_verdict(
+            conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
+        return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
+
+    return classify_fn, compare_fn, site_plan_fn
+
+
 def _visual_autodismiss_enabled(conn: Any) -> bool:
     """Operator toggle for auto-dismissing confident visual 'different' verdicts
     (app_settings.dedup_visual_autodismiss_enabled). Default on."""
@@ -741,6 +788,10 @@ def main() -> int:
     parser.add_argument("--no-autodismiss", action="store_true",
                         help="Disable auto-dismissing confident visual 'different' verdicts "
                              "(overrides the app_settings toggle).")
+    parser.add_argument("--cache-only", action="store_true",
+                        help="Consume only ALREADY-WARMED vision verdicts (no LLM, $0): "
+                             "applies cached merge/dismiss results the batch lane paid for; "
+                             "un-warmed pairs stay queued. The cost-efficient drain half.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -773,14 +824,17 @@ def main() -> int:
         auto_merge_enabled = _auto_merge_enabled(conn)
         autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
         LOG.info(
-            "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s",
-            auto_merge_enabled, autodismiss, args.shadow,
+            "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s cache_only=%s",
+            auto_merge_enabled, autodismiss, args.shadow, args.cache_only,
         )
 
         classify_fn = None
         compare_fn = None
         site_plan_fn = None
-        if auto_merge_enabled and args.max_vision_calls > 0:
+        if auto_merge_enabled and args.cache_only:
+            # Cost-efficient consume: read warm caches only, never call the LLM.
+            classify_fn, compare_fn, site_plan_fn = _build_cache_only_fns(conn)
+        elif auto_merge_enabled and args.max_vision_calls > 0:
             classify_fn = _build_classify_fn(conn)
             compare_fn = _build_compare_fn(conn)
             site_plan_fn = _build_site_plan_fn(conn)
@@ -790,12 +844,17 @@ def main() -> int:
         # When auto-merge is off the engine never reaches the visual step, so we
         # skip building the (LLM-backed) classify/compare fns entirely.
 
+        # Cache-only calls are free, so don't let the vision budget / room cap
+        # throttle consumption — try every warmed room of every warmed pair.
+        eff_max_vision = 10_000_000 if args.cache_only else args.max_vision_calls
+        eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
+
         deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
         stats = run_engine(
             conn, classify_fn=classify_fn, compare_fn=compare_fn,
             site_plan_fn=site_plan_fn,
-            max_pairs=args.max_pairs, max_vision_calls=args.max_vision_calls,
-            max_room_attempts=args.max_room_attempts,
+            max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,
+            max_room_attempts=eff_max_rooms,
             auto_merge_enabled=auto_merge_enabled,
             autodismiss=autodismiss,
             dry_run=args.shadow,

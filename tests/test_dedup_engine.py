@@ -967,3 +967,54 @@ def test_run_engine_partial_room_scan_does_not_dismiss(monkeypatch: Any) -> None
     assert stats["auto_dismissed"] == 0
     assert stats["queued"] == 1
     assert (101, 102) not in _dismissed_pairs(conn)
+
+
+def test_run_engine_warm_cache_hits_do_not_consume_budget(monkeypatch: Any) -> None:
+    # Cost lever: a warm (cache_hit) compare is free and must NOT consume the cold
+    # budget, so a tiny budget still applies unlimited already-paid-for verdicts.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "kitchen"},
+            {"image_id": sid * 10 + 2, "room_type": "bathroom"},
+        ]}}
+
+    # Both distinctive rooms warm + Low -> dismiss, even with cold budget = 1.
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify,
+        compare_fn=lambda *a, **k: {"verdict": "Low", "rationale": None, "cache_hit": True},
+        max_vision_calls=1, max_room_attempts=4,
+    )
+    assert stats["auto_dismissed"] == 1
+    assert stats["vision_calls"] == 0          # nothing cold spent
+    assert (101, 102) in _dismissed_pairs(conn)
+
+
+def test_run_engine_missing_room_verdict_blocks_dismiss(monkeypatch: Any) -> None:
+    # A room whose compare returns None (un-warmed in cache-only / failed call) means
+    # NOT every common room was verdicted -> never dismiss (an unseen room may match).
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [
+            {"image_id": sid * 10 + 1, "room_type": "kitchen"},
+            {"image_id": sid * 10 + 2, "room_type": "bathroom"},
+        ]}}
+
+    # kitchen Low (warm), bathroom un-warmed (None) -> not all rooms verdicted -> queue.
+    def compare(a, b, room, ids_a, ids_b):
+        return {"verdict": "Low", "cache_hit": True} if room == "kitchen" else None
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=compare,
+        max_vision_calls=10, max_room_attempts=4,
+    )
+    assert stats["auto_dismissed"] == 0
+    assert stats["queued"] == 1

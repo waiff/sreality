@@ -13,20 +13,22 @@ name: Dedup engine (street + disposition)
 # Every auto-merge is reversible (property_merge_events ledger + one-click Undo).
 # A per-run dedup_engine_runs row powers the /dedup automation dashboard.
 #
-# Cadence: daily, after the property recompute so stats are fresh. Mostly inert
-# until enough listings carry a street (sreality detail rows do; other portals
-# as their parsers improve) — by design, like the old sweep was.
+# Cadence: every 6h. The engine is also the cost-efficient VISION payer for the
+# backlog drain — its forensic compare stops at the first High room (so ~75% of
+# real dups cost ONE call, cheaper than the batch warmer's all-rooms warming), and
+# the per-run cold budget (max_vision_calls) caps NEW paid comparisons while warm
+# cache hits are free (so each run applies all already-paid-for verdicts at $0 and
+# spends its budget only on new pairs). Total backlog cost ≈ #cold pairs × ~$0.04;
+# cadence sets speed, not total cost. (--cache-only dispatch = $0 consume of warm
+# cache only; the dedup_batches warmer is disabled — less cost-efficient here.)
 #
-# Vision has a bounded default budget (max_vision_calls=200): the free pHash
-# fast-path is the primary auto-merge path; the bounded forensic calls settle the
-# rest. Set max_vision_calls=0 for a pHash-only run. Required GitHub secret:
-# SUPABASE_DB_URL; the visual layer additionally needs ANTHROPIC_API_KEY + R2_*
-# for image bytes (absent these, the engine still does rule A/B/C and degrades
-# the visual layer to a logged skip).
+# Required GitHub secret: SUPABASE_DB_URL; the visual layer additionally needs
+# ANTHROPIC_API_KEY + R2_* for image bytes (absent these, the engine still does
+# rule A/B/C + the free pHash fast-path and degrades the visual layer to a skip).
 
 on:
   schedule:
-    - cron: "45 4 * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch:
     inputs:
       max_pairs:
@@ -59,6 +61,14 @@ on:
           - "true"
       shadow:
         description: Run the full pipeline but WRITE NOTHING (preview merge/dismiss/reconcile counts)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      cache_only:
+        description: Consume only already-warmed verdicts (no LLM, $0)
         required: false
         default: "false"
         type: choice
@@ -98,11 +108,14 @@ jobs:
 
       - name: Run dedup engine
         run: |
-          ARGS="--max-pairs ${{ inputs.max_pairs || '4000' }}"
-          ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '400' }}"
+          # Scheduled run: examine many pairs (apply warm cache free) under a
+          # bounded COLD vision budget (the $ dial). Dispatch can override.
+          ARGS="--max-pairs ${{ inputs.max_pairs || '20000' }}"
+          ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '300' }}"
           ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
           ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
+          if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS
