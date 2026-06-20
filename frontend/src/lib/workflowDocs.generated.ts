@@ -863,8 +863,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "manual": true,
     "schedules": [
       {
-        "cron": "45 4 * * *",
-        "human": "Daily at 04:45 UTC"
+        "cron": "0 */6 * * *",
+        "human": "Every 6 hours"
       }
     ],
     "onPush": false,
@@ -917,6 +917,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "name": "shadow",
         "description": "Run the full pipeline but WRITE NOTHING (preview merge/dismiss/reconcile counts)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "cache_only",
+        "description": "Consume only already-warmed verdicts (no LLM, $0)",
         "required": false,
         "type": "choice",
         "default": "false",
