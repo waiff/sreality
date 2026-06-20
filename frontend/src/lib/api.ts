@@ -1069,6 +1069,7 @@ export const createWatchdogSubscription = (input: {
   name: string;
   filter_spec: WatchdogFilterSpec;
   is_active?: boolean;
+  channels?: string[];
 }): Promise<WatchdogSubscription> =>
   request<WatchdogSubscription>('/notifications/subscriptions', {
     method: 'POST',
@@ -1081,6 +1082,7 @@ export const updateWatchdogSubscription = (
     name?: string;
     filter_spec?: WatchdogFilterSpec;
     is_active?: boolean;
+    channels?: string[];
   },
 ): Promise<WatchdogSubscription> =>
   request<WatchdogSubscription>(

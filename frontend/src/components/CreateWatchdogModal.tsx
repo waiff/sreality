@@ -15,6 +15,7 @@ import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { ApiError, createWatchdogSubscription } from '@/lib/api';
 import type { WatchdogFilterSpec } from '@/lib/types';
+import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
 
 export interface CreateWatchdogModalProps {
   spec: WatchdogFilterSpec;
@@ -33,6 +34,7 @@ export default function CreateWatchdogModal({
 }: CreateWatchdogModalProps) {
   const navigate = useNavigate();
   const [name, setName] = useState(suggestedName);
+  const [channels, setChannels] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -54,6 +56,7 @@ export default function CreateWatchdogModal({
         name: watchdogName,
         filter_spec: spec,
         is_active: true,
+        channels,
       }),
     onSuccess: () => {
       navigate('/watchdog/manage');
@@ -116,6 +119,15 @@ export default function CreateWatchdogModal({
             className="mt-1 w-full px-3 py-2 text-sm rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-copper)]"
           />
         </label>
+
+        <div className="mt-4">
+          <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            Delivery
+          </span>
+          <div className="mt-1.5">
+            <DeliveryChannelsPicker value={channels} onChange={setChannels} />
+          </div>
+        </div>
 
         {unsupported.length > 0 ? (
           <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-3 py-2">

@@ -1245,6 +1245,10 @@ export interface WatchdogSubscription {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  /* Non-in_app delivery channels this watchdog fans out to (e.g. ['email'])
+   * — folded into each dispatch's target_channels by the matcher (Sprint N).
+   * in_app is always implicit. */
+  channels: string[];
   dispatch_count: number;
 }
 

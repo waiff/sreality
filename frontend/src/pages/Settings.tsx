@@ -65,6 +65,19 @@ export default function Settings() {
 
       <section className="mt-10">
         <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
+          Delivery
+        </h2>
+        <p className="text-sm text-[var(--color-ink-3)] mb-3">
+          Where watchdog &amp; collection-monitoring alerts reach you, beyond
+          the in-app feed. Pick the channels per watchdog / collection; set the
+          destination address here. (Each channel also needs its transport key
+          on the API service.)
+        </p>
+        <DeliverySection />
+      </section>
+
+      <section className="mt-10">
+        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
           App settings
         </h2>
         <p className="text-sm text-[var(--color-ink-3)] mb-3">
@@ -842,6 +855,112 @@ function LimitInput({
 /* -------------------------------------------------------------------- */
 /* App settings                                                          */
 /* -------------------------------------------------------------------- */
+
+function DeliverySection() {
+  const q = useQuery({ queryKey: ['admin', 'app_settings'], queryFn: listAppSettings });
+  if (q.error) return <ErrorBanner message={q.error.message} />;
+  if (!q.data)
+    return <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>;
+  const val = (key: string) => {
+    const s = q.data.data.find((x) => x.key === key);
+    return typeof s?.value === 'string' ? s.value : '';
+  };
+  return (
+    <div className="space-y-4 max-w-xl">
+      <RecipientField
+        settingKey="notification_email_to"
+        label="Email recipient"
+        placeholder="you@example.com"
+        hint="Where watchdog / collection email alerts are sent. Also needs RESEND_API_KEY + EMAIL_FROM on the API service."
+        initial={val('notification_email_to')}
+      />
+      <RecipientField
+        settingKey="notification_telegram_chat_id"
+        label="Telegram chat ID"
+        placeholder="e.g. 123456789"
+        hint="DM your bot once, then paste the numeric chat_id. Also needs TELEGRAM_BOT_TOKEN on the API service."
+        initial={val('notification_telegram_chat_id')}
+      />
+    </div>
+  );
+}
+
+function RecipientField({
+  settingKey,
+  label,
+  placeholder,
+  hint,
+  initial,
+}: {
+  settingKey: string;
+  label: string;
+  placeholder: string;
+  hint: string;
+  initial: string;
+}) {
+  const queryClient = useQueryClient();
+  const [text, setText] = useState(initial);
+  const [toast, setToast] = useState<{ kind: 'ok' | 'err'; message: string } | null>(
+    null,
+  );
+
+  const mutation = useMutation({
+    mutationFn: () => updateAppSetting(settingKey, text.trim()),
+    onSuccess: () => {
+      setToast({ kind: 'ok', message: 'Saved.' });
+      queryClient.invalidateQueries({ queryKey: ['admin', 'app_settings'] });
+    },
+    onError: (err: Error) => setToast({ kind: 'err', message: err.message }),
+  });
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const dirty = text.trim() !== initial.trim();
+
+  return (
+    <div>
+      <label className="block">
+        <span className="text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+          {label}
+        </span>
+        <div className="mt-1 flex items-center gap-2">
+          <input
+            type="text"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={placeholder}
+            className="flex-1 px-3 py-2 text-sm rounded-[var(--radius-sm)] bg-[var(--color-inset)] border border-[var(--color-rule)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+          />
+          <button
+            type="button"
+            onClick={() => mutation.mutate()}
+            disabled={!dirty || mutation.isPending}
+            className="px-3 py-1.5 text-sm rounded-[var(--radius-sm)] bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)] transition-colors disabled:opacity-50"
+          >
+            {mutation.isPending ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </label>
+      <p className="mt-1 text-[0.72rem] text-[var(--color-ink-4)]">{hint}</p>
+      {toast && (
+        <p
+          className={[
+            'mt-1 text-[0.72rem]',
+            toast.kind === 'ok'
+              ? 'text-[var(--color-sage)]'
+              : 'text-[var(--color-brick)]',
+          ].join(' ')}
+        >
+          {toast.message}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function AppSettingsSection() {
   const q = useQuery({ queryKey: ['admin', 'app_settings'], queryFn: listAppSettings });
