@@ -5,7 +5,9 @@
 
 import type {
   ApiResult,
+  CollectionWriteResult,
   EstimationRun,
+  ExtCollection,
   PipelineCardResult,
   PipelineStage,
   PortalListing,
@@ -176,4 +178,38 @@ export async function listPipelineStages(): Promise<ApiResult<PipelineStage[]>> 
   const res = await request<{ data: PipelineStage[] }>('/pipeline/stages');
   if (!res.ok) return res;
   return { ok: true, data: res.data.data };
+}
+
+/* GET /collections — the operator-curated collections (rule #18). The panel
+ * reads `monitoring_enabled` + `is_system` to pick a monitoring target for its
+ * one-click toggle. Returns `{data:[...]}`; we unwrap to the array. */
+export async function listCollections(): Promise<ApiResult<ExtCollection[]>> {
+  const res = await request<{ data: ExtCollection[] }>('/collections');
+  if (!res.ok) return res;
+  return { ok: true, data: res.data.data };
+}
+
+/* POST /collections/:id/properties — add the property to a collection (rule #18).
+ * The SAME bearer-gated route the SPA's Collection page uses; idempotent
+ * server-side (ON CONFLICT DO NOTHING). Returns `{added, skipped}`. */
+export async function addToCollection(
+  collection_id: number,
+  property_id: number,
+): Promise<ApiResult<CollectionWriteResult>> {
+  return request<CollectionWriteResult>(`/collections/${collection_id}/properties`, {
+    method: 'POST',
+    body: JSON.stringify({ property_ids: [property_id] }),
+  });
+}
+
+/* DELETE /collections/:id/properties/:property_id — remove the property from a
+ * collection. Returns `{removed}`. */
+export async function removeFromCollection(
+  collection_id: number,
+  property_id: number,
+): Promise<ApiResult<CollectionWriteResult>> {
+  return request<CollectionWriteResult>(
+    `/collections/${collection_id}/properties/${property_id}`,
+    { method: 'DELETE' },
+  );
 }

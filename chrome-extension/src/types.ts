@@ -87,11 +87,31 @@ export interface PipelineCardResult {
   removed?: boolean;
 }
 
+/* One operator-curated collection (GET /collections). Property-grain
+ * (rule #18); `monitoring_enabled` marks it as a watchlist, `is_system` marks
+ * the default "monitoring" collection. The panel reads these to pick a single
+ * monitoring target for its one-click toggle. */
+export interface ExtCollection {
+  id: number;
+  name: string;
+  monitoring_enabled: boolean;
+  is_system: boolean;
+}
+
+/* Response of the collection writes: POST /collections/{id}/properties (add)
+ * returns `{added, skipped}`; DELETE /collections/{id}/properties/{property_id}
+ * returns `{removed}`. We only read these to confirm the write landed. */
+export interface CollectionWriteResult {
+  added?: number;
+  skipped?: number;
+  removed?: boolean;
+}
+
 /* One entry from POST /listings/lookup — our scraped facts for a portal
  * listing keyed by (source, native id), including the precomputed MF
  * reference rent + "Výnos MF" gross yield (the same figures Browse cards
- * show), a handle on any existing successful estimation, and the property's
- * deal-pipeline membership. */
+ * show), a handle on any existing successful estimation, the property's
+ * deal-pipeline membership, and its collection memberships. */
 export interface PortalListing {
   source: string;
   source_id: string;
@@ -119,6 +139,9 @@ export interface PortalListing {
     gross_yield_pct: number | null;
   } | null;
   pipeline: PipelineMembership | null;
+  /* Collection memberships of the listing's property (rule #18). Null when the
+   * listing has no property yet (same posture as `pipeline`). */
+  collection_ids: number[] | null;
 }
 
 export interface PortalLookupResponse {
@@ -142,7 +165,10 @@ export type ApiMessage =
   | { type: 'add_pipeline_card'; property_id: number }
   | { type: 'remove_pipeline_card'; property_id: number }
   | { type: 'move_pipeline_card'; property_id: number; stage_id: number }
-  | { type: 'list_pipeline_stages' };
+  | { type: 'list_pipeline_stages' }
+  | { type: 'list_collections' }
+  | { type: 'add_to_collection'; collection_id: number; property_id: number }
+  | { type: 'remove_from_collection'; collection_id: number; property_id: number };
 
 export interface ApiResponse<T> {
   ok: true;
