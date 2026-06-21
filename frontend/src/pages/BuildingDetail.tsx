@@ -23,6 +23,7 @@ import {
   uploadBuildingAttachment,
 } from '@/lib/api';
 import { fmtAbsolute, fmtArea, fmtCzk } from '@/lib/format';
+import { usePageTitle } from '@/lib/pageTitle';
 import BuildingUnitEditor from '@/components/BuildingUnitEditor';
 import RangeStrip from '@/components/region/RangeStrip';
 import type {
@@ -72,6 +73,13 @@ export default function BuildingDetail() {
   const onConfirmed = (next: BuildingRun) => {
     if (id != null) qc.setQueryData(buildingKey(id), next);
   };
+
+  // Tab title from the parse-derived locality (falls back to the URL id, which
+  // is known before the fetch resolves). Above the early returns (hook-order).
+  const titleFields = (runQ.data?.subject_summary as { fields?: Record<string, unknown> } | null)
+    ?.fields;
+  const titleLocality = (titleFields?.locality ?? titleFields?.district) as string | undefined;
+  usePageTitle(titleLocality ?? (id != null ? `Building #${id}` : null));
 
   if (id == null) {
     return <Page><p className="text-sm">Invalid id.</p></Page>;

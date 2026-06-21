@@ -3,6 +3,7 @@ import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
 } from './types';
+import { fmtArea } from './format';
 
 export type TriState = 'any' | 'yes' | 'no';
 export type ListingStatus = 'active' | 'inactive' | 'any';
@@ -941,6 +942,41 @@ export const watchdogNameSuggestion = (f: ListingFilters): string => {
     );
   }
   return parts.join(' · ');
+};
+
+/* Deterministic "disposition · area · city" summary of the active Browse
+ * filters, for the browser-tab title (the constraints that most identify a
+ * Browse tab at a glance). Each segment is omitted when empty; returns null
+ * when nothing relevant is set, so the caller falls back to the static
+ * "Browse" route title. Reuses fmtArea + the include-only district logic of
+ * regionLabelFromFilters; the tab form is tighter (one name + "+N") because
+ * tab space is narrow. Dispositions are joined with ", " (they already contain
+ * "+", e.g. "2+kk"). */
+export const browseTitleSummary = (f: ListingFilters): string | null => {
+  const segments: string[] = [];
+
+  if (f.dispositions.length) {
+    segments.push(
+      f.dispositions.length <= 3
+        ? f.dispositions.join(', ')
+        : `${f.dispositions.slice(0, 2).join(', ')} +${f.dispositions.length - 2}`,
+    );
+  }
+
+  const { areaMin, areaMax } = f;
+  if (areaMin != null && areaMax != null) {
+    segments.push(`${areaMin.toLocaleString('cs-CZ')}–${fmtArea(areaMax)}`);
+  } else if (areaMin != null) {
+    segments.push(`≥ ${fmtArea(areaMin)}`);
+  } else if (areaMax != null) {
+    segments.push(`≤ ${fmtArea(areaMax)}`);
+  }
+
+  const cities = f.districts.filter((d) => !d.excluded).map((d) => d.name.trim()).filter(Boolean);
+  if (cities.length === 1) segments.push(cities[0]);
+  else if (cities.length > 1) segments.push(`${cities[0]} +${cities.length - 1}`);
+
+  return segments.length ? segments.join(' · ') : null;
 };
 
 /* Generic compare against DEFAULT_FILTERS so new fields can never be

@@ -16,6 +16,7 @@ import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
 import { PickButton } from '../components/controls';
 import { listingPath } from '@/lib/listingUrl';
+import { usePageTitle } from '@/lib/pageTitle';
 
 const CATEGORY_LABEL: Record<string, string> = {
   byt: 'Byt',
@@ -78,6 +79,7 @@ export default function BrokerDetail() {
   });
 
   const b = brokerQ.data;
+  usePageTitle(b?.display_name ?? null);
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto text-[var(--color-ink)]">

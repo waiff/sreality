@@ -11,6 +11,7 @@ import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-route
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { estimationKeys, fetchEstimation, submitEstimation } from '@/lib/queries';
 import { fmtAbsolute, fmtRelative } from '@/lib/format';
+import { usePageTitle } from '@/lib/pageTitle';
 import { ApiError } from '@/lib/api';
 import { runSurfaceUrl } from '@/lib/runLinks';
 import { buildRerunPayload, type RerunInput } from '@/lib/rerun';
@@ -40,6 +41,10 @@ export default function EstimationDetail() {
       submitEstimation(buildRerunPayload(run, overrides)),
     onSuccess: (run) => navigate(runSurfaceUrl(run)),
   });
+
+  // Above the early returns (hook-order). Falls back to the route's
+  // "Estimation" handle while loading / on invalid id.
+  usePageTitle(runQ.data ? `Estimation · run #${runQ.data.id}` : null);
 
   if (id == null) {
     return <NotFoundState reason="invalid" id={idParam ?? null} />;

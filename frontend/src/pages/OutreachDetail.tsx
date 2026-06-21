@@ -16,6 +16,7 @@ import {
 } from '../lib/api';
 import { prettyPhone } from '../lib/brokers';
 import { fmtRelative } from '../lib/format';
+import { usePageTitle } from '@/lib/pageTitle';
 import { StatusChip } from './Outreach';
 
 export default function OutreachDetail() {
@@ -58,6 +59,8 @@ export default function OutreachDetail() {
   const campaign = campaignQ.data;
   const messages = messagesQ.data?.messages ?? [];
   const pendingTargets = targetsQ.data?.count ?? 0;
+
+  usePageTitle(campaign?.name ?? null);
 
   if (campaignQ.isLoading) {
     return <Centered>Načítám kampaň…</Centered>;

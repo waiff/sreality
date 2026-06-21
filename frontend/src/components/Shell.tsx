@@ -5,6 +5,7 @@ import { getNotificationUnreadCount } from '@/lib/api';
 import { notificationKeys } from '@/lib/queries';
 import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
+import { APP_NAME } from '@/lib/brand';
 
 type NavItem =
   | { kind: 'link'; to: string; label: string; disabled?: boolean; title?: string }
@@ -142,17 +143,23 @@ function NavLabel({ active, children }: { active: boolean; children: ReactNode }
 }
 
 function BrandMark() {
+  // Two-part wordmark derived from the shared brand name: first word as the
+  // display wordmark, the rest as the spaced uppercase descriptor.
+  const [wordmark, ...rest] = APP_NAME.split(' ');
+  const descriptor = rest.join(' ');
   return (
-    <div className="flex items-baseline gap-2 select-none">
+    <div className="flex items-baseline gap-2 select-none" title={APP_NAME}>
       <span
         className="font-display text-[1.05rem] leading-none"
         style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
       >
-        sreality
+        {wordmark}
       </span>
-      <span className="text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-        database&nbsp;browser
-      </span>
+      {descriptor && (
+        <span className="text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+          {descriptor}
+        </span>
+      )}
     </div>
   );
 }

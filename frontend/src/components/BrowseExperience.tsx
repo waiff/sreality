@@ -37,10 +37,12 @@ import {
   regionLabelFromFilters,
   filtersToWatchdogSpec,
   watchdogNameSuggestion,
+  browseTitleSummary,
   toSearchParams,
   DEFAULT_FILTERS,
   type ListingFilters,
 } from '@/lib/filters';
+import { usePageTitle } from '@/lib/pageTitle';
 import CreateWatchdogModal from '@/components/CreateWatchdogModal';
 import PresetBar from '@/components/PresetBar';
 import type { ListingEstimate } from '@/lib/types';
@@ -115,6 +117,11 @@ export default function BrowseExperience({
   const f = { ...DEFAULT_FEATURES, ...features };
   const isModal = layout === 'modal';
   const { filters, sort, tab, overlay, activePresetId } = view;
+
+  // Browser-tab title reflects the active filters ("LR: 2+kk · 60–90 m² · Praha")
+  // so multiple Browse tabs are distinguishable. Skipped in the Explore-area
+  // modal, which reuses this component but must not own the page title.
+  usePageTitle(isModal ? null : browseTitleSummary(filters));
 
   /* Price-stats growth overlay control state — transient map-exploration knob,
    * kept in component state (not the view contract) on both surfaces. */

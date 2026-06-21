@@ -21,6 +21,7 @@ import {
 } from '@/lib/api';
 import { notificationKeys } from '@/lib/queries';
 import { listingPath } from '@/lib/listingUrl';
+import { usePageTitle } from '@/lib/pageTitle';
 import { fmtAbsolute, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import type {
   NotificationSourceKind,
@@ -88,6 +89,10 @@ export default function Notifications() {
 
   const rows = feedQ.data?.data ?? [];
   const unread = unreadQ.data?.unread_count ?? 0;
+
+  // Tab title carries the unread count, capped like the nav badge so the two
+  // never disagree. Zero → the plain "Notifications" route handle.
+  usePageTitle(unread > 0 ? `Notifications (${unread > 99 ? '99+' : unread})` : null);
 
   return (
     <div className="px-6 py-8 max-w-5xl mx-auto">

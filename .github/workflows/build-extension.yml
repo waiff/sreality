@@ -16,10 +16,14 @@ on:
     branches: [main]
     paths:
       - 'chrome-extension/**'
+      # The extension imports the shared brand from the SPA tree, so a brand
+      # change must re-validate the extension build (manifest name + wordmark).
+      - 'frontend/src/lib/brand.ts'
       - '.github/workflows/build-extension.yml'
   pull_request:
     paths:
       - 'chrome-extension/**'
+      - 'frontend/src/lib/brand.ts'
       - '.github/workflows/build-extension.yml'
   workflow_dispatch:
 

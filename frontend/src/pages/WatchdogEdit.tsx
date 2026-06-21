@@ -11,6 +11,7 @@ import {
   updateWatchdogSubscription,
 } from '@/lib/api';
 import { watchdogKeys } from '@/lib/queries';
+import { usePageTitle } from '@/lib/pageTitle';
 import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
@@ -69,6 +70,10 @@ export default function WatchdogEdit() {
 
   const canSave = name.trim().length > 0 && !saveMut.isPending;
   const submitError = saveMut.error?.message ?? null;
+
+  // Read the loaded original name (not the per-keystroke `name` state, which
+  // would make the tab flicker while editing). Above the early return below.
+  usePageTitle(existingQ.data?.name ? `Edit · ${existingQ.data.name}` : null);
 
   // Watchdog creation now lives on Browse ("Create watchdog" from a saved
   // filter). This page is edit-only; a missing id has nowhere to go.
