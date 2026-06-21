@@ -894,6 +894,67 @@ def mark_inactive_native(
         return len(rows)
 
 
+def mark_inactive_agenda(
+    conn: psycopg.Connection,
+    source: str,
+    category_type: str,
+    seen_natives: set[str],
+    *,
+    min_unseen_hours: int | None = None,
+) -> int:
+    """Agenda-grain native-id sweep: flip active (source, category_type) listings
+    whose `source_id_native` is absent from `seen_natives` to is_active=false.
+
+    For portals (maxima/remax) whose index is TWO mixed agendas — sale / rent ≡
+    category_type — that report a per-AGENDA total but only a TITLE-DERIVED
+    per-category slice. A per-(category_main, category_type) sweep would risk
+    false-flipping a listing whose index-time title category disagrees with its
+    detail-time stored category (the same ad in two different `category_main`
+    buckets). Scoping by category_type with the FULL agenda walk's id set removes
+    that risk: a still-listed ad is in `seen_natives` regardless of which
+    category_main it maps to, so only ads genuinely gone from the whole agenda
+    flip. Source-scoped (rule #15) so a portal's walk only touches its own rows.
+
+    `min_unseen_hours` is the same staleness rail as `mark_inactive_native`. Only
+    call with the full agenda's id set AFTER a completeness-proven agenda walk.
+    """
+    if not seen_natives:
+        return 0
+    stale_clause = (
+        "\n              AND last_seen_at < now() - make_interval(hours => %s)"
+        if min_unseen_hours is not None else ""
+    )
+    params: list[Any] = [source, category_type]
+    if min_unseen_hours is not None:
+        params.append(min_unseen_hours)
+    params.append(list(seen_natives))
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE listings
+            SET is_active = false, inactive_at = now()
+            WHERE is_active = true
+              AND source = %s
+              AND category_type = %s{stale_clause}
+              AND source_id_native <> ALL(%s)
+            RETURNING property_id
+            """,
+            tuple(params),
+        )
+        rows = cur.fetchall()
+        pids = {int(r[0]) for r in rows if r[0] is not None}
+        if pids:
+            cur.execute(
+                """
+                INSERT INTO dirty_properties (property_id)
+                SELECT DISTINCT u FROM unnest(%s::bigint[]) AS u
+                ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+                """,
+                (list(pids),),
+            )
+        return len(rows)
+
+
 def mark_listing_inactive_native(
     conn: psycopg.Connection,
     source: str,
