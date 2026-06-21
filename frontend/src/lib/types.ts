@@ -881,6 +881,14 @@ export interface PipelineBoardCard {
   area_m2: number | null;
   price_czk: number | null;
   mf_gross_yield_pct: number | null;
+  /* Region fields from properties_public — the in-memory region filter
+   * (matchesDistricts) reuses Browse's admin-id + name-fallback semantics. */
+  obec_id: number | null;
+  okres_id: number | null;
+  region_id: number | null;
+  place_search_text: string | null;
+  okres: string | null;
+  region: string | null;
   image_url: string | null;
   broker: PipelineCardBroker | null;
 }

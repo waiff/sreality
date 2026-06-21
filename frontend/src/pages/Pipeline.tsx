@@ -25,8 +25,11 @@ import {
 import {
   fetchPipelineBoard,
   fetchPipelineStages,
+  matchesDistricts,
   pipelineKeys,
 } from '@/lib/queries';
+import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
+import { type DistrictChip } from '@/lib/filters';
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
@@ -52,6 +55,7 @@ const CATEGORY_MAIN_LABEL: Record<string, string> = Object.fromEntries(
 export default function Pipeline() {
   const [manage, setManage] = useState(false);
   const [types, setTypes] = useState<Set<string>>(new Set());
+  const [districts, setDistricts] = useState<DistrictChip[]>([]);
   const stagesQ = useQuery({
     queryKey: pipelineKeys.stages,
     queryFn: fetchPipelineStages,
@@ -74,13 +78,22 @@ export default function Pipeline() {
     return CATEGORY_MAIN_ORDER.filter((t) => set.has(t));
   }, [boardQ.data]);
 
-  // Client-side filter (the board is small): empty selection = all types.
+  // Client-side filters (the board is small, rule #22): type chips + the region
+  // picker, applied in-memory. Region reuses Browse's exact chip semantics via
+  // matchesDistricts. Empty = no constraint.
+  const filtersActive = types.size > 0 || districts.length > 0;
   const filteredCards = useMemo(() => {
-    const all = boardQ.data ?? [];
-    return types.size === 0
-      ? all
-      : all.filter((c) => c.category_main != null && types.has(c.category_main));
-  }, [boardQ.data, types]);
+    let result = boardQ.data ?? [];
+    if (types.size > 0) {
+      result = result.filter(
+        (c) => c.category_main != null && types.has(c.category_main),
+      );
+    }
+    if (districts.length > 0) {
+      result = result.filter((c) => matchesDistricts(c, districts));
+    }
+    return result;
+  }, [boardQ.data, types, districts]);
 
   const byStage = useMemo(() => {
     const m = new Map<number, PipelineBoardCard[]>();
@@ -108,7 +121,7 @@ export default function Pipeline() {
         </div>
         <div className="flex items-center gap-4">
           <p className="text-[0.75rem] tracking-wide text-[var(--color-ink-3)] font-mono tabular-nums">
-            {types.size > 0
+            {filtersActive
               ? `${filteredCards.length} z ${cards.length}`
               : cards.length}{' '}
             nemovitostí
@@ -126,49 +139,65 @@ export default function Pipeline() {
 
       {manage && stages.length > 0 && <StageManager stages={stages} />}
 
-      {/* Basic filtering by property type — only shown when the pipeline holds
-          more than one type (a single-type filter is pointless). Multi-select
-          chips; empty = all. */}
-      {presentTypes.length >= 2 && (
-        <div className="mt-5 flex flex-wrap items-center gap-1.5">
-          <span className="mr-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-            Typ
-          </span>
-          {presentTypes.map((t) => {
-            const active = types.has(t);
-            return (
-              <button
-                key={t}
-                type="button"
-                aria-pressed={active}
-                onClick={() =>
-                  setTypes((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(t)) next.delete(t);
-                    else next.add(t);
-                    return next;
-                  })
-                }
-                className={[
-                  'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.78rem] transition-colors',
-                  active
-                    ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
-                    : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
-                ].join(' ')}
-              >
-                {CATEGORY_MAIN_LABEL[t] ?? t}
-              </button>
-            );
-          })}
-          {types.size > 0 && (
-            <button
-              type="button"
-              onClick={() => setTypes(new Set())}
-              className="ml-1 text-[0.72rem] text-[var(--color-ink-3)] underline underline-offset-2 hover:text-[var(--color-ink)]"
-            >
-              Vše
-            </button>
+      {/* Filters — property type (only when the pipeline holds >1 type) + the
+          region picker. The region control is the SAME LocationTypeahead Browse
+          and Datasets use; both filters apply client-side (rule #22, the board
+          is small). */}
+      {cards.length > 0 && (
+        <div className="mt-5 flex flex-col gap-3">
+          {presentTypes.length >= 2 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-1 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+                Typ
+              </span>
+              {presentTypes.map((t) => {
+                const active = types.has(t);
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() =>
+                      setTypes((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(t)) next.delete(t);
+                        else next.add(t);
+                        return next;
+                      })
+                    }
+                    className={[
+                      'rounded-[var(--radius-sm)] border px-2.5 py-1 text-[0.78rem] transition-colors',
+                      active
+                        ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper)]'
+                        : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)] hover:text-[var(--color-ink)]',
+                    ].join(' ')}
+                  >
+                    {CATEGORY_MAIN_LABEL[t] ?? t}
+                  </button>
+                );
+              })}
+              {types.size > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setTypes(new Set())}
+                  className="ml-1 text-[0.72rem] text-[var(--color-ink-3)] underline underline-offset-2 hover:text-[var(--color-ink)]"
+                >
+                  Vše
+                </button>
+              )}
+            </div>
           )}
+          <div className="flex items-start gap-2">
+            <span className="mt-1.5 shrink-0 text-[0.65rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+              Lokalita
+            </span>
+            <div className="min-w-0 flex-1 max-w-xl">
+              <LocationTypeahead
+                value={districts}
+                onChange={(n) => setDistricts(n ?? [])}
+              />
+            </div>
+          </div>
         </div>
       )}
 

@@ -11,7 +11,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_FILTERS } from './filters';
-import { districtsFilterClause, effectiveBbox } from './queries';
+import {
+  districtsFilterClause,
+  effectiveBbox,
+  matchesDistricts,
+  type DistrictMatchRow,
+} from './queries';
+import type { DistrictChip } from './filters';
 
 describe('effectiveBbox', () => {
   it('returns null when both modes are empty', () => {
@@ -174,5 +180,69 @@ describe('districtsFilterClause', () => {
       { name: 'Nové Město (u Brna), *', context: null },
     ]);
     expect(got).toContain('"*Nové Město \\(u Brna\\)\\, \\**"');
+  });
+});
+
+/* `matchesDistricts` is the in-memory predicate the pipeline board uses. Pinned
+ * against the SAME chip fixtures as `districtsFilterClause` above so the two
+ * implementations of the location-chip contract can never silently diverge. */
+describe('matchesDistricts', () => {
+  const mkRow = (o: Partial<DistrictMatchRow>): DistrictMatchRow => ({
+    obec_id: null, okres_id: null, region_id: null,
+    district: null, place_search_text: null, okres: null, region: null,
+    ...o,
+  });
+
+  it('matches any row when there are no chips', () => {
+    expect(matchesDistricts(mkRow({ obec_id: 1 }), [])).toBe(true);
+  });
+
+  it('matches a resolved obec chip by stable admin id, never by name', () => {
+    const chip: DistrictChip = { name: 'Jihlava', context: null, level: 'obec', id: 586846 };
+    expect(matchesDistricts(mkRow({ obec_id: 586846 }), [chip])).toBe(true);
+    // Same name in the text but a different id → no match (id, not name).
+    expect(matchesDistricts(mkRow({ obec_id: 999, district: 'Jihlava' }), [chip])).toBe(false);
+  });
+
+  it('matches okres / kraj chips on their own id columns', () => {
+    const chips: DistrictChip[] = [
+      { name: 'okres Jihlava', context: null, level: 'okres', id: 3707 },
+      { name: 'Kraj Vysočina', context: null, level: 'kraj', id: 108 },
+    ];
+    expect(matchesDistricts(mkRow({ okres_id: 3707 }), chips)).toBe(true);
+    expect(matchesDistricts(mkRow({ region_id: 108 }), chips)).toBe(true);
+    expect(matchesDistricts(mkRow({ okres_id: 1, region_id: 2 }), chips)).toBe(false);
+  });
+
+  it('street pick = containing obec id AND place_search_text substring', () => {
+    const chip: DistrictChip = { name: 'Pezinská', context: 'Mladá Boleslav', level: 'locality', id: 535419 };
+    expect(matchesDistricts(mkRow({ obec_id: 535419, place_search_text: 'Pezinská 12, Mladá Boleslav' }), [chip])).toBe(true);
+    // Right obec, wrong street text → no match.
+    expect(matchesDistricts(mkRow({ obec_id: 535419, place_search_text: 'Hlavní 1' }), [chip])).toBe(false);
+    // Right street text, wrong obec → no match.
+    expect(matchesDistricts(mkRow({ obec_id: 1, place_search_text: 'Pezinská 12' }), [chip])).toBe(false);
+  });
+
+  it('legacy chip falls back to name substring AND context across place columns', () => {
+    const chip: DistrictChip = { name: 'Edvarda Beneše', context: 'Plzeň' };
+    expect(matchesDistricts(mkRow({ place_search_text: 'Edvarda Beneše 3', okres: 'Plzeň-město', region: 'Plzeňský kraj' }), [chip])).toBe(true);
+    // Name matches but the context (Plzeň) appears in no place column → no match.
+    expect(matchesDistricts(mkRow({ place_search_text: 'Edvarda Beneše 3', region: 'Jihomoravský kraj' }), [chip])).toBe(false);
+  });
+
+  it('name fallback is case-insensitive (mirrors ILIKE "*…*")', () => {
+    expect(matchesDistricts(mkRow({ district: 'Edvarda BENEŠE' }), [
+      { name: 'beneše', context: null },
+    ])).toBe(true);
+  });
+
+  it('splits include and exclude: included AND not excluded', () => {
+    const inc: DistrictChip = { name: 'Jihlava', context: null, level: 'obec', id: 586846 };
+    const exc: DistrictChip = { name: 'Modřany', context: null, level: 'locality', id: 554782, excluded: true };
+    expect(matchesDistricts(mkRow({ obec_id: 586846 }), [inc, exc])).toBe(true);
+    // A Modřany row is excluded (and isn't an include either).
+    expect(matchesDistricts(mkRow({ obec_id: 554782, place_search_text: 'Modřany' }), [inc, exc])).toBe(false);
+    // Exclude-only: a non-Modřany row passes.
+    expect(matchesDistricts(mkRow({ obec_id: 1 }), [exc])).toBe(true);
   });
 });
