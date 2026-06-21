@@ -188,6 +188,68 @@ export const districtsFilterClause = (districts: DistrictChip[]): string | null 
   return groups.length ? `and(${groups.join(',')})` : null;
 };
 
+/* Client-side counterpart to `districtsFilterClause` — the SAME include/exclude
+ * + admin-id + name-fallback semantics, but as a row predicate for in-memory
+ * filtering. The SQL builder above can't be reused directly (it emits a
+ * PostgREST string, not a predicate); the pipeline board loads its small card
+ * set fully and filters locally (rule #22), so it needs this. Keep the two in
+ * LOCKSTEP — they share the column contract (obec_id/okres_id/region_id +
+ * district/place_search_text/okres/region on properties_public) pinned by
+ * queries.test.ts. A resolved chip matches by exact admin id; an unresolved one
+ * by case-insensitive substring across the place columns (mirroring ILIKE
+ * "*…*"), AND its context when present. */
+export interface DistrictMatchRow {
+  obec_id: number | null;
+  okres_id: number | null;
+  region_id: number | null;
+  district: string | null;
+  place_search_text: string | null;
+  okres: string | null;
+  region: string | null;
+}
+
+const ilikeContains = (text: string | null, needle: string): boolean =>
+  text != null && text.toLowerCase().includes(needle.toLowerCase());
+
+const matchesDistrictChip = (row: DistrictMatchRow, d: DistrictChip): boolean => {
+  if (
+    d.id != null
+    && (d.level === 'obec' || d.level === 'okres' || d.level === 'kraj')
+  ) {
+    const col = { obec: 'obec_id', okres: 'okres_id', kraj: 'region_id' }[d.level] as
+      'obec_id' | 'okres_id' | 'region_id';
+    return row[col] === d.id;
+  }
+  if (d.level === 'locality') {
+    const loc = ilikeContains(row.place_search_text, d.name);
+    return d.id != null ? row.obec_id === d.id && loc : loc;
+  }
+  const nameHalf =
+    ilikeContains(row.district, d.name)
+    || ilikeContains(row.place_search_text, d.name)
+    || ilikeContains(row.okres, d.name)
+    || ilikeContains(row.region, d.name);
+  if (!d.context) return nameHalf;
+  const ctxHalf =
+    ilikeContains(row.district, d.context)
+    || ilikeContains(row.place_search_text, d.context)
+    || ilikeContains(row.okres, d.context)
+    || ilikeContains(row.region, d.context);
+  return nameHalf && ctxHalf;
+};
+
+export const matchesDistricts = (
+  row: DistrictMatchRow,
+  districts: DistrictChip[],
+): boolean => {
+  if (!districts.length) return true;
+  const inc = districts.filter((d) => !d.excluded);
+  const exc = districts.filter((d) => d.excluded);
+  const included = inc.length === 0 || inc.some((d) => matchesDistrictChip(row, d));
+  const notExcluded = !exc.some((d) => matchesDistrictChip(row, d));
+  return included && notExcluded;
+};
+
 /* Generic identity-typed helper. Postgrest's filter methods all return the
  * same builder, so passing the chain through any subset of them preserves
  * the input type at runtime.
@@ -1574,7 +1636,7 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
   const { data: props, error: pErr } = await supabase
     .from('properties_public')
     .select(
-      'property_id, sreality_id, category_main, street, district, disposition, area_m2, price_czk, mf_gross_yield_pct',
+      'property_id, sreality_id, category_main, street, district, disposition, area_m2, price_czk, mf_gross_yield_pct, obec_id, okres_id, region_id, place_search_text, okres, region',
     )
     .in('property_id', ids);
   if (pErr) throw pErr;
@@ -1619,6 +1681,12 @@ export const fetchPipelineBoard = async (): Promise<PipelineBoardCard[]> => {
       area_m2: (p?.area_m2 as number | null) ?? null,
       price_czk: (p?.price_czk as number | null) ?? null,
       mf_gross_yield_pct: (p?.mf_gross_yield_pct as number | null) ?? null,
+      obec_id: (p?.obec_id as number | null) ?? null,
+      okres_id: (p?.okres_id as number | null) ?? null,
+      region_id: (p?.region_id as number | null) ?? null,
+      place_search_text: (p?.place_search_text as string | null) ?? null,
+      okres: (p?.okres as string | null) ?? null,
+      region: (p?.region as string | null) ?? null,
       image_url: firstImage ? imageSrc(firstImage) : null,
       broker: lb
         ? {

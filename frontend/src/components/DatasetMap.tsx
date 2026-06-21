@@ -4,7 +4,7 @@
  * Each metric is its own fill layer toggled by visibility. */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
-import { TILE_STYLE } from '@/lib/basemap';
+import { createMap } from '@/lib/basemap';
 import type { PriceStatGrowthRow } from '@/lib/priceStats';
 import {
   GROWTH_METRICS,
@@ -45,15 +45,12 @@ export default function DatasetMap({ rows, metric, chartOnHover = false, hoverDa
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: TILE_STYLE,
+    const map = createMap(containerRef.current, {
       center: [15.47, 49.82],
       zoom: 6.6,
-      attributionControl: { compact: true },
+      scaleControl: false,
     });
     mapRef.current = map;
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 
     map.on('load', () => {
       map.addSource('obce', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });

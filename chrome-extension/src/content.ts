@@ -233,6 +233,23 @@ function computeYield(state: PanelState): number | null {
   return ((rent - fond) * 12) / acquisition * 100;
 }
 
+/* The two derived quantities the yield is built from, shown as field hints so the
+ * operator sees the formula's parts (mirrors the SPA's YieldBlock): the monthly
+ * fond from the per-m² rate × area, and the acquisition denominator (price +
+ * renovation). Empty fond hint (no area) collapses via `.field-hint:empty`. */
+function fondHint(state: PanelState): string {
+  const area = subjectArea(state);
+  if (state.costPerM2 == null || area == null) return '';
+  return `= ${fmtCzk(Math.round(state.costPerM2 * area))}/měs`;
+}
+
+function acquisitionHint(state: PanelState): string {
+  const reno = state.renovation ?? 0;
+  return reno > 0 && state.price != null
+    ? `Akvizice ${fmtCzk(state.price + reno)}`
+    : 'Jednorázový rozpočet, přičte se k ceně';
+}
+
 function bodyFromState(state: PanelState): YieldScenarioUpdate {
   return {
     rent_czk: state.rentTouched ? state.rent : null,
@@ -733,6 +750,7 @@ function mountPanel(): {
     fields.appendChild(buildField({
       key: 'cost', label: 'Fond oprav + SVJ', suffix: 'Kč/m²',
       value: state.costPerM2, onInput: (v) => onEdit('cost', v),
+      hint: fondHint(state),
     }));
     fields.appendChild(buildField({
       key: 'price', label: 'Cena', suffix: 'Kč',
@@ -741,6 +759,7 @@ function mountPanel(): {
     fields.appendChild(buildField({
       key: 'renovation', label: 'Rekonstrukce', suffix: 'Kč',
       value: state.renovation, onInput: (v) => onEdit('renovation', v),
+      hint: acquisitionHint(state),
     }));
     sec.appendChild(fields);
 
@@ -783,6 +802,7 @@ function mountPanel(): {
     suffix: string;
     value: number | null;
     onInput: (v: number | null) => void;
+    hint?: string;
   }): HTMLElement {
     const wrap = document.createElement('div');
     wrap.className = 'field';
@@ -811,6 +831,13 @@ function mountPanel(): {
     suf.textContent = opts.suffix;
     row.appendChild(suf);
     wrap.appendChild(row);
+    if (opts.hint !== undefined) {
+      const h = document.createElement('p');
+      h.className = 'field-hint';
+      h.dataset.hintFor = opts.key;  // onEdit refreshes it in place (no re-render)
+      h.textContent = opts.hint;
+      wrap.appendChild(h);
+    }
     return wrap;
   }
 
@@ -872,6 +899,12 @@ function onEdit(
   }
   const yv = panelShadow?.querySelector<HTMLElement>('.est-yield-value');
   if (yv != null) yv.textContent = fmtPct(computeYield(state));
+  /* Refresh the derived field hints (fond/měs + acquisition denominator) in
+   * place too, so the formula's parts track the inputs without a re-render. */
+  const fh = panelShadow?.querySelector<HTMLElement>('[data-hint-for="cost"]');
+  if (fh != null) fh.textContent = fondHint(state);
+  const ah = panelShadow?.querySelector<HTMLElement>('[data-hint-for="renovation"]');
+  if (ah != null) ah.textContent = acquisitionHint(state);
   const status = panelShadow?.querySelector<HTMLElement>('.est-status');
   if (status != null) status.textContent = 'upraveno · uloženo';
   const reset = panelShadow?.querySelector<HTMLElement>('.est-reset');
