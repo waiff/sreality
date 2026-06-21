@@ -14,6 +14,7 @@ import {
 } from '@/lib/api';
 import { curationKeys } from '@/lib/queries';
 import { listingPath } from '@/lib/listingUrl';
+import { usePageTitle } from '@/lib/pageTitle';
 import { DeliveryChannelsPicker } from '@/components/DeliveryChannelsPicker';
 import {
   fmtAbsolute,
@@ -38,6 +39,8 @@ export default function CollectionDetail() {
     enabled: id != null,
     staleTime: 30_000,
   });
+
+  usePageTitle(q.data ? q.data.collection.name : null);
 
   if (id == null) {
     return <NotFoundState reason="invalid" id={idParam ?? null} />;

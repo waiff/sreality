@@ -143,15 +143,15 @@ function NavLabel({ active, children }: { active: boolean; children: ReactNode }
 
 function BrandMark() {
   return (
-    <div className="flex items-baseline gap-2 select-none">
+    <div className="flex items-baseline gap-2 select-none" title="Limen Reality">
       <span
         className="font-display text-[1.05rem] leading-none"
         style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
       >
-        sreality
+        Limen
       </span>
       <span className="text-[0.65rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-        database&nbsp;browser
+        Reality
       </span>
     </div>
   );

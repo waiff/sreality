@@ -6,6 +6,7 @@ import {
 } from '@/components/NewEstimationModal';
 import { useExploreAreaModal } from '@/components/ExploreAreaModal';
 import { placePrimary } from '@/lib/placeLabel';
+import { usePageTitle } from '@/lib/pageTitle';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchListingById,
@@ -165,6 +166,17 @@ export default function ListingDetail() {
       estimateKind: listing.category_type === 'pronajem' ? 'rent' : 'sale',
     };
   }, [listingQ.data, sourcesQ.data]);
+
+  // Tab title = "place · disposition" once the listing loads (falls back to the
+  // route's "Listing" handle while loading / on the ?property redirect). MUST
+  // stay above the early returns — same React #310 hook-order trap as above.
+  usePageTitle(
+    listingQ.data
+      ? [placePrimary(listingQ.data), listingQ.data.disposition]
+          .filter(Boolean)
+          .join(' · ') || null
+      : null,
+  );
 
   if (sid == null) {
     // Resolving ?property=ID → redirect (handled by the effect above). Show a
