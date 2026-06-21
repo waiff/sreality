@@ -1,0 +1,81 @@
+-- 215_drop_orphaned_health_stat_helpers.sql
+--
+-- Retire the 4 SECURITY DEFINER stat helpers that existed ONLY as a workaround
+-- for scraper_health_checks running as anon (SECURITY INVOKER) and needing
+-- privileged base-table aggregates across the anon boundary. Migration 214
+-- moved that computation into scraper_health_checks_mv, materialized at
+-- owner-privileged refresh time, so the helpers are now orphaned scaffolding:
+-- verified zero callers across pg_proc bodies, view/matview definitions,
+-- pg_cron commands, and the application tree (api/scripts/toolkit/frontend).
+--
+-- Destructive (DROP FUNCTION). The functions are pure SQL, fully restorable
+-- from git: their live definitions at drop time are reproduced below verbatim,
+-- and the originals live in migrations 170 (unattached_listings_stat), 176
+-- (delisting_latency_stat — original live body), 179 (field_null_drift_stat),
+-- 180 (snapshot_churn_stat).
+--
+-- REVERSAL (exact pre-drop definitions):
+--
+--   create or replace function public.unattached_listings_stat(p_source text)
+--    returns table(n integer, oldest_min numeric)
+--    language sql stable security definer set search_path to 'public'
+--   as $f$
+--     select count(*)::int,
+--            coalesce(round(extract(epoch from now() - min(first_seen_at))/60.0, 1), 0)
+--     from listings
+--     where source = p_source and is_active and property_id is null
+--   $f$;
+--
+--   create or replace function public.delisting_latency_stat(p_source text)
+--    returns table(n integer, p50_min numeric, p90_min numeric)
+--    language sql stable security definer set search_path to 'public'
+--   as $f$
+--     select count(*)::int,
+--            coalesce(round((percentile_cont(0.5) within group
+--              (order by extract(epoch from inactive_at - last_seen_at)/60.0))::numeric, 1), 0),
+--            coalesce(round((percentile_cont(0.9) within group
+--              (order by extract(epoch from inactive_at - last_seen_at)/60.0))::numeric, 1), 0)
+--     from listings
+--     where source = p_source
+--       and inactive_at is not null
+--       and inactive_at > now() - interval '7 days'
+--   $f$;
+--
+--   create or replace function public.snapshot_churn_stat(p_source text)
+--    returns table(snaps_24h bigint, active_n bigint)
+--    language sql stable security definer set search_path to 'public'
+--   as $f$
+--     select coalesce(m.snaps_24h, 0), coalesce(m.active_n, 0)
+--     from (select 1) one
+--     left join snapshot_churn_24h_mv m on m.source = p_source
+--   $f$;
+--
+--   create or replace function public.field_null_drift_stat(p_source text)
+--    returns table(field text, baseline_pct numeric, live_pct numeric, drift_pts numeric)
+--    language sql stable security definer set search_path to 'public'
+--   as $f$
+--     with fresh as (
+--       select distinct on (field) field, pct_populated
+--       from data_quality_snapshots
+--       where source = p_source
+--         and field in ('price_czk', 'area_m2', 'geom', 'locality', 'disposition')
+--         and captured_at > now() - interval '20 hours'
+--       order by field, captured_at desc
+--     ),
+--     baseline as (
+--       select distinct on (field) field, pct_populated
+--       from data_quality_snapshots
+--       where source = p_source
+--         and field in ('price_czk', 'area_m2', 'geom', 'locality', 'disposition')
+--         and captured_at < now() - interval '20 hours'
+--         and captured_at > now() - interval '8 days'
+--       order by field, captured_at desc
+--     )
+--     select f.field, b.pct_populated, f.pct_populated, b.pct_populated - f.pct_populated
+--     from fresh f join baseline b using (field)
+--   $f$;
+
+drop function if exists public.delisting_latency_stat(text);
+drop function if exists public.snapshot_churn_stat(text);
+drop function if exists public.field_null_drift_stat(text);
+drop function if exists public.unattached_listings_stat(text);
