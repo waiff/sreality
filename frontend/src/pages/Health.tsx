@@ -18,9 +18,9 @@ import {
   fetchImagesFailureOverview,
   fetchPortalHealth,
   fetchRecentScrapeRuns,
-  fetchRecentWorkflowFailures,
+  fetchWorkflowFailureSummary,
   fetchScraperHealthChecks,
-  type WorkflowFailureRow,
+  type WorkflowFailureSummaryRow,
 } from '@/lib/queries';
 import type {
   CategoryTrend,
@@ -1340,60 +1340,101 @@ function FailuresPanel({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Failed workflow runs (migration 178 — recent_workflow_failures RPC, fed by  */
-/* the 30-min monitor_workflow_failures.yml poller)                            */
+/* Failed workflow runs (migration 217 — workflow_failure_summary RPC, fed by   */
+/* the 30-min monitor_workflow_failures.yml poller). Streak-aware: chronic       */
+/* breaks (failing every run for days) render loud above muted transients.       */
 /* -------------------------------------------------------------------------- */
 
+function WorkflowFailureLine({ r, chronic }: { r: WorkflowFailureSummaryRow; chronic: boolean }) {
+  // Chronic rows count "consecutive since last success" and stamp "failing since
+  // <first failure>"; transient rows just show the window count + last failure.
+  const badge = chronic ? `${r.consecutive_failures}× v řadě` : `${r.failure_count}×`;
+  const when = chronic ? r.first_failure_at : r.last_failure_at;
+  const whenLabel = chronic ? 'selhává od ' : '';
+  return (
+    <li className="flex items-baseline gap-3 text-sm py-1.5 border-t border-[var(--color-rule-soft)] first:border-t-0 first:pt-0">
+      {r.last_html_url ? (
+        <a
+          href={r.last_html_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`hover:underline underline-offset-2 truncate ${
+            chronic ? 'text-[var(--color-brick)] font-medium' : 'text-[var(--color-copper)]'
+          }`}
+        >
+          {r.workflow_name} ↗
+        </a>
+      ) : (
+        <span className="text-[var(--color-ink)] truncate">{r.workflow_name}</span>
+      )}
+      <span
+        className={`inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium ${
+          chronic
+            ? 'bg-[var(--color-brick)] text-[var(--color-paper)]'
+            : 'bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
+        }`}
+      >
+        {badge}
+      </span>
+      <span
+        className="ml-auto shrink-0 tabular-nums text-xs text-[var(--color-ink-3)]"
+        title={when ? `${whenLabel}${fmtAbsolute(when)}` : undefined}
+      >
+        {when ? `${whenLabel}${fmtRelative(when)}` : '—'}
+      </span>
+    </li>
+  );
+}
+
 function WorkflowFailuresCard() {
-  const q = useQuery<WorkflowFailureRow[], Error>({
-    queryKey: ['workflow-failures', 48],
-    queryFn: () => fetchRecentWorkflowFailures(48),
+  const q = useQuery<WorkflowFailureSummaryRow[], Error>({
+    queryKey: ['workflow-failure-summary', 168],
+    queryFn: () => fetchWorkflowFailureSummary(168),
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
+  const rows = q.data ?? [];
+  const chronic = rows.filter((r) => r.is_chronic);
+  const transient = rows.filter((r) => !r.is_chronic);
   return (
-    <Card label="Selhané workflow běhy (48 h)">
+    <Card label="Selhané workflow běhy (7 d)">
       {q.error ? (
         <p className="text-sm text-[var(--color-brick)]">
-          recent_workflow_failures failed: {q.error.message}
+          workflow_failure_summary failed: {q.error.message}
         </p>
       ) : q.isLoading && !q.data ? (
         <p className="text-sm text-[var(--color-ink-3)]">Loading…</p>
-      ) : !q.data || q.data.length === 0 ? (
+      ) : rows.length === 0 ? (
         <p className="text-sm text-[var(--color-ink-4)] py-2">
-          Žádné selhané běhy za posledních 48 hodin.
+          Žádné selhané běhy za posledních 7 dní.
         </p>
       ) : (
-        <ul>
-          {q.data.map((f, i) => (
-            <li
-              key={`${f.html_url ?? f.workflow_name}-${i}`}
-              className="flex items-baseline gap-3 text-sm py-1.5 border-t border-[var(--color-rule-soft)] first:border-t-0 first:pt-0"
-            >
-              {f.html_url ? (
-                <a
-                  href={f.html_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[var(--color-copper)] hover:underline underline-offset-2 truncate"
-                >
-                  {f.workflow_name} ↗
-                </a>
-              ) : (
-                <span className="text-[var(--color-ink)] truncate">{f.workflow_name}</span>
-              )}
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] text-[0.6rem] uppercase tracking-wide font-medium bg-[var(--color-brick-soft)] text-[var(--color-brick)]">
-                {f.conclusion}
-              </span>
-              <span
-                className="ml-auto shrink-0 tabular-nums text-xs text-[var(--color-ink-3)]"
-                title={f.run_started_at ? fmtAbsolute(f.run_started_at) : undefined}
-              >
-                {f.run_started_at ? fmtRelative(f.run_started_at) : '—'}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <div className="space-y-3">
+          {chronic.length > 0 && (
+            <div>
+              <p className="text-[0.6rem] uppercase tracking-wide font-medium text-[var(--color-brick)] mb-0.5">
+                Chronické selhání ({chronic.length})
+              </p>
+              <ul>
+                {chronic.map((r) => (
+                  <WorkflowFailureLine key={r.workflow_path} r={r} chronic />
+                ))}
+              </ul>
+            </div>
+          )}
+          {transient.length > 0 && (
+            <div>
+              <p className="text-[0.6rem] uppercase tracking-wide font-medium text-[var(--color-ink-4)] mb-0.5">
+                Ojedinělé ({transient.length})
+              </p>
+              <ul>
+                {transient.map((r) => (
+                  <WorkflowFailureLine key={r.workflow_path} r={r} chronic={false} />
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
       )}
     </Card>
   );
