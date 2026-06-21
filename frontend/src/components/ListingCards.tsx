@@ -26,6 +26,7 @@ import {
   fmtArea, fmtCzk, fmtPricePerM2,
   fmtShortDate, fmtTomDays,
 } from '@/lib/format';
+import { categoryMainLabel } from '@/lib/enums';
 import { portalLabel } from '@/lib/portals';
 import { placePrimary } from '@/lib/placeLabel';
 import type { ListingEstimate } from '@/lib/types';
@@ -672,12 +673,7 @@ function Card({
 }
 
 function formatTitle(r: CardRow): string {
-  const kind = (() => {
-    if (r.category_main === 'byt') return 'Byt';
-    if (r.category_main === 'dum') return 'Dům';
-    if (r.category_main === 'komercni') return 'Komerční prostor';
-    return 'Nemovitost';
-  })();
+  const kind = categoryMainLabel(r.category_main);
   const deal = r.category_type === 'pronajem' ? 'k pronájmu' : 'na prodej';
   const parts = [`${kind} ${deal}`];
   if (r.disposition) parts.push(r.disposition);

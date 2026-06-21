@@ -6,6 +6,7 @@ import {
 } from '@/components/NewEstimationModal';
 import { useExploreAreaModal } from '@/components/ExploreAreaModal';
 import { placePrimary } from '@/lib/placeLabel';
+import { categoryMainLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -167,12 +168,20 @@ export default function ListingDetail() {
     };
   }, [listingQ.data, sourcesQ.data]);
 
-  // Tab title = "place · disposition" once the listing loads (falls back to the
-  // route's "Listing" handle while loading / on the ?property redirect). MUST
-  // stay above the early returns — same React #310 hook-order trap as above.
+  // Tab title = "type · disposition · street-or-city" once the listing loads
+  // (falls back to the route's "Listing" handle while loading / on the
+  // ?property redirect). Location prefers the parsed street, else the
+  // municipality (obec), else the richer place label. MUST stay above the early
+  // returns — same React #310 hook-order trap as above.
   usePageTitle(
     listingQ.data
-      ? [placePrimary(listingQ.data), listingQ.data.disposition]
+      ? [
+          categoryMainLabel(listingQ.data.category_main),
+          listingQ.data.disposition,
+          listingQ.data.street?.trim()
+            || listingQ.data.obec?.trim()
+            || placePrimary(listingQ.data),
+        ]
           .filter(Boolean)
           .join(' · ') || null
       : null,

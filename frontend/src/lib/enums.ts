@@ -24,6 +24,20 @@ export const OWNERSHIP_LABELS: Record<Ownership, string> = {
   statni: 'Státní/obecní',
 };
 
+/* Czech singular label for a listing's `category_main` (the property type).
+ * The single source for the type word shown on cards + the listing tab title. */
+export const CATEGORY_MAIN_LABELS: Record<string, string> = {
+  byt: 'Byt',
+  dum: 'Dům',
+  komercni: 'Komerční prostor',
+  pozemek: 'Pozemek',
+  ostatni: 'Ostatní',
+};
+
+export function categoryMainLabel(cm: string | null | undefined): string {
+  return (cm && CATEGORY_MAIN_LABELS[cm]) || 'Nemovitost';
+}
+
 /* category_sub_cb meanings differ across category_main. We key by the
  * sreality cb value alone since the codes don't collide across the
  * three category_main values we surface (1=byt, 2=dum, 4=komercni)
