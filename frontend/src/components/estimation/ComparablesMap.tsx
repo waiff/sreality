@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
-import { TILE_STYLE } from '@/lib/basemap';
+import { createMap } from '@/lib/basemap';
 import { fmtArea, fmtCzk } from '@/lib/format';
 import { imageSrc, type ImageRef } from '@/lib/imageUrl';
 import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
@@ -89,16 +89,11 @@ export default function ComparablesMap({
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: TILE_STYLE,
+    const map = createMap(containerRef.current, {
       center: [subject.lng, subject.lat],
       zoom: 13.5,
-      attributionControl: { compact: true },
     });
     mapRef.current = map;
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
-    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
     map.on('load', () => {
       map.addSource('subject', {

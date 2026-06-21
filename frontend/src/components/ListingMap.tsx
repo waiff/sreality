@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
-import { TILE_STYLE } from '@/lib/basemap';
+import { createMap } from '@/lib/basemap';
 import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
 import type {
   CityIndexDefinition,
@@ -490,20 +490,14 @@ export default function ListingMap({
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: TILE_STYLE,
+    /* Scale sits bottom-LEFT (createMap default) so it never collides with the
+     * OpenFreeMap attribution; the bottom-left city controls are lifted clear
+     * of it below. */
+    const map = createMap(containerRef.current, {
       center: [PRAGUE.lng, PRAGUE.lat],
       zoom: PRAGUE.zoom,
-      attributionControl: { compact: true },
     });
     mapRef.current = map;
-
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
-    /* Distance scale, bottom-LEFT so it never collides with the
-     * OpenFreeMap attribution (maplibre defaults it bottom-right). The
-     * bottom-left city controls are lifted clear of it below. */
-    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
     map.on('load', () => {
       /* MF rent-price choropleth. Added FIRST of all overlays so it sits
