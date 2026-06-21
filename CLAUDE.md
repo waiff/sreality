@@ -241,7 +241,11 @@ rules. Identify which one a task belongs to before you start.
   membership, and the toggle writes through the SAME bearer-gated
   `POST/DELETE /pipeline/cards` the SPA's `PipelineToggle` uses — one write path, one
   `<FunnelIcon>` glyph everywhere. Reachable from index/search pages too: the per-card
-  badge opens this same panel.
+  badge opens this same panel. The panel can be **minimized** (a `−` in the header) to a
+  tiny one-line bar showing only the two yield figures (MF + comparables estimate); the
+  preference persists across listings via `chrome.storage.local` (`panelMinimized`, the
+  "storage" permission) so it stays tucked away while browsing, and `openPanel` awaits it
+  before first paint (no flash).
   **Index/search pages** get per-card badges via anchor-href scanning (no per-portal card
   selectors — robust to markup changes). The default display is a **read** through
   `POST /listings/lookup`, which maps a card's on-page `(source, native id)` to our row +
