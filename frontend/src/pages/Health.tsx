@@ -35,12 +35,17 @@ import type {
   ImageStorageOverview,
   PortalHealth,
   PortalKind,
-  PortalStage,
   ScrapeRun,
   ScrapeRunCategory,
   ScraperHealthCheck,
   ScraperHealthChecks,
 } from '@/lib/types';
+import {
+  portalPosture,
+  PORTAL_POSTURE_LABEL,
+  PORTAL_POSTURE_BLURB,
+  type PortalPosture,
+} from '@/lib/portalPosture';
 import { fmtCount, fmtRelative, fmtAbsolute } from '@/lib/format';
 import { portalShort } from '@/lib/portals';
 import { WORKFLOW_DOCS } from '@/lib/workflowDocs.generated';
@@ -204,23 +209,17 @@ function SectionHeading({ children }: { children: ReactNode }) {
 /* Data-source catalogue (migration 100 — portal_health_summary RPC)          */
 /*                                                                            */
 /* A roll-call of every portal the platform pulls from. Each portal is a      */
-/* register entry: name in the display serif, a quiet kind/stage tag, and a   */
-/* headline number whose meaning shifts by kind — active listings for         */
+/* register entry: name in the display serif, a quiet kind/posture tag        */
+/* (posture DERIVED from supports_complete_walk — see lib/portalPosture), and  */
+/* a headline number whose meaning shifts by kind — active listings for       */
 /* scrapers, URLs parsed for on-demand parsers. New portals appear the moment */
 /* a row is added to the `portals` table; never-run ones show at zero rather  */
-/* than vanishing, so a dormant pilot stays visible.                          */
+/* than vanishing, so a dormant portal stays visible.                         */
 /* -------------------------------------------------------------------------- */
 
 const PORTAL_KIND_LABEL: Record<PortalKind, string> = {
   scraper: 'scraper',
   parser: 'on-demand parser',
-};
-
-const PORTAL_STAGE_LABEL: Record<PortalStage, string> = {
-  live: 'live',
-  pilot: 'pilot',
-  on_demand: 'on demand',
-  planned: 'planned',
 };
 
 type RollupStatus = HealthCheckStatus | 'idle' | 'loading';
@@ -263,7 +262,7 @@ function portalHost(url: string | null): string | null {
 
 /* Group registry rows by canonical portal identity (home host), so a portal's
  * scraper + on-demand-parser facets fold into one card — which dedupes the two
- * "iDNES Reality" rows (scraper pilot + parser) the flat grid showed twice. */
+ * "iDNES Reality" rows (scraper + parser) the flat grid showed twice. */
 function groupPortals(portals: PortalHealth[]): PortalGroup[] {
   const groups = new Map<string, PortalGroup>();
   for (const p of portals) {
@@ -276,8 +275,9 @@ function groupPortals(portals: PortalHealth[]): PortalGroup[] {
     if (p.kind === 'scraper') { g.scraper = p; g.label = p.label; }
     else g.parser = p;
   }
+  // Live scrapers first, then partial-walk scrapers, then parser-only groups.
   const rank = (g: PortalGroup): number =>
-    g.scraper?.stage === 'live' ? 0 : g.scraper ? 1 : 2;
+    !g.scraper ? 2 : portalPosture(g.scraper) === 'live' ? 0 : 1;
   return [...groups.values()].sort(
     (a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label),
   );
@@ -409,8 +409,8 @@ function PortalGroupCard({
             <span className="font-display text-lg leading-tight text-[var(--color-ink)] truncate">
               {group.label}
             </span>
-            {scraper && <FacetChip kind="scraper" stage={scraper.stage} />}
-            {parser && <FacetChip kind="parser" stage={parser.stage} />}
+            {scraper && <FacetChip kind="scraper" posture={portalPosture(scraper)} />}
+            {parser && <FacetChip kind="parser" posture={portalPosture(parser)} />}
           </div>
           <div className="mt-1 flex items-center gap-x-5 gap-y-1 flex-wrap">
             {scraper ? (
@@ -455,7 +455,10 @@ function PortalGroupCard({
           {scraper && scraperHasActivity(scraper) ? (
             <>
               <Disclosure label="Listings by category · reconciliation">
-                <CategoryTable source={scraper.source} stage={scraper.stage} />
+                <CategoryTable
+                  source={scraper.source}
+                  supportsCompleteWalk={scraper.supports_complete_walk}
+                />
               </Disclosure>
               <Disclosure
                 label="Scrape health checks"
@@ -489,10 +492,19 @@ function PortalGroupCard({
   );
 }
 
-function FacetChip({ kind, stage }: { kind: PortalKind; stage: PortalStage }) {
+function FacetChip({ kind, posture }: { kind: PortalKind; posture: PortalPosture }) {
+  // For an on-demand parser the posture (on_demand) just restates the kind, so
+  // drop the redundant suffix; scrapers show "scraper · live" / "· partial walk".
+  const text =
+    posture === 'on_demand'
+      ? PORTAL_KIND_LABEL[kind]
+      : `${PORTAL_KIND_LABEL[kind]} · ${PORTAL_POSTURE_LABEL[posture]}`;
   return (
-    <span className="inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] bg-[var(--color-rule-soft)] text-[0.55rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] whitespace-nowrap">
-      {PORTAL_KIND_LABEL[kind]} · {PORTAL_STAGE_LABEL[stage]}
+    <span
+      title={PORTAL_POSTURE_BLURB[posture]}
+      className="inline-flex items-center px-1.5 py-0.5 rounded-[var(--radius-xs)] bg-[var(--color-rule-soft)] text-[0.55rem] tracking-[0.1em] uppercase text-[var(--color-ink-3)] whitespace-nowrap"
+    >
+      {text}
     </span>
   );
 }
@@ -660,10 +672,10 @@ function StaleScrapeBanner({ lastScrapeAt }: { lastScrapeAt: string | null }) {
 
 function CategoryTable({
   source,
-  stage,
+  supportsCompleteWalk,
 }: {
   source: string;
-  stage?: PortalStage;
+  supportsCompleteWalk?: boolean;
 }) {
   const [grain, setGrain] = useState<'hour' | 'day'>('hour');
 
@@ -677,7 +689,10 @@ function CategoryTable({
     staleTime: 30_000,
   });
   const cats = trendsQuery.data ?? [];
-  const isPilot = stage === 'pilot';
+  // Tie the delisting caveat to the REAL operational column (supports_complete_walk),
+  // not the retired stage label — bazos/bezrealitky are complete-walk, so the old
+  // stage==='pilot' check printed a false "delistings aren't inferred" for them.
+  const partialWalk = supportsCompleteWalk === false;
 
   if (trendsQuery.isLoading && cats.length === 0) {
     return <p className="text-sm text-[var(--color-ink-3)]">Loading categories…</p>;
@@ -704,7 +719,7 @@ function CategoryTable({
         fetched by the detail-drain. Trend overlays{' '}
         <span style={{ color: 'var(--color-copper)' }}>active on portal</span> vs{' '}
         <span style={{ color: 'var(--color-ink-2)' }}>active in DB</span>
-        {isPilot ? <>. Pilot portals walk a partial index, so delistings aren&rsquo;t inferred.</> : null}.
+        {partialWalk ? <>. This portal can&rsquo;t prove a complete index walk, so delistings are caught only on a gone re-fetch — not inferred from index absence.</> : null}.
       </p>
       <div className="overflow-x-auto -mx-1">
         <table className="w-full text-xs">

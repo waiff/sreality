@@ -26,12 +26,12 @@ from scraper.portal import PortalLimits
 def _seed_portals() -> dict[str, dict[str, Any]]:
     return {
         "sreality": {
-            "label": "Sreality", "kind": "scraper", "stage": "live",
+            "label": "Sreality", "kind": "scraper",
             "sort_order": 10, "is_enabled": True, "supports_complete_walk": True,
             "operational_limits": {"detail_workers": 8, "detail_rate": 6.0},
         },
         "remax": {
-            "label": "RE/MAX", "kind": "parser", "stage": "on_demand",
+            "label": "RE/MAX", "kind": "parser",
             "sort_order": 50, "is_enabled": True, "supports_complete_walk": False,
             "operational_limits": None,
         },
@@ -52,9 +52,9 @@ class _Cursor:
 
     def execute(self, sql: str, params: Any = ()) -> None:
         s = " ".join(sql.split()).lower()
-        if s.startswith("select source, label, kind, stage") and "from portals order by" in s:
+        if s.startswith("select source, label, kind, sort_order") and "from portals order by" in s:
             self._rows = [
-                (src, p["label"], p["kind"], p["stage"], p["sort_order"],
+                (src, p["label"], p["kind"], p["sort_order"],
                  p["is_enabled"], p["supports_complete_walk"], p["operational_limits"])
                 for src, p in self._p.portals.items()
             ]
