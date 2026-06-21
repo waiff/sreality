@@ -472,7 +472,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "onPullRequest": true,
     "paths": [
       ".github/workflows/build-extension.yml",
-      "chrome-extension/**"
+      "chrome-extension/**",
+      "frontend/src/lib/brand.ts"
     ],
     "inputs": [],
     "secrets": [

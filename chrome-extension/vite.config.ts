@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite';
-import { copyFileSync } from 'node:fs';
+import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+// Shared product brand — the SAME source the SPA + content script use, so the
+// chrome://extensions display name stays linked to the one definition.
+import { EXTENSION_NAME } from '../frontend/src/lib/brand';
 
 /* Two-entry build: the content script that mounts onto sreality.cz
  * detail pages, and the background service worker that owns every
@@ -35,10 +38,17 @@ export default defineConfig({
     {
       name: 'copy-static',
       closeBundle() {
-        for (const name of [
-          'manifest.json',
-          'icon-16.png', 'icon-48.png', 'icon-128.png',
-        ]) {
+        // manifest.json is the template; its display `name` is stamped from the
+        // shared brand at build so chrome://extensions tracks the one source.
+        const manifest = JSON.parse(
+          readFileSync(resolve(__dirname, 'manifest.json'), 'utf8'),
+        );
+        manifest.name = EXTENSION_NAME;
+        writeFileSync(
+          resolve(__dirname, 'dist', 'manifest.json'),
+          JSON.stringify(manifest, null, 2) + '\n',
+        );
+        for (const name of ['icon-16.png', 'icon-48.png', 'icon-128.png']) {
           copyFileSync(
             resolve(__dirname, name),
             resolve(__dirname, 'dist', name),

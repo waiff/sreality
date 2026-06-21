@@ -25,6 +25,9 @@ import type {
   PortalListing,
   YieldScenarioUpdate,
 } from './types';
+// Shared product brand — the ONE definition (frontend/src/lib/brand.ts), the
+// same one the SPA uses. Rebranding there updates the panel wordmark here too.
+import { APP_NAME } from '../../frontend/src/lib/brand';
 
 const DEFAULT_FOND_CZK_PER_M2 = 10;
 const DEFAULT_RENOVATION_CZK = 0;
@@ -283,8 +286,9 @@ function mountPanel(): {
   let lastFocusedKey: 'rent' | 'cost' | 'price' | 'renovation' | 'note' | null = null;
 
   /* The ledger header band: a small copper index-mark + product wordmark, and
-   * the close control. Neutral wordmark (not "Výnos MF") so it reads honestly
-   * for non-apartment listings where no yield is shown. */
+   * the close control. The wordmark is the shared product brand (APP_NAME) —
+   * mirrors the SPA header — so it reads honestly for every listing, including
+   * non-apartments where no yield is shown. */
   function header(): HTMLElement {
     const h = document.createElement('div');
     h.className = 'p-head';
@@ -295,7 +299,7 @@ function mountPanel(): {
     mark.appendChild(tick);
     const word = document.createElement('span');
     word.className = 'p-word';
-    word.textContent = 'Realitní výnos';
+    word.textContent = APP_NAME;
     mark.appendChild(word);
     h.appendChild(mark);
     const close = document.createElement('button');

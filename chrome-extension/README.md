@@ -1,4 +1,4 @@
-# Realitní výnos (MF) — Chrome extension
+# Limen Reality — Chrome extension (Realitní výnos / MF panel)
 
 Overlays our **MF reference rent** (`mf_reference_rent_czk`) and the
 **"Výnos MF"** gross yield (`mf_gross_yield_pct`) — the same precomputed

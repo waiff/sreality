@@ -23,9 +23,11 @@ import {
   type ReactNode,
 } from 'react';
 import { matchRoutes, useLocation, type RouteObject } from 'react-router-dom';
+import { APP_NAME, APP_SHORT } from './brand';
 
-export const APP_NAME = 'Limen Reality';
-export const APP_SHORT = 'LR';
+// Re-exported so callers can keep importing brand from the title module; the
+// canonical definition lives in ./brand (shared with the Chrome extension).
+export { APP_NAME, APP_SHORT };
 
 /* Shape of the `handle` we read off routes. Kept permissive so routes without a
  * title (dynamic pages, redirects) simply contribute nothing. */
