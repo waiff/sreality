@@ -8,12 +8,20 @@ maxima, remax, mmreality, ceskereality).
 
 - **Detail pages** get a floating panel (closed shadow root). For **any**
   listing we have, it shows a **deal-pipeline control** (bookmark, then change
-  stage / remove) + an **"Otevřít v aplikaci"** deep-link to that listing's page in our
-  app (`/listing/{sreality_id}`) plus its subject facts. For **apartments for
-  sale** it additionally shows the Výnos MF headline + MF reference rent, with a
-  comparables-based estimation as the deeper tool / fallback. (MF + estimation
-  are gated to byt+prodej; the bookmark + app link + facts are not.) Listings
+  stage / remove), a monitoring/collection toggle, **operator notes** (see the
+  existing notes + add a new one), and an **"Otevřít v aplikaci"** deep-link to
+  that listing's page in our app (`/listing/{sreality_id}`) plus its subject
+  facts. For **apartments for sale** it additionally shows the Výnos MF headline +
+  MF reference rent, with a comparables-based estimation as the deeper tool /
+  fallback. (MF + estimation are gated to byt+prodej; the rest are not.) Listings
   not in our DB show a short "není v databázi" note.
+  - The **notes** are property-grain (rule #18), the same notes the SPA's
+    listing-detail `CurationBlock` shows. The panel lists the property's existing
+    notes (most-recent-first) and an add box ("Přidat poznámku…" → **Uložit
+    poznámku**). Writes go through the same bearer-gated `POST /properties/{id}/notes`
+    the SPA uses, recording the viewed advert's `sreality_id` as the note's
+    `origin_listing_id` ("written while viewing this advert"); the panel fetches
+    existing notes lazily via `GET /properties/{id}/notes` on open.
   - The **pipeline control** is property-grain (the deal pipeline, rule #22),
     the same as the SPA's listing-detail control. Out of pipeline → a
     **"Přidat do pipeline"** button that inserts the property at the entry stage.
