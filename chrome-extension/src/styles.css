@@ -80,19 +80,119 @@
   color: var(--copper);
 }
 
-.p-close {
+.p-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.05rem;
+  margin: -0.2rem -0.3rem -0.2rem 0;
+}
+
+.p-close,
+.p-min {
   background: transparent;
   border: 0;
-  margin: -0.2rem -0.3rem -0.2rem 0;
   padding: 0 0.2rem;
-  font-size: 1.1rem;
   line-height: 1;
   color: var(--ink-4);
   cursor: pointer;
   transition: color 120ms ease;
 }
 
-.p-close:hover { color: var(--ink); }
+.p-close { font-size: 1.1rem; }
+
+.p-min {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.2rem;
+}
+
+.p-min .ctrl-icon { width: 0.95rem; height: 0.95rem; }
+
+.p-close:hover,
+.p-min:hover { color: var(--ink); }
+
+/* ---- minimized bar (the filed-card spine) --------------------------- */
+
+.panel--min { width: auto; }  /* shrink to content; the bar is tiny */
+
+.min-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.42rem 0.5rem 0.42rem 0.6rem;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.min-bar:hover { background: var(--copper-soft); }
+
+.min-tick {
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--copper);
+  flex-shrink: 0;
+}
+
+.min-content {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  white-space: nowrap;
+}
+
+.min-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.32rem;
+}
+
+.min-label {
+  font-size: 0.58rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-3);
+}
+
+.min-value {
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--copper);
+  font-variant-numeric: tabular-nums;
+}
+
+.min-sep { color: var(--rule); }
+
+.min-fallback {
+  font-size: 0.78rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.min-restore {
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--ink-4);
+  transition: color 120ms ease;
+}
+
+.min-restore .ctrl-icon { width: 0.85rem; height: 0.85rem; }
+
+.min-bar:hover .min-restore { color: var(--copper); }
+
+.min-close {
+  background: transparent;
+  border: 0;
+  padding: 0 0.1rem;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--ink-4);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 120ms ease;
+}
+
+.min-close:hover { color: var(--ink); }
 
 /* ---- body ----------------------------------------------------------- */
 

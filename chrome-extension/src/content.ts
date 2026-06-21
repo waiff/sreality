@@ -36,6 +36,18 @@ const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;
 const HOST_ELEMENT_ID = '__sreality_yield_panel_host__';
 
+/* Minimized = the panel collapses to a tiny bar showing just the two yield
+ * figures. The preference persists across listings/pages via chrome.storage.local
+ * (the "storage" permission), so once the operator tucks it away it stays small
+ * while they browse. Loaded once on boot; openPanel awaits it before first paint
+ * so there's no expand→collapse flash. */
+const MINIMIZED_KEY = 'panelMinimized';
+let minimized = false;
+const minimizedReady: Promise<void> = chrome.storage.local
+  .get([MINIMIZED_KEY])
+  .then((r) => { minimized = r[MINIMIZED_KEY] === true; })
+  .catch(() => { /* storage unavailable → default to expanded */ });
+
 /* SPA base URL for the "Otevřít v aplikaci" deep-link, inlined at build time.
  * Inlined here (not shared with api.ts) because MV3 content scripts are classic
  * scripts that can't `import` — content.js must stay self-contained. Empty →
@@ -250,6 +262,47 @@ function acquisitionHint(state: PanelState): string {
     : 'Jednorázový rozpočet, přičte se k ceně';
 }
 
+/* The two yield figures shown in the minimized bar: the precomputed MF gross
+ * yield (sale apts) and the operator's live comparables yield (when an estimation
+ * is loaded). Either may be absent — the bar degrades to whatever exists. */
+function minimizedYieldCells(state: PanelState): { label: string; value: string }[] {
+  const cells: { label: string; value: string }[] = [];
+  const mf = state.listing?.mf_gross_yield_pct ?? null;
+  if (state.isSaleApt !== false && mf != null) {
+    cells.push({ label: 'MF', value: fmtPct(mf) });
+  }
+  if (state.run?.status === 'success') {
+    const y = computeYield(state);
+    if (y != null) cells.push({ label: 'Odhad', value: fmtPct(y) });
+  }
+  return cells;
+}
+
+/* The window-control glyphs: a minimize line (collapse to bar) + a restore
+ * chevron (the bar grows upward into the full card). Inline SVG, currentColor. */
+function minimizeIconSvg(): string {
+  return (
+    '<svg class="ctrl-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round" aria-hidden="true">' +
+    '<line x1="4" y1="11.5" x2="12" y2="11.5"/></svg>'
+  );
+}
+
+function restoreIconSvg(): string {
+  return (
+    '<svg class="ctrl-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<polyline points="4.5,10 8,6.5 11.5,10"/></svg>'
+  );
+}
+
+/* Toggle the persisted minimized preference + re-render the current panel. */
+function onToggleMinimize(): void {
+  minimized = !minimized;
+  void chrome.storage.local.set({ [MINIMIZED_KEY]: minimized });
+  render(state);
+}
+
 function bodyFromState(state: PanelState): YieldScenarioUpdate {
   return {
     rent_czk: state.rentTouched ? state.rent : null,
@@ -306,7 +359,7 @@ function mountPanel(): {
    * the close control. The wordmark is the shared product brand (APP_NAME) —
    * mirrors the SPA header — so it reads honestly for every listing, including
    * non-apartments where no yield is shown. */
-  function header(): HTMLElement {
+  function header(showMinimize: boolean): HTMLElement {
     const h = document.createElement('div');
     h.className = 'p-head';
     const mark = document.createElement('div');
@@ -319,21 +372,119 @@ function mountPanel(): {
     word.textContent = APP_NAME;
     mark.appendChild(word);
     h.appendChild(mark);
+    const controls = document.createElement('div');
+    controls.className = 'p-controls';
+    if (showMinimize) {
+      const min = document.createElement('button');
+      min.className = 'p-min';
+      min.type = 'button';
+      min.title = 'Minimalizovat';
+      min.setAttribute('aria-label', 'Minimalizovat');
+      min.innerHTML = minimizeIconSvg();
+      min.onclick = () => onToggleMinimize();
+      controls.appendChild(min);
+    }
     const close = document.createElement('button');
     close.className = 'p-close';
     close.type = 'button';
     close.textContent = '×';
     close.title = 'Skrýt panel';
     close.onclick = () => host.remove();
-    h.appendChild(close);
+    controls.appendChild(close);
+    h.appendChild(controls);
     return h;
+  }
+
+  /* The minimized panel: a tiny one-line bar showing just the two yield figures
+   * (the operator's at-a-glance triage signal), with a restore chevron + close.
+   * Clicking anywhere on the bar (except ×) expands. Reads as the spine of the
+   * same filed card — copper tick + stamped copper figures. */
+  function renderMinimizedBar(state: PanelState): HTMLElement {
+    const bar = document.createElement('div');
+    bar.className = 'min-bar';
+    bar.title = 'Rozbalit panel';
+    bar.onclick = () => onToggleMinimize();
+
+    const tick = document.createElement('span');
+    tick.className = 'min-tick';
+    bar.appendChild(tick);
+
+    const content = document.createElement('div');
+    content.className = 'min-content';
+    if (state.phase === 'loading') {
+      content.appendChild(minText('Načítám…'));
+    } else if (state.phase === 'deactivated') {
+      content.appendChild(minText('Není v databázi'));
+    } else {
+      const cells = minimizedYieldCells(state);
+      if (cells.length > 0) {
+        cells.forEach((c, i) => {
+          if (i > 0) {
+            const sep = document.createElement('span');
+            sep.className = 'min-sep';
+            sep.textContent = '·';
+            content.appendChild(sep);
+          }
+          const cell = document.createElement('span');
+          cell.className = 'min-cell';
+          const lab = document.createElement('span');
+          lab.className = 'min-label';
+          lab.textContent = c.label;
+          const val = document.createElement('span');
+          val.className = 'min-value';
+          val.textContent = c.value;
+          cell.append(lab, val);
+          content.appendChild(cell);
+        });
+      } else {
+        /* No yields (non-sale-apt / not yet computed) → a compact subject. */
+        const l = state.listing;
+        const parts: string[] = [];
+        if (l?.disposition) parts.push(l.disposition);
+        if (l?.price_czk != null) parts.push(fmtCzk(l.price_czk));
+        content.appendChild(minText(parts.join(' · ') || APP_NAME));
+      }
+    }
+    bar.appendChild(content);
+
+    const restore = document.createElement('span');
+    restore.className = 'min-restore';
+    restore.innerHTML = restoreIconSvg();
+    bar.appendChild(restore);
+
+    const close = document.createElement('button');
+    close.className = 'min-close';
+    close.type = 'button';
+    close.textContent = '×';
+    close.title = 'Skrýt panel';
+    close.onclick = (e) => { e.stopPropagation(); host.remove(); };
+    bar.appendChild(close);
+
+    return bar;
+  }
+
+  function minText(text: string): HTMLElement {
+    const s = document.createElement('span');
+    s.className = 'min-fallback';
+    s.textContent = text;
+    return s;
   }
 
   const render = (state: PanelState): void => {
     panel.innerHTML = '';
-    panel.classList.toggle('panel--muted', state.phase === 'deactivated');
+    /* Minimized collapses every phase to the tiny bar EXCEPT error (a failure
+     * should stay fully visible). The minimize control itself only shows once
+     * there's a full panel worth collapsing (active phase). */
+    const isMin = minimized && state.phase !== 'error';
+    panel.classList.toggle('panel--min', isMin);
+    panel.classList.toggle('panel--muted', state.phase === 'deactivated' && !isMin);
 
-    panel.appendChild(header());
+    if (isMin) {
+      panel.appendChild(renderMinimizedBar(state));
+      return;
+    }
+
+    panel.appendChild(header(state.phase === 'active'));
     const body = document.createElement('div');
     body.className = 'p-body';
     panel.appendChild(body);
@@ -1257,6 +1408,7 @@ export async function openPanel(
     collections: cachedCollections, collectionBusy: false,
     notes: null, noteBusy: false, errorMessage: null,
   };
+  await minimizedReady;  // persisted minimized pref before first paint → no flash
   render(state);
 
   let listing: PortalListing | null;
