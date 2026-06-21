@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 
-import { TILE_STYLE } from '@/lib/basemap';
+import { createMap } from '@/lib/basemap';
 
 interface Props {
   lat: number;
@@ -18,20 +18,15 @@ export default function DetailMap({ lat, lng, isActive, heightClass }: Props) {
 
   useEffect(() => {
     if (!containerRef.current) return;
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: TILE_STYLE,
+    const map = createMap(containerRef.current, {
       center: [lng, lat],
       // Two levels out from the original 14.5 — the header map is for grasping
       // the neighbourhood context (river, arterials, districts), not the street.
       zoom: 12.5,
-      attributionControl: { compact: true },
       interactive: true,
       cooperativeGestures: false,
     });
     mapRef.current = map;
-    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
-    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }), 'bottom-left');
 
     map.on('load', () => {
       map.addSource('pin', {

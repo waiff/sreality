@@ -25,7 +25,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 
 import { NumberCell } from '@/components/controls';
-import { TILE_STYLE } from '@/lib/basemap';
+import { createMap } from '@/lib/basemap';
 
 const PRAGUE = { lng: 14.4378, lat: 50.0755, zoom: 11 };
 const EARTH_RADIUS_M = 6_371_000;
@@ -80,24 +80,13 @@ export function LocationControl({
       ? [value.lng, value.lat]
       : [PRAGUE.lng, PRAGUE.lat];
 
-    const map = new maplibregl.Map({
-      container: containerRef.current,
-      style: TILE_STYLE,
+    const map = createMap(containerRef.current, {
       center: initialCenter as [number, number],
       zoom: PRAGUE.zoom,
-      attributionControl: { compact: true },
       // Keep the widget self-contained.
       keyboard: false,
     });
     mapRef.current = map;
-    map.addControl(
-      new maplibregl.NavigationControl({ showCompass: false }),
-      'top-right',
-    );
-    map.addControl(
-      new maplibregl.ScaleControl({ maxWidth: 120, unit: 'metric' }),
-      'bottom-left',
-    );
 
     map.on('load', () => {
       map.addSource('radius-circle', {
