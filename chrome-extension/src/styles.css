@@ -432,6 +432,17 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Derived-quantity hint under a yield field (fond/měs, acquisition denominator).
+ * Collapses when empty (no area → no fond hint). */
+.field-hint {
+  margin: 0.2rem 0 0;
+  font-size: 0.6rem;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.field-hint:empty { display: none; }
+
 .est-yield {
   display: flex;
   align-items: baseline;
