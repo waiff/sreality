@@ -100,11 +100,7 @@ jobs:
       - name: Install runtime deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install \
-            "psycopg[binary]>=3.2" \
-            "requests>=2.32" \
-            "boto3>=1.35" \
-            "anthropic>=0.40"
+          pip install -e ".[api]"
 
       - name: Run condition scoring
         run: |
