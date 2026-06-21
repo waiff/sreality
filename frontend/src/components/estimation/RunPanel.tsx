@@ -408,13 +408,16 @@ function RentRange({ run }: { run: EstimationRun }) {
 /* -------------------------------------------------------------------------- */
 /* Yield                                                                      */
 /*                                                                            */
-/* Live calculation over three editable inputs (monthly rent, fond-oprav      */
-/* cost per m², listing price); the listing area comes from the run's input   */
-/* spec. Overrides persist on estimation_runs.scenario (migration 085) and    */
-/* are shared with the Chrome extension's yield panel.                        */
+/* Live calculation over four editable inputs (monthly rent, fond-oprav cost  */
+/* per m², listing price, renovation budget); the listing area comes from the */
+/* run's input spec. Renovation is a flat one-off cost added to the price to  */
+/* form the total acquisition cost (the denominator). Overrides persist on    */
+/* estimation_runs.scenario (migrations 085/213) and are shared with the      */
+/* Chrome extension's yield panel.                                            */
 /* -------------------------------------------------------------------------- */
 
 const DEFAULT_FOND_CZK_PER_M2 = 10;
+const DEFAULT_RENOVATION_CZK = 0;
 
 function YieldBlock({
   run, subject,
@@ -441,6 +444,7 @@ function YieldBlock({
   const persistedRent = run.scenario?.rent_czk ?? null;
   const persistedCost = run.scenario?.fond_per_m2_czk ?? null;
   const persistedPrice = run.scenario?.price_czk ?? null;
+  const persistedRenovation = run.scenario?.renovation_czk ?? null;
 
   const [rent, setRent] = useState<number | null>(
     persistedRent !== null ? persistedRent : defaultRent,
@@ -459,6 +463,12 @@ function YieldBlock({
   );
   const [costTouched, setCostTouched] = useState<boolean>(
     persistedCost !== null,
+  );
+  const [renovation, setRenovationState] = useState<number | null>(
+    persistedRenovation !== null ? persistedRenovation : DEFAULT_RENOVATION_CZK,
+  );
+  const [renovationTouched, setRenovationTouched] = useState<boolean>(
+    persistedRenovation !== null,
   );
 
   /* Sync untouched inputs to the latest defaults — handles the subject
@@ -487,13 +497,17 @@ function YieldBlock({
         rent_czk: rentTouched ? rent : null,
         fond_per_m2_czk: costTouched ? costPerM2 : null,
         price_czk: priceTouched ? price : null,
+        renovation_czk: renovationTouched ? renovation : null,
       });
     }, 500);
     return () => window.clearTimeout(handle);
     /* scenarioMut is stable across renders for our purposes; depending
      * on it would refire the timer when the mutation state churns. */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rent, costPerM2, price, priceTouched, rentTouched, costTouched]);
+  }, [
+    rent, costPerM2, price, renovation,
+    priceTouched, rentTouched, costTouched, renovationTouched,
+  ]);
 
   const setPrice = (v: number | null) => {
     setPriceTouched(true);
@@ -507,26 +521,38 @@ function YieldBlock({
     setCostTouched(true);
     setCostPerM2(v);
   };
+  const setRenovation = (v: number | null) => {
+    setRenovationTouched(true);
+    setRenovationState(v);
+  };
 
   const resetScenario = () => {
     setPriceTouched(false);
     setRentTouched(false);
     setCostTouched(false);
+    setRenovationTouched(false);
     setRent(defaultRent);
     setCostPerM2(DEFAULT_FOND_CZK_PER_M2);
     setPriceState(defaultPrice);
+    setRenovationState(DEFAULT_RENOVATION_CZK);
     /* The debounce useEffect will pick up the touched=false transitions
      * and PATCH with all-null automatically. No direct mutate here. */
   };
 
-  const hasOverrides = priceTouched || rentTouched || costTouched;
+  const hasOverrides =
+    priceTouched || rentTouched || costTouched || renovationTouched;
 
   const fondOprav =
     costPerM2 != null && areaM2 != null ? costPerM2 * areaM2 : null;
 
+  /* Total acquisition cost = listing price + one-off renovation budget. */
+  const acquisitionCost =
+    price != null ? price + (renovation ?? 0) : null;
+
   const yieldPct =
-    rent != null && fondOprav != null && price != null && price > 0
-      ? ((rent - fondOprav) * 12) / price * 100
+    rent != null && fondOprav != null &&
+    acquisitionCost != null && acquisitionCost > 0
+      ? ((rent - fondOprav) * 12) / acquisitionCost * 100
       : null;
 
   const priceHint = subjectSalePrice != null
@@ -572,11 +598,11 @@ function YieldBlock({
           {yieldPct != null ? `${yieldPct.toFixed(2)} %` : '—'}
         </p>
         <p className="mt-2 text-[0.78rem] text-[var(--color-ink-3)] font-mono tabular-nums">
-          ((rent − fond oprav a SVJ) × 12) ÷ listing price
+          ((rent − fond oprav a SVJ) × 12) ÷ (listing price + renovation)
         </p>
       </div>
 
-      <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <YieldNumField
           label="Monthly rent"
           value={rent}
@@ -615,6 +641,18 @@ function YieldBlock({
           suffix="Kč"
           onChange={setPrice}
           hint={priceHint}
+        />
+        <YieldNumField
+          label="Renovation"
+          value={renovation}
+          step="50000"
+          suffix="Kč"
+          onChange={setRenovation}
+          hint={
+            renovation != null && renovation > 0 && price != null
+              ? `Acquisition: ${fmtCzk(price + renovation)}`
+              : 'One-off budget, added to price'
+          }
         />
       </div>
     </div>

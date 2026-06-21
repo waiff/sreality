@@ -765,7 +765,7 @@ def patch_estimation_scenario(
     """Persist the operator's yield-scenario overrides.
 
     Shared by the SPA's YieldBlock and the Chrome extension's yield
-    panel; latest-wins. A body with all three numbers null clears the
+    panel; latest-wins. A body with every number null clears the
     column back to NULL — render defaults again.
     """
     row = update_scenario(
@@ -773,6 +773,7 @@ def patch_estimation_scenario(
         rent_czk=body.rent_czk,
         fond_per_m2_czk=body.fond_per_m2_czk,
         price_czk=body.price_czk,
+        renovation_czk=body.renovation_czk,
     )
     if row is None:
         raise HTTPException(status_code=404, detail="estimation run not found")

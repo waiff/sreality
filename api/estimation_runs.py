@@ -721,24 +721,29 @@ def update_scenario(
     rent_czk: float | None,
     fond_per_m2_czk: float | None,
     price_czk: float | None,
+    renovation_czk: float | None = None,
 ) -> dict[str, Any] | None:
     """PATCH the operator-tunable yield scenario on an estimation_runs row.
 
-    A body with all three numbers None clears the column back to NULL
+    A body with every number None clears the column back to NULL
     (re-render defaults). Otherwise we store the supplied subset plus
     an `updated_at` stamp so concurrent edits between the SPA and the
-    Chrome extension can be reasoned about.
+    Chrome extension can be reasoned about. `renovation_czk` is a flat
+    one-off renovation budget added to the price to form the total
+    acquisition cost (the yield denominator).
 
     Returns the refreshed row, or None when the run id is unknown.
     """
     has_any = any(
-        v is not None for v in (rent_czk, fond_per_m2_czk, price_czk)
+        v is not None
+        for v in (rent_czk, fond_per_m2_czk, price_czk, renovation_czk)
     )
     if has_any:
         payload: dict[str, Any] = {
             "rent_czk": rent_czk,
             "fond_per_m2_czk": fond_per_m2_czk,
             "price_czk": price_czk,
+            "renovation_czk": renovation_czk,
             "updated_at": datetime.now(timezone.utc).isoformat(
                 timespec="milliseconds",
             ),

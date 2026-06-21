@@ -7,6 +7,9 @@ export interface YieldScenario {
   rent_czk: number | null;
   fond_per_m2_czk: number | null;
   price_czk: number | null;
+  /* Migration 213 — flat one-off renovation budget added to price_czk to form
+   * the total acquisition cost (the yield denominator). Null/absent = none. */
+  renovation_czk: number | null;
   updated_at: string;
 }
 
@@ -49,6 +52,7 @@ export interface YieldScenarioUpdate {
   rent_czk?: number | null;
   fond_per_m2_czk?: number | null;
   price_czk?: number | null;
+  renovation_czk?: number | null;
 }
 
 /* Deal-pipeline membership for the listing's property (rule #22). Null when the
