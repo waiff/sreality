@@ -313,9 +313,29 @@ wrong street is worse than NULL.
   rules were deliberately **not** added (fabrication risk > the small gain).
 - **Honest reporting:** iDNES's headline 60.5% is ~77% foreign apartments; on Czech
   apartments it is already ~87%. Report coverage foreign-excluded.
-- **Next (scoped, not built):** a coords→street source via a one-time RÚIAN
-  "Adresní místa" address-point ingest (free, offline, exact-match-only) is the durable
-  path to ~88–90% overall — see `docs/design/street-coverage-ruian.md`.
+- **Built:** the coords→street source via the RÚIAN "Adresní místa" address-point ingest
+  (free, offline, exact-match-only), the durable path to ~88–90% overall — see
+  `docs/design/street-coverage-ruian.md` (`address_points`, `ingest_address_points`,
+  `backfill_address_point_streets`, + the ingest/resolve workflows).
+
+### 2026-06: RÚIAN resolver — deadlock fix + version-gated re-attempts (migration 222)
+
+The weekly "resolve streets from coordinates" job started failing with
+`DeadlockDetected` against the `*/15` `listings` writers (index walk / detail drain).
+Root cause: the resolver ran its whole ~93k-candidate run in ONE transaction (to keep a
+`fallback_coords` temp table alive on the transaction pooler), holding row-locks the
+entire run. Two coupled fixes, both validated on live data:
+- **No long transaction.** Materialise the town-centre reject set (verified just **8,678**
+  coords) into a Python set, drop the temp table, and commit each ≤500-row write on its own
+  (the proven `backfill_portal_streets` shape) under a `SET LOCAL lock_timeout` + bounded
+  deadlock/lock retry. Lock-hold collapses from minutes to one sub-second statement.
+- **Stop re-scanning the dead backlog.** The resolver only marked *matched* rows, so 0 of
+  ~93k candidates carried an attempt marker and 100% (54% of them streetless `pozemek`)
+  were re-probed against 1.57M points every week. Now every processed candidate is stamped
+  with the `address_points` revision (new `address_points_revisions` provenance table +
+  `listings.coord_street_attempt_version`); a no-match is re-attempted only when the dataset
+  advances (monthly ingest) or its coordinate changes (the geo trigger clears the stamp).
+  `pozemek` is excluded outright. Steady-state weekly runs now scan only genuinely-new rows.
 
 ### 2026-06: Reliable street across portals (street extractor + group-best place_search_text)
 
