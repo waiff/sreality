@@ -6,7 +6,7 @@ import {
 } from '@/components/NewEstimationModal';
 import { useExploreAreaModal } from '@/components/ExploreAreaModal';
 import { placePrimary } from '@/lib/placeLabel';
-import { categoryMainLabel } from '@/lib/enums';
+import { listingTypeLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -176,7 +176,7 @@ export default function ListingDetail() {
   usePageTitle(
     listingQ.data
       ? [
-          categoryMainLabel(listingQ.data.category_main),
+          listingTypeLabel(listingQ.data),
           listingQ.data.disposition,
           listingQ.data.street?.trim()
             || listingQ.data.obec?.trim()
