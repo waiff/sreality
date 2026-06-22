@@ -8,6 +8,7 @@ import {
 } from '@tanstack/react-query';
 
 import {
+  bulkMergeDedupCandidates,
   dismissDedupCluster,
   getAppSetting,
   getDedupSummary,
@@ -44,6 +45,7 @@ import type {
   DedupPropertySide,
   DedupSummaryBucket,
   DedupSummaryResponse,
+  DedupSummaryTier,
   ImagePublic,
   MergeGroup,
   MergesResponse,
@@ -67,6 +69,8 @@ export default function Dedup() {
 
   // Which backlog bucket the operator drilled into (null = the whole queue).
   const [bucket, setBucket] = useState<Bucket | null>(null);
+  // Which category (tier) the operator is focused on (null = every family).
+  const [tier, setTier] = useState<string | null>(null);
 
   const summaryQ = useQuery<DedupSummaryResponse, Error>({
     queryKey: dedupKeys.summary('proposed'),
@@ -78,12 +82,14 @@ export default function Dedup() {
   const candidatesQ = useQuery<DedupCandidatesResponse, Error>({
     queryKey: dedupKeys.candidates({
       status: 'proposed',
+      tier: tier ?? null,
       reason: bucket?.reason ?? null,
       verdict: bucket ? bucket.verdict ?? NULL_VERDICT : null,
     }),
     queryFn: () => listDedupCandidates({
       status: 'proposed',
       limit: 100,
+      ...(tier ? { tier } : {}),
       ...(bucket
         ? { reason: bucket.reason, verdict: bucket.verdict ?? NULL_VERDICT }
         : {}),
@@ -160,6 +166,19 @@ export default function Dedup() {
   const mergeSetMut = useMutation({ mutationFn: mergeDedupPropertySet, onSuccess: invalidate });
   const dismissMut = useMutation({ mutationFn: dismissDedupCluster, onSuccess: invalidate });
   const unmergeMut = useMutation({ mutationFn: unmergeMergeGroup, onSuccess: invalidate });
+  const bulkMut = useMutation({ mutationFn: bulkMergeDedupCandidates, onSuccess: invalidate });
+
+  // The loaded STRONG geo candidates (same coord + area + price/№) — the scoped
+  // bulk-approve target. Gated to Houses in the render (the approved auto-merge family).
+  const strongLoadedIds = useMemo(
+    () => candidates
+      .filter((c) => {
+        const r = (c.markers_matched as { reason?: string } | null)?.reason;
+        return r === 'geo_exact' || r === 'geo_strong';
+      })
+      .map((c) => c.id),
+    [candidates],
+  );
 
   const sameIds = (a: number[] | undefined, b: number[]) =>
     a != null && a.length === b.length && a.every((v, i) => v === b[i]);
@@ -186,6 +205,20 @@ export default function Dedup() {
         selected={bucket}
         onSelect={setBucket}
       />
+
+      <CategoryFacet
+        tiers={summaryQ.data?.data.tiers ?? []}
+        selected={tier}
+        onSelect={setTier}
+      />
+
+      {tier === 'geo_dum' ? (
+        <BulkApproveBar
+          count={strongLoadedIds.length}
+          busy={bulkMut.isPending}
+          onApprove={() => bulkMut.mutate(strongLoadedIds)}
+        />
+      ) : null}
 
       <Section
         title="Needs review"
@@ -383,6 +416,13 @@ function bucketLabel(
     return { label: 'Visual match', hint: 'High verdict', tone: 'sage' };
   if (reason === 'image_phash')
     return { label: 'Identical photos', hint: '', tone: 'sage' };
+  // Geo path (single-dwelling families: houses / land / commercial).
+  if (reason === 'geo_exact')
+    return { label: 'Same location & price', hint: 'coordinate + area + price/№ all match', tone: 'sage' };
+  if (reason === 'geo_strong')
+    return { label: 'Strong location match', hint: 'same spot, matching area + price/№', tone: 'copper' };
+  if (reason === 'geo_weak')
+    return { label: 'Location match — review', hint: 'same spot + area; price differs', tone: 'muted' };
   if (reason === '(legacy)')
     return { label: 'Legacy (no reason)', hint: 'from an older engine version', tone: 'muted' };
   return { label: reason, hint: '', tone: 'muted' };
@@ -490,6 +530,122 @@ function BacklogRow({
         {fmtCount(count)}
       </span>
     </button>
+  );
+}
+
+const TIER_LABEL: Record<string, string> = {
+  street_disposition: 'Apartments',
+  geo_dum: 'Houses',
+  geo_komercni: 'Commercial',
+  geo_pozemek: 'Land',
+  geo_ostatni: 'Other',
+};
+const tierLabel = (t: string) => TIER_LABEL[t] ?? t;
+
+/* Category (tier) facet — focus the queue on one property family at a time.
+ * Houses/Land/Commercial are the geo matcher's single-dwelling families; Apartments
+ * is the street+disposition tier. Picking one scopes "Needs review" and (for Houses)
+ * enables the bulk-approve. Reads /dedup/summary's per-tier counts. */
+function CategoryFacet({
+  tiers,
+  selected,
+  onSelect,
+}: {
+  tiers: DedupSummaryTier[];
+  selected: string | null;
+  onSelect: (t: string | null) => void;
+}) {
+  if (tiers.length === 0) return null;
+  const chip = (active: boolean) =>
+    [
+      'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-[var(--radius-sm)] border text-sm transition-colors',
+      active
+        ? 'border-[var(--color-copper)] bg-[var(--color-copper-soft)] text-[var(--color-copper-2)]'
+        : 'border-[var(--color-rule)] text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]',
+    ].join(' ');
+  return (
+    <section className="mt-8">
+      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+        Category
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button type="button" className={chip(selected == null)} onClick={() => onSelect(null)}>
+          All
+        </button>
+        {tiers.map((t) => (
+          <button
+            key={t.tier}
+            type="button"
+            className={chip(selected === t.tier)}
+            onClick={() => onSelect(selected === t.tier ? null : t.tier)}
+          >
+            <span>{tierLabel(t.tier)}</span>
+            <span className="font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-3)]">
+              {fmtCount(t.count)}
+            </span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/* Scoped bulk-approve — HOUSES only (the operator-approved auto-merge family;
+ * land/commercial stay one-by-one). Acts on the loaded STRONG pairs (≤ one page),
+ * with an explicit count + a two-step confirm. Each merge is independent + reversible. */
+function BulkApproveBar({
+  count,
+  busy,
+  onApprove,
+}: {
+  count: number;
+  busy: boolean;
+  onApprove: () => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  if (count === 0) return null;
+  return (
+    <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[var(--radius-md)] border border-[var(--color-copper)]/50 bg-[var(--color-copper-soft)] px-4 py-3">
+      <div className="min-w-0 text-sm text-[var(--color-ink-2)]">
+        <span className="font-medium text-[var(--color-ink)]">
+          {fmtCount(count)} strong house {count === 1 ? 'pair' : 'pairs'}
+        </span>{' '}
+        on this page — same coordinate, matching area + price or house number.
+        <span className="text-[var(--color-ink-4)]"> Each merge is reversible below.</span>
+      </div>
+      {confirming ? (
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setConfirming(false)}
+            disabled={busy}
+            className={`${BTN} border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)]`}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onApprove();
+              setConfirming(false);
+            }}
+            disabled={busy}
+            className={`${BTN} bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
+          >
+            {busy ? 'Merging…' : `Confirm — merge ${fmtCount(count)}`}
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setConfirming(true)}
+          disabled={busy}
+          className={`${BTN} shrink-0 bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
+        >
+          Approve {fmtCount(count)} strong
+        </button>
+      )}
+    </div>
   );
 }
 
