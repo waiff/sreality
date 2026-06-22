@@ -13,8 +13,9 @@ from scraper.portal_runner import DrainItem
 
 
 class _Conn:
-    def __init__(self) -> None:
+    def __init__(self, close_error: Exception | None = None) -> None:
         self.closed = False
+        self._close_error = close_error
 
     def __enter__(self) -> "_Conn":
         return self
@@ -24,6 +25,8 @@ class _Conn:
 
     def close(self) -> None:
         self.closed = True
+        if self._close_error is not None:
+            raise self._close_error
 
 
 class _FakePortal:
@@ -31,13 +34,13 @@ class _FakePortal:
     index_rate = 1.0
 
     def __init__(self, *, supports_complete_walk=True, categories=None, complete=True,
-                 fetch_kinds=None, walk_fails=None) -> None:
+                 fetch_kinds=None, walk_fails=None, conn_close_error=None) -> None:
         self.supports_complete_walk = supports_complete_walk
         self._categories = categories if categories is not None else ["A", "B"]
         self._complete = complete
         self._fetch_kinds = fetch_kinds or {}
         self._walk_fails = walk_fails or set()
-        self.conn = _Conn()
+        self.conn = _Conn(close_error=conn_close_error)
         self.calls: dict[str, list] = {
             "walk": [], "mark_inactive": [], "active_count": [],
             "write": [], "gone": [], "failure": [],
@@ -318,3 +321,35 @@ def test_detail_drain_time_budget_finalizes_cleanly(monkeypatch):
     assert rc == 0
     assert cap["claim_n"] == []      # budget exceeded → stopped before claiming
     assert p.conn.closed             # but finalized cleanly (no stuck run)
+
+
+def test_detail_drain_swallows_teardown_close_failure(monkeypatch):
+    # The pooler can silently drop the long-held drain connection; the teardown
+    # conn.close() then raises OperationalError. Every batch already committed and
+    # the caller finalizes the scrape_run on a SEPARATE connection, so a teardown
+    # failure must NOT red the run (the historical ~1% false-red on detail_drain).
+    _patch_queue(monkeypatch, [[("1", None, None), ("2", None, None)]])
+    p = _FakePortal(conn_close_error=OSError("server closed the connection unexpectedly"))
+    rc, agg = portal_runner.run_detail_drain(
+        p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0                            # did NOT propagate the close failure
+    assert p.calls["write"] == [["1", "2"]]   # the listing writes still committed
+    assert agg["listings_scraped_new"] == 2
+    assert p.conn.closed                      # close() was attempted
+
+
+def test_detail_drain_swallows_counts_bump_failure(monkeypatch):
+    # Counts are post-commit bookkeeping; a transient pooler reset on the bump
+    # must not red a drain whose listing data already committed.
+    _patch_queue(monkeypatch, [[("1", None, None)]])
+
+    def _boom(*a, **k):
+        raise OSError("connection reset by peer")
+
+    monkeypatch.setattr(portal_runner.db, "bump_scrape_run_counts", _boom)
+    p = _FakePortal()
+    rc, agg = portal_runner.run_detail_drain(
+        p, None, False, detail_workers=1, detail_rate=1.0, run_id=9)
+    assert rc == 0                            # bump failure swallowed
+    assert p.calls["write"] == [["1"]]        # data still committed
+    assert agg["listings_scraped_new"] == 1

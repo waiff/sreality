@@ -1158,6 +1158,31 @@ export const fetchRecentWorkflowFailures = async (
   return (data ?? []) as WorkflowFailureRow[];
 };
 
+/* Migration 220 — streak-aware per-workflow failure summary. One row per
+ * workflow with the consecutive-failure streak + is_chronic flag, so the Health
+ * card can separate a chronic break (failing every run for days) from a 1%
+ * self-healing transient. Supersedes recent_workflow_failures for the card. */
+export interface WorkflowFailureSummaryRow {
+  workflow_path: string;
+  workflow_name: string;
+  failure_count: number;
+  first_failure_at: string | null;
+  last_failure_at: string | null;
+  last_conclusion: string;
+  last_html_url: string | null;
+  last_success_at: string | null;
+  consecutive_failures: number;
+  is_chronic: boolean;
+}
+
+export const fetchWorkflowFailureSummary = async (
+  hours: number = 168,
+): Promise<WorkflowFailureSummaryRow[]> => {
+  const { data, error } = await supabase.rpc('workflow_failure_summary', { p_hours: hours });
+  if (error) throw error;
+  return (data ?? []) as WorkflowFailureSummaryRow[];
+};
+
 export const ping = async (): Promise<{ ok: boolean; count: number | null }> => {
   const { count, error } = await supabase
     .from('listings_public')

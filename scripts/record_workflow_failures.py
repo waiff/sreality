@@ -70,12 +70,41 @@ def select_failed_runs(
             {
                 "run_id": int(run["id"]),
                 "workflow_name": run.get("name") or "(unnamed)",
+                "workflow_path": run.get("path"),
                 "conclusion": run["conclusion"],
                 "run_started_at": parse_ts(run.get("run_started_at")),
                 "html_url": run.get("html_url"),
             }
         )
     return out
+
+
+def select_latest_successes(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Latest SUCCESS run per workflow path (no network, testable).
+
+    Feeds workflow_run_health so the streak resets when a job recovers. Keyed on
+    the stable `.path`; runs without a path or a success conclusion are skipped.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        if run.get("conclusion") != "success":
+            continue
+        path = run.get("path")
+        if not path:
+            continue
+        started = parse_ts(run.get("run_started_at"))
+        cur = best.get(path)
+        if cur is None or (
+            started is not None
+            and (cur["last_success_at"] is None or started > cur["last_success_at"])
+        ):
+            best[path] = {
+                "workflow_path": path,
+                "workflow_name": run.get("name") or "(unnamed)",
+                "last_success_run_id": int(run["id"]),
+                "last_success_at": started,
+            }
+    return list(best.values())
 
 
 def _fetch_runs_page(repo: str, token: str, page: int) -> list[dict[str, Any]]:
@@ -120,21 +149,50 @@ def main() -> int:
         if len(batch) < PER_PAGE:
             break
     failed = select_failed_runs(runs, since=since)
+    # Successes are NOT windowed: the latest success anywhere in the page resets
+    # the streak. workflow_run_health is one upserted row per workflow, so a stale
+    # page-success can never regress last_success_at (greatest() guard below).
+    successes = select_latest_successes(runs)
 
     import psycopg
 
     inserted = 0
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         with conn.cursor() as cur:
+            for s in successes:
+                cur.execute(
+                    "INSERT INTO workflow_run_health "
+                    "  (workflow_path, workflow_name, last_success_at, "
+                    "   last_success_run_id, updated_at) "
+                    "VALUES (%s, %s, %s, %s, now()) "
+                    "ON CONFLICT (workflow_path) DO UPDATE SET "
+                    "  workflow_name = excluded.workflow_name, "
+                    "  last_success_at = greatest("
+                    "    workflow_run_health.last_success_at, excluded.last_success_at), "
+                    "  last_success_run_id = CASE "
+                    "    WHEN excluded.last_success_at >= "
+                    "         coalesce(workflow_run_health.last_success_at, '-infinity'::timestamptz) "
+                    "    THEN excluded.last_success_run_id "
+                    "    ELSE workflow_run_health.last_success_run_id END, "
+                    "  updated_at = now()",
+                    (
+                        s["workflow_path"],
+                        s["workflow_name"],
+                        s["last_success_at"],
+                        s["last_success_run_id"],
+                    ),
+                )
             for f in failed:
                 cur.execute(
                     "INSERT INTO workflow_failures "
-                    "  (run_id, workflow_name, conclusion, run_started_at, html_url) "
-                    "VALUES (%s, %s, %s, %s, %s) "
+                    "  (run_id, workflow_name, workflow_path, conclusion, "
+                    "   run_started_at, html_url) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
                     "ON CONFLICT (run_id) DO NOTHING",
                     (
                         f["run_id"],
                         f["workflow_name"],
+                        f["workflow_path"],
                         f["conclusion"],
                         f["run_started_at"],
                         f["html_url"],
@@ -143,8 +201,8 @@ def main() -> int:
                 inserted += cur.rowcount
 
     LOG.info(
-        "WORKFLOW_FAILURES scanned=%d failed=%d inserted=%d",
-        len(runs), len(failed), inserted,
+        "WORKFLOW_FAILURES scanned=%d failed=%d inserted=%d successes_tracked=%d",
+        len(runs), len(failed), inserted, len(successes),
     )
     return 0
 
