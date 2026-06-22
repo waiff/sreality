@@ -14,12 +14,18 @@ from typing import Any
 import pytest
 
 from toolkit.dedup_engine import (
+    ADDRESS_AREA_GUARD_PCT,
+    CANDIDATE_AREA_MAX_PCT,
     ListingKey,
+    MatchProfile,
+    classify_geo_pair,
     classify_pair,
     decide_phash_fastpath,
     decide_visual_dismiss,
     disposition_compatible,
+    geo_cell_key,
     normalize_street,
+    profile_for,
     rooms_in_priority,
     street_group_keys,
     verdict_is_merge,
@@ -327,6 +333,216 @@ def test_missing_floor_on_one_side_is_candidate_not_merge() -> None:
     # no exact-address merge without floor on both; not a contradiction either
     d = classify_pair(_key(1, floor=None), _key(2, floor=3))
     assert d.action == "candidate"
+
+
+# --- MatchProfile: per-category matching policy -----------------------------
+
+def test_profile_for_known_families() -> None:
+    assert profile_for("byt").family == "byt"
+    assert profile_for("dum").family == "dum"
+    assert profile_for("pozemek").family == "pozemek"
+    assert profile_for("komercni").family == "komercni"
+    assert profile_for("ostatni").family == "ostatni"
+
+
+def test_profile_for_null_or_unknown_is_byt() -> None:
+    # A row with no/unknown category must behave exactly as the legacy engine.
+    assert profile_for(None) is profile_for("byt")
+    assert profile_for("") is profile_for("byt")
+    assert profile_for("garaz").family == "byt"
+
+
+def test_byt_profile_reproduces_legacy_constants() -> None:
+    # The byt profile IS today's behavior: same area guards, disposition mandatory,
+    # street-blocked (not geo), never geo-auto-merges. This is why landing the
+    # abstraction is byte-identical for apartments (and NULL-category rows).
+    byt = profile_for("byt")
+    assert byt.disposition_required is True
+    assert byt.address_area_guard_pct == ADDRESS_AREA_GUARD_PCT
+    assert byt.candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT
+    assert byt.geo_blocked is False
+    assert byt.geo_auto_merge_allowed is False
+
+
+def test_single_dwelling_profiles_drop_disposition_and_geo_block() -> None:
+    # Houses/land/commercial have no usable disposition → it is not a matching key,
+    # and they route through the (P1) geo-cell block instead of street-only.
+    for fam in ("dum", "pozemek", "komercni", "ostatni"):
+        p = profile_for(fam)
+        assert p.disposition_required is False, fam
+        assert p.geo_blocked is True, fam
+
+
+def test_only_houses_geo_auto_merge_and_always_behind_dev_guard() -> None:
+    # Operator policy: houses may auto-merge (coord+area+price, validated 83.5%
+    # same-price) but ONLY with the same-development guard; land/commercial/other
+    # are queue-only (weaker signal) until a human confirms.
+    dum = profile_for("dum")
+    assert dum.geo_auto_merge_allowed is True
+    assert dum.requires_development_guard is True
+    for fam in ("pozemek", "komercni", "ostatni"):
+        assert profile_for(fam).geo_auto_merge_allowed is False, fam
+
+
+def test_match_profile_is_frozen() -> None:
+    with pytest.raises(Exception):
+        profile_for("byt").disposition_required = False  # type: ignore[misc]
+
+
+def test_classify_pair_still_requires_disposition_for_byt() -> None:
+    # Dark-landing guard: the profile path must NOT relax disposition for apartments
+    # (profile_for('byt').disposition_required is True), so a missing disposition on
+    # one side still rejects exactly as the legacy engine did.
+    d = classify_pair(_key(1, disp="2+kk"), _key(2, disp=None))
+    assert d.action == "reject"
+    assert d.detail == "disposition_mismatch"
+
+
+def test_match_profile_is_a_dataclass_type() -> None:
+    assert isinstance(profile_for("byt"), MatchProfile)
+
+
+# --- geo path: single-dwelling families -------------------------------------
+
+def _gk(
+    sid: int, pid: int, *, source: str = "sreality", cat: str = "dum",
+    ct: str = "prodej", area: float | None = 120.0, price: int | None = 5_950_000,
+    hn: str | None = None, lat: float = 50.10064, lng: float = 14.53742,
+    desc: str | None = None,
+) -> ListingKey:
+    return ListingKey(
+        sreality_id=sid, property_id=pid, source=source, street_key="geo:cell",
+        disposition="", house_number=hn, floor=None, area_m2=area, description=desc,
+        category_type=ct, category_main=cat, street_id=None, lat=lat, lng=lng,
+        price_czk=price,
+    )
+
+
+def test_geo_cell_key_format_and_scoping() -> None:
+    assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej") == "geo:5001:50.1006:14.5374:dum:prodej"
+    # different obec / category / offering → different cell (no cross-bucket pairing)
+    base = geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej")
+    assert geo_cell_key(5002, 50.10064, 14.53742, "dum", "prodej") != base
+    assert geo_cell_key(5001, 50.10064, 14.53742, "komercni", "prodej") != base
+    assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "pronajem") != base
+
+
+def test_geo_cell_key_none_when_coord_or_obec_missing() -> None:
+    assert geo_cell_key(None, 50.1, 14.5, "dum", "prodej") is None
+    assert geo_cell_key(5001, None, 14.5, "dum", "prodej") is None
+    assert geo_cell_key(5001, 50.1, None, "dum", "prodej") is None
+
+
+def test_classify_geo_dum_strong_auto_merges() -> None:
+    # identical coord + area + price across two portals → strong; dum may auto-merge.
+    d = classify_geo_pair(_gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"), profile_for("dum"))
+    assert d.action == "auto_merge"
+    assert d.reason == "geo_exact"
+
+
+def test_classify_geo_strong_via_house_number_even_if_price_differs() -> None:
+    d = classify_geo_pair(
+        _gk(1, 101, price=5_000_000, hn="12"),
+        _gk(2, 102, price=9_000_000, hn="12"),
+        profile_for("dum"),
+    )
+    assert d.action == "auto_merge" and d.reason == "geo_exact"
+
+
+def test_classify_geo_land_strong_is_candidate_never_auto_merge() -> None:
+    # Same strong signal, but land's profile forbids geo-auto-merge → queue.
+    d = classify_geo_pair(_gk(1, 101, cat="pozemek"), _gk(2, 102, cat="pozemek"), profile_for("pozemek"))
+    assert d.action == "candidate" and d.reason == "geo_strong"
+
+
+def test_classify_geo_weak_when_no_price_or_houseno_match() -> None:
+    d = classify_geo_pair(_gk(1, 101, price=5_000_000), _gk(2, 102, price=9_000_000), profile_for("dum"))
+    assert d.action == "candidate" and d.reason == "geo_weak"
+
+
+def test_classify_geo_area_contradiction_rejects() -> None:
+    d = classify_geo_pair(_gk(1, 101, area=100.0), _gk(2, 102, area=150.0), profile_for("dum"))
+    assert d.action == "reject" and d.detail == "area_contradiction"
+
+
+def test_classify_geo_house_number_contradiction_rejects() -> None:
+    d = classify_geo_pair(_gk(1, 101, hn="10"), _gk(2, 102, hn="12"), profile_for("dum"))
+    assert d.action == "reject" and d.detail == "house_number_contradiction"
+
+
+def test_classify_geo_coord_too_far_rejects() -> None:
+    # ~13 km apart — beyond the cell guard (defensive backstop).
+    d = classify_geo_pair(
+        _gk(1, 101, lat=50.10, lng=14.50), _gk(2, 102, lat=50.20, lng=14.60), profile_for("dum"),
+    )
+    assert d.action == "reject" and d.detail == "coord_too_far"
+
+
+def test_classify_geo_unit_marker_contradiction_rejects() -> None:
+    # Same-development guard: "pozemek č.3" vs "č.4" are distinct plots, never merge.
+    d = classify_geo_pair(
+        _gk(1, 101, cat="pozemek", desc="pozemek č.3 o velikosti 400 m²"),
+        _gk(2, 102, cat="pozemek", desc="pozemek č.4 o velikosti 400 m²"),
+        profile_for("pozemek"),
+    )
+    assert d.action == "reject" and d.detail == "unit_marker_contradiction"
+
+
+def test_classify_geo_category_contradiction_rejects() -> None:
+    d = classify_geo_pair(_gk(1, 101, cat="dum"), _gk(2, 102, cat="komercni"), profile_for("dum"))
+    assert d.action == "reject" and d.detail == "category_main_contradiction"
+
+
+def test_run_geo_candidates_queues_only_in_p1(monkeypatch: Any) -> None:
+    # A strong house pair would auto-merge by rule, but P1 keeps it queue-only.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [
+        _gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"),
+    ])
+    enq: list[tuple[Any, Any]] = []
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda conn, x, y, markers, **kw: enq.append((kw.get("tier"), markers["reason"])))
+    monkeypatch.setattr(eng, "_merge_pair",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("P1 must not merge")))
+    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=False)
+    assert stats["geo_candidates"] == 1
+    assert stats["geo_auto"] == 0
+    assert enq == [("geo_dum", "geo_exact")]
+
+
+def test_run_geo_candidates_auto_merges_when_enabled(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [_gk(1, 101), _gk(2, 102)])
+    merges: list[str] = []
+    monkeypatch.setattr(eng, "_merge_pair",
+                        lambda conn, x, y, reason, markers: merges.append(reason) or True)
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should merge")))
+    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=True)
+    assert stats["geo_auto"] == 1
+    assert merges == ["geo_exact"]
+
+
+def test_run_geo_candidates_dry_run_writes_nothing(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [_gk(1, 101), _gk(2, 102)])
+    monkeypatch.setattr(eng, "_merge_pair",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not merge")))
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not enqueue")))
+    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=True, dry_run=True)
+    assert stats["geo_auto"] == 1  # counted, but no merge call
+
+
+def test_run_geo_candidates_skips_large_cell(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    members = [_gk(i, 100 + i) for i in range(1, eng.MAX_GEO_GROUP_SIZE + 3)]  # one oversized cell
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: members)
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("oversized cell must skip")))
+    stats = eng.run_geo_candidates(object())
+    assert stats["geo_skipped_large_cell"] == 1
+    assert stats["geo_pairs"] == 0
 
 
 # --- rule D helpers ---------------------------------------------------------

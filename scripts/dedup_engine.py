@@ -46,9 +46,15 @@ from typing import Any
 from toolkit.dedup_engine import (
     PHASH_IDENTICAL_MAX,
     ListingKey,
+    _area_pct_diff,
+    _haversine_m,
+    _price_match,
+    classify_geo_pair,
     classify_pair,
     decide_phash_fastpath,
     decide_visual_dismiss,
+    geo_cell_key,
+    profile_for,
     rooms_in_priority,
     street_group_keys,
     verdict_is_merge,
@@ -62,6 +68,11 @@ LOG = logging.getLogger("dedup_engine")
 # rather than one building's units; the O(n^2) pairing would explode and the
 # matches would be low-value. Skip + log (no silent truncation).
 MAX_GROUP_SIZE = 40
+
+# A geo cell (~11 m) holding more than this many distinct single-dwelling properties
+# is a development/geocode-pileup, not one building's re-posts — pairing it is
+# O(n^2) and low-value. Skip + log (mirrors MAX_GROUP_SIZE for the street path).
+MAX_GEO_GROUP_SIZE = 25
 
 
 # Eligible listings that can still be matched, with everything the rules need.
@@ -231,7 +242,10 @@ def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str)
         return cur.rowcount or 0
 
 
-def _enqueue_candidate(conn: Any, a: ListingKey, b: ListingKey, markers: dict[str, Any]) -> None:
+def _enqueue_candidate(
+    conn: Any, a: ListingKey, b: ListingKey, markers: dict[str, Any],
+    *, tier: str = "street_disposition",
+) -> None:
     from psycopg.types.json import Jsonb
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
         return
@@ -244,8 +258,60 @@ def _enqueue_candidate(conn: Any, a: ListingKey, b: ListingKey, markers: dict[st
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (left_property_id, right_property_id) DO NOTHING
             """,
-            (lo, hi, "street_disposition", markers.get("confidence"), Jsonb(markers)),
+            (lo, hi, tier, markers.get("confidence"), Jsonb(markers)),
         )
+
+
+# --- geo path (single-dwelling families) ------------------------------------
+# Disposition-less houses/land/commercial that the street pass can't reach. Blocked
+# by geo cell (one obec + a rounded coordinate). ACTIVE only for P1 (the operator's
+# pain is active duplicate cards); inactive-for-history is a later concern. The
+# NOT(street AND disposition) clause hands the rare disposition-bearing non-apartment
+# to the street pass instead, so the two passes never double-handle a pair.
+_GEO_ELIGIBLE_SQL = """
+    SELECT l.sreality_id, l.property_id, l.source, l.house_number,
+           coalesce(l.area_m2, l.estate_area, l.usable_area) AS area,
+           left(l.description, 600) AS description,
+           l.category_type, l.category_main, l.obec_id, l.price_czk,
+           ST_Y(l.geom::geometry) AS lat, ST_X(l.geom::geometry) AS lng
+    FROM listings l
+    JOIN properties p ON p.id = l.property_id AND p.status = 'active'
+    WHERE l.is_active = true
+      AND l.category_main IN ('dum', 'pozemek', 'komercni', 'ostatni')
+      AND l.geom IS NOT NULL
+      AND l.obec_id IS NOT NULL
+      AND coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL
+      AND NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)
+    ORDER BY l.obec_id, l.category_main, l.category_type
+"""
+
+
+def _load_geo_eligible(conn: Any) -> list[ListingKey]:
+    """One ListingKey per geo-eligible single-dwelling listing, keyed by its geo cell
+    (so the existing _group_by_street groups them). Carries lat/lng/price for the geo
+    classifier; disposition/floor/street_id are unused on this path."""
+    with conn.cursor() as cur:
+        cur.execute(_GEO_ELIGIBLE_SQL)
+        rows = cur.fetchall()
+    keys: list[ListingKey] = []
+    for r in rows:
+        lat = float(r[10]) if r[10] is not None else None
+        lng = float(r[11]) if r[11] is not None else None
+        obec_id = int(r[8]) if r[8] is not None else None
+        cell = geo_cell_key(obec_id, lat, lng, r[7], r[6])
+        if cell is None:
+            continue
+        keys.append(ListingKey(
+            sreality_id=int(r[0]),
+            property_id=int(r[1]) if r[1] is not None else None,
+            source=r[2], street_key=cell, disposition="",
+            house_number=r[3], floor=None,
+            area_m2=float(r[4]) if r[4] is not None else None,
+            description=r[5], category_type=r[6], category_main=r[7],
+            street_id=None, lat=lat, lng=lng,
+            price_czk=int(r[9]) if r[9] is not None else None,
+        ))
+    return keys
 
 
 def _phash_identical_pairs(conn: Any, a_id: int, b_id: int) -> int:
@@ -652,6 +718,97 @@ def _finish(stats: dict[str, int], vision_budget: list[int], max_vision_calls: i
     return stats
 
 
+def run_geo_candidates(
+    conn: Any,
+    *,
+    max_pairs: int = 20000,
+    geo_auto_merge_enabled: bool = False,
+    dry_run: bool = False,
+    deadline: float | None = None,
+) -> dict[str, int]:
+    """Geo path: find duplicate single-dwelling properties (houses/land/commercial) the
+    street+disposition engine structurally can't see. Blocks by geo cell, classifies
+    each co-located pair deterministically (classify_geo_pair — no LLM), and QUEUES the
+    matches into property_identity_candidates (tier 'geo_<family>').
+
+    `geo_auto_merge_enabled` is the P2 switch: when False (P1) even a strong house signal
+    is queued for the operator, never auto-merged — so this pass cannot false-merge. Only
+    `dum` is ever eligible to auto-merge (its profile); land/commercial/other are always
+    queue-only by profile.
+    """
+    keys = _load_geo_eligible(conn)
+    groups = _group_by_street(keys)
+    stats: dict[str, int] = {
+        "geo_eligible": len({k.sreality_id for k in keys}), "geo_cells": len(groups),
+        "geo_pairs": 0, "geo_candidates": 0, "geo_auto": 0, "geo_rejected": 0,
+        "geo_skipped_large_cell": 0,
+    }
+    seen_property_pairs: set[tuple[int, int]] = set()
+    seen_listing_pairs: set[tuple[int, int]] = set()
+    pairs_left = max_pairs
+
+    for cell, members in groups.items():
+        if len(members) > MAX_GEO_GROUP_SIZE:
+            stats["geo_skipped_large_cell"] += 1
+            LOG.info("SKIP large geo cell key=%s size=%d", cell, len(members))
+            continue
+        for i in range(len(members)):
+            if pairs_left <= 0:
+                break
+            for j in range(i + 1, len(members)):
+                if pairs_left <= 0:
+                    LOG.info("GEO pair cap reached; deferring remainder to next run")
+                    return stats
+                if deadline is not None and time.monotonic() >= deadline:
+                    LOG.info("GEO time budget reached; finalizing at geo_pairs=%d", stats["geo_pairs"])
+                    return stats
+                a, b = members[i], members[j]
+                lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))
+                if lpair in seen_listing_pairs:
+                    continue
+                seen_listing_pairs.add(lpair)
+                profile = profile_for(a.category_main)
+                decision = classify_geo_pair(a, b, profile)
+                if decision.action == "reject":
+                    stats["geo_rejected"] += 1
+                    continue
+                cp = _canon_pair(a, b)
+                if cp is None or cp in seen_property_pairs:
+                    continue
+                seen_property_pairs.add(cp)
+                pairs_left -= 1
+                stats["geo_pairs"] += 1
+                dist = (
+                    _haversine_m(a.lat, a.lng, b.lat, b.lng)
+                    if None not in (a.lat, a.lng, b.lat, b.lng) else None
+                )
+                area_ratio = _area_pct_diff(a.area_m2, b.area_m2)
+                house_no_match = (
+                    a.house_number is not None and b.house_number is not None
+                    and a.house_number.strip().lower() == b.house_number.strip().lower()
+                )
+                tier = f"geo_{profile.family}"
+                markers = {
+                    "tier": tier, "reason": decision.reason,
+                    "coord_distance_m": round(dist, 1) if dist is not None else None,
+                    "area_ratio": round(area_ratio, 4) if area_ratio is not None else None,
+                    "price_match": _price_match(a.price_czk, b.price_czk),
+                    "house_number_match": house_no_match,
+                    "confidence": (
+                        0.9 if decision.action == "auto_merge"
+                        else (0.7 if decision.reason == "geo_strong" else 0.5)
+                    ),
+                }
+                if decision.action == "auto_merge" and geo_auto_merge_enabled:
+                    if dry_run or _merge_pair(conn, a, b, "geo_exact", markers):
+                        stats["geo_auto"] += 1
+                else:
+                    if not dry_run:
+                        _enqueue_candidate(conn, a, b, markers, tier=tier)
+                    stats["geo_candidates"] += 1
+    return stats
+
+
 def _build_classify_fn(conn: Any) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
@@ -805,6 +962,14 @@ def main() -> int:
                              "pairs are skipped (NOT queued as placeholders), so the review queue "
                              "doesn't inflate. Captures every photo-sharing dup; different-photo "
                              "dups are left for a future run (more free pHash, or vision if enabled).")
+    parser.add_argument("--geo", action="store_true",
+                        help="ALSO run the geo candidate pass for single-dwelling families "
+                             "(dum/pozemek/komercni/ostatni) the street+disposition engine "
+                             "can't reach. QUEUE-ONLY in P1 — never auto-merges.")
+    parser.add_argument("--geo-only", action="store_true",
+                        help="Run ONLY the geo candidate pass (skip the street engine).")
+    parser.add_argument("--geo-max-pairs", type=int, default=20000,
+                        help="Max geo candidate pairs examined per run.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -834,64 +999,81 @@ def main() -> int:
             )
             return 0
 
-        auto_merge_enabled = _auto_merge_enabled(conn)
-        autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
-        LOG.info(
-            "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s cache_only=%s free=%s",
-            auto_merge_enabled, autodismiss, args.shadow, args.cache_only, args.free,
-        )
-
-        classify_fn = None
-        compare_fn = None
-        site_plan_fn = None
-        if args.free:
-            # FREE mode: no vision fns at all -> pHash / rule-B / reconcile /
-            # reject-gate only ($0); un-vision'd pairs are skipped, not queued.
-            pass
-        elif auto_merge_enabled and args.cache_only:
-            # Cost-efficient consume: read warm caches only, never call the LLM.
-            classify_fn, compare_fn, site_plan_fn = _build_cache_only_fns(conn)
-        elif auto_merge_enabled and args.max_vision_calls > 0:
-            classify_fn = _build_classify_fn(conn)
-            compare_fn = _build_compare_fn(conn)
-            site_plan_fn = _build_site_plan_fn(conn)
-        elif auto_merge_enabled:
-            # pHash fast-path still needs room labels to gate on interior shots.
-            classify_fn = _build_classify_fn(conn)
-        # When auto-merge is off the engine never reaches the visual step, so we
-        # skip building the (LLM-backed) classify/compare fns entirely.
-
-        # Cache-only calls are free, so don't let the vision budget / room cap
-        # throttle consumption — try every warmed room of every warmed pair.
-        eff_max_vision = 10_000_000 if args.cache_only else args.max_vision_calls
-        eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
-
         deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
-        stats = run_engine(
-            conn, classify_fn=classify_fn, compare_fn=compare_fn,
-            site_plan_fn=site_plan_fn,
-            max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,
-            max_room_attempts=eff_max_rooms,
-            auto_merge_enabled=auto_merge_enabled,
-            autodismiss=autodismiss,
-            enqueue_unresolved=not args.free,
-            dry_run=args.shadow,
-            deadline=deadline,
-        )
-        if not args.shadow:
-            _write_run_row(conn, stats)
 
-    LOG.info(
-        "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
-        "auto_dismissed=%d reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
-        "skipped_same_source=%d pairs=%d vision_calls=%d",
-        "shadow" if args.shadow else "done",
-        stats["eligible"], stats["auto_address"], stats["auto_phash"],
-        stats["auto_visual"], stats["auto_dismissed"], stats["reconciled"],
-        stats["queued"], stats["skipped_unresolved"], stats["rejected"],
-        stats.get("skipped_same_source", 0),
-        stats["pairs_considered"], stats["vision_calls"],
-    )
+        if not args.geo_only:
+            auto_merge_enabled = _auto_merge_enabled(conn)
+            autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
+            LOG.info(
+                "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s cache_only=%s free=%s",
+                auto_merge_enabled, autodismiss, args.shadow, args.cache_only, args.free,
+            )
+
+            classify_fn = None
+            compare_fn = None
+            site_plan_fn = None
+            if args.free:
+                # FREE mode: no vision fns at all -> pHash / rule-B / reconcile /
+                # reject-gate only ($0); un-vision'd pairs are skipped, not queued.
+                pass
+            elif auto_merge_enabled and args.cache_only:
+                # Cost-efficient consume: read warm caches only, never call the LLM.
+                classify_fn, compare_fn, site_plan_fn = _build_cache_only_fns(conn)
+            elif auto_merge_enabled and args.max_vision_calls > 0:
+                classify_fn = _build_classify_fn(conn)
+                compare_fn = _build_compare_fn(conn)
+                site_plan_fn = _build_site_plan_fn(conn)
+            elif auto_merge_enabled:
+                # pHash fast-path still needs room labels to gate on interior shots.
+                classify_fn = _build_classify_fn(conn)
+            # When auto-merge is off the engine never reaches the visual step, so we
+            # skip building the (LLM-backed) classify/compare fns entirely.
+
+            # Cache-only calls are free, so don't let the vision budget / room cap
+            # throttle consumption — try every warmed room of every warmed pair.
+            eff_max_vision = 10_000_000 if args.cache_only else args.max_vision_calls
+            eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
+
+            stats = run_engine(
+                conn, classify_fn=classify_fn, compare_fn=compare_fn,
+                site_plan_fn=site_plan_fn,
+                max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,
+                max_room_attempts=eff_max_rooms,
+                auto_merge_enabled=auto_merge_enabled,
+                autodismiss=autodismiss,
+                enqueue_unresolved=not args.free,
+                dry_run=args.shadow,
+                deadline=deadline,
+            )
+            if not args.shadow:
+                _write_run_row(conn, stats)
+            LOG.info(
+                "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
+                "auto_dismissed=%d reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
+                "skipped_same_source=%d pairs=%d vision_calls=%d",
+                "shadow" if args.shadow else "done",
+                stats["eligible"], stats["auto_address"], stats["auto_phash"],
+                stats["auto_visual"], stats["auto_dismissed"], stats["reconciled"],
+                stats["queued"], stats["skipped_unresolved"], stats["rejected"],
+                stats.get("skipped_same_source", 0),
+                stats["pairs_considered"], stats["vision_calls"],
+            )
+
+        if args.geo or args.geo_only:
+            # P1: geo_auto_merge_enabled is hard-OFF — every family queues for the
+            # operator; nothing auto-merges until the golden set calibrates it (P2).
+            geo_stats = run_geo_candidates(
+                conn, max_pairs=args.geo_max_pairs,
+                geo_auto_merge_enabled=False, dry_run=args.shadow, deadline=deadline,
+            )
+            LOG.info(
+                "GEO %s eligible=%d cells=%d pairs=%d candidates=%d auto=%d rejected=%d "
+                "skipped_large_cell=%d",
+                "shadow" if args.shadow else "done",
+                geo_stats["geo_eligible"], geo_stats["geo_cells"], geo_stats["geo_pairs"],
+                geo_stats["geo_candidates"], geo_stats["geo_auto"], geo_stats["geo_rejected"],
+                geo_stats["geo_skipped_large_cell"],
+            )
     return 0
 
 

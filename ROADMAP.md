@@ -6,6 +6,53 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Property identity — category-aware dedup (P0 foundation, landed dark)
+
+The dedup engine keys on `street + disposition`, but `disposition` is an apartment-shaped
+token (`2+kk`) — structurally absent for houses/land/commercial. So ~64% of active inventory
+(dum 2.3% eligible, pozemek 0%, komercni 0.2%) can never be matched, queued, or merged: the
+operator's "I merge by hand but the listings count never drops" is that coverage gap (the
+visible duplicates are houses/commercial the engine can't see), compounded by a singleton-at-
+birth treadmill that regenerates dupes every scrape. Full diagnosis + the judged target
+architecture (geo-anchored, per-category matching; durable identity to kill the treadmill;
+houses auto-merge behind a same-development guard, land/commercial queue-only) is in the PR.
+
+P0 (this PR) is behavior-neutral scaffolding for that work:
+- `toolkit/dedup_engine.MatchProfile` + `profile_for(category_main)` — per-category policy as
+  DATA, one profile per family (no `if category ==` branches; rule #21 posture). The `byt`
+  profile reproduces today's constants exactly, so `classify_pair` is byte-identical for
+  apartments and NULL-category rows (guarded by the existing suite); non-apartment profiles
+  carry their intended flags (`disposition_required=False`, `geo_blocked=True`,
+  `geo_auto_merge_allowed` only for `dum`, always `requires_development_guard`) but are
+  unreachable by the live orchestrator — dark until P1 wires geo blocking.
+- Golden-set harness: `dedup_golden_pairs` (migration 223), `scripts/build_golden_set.py`
+  (positives from the 12.9k historical merges; negatives from the apartment coordinate trap —
+  distinct disposition at one pin), `scripts/eval_identity.py` (per-category auto-merge
+  precision / recall / false-merge-rate, the gate for any rule change). Seeded: 9,888 positives
+  + 6,000 negatives. KNOWN LIMITATION: positives are apartment-biased (71 dum, 8 komercni) —
+  historical merges only ever touched apartments — so non-apartment recall isn't measurable yet;
+  P2's operator review of geo candidates is the labeling loop that grows those classes.
+
+P1 (this PR) adds the **geo candidate generator** (dark/opt-in, queue-only):
+- `geo_cell_key` (obec_id + 4-dp coord + category + offering — admin-scoped, NEVER raw-coord, so
+  a same-coordinate collision across towns can't block together) + `classify_geo_pair`
+  (deterministic, no LLM: coord/house-number/area/unit-marker contradictions → reject; strong =
+  area ≤3% AND price-or-house#-match). `ListingKey` gained `lat`/`lng`/`price_czk`.
+- `scripts/dedup_engine.run_geo_candidates` — a SEPARATE pass (the byt street engine is untouched)
+  behind `--geo` / `--geo-only`; loads disposition-less single-dwelling listings the street pass
+  can't reach, blocks by geo cell, and QUEUES candidates (tier `geo_<family>`). `geo_auto_merge`
+  is hard-OFF in P1, so nothing auto-merges — it cannot false-merge. Not wired to cron yet.
+- Validated against prod (set-based replica): the pass would surface **~71k candidate property
+  pairs** (dum 25.8k / pozemek 22.4k / komercni 21.1k / ostatni 1.7k), ~47.7k of them "strong".
+  That volume is exactly why it ships dark — `/dedup` needs a category facet + bulk-approve first.
+
+**Next (P2+):** `/dedup` category facet + bulk-approve (the 71k can't be reviewed one-by-one) →
+calibrate the strong-house bucket against the golden set → flip `dum` auto-merge on behind the
+same-development guard (land/commercial stay queue-only) → durable `property_identity_keys`
+signature + incremental resolver in `_attach_stragglers` to end the treadmill → score-gate Browse
+merge-mode → wire the geo pass into `dedup_engine.yml`. Rewrite CLAUDE.md rule #15
+(street+disposition is the byt profile, not the universal key).
+
 ### 2026-06: Delivery UI — channel opt-in + recipient config (Sprint N PR 5)
 
 The operator-facing surface that turns the channel stack on from the app (no API/SQL).
