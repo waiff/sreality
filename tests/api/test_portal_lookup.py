@@ -33,7 +33,7 @@ def _mk_row(source: str, source_id: str, found: bool, **cols: Any) -> dict[str, 
         "source": source, "source_id": source_id, "found": found,
         "sreality_id": None, "property_id": None,
         "category_main": None, "category_type": None,
-        "area_m2": None, "price_czk": None, "disposition": None,
+        "area_m2": None, "price_czk": None, "disposition": None, "subtype": None,
         "district": None, "locality": None, "is_active": None,
         "last_seen_at": None, "mf_reference_rent_czk": None,
         "mf_gross_yield_pct": None, "estimation_id": None,
@@ -99,8 +99,8 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
         # bazos: found, NEGATIVE synthetic sreality_id, no MF, no estimation;
         # has a property but is NOT in the pipeline
         _mk_row("bazos", "220291221", True, sreality_id=-187691, property_id=777,
-                category_main="byt", category_type="prodej", price_czk=7_700_000,
-                disposition="3+kk", district="okres Pardubice", is_active=True),
+                category_main="komercni", category_type="prodej", price_czk=7_700_000,
+                subtype="ubytovani", district="okres Pardubice", is_active=True),
         # idnes: not found → sreality_id null
         _mk_row("idnes", "deadbeef", False),
     ]
@@ -127,10 +127,16 @@ def test_lookup_maps_rows_with_sreality_id_mf_and_estimation() -> None:
         "stage_key": "interested", "stage_label": "Zájem",
     }
     assert sr["collection_ids"] == [7, 9]  # property-grain memberships
+    # apartment: subtype NULL → kind_label is the disposition
+    assert sr["subtype"] is None
+    assert sr["kind_label"] == "2+kk"
 
     bz = data[1]
     assert bz["found"] is True
     assert bz["sreality_id"] == -187691  # negative synthetic for non-sreality
+    # commercial: kind_label is the Czech subtype label (no disposition)
+    assert bz["subtype"] == "ubytovani"
+    assert bz["kind_label"] == "Ubytování"
     assert bz["latest_estimation"] is None
     assert bz["property_id"] == 777
     # has a property but no card → in_pipeline false (still toggle-able)

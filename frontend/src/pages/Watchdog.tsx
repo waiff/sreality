@@ -23,6 +23,7 @@ import {
   fmtRelative,
 } from '@/lib/format';
 import { portalListingUrl, portalShort } from '@/lib/portals';
+import { listingKindLabel } from '@/lib/enums';
 import { listingPath } from '@/lib/listingUrl';
 import type {
   WatchdogDispatch,
@@ -501,7 +502,7 @@ function Row({
         </Link>
       </td>
       <td className="px-4 py-2.5 align-middle text-[var(--color-ink-2)] tabular-nums">
-        {dispatch.disposition ?? <span className="text-[var(--color-ink-4)]">—</span>}
+        {listingKindLabel(dispatch) ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
         <PriceCell dispatch={dispatch} />

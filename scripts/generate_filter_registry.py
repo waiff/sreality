@@ -57,6 +57,7 @@ export interface EnumOption {{
   value: string | number;
   label_cs: string;
   label_en: string;
+  group?: string;
 }}
 
 export interface FilterDef {{

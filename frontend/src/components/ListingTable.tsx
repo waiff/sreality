@@ -11,6 +11,7 @@ import {
 } from '@/lib/format';
 import type { Furnished, Ownership } from '@/lib/types';
 import { placePrimary } from '@/lib/placeLabel';
+import { listingKindLabel } from '@/lib/enums';
 import { listingPath } from '@/lib/listingUrl';
 
 interface Column {
@@ -217,7 +218,7 @@ function Row({
         {placePrimary(row) ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-4 py-2.5 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
-        {row.disposition ?? <span className="text-[var(--color-ink-4)]">—</span>}
+        {listingKindLabel(row) ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-4 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink)]">
         {fmtArea(row.area_m2)}

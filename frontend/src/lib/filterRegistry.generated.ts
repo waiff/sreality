@@ -46,6 +46,7 @@ export interface EnumOption {
   value: string | number;
   label_cs: string;
   label_en: string;
+  group?: string;
 }
 
 export interface FilterDef {
@@ -823,102 +824,122 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
         {
           "value": "rodinny_dum",
           "label_cs": "Rodinný dům",
-          "label_en": "Detached house"
+          "label_en": "Detached house",
+          "group": "dum"
         },
         {
           "value": "vila",
           "label_cs": "Vila",
-          "label_en": "Villa"
+          "label_en": "Villa",
+          "group": "dum"
         },
         {
           "value": "chata",
           "label_cs": "Chata",
-          "label_en": "Cabin"
+          "label_en": "Cabin",
+          "group": "dum"
         },
         {
           "value": "chalupa",
           "label_cs": "Chalupa",
-          "label_en": "Cottage"
+          "label_en": "Cottage",
+          "group": "dum"
         },
         {
           "value": "vicegeneracni_dum",
           "label_cs": "Vícegenerační dům",
-          "label_en": "Multi-generational house"
+          "label_en": "Multi-generational house",
+          "group": "dum"
         },
         {
           "value": "zemedelska_usedlost",
           "label_cs": "Zemědělská usedlost",
-          "label_en": "Farmstead"
+          "label_en": "Farmstead",
+          "group": "dum"
         },
         {
           "value": "na_klic",
           "label_cs": "Na klíč",
-          "label_en": "Turnkey"
+          "label_en": "Turnkey",
+          "group": "dum"
         },
         {
           "value": "pamatka_jine",
           "label_cs": "Památka/jiné",
-          "label_en": "Heritage/other"
+          "label_en": "Heritage/other",
+          "group": "dum"
         },
         {
           "value": "kancelar",
           "label_cs": "Kancelář",
-          "label_en": "Office"
+          "label_en": "Office",
+          "group": "komercni"
         },
         {
           "value": "sklad",
           "label_cs": "Sklad",
-          "label_en": "Warehouse"
+          "label_en": "Warehouse",
+          "group": "komercni"
         },
         {
           "value": "obchodni_prostor",
           "label_cs": "Obchodní prostor",
-          "label_en": "Retail space"
+          "label_en": "Retail space",
+          "group": "komercni"
         },
         {
           "value": "vyroba",
           "label_cs": "Výroba",
-          "label_en": "Manufacturing"
+          "label_en": "Manufacturing",
+          "group": "komercni"
         },
         {
           "value": "ubytovani",
           "label_cs": "Ubytování",
-          "label_en": "Accommodation"
+          "label_en": "Accommodation",
+          "group": "komercni"
         },
         {
           "value": "restaurace",
           "label_cs": "Restaurace",
-          "label_en": "Restaurant"
+          "label_en": "Restaurant",
+          "group": "komercni"
         },
         {
           "value": "cinzovni_dum",
           "label_cs": "Činžovní dům",
-          "label_en": "Tenement house"
+          "label_en": "Tenement house",
+          "group": "komercni"
         },
         {
           "value": "apartmany",
           "label_cs": "Apartmány",
-          "label_en": "Apartments"
+          "label_en": "Apartments",
+          "group": "komercni"
         },
         {
           "value": "ordinace",
           "label_cs": "Ordinace",
-          "label_en": "Medical office"
+          "label_en": "Medical office",
+          "group": "komercni"
         },
         {
           "value": "zemedelsky",
           "label_cs": "Zemědělský objekt",
-          "label_en": "Agricultural"
+          "label_en": "Agricultural",
+          "group": "komercni"
         },
         {
           "value": "virtualni_kancelar",
           "label_cs": "Virtuální kancelář",
-          "label_en": "Virtual office"
+          "label_en": "Virtual office",
+          "group": "komercni"
         },
         {
           "value": "ostatni",
           "label_cs": "Ostatní",
-          "label_en": "Other"
+          "label_en": "Other",
+          "group": "komercni"
         }
       ],
       "aliases": []
