@@ -1608,6 +1608,25 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       ]
     },
     {
+      "id": "include_no_price",
+      "type": "bool",
+      "pg_column": null,
+      "default": false,
+      "description": "When true AND a min/max price bound is set, KEEP listings with no price (price_czk IS NULL — 'cena v RK' / 'dohodou' placeholders the scraper normalises to NULL) instead of dropping them via SQL three-valued logic. A no-op when no price bound is set (no-price listings are already included then). BROWSE + WATCHDOG only — the estimation agent / comparables tool never see it.",
+      "category": "Property",
+      "ui_control": "boolean",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": null,
+      "unit": null,
+      "enum_values": null,
+      "aliases": [
+        "includeNoPrice"
+      ]
+    },
+    {
       "id": "min_price_per_m2",
       "type": "float",
       "pg_column": "price_per_m2",

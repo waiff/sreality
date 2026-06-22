@@ -184,6 +184,7 @@ export function PickButton({
   variant = 'soft',
   className = '',
   ariaLabel,
+  disabled = false,
 }: {
   on: boolean;
   onClick: () => void;
@@ -191,6 +192,7 @@ export function PickButton({
   variant?: 'soft' | 'solid';
   className?: string;
   ariaLabel?: string;
+  disabled?: boolean;
 }) {
   const onClasses =
     variant === 'solid'
@@ -198,15 +200,18 @@ export function PickButton({
       : 'bg-[var(--color-copper-soft)] text-[var(--color-copper)] border-[var(--color-copper)]';
   const offClasses =
     'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] hover:text-[var(--color-ink-2)] hover:border-[var(--color-rule-strong)]';
+  const disabledClasses =
+    'bg-[var(--color-paper-2)] text-[var(--color-ink-3)] border-[var(--color-rule)] opacity-50 cursor-not-allowed';
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-pressed={on}
       aria-label={ariaLabel}
       className={[
         'px-2 py-1.5 text-xs rounded-[var(--radius-sm)] border transition-colors',
-        on ? onClasses : offClasses,
+        disabled ? disabledClasses : on ? onClasses : offClasses,
         className,
       ].join(' ')}
     >

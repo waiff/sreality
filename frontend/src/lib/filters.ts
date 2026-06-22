@@ -141,6 +141,10 @@ export interface ListingFilters {
   dispositions: Disposition[];
   priceMin: number | null;
   priceMax: number | null;
+  /* When true AND a price bound is set, KEEP no-price listings
+   * (price_czk IS NULL) instead of dropping them via SQL three-valued
+   * logic. A no-op when no bound is set. Browse + Watchdog only. */
+  includeNoPrice: boolean;
   /* Price per m² bounds (price_czk / area_m2). Computed on
    * listings_public; toolkit / matcher re-derive from the raw columns.
    * NULL area_m2 rows fall out when either bound is set. */
@@ -267,6 +271,7 @@ export const DEFAULT_FILTERS: ListingFilters = {
   dispositions: [],
   priceMin: null,
   priceMax: null,
+  includeNoPrice: false,
   pricePerM2Min: null,
   pricePerM2Max: null,
   mfGrossYieldPctMin: null,
@@ -535,6 +540,7 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
     dispositions,
     priceMin,
     priceMax,
+    includeNoPrice: sp.get('no_price') === '1',
     pricePerM2Min: ppm2Min,
     pricePerM2Max: ppm2Max,
     mfGrossYieldPctMin: yieldMin,
@@ -771,6 +777,7 @@ export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   if (f.priceMin != null || f.priceMax != null) {
     sp.set('price', fmtRange(f.priceMin, f.priceMax));
   }
+  if (f.includeNoPrice) sp.set('no_price', '1');
   if (f.pricePerM2Min != null || f.pricePerM2Max != null) {
     sp.set('ppm2', fmtRange(f.pricePerM2Min, f.pricePerM2Max));
   }
@@ -1153,6 +1160,7 @@ export const REGISTRY_KEY_MAP = {
   status: 'status',
   min_price_czk: 'priceMin',
   max_price_czk: 'priceMax',
+  include_no_price: 'includeNoPrice',
   min_price_per_m2: 'pricePerM2Min',
   max_price_per_m2: 'pricePerM2Max',
   min_mf_gross_yield_pct: 'mfGrossYieldPctMin',
@@ -1417,6 +1425,7 @@ export function filtersToWatchdogSpec(
     radius_m: cr ? cr.radius_m : null,
     min_price_czk: f.priceMin,
     max_price_czk: f.priceMax,
+    include_no_price: f.includeNoPrice,
     min_price_per_m2: f.pricePerM2Min,
     max_price_per_m2: f.pricePerM2Max,
     min_mf_gross_yield_pct: f.mfGrossYieldPctMin,

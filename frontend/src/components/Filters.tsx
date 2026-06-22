@@ -8,9 +8,10 @@ import {
   applyRegistryUpdates,
 } from '@/lib/filters';
 import type { MapySuggestion } from '@/lib/maps';
-import { CollapsibleGroup, ControlGroup, Section } from '@/components/controls';
+import { CollapsibleGroup, ControlGroup, PickButton, Section } from '@/components/controls';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
+import { fetchNoPriceCount } from '@/lib/queries';
 import { FilterForm } from '@/components/FilterForm';
 import CityIndexRulesPicker from '@/components/CityIndexRulesPicker';
 import MarketGrowthFilter from '@/components/MarketGrowthFilter';
@@ -101,6 +102,67 @@ const bandActive = (
     if (def === null) return value !== null && value !== undefined;
     return value !== def;
   });
+
+/* Price-section "include listings without a price" toggle. No-price listings
+ * (price_czk IS NULL — RK / dohodou placeholders the scraper normalises to NULL)
+ * are silently dropped by SQL the moment a min/max price bound is set; this
+ * re-includes them. Disabled (greyed) until a bound is set, because with no
+ * bound they're already shown — the toggle would be a no-op. The count of
+ * affected listings is fetched lazily and degrades to nothing on error. */
+function IncludeNoPriceToggle({
+  filters,
+  onChange,
+}: {
+  filters: ListingFilters;
+  onChange: (next: ListingFilters) => void;
+}) {
+  const hasBound = filters.priceMin != null || filters.priceMax != null;
+  const on = filters.includeNoPrice;
+  /* The count is independent of the bound itself (it's "no-price rows in the
+   * rest of the cohort"), so key on the cohort MINUS price — dragging the
+   * price range never refetches it. Only fetched once a bound is set. */
+  const countQuery = useQuery({
+    queryKey: [
+      'no-price-count',
+      { ...filters, priceMin: null, priceMax: null, includeNoPrice: false },
+    ],
+    queryFn: () => fetchNoPriceCount(filters),
+    enabled: hasBound,
+    placeholderData: (prev) => prev,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const count = hasBound ? countQuery.data ?? null : null;
+  const fmt = (n: number) => n.toLocaleString('cs-CZ');
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className={`text-sm ${hasBound ? 'text-[var(--color-ink-2)]' : 'text-[var(--color-ink-3)]'}`}
+        >
+          Include listings without a price
+        </span>
+        <PickButton
+          on={hasBound && on}
+          disabled={!hasBound}
+          ariaLabel="Include listings without a price"
+          onClick={() => onChange({ ...filters, includeNoPrice: !on })}
+        >
+          {hasBound && on ? 'on' : 'off'}
+        </PickButton>
+      </div>
+      <p className="text-[11px] leading-snug text-[var(--color-ink-3)]">
+        {!hasBound
+          ? 'Shown by default — set a price range to choose whether to keep them.'
+          : count == null
+            ? ' '
+            : on
+              ? `Keeping ${fmt(count)} listing${count === 1 ? '' : 's'} with no listed price.`
+              : `${fmt(count)} listing${count === 1 ? '' : 's'} with no listed price ${count === 1 ? 'is' : 'are'} hidden.`}
+      </p>
+    </div>
+  );
+}
 
 export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, layout = 'page' }: SidebarProps) {
   // <FilterForm> reads snake_case registry ids; Browse keeps the
@@ -321,6 +383,11 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               }}
               flat
             />
+            {/* Spans every grid column so it sits as its own row below the
+                price inputs rather than as a cramped grid cell. */}
+            <div className="[grid-column:1/-1]">
+              <IncludeNoPriceToggle filters={filters} onChange={onChange} />
+            </div>
           </ControlGroup>
 
           {/* Yield is the MF reference rent ÷ asking price — only meaningful

@@ -264,6 +264,24 @@ export const matchesDistricts = (
  * (districtsFilterClause), and the bbox spatial predicates that aren't
  * registry filters at all. The drift test in registryQueryBuilder.test.ts
  * fails CI if a new registry filter is added that fits no path. */
+
+/* PostgREST `.or()` argument for a NULL-tolerant absolute-price bound: keeps
+ * no-price listings (price_czk IS NULL) alongside the [min,max] range. Only
+ * used when `includeNoPrice` is on AND at least one bound is set. Mirrors the
+ * SQL `(price >= lo and price <= hi) or price is null` that
+ * browse_stats_properties + the watchdog matcher apply. Pure + exported so the
+ * shape is unit-tested (like districtsFilterClause). */
+export const priceNullTolerantOr = (
+  min: number | null,
+  max: number | null,
+): string => {
+  const bounds: string[] = [];
+  if (min != null) bounds.push(`price_czk.gte.${min}`);
+  if (max != null) bounds.push(`price_czk.lte.${max}`);
+  const range = bounds.length > 1 ? `and(${bounds.join(',')})` : bounds[0];
+  return `${range},price_czk.is.null`;
+};
+
 const applyFilters = <T>(q: T, f: ListingFilters): T => {
   let r = applyRegistryFilters(q, f) as unknown as {
     eq:  (c: string, v: unknown) => typeof r;
@@ -314,6 +332,19 @@ const applyFilters = <T>(q: T, f: ListingFilters): T => {
   if (furnishedOr) r = r.or(furnishedOr);
   const ownershipOr = enumOrUnknown('ownership', f.ownership, OWNERSHIP_CANONICAL);
   if (ownershipOr) r = r.or(ownershipOr);
+  /* Absolute price bound (price_czk). Hand-coded — not the registry auto
+   * `.gte`/`.lte` — so `includeNoPrice` can widen it to keep no-price listings:
+   * a plain `.gte` already drops NULLs and a later `.or` can't add them back, so
+   * the whole bound is re-expressed as one disjunction. Scope is price_czk only;
+   * the price/m² + yield bounds deliberately keep dropping NULL-price rows. */
+  if (f.priceMin != null || f.priceMax != null) {
+    if (f.includeNoPrice) {
+      r = r.or(priceNullTolerantOr(f.priceMin, f.priceMax));
+    } else {
+      if (f.priceMin != null) r = r.gte('price_czk', f.priceMin);
+      if (f.priceMax != null) r = r.lte('price_czk', f.priceMax);
+    }
+  }
   /* Merged price-history filters (migration 173). The window picks which
    * precomputed count column the threshold reads; the signed total-change
    * threshold flips direction on sign (negative = "dropped at least",
@@ -529,6 +560,32 @@ const applyPrefilters = <T>(q: T, p: BrowsePrefilters): T => {
   if (p.obecIds != null) r = r.in('obec_id', p.obecIds);
   if (p.propertyIds != null) r = r.in('property_id', p.propertyIds);
   return r as unknown as T;
+};
+
+/* Count of properties matching the CURRENT filters EXCEPT the price bound that
+ * have no listed price (price_czk IS NULL) — i.e. how many a min/max price
+ * bound is hiding (or, with the toggle on, including). Powers the discoverable
+ * "N listings have no listed price" hint next to the Price section's toggle.
+ * Reuses the exact cohort filter path (resolveBrowsePrefilters + applyFilters)
+ * so it can never drift from the Map/Table semantics. A `head:true` count, same
+ * risk class as the result-badge count Browse already issues. Callers gate on a
+ * price bound being set; on error the UI just omits the number (graceful). */
+export const fetchNoPriceCount = async (f: ListingFilters): Promise<number> => {
+  const pre = await resolveBrowsePrefilters(f);
+  if (pre.empty) return 0;
+  const base = supabase
+    .from('properties_public')
+    .select('property_id', { count: 'exact', head: true });
+  // Strip the price bound (and the toggle) so the count is purely "no-price
+  // rows in the rest of the cohort", then restrict to NULL price.
+  const noPriceFilters: ListingFilters = {
+    ...f, priceMin: null, priceMax: null, includeNoPrice: false,
+  };
+  const scoped = applyPrefilters(applyFilters(base, noPriceFilters), pre)
+    .is('price_czk', null);
+  const { count, error } = await scoped;
+  if (error) throw error;
+  return count ?? 0;
 };
 
 /* Browse cohort fetchers (Map / Table / Cards) AND fetchBrowseStats read the
@@ -802,6 +859,7 @@ export const fetchBrowseStats = async (
     dispositions_filter:     f.dispositions.length ? f.dispositions : null,
     price_min_filter:        f.priceMin,
     price_max_filter:        f.priceMax,
+    include_no_price:        f.includeNoPrice,
     area_min_filter:         f.areaMin,
     area_max_filter:         f.areaMax,
     active_only_filter:      f.status === 'active',

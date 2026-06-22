@@ -65,6 +65,16 @@ describe('URL round-trip', () => {
     expect(round.ownership).toEqual(['osobni']);
   });
 
+  it('round-trips the includeNoPrice toggle (emitted only when on)', () => {
+    expect(toSearchParams(DEFAULT_FILTERS).has('no_price')).toBe(false);
+    const f: ListingFilters = { ...DEFAULT_FILTERS, priceMax: 5_000_000, includeNoPrice: true };
+    const sp = toSearchParams(f);
+    expect(sp.get('no_price')).toBe('1');
+    expect(fromSearchParams(sp).includeNoPrice).toBe(true);
+    // Absent param parses back to false (old URLs / presets self-heal).
+    expect(fromSearchParams(new URLSearchParams('price=,5000000')).includeNoPrice).toBe(false);
+  });
+
   it('round-trips conditionMatch and drops unknown values', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,
