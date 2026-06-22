@@ -97,7 +97,7 @@ def test_default_config_mmreality():
 
 def test_default_config_remax():
     cfg = default_config("remax")
-    assert cfg.supports_complete_walk is False  # mixed per-agenda index → partial walk
+    assert cfg.supports_complete_walk is True   # complete-walk via agenda-grain delisting
     assert cfg.split_threshold is None
     assert cfg.splits is False
     assert len(cfg.categories) == 10            # 5 categories × prodej + pronajem

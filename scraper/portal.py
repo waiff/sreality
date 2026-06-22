@@ -204,10 +204,11 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # A small agency catalogue on TWO mixed indexes — sale (af=1) and rent
         # (af=2, the buy/rent toggle). No per-category URL, so each descriptor
         # pairs a category with its agenda; walk_category walks that agenda once
-        # (cached) and keeps the id-prefix slice for its category. Pilot:
-        # supports_complete_walk=false (maxima reports a per-AGENDA total, not a
-        # per-category one, so a per-(cm,ct) completeness check isn't available).
-        supports_complete_walk=False,
+        # (cached) and keeps the id-prefix slice for its category. Complete-walk
+        # via AGENDA-GRAIN delisting: maxima reports a per-AGENDA total, so the
+        # sweep flips the whole agenda (af ≡ category_type) once it's fully walked
+        # (db.mark_inactive_agenda), not the per-(cm,ct) slice. See maxima_main.
+        supports_complete_walk=True,
         categories=[
             {"category_main": "byt",      "category_type": "prodej",   "af": 1},
             {"category_main": "dum",      "category_type": "prodej",   "af": 1},
@@ -230,11 +231,12 @@ _DEFAULTS: dict[str, PortalConfig] = {
         # TWO mixed indexes — sale (sale=1) and rent (sale=2) — no per-category
         # URL. Each descriptor pairs a category with its offer-type flag;
         # walk_category walks that agenda once (cached) and keeps the
-        # title-derived slice for its category. Pilot: supports_complete_walk=
-        # false (remax reports a per-AGENDA total, and the per-category slice is
-        # title-derived — not a portal-reported per-(cm,ct) total — so a safe
-        # per-category completeness check isn't available).
-        supports_complete_walk=False,
+        # title-derived slice for its category. Complete-walk via AGENDA-GRAIN
+        # delisting: remax reports a per-AGENDA total, so the sweep flips the whole
+        # agenda (sale ≡ category_type) once it's fully walked
+        # (db.mark_inactive_agenda), not the title-derived per-(cm,ct) slice. See
+        # remax_main.
+        supports_complete_walk=True,
         categories=[
             {"category_main": "byt",      "category_type": "prodej",   "sale": 1},
             {"category_main": "dum",      "category_type": "prodej",   "sale": 1},

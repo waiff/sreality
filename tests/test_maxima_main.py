@@ -1,7 +1,8 @@
-"""maxima_main on the portal framework: MaximaPortal (pilot, two mixed agendas
-split per (category_main, category_type) via id-prefix) seams + the main() that
-drives index-walk then detail-drain through the shared runner, recording an
-'index' + a 'detail' scrape_runs row tagged source='maxima'.
+"""maxima_main on the portal framework: MaximaPortal (complete-walk via agenda-
+grain delisting, two mixed agendas split per (category_main, category_type) via
+id-prefix) seams + the main() that drives index-walk then detail-drain through
+the shared runner, recording an 'index' + a 'detail' scrape_runs row tagged
+source='maxima'.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ _CATEGORIES = [
 def _config() -> PortalConfig:
     return PortalConfig(
         source="maxima",
-        supports_complete_walk=False,
+        supports_complete_walk=True,
         categories=_CATEGORIES,
         split_threshold=None,
     )
@@ -135,13 +136,13 @@ def test_dry_run_records_no_scrape_run(monkeypatch):
 def test_portal_config_categories_and_labels():
     p = _portal()
     assert p.source == "maxima"
-    assert p.supports_complete_walk is False
+    assert p.supports_complete_walk is True
     assert p.categories() == _CATEGORIES
     assert p.category_labels(_CATEGORIES[0]) == ("byt", "prodej")
     assert p.category_labels(_CATEGORIES[3]) == ("byt", "pronajem")
 
 
-def test_active_count_and_mark_inactive_source_scoped(monkeypatch):
+def test_active_count_source_scoped(monkeypatch):
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
         maxima_main.db, "active_count",
@@ -150,16 +151,70 @@ def test_active_count_and_mark_inactive_source_scoped(monkeypatch):
     assert _portal().active_count(object(), _CATEGORIES[0]) == 12
     assert captured["active"] == ("byt", "prodej", "maxima")
 
+
+def _walk_one_agenda(monkeypatch, portal, *, total, items, max_pages=None):
+    """Drive one agenda walk (af=1) so the portal's agenda cache is populated."""
+    page1 = SimpleNamespace(total=total, next_offset=None, items=items)
+    empty = SimpleNamespace(total=total, next_offset=None, items=[])
+    seq = iter([page1, empty, empty, empty])
+    monkeypatch.setattr(maxima_main, "parse_index", lambda _h: next(seq))
+    monkeypatch.setattr(maxima_main, "MaximaClient", _IdxClient)
+    _IdxClient.fetches = {}
+    monkeypatch.setattr(maxima_main.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(maxima_main.db, "enqueue_detail", lambda *a, **k: 0)
+    monkeypatch.setattr(maxima_main.db, "touch_listings", lambda *a, **k: None)
+    portal.walk_category(_CATEGORIES[0], object(), False, _Limiter())  # byt·prodej, af=1
+
+
+def test_mark_inactive_is_agenda_grain(monkeypatch):
+    # A complete sale agenda spanning byt + dum + ostatni. mark_inactive must
+    # sweep the WHOLE agenda (category_type=prodej) against EVERY agenda id —
+    # never the per-category byt slice — and only once per agenda per run.
+    base = "https://nemovitosti.maxima.cz/nemovitosti/"
+    items = [
+        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
+                        price_text="5 000 000 Kč", title=t)
+        for n, t in [("b1", "Prodej bytu"), ("b2", "Prodej bytu"),
+                     ("d1", "Prodej domu"), ("o1", "Prodej")]
+    ]
+    portal = _portal()
+    _walk_one_agenda(monkeypatch, portal, total=4, items=items)
+
+    captured: list[Any] = []
     monkeypatch.setattr(
-        maxima_main.db, "index_summary_native",
-        lambda _c, _s, ids: {n: {"sreality_id": -i} for i, n in enumerate(ids, 1)},
+        maxima_main.db, "mark_inactive_agenda",
+        lambda _c, source, ct, seen, *, min_unseen_hours: (
+            captured.append((source, ct, set(seen), min_unseen_hours)) or 7
+        ),
     )
+    # First prodej descriptor (byt) triggers the agenda sweep.
+    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 7
+    source, ct, seen, hrs = captured[0]
+    assert source == "maxima" and ct == "prodej" and hrs == 24
+    assert seen == {"b1", "b2", "d1", "o1"}        # the FULL agenda, not the byt slice
+    # A second prodej descriptor (dum) must NOT re-sweep the same agenda.
+    assert portal.mark_inactive(object(), _CATEGORIES[1], {"d1"}) == 0
+    assert len(captured) == 1
+
+
+def test_mark_inactive_skips_incomplete_agenda(monkeypatch):
+    # Agenda reports total=10 but only 2 collected -> walk.complete is False, so
+    # no index-absence delisting (avoids false-flipping the unseen 8).
+    base = "https://nemovitosti.maxima.cz/nemovitosti/"
+    items = [
+        SimpleNamespace(source_id_native=n, detail_path=f"{base}{n}/",
+                        price_text="5 000 000 Kč", title="Prodej bytu")
+        for n in ("b1", "b2")
+    ]
+    portal = _portal()
+    _walk_one_agenda(monkeypatch, portal, total=10, items=items)
+    called = {"n": 0}
     monkeypatch.setattr(
-        maxima_main.db, "mark_inactive",
-        lambda _c, cm, ct, pks, source: captured.update(mark=(cm, ct, source, set(pks))) or 3,
+        maxima_main.db, "mark_inactive_agenda",
+        lambda *a, **k: called.__setitem__("n", called["n"] + 1) or 0,
     )
-    assert _portal().mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 3
-    assert captured["mark"][:3] == ("byt", "prodej", "maxima")
+    assert portal.mark_inactive(object(), _CATEGORIES[0], {"b1", "b2"}) == 0
+    assert called["n"] == 0
 
 
 class _IdxClient:
@@ -210,7 +265,8 @@ def test_walk_category_filters_by_category_and_caches_agenda(monkeypatch):
         _CATEGORIES[0], object(), False, _Limiter(),
     )
     assert seen_b == {b1, b2}
-    assert total_b == 2 and complete_b is False
+    # complete reflects the AGENDA (3 of 3 collected), not the byt slice (2).
+    assert total_b == 2 and complete_b is True
     assert pages_b == 2                       # page 1 + the empty terminator
     assert _IdxClient.fetches[1] == 2
 

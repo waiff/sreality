@@ -20,12 +20,13 @@ joins listings on those — while fetching each agenda's pages only once per run
 The drain still derives each listing's category from the detail page itself
 (`maxima_parser.parse_detail`), so the queue stays category-agnostic.
 
-Like every portal's first cut (bazos/idnes/bezrealitky/mmreality all started this way),
-maxima ships as a PILOT with `supports_complete_walk=false`: the runner never marks
-listings inactive from index-absence (maxima reports a per-AGENDA total, not a
-per-category one, so a per-(cm,ct) completeness check isn't available). A gone detail
-fetch (404/410) still flips that one listing inactive. `mark_inactive` / `active_count`
-are implemented source-scoped so promotion to complete-walk is a one-flag change.
+maxima is `supports_complete_walk=true` via AGENDA-GRAIN delisting: it reports a
+per-AGENDA total (not per-category), so the runner can't gate a per-(cm,ct) sweep —
+instead `mark_inactive` flips the whole agenda (af ≡ category_type) once the agenda
+walk reaches its reported total, scoped by category_type against the full walk's id
+set (`db.mark_inactive_agenda`), never the title-derived per-category slice (which
+could false-flip a listing whose index-time title category ≠ its detail-time one).
+A gone detail fetch (404/410) still flips that one listing inactive immediately.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from scraper.rate_limit import RateLimiter
 
 LOG = logging.getLogger(__name__)
 SOURCE = "maxima"
+INDEX_MIN_COMPLETENESS = 0.995  # agenda walk must reach ≥99.5% of the reported total to delist
 
 
 class _AgendaWalk:
@@ -53,7 +55,7 @@ class _AgendaWalk:
     def __init__(
         self, native_ids: list[str], ref_map: dict[str, str],
         price_map: dict[str, int | None], cat_map: dict[str, str | None],
-        total: int | None, pages: int,
+        total: int | None, pages: int, complete: bool,
     ) -> None:
         self.native_ids = native_ids
         self.ref_map = ref_map
@@ -61,6 +63,9 @@ class _AgendaWalk:
         self.cat_map = cat_map  # id -> category_main (title-first, prefix fallback)
         self.total = total
         self.pages = pages
+        # Did this walk reach the agenda's reported total? Gates agenda-grain
+        # delisting (mark_inactive). False on a capped/short walk → no flip.
+        self.complete = complete
 
 
 class MaximaPortal:
@@ -85,6 +90,7 @@ class MaximaPortal:
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self._agenda_cache: dict[int, _AgendaWalk] = {}
+        self._swept_agendas: set[int] = set()  # delist each agenda once per run
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -146,7 +152,14 @@ class MaximaPortal:
                 break
             page += 1
 
-        walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages)
+        # Complete only if we walked the whole agenda (not page-capped) AND reached
+        # the portal-reported total — the gate for agenda-grain delisting.
+        capped = bool(self._max_pages and pages >= self._max_pages)
+        complete = (
+            not capped and total is not None and total > 0
+            and len(native_ids) >= total * INDEX_MIN_COMPLETENESS
+        )
+        walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
         self._agenda_cache[af] = walk
         return walk, pages
 
@@ -203,18 +216,35 @@ class MaximaPortal:
         )
         # maxima reports a per-AGENDA total (220/34), not per-category, so the
         # per-category "portal expected" is what this category collected — index%
-        # is then 100% by construction. supports_complete_walk=false keeps the
-        # runner from marking inactive regardless (pilot), so this never gates a
-        # delisting; it only labels the Health reconciliation row.
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, False
+        # is then 100% by construction. The COMPLETE flag is the agenda's (not the
+        # slice's): delisting is agenda-grain (mark_inactive), so the slice never
+        # needs its own completeness proof. The runner only delists when the agenda
+        # walk reached its reported total.
+        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, walk.complete
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
+        # Agenda-grain: the runner calls this once per (cm, ct) descriptor, but
+        # maxima's completeness is per-AGENDA (af ≡ category_type), so we sweep the
+        # whole agenda once — scoped by category_type against the FULL agenda walk's
+        # id set, NOT the title-derived per-category slice (which could false-flip a
+        # listing whose index-time title category ≠ its detail-time category). The
+        # passed `seen` (this category's slice) is intentionally ignored.
         cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
+        af = int(category.get("af") or 1)
+        if ct is None or af in self._swept_agendas:
             return 0
-        existing = db.index_summary_native(conn, SOURCE, list(seen))
-        pks = {v["sreality_id"] for v in existing.values()}
-        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
+        walk = self._agenda_cache.get(af)
+        if walk is None or not walk.complete:
+            return 0
+        self._swept_agendas.add(af)
+        flipped = db.mark_inactive_agenda(
+            conn, SOURCE, ct, set(walk.native_ids), min_unseen_hours=24,
+        )
+        LOG.info(
+            "INACTIVE agenda af=%d ct=%s marked=%d collected=%d total=%s",
+            af, ct, flipped, len(walk.native_ids), walk.total,
+        )
+        return flipped
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)
@@ -264,8 +294,8 @@ class MaximaPortal:
         return counts
 
     def mark_gone(self, conn: Any, native_id: str) -> None:
-        # A gone detail flips that one listing inactive immediately (per-listing
-        # signal, independent of the index-absence sweep this pilot keeps off).
+        # A gone detail flips that one listing inactive immediately (a definitive
+        # per-listing signal, independent of the agenda-grain index-absence sweep).
         db.mark_listing_inactive_native(conn, SOURCE, native_id)
 
     def record_failure(self, conn: Any, native_id: str, message: str) -> None:

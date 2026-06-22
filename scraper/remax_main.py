@@ -19,14 +19,15 @@ reconciliation joins listings on those — while fetching each agenda's pages on
 once per run. The drain re-derives each listing's category from the detail page
 ("Typ nemovitosti" + title), so the queue stays category-agnostic.
 
-Like every portal's first cut (bazos/idnes/bezrealitky/mmreality/maxima all
-started this way), remax ships as a PILOT with `supports_complete_walk=false`: the
-runner never marks listings inactive from index-absence (remax reports a per-
-AGENDA total, and the per-category slice is title-derived — not a portal-reported
-per-(cm,ct) total — so a safe per-category completeness check isn't available). A
-gone detail fetch (404/410 or a redirect off the detail path) still flips that one
-listing inactive. `mark_inactive` / `active_count` are implemented source-scoped so
-promotion to complete-walk is a one-flag change.
+remax is `supports_complete_walk=true` via AGENDA-GRAIN delisting: it reports a
+per-AGENDA total (the per-category slice is title-derived, not a portal-reported
+per-(cm,ct) total), so the runner can't gate a per-category sweep — instead
+`mark_inactive` flips the whole agenda (sale ≡ category_type) once the agenda walk
+reaches its reported total, scoped by category_type against the full walk's id set
+(`db.mark_inactive_agenda`), never the title-derived per-category slice (which could
+false-flip a listing whose index-time title category ≠ its detail-time one). A gone
+detail fetch (404/410 or a redirect off the detail path) still flips that one
+listing inactive immediately.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ from scraper.remax_parser import category_of, index_price, parse_detail, parse_i
 LOG = logging.getLogger(__name__)
 SOURCE = "remax"
 _PAGE_SIZE = 21  # remax serves 21 cards per search page
+INDEX_MIN_COMPLETENESS = 0.995  # agenda walk must reach ≥99.5% of the reported total to delist
 
 
 class _AgendaWalk:
@@ -55,7 +57,7 @@ class _AgendaWalk:
     def __init__(
         self, native_ids: list[str], ref_map: dict[str, str],
         price_map: dict[str, int | None], cat_map: dict[str, str | None],
-        total: int | None, pages: int,
+        total: int | None, pages: int, complete: bool,
     ) -> None:
         self.native_ids = native_ids
         self.ref_map = ref_map
@@ -63,6 +65,9 @@ class _AgendaWalk:
         self.cat_map = cat_map  # id -> category_main (from the card title)
         self.total = total
         self.pages = pages
+        # Did this walk reach the agenda's reported total? Gates agenda-grain
+        # delisting (mark_inactive). False on a capped/short walk → no flip.
+        self.complete = complete
 
 
 class RemaxPortal:
@@ -80,6 +85,7 @@ class RemaxPortal:
         self._max_pages = max_pages
         self.index_rate = config.limits.index_rate
         self._agenda_cache: dict[int, _AgendaWalk] = {}
+        self._swept_agendas: set[int] = set()  # delist each agenda once per run
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -140,7 +146,14 @@ class RemaxPortal:
                 break
             page += 1
 
-        walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages)
+        # Complete only if we walked the whole agenda (not page-capped) AND reached
+        # the portal-reported total — the gate for agenda-grain delisting.
+        capped = bool(self._max_pages and pages >= self._max_pages)
+        complete = (
+            not capped and total is not None and total > 0
+            and len(native_ids) >= total * INDEX_MIN_COMPLETENESS
+        )
+        walk = _AgendaWalk(native_ids, ref_map, price_map, cat_map, total, pages, complete)
         self._agenda_cache[sale] = walk
         return walk, pages
 
@@ -197,17 +210,35 @@ class RemaxPortal:
         )
         # remax reports a per-AGENDA total, not per-category, so the per-category
         # "portal expected" is what this category collected — index% is then 100%
-        # by construction. supports_complete_walk=false keeps the runner from
-        # marking inactive regardless (pilot); this only labels the Health row.
-        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, False
+        # by construction. The COMPLETE flag is the agenda's (not the slice's):
+        # delisting is agenda-grain (mark_inactive), so the slice never needs its
+        # own completeness proof. The runner only delists when the agenda walk
+        # reached its reported total.
+        return seen, {"found_new": len(new_ids), "enqueued": enqueued}, len(seen), pages, walk.complete
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
+        # Agenda-grain: the runner calls this once per (cm, ct) descriptor, but
+        # remax's completeness is per-AGENDA (sale ≡ category_type), so we sweep the
+        # whole agenda once — scoped by category_type against the FULL agenda walk's
+        # id set, NOT the title-derived per-category slice (which could false-flip a
+        # listing whose index-time title category ≠ its detail-time category). The
+        # passed `seen` (this category's slice) is intentionally ignored.
         cm, ct = self.category_labels(category)
-        if cm is None or ct is None:
+        sale = int(category.get("sale") or 1)
+        if ct is None or sale in self._swept_agendas:
             return 0
-        existing = db.index_summary_native(conn, SOURCE, list(seen))
-        pks = {v["sreality_id"] for v in existing.values()}
-        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
+        walk = self._agenda_cache.get(sale)
+        if walk is None or not walk.complete:
+            return 0
+        self._swept_agendas.add(sale)
+        flipped = db.mark_inactive_agenda(
+            conn, SOURCE, ct, set(walk.native_ids), min_unseen_hours=24,
+        )
+        LOG.info(
+            "INACTIVE agenda sale=%d ct=%s marked=%d collected=%d total=%s",
+            sale, ct, flipped, len(walk.native_ids), walk.total,
+        )
+        return flipped
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)
