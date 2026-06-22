@@ -5,6 +5,7 @@ import { getNotificationUnreadCount } from '@/lib/api';
 import { notificationKeys } from '@/lib/queries';
 import { NewEstimationProvider } from './NewEstimationModal';
 import { ExploreAreaProvider } from './ExploreAreaModal';
+import ToastViewport from './ToastViewport';
 import { APP_NAME } from '@/lib/brand';
 
 type NavItem =
@@ -43,6 +44,7 @@ export default function Shell() {
           </main>
           <Footer />
         </div>
+        <ToastViewport />
       </ExploreAreaProvider>
     </NewEstimationProvider>
   );

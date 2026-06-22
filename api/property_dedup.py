@@ -242,30 +242,36 @@ def merge_cluster(
     survivor = int(srow[0])
     retired_ids = sorted(p for p in prop_ids if p != survivor)
 
+    # One outer transaction so the whole cluster merge is ATOMIC: each
+    # merge_properties opens its own `with conn.transaction()` which nests as a
+    # savepoint here, so if a later pair is refused (e.g. the category guard)
+    # the entire cluster rolls back rather than leaving a partial merge.
     group: str | None = None
     moved = 0
-    for retired in retired_ids:
-        result = merge_properties(
-            conn,
-            survivor_id=survivor,
-            retired_id=retired,
-            reason="manual_cluster",
-            source="operator",
-            merge_group_id=group,
-        )
-        group = result["data"]["merge_group_id"]
-        moved += int(result["data"]["listings_moved"])
+    with conn.transaction():
+        for retired in retired_ids:
+            result = merge_properties(
+                conn,
+                survivor_id=survivor,
+                retired_id=retired,
+                reason="manual_cluster",
+                source="operator",
+                merge_group_id=group,
+            )
+            group = result["data"]["merge_group_id"]
+            moved += int(result["data"]["listings_moved"])
 
-    # merge_properties only marks the (survivor, retired) candidate row per call;
-    # cluster-internal pairs (retired_i, retired_j) are now stale — mark them all.
-    with conn.transaction(), conn.cursor() as cur:
-        cur.execute(
-            "UPDATE property_identity_candidates "
-            "SET status = 'merged', reviewed_at = now(), "
-            "    reviewed_action = 'operator', merge_group_id = %s "
-            "WHERE id = ANY(%s) AND status = 'proposed'",
-            (group, candidate_ids),
-        )
+        # merge_properties only marks the (survivor, retired) candidate row per
+        # call; cluster-internal pairs (retired_i, retired_j) are now stale —
+        # mark them all.
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE property_identity_candidates "
+                "SET status = 'merged', reviewed_at = now(), "
+                "    reviewed_action = 'operator', merge_group_id = %s "
+                "WHERE id = ANY(%s) AND status = 'proposed'",
+                (group, candidate_ids),
+            )
 
     return {
         "merge_group_id": group,
@@ -306,17 +312,21 @@ def merge_property_set(
         raise MergeError("fewer than two active properties in the selection")
     survivor, retired_ids = active[0], active[1:]
 
+    # One outer transaction so the subset merge is ATOMIC: each merge_properties
+    # nests as a savepoint, so a later refusal (e.g. the category guard) rolls
+    # the whole set back instead of committing a partial merge.
     group: str | None = None
     moved = 0
-    for retired in retired_ids:
-        result = merge_properties(
-            conn, survivor_id=survivor, retired_id=retired,
-            reason="manual_subset", source="operator", merge_group_id=group,
-        )
-        group = result["data"]["merge_group_id"]
-        moved += int(result["data"]["listings_moved"])
+    with conn.transaction():
+        for retired in retired_ids:
+            result = merge_properties(
+                conn, survivor_id=survivor, retired_id=retired,
+                reason="manual_subset", source="operator", merge_group_id=group,
+            )
+            group = result["data"]["merge_group_id"]
+            moved += int(result["data"]["listings_moved"])
 
-    _repoint_proposed_candidates(conn, survivor, retired_ids)
+        _repoint_proposed_candidates(conn, survivor, retired_ids)
 
     return {
         "merge_group_id": group,

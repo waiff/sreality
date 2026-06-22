@@ -209,3 +209,34 @@ def test_merge_property_set_one_active_raises(monkeypatch):
     with pytest.raises(MergeError):
         # two requested but only one is still active
         dedup.merge_property_set(_SetConn(active_ids=[3]), [3, 7])
+
+
+def test_merge_property_set_partial_failure_rolls_back(monkeypatch):
+    """A refusal on a later pair propagates through the OUTER transaction, so a
+    real DB rolls the whole set back instead of committing a partial merge."""
+    exits: list[Any] = []
+
+    class _RecCtx:
+        def __enter__(self) -> "_RecCtx":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+            exits.append(exc_type)
+            return False  # never suppress — let the error propagate
+
+    class _RecConn(_SetConn):
+        def transaction(self) -> _RecCtx:
+            return _RecCtx()
+
+    def fake_merge(conn, *, survivor_id, retired_id, **kwargs):
+        if retired_id == 9:
+            raise MergeError("category_main mismatch (dum vs komercni)")
+        return {"data": {"merge_group_id": "grp-1", "listings_moved": 1}}
+
+    monkeypatch.setattr(dedup, "merge_properties", fake_merge)
+    # survivor=3, retired=[7, 9]; the merge of 9 is refused after 7 succeeded.
+    with pytest.raises(MergeError):
+        dedup.merge_property_set(_RecConn(active_ids=[3, 7, 9]), [3, 7, 9])
+    # the merge loop ran inside a transaction that received the exception →
+    # a real DB would ROLLBACK the already-applied merge of 7 (no partial merge).
+    assert MergeError in exits
