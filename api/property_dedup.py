@@ -153,7 +153,33 @@ def summary(conn: psycopg.Connection, *, status: str = "proposed") -> dict[str, 
             {"reason": r[0], "verdict": r[1], "count": int(r[2])}
             for r in cur.fetchall()
         ]
-    return {"data": {"status": status, "total": sum(b["count"] for b in buckets), "buckets": buckets}}
+        # Per-tier facet for the review rail: each family's pending count + the
+        # bulk-approvable STRONG subset (geo matches with concordant area+price/house#).
+        cur.execute(
+            """
+            SELECT c.tier, count(*) AS n,
+                   count(*) FILTER (
+                     WHERE c.markers_matched->>'reason' IN ('geo_exact', 'geo_strong')
+                   ) AS strong
+            FROM property_identity_candidates c
+            WHERE c.status = %(status)s
+            GROUP BY c.tier
+            ORDER BY n DESC
+            """,
+            {"status": status},
+        )
+        tiers = [
+            {"tier": r[0], "count": int(r[1]), "strong": int(r[2])}
+            for r in cur.fetchall()
+        ]
+    return {
+        "data": {
+            "status": status,
+            "total": sum(b["count"] for b in buckets),
+            "buckets": buckets,
+            "tiers": tiers,
+        }
+    }
 
 
 def merge_candidate(
@@ -194,6 +220,32 @@ def merge_candidate(
         confidence=float(confidence) if confidence is not None else None,
         markers=markers,
     )
+
+
+def bulk_merge_candidates(
+    conn: psycopg.Connection, candidate_ids: list[int],
+) -> dict[str, Any]:
+    """Approve many proposed candidates as INDEPENDENT pairs — each its own reversible
+    merge group, so any one can be undone alone. Per-pair tolerant: a candidate whose
+    property an earlier pair in this batch already merged (a shared endpoint) is skipped,
+    not fatal, and stays proposed for the next batch (the engine self-heals it). This is
+    the operator's scoped bulk-approve; the caller decides WHICH ids (e.g. the loaded
+    STRONG geo pairs of one category) — this function never selects, only executes."""
+    merged = 0
+    skipped = 0
+    group_ids: list[str] = []
+    for cid in candidate_ids:
+        try:
+            result = merge_candidate(conn, cid)
+        except MergeError:
+            skipped += 1
+            continue
+        if result is None:
+            skipped += 1
+            continue
+        merged += 1
+        group_ids.append(result["data"]["merge_group_id"])
+    return {"data": {"merged": merged, "skipped": skipped, "merge_group_ids": group_ids}}
 
 
 def merge_cluster(

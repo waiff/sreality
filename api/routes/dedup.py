@@ -71,6 +71,20 @@ def post_merge_candidate(
     return result
 
 
+@router.post("/candidates/bulk-merge")
+def post_bulk_merge_candidates(
+    body: ClusterAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Scoped bulk-approve: merge each given candidate as its own reversible pair.
+
+    Per-pair tolerant (a conflicting pair is skipped, not fatal). The operator-facing
+    /dedup surface sends the loaded STRONG candidates of one category here.
+    """
+    return dedup.bulk_merge_candidates(conn, body.candidate_ids)
+
+
 @router.post("/candidates/{candidate_id}/dismiss")
 def post_dismiss_candidate(
     candidate_id: int,
