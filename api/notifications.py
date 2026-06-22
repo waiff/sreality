@@ -150,6 +150,10 @@ class WatchdogFilterSpec(BaseModel):
     # Price + area bounds.
     min_price_czk: int | None = None
     max_price_czk: int | None = None
+    # When true AND a price bound is set, keep no-price (price_czk IS NULL)
+    # listings instead of dropping them. No-op when no bound is set. Mirrors
+    # the Browse toggle so a saved alert means the same thing (rule #16).
+    include_no_price: bool = False
     # Price per m² (price_czk / NULLIF(area_m2, 0)). NULL area_m2 falls
     # out when either bound is set.
     min_price_per_m2: float | None = None
@@ -378,11 +382,20 @@ def _build_match_clauses(
         if exc_clauses:
             where.append("NOT (" + " OR ".join(exc_clauses) + ")")
 
+    # Price bound. With include_no_price, NULL-price listings survive the bound
+    # (mirrors browse_stats_properties + queries.ts:applyFilters). Scope is
+    # price_czk only — the price/m² + yield bounds below still drop NULL rows.
     if spec.min_price_czk is not None:
-        where.append("l.price_czk >= %(min_price_czk)s")
+        if spec.include_no_price:
+            where.append("(l.price_czk is null or l.price_czk >= %(min_price_czk)s)")
+        else:
+            where.append("l.price_czk >= %(min_price_czk)s")
         params["min_price_czk"] = spec.min_price_czk
     if spec.max_price_czk is not None:
-        where.append("l.price_czk <= %(max_price_czk)s")
+        if spec.include_no_price:
+            where.append("(l.price_czk is null or l.price_czk <= %(max_price_czk)s)")
+        else:
+            where.append("l.price_czk <= %(max_price_czk)s")
         params["max_price_czk"] = spec.max_price_czk
     if spec.min_price_per_m2 is not None:
         where.append(

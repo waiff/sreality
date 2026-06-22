@@ -100,14 +100,14 @@ describe('auto-dispatch', () => {
     const r = new _Recorder();
     applyRegistryFilters(r, {
       ...DEFAULT_FILTERS,
-      priceMax: 50_000,
       areaMax: 100,
+      apartmentConditionLevelMax: 4,
     });
     const cols = r.calls
       .filter((c) => c.op === 'lte')
       .map((c) => `${c.col}=${String(c.value)}`);
-    expect(cols).toContain('price_czk=50000');
     expect(cols).toContain('area_m2=100');
+    expect(cols).toContain('apartment_condition_level=4');
   });
 
   it('emits in for string_list filters with values', () => {
@@ -168,11 +168,10 @@ describe('auto-dispatch', () => {
     const r = new _Recorder();
     applyRegistryFilters(r, {
       ...DEFAULT_FILTERS,
-      priceMin: null,
+      areaMin: null,
       areaMax: null,
       buildingConditionLevelMin: null,
     });
-    expect(r.calls.find((c) => c.col === 'price_czk')).toBeUndefined();
     expect(r.calls.find((c) => c.col === 'area_m2')).toBeUndefined();
     expect(r.calls.find((c) => c.col === 'building_condition_level')).toBeUndefined();
   });
@@ -183,6 +182,19 @@ describe('auto-dispatch', () => {
 
 
 describe('hand-coded skip set', () => {
+  it('does not auto-dispatch price bounds (NULL-tolerant branch is hand-coded)', () => {
+    const r = new _Recorder();
+    applyRegistryFilters(r, {
+      ...DEFAULT_FILTERS,
+      priceMin: 1_000_000,
+      priceMax: 5_000_000,
+      includeNoPrice: true,
+    });
+    // price_czk is owned by queries.ts:applyFilters so it can emit the
+    // `.or(...,price_czk.is.null)` form when includeNoPrice is set, NOT here.
+    expect(r.calls.find((c) => c.col === 'price_czk')).toBeUndefined();
+  });
+
   it('does not auto-dispatch building_material (custom 1-to-many enum)', () => {
     const r = new _Recorder();
     applyRegistryFilters(r, {

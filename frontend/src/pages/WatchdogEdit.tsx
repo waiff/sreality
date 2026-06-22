@@ -176,6 +176,7 @@ export default function WatchdogEdit() {
             locality_district_id: 'District id',
             locality_region_id: 'Region id',
             min_price_czk: 'Price Kč',
+            include_no_price: 'Include listings without a price',
             min_area_m2: 'Area m²',
             min_usable_area: 'Usable area m²',
             min_estate_area: 'Estate area m²',

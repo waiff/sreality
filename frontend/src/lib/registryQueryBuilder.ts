@@ -65,6 +65,16 @@ export const HAND_CODED_BROWSE_FILTERS: ReadonlySet<string> = new Set([
   // With-estimates is a property-id allowlist prefilter
   // (property_estimates_public), not a column predicate.
   'with_estimates',
+  // Price bounds are hand-coded (not the plain `.gte`/`.lte` auto-path) so they
+  // can branch on `include_no_price`: when that toggle is on AND a bound is set,
+  // the clause becomes `.or((price>=lo,price<=hi),price.is.null)` to keep
+  // no-price listings — a plain `.gte` already dropped NULLs and can't be
+  // un-narrowed by a later OR. Handled in queries.ts:applyFilters.
+  'min_price_czk',
+  'max_price_czk',
+  // The toggle itself is a modifier on the price bound, not a column predicate
+  // (pg_column=None); applyRegistryFilters skips it anyway.
+  'include_no_price',
 ]);
 
 /* Minimal PostgREST builder shape we need to call into. The real

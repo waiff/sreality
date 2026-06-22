@@ -1125,6 +1125,24 @@ def _build_registry() -> dict[str, FilterDef]:
             aliases=("price_max", "priceMax"),
         ),
         FilterDef(
+            id="include_no_price",
+            type=FilterType.BOOL,
+            pg_column=None,  # modifier on the price bound, not a column predicate
+            default=False,
+            description=(
+                "When true AND a min/max price bound is set, KEEP listings with "
+                "no price (price_czk IS NULL — 'cena v RK' / 'dohodou' placeholders "
+                "the scraper normalises to NULL) instead of dropping them via SQL "
+                "three-valued logic. A no-op when no price bound is set (no-price "
+                "listings are already included then). BROWSE + WATCHDOG only — the "
+                "estimation agent / comparables tool never see it."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.BOOLEAN,
+            agendas=_UI_AGENDAS,
+            aliases=("includeNoPrice",),
+        ),
+        FilterDef(
             id="min_price_per_m2",
             type=FilterType.FLOAT,
             pg_column="price_per_m2",

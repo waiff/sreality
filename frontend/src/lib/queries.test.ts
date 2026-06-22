@@ -15,9 +15,26 @@ import {
   districtsFilterClause,
   effectiveBbox,
   matchesDistricts,
+  priceNullTolerantOr,
   type DistrictMatchRow,
 } from './queries';
 import type { DistrictChip } from './filters';
+
+describe('priceNullTolerantOr', () => {
+  it('AND-groups both bounds with the NULL disjunct', () => {
+    expect(priceNullTolerantOr(1_000_000, 5_000_000)).toBe(
+      'and(price_czk.gte.1000000,price_czk.lte.5000000),price_czk.is.null',
+    );
+  });
+  it('keeps a single bound un-grouped', () => {
+    expect(priceNullTolerantOr(1_000_000, null)).toBe(
+      'price_czk.gte.1000000,price_czk.is.null',
+    );
+    expect(priceNullTolerantOr(null, 5_000_000)).toBe(
+      'price_czk.lte.5000000,price_czk.is.null',
+    );
+  });
+});
 
 describe('effectiveBbox', () => {
   it('returns null when both modes are empty', () => {

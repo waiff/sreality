@@ -315,7 +315,7 @@ function summariseFilter(spec: WatchdogFilterSpec): string {
   if (spec.min_price_czk != null || spec.max_price_czk != null) {
     const lo = spec.min_price_czk != null ? `${spec.min_price_czk.toLocaleString()}` : '0';
     const hi = spec.max_price_czk != null ? `${spec.max_price_czk.toLocaleString()}` : '∞';
-    bits.push(`${lo}–${hi} Kč`);
+    bits.push(`${lo}–${hi} Kč${spec.include_no_price ? ' (+ no price)' : ''}`);
   }
   if (spec.min_area_m2 != null || spec.max_area_m2 != null) {
     const lo = spec.min_area_m2 != null ? `${spec.min_area_m2}` : '0';
