@@ -16,16 +16,9 @@ import { fmtCount, fmtCzk, fmtArea, fmtRelative } from '../lib/format';
 import { portalShort } from '../lib/portals';
 import { PickButton } from '../components/controls';
 import { listingPath } from '@/lib/listingUrl';
+import { categoryMainLabel, categoryTypeLabel, listingKindLabel } from '@/lib/enums';
 import { usePageTitle } from '@/lib/pageTitle';
 
-const CATEGORY_LABEL: Record<string, string> = {
-  byt: 'Byt',
-  dum: 'Dům',
-  pozemek: 'Pozemek',
-  komercni: 'Komerční',
-  ostatni: 'Ostatní',
-};
-const OFFER_LABEL: Record<string, string> = { prodej: 'prodej', pronajem: 'pronájem' };
 
 // Mirror the Žebříček (leaderboard) filter chips, but the broker's own inventory
 // defaults to Vše/Vše so nothing is hidden on load.
@@ -407,9 +400,12 @@ function Inventory({
                   </td>
                   <td className="px-3 py-1.5 whitespace-nowrap text-[var(--color-ink-2)] font-[family-name:var(--font-sans)]">
                     {[
-                      l.disposition,
-                      CATEGORY_LABEL[l.category_main ?? ''] ?? l.category_main,
-                      l.category_type ? OFFER_LABEL[l.category_type] ?? l.category_type : null,
+                      // The specific kind (subtype for commercial/houses, else
+                      // disposition); the umbrella category word only when no
+                      // subtype is shown, to avoid "Ubytování · Komerční" doubling.
+                      listingKindLabel(l),
+                      l.subtype ? null : categoryMainLabel(l.category_main),
+                      l.category_type ? categoryTypeLabel(l.category_type).toLowerCase() : null,
                     ]
                       .filter(Boolean)
                       .join(' · ')}

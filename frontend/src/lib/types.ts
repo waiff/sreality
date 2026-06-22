@@ -887,6 +887,7 @@ export interface PipelineBoardCard {
   street: string | null;
   district: string | null;
   disposition: string | null;
+  subtype: string | null;
   area_m2: number | null;
   price_czk: number | null;
   mf_gross_yield_pct: number | null;
