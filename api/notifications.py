@@ -93,10 +93,14 @@ class WatchdogFilterSpec(BaseModel):
     of the three drops the spatial clause entirely.
     """
 
-    # Category coords — defaults match the Browse defaults so a
-    # blank-save watchdog already targets "apartments for rent" rather
-    # than every category in the database.
-    category_main: str | None = "byt"
+    # Category. `category_type` (deal type) stays single-valued — rent and
+    # sale are different price scales, so Browse keeps it an exclusive pill;
+    # its default targets "for rent" so a blank-save watchdog isn't every
+    # deal type. `category_main_in` is multi-select (a listing matches if
+    # its category_main is in the list); null = no constraint. Mirrors the
+    # Browse split (scalar category_type, multi category_main_in) and the
+    # dispositions / disposition_match precedent.
+    category_main_in: list[str] | None = None
     category_type: str | None = "pronajem"
     category_sub_cb: int | None = None
 
@@ -218,11 +222,33 @@ class WatchdogFilterSpec(BaseModel):
     near_overall_5km_min: float | None = None
     near_overall_15km_min: float | None = None
 
-    @field_validator("furnished", "ownership", mode="before")
+    @field_validator(
+        "furnished", "ownership", "category_main_in", mode="before"
+    )
     @classmethod
     def _wrap_bare_str(cls, v: Any) -> Any:
         """Accept a bare string (legacy single-select callers) as [string]."""
         return [v] if isinstance(v, str) else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_category_main(cls, data: Any) -> Any:
+        """Lift a legacy scalar `category_main` key (specs saved before the
+        scalar→multiselect split) onto `category_main_in`, so existing
+        watchdogs keep their category constraint instead of silently
+        widening to "any category" on load."""
+        if not isinstance(data, dict):
+            return data
+        if "category_main_in" not in data and "category_main" in data:
+            legacy = data.get("category_main")
+            if legacy is not None:
+                data = {
+                    **data,
+                    "category_main_in": (
+                        [legacy] if isinstance(legacy, str) else legacy
+                    ),
+                }
+        return data
 
     @model_validator(mode="after")
     def _spatial_all_or_none(self) -> "WatchdogFilterSpec":
@@ -248,9 +274,9 @@ def _build_match_clauses(
     where: list[str] = []
     params: dict[str, Any] = {}
 
-    if spec.category_main is not None:
-        where.append("l.category_main = %(category_main)s")
-        params["category_main"] = spec.category_main
+    if spec.category_main_in:
+        where.append("l.category_main = ANY(%(category_main_in)s)")
+        params["category_main_in"] = list(spec.category_main_in)
     if spec.category_type is not None:
         where.append("l.category_type = %(category_type)s")
         params["category_type"] = spec.category_type

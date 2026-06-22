@@ -695,16 +695,40 @@ def _build_registry() -> dict[str, FilterDef]:
             pg_column="category_main",
             default="byt",
             description=(
-                "Top-level sreality category. `byt` = apartments, "
-                "`dum` = houses, `komercni` = commercial. "
-                "`pozemek` (land) and `ostatni` (other) exist in the "
-                "data but the app's downstream surfaces target the "
-                "first three."
+                "Top-level sreality category, as a SINGLE value. `byt` = "
+                "apartments, `dum` = houses, `komercni` = commercial, "
+                "`pozemek` = land, `ostatni` = other. This scalar form is "
+                "the analytical anchor: an estimate / comparable cohort is "
+                "for exactly one category. Browse + Watchdog use the "
+                "multi-select `category_main_in` instead."
             ),
             category=CATEGORY_PROPERTY,
             ui_control=UiControl.PILL_GROUP,
-            agendas=_ALL_AGENDAS,
+            # Scalar form is analytical-only; the UI surfaces use
+            # `category_main_in` (multi-select). See that FilterDef.
+            agendas=_ALL_AGENDAS - _UI_AGENDAS,
             constraints={"enum": [o.value for o in CATEGORY_MAIN_OPTIONS]},
+            enum_values=CATEGORY_MAIN_OPTIONS,
+        ),
+        FilterDef(
+            id="category_main_in",
+            type=FilterType.STRING_LIST,
+            pg_column="category_main",
+            default=None,
+            description=(
+                "Multi-select top-level category for Browse + Watchdog "
+                "cohorts: a listing matches if its `category_main` is in the "
+                "list (`byt` apartments, `dum` houses, `komercni` commercial, "
+                "`pozemek` land, `ostatni` other). Empty list / null = no "
+                "constraint. The analytical surfaces (comparables / "
+                "estimation / velocity / neighborhood) use the SCALAR "
+                "`category_main` instead — an estimate is for one property of "
+                "one category, so a multi-value category is meaningless there. "
+                "Mirrors the dispositions / disposition_match split."
+            ),
+            category=CATEGORY_PROPERTY,
+            ui_control=UiControl.MULTISELECT,
+            agendas=frozenset({Agenda.BROWSE, Agenda.WATCHDOG}),
             enum_values=CATEGORY_MAIN_OPTIONS,
         ),
         FilterDef(

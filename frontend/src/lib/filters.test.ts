@@ -107,7 +107,7 @@ describe('URL round-trip', () => {
   it('round-trips the subtype multi-select', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,
-      categoryMain: 'dum',
+      categoryMain: ['dum'],
       subtype: ['rodinny_dum', 'vila'],
     };
     const round = fromSearchParams(toSearchParams(f));
@@ -336,13 +336,14 @@ describe('listingFiltersToRegistryView', () => {
       ...DEFAULT_FILTERS,
       priceMin: 10_000,
       priceMax: null,
-      categoryMain: 'dum',
+      categoryMain: ['dum'],
       status: 'active',
     };
     const view = listingFiltersToRegistryView(f);
     expect(view.min_price_czk).toBe(10_000);
     expect(view.max_price_czk).toBeNull();
-    expect(view.category_main).toBe('dum');
+    // category is multi-select now: array coerces to itself (empty -> null).
+    expect(view.category_main_in).toEqual(['dum']);
     expect(view.status).toBe('active');
   });
 });
@@ -448,13 +449,13 @@ describe('filtersToWatchdogSpec', () => {
   it('maps category, dispositions and district chips', () => {
     const f: ListingFilters = {
       ...DEFAULT_FILTERS,
-      categoryMain: 'byt',
+      categoryMain: ['byt', 'dum'],
       categoryType: 'prodej',
       dispositions: ['2+kk', '2+1'],
       districts: [{ name: 'Jihlava', context: null }],
     };
     const { spec } = filtersToWatchdogSpec(f);
-    expect(spec.category_main).toBe('byt');
+    expect(spec.category_main_in).toEqual(['byt', 'dum']);
     expect(spec.category_type).toBe('prodej');
     expect(spec.dispositions).toEqual(['2+kk', '2+1']);
     expect(spec.districts).toEqual([{ name: 'Jihlava', context: null }]);
@@ -556,7 +557,7 @@ describe('watchdogNameSuggestion', () => {
     expect(
       watchdogNameSuggestion({
         ...DEFAULT_FILTERS,
-        categoryMain: 'byt',
+        categoryMain: ['byt', 'dum'],
         categoryType: 'prodej',
         dispositions: ['2+kk', '2+1'],
         districts: [
@@ -564,7 +565,7 @@ describe('watchdogNameSuggestion', () => {
           { name: 'Havlíčkův Brod', context: null },
         ],
       }),
-    ).toBe('byt prodej · 2+kk, 2+1 · Jihlava, Havlíčkův Brod');
+    ).toBe('byt+dum prodej · 2+kk, 2+1 · Jihlava, Havlíčkův Brod');
   });
 
   it('falls back to just the category when nothing else is set', () => {
@@ -639,7 +640,7 @@ describe('filter presets', () => {
       filters: { priceMin: 1000 } as unknown as ListingFilters,
     });
     // Missing fields fall back to defaults, so toSearchParams won't throw.
-    expect(got.filters.categoryMain).toBe('byt');
+    expect(got.filters.categoryMain).toEqual(['byt']);
     expect(got.filters.priceMin).toBe(1000);
     expect(got.sort).toBeNull();
   });
@@ -666,10 +667,13 @@ describe('filter presets', () => {
     expect(got.sort).toBe('-mf_gross_yield_pct');
   });
 
-  it('readPresetSpec drops a stale array value where the field is now scalar', () => {
-    const stale = { ...DEFAULT_FILTERS, categoryMain: ['byt'] } as unknown as ListingFilters;
+  it('readPresetSpec lifts a legacy scalar categoryMain to an array', () => {
+    // categoryMain went scalar -> array (multiselect). A preset saved with the
+    // old scalar "dum" must keep its category, lifted to ["dum"], not reset to
+    // the default — the migration shim in coerceStoredFilters.
+    const stale = { ...DEFAULT_FILTERS, categoryMain: 'dum' } as unknown as ListingFilters;
     const got = readPresetSpec(stale);
-    // categoryMain is scalar; an array drifted-in value falls back to default.
-    expect(got.filters.categoryMain).toBe('byt');
+    expect(got.filters.categoryMain).toEqual(['dum']);
+    expect(() => toSearchParams(got.filters)).not.toThrow();
   });
 });

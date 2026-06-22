@@ -88,7 +88,16 @@ const bandActive = (
   keys.some((k) => {
     const value = f[k];
     const def = DEFAULT_FILTERS[k];
-    if (Array.isArray(def)) return Array.isArray(value) && value.length > 0;
+    // Array fields are "active" when they differ from their default array
+    // (order-insensitive). Every array default is [] except categoryMain
+    // (['byt']) — for [] this reduces to the old "non-empty" check.
+    if (Array.isArray(def)) {
+      if (!Array.isArray(value)) return false;
+      return (
+        value.length !== def.length
+        || !def.every((d) => (value as unknown[]).includes(d))
+      );
+    }
     if (def === null) return value !== null && value !== undefined;
     return value !== def;
   });
@@ -117,10 +126,11 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
     ) {
       next = { ...next, mfGrossYieldPctMin: null, mfGrossYieldPctMax: null };
     }
-    // Subtype only applies to houses / commercial; clear it when leaving so a
-    // hidden, still-active filter never silently empties the cohort.
+    // Subtype only applies to houses / commercial; clear it when NONE of the
+    // selected categories is dum/komercni so a hidden, still-active filter
+    // never silently empties the cohort.
     if (
-      next.categoryMain !== 'dum' && next.categoryMain !== 'komercni' &&
+      !next.categoryMain.some((c) => c === 'dum' || c === 'komercni') &&
       next.subtype.length > 0
     ) {
       next = { ...next, subtype: [] };
@@ -181,9 +191,9 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
-              includeOnly={['category_main', 'category_type']}
+              includeOnly={['category_main_in', 'category_type']}
               labels={{
-                category_main: 'Type',
+                category_main_in: 'Type',
                 category_type: 'Listing for',
               }}
               flat
@@ -192,22 +202,31 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
 
           {/* Subtype sits directly under Type — it's a refinement of the
               chosen category (houses / commercial), so it belongs next to it
-              rather than further down the band. Only shown when relevant. */}
-          {(filters.categoryMain === 'dum' || filters.categoryMain === 'komercni') && (
-            <ControlGroup title="Subtype" bordered={false}>
-              <MultiselectChips
-                value={filters.subtype}
-                options={SUBTYPE_LABELS_BY_MAIN[filters.categoryMain].map((o) => ({
-                  value: o.slug,
-                  label: o.label,
-                }))}
-                onChange={(next) =>
-                  handleRegistryChange([{ id: 'subtype', value: next }])
-                }
-                cols={2}
-              />
-            </ControlGroup>
-          )}
+              rather than further down the band. Shown when ANY selected
+              category is dum/komercni; options union over those selected. */}
+          {(() => {
+            const subMains = filters.categoryMain.filter(
+              (c): c is 'dum' | 'komercni' => c === 'dum' || c === 'komercni',
+            );
+            if (subMains.length === 0) return null;
+            const seen = new Set<string>();
+            const options = subMains
+              .flatMap((c) => SUBTYPE_LABELS_BY_MAIN[c])
+              .filter((o) => (seen.has(o.slug) ? false : (seen.add(o.slug), true)))
+              .map((o) => ({ value: o.slug, label: o.label }));
+            return (
+              <ControlGroup title="Subtype" bordered={false}>
+                <MultiselectChips
+                  value={filters.subtype}
+                  options={options}
+                  onChange={(next) =>
+                    handleRegistryChange([{ id: 'subtype', value: next }])
+                  }
+                  cols={2}
+                />
+              </ControlGroup>
+            );
+          })()}
 
           <ControlGroup title="Status" bordered={false}>
             <FilterForm

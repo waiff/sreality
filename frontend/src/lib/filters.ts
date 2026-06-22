@@ -8,14 +8,16 @@ import { fmtArea } from './format';
 export type TriState = 'any' | 'yes' | 'no';
 export type ListingStatus = 'active' | 'inactive' | 'any';
 
-/* The three category_main values surfaced as filters in the UI. The DB
- * also stores 'pozemek' (land) and 'ostatni' (other), but the scrape /
- * toolkit only target the apartments / houses / commercial trio. */
-export type CategoryMain = 'byt' | 'dum' | 'komercni';
+/* All five category_main values. Browse + Watchdog MULTISELECT them
+ * (`ListingFilters.categoryMain` is an array, wired to the registry's
+ * `category_main_in` filter); the analytical surfaces still anchor a cohort
+ * to ONE category via the scalar `category_main` filter. */
+export type CategoryMain = 'byt' | 'dum' | 'komercni' | 'pozemek' | 'ostatni';
 
-/* CHECK constraint on listings.category_type allows pronajem / prodej /
- * drazba / podil; only the first two are user-facing in Browse. */
-export type CategoryType = 'pronajem' | 'prodej';
+/* CHECK constraint on listings.category_type allows all four. Deal-type stays
+ * SINGLE-select in Browse — rent (monthly Kč) and sale (total Kč) are different
+ * price scales, so mixing them would make the price tooling cross-scale. */
+export type CategoryType = 'pronajem' | 'prodej' | 'drazba' | 'podil';
 
 /* Building material buckets surfaced in the filter panel. Maps to
  * one or more sreality building_type values via BUILDING_MATERIAL_VALUES
@@ -130,7 +132,10 @@ export interface PriceGrowthRule {
 }
 
 export interface ListingFilters {
-  categoryMain: CategoryMain;
+  /* Multi-select (Browse + Watchdog): a property matches if its category_main
+   * is in the list. Default ['byt']; empty [] = no category constraint. */
+  categoryMain: CategoryMain[];
+  /* Single-select deal type (rent / sale / auction / fractional). */
   categoryType: CategoryType;
   districts: DistrictChip[];
   dispositions: Disposition[];
@@ -256,7 +261,7 @@ export interface ListingFilters {
 }
 
 export const DEFAULT_FILTERS: ListingFilters = {
-  categoryMain: 'byt',
+  categoryMain: ['byt'],
   categoryType: 'pronajem',
   districts: [],
   dispositions: [],
@@ -376,8 +381,15 @@ const CONDITION_VALUES: ReadonlyArray<string> = [
   'novostavba', 'po_rekonstrukci', 'velmi_dobry',
   'dobry', 'pred_rekonstrukci', 'k_demolici',
 ];
-const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = ['byt', 'dum', 'komercni'];
-const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = ['pronajem', 'prodej'];
+const CATEGORY_MAIN_VALUES: ReadonlyArray<CategoryMain> = [
+  'byt', 'dum', 'komercni', 'pozemek', 'ostatni',
+];
+/* The single-element default cohort. `cat` is omitted from the URL when the
+ * selection equals this, and emitted as an empty `cat=` token for [] (all). */
+const DEFAULT_CATEGORY_MAIN: ReadonlyArray<CategoryMain> = ['byt'];
+const CATEGORY_TYPE_VALUES: ReadonlyArray<CategoryType> = [
+  'pronajem', 'prodej', 'drazba', 'podil',
+];
 const BUILDING_MATERIAL_VALUES: ReadonlyArray<BuildingMaterial> = [
   'cihla', 'panel', 'smisena', 'ostatni',
 ];
@@ -505,7 +517,13 @@ export const fromSearchParams = (sp: URLSearchParams): ListingFilters => {
   /* Legacy ?active=0 from pre-status-enum URLs. The newer ?status= wins. */
   const legacyStatus: ListingStatus = sp.get('active') === '0' ? 'any' : 'any';
   return {
-    categoryMain: enumOr(sp.get('cat'), CATEGORY_MAIN_VALUES, 'byt'),
+    /* Absent `cat` = the default cohort (['byt']); an empty `cat=` token =
+     * the deliberate "all categories" ([]). Otherwise CSV, filtered to the
+     * known set (so an old ?cat=dum still parses, and junk is dropped). */
+    categoryMain: sp.get('cat') == null
+      ? [...DEFAULT_CATEGORY_MAIN]
+      : splitCsv(sp.get('cat')).filter((c): c is CategoryMain =>
+          (CATEGORY_MAIN_VALUES as ReadonlyArray<string>).includes(c)),
     categoryType: enumOr(sp.get('deal'), CATEGORY_TYPE_VALUES, 'pronajem'),
     districts: parseDistrictChips(
       sp.get('districts'),
@@ -712,7 +730,12 @@ const fmtRange = (lo: number | null, hi: number | null): string =>
 
 export const toSearchParams = (f: ListingFilters): URLSearchParams => {
   const sp = new URLSearchParams();
-  if (f.categoryMain !== 'byt') sp.set('cat', f.categoryMain);
+  /* Emit `cat` whenever the set differs from the default ['byt'] — including
+   * the empty set ("all categories"), serialised as an empty `cat=` so a
+   * deliberate "all" round-trips distinctly from the omitted default. */
+  if (!(f.categoryMain.length === 1 && f.categoryMain[0] === 'byt')) {
+    sp.set('cat', f.categoryMain.join(','));
+  }
   if (f.categoryType !== 'pronajem') sp.set('deal', f.categoryType);
   if (f.districts.length) {
     sp.set('districts', joinCsv(f.districts.map((d) => d.name)));
@@ -844,15 +867,26 @@ const CATEGORY_MAIN_PLURAL: Record<CategoryMain, string> = {
   byt: 'apartments',
   dum: 'houses',
   komercni: 'commercial',
+  pozemek: 'land',
+  ostatni: 'other',
 };
+
+/* Join the multi-select category_main into a human label, e.g.
+ * ['byt','dum'] -> "apartments / houses". Empty = "listings" (no constraint). */
+const categoryMainLabel = (cats: ReadonlyArray<CategoryMain>): string =>
+  cats.length === 0
+    ? 'listings'
+    : cats.map((c) => CATEGORY_MAIN_PLURAL[c]).join(' / ');
 
 const CATEGORY_TYPE_LABEL: Record<CategoryType, string> = {
   pronajem: 'for rent',
   prodej: 'for sale',
+  drazba: 'at auction',
+  podil: 'fractional',
 };
 
 export const categoryHeading = (f: ListingFilters): string =>
-  `${CATEGORY_MAIN_PLURAL[f.categoryMain]} ${CATEGORY_TYPE_LABEL[f.categoryType]}`;
+  `${categoryMainLabel(f.categoryMain)} ${CATEGORY_TYPE_LABEL[f.categoryType]}`;
 
 /* Stable, order-independent serialization of the cohort-defining filters.
  * Reuses the canonical URL serializer (toSearchParams) and sorts the
@@ -894,7 +928,7 @@ const fmtDaysRange = (lo: number | null, hi: number | null): string => {
 export const summarise = (f: ListingFilters, count: number | null): string => {
   const bits: string[] = [];
   bits.push(f.status === 'active' ? 'active' : f.status === 'inactive' ? 'inactive' : 'all');
-  bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} ${CATEGORY_MAIN_PLURAL[f.categoryMain]}`);
+  bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} ${categoryMainLabel(f.categoryMain)}`);
   bits.push(CATEGORY_TYPE_LABEL[f.categoryType]);
   if (f.districts.length) {
     const shown = f.districts
@@ -925,7 +959,9 @@ export const summarise = (f: ListingFilters, count: number | null): string => {
  * "byt prodej · 2+kk, 2+1 · Jihlava, HB". Operator can overwrite it in the
  * Create-watchdog dialog. */
 export const watchdogNameSuggestion = (f: ListingFilters): string => {
-  const parts: string[] = [`${f.categoryMain} ${f.categoryType}`];
+  const parts: string[] = [
+    `${f.categoryMain.join('+') || 'vše'} ${f.categoryType}`,
+  ];
   if (f.dispositions.length) {
     parts.push(
       f.dispositions.slice(0, 4).join(', ')
@@ -988,7 +1024,16 @@ export const isDefault = (f: ListingFilters): boolean =>
   (Object.keys(DEFAULT_FILTERS) as Array<keyof ListingFilters>).every((k) => {
     const value = f[k];
     const def = DEFAULT_FILTERS[k];
-    if (Array.isArray(def)) return Array.isArray(value) && value.length === 0;
+    /* Array-valued fields are default iff they equal the default array
+     * (order-insensitive). Every array default is [] except categoryMain
+     * (['byt']) — for [] this reduces to the old "is empty" check. */
+    if (Array.isArray(def)) {
+      return (
+        Array.isArray(value)
+        && value.length === def.length
+        && def.every((d) => (value as unknown[]).includes(d))
+      );
+    }
     if (def === null) return value == null;
     return value === def;
   });
@@ -1032,8 +1077,13 @@ const coerceStoredFilters = (stored: unknown): ListingFilters => {
   const def = DEFAULT_FILTERS as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = { ...def };
   if (stored && typeof stored === 'object') {
-    for (const [k, v] of Object.entries(stored as Record<string, unknown>)) {
+    for (const [k, vRaw] of Object.entries(stored as Record<string, unknown>)) {
       if (!(k in def)) continue;
+      // Migration shim: categoryMain went scalar -> array. Lift an old stored
+      // scalar (e.g. "dum") to ["dum"] so a preset saved before the multiselect
+      // change keeps its category instead of silently reverting to ['byt'].
+      const v =
+        k === 'categoryMain' && typeof vRaw === 'string' ? [vRaw] : vRaw;
       // Array-vs-scalar mismatch ⇒ the field's type evolved; keep the default.
       if (Array.isArray(def[k]) !== Array.isArray(v)) continue;
       out[k] = v;
@@ -1094,7 +1144,7 @@ export const filtersEqualForPreset = (
  *  of the Browse filter set (e.g. `radius_m` and `area_band_pct` are
  *  cohort-tuning knobs that don't surface on Browse). */
 export const REGISTRY_KEY_MAP = {
-  category_main: 'categoryMain',
+  category_main_in: 'categoryMain',
   category_type: 'categoryType',
   category_sub_cb: 'categorySubCb',
   subtype: 'subtype',
@@ -1187,7 +1237,8 @@ export function listingFiltersToRegistryView(
     } else if (registryId === 'tags') {
       out[registryId] = (v as number[]).length === 0 ? null : v;
     } else if (
-      registryId === 'dispositions'
+      registryId === 'category_main_in'
+      || registryId === 'dispositions'
       || registryId === 'districts'
       || registryId === 'condition_match'
       || registryId === 'furnished'
@@ -1224,6 +1275,10 @@ export function applyRegistryUpdate(
   if (id === 'tags') {
     const next = value == null ? [] : (value as number[]);
     return { ...filters, tags: next };
+  }
+  if (id === 'category_main_in') {
+    const next = value == null ? [] : (value as CategoryMain[]);
+    return { ...filters, categoryMain: next };
   }
   if (id === 'dispositions') {
     const next = value == null ? [] : (value as Disposition[]);
@@ -1351,7 +1406,7 @@ export function filtersToWatchdogSpec(
 
   const spec: WatchdogFilterSpec = {
     ...DEFAULT_WATCHDOG_FILTER_SPEC,
-    category_main: f.categoryMain,
+    category_main_in: arr(f.categoryMain),
     category_type: f.categoryType,
     category_sub_cb: f.categorySubCb,
     subtype: arr(f.subtype),

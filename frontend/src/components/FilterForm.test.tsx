@@ -28,13 +28,15 @@ describe('<FilterForm>', () => {
         scope="browse"
         state={{}}
         onChange={vi.fn()}
-        includeOnly={['category_main']}
+        includeOnly={['category_type']}
         flat
       />,
     );
-    // category_main is a PILL_GROUP with the four registry options;
-    // at least one of them should appear as a button.
-    expect(screen.getByRole('button', { name: 'Byty' })).toBeInTheDocument();
+    // category_type is a PILL_GROUP with the four registry options;
+    // at least one of them should appear as a button. (category_main is now
+    // a multiselect scoped off the browse agenda, so it's no longer the
+    // representative pill_group here.)
+    expect(screen.getByRole('button', { name: 'Pronájem' })).toBeInTheDocument();
   });
 
   it('honours the includeOnly slice', () => {
@@ -43,7 +45,7 @@ describe('<FilterForm>', () => {
         scope="browse"
         state={{}}
         onChange={vi.fn()}
-        includeOnly={['category_main']}
+        includeOnly={['category_type']}
         flat
       />,
     );
@@ -91,21 +93,21 @@ describe('<FilterForm>', () => {
     render(
       <FilterForm
         scope="browse"
-        state={{ category_main: 'byt' }}
+        state={{ category_type: 'pronajem' }}
         onChange={onChange}
-        includeOnly={['category_main']}
+        includeOnly={['category_type']}
         flat
       />,
     );
-    const byt = screen.getByRole('button', { name: 'Byty' });
-    expect(byt).toHaveAttribute('aria-pressed', 'true');
-    const dum = screen.getByRole('button', { name: 'Domy' });
-    fireEvent.click(dum);
+    const rent = screen.getByRole('button', { name: 'Pronájem' });
+    expect(rent).toHaveAttribute('aria-pressed', 'true');
+    const sale = screen.getByRole('button', { name: 'Prodej' });
+    fireEvent.click(sale);
     // Single-filter updates ship as one-element arrays — the batching
     // shape is uniform across single + paired emissions so the parent
     // can always apply them atomically.
     expect(onChange).toHaveBeenCalledWith([
-      { id: 'category_main', value: 'dum' },
+      { id: 'category_type', value: 'prodej' },
     ]);
   });
 
@@ -179,19 +181,19 @@ describe('<FilterForm>', () => {
     render(
       <FilterForm
         scope="browse"
-        state={{ category_main: 'byt' }}
+        state={{ category_type: 'pronajem' }}
         onChange={vi.fn()}
-        includeOnly={['category_main']}
+        includeOnly={['category_type']}
         visibility={[
           {
-            id: 'category_main',
+            id: 'category_type',
             visibility: { browse: false, watchdog: true },
           },
         ]}
         flat
       />,
     );
-    expect(screen.queryByRole('button', { name: 'Byty' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Pronájem' })).not.toBeInTheDocument();
   });
 
   /* Stateful harness mirroring how Browse / WatchdogEdit feed updates

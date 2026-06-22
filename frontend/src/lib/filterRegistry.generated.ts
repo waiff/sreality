@@ -573,17 +573,15 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
       "type": "string",
       "pg_column": "category_main",
       "default": "byt",
-      "description": "Top-level sreality category. `byt` = apartments, `dum` = houses, `komercni` = commercial. `pozemek` (land) and `ostatni` (other) exist in the data but the app's downstream surfaces target the first three.",
+      "description": "Top-level sreality category, as a SINGLE value. `byt` = apartments, `dum` = houses, `komercni` = commercial, `pozemek` = land, `ostatni` = other. This scalar form is the analytical anchor: an estimate / comparable cohort is for exactly one category. Browse + Watchdog use the multi-select `category_main_in` instead.",
       "category": "Property",
       "ui_control": "pill_group",
       "agendas": [
-        "browse",
         "comparables",
         "defaults",
         "estimation",
         "neighborhood",
-        "velocity",
-        "watchdog"
+        "velocity"
       ],
       "constraints": {
         "enum": [
@@ -594,6 +592,49 @@ export const FILTER_REGISTRY: FilterRegistryPayload = {
           "ostatni"
         ]
       },
+      "unit": null,
+      "enum_values": [
+        {
+          "value": "byt",
+          "label_cs": "Byty",
+          "label_en": "Apartments"
+        },
+        {
+          "value": "dum",
+          "label_cs": "Domy",
+          "label_en": "Houses"
+        },
+        {
+          "value": "komercni",
+          "label_cs": "Komerční",
+          "label_en": "Commercial"
+        },
+        {
+          "value": "pozemek",
+          "label_cs": "Pozemky",
+          "label_en": "Land"
+        },
+        {
+          "value": "ostatni",
+          "label_cs": "Ostatní",
+          "label_en": "Other"
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "id": "category_main_in",
+      "type": "string_list",
+      "pg_column": "category_main",
+      "default": null,
+      "description": "Multi-select top-level category for Browse + Watchdog cohorts: a listing matches if its `category_main` is in the list (`byt` apartments, `dum` houses, `komercni` commercial, `pozemek` land, `ostatni` other). Empty list / null = no constraint. The analytical surfaces (comparables / estimation / velocity / neighborhood) use the SCALAR `category_main` instead — an estimate is for one property of one category, so a multi-value category is meaningless there. Mirrors the dispositions / disposition_match split.",
+      "category": "Property",
+      "ui_control": "multiselect",
+      "agendas": [
+        "browse",
+        "watchdog"
+      ],
+      "constraints": null,
       "unit": null,
       "enum_values": [
         {

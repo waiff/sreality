@@ -281,7 +281,9 @@ const OWNERSHIP_TEXT: Record<string, string> = {
 
 function summariseFilter(spec: WatchdogFilterSpec): string {
   const bits: string[] = [];
-  const cat = spec.category_main ?? 'any category';
+  const cat = spec.category_main_in && spec.category_main_in.length
+    ? spec.category_main_in.join(', ')
+    : 'any category';
   const deal = spec.category_type ?? 'any deal';
   bits.push(`${cat} / ${deal}`);
   if (spec.dispositions && spec.dispositions.length) {

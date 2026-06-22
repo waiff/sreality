@@ -31,7 +31,7 @@ describe('browseFiltersForArea', () => {
       categoryType: 'prodej',
       disposition: '2+1',
     });
-    expect(f.categoryMain).toBe('byt');
+    expect(f.categoryMain).toEqual(['byt']);
     expect(f.categoryType).toBe('prodej');
     expect(f.dispositions).toEqual(['2+1']);
     expect(f.locationMode).toBe('viewport');
@@ -46,18 +46,28 @@ describe('browseFiltersForArea', () => {
       categoryType: 'prodej',
       disposition: null,
     });
-    expect(f.categoryMain).toBe('dum');
+    expect(f.categoryMain).toEqual(['dum']);
     expect(f.dispositions).toEqual([]);
   });
 
-  it('falls back to the default category for non-UI categories (pozemek)', () => {
+  it('seeds pozemek now that Browse supports all five categories', () => {
     const f = browseFiltersForArea({
       ...TREBIC,
       categoryMain: 'pozemek',
       categoryType: 'prodej',
       disposition: null,
     });
-    expect(f.categoryMain).toBe(DEFAULT_FILTERS.categoryMain);
+    expect(f.categoryMain).toEqual(['pozemek']);
+  });
+
+  it('falls back to the default category for an unknown category', () => {
+    const f = browseFiltersForArea({
+      ...TREBIC,
+      categoryMain: 'spaceship',
+      categoryType: 'prodej',
+      disposition: null,
+    });
+    expect(f.categoryMain).toEqual(DEFAULT_FILTERS.categoryMain);
   });
 });
 
@@ -76,7 +86,7 @@ describe('browseUrlFromState ↔ fromSearchParams round-trip', () => {
       overlay: DEFAULT_OVERLAY,
     });
     const parsed = fromSearchParams(new URLSearchParams(url.split('?')[1]));
-    expect(parsed.categoryMain).toBe('byt');
+    expect(parsed.categoryMain).toEqual(['byt']);
     expect(parsed.categoryType).toBe('prodej');
     expect(parsed.dispositions).toEqual(['3+kk']);
     // bbox serialises at 5-decimal precision
