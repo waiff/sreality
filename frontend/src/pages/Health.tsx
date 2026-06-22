@@ -454,6 +454,7 @@ function PortalGroupCard({
         <div className="border-t border-[var(--color-rule-soft)] px-4 py-3 space-y-2">
           {scraper && scraperHasActivity(scraper) ? (
             <>
+              <CoverageLine scraper={scraper} />
               <Disclosure label="Listings by category · reconciliation">
                 <CategoryTable
                   source={scraper.source}
@@ -489,6 +490,27 @@ function PortalGroupCard({
         </div>
       )}
     </section>
+  );
+}
+
+/* Active-listing data-quality coverage (migration 219) — informational, not a
+ * pass/warn/fail check. `dedup-ready` = street AND disposition, the share of a
+ * portal's active listings eligible for cross-portal dedup (rule #15); a portal
+ * shipping near-0% street would otherwise sit invisibly green (field_null_drift
+ * only watches same-day deltas, so a persistent gap never "drifts"). */
+function CoverageLine({ scraper }: { scraper: PortalHealth }) {
+  const pct = (v: number | null): string => (v == null ? '—' : `${v}%`);
+  return (
+    <div className="flex items-center gap-x-4 gap-y-1 flex-wrap text-xs px-1 pb-1">
+      <span className="text-[0.6rem] tracking-[0.14em] uppercase text-[var(--color-ink-3)]">
+        Data coverage
+      </span>
+      <Inline label="geo" value={pct(scraper.geo_pct)} />
+      <Inline label="street" value={pct(scraper.street_pct)} />
+      <span title="Share of active listings with BOTH a parsed street and disposition — the gate for cross-portal dedup (rule #15).">
+        <Inline label="dedup-ready" value={pct(scraper.dedup_eligible_pct)} />
+      </span>
+    </div>
   );
 }
 
