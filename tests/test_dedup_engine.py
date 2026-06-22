@@ -14,12 +14,16 @@ from typing import Any
 import pytest
 
 from toolkit.dedup_engine import (
+    ADDRESS_AREA_GUARD_PCT,
+    CANDIDATE_AREA_MAX_PCT,
     ListingKey,
+    MatchProfile,
     classify_pair,
     decide_phash_fastpath,
     decide_visual_dismiss,
     disposition_compatible,
     normalize_street,
+    profile_for,
     rooms_in_priority,
     street_group_keys,
     verdict_is_merge,
@@ -327,6 +331,73 @@ def test_missing_floor_on_one_side_is_candidate_not_merge() -> None:
     # no exact-address merge without floor on both; not a contradiction either
     d = classify_pair(_key(1, floor=None), _key(2, floor=3))
     assert d.action == "candidate"
+
+
+# --- MatchProfile: per-category matching policy -----------------------------
+
+def test_profile_for_known_families() -> None:
+    assert profile_for("byt").family == "byt"
+    assert profile_for("dum").family == "dum"
+    assert profile_for("pozemek").family == "pozemek"
+    assert profile_for("komercni").family == "komercni"
+    assert profile_for("ostatni").family == "ostatni"
+
+
+def test_profile_for_null_or_unknown_is_byt() -> None:
+    # A row with no/unknown category must behave exactly as the legacy engine.
+    assert profile_for(None) is profile_for("byt")
+    assert profile_for("") is profile_for("byt")
+    assert profile_for("garaz").family == "byt"
+
+
+def test_byt_profile_reproduces_legacy_constants() -> None:
+    # The byt profile IS today's behavior: same area guards, disposition mandatory,
+    # street-blocked (not geo), never geo-auto-merges. This is why landing the
+    # abstraction is byte-identical for apartments (and NULL-category rows).
+    byt = profile_for("byt")
+    assert byt.disposition_required is True
+    assert byt.address_area_guard_pct == ADDRESS_AREA_GUARD_PCT
+    assert byt.candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT
+    assert byt.geo_blocked is False
+    assert byt.geo_auto_merge_allowed is False
+
+
+def test_single_dwelling_profiles_drop_disposition_and_geo_block() -> None:
+    # Houses/land/commercial have no usable disposition → it is not a matching key,
+    # and they route through the (P1) geo-cell block instead of street-only.
+    for fam in ("dum", "pozemek", "komercni", "ostatni"):
+        p = profile_for(fam)
+        assert p.disposition_required is False, fam
+        assert p.geo_blocked is True, fam
+
+
+def test_only_houses_geo_auto_merge_and_always_behind_dev_guard() -> None:
+    # Operator policy: houses may auto-merge (coord+area+price, validated 83.5%
+    # same-price) but ONLY with the same-development guard; land/commercial/other
+    # are queue-only (weaker signal) until a human confirms.
+    dum = profile_for("dum")
+    assert dum.geo_auto_merge_allowed is True
+    assert dum.requires_development_guard is True
+    for fam in ("pozemek", "komercni", "ostatni"):
+        assert profile_for(fam).geo_auto_merge_allowed is False, fam
+
+
+def test_match_profile_is_frozen() -> None:
+    with pytest.raises(Exception):
+        profile_for("byt").disposition_required = False  # type: ignore[misc]
+
+
+def test_classify_pair_still_requires_disposition_for_byt() -> None:
+    # Dark-landing guard: the profile path must NOT relax disposition for apartments
+    # (profile_for('byt').disposition_required is True), so a missing disposition on
+    # one side still rejects exactly as the legacy engine did.
+    d = classify_pair(_key(1, disp="2+kk"), _key(2, disp=None))
+    assert d.action == "reject"
+    assert d.detail == "disposition_mismatch"
+
+
+def test_match_profile_is_a_dataclass_type() -> None:
+    assert isinstance(profile_for("byt"), MatchProfile)
 
 
 # --- rule D helpers ---------------------------------------------------------

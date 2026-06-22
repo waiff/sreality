@@ -55,6 +55,82 @@ ROOM_PRIORITY: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class MatchProfile:
+    """Per-category matching policy — the seam that makes the engine category-aware.
+
+    The street+disposition rules this module grew up on are the `byt` (apartment)
+    profile. Single-dwelling families (dum/pozemek/komercni/ostatni) have NO usable
+    disposition — it is an apartment-shaped token (`2+kk`), ~0% present for them — so
+    they must key on the coordinate + area instead. The flags are DATA, one profile per
+    family, so a category's policy is a profile row, never an `if category ==` branch.
+
+    `classify_pair` (pure, street-path) consumes `disposition_required` + the two area
+    guards. The orchestrator (P1) consumes `geo_blocked` (block by geo cell vs street),
+    `geo_auto_merge_allowed` (may a coord+area(+price) match auto-merge this family), and
+    `requires_development_guard` (such an auto-merge needs the same-development guard).
+    """
+    family: str
+    disposition_required: bool
+    address_area_guard_pct: float
+    candidate_area_max_pct: float
+    geo_blocked: bool
+    geo_auto_merge_allowed: bool
+    requires_development_guard: bool
+
+
+# Apartments: disposition is the mandatory disambiguator (one building stacks many
+# units on one coordinate — coord alone would false-merge them), so byt keeps the
+# street block and NEVER geo-auto-merges. This is exactly today's behavior.
+_BYT_PROFILE = MatchProfile(
+    family="byt", disposition_required=True,
+    address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
+    candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
+    geo_blocked=False, geo_auto_merge_allowed=False, requires_development_guard=False,
+)
+# Houses: one dwelling per address, so coord + area (+ house number / price) identifies
+# the property; disposition is dropped. May geo-auto-merge — but only behind the
+# same-development guard (a new estate of near-identical houses must not collapse).
+_DUM_PROFILE = MatchProfile(
+    family="dum", disposition_required=False,
+    address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
+    candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
+    geo_blocked=True, geo_auto_merge_allowed=True, requires_development_guard=True,
+)
+# Land / commercial / other: coord+area is a weaker same-property signal (land shares
+# an exact price only ~58% of the time), so these are QUEUE-ONLY — geo blocking finds
+# the candidate, but a human confirms the merge. Never geo-auto-merge.
+_POZEMEK_PROFILE = MatchProfile(
+    family="pozemek", disposition_required=False,
+    address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
+    candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
+    geo_blocked=True, geo_auto_merge_allowed=False, requires_development_guard=True,
+)
+_KOMERCNI_PROFILE = MatchProfile(
+    family="komercni", disposition_required=False,
+    address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
+    candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
+    geo_blocked=True, geo_auto_merge_allowed=False, requires_development_guard=True,
+)
+_OSTATNI_PROFILE = MatchProfile(
+    family="ostatni", disposition_required=False,
+    address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
+    candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
+    geo_blocked=True, geo_auto_merge_allowed=False, requires_development_guard=True,
+)
+
+_PROFILES: dict[str, MatchProfile] = {
+    "byt": _BYT_PROFILE, "dum": _DUM_PROFILE, "pozemek": _POZEMEK_PROFILE,
+    "komercni": _KOMERCNI_PROFILE, "ostatni": _OSTATNI_PROFILE,
+}
+
+
+def profile_for(category_main: str | None) -> MatchProfile:
+    """The MatchProfile for a category. Unknown / NULL → the byt profile, so a row
+    with no category behaves exactly as the street+disposition engine always has."""
+    return _PROFILES.get(category_main or "", _BYT_PROFILE)
+
+
+@dataclass(frozen=True)
 class ListingKey:
     """The matchable identity of one eligible listing."""
     sreality_id: int
@@ -298,8 +374,17 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
         and a.category_main != b.category_main
     ):
         return PairDecision("reject", None, "category_main_contradiction")
-    if not disposition_compatible(a.disposition, b.disposition):
-        return PairDecision("reject", None, "disposition_mismatch")
+    # Category drives the matching policy. The pair shares a category_main here (the
+    # contradiction above rejected mismatches), so either side's family is the profile;
+    # a NULL/unknown category falls back to the byt profile (unchanged behavior).
+    profile = profile_for(a.category_main if a.category_main is not None else b.category_main)
+    # Disposition is mandatory for apartments; for single-dwelling families it's absent,
+    # so only enforce compatibility when the profile requires it OR both rows carry one.
+    if profile.disposition_required or (
+        a.disposition is not None and b.disposition is not None
+    ):
+        if not disposition_compatible(a.disposition, b.disposition):
+            return PairDecision("reject", None, "disposition_mismatch")
 
     # Rule C hard disqualifiers (apply to BOTH the exact-address and candidate
     # paths — a contradiction means "not the same property", full stop).
@@ -319,7 +404,7 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
     if _house_numbers_contradict(a.house_number, b.house_number):
         return PairDecision("reject", None, "house_number_contradiction")
     area_diff = _area_pct_diff(a.area_m2, b.area_m2)
-    if area_diff is not None and area_diff > CANDIDATE_AREA_MAX_PCT:
+    if area_diff is not None and area_diff > profile.candidate_area_max_pct:
         return PairDecision("reject", None, "area_contradiction")
     # Distinct units of one development (pozemek č.3 vs č.4, dům 3A vs 5C, …):
     # the descriptions name the same keyword with different unit tokens. The
@@ -338,7 +423,7 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
         and a.disposition == b.disposition
     )
     if exact_address:
-        if area_diff is not None and area_diff > ADDRESS_AREA_GUARD_PCT:
+        if area_diff is not None and area_diff > profile.address_area_guard_pct:
             # Same address+floor+disposition but materially different area: most
             # likely two distinct units — let vision settle it.
             return PairDecision("candidate", "area_guard")
