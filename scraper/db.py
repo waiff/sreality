@@ -218,6 +218,21 @@ def database_url() -> str:
     return url
 
 
+# libpq TCP keepalives. The detail drain holds one connection for the whole
+# --max-seconds budget (up to 40 min), idle during the rate-limited fetch waits;
+# the Supabase pooler silently drops such a connection and the next op (often the
+# teardown conn.close()) raises OperationalError. Keepalives keep the socket warm
+# and surface a dead peer fast instead of on a late write. Applied to every
+# connection for parity — harmless on short-lived ones.
+_KEEPALIVES: dict[str, int] = {
+    "keepalives": 1,
+    "keepalives_idle": 30,
+    "keepalives_interval": 10,
+    "keepalives_count": 5,
+    "tcp_user_timeout": 30000,
+}
+
+
 def connect(url: str | None = None) -> psycopg.Connection:
     """Open an autocommit connection. Callers manage transactions explicitly.
 
@@ -230,6 +245,7 @@ def connect(url: str | None = None) -> psycopg.Connection:
         url or database_url(),
         autocommit=True,
         prepare_threshold=None,
+        **_KEEPALIVES,
     )
 
 
@@ -249,7 +265,7 @@ def connect_session(url: str | None = None) -> psycopg.Connection:
     session_url = url or os.environ.get("SUPABASE_DB_SESSION_URL")
     if not session_url:
         return connect()
-    return psycopg.connect(session_url, autocommit=True)
+    return psycopg.connect(session_url, autocommit=True, **_KEEPALIVES)
 
 
 def upsert_listing(

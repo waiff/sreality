@@ -286,15 +286,24 @@ def run_detail_drain(
         if run_id is None:
             return
         new_d = counts["new"] - last_bumped["new"]
-        db.bump_scrape_run_counts(
-            conn, run_id,
-            found_new=new_d,
-            scraped_new=new_d,
-            updated=counts["updated"] - last_bumped["updated"],
-            inactive=counts["gone"] - last_bumped["gone"],
-            errors=counts["errors"] - last_bumped["errors"],
-            images_discovered=counts["images_discovered"] - last_bumped["images_discovered"],
-        )
+        try:
+            db.bump_scrape_run_counts(
+                conn, run_id,
+                found_new=new_d,
+                scraped_new=new_d,
+                updated=counts["updated"] - last_bumped["updated"],
+                inactive=counts["gone"] - last_bumped["gone"],
+                errors=counts["errors"] - last_bumped["errors"],
+                images_discovered=counts["images_discovered"] - last_bumped["images_discovered"],
+            )
+        except Exception as exc:
+            # Counts are bookkeeping, not the listing data (already committed by
+            # _flush_drain_batch). A transient pooler reset on this bump must not
+            # red a drain whose writes succeeded; the caller finalizes the
+            # scrape_run from the row's accumulated counters on a fresh
+            # connection regardless. Next bump's delta self-corrects.
+            LOG.warning("DRAIN counts bump failed (ignored): %r", exc)
+            return
         last_bumped.update(counts)
 
     try:
@@ -356,7 +365,18 @@ def run_detail_drain(
         _flush_drain_batch(portal, conn, buffer, counts, dry_run)
         _persist_counts()
     finally:
-        conn.close()
+        # Teardown must never red an otherwise-successful drain. The pooler can
+        # silently drop the long-held drain connection during the rate-limited
+        # fetch waits; closing the reset socket then raises OperationalError —
+        # which previously propagated to a non-zero exit even though every batch
+        # had committed and the caller had finalized the scrape_run cleanly
+        # (errors=0, ended_at set) on its own connection. Any claim not yet
+        # written stays claimed and is recovered by the next run's
+        # reclaim_stale_claims, so swallowing a close failure loses nothing.
+        try:
+            conn.close()
+        except Exception as exc:
+            LOG.warning("DRAIN teardown: conn.close() failed (ignored): %r", exc)
 
     LOG.info(
         "RUN done pages=0 new=%d updated=%d unchanged=%d gone=%d errors=%d claimed=%d",
