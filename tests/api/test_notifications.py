@@ -14,10 +14,12 @@ pytest.importorskip("pydantic")
 from api.notifications import WatchdogFilterSpec, _build_match_clauses
 
 
-def test_filter_spec_defaults_target_byt_pronajem() -> None:
-    """Blank-save watchdogs already target apartments-for-rent."""
+def test_filter_spec_defaults() -> None:
+    """category_main is multiselect now: a blank-save watchdog carries no
+    category_main constraint (matches every category). Deal type still
+    defaults to rent."""
     spec = WatchdogFilterSpec()
-    assert spec.category_main == "byt"
+    assert spec.category_main_in is None
     assert spec.category_type == "pronajem"
 
 
@@ -602,7 +604,9 @@ def test_match_once_uses_per_subscription_cursor() -> None:
     # `district_name_0` placeholder (matching browse_stats' migration
     # 069 predicate); the row's legacy string form is lifted by
     # `WatchdogFilterSpec._lift_legacy_districts` before SQL build.
-    assert params["category_main"] == "byt"
+    # The stored spec carries a legacy scalar category_main; the before-validator
+    # lifts it to category_main_in and the matcher emits an = ANY membership.
+    assert params["category_main_in"] == ["byt"]
     assert params["category_type"] == "pronajem"
     assert params["district_name_0"] == "%Praha%"
     assert "district_ctx_0" not in params  # null context = no narrow
