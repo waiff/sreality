@@ -33,12 +33,25 @@ P0 (this PR) is behavior-neutral scaffolding for that work:
   historical merges only ever touched apartments — so non-apartment recall isn't measurable yet;
   P2's operator review of geo candidates is the labeling loop that grows those classes.
 
-**Next (P1+):** geo-cell blocking (`ku_id`/`obec_id` + coord, never raw-coord — the apartment
-trap) + per-profile geo classification, queue-only first; calibrate against the golden set;
-flip `dum` auto-merge on behind the same-development guard; durable `property_identity_keys`
-signature + incremental resolver in `_attach_stragglers` to end the treadmill; extend `/dedup`
-to all categories + score-gate Browse merge-mode. Rewrite CLAUDE.md rule #15 (street+disposition
-is the byt profile, not the universal key).
+P1 (this PR) adds the **geo candidate generator** (dark/opt-in, queue-only):
+- `geo_cell_key` (obec_id + 4-dp coord + category + offering — admin-scoped, NEVER raw-coord, so
+  a same-coordinate collision across towns can't block together) + `classify_geo_pair`
+  (deterministic, no LLM: coord/house-number/area/unit-marker contradictions → reject; strong =
+  area ≤3% AND price-or-house#-match). `ListingKey` gained `lat`/`lng`/`price_czk`.
+- `scripts/dedup_engine.run_geo_candidates` — a SEPARATE pass (the byt street engine is untouched)
+  behind `--geo` / `--geo-only`; loads disposition-less single-dwelling listings the street pass
+  can't reach, blocks by geo cell, and QUEUES candidates (tier `geo_<family>`). `geo_auto_merge`
+  is hard-OFF in P1, so nothing auto-merges — it cannot false-merge. Not wired to cron yet.
+- Validated against prod (set-based replica): the pass would surface **~71k candidate property
+  pairs** (dum 25.8k / pozemek 22.4k / komercni 21.1k / ostatni 1.7k), ~47.7k of them "strong".
+  That volume is exactly why it ships dark — `/dedup` needs a category facet + bulk-approve first.
+
+**Next (P2+):** `/dedup` category facet + bulk-approve (the 71k can't be reviewed one-by-one) →
+calibrate the strong-house bucket against the golden set → flip `dum` auto-merge on behind the
+same-development guard (land/commercial stay queue-only) → durable `property_identity_keys`
+signature + incremental resolver in `_attach_stragglers` to end the treadmill → score-gate Browse
+merge-mode → wire the geo pass into `dedup_engine.yml`. Rewrite CLAUDE.md rule #15
+(street+disposition is the byt profile, not the universal key).
 
 ### 2026-06: Delivery UI — channel opt-in + recipient config (Sprint N PR 5)
 

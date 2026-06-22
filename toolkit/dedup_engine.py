@@ -27,6 +27,7 @@ orchestrator that feeds these and calls merge_properties / the vision tools.
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -152,6 +153,10 @@ class ListingKey:
     # grouping key this instance carries. Two known-but-different ids inside a
     # name group mean two distinct streets sharing a name — a hard reject.
     street_id: int | None = None
+    # Coordinate + price — the geo-path signals (the street path ignores these).
+    lat: float | None = None
+    lng: float | None = None
+    price_czk: int | None = None
 
 
 # Unit markers in the description that identify a SPECIFIC unit within one
@@ -431,6 +436,99 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
 
     # Rule C: shares street + disposition, no contradiction — a visual candidate.
     return PairDecision("candidate", None)
+
+
+# --- geo path: single-dwelling families (dum/pozemek/komercni/ostatni) -------
+# These have no usable disposition, so the matcher keys on the COORDINATE instead.
+# The orchestrator blocks pairs into a small geo cell (one obec + a rounded coord),
+# and classify_geo_pair is the per-pair decision INSIDE that cell. Deterministic, no
+# LLM. A geo cell at 4-dp precision spans ~11 m, so a same-cell pair is co-located by
+# construction; the haversine guard below is the precise backstop for cell-edge cases.
+GEO_MAX_COORD_M = 35.0
+GEO_STRONG_AREA_PCT = 0.03      # "same area" for the strong same-property signal
+GEO_PRICE_MATCH_PCT = 0.02      # asking prices this close count as the same price
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Great-circle distance in metres (in-memory pair check, not a DB query)."""
+    r = 6_371_000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(h))
+
+
+def geo_cell_key(
+    obec_id: int | None, lat: float | None, lng: float | None,
+    category_main: str | None, category_type: str | None, *, precision: int = 4,
+) -> str | None:
+    """Blocking key for the geo path: one municipality + a rounded coordinate + the
+    offering. Scoping by obec_id keeps a coordinate collision across towns apart, and
+    by (category_main, category_type) keeps a sale flat and a rental house out of one
+    cell. None when the coordinate / municipality is missing (the row can't geo-block)."""
+    if obec_id is None or lat is None or lng is None:
+        return None
+    return f"geo:{obec_id}:{round(lat, precision)}:{round(lng, precision)}:{category_main}:{category_type}"
+
+
+def _price_match(a: int | None, b: int | None, pct: float = GEO_PRICE_MATCH_PCT) -> bool:
+    if a is None or b is None or max(a, b) == 0:
+        return False
+    return abs(a - b) / max(a, b) <= pct
+
+
+def classify_geo_pair(
+    a: ListingKey, b: ListingKey, profile: MatchProfile, *, max_coord_m: float = GEO_MAX_COORD_M,
+) -> PairDecision:
+    """Decide two co-located single-dwelling listings (same geo cell). Pure, no images.
+
+    'reject' on a hard contradiction (coordinate too far, different house number, area
+    gap > the profile's max, or a same-development unit-marker clash); 'auto_merge' only
+    for a STRONG house signal (near-identical area AND matching price-or-house-number)
+    when the profile permits it; otherwise 'candidate'. The orchestrator decides whether
+    to honour an auto_merge (P1 keeps every family queue-only until the golden set
+    calibrates the threshold)."""
+    if a.sreality_id == b.sreality_id:
+        return PairDecision("reject", None, "same_listing")
+    if a.property_id is not None and a.property_id == b.property_id:
+        return PairDecision("reject", None, "already_merged")
+    if (
+        a.category_type is not None and b.category_type is not None
+        and a.category_type != b.category_type
+    ):
+        return PairDecision("reject", None, "category_type_contradiction")
+    if (
+        a.category_main is not None and b.category_main is not None
+        and a.category_main != b.category_main
+    ):
+        return PairDecision("reject", None, "category_main_contradiction")
+    if (
+        a.lat is not None and a.lng is not None and b.lat is not None and b.lng is not None
+        and _haversine_m(a.lat, a.lng, b.lat, b.lng) > max_coord_m
+    ):
+        return PairDecision("reject", None, "coord_too_far")
+    if _house_numbers_contradict(a.house_number, b.house_number):
+        return PairDecision("reject", None, "house_number_contradiction")
+    area_diff = _area_pct_diff(a.area_m2, b.area_m2)
+    if area_diff is not None and area_diff > profile.candidate_area_max_pct:
+        return PairDecision("reject", None, "area_contradiction")
+    # Same-development text guard (a new estate names "dům 3A" vs "5C", "pozemek č.3"
+    # vs "č.4"): distinct units, never the same property — reuse the street path's check.
+    if _unit_markers_contradict(a.description, b.description):
+        return PairDecision("reject", None, "unit_marker_contradiction")
+
+    house_no_match = (
+        a.house_number is not None and b.house_number is not None
+        and a.house_number.strip().lower() == b.house_number.strip().lower()
+    )
+    strong = (
+        area_diff is not None and area_diff <= GEO_STRONG_AREA_PCT
+        and (_price_match(a.price_czk, b.price_czk) or house_no_match)
+    )
+    if strong and profile.geo_auto_merge_allowed:
+        return PairDecision("auto_merge", "geo_exact")
+    return PairDecision("candidate", "geo_strong" if strong else "geo_weak")
 
 
 @dataclass
