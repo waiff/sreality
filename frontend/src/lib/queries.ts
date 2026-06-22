@@ -779,7 +779,7 @@ export const fetchBrowseStats = async (
   const growthObec = await resolvePriceGrowthPrefilter(f);
 
   const { data, error } = await supabase.rpc('browse_stats_properties', {
-    category_main_filter:    f.categoryMain,
+    category_main_filter:    f.categoryMain.length ? f.categoryMain : null,
     category_type_filter:    f.categoryType,
     districts_filter:        f.districts.length ? f.districts.map((d) => d.name) : null,
     districts_context_filter: f.districts.length

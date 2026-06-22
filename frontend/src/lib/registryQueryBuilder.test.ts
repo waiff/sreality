@@ -154,14 +154,14 @@ describe('auto-dispatch', () => {
     }
   });
 
-  it('emits eq with the value for single-value enum filters', () => {
+  it('emits in() for the multi-select category filter', () => {
     const r = new _Recorder();
     applyRegistryFilters(r, {
       ...DEFAULT_FILTERS,
-      categoryMain: 'dum',
+      categoryMain: ['byt', 'dum'],
     });
-    const eqs = r.calls.filter((c) => c.op === 'eq');
-    expect(eqs).toContainEqual({ op: 'eq', col: 'category_main', value: 'dum' });
+    const ins = r.calls.filter((c) => c.op === 'in');
+    expect(ins).toContainEqual({ op: 'in', col: 'category_main', value: ['byt', 'dum'] });
   });
 
   it('skips null-valued filters (no spurious clauses)', () => {

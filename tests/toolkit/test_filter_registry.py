@@ -349,3 +349,31 @@ def test_mf_gross_yield_filter_registered():
         assert f.agendas == frozenset({fr.Agenda.BROWSE, fr.Agenda.WATCHDOG})
         assert fr.Agenda.COMPARABLES not in f.agendas
         assert fr.Agenda.ESTIMATION not in f.agendas
+
+
+def test_category_main_multiselect_split():
+    """category_main is split like dispositions/disposition_match: the
+    multi-select `category_main_in` is Browse+Watchdog only, while the
+    scalar `category_main` is the analytical single-category anchor.
+
+    The two MUST NOT both reach a UI agenda (FilterForm would render two
+    category controls) nor both reach an analytical agenda (a list-valued
+    category would corrupt the comparable cohort)."""
+    multi = fr.REGISTRY["category_main_in"]
+    assert multi.pg_column == "category_main"
+    assert multi.type == fr.FilterType.STRING_LIST
+    assert multi.ui_control == fr.UiControl.MULTISELECT
+    assert multi.agendas == frozenset({fr.Agenda.BROWSE, fr.Agenda.WATCHDOG})
+    # STRING_LIST renders its enum under items.enum; a stray
+    # constraints['enum'] would also emit an invalid top-level enum.
+    assert not multi.constraints
+    assert multi.enum_values == fr.CATEGORY_MAIN_OPTIONS
+
+    scalar = fr.REGISTRY["category_main"]
+    assert scalar.type == fr.FilterType.STRING
+    assert fr.Agenda.BROWSE not in scalar.agendas
+    assert fr.Agenda.WATCHDOG not in scalar.agendas
+    assert fr.Agenda.COMPARABLES in scalar.agendas
+    assert fr.Agenda.ESTIMATION in scalar.agendas
+    # The two never co-occupy an agenda.
+    assert scalar.agendas.isdisjoint(multi.agendas)

@@ -168,7 +168,7 @@ export default function WatchdogEdit() {
             city_index_rules: CityIndexRulesPicker as never,
           }}
           labels={{
-            category_main: 'Category main',
+            category_main_in: 'Category',
             category_type: 'Deal',
             category_sub_cb: 'Subtype',
             dispositions: 'Dispositions',

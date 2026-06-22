@@ -34,13 +34,33 @@ def test_filter_spec_spatial_requires_all_three() -> None:
     assert s.lat == 50.0
 
 
-def test_build_clauses_emits_category_clauses_by_default() -> None:
+def test_build_clauses_default_category_main_unconstrained_type_rent() -> None:
+    # category_main is multiselect now; a blank spec carries no category_main
+    # constraint (matches every category). Deal type still defaults to rent.
     spec = WatchdogFilterSpec()
     where, params = _build_match_clauses(spec)
-    assert "l.category_main = %(category_main)s" in where
+    assert not any("l.category_main" in w for w in where)
+    assert "category_main_in" not in params
     assert "l.category_type = %(category_type)s" in where
-    assert params["category_main"] == "byt"
     assert params["category_type"] == "pronajem"
+
+
+def test_build_clauses_emits_category_main_in_membership() -> None:
+    spec = WatchdogFilterSpec(category_main_in=["byt", "dum"])
+    where, params = _build_match_clauses(spec)
+    assert "l.category_main = ANY(%(category_main_in)s)" in where
+    assert params["category_main_in"] == ["byt", "dum"]
+
+
+def test_build_clauses_migrates_legacy_scalar_category_main() -> None:
+    # Specs saved before the multiselect split carry a scalar "category_main"
+    # key; the before-validator lifts it to category_main_in so the saved
+    # watchdog keeps matching instead of silently widening to all categories.
+    spec = WatchdogFilterSpec(**{"category_main": "dum"})
+    assert spec.category_main_in == ["dum"]
+    where, params = _build_match_clauses(spec)
+    assert "l.category_main = ANY(%(category_main_in)s)" in where
+    assert params["category_main_in"] == ["dum"]
 
 
 def test_build_clauses_skips_unset_spatial() -> None:
@@ -422,11 +442,11 @@ def test_build_clauses_categoryless_spec() -> None:
     """An operator who explicitly clears the category filters gets a
     spec with no category WHERE clauses — the watchdog matches every
     category. Defaults narrow; explicit None widens."""
-    spec = WatchdogFilterSpec(category_main=None, category_type=None)
+    spec = WatchdogFilterSpec(category_main_in=None, category_type=None)
     where, params = _build_match_clauses(spec)
     assert not any("l.category_main" in w for w in where)
     assert not any("l.category_type" in w for w in where)
-    assert "category_main" not in params
+    assert "category_main_in" not in params
     assert "category_type" not in params
 
 

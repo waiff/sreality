@@ -216,7 +216,7 @@ export function useMemoryBrowseState(init: {
   );
 }
 
-const CATEGORY_MAINS = ['byt', 'dum', 'komercni'] as const;
+const CATEGORY_MAINS = ['byt', 'dum', 'komercni', 'pozemek', 'ostatni'] as const;
 const CATEGORY_TYPES = ['prodej', 'pronajem'] as const;
 
 /* Default viewport span when opening Browse focused on a property: the camera
@@ -240,9 +240,10 @@ export const browseFiltersForArea = (
   seed: ExploreAreaSeed,
   km: number = EXPLORE_VIEWPORT_KM,
 ): ListingFilters => {
-  const categoryMain = (CATEGORY_MAINS as readonly string[]).includes(seed.categoryMain ?? '')
-    ? (seed.categoryMain as ListingFilters['categoryMain'])
-    : DEFAULT_FILTERS.categoryMain;
+  const categoryMain: ListingFilters['categoryMain'] =
+    (CATEGORY_MAINS as readonly string[]).includes(seed.categoryMain ?? '')
+      ? [seed.categoryMain as ListingFilters['categoryMain'][number]]
+      : [...DEFAULT_FILTERS.categoryMain];
   const categoryType = (CATEGORY_TYPES as readonly string[]).includes(seed.categoryType ?? '')
     ? (seed.categoryType as ListingFilters['categoryType'])
     : DEFAULT_FILTERS.categoryType;

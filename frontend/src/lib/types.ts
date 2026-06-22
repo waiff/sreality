@@ -1095,7 +1095,8 @@ export interface BuildingListResponse {
 /* -------------------------------------------------------------------------- */
 
 export interface WatchdogFilterSpec {
-  category_main: string | null;
+  // Multi-select category (matches any). Deal type stays single-valued.
+  category_main_in: string[] | null;
   category_type: string | null;
   category_sub_cb: number | null;
   // Portal-agnostic property sub-type (multi-select; matches any).
@@ -1197,7 +1198,7 @@ export interface WatchdogFilterSpec {
 }
 
 export const DEFAULT_WATCHDOG_FILTER_SPEC: WatchdogFilterSpec = {
-  category_main: 'byt',
+  category_main_in: null,
   category_type: 'pronajem',
   category_sub_cb: null,
   subtype: null,
