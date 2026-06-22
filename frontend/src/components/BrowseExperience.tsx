@@ -51,8 +51,10 @@ import {
   fetchRegionDispositionAnnotations,
   isApiConfigured,
   latestEstimationsByListing,
+  linkAssetProperties,
   mergeDedupPropertySet,
 } from '@/lib/api';
+import { pushToast } from '@/lib/toast';
 import {
   fetchCityIndexDefinitions,
   fetchCityIndexValues,
@@ -168,6 +170,20 @@ export default function BrowseExperience({
   const mergeMut = useMutation({
     mutationFn: (propertyIds: number[]) => mergeDedupPropertySet(propertyIds),
     onSuccess: () => {
+      for (const key of ['cards', 'map', 'table', 'stats']) {
+        queryClient.invalidateQueries({ queryKey: [key] });
+      }
+      exitMergeMode();
+    },
+  });
+  /* Link selected properties as the SAME physical building without collapsing
+   * them — the cross-category case (a `dum` + a `komercni` at one address) a
+   * merge correctly refuses. Errors surface via the global MutationCache. */
+  const linkMut = useMutation({
+    mutationFn: (propertyIds: number[]) => linkAssetProperties(propertyIds),
+    onSuccess: (res) => {
+      const n = res.data.member_property_ids.length;
+      pushToast('ok', `Linked ${n} listings as the same building.`);
       for (const key of ['cards', 'map', 'table', 'stats']) {
         queryClient.invalidateQueries({ queryKey: [key] });
       }
@@ -617,9 +633,12 @@ export default function BrowseExperience({
               <MergeModeBar
                 active={mergeMode}
                 selectedCount={selectedForMerge.size}
-                busy={mergeMut.isPending}
+                busy={mergeMut.isPending || linkMut.isPending}
+                merging={mergeMut.isPending}
+                linking={linkMut.isPending}
                 onToggle={() => (mergeMode ? exitMergeMode() : setMergeMode(true))}
                 onMerge={() => mergeMut.mutate([...selectedForMerge])}
+                onLink={() => linkMut.mutate([...selectedForMerge])}
               />
             )}
           </div>
@@ -859,14 +878,20 @@ function MergeModeBar({
   active,
   selectedCount,
   busy,
+  merging,
+  linking,
   onToggle,
   onMerge,
+  onLink,
 }: {
   active: boolean;
   selectedCount: number;
   busy: boolean;
+  merging: boolean;
+  linking: boolean;
   onToggle: () => void;
   onMerge: () => void;
+  onLink: () => void;
 }) {
   const btn = 'px-3 py-1.5 text-sm rounded-[var(--radius-sm)] transition-colors disabled:opacity-50';
   return (
@@ -875,7 +900,7 @@ function MergeModeBar({
         <>
           <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
             {selectedCount === 0
-              ? 'Pick listings to merge'
+              ? 'Pick listings to merge or link'
               : `${selectedCount} selected`}
           </span>
           <button
@@ -884,7 +909,17 @@ function MergeModeBar({
             disabled={busy || selectedCount < 2}
             className={`${btn} bg-[var(--color-copper)] text-white hover:bg-[var(--color-copper-2)]`}
           >
-            {busy ? 'Merging…' : `Merge ${selectedCount >= 2 ? selectedCount : ''}`.trim()}
+            {merging ? 'Merging…' : `Merge ${selectedCount >= 2 ? selectedCount : ''}`.trim()}
+          </button>
+          {/* Cross-category same-building grouping a merge refuses. */}
+          <button
+            type="button"
+            onClick={onLink}
+            disabled={busy || selectedCount < 2}
+            title="Mark as the same physical building without merging — keeps each listing's category"
+            className={`${btn} border border-[var(--color-copper)] text-[var(--color-copper-2)] hover:bg-[var(--color-copper-soft)]`}
+          >
+            {linking ? 'Linking…' : 'Link as same building'}
           </button>
         </>
       )}
