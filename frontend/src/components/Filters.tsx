@@ -369,13 +369,25 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               scope="browse"
               state={registryView}
               onChange={handleRegistryChange}
+              includeOnly={['min_price_czk']}
+              labels={{ min_price_czk: 'Price' }}
+              flat
+            />
+            {/* Sits directly below the Price (Kč) inputs it modifies. Spans
+                every grid column so it's its own row, not a cramped cell. */}
+            <div className="[grid-column:1/-1]">
+              <IncludeNoPriceToggle filters={filters} onChange={onChange} />
+            </div>
+            <FilterForm
+              scope="browse"
+              state={registryView}
+              onChange={handleRegistryChange}
               includeOnly={[
-                'min_price_czk', 'min_price_per_m2',
+                'min_price_per_m2',
                 'price_change_count_min', 'price_change_window_days',
                 'total_price_change_pct',
               ]}
               labels={{
-                min_price_czk: 'Price',
                 min_price_per_m2: 'Price / m²',
                 price_change_count_min: 'Price changed N+ times',
                 price_change_window_days: 'Price change window',
@@ -383,11 +395,6 @@ export function FilterSidebar({ filters, onChange, onLocationPick, width = 320, 
               }}
               flat
             />
-            {/* Spans every grid column so it sits as its own row below the
-                price inputs rather than as a cramped grid cell. */}
-            <div className="[grid-column:1/-1]">
-              <IncludeNoPriceToggle filters={filters} onChange={onChange} />
-            </div>
           </ControlGroup>
 
           {/* Yield is the MF reference rent ÷ asking price — only meaningful
