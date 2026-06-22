@@ -10,9 +10,7 @@ import logging
 import os
 from typing import Any
 
-import boto3
 import requests
-from botocore.config import Config as BotoConfig
 
 from scraper import media
 
@@ -106,6 +104,14 @@ class R2Client:
         bucket: str,
         max_pool_connections: int = 32,
     ) -> None:
+        # boto3/botocore are imported here, not at module top, so that
+        # importing this module (and anything that transitively pulls it in —
+        # notably the toolkit package) costs nothing unless R2 is actually used.
+        # R2 is optional (see module docstring + is_configured()); a client is
+        # only ever built when R2_* env vars are present.
+        import boto3
+        from botocore.config import Config as BotoConfig
+
         self.bucket = bucket
         # Pool sized to the download worker count — the default of 10 caused
         # constant "Connection pool is full, discarding connection" churn
