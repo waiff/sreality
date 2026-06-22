@@ -23,6 +23,11 @@ import {
   type AppSetting,
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
+import {
+  portalPosture,
+  PORTAL_POSTURE_LABEL,
+  PORTAL_POSTURE_BLURB,
+} from '@/lib/portalPosture';
 
 const GLOBAL_KEY = 'scraper_limits_global';
 
@@ -153,7 +158,12 @@ function PortalCard({ portal }: { portal: PortalAdminRow }) {
           <span className="font-medium">{portal.label}</span>
           <span className="font-mono text-[0.7rem] text-[var(--color-ink-4)]">{portal.source}</span>
           <Tag>{portal.kind}</Tag>
-          <span className="text-[0.7rem] text-[var(--color-ink-4)]">{portal.stage}</span>
+          <span
+            title={PORTAL_POSTURE_BLURB[portalPosture(portal)]}
+            className="text-[0.7rem] text-[var(--color-ink-4)]"
+          >
+            {PORTAL_POSTURE_LABEL[portalPosture(portal)]}
+          </span>
         </div>
         <span className="text-[0.7rem] text-[var(--color-ink-4)]" aria-hidden="true">
           {open ? '▴' : '▾'}

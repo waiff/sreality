@@ -290,13 +290,14 @@ export interface ScrapeRun {
  * kind) so the dashboard renders uniformly. */
 
 export type PortalKind = 'scraper' | 'parser';
-export type PortalStage = 'live' | 'pilot' | 'on_demand' | 'planned';
 
 export interface PortalHealth {
   source: string;
   label: string;
   kind: PortalKind;
-  stage: PortalStage;
+  // Drives the derived posture badge (see lib/portalPosture). Replaced the
+  // hand-set `stage` label in migration 217.
+  supports_complete_walk: boolean;
   home_url: string | null;
   listings_total: number;
   listings_active: number;

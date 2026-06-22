@@ -304,7 +304,7 @@ def get_portals(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
     inherited rather than explicitly overridden."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT source, label, kind, stage, sort_order, is_enabled, "
+            "SELECT source, label, kind, sort_order, is_enabled, "
             "supports_complete_walk, operational_limits "
             "FROM portals ORDER BY sort_order, source"
         )
@@ -324,11 +324,10 @@ def get_portals(conn: Any = Depends(deps.get_db_conn)) -> dict[str, Any]:
             "source": source,
             "label": r[1],
             "kind": r[2],
-            "stage": r[3],
-            "sort_order": r[4],
-            "is_enabled": r[5],
-            "supports_complete_walk": r[6],
-            "overrides": r[7],          # raw per-portal jsonb (or null)
+            "sort_order": r[3],
+            "is_enabled": r[4],
+            "supports_complete_walk": r[5],
+            "overrides": r[6],          # raw per-portal jsonb (or null)
             "effective": effective,     # resolved: baked < global < per-portal
             "baked_default": baked,
         })

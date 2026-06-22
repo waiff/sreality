@@ -653,7 +653,6 @@ export interface PortalAdminRow {
   source: string;
   label: string;
   kind: 'scraper' | 'parser';
-  stage: string;
   sort_order: number;
   is_enabled: boolean;
   supports_complete_walk: boolean;
