@@ -1340,7 +1340,7 @@ function FailuresPanel({
 }
 
 /* -------------------------------------------------------------------------- */
-/* Failed workflow runs (migration 217 — workflow_failure_summary RPC, fed by   */
+/* Failed workflow runs (migration 220 — workflow_failure_summary RPC, fed by   */
 /* the 30-min monitor_workflow_failures.yml poller). Streak-aware: chronic       */
 /* breaks (failing every run for days) render loud above muted transients.       */
 /* -------------------------------------------------------------------------- */

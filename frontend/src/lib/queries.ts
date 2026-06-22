@@ -1158,7 +1158,7 @@ export const fetchRecentWorkflowFailures = async (
   return (data ?? []) as WorkflowFailureRow[];
 };
 
-/* Migration 217 — streak-aware per-workflow failure summary. One row per
+/* Migration 220 — streak-aware per-workflow failure summary. One row per
  * workflow with the consecutive-failure streak + is_chronic flag, so the Health
  * card can separate a chronic break (failing every run for days) from a 1%
  * self-healing transient. Supersedes recent_workflow_failures for the card. */
