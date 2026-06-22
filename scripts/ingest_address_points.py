@@ -136,6 +136,27 @@ def _obec_codes(conn: Any) -> list[int]:
         return [r[0] for r in cur.fetchall()]
 
 
+def _record_revision(conn: Any, date: str, row_count: int, obec_count: int) -> None:
+    """Append an address_points_revisions row, guarded on source_date so
+    re-running the same published RÚIAN month does not bump the version (which
+    would trigger a pointless full coord->street re-attempt). The bump is the
+    LAST thing the ingest does — only after the wholesale reload committed."""
+    source_date = datetime.datetime.strptime(date, "%Y%m%d").date()
+    with conn.cursor() as cur:
+        cur.execute("SELECT source_date FROM address_points_revisions ORDER BY revision DESC LIMIT 1")
+        row = cur.fetchone()
+        if row is not None and row[0] == source_date:
+            LOG.info("RUIAN revision unchanged source_date=%s — no bump", source_date)
+            return
+        cur.execute(
+            "INSERT INTO address_points_revisions (source_date, row_count, obec_count) "
+            "VALUES (%s, %s, %s) RETURNING revision",
+            (source_date, row_count, obec_count),
+        )
+        LOG.info("RUIAN revision recorded source_date=%s revision=%s row_count=%s",
+                 source_date, cur.fetchone()[0], row_count)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--date", help="strukt file date YYYYMMDD (default: latest month-end)")
@@ -206,6 +227,7 @@ def main() -> int:
             with conn.cursor() as cur:
                 cur.execute("SELECT count(*), count(DISTINCT obec_id) FROM address_points")
                 total, distinct_obce = cur.fetchone()
+            _record_revision(conn, date, total, distinct_obce)
         else:
             total = distinct_obce = "(dry-run)"
     LOG.info("RUIAN done date=%s obce_ok=%d obce_404=%d inserted=%d total=%s distinct_obce=%s",
