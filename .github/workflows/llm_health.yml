@@ -41,7 +41,7 @@ jobs:
       - name: Install runtime deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "psycopg[binary]>=3.2"
+          pip install -e .
 
       - name: Check LLM pipeline liveness
         run: python -m scripts.check_llm_health
