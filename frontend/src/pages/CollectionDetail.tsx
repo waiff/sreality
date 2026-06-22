@@ -23,6 +23,7 @@ import {
   fmtCzk,
   fmtRelative,
 } from '@/lib/format';
+import { listingKindLabel } from '@/lib/enums';
 import type {
   Collection,
   CollectionPropertyRow,
@@ -456,7 +457,7 @@ function PropertyRowView({
         {row.district ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-3 py-2.5 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
-        {row.disposition ?? <span className="text-[var(--color-ink-4)]">—</span>}
+        {listingKindLabel(row) ?? <span className="text-[var(--color-ink-4)]">—</span>}
       </td>
       <td className="px-3 py-2.5 align-middle text-right font-mono tabular-nums text-[var(--color-ink-2)]">
         {row.area_m2 != null ? fmtArea(row.area_m2) : <span className="text-[var(--color-ink-4)]">—</span>}

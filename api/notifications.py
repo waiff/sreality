@@ -679,7 +679,7 @@ def delete_subscription(
 
 _LISTING_PROJECTION = (
     "l.sreality_id, l.category_main, l.category_type, l.price_czk, "
-    "l.price_unit, l.area_m2, l.disposition, l.locality, l.district, "
+    "l.price_unit, l.area_m2, l.disposition, l.subtype, l.locality, l.district, "
     "l.is_active, l.first_seen_at, l.last_seen_at, l.mf_gross_yield_pct, "
     "l.source, l.source_url"
 )

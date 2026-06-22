@@ -22,6 +22,7 @@ import {
   fetchScraperHealthChecks,
   type WorkflowFailureSummaryRow,
 } from '@/lib/queries';
+import { categoryMainLabelPlural, categoryTypeLabel } from '@/lib/enums';
 import type {
   CategoryTrend,
   CategoryTrendPoint,
@@ -56,23 +57,8 @@ const STALE_HOURS_WARN = 36;
 // silence means it has missed two cycles — likely dead, not just slow.
 const HEALTH_DATA_STALE_MIN = 25;
 
-const CATEGORY_LABELS: Record<string, string> = {
-  byt: 'Byty',
-  dum: 'Domy',
-  komercni: 'Komerční',
-  pozemek: 'Pozemky',
-  ostatni: 'Ostatní',
-};
-
-const TYPE_LABELS: Record<string, string> = {
-  pronajem: 'pronájem',
-  prodej: 'prodej',
-};
-
 function categoryLabel(c: { category_main: string; category_type: string }): string {
-  const main = CATEGORY_LABELS[c.category_main] ?? c.category_main;
-  const type = TYPE_LABELS[c.category_type] ?? c.category_type;
-  return `${main} · ${type}`;
+  return `${categoryMainLabelPlural(c.category_main)} · ${categoryTypeLabel(c.category_type).toLowerCase()}`;
 }
 
 export default function Health() {
@@ -1535,8 +1521,8 @@ function categoryPairLabel(
   cm: string | null,
   ct: string | null,
 ): string {
-  const main = cm == null ? '—' : (CATEGORY_LABELS[cm] ?? cm);
-  const type = ct == null ? '—' : (TYPE_LABELS[ct] ?? ct);
+  const main = cm == null ? '—' : categoryMainLabelPlural(cm);
+  const type = ct == null ? '—' : categoryTypeLabel(ct).toLowerCase();
   return `${main} · ${type}`;
 }
 

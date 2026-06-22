@@ -12,6 +12,7 @@ import type {
 import type { CenterRadius, MapBounds } from '@/lib/filters';
 import { groupForPicker, indexLabel, pinnedFirst } from '@/lib/cityIndexes';
 import { fmtCzk, fmtArea, fmtRelative, fmtAbsolute } from '@/lib/format';
+import { listingKindLabel } from '@/lib/enums';
 import type { PriceStatDataset, PriceStatGrowthRow } from '@/lib/priceStats';
 import {
   GROWTH_METRICS,
@@ -1731,7 +1732,7 @@ function Pill({ children }: { children: React.ReactNode }) {
 function popupHtml(r: MapRow): string {
   const price = fmtCzk(r.price_czk);
   const area = fmtArea(r.area_m2);
-  const disposition = r.disposition ?? '—';
+  const disposition = listingKindLabel(r) ?? '—';
   const district = r.district ?? '';
   const seen = fmtRelative(r.last_seen_at);
   const seenAbs = fmtAbsolute(r.last_seen_at);

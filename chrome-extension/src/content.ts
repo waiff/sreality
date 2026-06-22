@@ -440,7 +440,8 @@ function mountPanel(): {
         /* No yields (non-sale-apt / not yet computed) → a compact subject. */
         const l = state.listing;
         const parts: string[] = [];
-        if (l?.disposition) parts.push(l.disposition);
+        const kind = l?.kind_label ?? l?.disposition;
+        if (kind) parts.push(kind);
         if (l?.price_czk != null) parts.push(fmtCzk(l.price_czk));
         content.appendChild(minText(parts.join(' · ') || APP_NAME));
       }
@@ -816,10 +817,11 @@ function mountPanel(): {
 
     const line = document.createElement('div');
     line.className = 'subject-line';
-    if (l.disposition) {
+    const kind = l.kind_label ?? l.disposition;
+    if (kind) {
       const disp = document.createElement('span');
       disp.className = 'subject-disp';
-      disp.textContent = l.disposition;
+      disp.textContent = kind;
       line.appendChild(disp);
     }
     const meta: string[] = [];

@@ -8,6 +8,7 @@ import {
   fmtAbsolute,
 } from '@/lib/format';
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
+import { listingKindLabel } from '@/lib/enums';
 import { imageSrc } from '@/lib/imageUrl';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { listingPath } from '@/lib/listingUrl';
@@ -118,7 +119,7 @@ function Header({ listing }: { listing: ListingPublic }) {
         )}
       </h2>
       <p className="mt-2 font-mono tabular-nums text-sm text-[var(--color-ink-2)]">
-        <span>{listing.disposition ?? '—'}</span>
+        <span>{listingKindLabel(listing) ?? '—'}</span>
         <span className="mx-2 text-[var(--color-ink-4)]">·</span>
         <span>{fmtArea(listing.area_m2)}</span>
         {ppm !== '—' && (

@@ -16,6 +16,7 @@ import {
   fmtParkingLots,
 } from '@/lib/format';
 import type { ImagePublic, ListingPublic } from '@/lib/types';
+import { listingKindParts } from '@/lib/enums';
 import { placePrimary } from '@/lib/placeLabel';
 
 const DetailMap = lazy(() => import('@/components/listing-detail/DetailMap'));
@@ -96,7 +97,10 @@ function Header({
   extras?: React.ReactNode;
   mapFooter?: React.ReactNode;
 }) {
-  const disposition = listing.disposition ?? '—';
+  // Identity tokens, most-specific first: subtype ("Ubytování", "Rodinný dům")
+  // and/or disposition ("2+kk"). Commercial/houses keep their kind instead of
+  // the old bare "—"; apartments are unchanged (subtype NULL → disposition).
+  const kindParts = listingKindParts(listing);
   const area = fmtArea(listing.area_m2);
   const floor =
     listing.floor != null
@@ -120,7 +124,7 @@ function Header({
         {extras && <div className="mb-4">{extras}</div>}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <p className="font-mono tabular-nums text-[var(--color-ink-2)] text-sm">
-            <span>{disposition}</span>
+            <span>{kindParts.length > 0 ? kindParts.join(' · ') : '—'}</span>
             <span className="mx-2 text-[var(--color-ink-4)]">·</span>
             <span>{area}</span>
             {floor != null && (
@@ -326,10 +330,9 @@ function DescriptionBody({ text }: { text: string }) {
 /* Key facts                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/* One dense data strip instead of the old Property/Building grids:
- * disposition, area, floor and district live in the header; subtype is the
- * disposition for apartments (a duplicate) so it's dropped entirely. What
- * remains — lot/garden for houses, the building facts — renders as inline
+/* One dense data strip instead of the old Property/Building grids: the kind
+ * (subtype and/or disposition), area, floor and district live in the header.
+ * What remains — lot/garden for houses, the building facts — renders as inline
  * label·value pairs on one wrapping line, with the amenity chips below. */
 function KeyFactsBlock({ listing }: { listing: ListingPublic }) {
   const facts: Fact[] = pruneNulls([

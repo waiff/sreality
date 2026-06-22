@@ -26,7 +26,7 @@ import {
   fmtArea, fmtCzk, fmtPricePerM2,
   fmtShortDate, fmtTomDays,
 } from '@/lib/format';
-import { categoryMainLabel } from '@/lib/enums';
+import { listingTypeLabel } from '@/lib/enums';
 import { portalLabel } from '@/lib/portals';
 import { placePrimary } from '@/lib/placeLabel';
 import type { ListingEstimate } from '@/lib/types';
@@ -673,7 +673,11 @@ function Card({
 }
 
 function formatTitle(r: CardRow): string {
-  const kind = categoryMainLabel(r.category_main);
+  // The specific subtype is the noun for commercial/houses ("Ubytování",
+  // "Činžovní dům"); apartments + subtype-less rows fall back to the generic
+  // category word ("Byt", "Komerční prostor"). disposition still appends for
+  // apartments (and the rare house listed by room count).
+  const kind = listingTypeLabel(r);
   const deal = r.category_type === 'pronajem' ? 'k pronájmu' : 'na prodej';
   const parts = [`${kind} ${deal}`];
   if (r.disposition) parts.push(r.disposition);

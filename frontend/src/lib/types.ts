@@ -54,6 +54,9 @@ export interface ListingPublic {
   price_unit: string | null;
   area_m2: number | null;
   disposition: Disposition | null;
+  /* Portal-agnostic property sub-type (migration 152): the meaningful "kind"
+   * for commercial/houses where disposition is NULL. NULL for apartments. */
+  subtype: string | null;
   locality: string | null;
   district: string | null;
   obec: string | null;
@@ -909,6 +912,7 @@ export interface CollectionPropertyRow {
   sreality_id: number;
   district: string | null;
   disposition: string | null;
+  subtype: string | null;
   area_m2: number | null;
   price_czk: number | null;
   last_seen_at: string;
@@ -1338,6 +1342,9 @@ export interface WatchdogDispatch {
   price_unit: string | null;
   area_m2: number | null;
   disposition: Disposition | null;
+  /* Portal-agnostic property sub-type (migration 152): the meaningful "kind"
+   * for commercial/houses where disposition is NULL. NULL for apartments. */
+  subtype: string | null;
   locality: string | null;
   district: string | null;
   is_active: boolean | null;

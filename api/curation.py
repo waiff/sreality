@@ -89,7 +89,7 @@ def get_collection(
         raise HTTPException(404, "collection not found")
 
     properties_sql = (
-        "SELECT cp.property_id, p.repr_listing_id, p.district, p.disposition, "
+        "SELECT cp.property_id, p.repr_listing_id, p.district, p.disposition, p.subtype, "
         "       p.area_m2, p.current_price_czk, p.last_seen_at, p.is_active, cp.added_at "
         "FROM collection_properties cp "
         "JOIN properties p ON p.id = cp.property_id "
@@ -105,11 +105,12 @@ def get_collection(
             "sreality_id":  int(r[1]) if r[1] is not None else None,
             "district":     r[2],
             "disposition":  r[3],
-            "area_m2":      float(r[4]) if r[4] is not None else None,
-            "price_czk":    r[5],
-            "last_seen_at": _iso(r[6]),
-            "is_active":    bool(r[7]),
-            "added_at":     _iso(r[8]),
+            "subtype":      r[4],
+            "area_m2":      float(r[5]) if r[5] is not None else None,
+            "price_czk":    r[6],
+            "last_seen_at": _iso(r[7]),
+            "is_active":    bool(r[8]),
+            "added_at":     _iso(r[9]),
         }
         for r in rows
     ]

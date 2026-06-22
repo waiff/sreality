@@ -142,6 +142,13 @@ export interface PortalListing {
   area_m2: number | null;
   price_czk: number | null;
   disposition: string | null;
+  /* Portal-agnostic property sub-type (migration 152): the meaningful "kind"
+   * for commercial/houses where disposition is NULL. */
+  subtype: string | null;
+  /* The display "kind": the Czech subtype label (commercial/houses) else the
+   * disposition (apartments). Computed server-side so the extension carries no
+   * slug→label dictionary of its own. */
+  kind_label: string | null;
   district: string | null;
   locality: string | null;
   is_active: boolean | null;

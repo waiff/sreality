@@ -96,10 +96,14 @@ class EnumOption:
     Pydantic schema). `label_cs` is what the operator sees in the UI;
     `label_en` is for tooling that needs English (agent prompts can
     pick either, but the SQL data is Czech without diacritics).
+    `group` optionally partitions an enum's options into sub-groups the
+    UI renders conditionally (today: subtype's dum/komercni split, keyed
+    off the selected category_main) — None for ungrouped enums.
     """
     value: str | int
     label_cs: str
     label_en: str
+    group: str | None = None
 
 
 @dataclass(frozen=True)
@@ -229,28 +233,39 @@ DISPOSITION_OPTIONS: tuple[EnumOption, ...] = (
 # selected category_main. Mirrors scraper.parser.SUBTYPE / data backfill.
 SUBTYPE_OPTIONS: tuple[EnumOption, ...] = (
     # dum (houses)
-    EnumOption("rodinny_dum", "Rodinný dům", "Detached house"),
-    EnumOption("vila", "Vila", "Villa"),
-    EnumOption("chata", "Chata", "Cabin"),
-    EnumOption("chalupa", "Chalupa", "Cottage"),
-    EnumOption("vicegeneracni_dum", "Vícegenerační dům", "Multi-generational house"),
-    EnumOption("zemedelska_usedlost", "Zemědělská usedlost", "Farmstead"),
-    EnumOption("na_klic", "Na klíč", "Turnkey"),
-    EnumOption("pamatka_jine", "Památka/jiné", "Heritage/other"),
+    EnumOption("rodinny_dum", "Rodinný dům", "Detached house", group="dum"),
+    EnumOption("vila", "Vila", "Villa", group="dum"),
+    EnumOption("chata", "Chata", "Cabin", group="dum"),
+    EnumOption("chalupa", "Chalupa", "Cottage", group="dum"),
+    EnumOption("vicegeneracni_dum", "Vícegenerační dům", "Multi-generational house", group="dum"),
+    EnumOption("zemedelska_usedlost", "Zemědělská usedlost", "Farmstead", group="dum"),
+    EnumOption("na_klic", "Na klíč", "Turnkey", group="dum"),
+    EnumOption("pamatka_jine", "Památka/jiné", "Heritage/other", group="dum"),
     # komercni (commercial)
-    EnumOption("kancelar", "Kancelář", "Office"),
-    EnumOption("sklad", "Sklad", "Warehouse"),
-    EnumOption("obchodni_prostor", "Obchodní prostor", "Retail space"),
-    EnumOption("vyroba", "Výroba", "Manufacturing"),
-    EnumOption("ubytovani", "Ubytování", "Accommodation"),
-    EnumOption("restaurace", "Restaurace", "Restaurant"),
-    EnumOption("cinzovni_dum", "Činžovní dům", "Tenement house"),
-    EnumOption("apartmany", "Apartmány", "Apartments"),
-    EnumOption("ordinace", "Ordinace", "Medical office"),
-    EnumOption("zemedelsky", "Zemědělský objekt", "Agricultural"),
-    EnumOption("virtualni_kancelar", "Virtuální kancelář", "Virtual office"),
-    EnumOption("ostatni", "Ostatní", "Other"),
+    EnumOption("kancelar", "Kancelář", "Office", group="komercni"),
+    EnumOption("sklad", "Sklad", "Warehouse", group="komercni"),
+    EnumOption("obchodni_prostor", "Obchodní prostor", "Retail space", group="komercni"),
+    EnumOption("vyroba", "Výroba", "Manufacturing", group="komercni"),
+    EnumOption("ubytovani", "Ubytování", "Accommodation", group="komercni"),
+    EnumOption("restaurace", "Restaurace", "Restaurant", group="komercni"),
+    EnumOption("cinzovni_dum", "Činžovní dům", "Tenement house", group="komercni"),
+    EnumOption("apartmany", "Apartmány", "Apartments", group="komercni"),
+    EnumOption("ordinace", "Ordinace", "Medical office", group="komercni"),
+    EnumOption("zemedelsky", "Zemědělský objekt", "Agricultural", group="komercni"),
+    EnumOption("virtualni_kancelar", "Virtuální kancelář", "Virtual office", group="komercni"),
+    EnumOption("ostatni", "Ostatní", "Other", group="komercni"),
 )
+
+_SUBTYPE_LABEL_CS: dict[str, str] = {o.value: o.label_cs for o in SUBTYPE_OPTIONS}
+
+
+def subtype_label_cs(slug: str | None) -> str | None:
+    """Czech label for a portal-agnostic `subtype` slug, or None. The single
+    server-side label source (mirrors the SPA's enums.subtypeLabel, which is
+    generated from the same SUBTYPE_OPTIONS) — used where Python must render the
+    label itself, e.g. the Chrome-extension lookup payload."""
+    return _SUBTYPE_LABEL_CS.get(slug) if slug else None
+
 
 LIFECYCLE_OPTIONS: tuple[EnumOption, ...] = (
     EnumOption("active", "Aktivní", "Active"),
@@ -1783,7 +1798,10 @@ def effective_for(
 
 
 def _enum_to_json(e: EnumOption) -> dict[str, Any]:
-    return {"value": e.value, "label_cs": e.label_cs, "label_en": e.label_en}
+    out: dict[str, Any] = {"value": e.value, "label_cs": e.label_cs, "label_en": e.label_en}
+    if e.group is not None:
+        out["group"] = e.group
+    return out
 
 
 def _filter_to_json(f: FilterDef) -> dict[str, Any]:

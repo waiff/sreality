@@ -33,6 +33,8 @@ from typing import TYPE_CHECKING, Any
 
 from psycopg.rows import dict_row
 
+from toolkit.filter_registry import subtype_label_cs
+
 if TYPE_CHECKING:
     import psycopg
 
@@ -43,7 +45,7 @@ if TYPE_CHECKING:
 # non-sreality portals) — the SPA route is /listing/{sreality_id}.
 _LISTING_COLS: tuple[str, ...] = (
     "sreality_id", "property_id",
-    "category_main", "category_type", "area_m2", "price_czk", "disposition",
+    "category_main", "category_type", "area_m2", "price_czk", "disposition", "subtype",
     "district", "locality", "is_active", "last_seen_at",
     "mf_reference_rent_czk", "mf_gross_yield_pct",
 )
@@ -55,7 +57,7 @@ SELECT
     req.source_id,
     (l.source_id_native IS NOT NULL) AS found,
     l.sreality_id, l.property_id,
-    l.category_main, l.category_type, l.area_m2, l.price_czk, l.disposition,
+    l.category_main, l.category_type, l.area_m2, l.price_czk, l.disposition, l.subtype,
     l.district, l.locality, l.is_active, l.last_seen_at,
     l.mf_reference_rent_czk, l.mf_gross_yield_pct,
     e.id AS estimation_id, e.estimate_kind AS estimation_kind,
@@ -119,6 +121,10 @@ def lookup_portal_listings(
             "found": bool(row["found"]),
         }
         entry.update({col: _clean(row[col]) for col in _LISTING_COLS})
+        # The display "kind": the subtype label (commercial/houses) else the
+        # disposition (apartments). Computed server-side from the one canonical
+        # label source so the extension needs no slug dictionary of its own.
+        entry["kind_label"] = subtype_label_cs(row["subtype"]) or row["disposition"]
         est_id = row["estimation_id"]
         entry["latest_estimation"] = (
             {
