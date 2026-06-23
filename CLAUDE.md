@@ -589,6 +589,26 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
     priority order, stop at the first **High** verdict → auto-merge. **(E)**
     everything else queues on the operator's `/dedup` review page.
+    **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
+    zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by
+    `clip_tag.yml`/`scripts/clip_tag_backfill.py`) tags every image — room/plot type into
+    `image_clip_tags.logical_tag` (the same `ROOM_TYPES` space the LLM classifier emits, via a
+    coherent-anchor→collapse taxonomy in `data/clip_taxonomy.json`) + a 512-d vector into
+    `image_clip_embeddings` (active-listing images only; pgvector, NO ANN index — dedup does exact
+    pairwise cosine). It does TWO jobs the LLM classifier can't afford at full-inventory scale: (1)
+    `dedup_prefer_clip_tags` makes the engine source like-room pairing from CLIP tags for FREE
+    (replacing the paid Haiku classify on the hot path) — and, decisively, it is the FIRST tagger for
+    `dum`/`pozemek`/`komercni` (which had zero classified images), unblocking their visual dedup; (2)
+    `dedup_clip_cosine_enabled` adds a cosine recall tier (`toolkit/clip_dedup.room_pair_cosine`) that
+    routes each room's forensic compare to a model by the same-room cosine band
+    (`toolkit.dedup_engine.route_by_cosine`/`CosineBands`: ≥`haiku_min`→Haiku, ≥`sonnet_min`→Sonnet,
+    below→skip the LLM for that room). The cosine tier NEVER auto-merges or auto-dismisses on cosine
+    alone — a too-low room is skipped (the pair still queues, protecting same-property reshoots whose
+    photos differ), and the forensic **High** verdict remains the only auto-merge gate. Validated
+    (PRs around the trial): pozemek 77% → plot/site family, coarse room agreement 87%, same-property
+    tag consistency 86%, cosine AUC 0.80. Both knobs ship OFF; flip via `app_settings` after a
+    `--shadow` merge-diff confirms merges hold. Run counters: `dedup_engine_runs.clip_classified` /
+    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`.
     **Self-healing queue (migration 198):** the engine doesn't only ADD to the review queue — each
     run it RESOLVES stale proposed candidates so they don't pile up. Recall-neutral dismissals: a
     pair the current rules now hard-reject, one the cross-source gate skips, or a candidate pointing

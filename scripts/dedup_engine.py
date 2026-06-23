@@ -45,6 +45,7 @@ from typing import Any
 
 from toolkit.dedup_engine import (
     PHASH_IDENTICAL_MAX,
+    CosineBands,
     ListingKey,
     _area_pct_diff,
     _haversine_m,
@@ -56,6 +57,7 @@ from toolkit.dedup_engine import (
     geo_cell_key,
     profile_for,
     rooms_in_priority,
+    route_by_cosine,
     street_group_keys,
     verdict_is_merge,
 )
@@ -376,6 +378,10 @@ def _resolve_visual(
     vision_budget: list[int],
     max_room_attempts: int,
     autodismiss: bool = True,
+    cosine_fn: Any = None,
+    bands: Any = None,
+    model_for: dict[str, str] | None = None,
+    stats: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
 
@@ -428,8 +434,25 @@ def _resolve_visual(
     for room in priority:
         if tried >= max_room_attempts or vision_budget[0] <= 0:
             break  # rooms remain untried — captured by the all-rooms-verdicted guard
+        # Stage 4b: the CLIP cosine recall tier picks WHICH model judges this room
+        # (high cosine -> cheap Haiku, uncertain -> Sonnet), or skips the LLM for a
+        # too-dissimilar room ('manual'). NEVER merges/dismisses on cosine alone, so
+        # a skipped room just leaves the pair to queue (protects reshoots). bands is
+        # None -> tier off -> today's behaviour (default model, every common room).
+        model: str | None = None
+        if bands is not None:
+            cos = cosine_fn(by_room_a[room], by_room_b[room]) if cosine_fn else None
+            if stats is not None and cos is not None:
+                stats["clip_cosine_calls"] = stats.get("clip_cosine_calls", 0) + 1
+            decision = route_by_cosine(cos, bands)
+            if decision == "manual":
+                continue  # too dissimilar to spend the LLM here (not a dismiss)
+            model = (model_for or {}).get(decision)
+            if stats is not None:
+                stats[f"routed_{decision}"] = stats.get(f"routed_{decision}", 0) + 1
         tried += 1
-        verdict_obj = compare_fn(a.sreality_id, b.sreality_id, room, by_room_a[room], by_room_b[room])
+        verdict_obj = compare_fn(
+            a.sreality_id, b.sreality_id, room, by_room_a[room], by_room_b[room], model)
         if verdict_obj is None:
             continue
         # Only a COLD (cache-miss) call consumes the budget — a warm cache hit is
@@ -502,6 +525,9 @@ def run_engine(
     classify_fn: Any = None,
     compare_fn: Any = None,
     site_plan_fn: Any = None,
+    cosine_fn: Any = None,
+    bands: Any = None,
+    model_for: dict[str, str] | None = None,
     max_pairs: int = 2000,
     max_vision_calls: int = 200,
     max_room_attempts: int = 4,
@@ -537,6 +563,8 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
+        "clip_classified": 0, "clip_cosine_calls": 0,
+        "routed_haiku": 0, "routed_sonnet": 0,
     })
 
     stats["reconciled"] = _reconcile_stale_candidates(conn, dry_run=dry_run)
@@ -682,6 +710,7 @@ def run_engine(
                     site_plan_fn=site_plan_fn,
                     vision_budget=vision_budget, max_room_attempts=max_room_attempts,
                     autodismiss=autodismiss,
+                    cosine_fn=cosine_fn, bands=bands, model_for=model_for, stats=stats,
                 )
                 markers = {
                     "tier": "street_disposition", "street_key": street_key,
@@ -809,13 +838,28 @@ def run_geo_candidates(
     return stats
 
 
-def _build_classify_fn(conn: Any) -> Any:
+def _build_classify_fn(
+    conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
+    clip_counter: list[int] | None = None,
+) -> Any:
     from api.dependencies import get_providers
     from api.llm_client import LLMClient
+    from toolkit.clip_dedup import clip_room_grouping
     from toolkit.image_classification import classify_listing_images
     llm = LLMClient(conn, providers=get_providers())
 
     def _fn(sreality_id: int) -> dict[str, Any]:
+        # Prefer the FREE CLIP room tags; fall back to the paid LLM classify only
+        # for a listing CLIP hasn't tagged yet (during the backfill ramp).
+        if prefer_clip and clip_model:
+            grouping = clip_room_grouping(conn, sreality_id=sreality_id, model=clip_model)
+            if grouping is not None:
+                if clip_counter is not None:
+                    clip_counter[0] += 1
+                return {"data": {"images": [
+                    {"image_id": iid, "room_type": rt}
+                    for rt, ids in grouping.items() for iid in ids
+                ]}}
         return classify_listing_images(conn, llm, sreality_id=sreality_id)
     return _fn
 
@@ -826,11 +870,13 @@ def _build_compare_fn(conn: Any) -> Any:
     from toolkit.visual_match import compare_listings_visually
     llm = LLMClient(conn, providers=get_providers())
 
-    def _fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def _fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int],
+            model: str | None = None) -> dict[str, Any] | None:
         try:
             res = compare_listings_visually(
                 conn, llm, sreality_id_a=a, sreality_id_b=b,
                 room_type=room_type, image_ids_a=ids_a, image_ids_b=ids_b,
+                model=model,
             )
             return res["data"]
         except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
@@ -858,14 +904,19 @@ def _build_site_plan_fn(conn: Any) -> Any:
     return _fn
 
 
-def _build_cache_only_fns(conn: Any) -> tuple[Any, Any, Any]:
+def _build_cache_only_fns(
+    conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
+    clip_counter: list[int] | None = None,
+) -> tuple[Any, Any, Any]:
     """classify/compare/site-plan fns that ONLY READ the warm caches (the ones the
     batch lane filled at 50% off) and NEVER call the LLM — so the engine applies
     already-paid-for verdicts for $0. Un-warmed listings/rooms return None and the
     pair stays queued until the batch lane warms it. This is the cost-efficient
-    consume half: the batch lane is the sole (discounted) payer."""
+    consume half: the batch lane is the sole (discounted) payer. CLIP room tags
+    (free) are preferred for the room grouping when present."""
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
+    from toolkit.clip_dedup import clip_room_grouping
     from toolkit.image_classification import cached_classification
     from toolkit.visual_match import cached_site_plan_verdict, cached_visual_verdict
 
@@ -875,6 +926,15 @@ def _build_cache_only_fns(conn: Any) -> tuple[Any, Any, Any]:
     site_plan_model = llm.resolve_model("llm_site_plan_match_model")
 
     def classify_fn(sreality_id: int) -> dict[str, Any] | None:
+        if prefer_clip and clip_model:
+            grouping = clip_room_grouping(conn, sreality_id=sreality_id, model=clip_model)
+            if grouping is not None:
+                if clip_counter is not None:
+                    clip_counter[0] += 1
+                return {"data": {"images": [
+                    {"image_id": iid, "room_type": rt}
+                    for rt, ids in grouping.items() for iid in ids
+                ]}}
         state, rooms = cached_classification(
             conn, sreality_id=sreality_id, model=classify_model)
         if state != "classified" or rooms is None:
@@ -885,9 +945,11 @@ def _build_cache_only_fns(conn: Any) -> tuple[Any, Any, Any]:
         ]
         return {"data": {"images": images}}
 
-    def compare_fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+    def compare_fn(a: int, b: int, room_type: str, ids_a: list[int], ids_b: list[int],
+                   model: str | None = None) -> dict[str, Any] | None:
         v = cached_visual_verdict(
-            conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type, model=compare_model)
+            conn, sreality_id_a=a, sreality_id_b=b, room_type=room_type,
+            model=model or compare_model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
     def site_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
@@ -916,6 +978,45 @@ def _visual_autodismiss_enabled(conn: Any) -> bool:
     return bool(v)
 
 
+def _clip_settings(conn: Any) -> dict[str, Any]:
+    """The CLIP-tier knobs (all default OFF / safe, so merging this changes nothing
+    until the operator flips them via app_settings — no redeploy). `clip_model` is
+    the taxonomy's model id, matching what the tagging backfill stored."""
+    from scraper.clip_tagger import load_taxonomy
+
+    def _get(key: str, default: Any = None) -> Any:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+            row = cur.fetchone()
+        return row[0] if row and row[0] is not None else default
+
+    def _flag(key: str) -> bool:
+        v = _get(key)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() in ("true", "1", "yes", "on")
+        return bool(v) if v is not None else False
+
+    def _num(key: str, default: float) -> float:
+        v = _get(key)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "prefer_clip": _flag("dedup_prefer_clip_tags"),
+        "cosine_enabled": _flag("dedup_clip_cosine_enabled"),
+        "bands": CosineBands(
+            haiku_min=_num("dedup_cosine_haiku_min", CosineBands().haiku_min),
+            sonnet_min=_num("dedup_cosine_sonnet_min", CosineBands().sonnet_min),
+        ),
+        "haiku_model": _get("dedup_visual_match_model_haiku", "claude-haiku-4-5"),
+        "clip_model": load_taxonomy()["model"],
+    }
+
+
 def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
     with conn.cursor() as cur:
         cur.execute(
@@ -923,10 +1024,13 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
             INSERT INTO dedup_engine_runs (
                 ended_at, eligible, flagged_location, flagged_disposition,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
-                queued, vision_calls, auto_dismissed
+                queued, vision_calls, auto_dismissed,
+                clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet
             ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
-                %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s)
+                %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s,
+                %(clip_classified)s, %(clip_cosine_calls)s, %(routed_haiku)s,
+                %(routed_sonnet)s)
             """,
             stats,
         )
@@ -1004,9 +1108,17 @@ def main() -> int:
         if not args.geo_only:
             auto_merge_enabled = _auto_merge_enabled(conn)
             autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
+            clip = _clip_settings(conn)
+            clip_counter = [0]
+            # Free CLIP room tags (preferred when on); the counter tracks how many
+            # listings were served from CLIP rather than the paid LLM classify.
+            ck = {"prefer_clip": clip["prefer_clip"], "clip_model": clip["clip_model"],
+                  "clip_counter": clip_counter}
             LOG.info(
-                "ENGINE auto_merge_enabled=%s autodismiss=%s shadow=%s cache_only=%s free=%s",
-                auto_merge_enabled, autodismiss, args.shadow, args.cache_only, args.free,
+                "ENGINE auto_merge_enabled=%s autodismiss=%s prefer_clip=%s cosine=%s "
+                "shadow=%s cache_only=%s free=%s",
+                auto_merge_enabled, autodismiss, clip["prefer_clip"],
+                clip["cosine_enabled"], args.shadow, args.cache_only, args.free,
             )
 
             classify_fn = None
@@ -1018,16 +1130,32 @@ def main() -> int:
                 pass
             elif auto_merge_enabled and args.cache_only:
                 # Cost-efficient consume: read warm caches only, never call the LLM.
-                classify_fn, compare_fn, site_plan_fn = _build_cache_only_fns(conn)
+                classify_fn, compare_fn, site_plan_fn = _build_cache_only_fns(conn, **ck)
             elif auto_merge_enabled and args.max_vision_calls > 0:
-                classify_fn = _build_classify_fn(conn)
+                classify_fn = _build_classify_fn(conn, **ck)
                 compare_fn = _build_compare_fn(conn)
                 site_plan_fn = _build_site_plan_fn(conn)
             elif auto_merge_enabled:
                 # pHash fast-path still needs room labels to gate on interior shots.
-                classify_fn = _build_classify_fn(conn)
+                classify_fn = _build_classify_fn(conn, **ck)
             # When auto-merge is off the engine never reaches the visual step, so we
             # skip building the (LLM-backed) classify/compare fns entirely.
+
+            # Stage 4b: the CLIP cosine recall tier (default OFF). When on it picks
+            # the forensic model per room from the stored-embedding cosine — 'sonnet'
+            # routes via the default model (model_for['sonnet'] = None).
+            cosine_fn = None
+            bands = None
+            model_for = None
+            if clip["cosine_enabled"] and compare_fn is not None:
+                from toolkit.clip_dedup import room_pair_cosine
+                bands = clip["bands"]
+                model_for = {"haiku": clip["haiku_model"], "sonnet": None}
+                _cm = clip["clip_model"]
+
+                def cosine_fn(ids_a: list[int], ids_b: list[int]) -> float | None:
+                    return room_pair_cosine(
+                        conn, image_ids_a=ids_a, image_ids_b=ids_b, model=_cm)
 
             # Cache-only calls are free, so don't let the vision budget / room cap
             # throttle consumption — try every warmed room of every warmed pair.
@@ -1037,6 +1165,7 @@ def main() -> int:
             stats = run_engine(
                 conn, classify_fn=classify_fn, compare_fn=compare_fn,
                 site_plan_fn=site_plan_fn,
+                cosine_fn=cosine_fn, bands=bands, model_for=model_for,
                 max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,
                 max_room_attempts=eff_max_rooms,
                 auto_merge_enabled=auto_merge_enabled,
@@ -1045,6 +1174,7 @@ def main() -> int:
                 dry_run=args.shadow,
                 deadline=deadline,
             )
+            stats["clip_classified"] = clip_counter[0]
             if not args.shadow:
                 _write_run_row(conn, stats)
             LOG.info(
