@@ -1,0 +1,79 @@
+name: Dedup v2 — CLIP feasibility trial
+
+# Dispatch-only. The go/no-go gate for dedup v2's visual stage: stands up a
+# self-hosted CLIP on a free runner, measures img/s (→ 1M backfill wall-clock),
+# and scores CLIP zero-shot tagging against the existing Haiku
+# image_room_classifications (agreement %). Opportunistically also probes
+# same-property vs different-property cosine separation (the stage-4b band
+# calibration). Read-only — no DB / R2 writes. NOT a portal ingest job (untagged,
+# portal: null). Installs the CPU-only torch wheel + the `clip` extra
+# (transformers); production CLIP would run on lighter int8-ONNX, so this is a
+# trial-only dependency.
+#
+# Required secrets: SUPABASE_DB_URL + the R2_* set (same as compute_image_phash.yml).
+
+on:
+  workflow_dispatch:
+    inputs:
+      n_labeled:
+        description: Labeled images sampled (accuracy + throughput)
+        required: false
+        default: "1500"
+        type: string
+      n_multi:
+        description: Images from multi-listing properties (cosine pairs)
+        required: false
+        default: "600"
+        type: string
+      frac:
+        description: Per-row random sampling fraction (bounds the DB scan)
+        required: false
+        default: "0.05"
+        type: string
+
+concurrency:
+  group: clip-trial
+  cancel-in-progress: false
+
+jobs:
+  trial:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (CPU torch + clip extra)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[clip]"
+
+      - name: Run CLIP trial
+        run: |
+          python -m scripts.clip_trial \
+            --n-labeled ${{ inputs.n_labeled || '1500' }} \
+            --n-multi ${{ inputs.n_multi || '600' }} \
+            --frac ${{ inputs.frac || '0.05' }} \
+            --out clip_trial_summary.json \
+            --verbose
+
+      - name: Upload summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip-trial-summary
+          path: clip_trial_summary.json
+          if-no-files-found: ignore

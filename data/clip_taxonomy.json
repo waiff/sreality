@@ -1,0 +1,18 @@
+{
+  "model": "openai/clip-vit-base-patch32",
+  "note": "Zero-shot tag prompts, one per canonical label in toolkit.image_classification.ROOM_TYPES. The CLIP trial picks argmax cosine(image, prompt) and measures agreement against the existing Haiku image_room_classifications on this exact label space, so 'does CLIP tag as well as the paid classifier' is a single number. Extended house/land buckets are a v2-core follow-up once tagging is proven on this core.",
+  "prompts": {
+    "kitchen": "a photo of a kitchen with cabinets and a countertop",
+    "bathroom": "a photo of a bathroom with a shower or bathtub",
+    "toilet": "a photo of a separate toilet or WC",
+    "living_room": "a photo of a living room with a sofa",
+    "bedroom": "a photo of a bedroom with a bed",
+    "hallway": "a photo of a hallway, corridor or entrance hall",
+    "exterior_facade": "a photo of the outside facade of a residential building",
+    "balcony_terrace": "a photo taken on a balcony or terrace",
+    "garden": "a photo of a garden, yard or outdoor green space",
+    "floor_plan": "an architectural floor plan drawing of an apartment layout",
+    "site_plan": "a site plan, situation plan or cadastral map drawing",
+    "other": "a photograph of something else"
+  }
+}
