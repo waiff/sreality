@@ -489,6 +489,56 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
   },
   {
+    "filename": "clip_trial.yml",
+    "name": "Dedup v2 — CLIP feasibility trial",
+    "description": "Dispatch-only. The go/no-go gate for dedup v2's visual stage: stands up a self-hosted CLIP on a free runner, measures img/s (→ 1M backfill wall-clock), and scores CLIP zero-shot tagging against the existing Haiku image_room_classifications (agreement %). Opportunistically also probes same-property vs different-property cosine separation (the stage-4b band calibration). Read-only — no DB / R2 writes. NOT a portal ingest job (untagged, portal: null). Installs the CPU-only torch wheel + the `clip` extra (transformers); production CLIP would run on lighter int8-ONNX, so this is a trial-only dependency.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "n_labeled",
+        "description": "Labeled images sampled (accuracy + throughput)",
+        "required": false,
+        "type": "string",
+        "default": "1500",
+        "options": null
+      },
+      {
+        "name": "n_multi",
+        "description": "Images from multi-listing properties (cosine pairs)",
+        "required": false,
+        "type": "string",
+        "default": "600",
+        "options": null
+      },
+      {
+        "name": "frac",
+        "description": "Per-row random sampling fraction (bounds the DB scan)",
+        "required": false,
+        "type": "string",
+        "default": "0.05",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "clip-trial",
+    "cancelInProgress": false,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/clip_trial.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/clip_trial.yml"
+  },
+  {
     "filename": "compare_condition_models.yml",
     "name": "Scoring: Condition model A/B (Haiku vs Sonnet)",
     "description": "Read-only validation harness for a cheaper condition-scoring model. For a sample of listings that already have a baseline-model score on their latest snapshot, it re-runs the SAME scoring request through a candidate model and reports per-axis agreement (exact / within-1 / mean abs diff / bias) plus the candidate vs baseline cost ratio.",
