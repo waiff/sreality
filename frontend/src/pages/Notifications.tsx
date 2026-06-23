@@ -23,6 +23,7 @@ import { notificationKeys } from '@/lib/queries';
 import { listingPath } from '@/lib/listingUrl';
 import { usePageTitle } from '@/lib/pageTitle';
 import { fmtAbsolute, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
+import { listingKindLabel } from '@/lib/enums';
 import type {
   NotificationSourceKind,
   WatchdogDispatch,
@@ -258,8 +259,8 @@ function NotificationRow({ dispatch: d }: { dispatch: WatchdogDispatch }) {
       <div className="min-w-0 flex-1">
         <p className="text-sm text-[var(--color-ink)] group-hover:text-[var(--color-copper)] transition-colors truncate">
           <span className="font-medium">{place}</span>
-          {d.disposition && (
-            <span className="text-[var(--color-ink-3)]"> · {d.disposition}</span>
+          {listingKindLabel(d) && (
+            <span className="text-[var(--color-ink-3)]"> · {listingKindLabel(d)}</span>
           )}
           {d.price_czk != null && (
             <span className="text-[var(--color-ink-2)] font-mono tabular-nums">

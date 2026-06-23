@@ -81,6 +81,7 @@ export interface BrokerListing {
   category_main: string | null;
   category_type: string | null;
   disposition: string | null;
+  subtype: string | null;
   area_m2: number | null;
   price_czk: number | null;
   is_active: boolean;

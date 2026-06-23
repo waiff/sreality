@@ -31,6 +31,7 @@ import {
 import { LocationTypeahead } from '@/components/filter-controls/LocationTypeahead';
 import { type DistrictChip } from '@/lib/filters';
 import { fmtArea, fmtCzk } from '@/lib/format';
+import { listingKindLabel } from '@/lib/enums';
 import { listingPath } from '@/lib/listingUrl';
 import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import TagColorPicker from '@/components/TagColorPicker';
@@ -641,7 +642,7 @@ function CardThumb({ url }: { url: string | null }) {
 function CardFace({ card }: { card: PipelineBoardCard }) {
   const place = [card.street, card.district].filter(Boolean).join(', ');
   const dims = [
-    card.disposition,
+    listingKindLabel(card),
     card.area_m2 != null ? fmtArea(card.area_m2) : null,
   ]
     .filter(Boolean)

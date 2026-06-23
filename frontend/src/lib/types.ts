@@ -887,6 +887,7 @@ export interface PipelineBoardCard {
   street: string | null;
   district: string | null;
   disposition: string | null;
+  subtype: string | null;
   area_m2: number | null;
   price_czk: number | null;
   mf_gross_yield_pct: number | null;
@@ -1500,11 +1501,18 @@ export interface DedupSummaryBucket {
   count: number;
 }
 
+export interface DedupSummaryTier {
+  tier: string;     // 'street_disposition' (apartments) | 'geo_dum' | 'geo_komercni' | ...
+  count: number;    // pending candidates in this family
+  strong: number;   // the bulk-approvable subset (geo_exact / geo_strong)
+}
+
 export interface DedupSummaryResponse {
   data: {
     status: string;
     total: number;
     buckets: DedupSummaryBucket[];
+    tiers: DedupSummaryTier[];
   };
 }
 

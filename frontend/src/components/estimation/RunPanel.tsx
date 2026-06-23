@@ -28,6 +28,7 @@ import {
   fmtPricePerM2,
   fmtRelative,
 } from '@/lib/format';
+import { listingKindLabel } from '@/lib/enums';
 import {
   ApiError,
   decideRefinement,
@@ -1014,6 +1015,7 @@ function ComparablesSection({ run }: { run: EstimationRun }) {
           price_czk: l.price_czk,
           area_m2: l.area_m2,
           disposition: l.disposition,
+          subtype: l.subtype,
           district: l.district,
         };
       })
@@ -1185,7 +1187,7 @@ function ComparableRow({
         {listing ? fmtArea(listing.area_m2) : '—'}
       </td>
       <td className="px-3 py-2 align-middle font-mono tabular-nums text-[var(--color-ink-2)]">
-        {listing?.disposition ?? '—'}
+        {listing ? listingKindLabel(listing) ?? '—' : '—'}
       </td>
       <td className="px-3 py-2 align-middle text-[0.82rem] text-[var(--color-ink-2)]">
         <span className="line-clamp-2 leading-snug">{locText}</span>

@@ -1332,6 +1332,24 @@ export const unlinkAssetProperty = (
     { method: 'POST', json: { property_id: propertyId } },
   );
 
+export interface BulkMergeResult {
+  data: {
+    merged: number;
+    skipped: number;
+    merge_group_ids: string[];
+  };
+}
+
+/* Scoped bulk-approve: merge many proposed candidates as INDEPENDENT reversible
+ * pairs (per-pair tolerant). The /dedup surface sends the loaded STRONG ids. */
+export const bulkMergeDedupCandidates = (
+  candidateIds: number[],
+): Promise<BulkMergeResult> =>
+  request<BulkMergeResult>('/dedup/candidates/bulk-merge', {
+    method: 'POST',
+    json: { candidate_ids: candidateIds },
+  });
+
 export const listDedupMerges = (
   params: { limit?: number; offset?: number } = {},
 ): Promise<MergesResponse> =>

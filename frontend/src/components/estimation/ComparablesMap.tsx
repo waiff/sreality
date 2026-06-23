@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import maplibregl, { type GeoJSONSource } from 'maplibre-gl';
 import { createMap } from '@/lib/basemap';
 import { fmtArea, fmtCzk } from '@/lib/format';
+import { listingKindLabel } from '@/lib/enums';
 import { imageSrc, type ImageRef } from '@/lib/imageUrl';
 import { useMapFeatureHover } from '@/lib/useMapFeatureHover';
 import MapImagePreview from '../MapImagePreview';
@@ -13,6 +14,7 @@ export interface ComparablePoint {
   price_czk: number | null;
   area_m2: number | null;
   disposition: string | null;
+  subtype: string | null;
   district: string | null;
 }
 
@@ -317,7 +319,7 @@ export default function ComparablesMap({
           <MapImagePreview
             urls={previewUrls}
             price={fmtCzk(pinHover.price_czk)}
-            meta={`${pinHover.disposition ?? '—'} · ${fmtArea(pinHover.area_m2)}`}
+            meta={`${listingKindLabel(pinHover) ?? '—'} · ${fmtArea(pinHover.area_m2)}`}
             district={pinHover.district}
             onMouseEnter={() => {
               clearCloseTimer();
