@@ -16,6 +16,12 @@ from pydantic import BaseModel
 
 from api import dependencies as deps
 from api import property_dedup as dedup
+from toolkit.asset_identity import (
+    AssetError,
+    get_asset,
+    link_properties,
+    unlink_property,
+)
 from toolkit.property_identity import MergeError
 
 router = APIRouter(prefix="/dedup", tags=["dedup"])
@@ -27,6 +33,15 @@ class ClusterAction(BaseModel):
 
 class PropertySetAction(BaseModel):
     property_ids: list[int]
+
+
+class AssetLinkAction(BaseModel):
+    property_ids: list[int]
+    note: str | None = None
+
+
+class AssetUnlinkAction(BaseModel):
+    property_id: int
 
 
 @router.get("/summary")
@@ -165,3 +180,52 @@ def post_unmerge(
         return dedup.unmerge(conn, merge_group_id, undone_by="operator")
     except MergeError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ----- asset links (same physical building, kept as separate cohorts) -------
+# Unlike a merge these never collapse properties — both category facets survive.
+# It is the surface for the cross-category sameness merge_properties refuses.
+
+
+@router.post("/assets/link")
+def post_asset_link(
+    body: AssetLinkAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Link the chosen properties into one asset (same building)."""
+    try:
+        return link_properties(
+            conn, property_ids=body.property_ids, source="operator",
+            reason="manual_link", note=body.note, created_by="operator",
+        )
+    except AssetError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/assets/unlink")
+def post_asset_unlink(
+    body: AssetUnlinkAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Remove one property from its asset (dissolves the asset if <2 remain)."""
+    try:
+        return unlink_property(
+            conn, property_id=body.property_id, reason="manual_unlink",
+            created_by="operator",
+        )
+    except AssetError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/assets/{asset_id}")
+def get_asset_route(
+    asset_id: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    result = get_asset(conn, asset_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="asset not found")
+    return result

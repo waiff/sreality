@@ -1303,6 +1303,35 @@ export const mergeDedupPropertySet = (
     json: { property_ids: propertyIds },
   });
 
+/* Asset links (migration 224): group properties that are the same physical
+ * building across category cohorts WITHOUT collapsing them — the cross-category
+ * sameness a merge correctly refuses. Both rows + both category facets survive. */
+export interface AssetLinkResult {
+  data: {
+    asset_id: number;
+    member_property_ids: number[];
+    newly_linked_property_ids: number[];
+    dissolved_asset_ids: number[];
+  };
+}
+
+export const linkAssetProperties = (
+  propertyIds: number[],
+  note?: string,
+): Promise<AssetLinkResult> =>
+  request<AssetLinkResult>('/dedup/assets/link', {
+    method: 'POST',
+    json: { property_ids: propertyIds, note: note ?? null },
+  });
+
+export const unlinkAssetProperty = (
+  propertyId: number,
+): Promise<{ data: { asset_id: number; asset_dissolved: boolean } }> =>
+  request<{ data: { asset_id: number; asset_dissolved: boolean } }>(
+    '/dedup/assets/unlink',
+    { method: 'POST', json: { property_id: propertyId } },
+  );
+
 export interface BulkMergeResult {
   data: {
     merged: number;
