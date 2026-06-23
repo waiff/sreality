@@ -81,20 +81,23 @@ def compare_listings_visually(
     image_ids_a: list[int],
     image_ids_b: list[int],
     force_refresh: bool = False,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Forensic verdict for one room type across two listings (cache on miss).
 
     image_ids_a / image_ids_b are the classifier-selected images of `room_type`
     for each listing (the caller picks them; this keeps the tool free of the
     classification dependency and trivially testable). data.verdict ∈
-    High|Medium|Low.
+    High|Medium|Low. `model` overrides the default (the dedup cosine tier routes
+    high-confidence rooms to Haiku, uncertain ones to Sonnet); the cache key
+    includes the model, so the two verdicts cache independently.
     """
     from toolkit import _now_iso
 
     if sreality_id_a == sreality_id_b:
         raise VisualMatchError("cannot compare a listing to itself")
     a, b = sorted((sreality_id_a, sreality_id_b))
-    model = llm_client.resolve_model(_MODEL_KEY)
+    model = model or llm_client.resolve_model(_MODEL_KEY)
 
     if not force_refresh:
         cached = _cache_lookup(conn, a, b, room_type, model)

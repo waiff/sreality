@@ -585,3 +585,29 @@ def decide_visual_dismiss(room_verdicts: dict[str, str]) -> bool:
     if not distinctive:
         return False
     return all(v == "Low" for v in distinctive)
+
+
+# Stage 4b: the CLIP cosine recall tier picks WHICH forensic model judges a room
+# by the upstream same-room cosine. Calibrated from the trial: same-property
+# same-tag median ~0.90, different-property p95 ~0.84.
+@dataclass(frozen=True)
+class CosineBands:
+    haiku_min: float = 0.90    # cosine >= this -> Haiku confirms (near-certain, cheap)
+    sonnet_min: float = 0.70   # [sonnet_min, haiku_min) -> Sonnet (the uncertain band)
+    # cosine < sonnet_min -> 'manual': too dissimilar to spend the LLM on this room
+    # (NOT a dismiss — the pair still queues if no room merges; protects reshoots).
+
+
+def route_by_cosine(cosine: float | None, bands: CosineBands) -> str:
+    """Which forensic model judges this room, from its upstream CLIP cosine:
+    'haiku' | 'sonnet' | 'manual'. NEVER auto-merges or auto-dismisses — it only
+    picks who decides, or 'manual' to skip the LLM for a too-dissimilar room. A
+    missing cosine (no stored embedding) routes to 'sonnet' — the precise model —
+    so the absence of CLIP never silently weakens a decision."""
+    if cosine is None:
+        return "sonnet"
+    if cosine >= bands.haiku_min:
+        return "haiku"
+    if cosine >= bands.sonnet_min:
+        return "sonnet"
+    return "manual"

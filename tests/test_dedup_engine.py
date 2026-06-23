@@ -16,6 +16,7 @@ import pytest
 from toolkit.dedup_engine import (
     ADDRESS_AREA_GUARD_PCT,
     CANDIDATE_AREA_MAX_PCT,
+    CosineBands,
     ListingKey,
     MatchProfile,
     classify_geo_pair,
@@ -27,6 +28,7 @@ from toolkit.dedup_engine import (
     normalize_street,
     profile_for,
     rooms_in_priority,
+    route_by_cosine,
     street_group_keys,
     verdict_is_merge,
 )
@@ -853,8 +855,10 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
     def classify(sid: int) -> dict:
         return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
 
-    # First pair: kitchen -> High. (single candidate pair)
-    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list) -> dict:
+    # First pair: kitchen -> High. (single candidate pair). The 6th `model` arg
+    # is the cosine-tier band route (None when the tier is off, as here).
+    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
+                model: str | None = None) -> dict:
         return {"verdict": "High", "rationale": "matching tiles"}
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -1224,7 +1228,7 @@ def test_run_engine_missing_room_verdict_blocks_dismiss(monkeypatch: Any) -> Non
         ]}}
 
     # kitchen Low (warm), bathroom un-warmed (None) -> not all rooms verdicted -> queue.
-    def compare(a, b, room, ids_a, ids_b):
+    def compare(a, b, room, ids_a, ids_b, model=None):
         return {"verdict": "Low", "cache_hit": True} if room == "kitchen" else None
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -1271,3 +1275,94 @@ def test_run_engine_free_mode_phash_still_merges(monkeypatch: Any) -> None:
     )
     assert stats["auto_phash"] == 1
     assert merges == ["image_phash"]
+
+
+# ---- Stage 4b: CLIP cosine -> forensic-model band routing (pure) ----------
+
+
+def test_route_by_cosine_high_band_routes_to_haiku() -> None:
+    bands = CosineBands(haiku_min=0.90, sonnet_min=0.70)
+    assert route_by_cosine(0.95, bands) == "haiku"
+    assert route_by_cosine(0.90, bands) == "haiku"  # inclusive
+
+
+def test_route_by_cosine_uncertain_band_routes_to_sonnet() -> None:
+    bands = CosineBands(haiku_min=0.90, sonnet_min=0.70)
+    assert route_by_cosine(0.80, bands) == "sonnet"
+    assert route_by_cosine(0.70, bands) == "sonnet"  # inclusive lower edge
+
+
+def test_route_by_cosine_too_low_is_manual_not_dismiss() -> None:
+    # Below sonnet_min: skip the LLM for this room. NOT a dismiss — a reshoot of
+    # the same property must never be dropped on a low cosine.
+    bands = CosineBands(haiku_min=0.90, sonnet_min=0.70)
+    assert route_by_cosine(0.50, bands) == "manual"
+
+
+def test_route_by_cosine_missing_embedding_defaults_to_sonnet() -> None:
+    # No stored embedding -> use the precise model, never silently weaken.
+    bands = CosineBands(haiku_min=0.90, sonnet_min=0.70)
+    assert route_by_cosine(None, bands) == "sonnet"
+
+
+# ---- Stage 4b cosine tier: model routing + the no-dismiss manual skip -------
+
+
+def test_cosine_tier_routes_high_cosine_to_haiku(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    seen: list[str | None] = []
+
+    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
+                model: str | None = None) -> dict:
+        seen.append(model)
+        return {"verdict": "High", "rationale": "x"}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=compare,
+        cosine_fn=lambda ids_a, ids_b: 0.95,                 # high -> Haiku band
+        bands=CosineBands(haiku_min=0.90, sonnet_min=0.70),
+        model_for={"haiku": "claude-haiku-x", "sonnet": None},
+        max_vision_calls=10,
+    )
+    assert seen == ["claude-haiku-x"]
+    assert stats["routed_haiku"] == 1
+    assert stats["clip_cosine_calls"] == 1
+    assert stats["auto_visual"] == 1
+
+
+def test_cosine_tier_low_cosine_skips_room_and_queues_not_dismiss(
+    monkeypatch: Any,
+) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
+                model: str | None = None) -> dict:
+        raise AssertionError("compare must NOT run for a manual-routed (low-cosine) room")
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=compare,
+        cosine_fn=lambda ids_a, ids_b: 0.40,                 # below sonnet_min -> 'manual'
+        bands=CosineBands(haiku_min=0.90, sonnet_min=0.70),
+        model_for={"haiku": "h", "sonnet": None},
+        max_vision_calls=10,
+    )
+    # A low cosine skips the LLM for that room but NEVER dismisses (protects a
+    # reshoot of the same property) — the pair queues for the operator.
+    assert stats["auto_visual"] == 0
+    assert stats["auto_dismissed"] == 0
+    assert stats["queued"] == 1
