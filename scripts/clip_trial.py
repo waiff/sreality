@@ -37,10 +37,9 @@ from pathlib import Path
 from typing import Any
 
 from scraper import image_storage
+from scraper.clip_tagger import Tagger, load_taxonomy
 
 LOG = logging.getLogger("clip_trial")
-
-_TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "data" / "clip_taxonomy.json"
 
 # Labeled-image sample: images carrying a Haiku room_type (the accuracy +
 # throughput set). `random() < frac` + LIMIT bounds the scan so the pooler's
@@ -120,62 +119,6 @@ def _download_decode(r2: image_storage.R2Client, rows: list[dict[str, Any]],
     return out
 
 
-def _load_clip(threads: int):
-    import torch  # noqa: F401 - presence check; clear error if the extra is missing
-    from transformers import CLIPModel, CLIPProcessor
-
-    torch.set_num_threads(threads)
-    model_id = json.loads(_TAXONOMY_PATH.read_text())["model"]
-    LOG.info("CLIP loading model=%s threads=%d", model_id, threads)
-    model = CLIPModel.from_pretrained(model_id)
-    model.eval()
-    processor = CLIPProcessor.from_pretrained(model_id)
-    return model, processor
-
-
-# Explicit submodel + projection rather than get_text_features/get_image_features:
-# across transformers versions those convenience methods sometimes return a raw
-# BaseModelOutputWithPooling instead of the projected tensor. text_model /
-# vision_model / *_projection are stable attributes and reproduce exactly what the
-# convenience methods do internally (pooler_output -> projection -> shared space).
-def _project(out):
-    return out if hasattr(out, "shape") else out.pooler_output
-
-
-def _embed_text(model, processor, prompts: dict[str, str]):
-    import torch
-
-    labels = list(prompts)
-    with torch.no_grad():
-        inputs = processor(text=[prompts[k] for k in labels],
-                           return_tensors="pt", padding=True)
-        out = model.text_model(input_ids=inputs["input_ids"],
-                               attention_mask=inputs.get("attention_mask"))
-        feats = model.text_projection(_project(out))
-    feats = feats / feats.norm(dim=-1, keepdim=True)
-    return labels, feats
-
-
-def _embed_images(model, processor, images: list, batch_size: int):
-    """Return (normalized_embeddings_tensor, encode_seconds)."""
-    import torch
-
-    chunks = []
-    encode_s = 0.0
-    for i in range(0, len(images), batch_size):
-        batch = images[i:i + batch_size]
-        inputs = processor(images=batch, return_tensors="pt")
-        t0 = time.perf_counter()
-        with torch.no_grad():
-            out = model.vision_model(pixel_values=inputs["pixel_values"])
-            feats = model.visual_projection(_project(out))
-        encode_s += time.perf_counter() - t0
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-        chunks.append(feats)
-        LOG.info("ENCODE %d/%d", min(i + batch_size, len(images)), len(images))
-    return torch.cat(chunks), encode_s
-
-
 # Dedup-relevant coarse buckets: same-tag matching only needs these distinctions,
 # not the fine 12-way labels. Most fine confusions (living_room<->bedroom,
 # toilet<->bathroom, balcony<->facade) collapse WITHIN a bucket, so coarse
@@ -195,7 +138,7 @@ def _coarse(tag: str) -> str:
     return COARSE_BUCKET.get(tag, "other")
 
 
-def _tag_accuracy(labels: list[str], img_tags: list[str],
+def _tag_accuracy(img_tags: list[str],
                   haiku: list[str | None]) -> dict[str, Any]:
     pairs = [(c, h) for c, h in zip(img_tags, haiku) if h]
     if not pairs:
@@ -402,9 +345,7 @@ def main() -> int:
     import psycopg
 
     threads = args.threads or (os.cpu_count() or 4)
-    taxonomy = json.loads(_TAXONOMY_PATH.read_text())
-    prompts = taxonomy["prompts"]
-    collapse = taxonomy.get("collapse", {})
+    taxonomy = load_taxonomy()
 
     # 1. Sample (dedupe by image id; labeled rows win so haiku_room is kept).
     cats = [c.strip() for c in args.categories.split(",") if c.strip()]
@@ -444,18 +385,17 @@ def main() -> int:
     meta = [row for row, _ in decoded]
     images = [img for _, img in decoded]
 
-    # 3. CLIP: text + image embeddings (image encode is the throughput metric).
-    model, processor = _load_clip(threads)
-    labels, text_emb = _embed_text(model, processor, prompts)
-    emb, encode_s = _embed_images(model, processor, images, args.batch_size)
+    # 3. CLIP via the SHARED tagger (same code path the backfill uses). Time the
+    # image-embed as the throughput metric; the embeddings feed the cosine probe.
+    tagger = Tagger.load(threads)
+    t0 = time.perf_counter()
+    emb = tagger.embed(images, args.batch_size)
+    encode_s = time.perf_counter() - t0
 
-    # 4. Tag = argmax cosine vs the prompt matrix (fine), then collapse to the
-    # engine's logical labels. Metrics use logical tags; the per-category
-    # distribution keeps the fine tag so plot sub-types (cadastral/aerial) show.
-    import torch
-    sims = emb @ text_emb.T
-    fine_tags = [labels[int(i)] for i in sims.argmax(dim=1)]
-    img_tags = [collapse.get(t, t) for t in fine_tags]
+    # 4. Tag (fine anchor + collapsed logical label) from the same embeddings.
+    results = tagger.tags_from_emb(emb)
+    fine_tags = [r.fine_tag for r in results]
+    img_tags = [r.logical_tag for r in results]
 
     # Per-category tag distribution (the only signal for the unlabeled
     # dum/pozemek/komercni — sanity: do plot categories tag as site/plot/exterior?).
@@ -492,7 +432,7 @@ def main() -> int:
                 round(1_000_000 / (n / encode_s) / 3600, 1) if encode_s else None
             ),
         },
-        "tag_accuracy": _tag_accuracy(labels, img_tags,
+        "tag_accuracy": _tag_accuracy(img_tags,
                                       [m["haiku_room"] for m in meta]),
         "tag_consistency": _tag_consistency(meta, img_tags),
         "category_tag_distribution": cat_dist,
