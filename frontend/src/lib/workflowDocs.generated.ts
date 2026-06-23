@@ -489,6 +489,64 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
   },
   {
+    "filename": "clip_tag.yml",
+    "name": "Dedup — CLIP image tagging (sharded)",
+    "description": "Backfills image_clip_tags: the self-hosted CLIP zero-shot tag per stored image (free replacement for the paid room classifier on the coarse dedup-relevant tags, and the FIRST tagger for dum/pozemek/komercni). ACTIVE-listing images first; idempotent + resumable (a tagged image drops out of the next select). Horizontally sharded into 4 parallel jobs (image_id %% 4), each with its own runner + cap, like images.yml. Installs CPU torch + the `clip` extra (transformers); the production CLIP could move to int8-ONNX later as an optimization. NOT a portal ingest job (untagged, portal: null).",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "40 */2 * * *",
+        "human": "Every 2 hours at :40"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "Max images tagged per shard per run",
+        "required": false,
+        "type": "string",
+        "default": "20000",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "Parallel R2 downloads",
+        "required": false,
+        "type": "string",
+        "default": "16",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report the pending count and exit without tagging",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "clip-tag",
+    "cancelInProgress": false,
+    "timeoutMinutes": 55,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/clip_tag.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/clip_tag.yml"
+  },
+  {
     "filename": "clip_trial.yml",
     "name": "Dedup v2 — CLIP feasibility trial",
     "description": "Dispatch-only. The go/no-go gate for dedup v2's visual stage: stands up a self-hosted CLIP on a free runner, measures img/s (→ 1M backfill wall-clock), and scores CLIP zero-shot tagging against the existing Haiku image_room_classifications (agreement %). Opportunistically also probes same-property vs different-property cosine separation (the stage-4b band calibration). Read-only — no DB / R2 writes. NOT a portal ingest job (untagged, portal: null). Installs the CPU-only torch wheel + the `clip` extra (transformers); production CLIP would run on lighter int8-ONNX, so this is a trial-only dependency.",
