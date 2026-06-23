@@ -161,6 +161,25 @@ def _embed_images(model, processor, images: list, batch_size: int):
     return torch.cat(chunks), encode_s
 
 
+# Dedup-relevant coarse buckets: same-tag matching only needs these distinctions,
+# not the fine 12-way labels. Most fine confusions (living_room<->bedroom,
+# toilet<->bathroom, balcony<->facade) collapse WITHIN a bucket, so coarse
+# agreement is the number that actually governs whether CLIP tags well enough.
+# floor_plan and site_plan stay SEPARATE — site_plan is the development guard.
+COARSE_BUCKET = {
+    "kitchen": "kitchen",
+    "bathroom": "sanitary", "toilet": "sanitary",
+    "living_room": "living", "bedroom": "living", "hallway": "living",
+    "exterior_facade": "exterior", "balcony_terrace": "exterior", "garden": "exterior",
+    "floor_plan": "floor_plan", "site_plan": "site_plan",
+    "other": "other",
+}
+
+
+def _coarse(tag: str) -> str:
+    return COARSE_BUCKET.get(tag, "other")
+
+
 def _tag_accuracy(labels: list[str], img_tags: list[str],
                   haiku: list[str | None]) -> dict[str, Any]:
     pairs = [(c, h) for c, h in zip(img_tags, haiku) if h]
@@ -169,7 +188,17 @@ def _tag_accuracy(labels: list[str], img_tags: list[str],
     agree = sum(1 for c, h in pairs if c == h)
     no_other = [(c, h) for c, h in pairs if h != "other"]
     agree_no_other = sum(1 for c, h in no_other if c == h)
-    # Per-Haiku-class agreement + the most common confusion per class.
+    # Coarse-bucket agreement (the dedup-relevant granularity) — excl 'other'.
+    coarse_agree = sum(1 for c, h in no_other if _coarse(c) == _coarse(h))
+    coarse_per: dict[str, dict[str, Any]] = {}
+    for b in {_coarse(h) for _, h in no_other}:
+        cls = [(c, h) for c, h in no_other if _coarse(h) == b]
+        coarse_per[b] = {
+            "n": len(cls),
+            "agreement": round(
+                sum(1 for c, _ in cls if _coarse(c) == b) / len(cls), 3),
+        }
+    # Per-Haiku-class fine agreement + the most common confusion per class.
     per_class: dict[str, dict[str, Any]] = {}
     for h in {h for _, h in pairs}:
         cls = [(c, hh) for c, hh in pairs if hh == h]
@@ -189,9 +218,43 @@ def _tag_accuracy(labels: list[str], img_tags: list[str],
         "agreement_excl_other": (
             round(agree_no_other / len(no_other), 3) if no_other else None
         ),
+        "coarse_agreement_excl_other": (
+            round(coarse_agree / len(no_other), 3) if no_other else None
+        ),
         "n_excl_other": len(no_other),
+        "coarse_per_bucket": dict(sorted(coarse_per.items(),
+                                         key=lambda kv: -kv[1]["n"])),
         "per_class": dict(sorted(per_class.items(),
                                  key=lambda kv: -kv[1]["n"])),
+    }
+
+
+def _tag_consistency(meta: list[dict[str, Any]],
+                     img_tags: list[str]) -> dict[str, Any]:
+    """The dedup-truest metric: across two listings of the SAME property showing
+    the same Haiku room type, does CLIP assign them the SAME tag? Consistency
+    (not vs-Haiku correctness) is what makes same-tag matching work."""
+    by_prop: dict[int, list[int]] = {}
+    for idx, m in enumerate(meta):
+        if m["property_id"] is not None and m["haiku_room"] and m["haiku_room"] != "other":
+            by_prop.setdefault(m["property_id"], []).append(idx)
+    fine_n = fine_ok = coarse_ok = 0
+    for idxs in by_prop.values():
+        for a in idxs:
+            for b in idxs:
+                if (a < b
+                        and meta[a]["sreality_id"] != meta[b]["sreality_id"]
+                        and meta[a]["haiku_room"] == meta[b]["haiku_room"]):
+                    fine_n += 1
+                    fine_ok += img_tags[a] == img_tags[b]
+                    coarse_ok += _coarse(img_tags[a]) == _coarse(img_tags[b])
+    return {
+        "n_same_room_cross_listing_pairs": fine_n,
+        "fine_consistency": round(fine_ok / fine_n, 3) if fine_n else None,
+        "coarse_consistency": round(coarse_ok / fine_n, 3) if fine_n else None,
+        "note": ("CLIP assigns the same tag to genuinely-same-room cross-listing "
+                 "pairs at this rate; high = same-tag matching is reliable "
+                 "regardless of vs-Haiku label correctness."),
     }
 
 
@@ -373,6 +436,7 @@ def main() -> int:
         },
         "tag_accuracy": _tag_accuracy(labels, img_tags,
                                       [m["haiku_room"] for m in meta]),
+        "tag_consistency": _tag_consistency(meta, img_tags),
         "cosine_discrimination": _cosine_discrimination(
             emb, meta, img_tags, args.max_cosine_pairs),
         "model": taxonomy["model"],
