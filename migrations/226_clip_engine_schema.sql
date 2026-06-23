@@ -9,14 +9,25 @@
 -- Active-listing images are tagged/embedded first, which bounds the footprint to
 -- the dedup-relevant set. halfvec is a later size optimization (vector = 2 KB/row).
 
-create extension if not exists vector;
-
-create table if not exists image_clip_embeddings (
-  image_id   bigint not null references images(id) on delete cascade,
-  model      text   not null,
-  embedding  vector(512) not null,
-  primary key (image_id, model)
-);
+-- pgvector + the embeddings table are GUARDED: production (Supabase) ships
+-- pgvector, but the CI migration-replay image (postgis/postgis) does not. The DO
+-- block (EXECUTE so the `vector` type resolves only AFTER the extension exists)
+-- applies cleanly in both; the table is idempotent, so production — where it was
+-- already applied — is unaffected.
+do $$
+begin
+  if exists (select 1 from pg_available_extensions where name = 'vector') then
+    create extension if not exists vector;
+    execute 'create table if not exists image_clip_embeddings (
+      image_id   bigint not null references images(id) on delete cascade,
+      model      text   not null,
+      embedding  vector(512) not null,
+      primary key (image_id, model)
+    )';
+  else
+    raise notice 'pgvector unavailable; image_clip_embeddings skipped (CI replay only). Production has it.';
+  end if;
+end $$;
 
 -- New per-run counters for the CLIP tiers (additive; existing rows read 0/NULL).
 alter table dedup_engine_runs

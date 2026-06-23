@@ -1228,7 +1228,7 @@ def test_run_engine_missing_room_verdict_blocks_dismiss(monkeypatch: Any) -> Non
         ]}}
 
     # kitchen Low (warm), bathroom un-warmed (None) -> not all rooms verdicted -> queue.
-    def compare(a, b, room, ids_a, ids_b):
+    def compare(a, b, room, ids_a, ids_b, model=None):
         return {"verdict": "Low", "cache_hit": True} if room == "kitchen" else None
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
