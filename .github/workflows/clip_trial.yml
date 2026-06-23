@@ -30,6 +30,11 @@ on:
         required: false
         default: "0.05"
         type: string
+      category_sample:
+        description: Images sampled PER category (dum/pozemek/komercni/byt) — tag distribution for the untagged categories
+        required: false
+        default: "500"
+        type: string
 
 concurrency:
   group: clip-trial
@@ -67,6 +72,7 @@ jobs:
             --n-labeled ${{ inputs.n_labeled || '1500' }} \
             --n-multi ${{ inputs.n_multi || '600' }} \
             --frac ${{ inputs.frac || '0.05' }} \
+            --category-sample ${{ inputs.category_sample || '500' }} \
             --out clip_trial_summary.json \
             --verbose
 

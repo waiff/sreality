@@ -1,6 +1,6 @@
 {
   "model": "openai/clip-vit-base-patch32",
-  "note": "Zero-shot tag prompts, one per canonical label in toolkit.image_classification.ROOM_TYPES. The CLIP trial picks argmax cosine(image, prompt) and measures agreement against the existing Haiku image_room_classifications on this exact label space, so 'does CLIP tag as well as the paid classifier' is a single number. Extended house/land buckets are a v2-core follow-up once tagging is proven on this core.",
+  "note": "CLIP zero-shot anchors. The trial's site_plan miss (37%) was one overloaded prompt: 'site_plan' bundled situation drawings + cadastral maps + aerial plot photos into one anchor that biased to line-art, so photo/aerial site plans leaked to garden/exterior. Fix: give each visual sub-style its OWN coherent anchor, then COLLAPSE back to the engine's logical labels (toolkit.image_classification.ROOM_TYPES) via `collapse`. CLIP picks argmax over `prompts`; metrics + the engine use the collapsed logical tag. This also unlocks the untagged non-apartment categories (dum/pozemek/komercni, ~166k listings, zero classified today) where plot/cadastral drawings are the property identity.",
   "prompts": {
     "kitchen": "a photo of a kitchen with cabinets and a countertop",
     "bathroom": "a photo of a bathroom with a shower or bathtub",
@@ -11,8 +11,28 @@
     "exterior_facade": "a photo of the outside facade of a residential building",
     "balcony_terrace": "a photo taken on a balcony or terrace",
     "garden": "a photo of a garden, yard or outdoor green space",
-    "floor_plan": "an architectural floor plan drawing of an apartment layout",
-    "site_plan": "a site plan, situation plan or cadastral map drawing",
+    "floor_plan": "an architectural floor plan drawing of the rooms inside an apartment",
+    "situation_plan": "an architectural site or situation plan, a line drawing showing building outlines and boundaries on a plot of land",
+    "cadastral_map": "a cadastral or land-registry map showing numbered land parcels and property boundaries",
+    "aerial_plot": "an aerial or satellite photograph of a plot of land or property seen from above",
+    "location_map": "a road or location map showing streets and a place marker",
     "other": "a photograph of something else"
+  },
+  "collapse": {
+    "kitchen": "kitchen",
+    "bathroom": "bathroom",
+    "toilet": "toilet",
+    "living_room": "living_room",
+    "bedroom": "bedroom",
+    "hallway": "hallway",
+    "exterior_facade": "exterior_facade",
+    "balcony_terrace": "balcony_terrace",
+    "garden": "garden",
+    "floor_plan": "floor_plan",
+    "situation_plan": "site_plan",
+    "cadastral_map": "site_plan",
+    "aerial_plot": "site_plan",
+    "location_map": "other",
+    "other": "other"
   }
 }

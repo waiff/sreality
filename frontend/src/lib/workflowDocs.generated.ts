@@ -522,6 +522,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "0.05",
         "options": null
+      },
+      {
+        "name": "category_sample",
+        "description": "Images sampled PER category (dum/pozemek/komercni/byt) — tag distribution for the untagged categories",
+        "required": false,
+        "type": "string",
+        "default": "500",
+        "options": null
       }
     ],
     "secrets": [

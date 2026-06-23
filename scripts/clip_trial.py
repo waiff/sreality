@@ -46,7 +46,8 @@ _TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "data" / "clip_taxonom
 # throughput set). `random() < frac` + LIMIT bounds the scan so the pooler's
 # statement timeout is never at risk (no full-table sort).
 _SAMPLE_LABELED_SQL = """
-    SELECT i.id, i.storage_path, irc.room_type, i.sreality_id, l.property_id
+    SELECT i.id, i.storage_path, irc.room_type, i.sreality_id, l.property_id,
+           l.category_main
     FROM image_room_classifications irc
     JOIN images i ON i.id = irc.image_id AND i.storage_path IS NOT NULL
     LEFT JOIN listings l ON l.sreality_id = i.sreality_id
@@ -58,7 +59,8 @@ _SAMPLE_LABELED_SQL = """
 # image pairs for the cosine-discrimination probe. room_type via LATERAL (may be
 # NULL — these need no label for the cosine math).
 _SAMPLE_MULTI_SQL = """
-    SELECT i.id, i.storage_path, irc.room_type, i.sreality_id, l.property_id
+    SELECT i.id, i.storage_path, irc.room_type, i.sreality_id, l.property_id,
+           l.category_main
     FROM properties p
     JOIN listings l ON l.property_id = p.id
     JOIN images i ON i.sreality_id = l.sreality_id AND i.storage_path IS NOT NULL
@@ -70,14 +72,27 @@ _SAMPLE_MULTI_SQL = """
     LIMIT %(n)s
 """
 
+# Per-category sample of UNTAGGED images (no classification join) — for the
+# categories that have zero Haiku labels (dum/pozemek/komercni). No ground truth,
+# so the metric is CLIP's tag DISTRIBUTION (sanity) + same-property consistency,
+# not vs-Haiku agreement. Active listings only (the dedup-relevant ones).
+_SAMPLE_CATEGORY_SQL = """
+    SELECT i.id, i.storage_path, NULL::text, i.sreality_id, l.property_id,
+           l.category_main
+    FROM listings l
+    JOIN images i ON i.sreality_id = l.sreality_id AND i.storage_path IS NOT NULL
+    WHERE l.category_main = %(cat)s AND l.is_active AND random() < %(frac)s
+    LIMIT %(n)s
+"""
 
-def _sample_rows(conn: Any, sql: str, frac: float, n: int) -> list[dict[str, Any]]:
+
+def _sample_rows(conn: Any, sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
-        cur.execute(sql, {"frac": frac, "n": n})
+        cur.execute(sql, params)
         return [
             {
                 "image_id": r[0], "key": r[1], "haiku_room": r[2],
-                "sreality_id": r[3], "property_id": r[4],
+                "sreality_id": r[3], "property_id": r[4], "category_main": r[5],
             }
             for r in cur.fetchall()
         ]
@@ -361,6 +376,12 @@ def main() -> int:
     p.add_argument("--threads", type=int, default=0,
                    help="torch CPU threads (0 = os.cpu_count()).")
     p.add_argument("--max-cosine-pairs", type=int, default=4000)
+    p.add_argument("--category-sample", type=int, default=0,
+                   help="Images sampled PER category in --categories (0 = off). "
+                        "For the untagged dum/pozemek/komercni categories: no "
+                        "ground truth, so reports CLIP's tag distribution.")
+    p.add_argument("--categories", type=str, default="dum,pozemek,komercni,byt",
+                   help="Comma-separated category_main values for --category-sample.")
     p.add_argument("--out", type=str, default="", help="Write JSON summary here.")
     p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
@@ -383,16 +404,29 @@ def main() -> int:
     threads = args.threads or (os.cpu_count() or 4)
     taxonomy = json.loads(_TAXONOMY_PATH.read_text())
     prompts = taxonomy["prompts"]
+    collapse = taxonomy.get("collapse", {})
 
     # 1. Sample (dedupe by image id; labeled rows win so haiku_room is kept).
+    cats = [c.strip() for c in args.categories.split(",") if c.strip()]
     with psycopg.connect(db_url, prepare_threshold=None) as conn:
-        labeled = _sample_rows(conn, _SAMPLE_LABELED_SQL, args.frac, args.n_labeled)
-        multi = _sample_rows(conn, _SAMPLE_MULTI_SQL, args.frac, args.n_multi)
+        labeled = _sample_rows(conn, _SAMPLE_LABELED_SQL,
+                               {"frac": args.frac, "n": args.n_labeled})
+        multi = _sample_rows(conn, _SAMPLE_MULTI_SQL,
+                             {"frac": args.frac, "n": args.n_multi})
+        cat_rows: list[dict[str, Any]] = []
+        if args.category_sample:
+            for cat in cats:
+                cr = _sample_rows(conn, _SAMPLE_CATEGORY_SQL,
+                                  {"cat": cat, "frac": args.frac,
+                                   "n": args.category_sample})
+                LOG.info("SAMPLE category=%s n=%d", cat, len(cr))
+                cat_rows += cr
     by_id: dict[int, dict[str, Any]] = {}
-    for row in multi + labeled:  # labeled second → its haiku_room overwrites
+    for row in cat_rows + multi + labeled:  # labeled last → its haiku_room wins
         by_id[row["image_id"]] = row
     rows = list(by_id.values())
-    LOG.info("SAMPLE labeled=%d multi=%d unique=%d", len(labeled), len(multi), len(rows))
+    LOG.info("SAMPLE labeled=%d multi=%d category=%d unique=%d",
+             len(labeled), len(multi), len(cat_rows), len(rows))
     if not rows:
         print("ERROR: empty sample (no classified images?).", file=sys.stderr)
         return 1
@@ -415,15 +449,39 @@ def main() -> int:
     labels, text_emb = _embed_text(model, processor, prompts)
     emb, encode_s = _embed_images(model, processor, images, args.batch_size)
 
-    # 4. Tag = argmax cosine vs the prompt matrix.
+    # 4. Tag = argmax cosine vs the prompt matrix (fine), then collapse to the
+    # engine's logical labels. Metrics use logical tags; the per-category
+    # distribution keeps the fine tag so plot sub-types (cadastral/aerial) show.
     import torch
     sims = emb @ text_emb.T
-    img_tags = [labels[int(i)] for i in sims.argmax(dim=1)]
+    fine_tags = [labels[int(i)] for i in sims.argmax(dim=1)]
+    img_tags = [collapse.get(t, t) for t in fine_tags]
+
+    # Per-category tag distribution (the only signal for the unlabeled
+    # dum/pozemek/komercni — sanity: do plot categories tag as site/plot/exterior?).
+    cat_dist: dict[str, Any] = {}
+    for cat in cats:
+        idxs = [i for i, m in enumerate(meta) if m["category_main"] == cat]
+        if not idxs:
+            continue
+        logical_c: dict[str, int] = {}
+        fine_c: dict[str, int] = {}
+        for i in idxs:
+            logical_c[img_tags[i]] = logical_c.get(img_tags[i], 0) + 1
+            fine_c[fine_tags[i]] = fine_c.get(fine_tags[i], 0) + 1
+        cat_dist[cat] = {
+            "n": len(idxs),
+            "logical": dict(sorted(logical_c.items(), key=lambda kv: -kv[1])),
+            "fine_plan_aerial": {k: v for k, v in sorted(fine_c.items(),
+                                 key=lambda kv: -kv[1])
+                                 if k in ("situation_plan", "cadastral_map",
+                                          "aerial_plot", "location_map", "floor_plan")},
+        }
 
     n = len(images)
     summary = {
         "sample": {"labeled": len(labeled), "multi": len(multi),
-                   "unique": len(rows), "decoded": n},
+                   "category": len(cat_rows), "unique": len(rows), "decoded": n},
         "throughput": {
             "encode_img_per_s": round(n / encode_s, 2) if encode_s else None,
             "end_to_end_img_per_s": round(n / (download_s + encode_s), 2),
@@ -437,6 +495,7 @@ def main() -> int:
         "tag_accuracy": _tag_accuracy(labels, img_tags,
                                       [m["haiku_room"] for m in meta]),
         "tag_consistency": _tag_consistency(meta, img_tags),
+        "category_tag_distribution": cat_dist,
         "cosine_discrimination": _cosine_discrimination(
             emb, meta, img_tags, args.max_cosine_pairs),
         "model": taxonomy["model"],
