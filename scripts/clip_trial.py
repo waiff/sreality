@@ -118,6 +118,15 @@ def _load_clip(threads: int):
     return model, processor
 
 
+# Explicit submodel + projection rather than get_text_features/get_image_features:
+# across transformers versions those convenience methods sometimes return a raw
+# BaseModelOutputWithPooling instead of the projected tensor. text_model /
+# vision_model / *_projection are stable attributes and reproduce exactly what the
+# convenience methods do internally (pooler_output -> projection -> shared space).
+def _project(out):
+    return out if hasattr(out, "shape") else out.pooler_output
+
+
 def _embed_text(model, processor, prompts: dict[str, str]):
     import torch
 
@@ -125,7 +134,9 @@ def _embed_text(model, processor, prompts: dict[str, str]):
     with torch.no_grad():
         inputs = processor(text=[prompts[k] for k in labels],
                            return_tensors="pt", padding=True)
-        feats = model.get_text_features(**inputs)
+        out = model.text_model(input_ids=inputs["input_ids"],
+                               attention_mask=inputs.get("attention_mask"))
+        feats = model.text_projection(_project(out))
     feats = feats / feats.norm(dim=-1, keepdim=True)
     return labels, feats
 
@@ -141,7 +152,8 @@ def _embed_images(model, processor, images: list, batch_size: int):
         inputs = processor(images=batch, return_tensors="pt")
         t0 = time.perf_counter()
         with torch.no_grad():
-            feats = model.get_image_features(**inputs)
+            out = model.vision_model(pixel_values=inputs["pixel_values"])
+            feats = model.visual_projection(_project(out))
         encode_s += time.perf_counter() - t0
         feats = feats / feats.norm(dim=-1, keepdim=True)
         chunks.append(feats)
