@@ -491,13 +491,13 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "clip_tag.yml",
     "name": "Dedup — CLIP image tagging (sharded)",
-    "description": "Backfills image_clip_tags: the self-hosted CLIP zero-shot tag per stored image (free replacement for the paid room classifier on the coarse dedup-relevant tags, and the FIRST tagger for dum/pozemek/komercni). ACTIVE-listing images first; idempotent + resumable (a tagged image drops out of the next select). Horizontally sharded into 4 parallel jobs (image_id %% 4), each with its own runner + cap, like images.yml. Installs CPU torch + the `clip` extra (transformers); the production CLIP could move to int8-ONNX later as an optimization. NOT a portal ingest job (untagged, portal: null).",
+    "description": "Backfills image_clip_tags + image_clip_embeddings: the self-hosted CLIP zero-shot tag per stored image (free replacement for the paid room classifier on the coarse dedup-relevant tags, and the FIRST tagger for dum/pozemek/komercni). Runs GLOBAL full-scale by default (the Středočeský priority drain is complete; pass region_id on dispatch to re-prioritise a kraj). ACTIVE-listing images first; idempotent + resumable (a tagged image drops out of the next select), so once caught up the hourly runs are cheap no-ops that just keep pace with new inflow. Horizontally sharded into 4 parallel jobs (image_id %% 4), each with its own runner + cap, like images.yml. Installs CPU torch + the `clip` extra (transformers); the production CLIP could move to int8-ONNX later as an optimization. NOT a portal ingest job (untagged, portal: null).",
     "portal": null,
     "manual": true,
     "schedules": [
       {
-        "cron": "40 */2 * * *",
-        "human": "Every 2 hours at :40"
+        "cron": "40 * * * *",
+        "human": "Every hour at :40"
       }
     ],
     "onPush": false,
@@ -522,10 +522,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "region_id",
-        "description": "Priority kraj id to drain first, then fall through to global (\"none\" = global only). Default 27 = Středočeský.",
+        "description": "Priority kraj id to drain first, then fall through to global (\"none\" = global full-scale, the default now that Středočeský is complete).",
         "required": false,
         "type": "string",
-        "default": "27",
+        "default": "none",
         "options": null
       },
       {

@@ -349,6 +349,74 @@ def decision_images(
     }
 
 
+def pipeline_overview(conn: psycopg.Connection) -> dict[str, Any]:
+    """The top-of-page dedup funnel: one cheap number per stage plus its last-24h
+    movement, so the operator can see work flowing top→bottom (photos tagged →
+    listings eligible → candidate pairs → decisions). All counts are indexed
+    aggregates or the single latest run row — no full image-table scan."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT count(*), count(*) FILTER (WHERE tagged_at > now() - interval '24 hours') "
+            "FROM image_clip_tags"
+        )
+        tags_total, tags_24h = cur.fetchone()
+        cur.execute("SELECT count(*) FROM image_clip_embeddings")
+        emb_total = int(cur.fetchone()[0])
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE status='proposed'), "
+            "count(*) FILTER (WHERE status='proposed' AND created_at > now() - interval '24 hours') "
+            "FROM property_identity_candidates"
+        )
+        cand_open, cand_24h = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FILTER (WHERE outcome='merged'), "
+            "count(*) FILTER (WHERE outcome='dismissed'), "
+            "count(*) FILTER (WHERE run_at > now() - interval '24 hours') "
+            "FROM dedup_pair_audit"
+        )
+        merged_total, dismissed_total, dec_24h = cur.fetchone()
+        cur.execute(
+            "SELECT started_at, eligible, flagged_location, flagged_disposition, "
+            "auto_address, auto_phash, auto_visual, auto_dismissed, queued, "
+            "clip_classified, routed_haiku, routed_sonnet, vision_calls "
+            "FROM dedup_engine_runs ORDER BY started_at DESC LIMIT 1"
+        )
+        r = cur.fetchone()
+    eligible = flagged_loc = flagged_disp = 0
+    last_run: dict[str, Any] | None = None
+    if r is not None:
+        eligible, flagged_loc, flagged_disp = int(r[1]), int(r[2]), int(r[3])
+        last_run = {
+            "started_at": r[0],
+            "auto_merged": int(r[4]) + int(r[5]) + int(r[6]),
+            "auto_dismissed": int(r[7]),
+            "queued": int(r[8]),
+            "clip_classified": int(r[9]),
+            "routed_haiku": int(r[10]),
+            "routed_sonnet": int(r[11]),
+            "vision_calls": int(r[12]),
+        }
+    return {
+        "data": {
+            "tagging": {
+                "total": int(tags_total), "delta_24h": int(tags_24h),
+                "embeddings": emb_total,
+            },
+            "eligible": {
+                "total": eligible, "flagged_location": flagged_loc,
+                "flagged_disposition": flagged_disp,
+            },
+            "candidates": {"total": int(cand_open), "delta_24h": int(cand_24h)},
+            "decisions": {
+                "total": int(merged_total) + int(dismissed_total),
+                "delta_24h": int(dec_24h),
+                "merged": int(merged_total), "dismissed": int(dismissed_total),
+            },
+            "last_run": last_run,
+        }
+    }
+
+
 def clip_coverage(
     conn: psycopg.Connection, *, priority_region_id: int = 27,
 ) -> dict[str, Any]:

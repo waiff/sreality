@@ -41,6 +41,7 @@ import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import DedupCandidateReset from '@/components/DedupCandidateReset';
 import DedupFactors from '@/components/DedupFactors';
+import DedupPipelineOverview from '@/components/DedupPipelineOverview';
 import { listingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
@@ -187,6 +188,8 @@ export default function Dedup() {
       <Header proposed={summaryQ.data?.data.total ?? candidates.length} />
 
       <AutoDedupToggle />
+
+      <DedupPipelineOverview />
 
       <CollapsibleSection id="clip" eyebrow="Backfill" title="CLIP backfill">
         <DedupBackfillProgress />

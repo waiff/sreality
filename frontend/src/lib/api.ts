@@ -737,6 +737,26 @@ export type DedupClipCoverage = {
 export const getDedupClipCoverage = (): Promise<{ data: DedupClipCoverage }> =>
   request<{ data: DedupClipCoverage }>('/dedup/clip-coverage');
 
+// Top-of-page dedup funnel: per-stage count + last-24h movement.
+export type DedupPipelineOverview = {
+  tagging: { total: number; delta_24h: number; embeddings: number };
+  eligible: { total: number; flagged_location: number; flagged_disposition: number };
+  candidates: { total: number; delta_24h: number };
+  decisions: { total: number; delta_24h: number; merged: number; dismissed: number };
+  last_run: {
+    started_at: string;
+    auto_merged: number;
+    auto_dismissed: number;
+    queued: number;
+    clip_classified: number;
+    routed_haiku: number;
+    routed_sonnet: number;
+    vision_calls: number;
+  } | null;
+};
+export const getDedupPipelineOverview = (): Promise<{ data: DedupPipelineOverview }> =>
+  request<{ data: DedupPipelineOverview }>('/dedup/pipeline-overview');
+
 export const archiveResetDedupCandidates = (): Promise<{
   archived: number;
   deleted: number;
