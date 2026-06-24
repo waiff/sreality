@@ -312,7 +312,13 @@ const rentPopupHtml = (p: RentFeatureProps): string => {
 
 interface Props {
   rows: MapRow[];
+  /* Mappable cohort size — properties with coordinates (the map query filters
+   * lat/lng NOT NULL). This is a SUBSET of cohortTotal, not a rival total. */
   total: number | null;
+  /* The full cohort total (incl. coordinate-less properties), from the one
+   * canonical count. When it exceeds `total` the pill shows "X of Y mapped"
+   * so the map never silently understates the cohort. */
+  cohortTotal: number | null;
   capped: boolean;
   isLoading: boolean;
   /* Bounds the URL says the map should be showing. The map applies it
@@ -415,6 +421,7 @@ interface Props {
 export default function ListingMap({
   rows,
   total,
+  cohortTotal,
   capped,
   isLoading,
   bounds,
@@ -1451,7 +1458,9 @@ export default function ListingMap({
             ? 'Loading…'
             : total == null
               ? '—'
-              : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
+              : cohortTotal != null && cohortTotal > total
+                ? `${total.toLocaleString('cs-CZ')} of ${cohortTotal.toLocaleString('cs-CZ')} mapped`
+                : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
           {capped && (
             <span className="ml-2 text-[var(--color-ochre)]">
               · capped at 50 000 — refine filters
