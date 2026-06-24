@@ -142,7 +142,9 @@ def _select_pending(conn, *, limit: int, shards: int, shard: int,
     rows: list[tuple[int, str, bool]] = []
     phases: list[str] = []
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = %s", (SELECT_TIMEOUT_MS,))
+        # SET is a utility statement — it can't take a bound parameter ($1), so the
+        # (module-constant int) value is interpolated, not passed as %s.
+        cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
         for region in priority_regions:
             if len(rows) >= limit:
                 break
