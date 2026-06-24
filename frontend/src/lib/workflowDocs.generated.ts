@@ -521,6 +521,22 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "options": null
       },
       {
+        "name": "region_id",
+        "description": "Priority kraj id to drain first, then fall through to global (\"none\" = global only). Default 27 = Středočeský.",
+        "required": false,
+        "type": "string",
+        "default": "27",
+        "options": null
+      },
+      {
+        "name": "categories",
+        "description": "Comma category_main list to scope with region_id (e.g. dum,komercni)",
+        "required": false,
+        "type": "string",
+        "default": "dum,komercni",
+        "options": null
+      },
+      {
         "name": "dry_run",
         "description": "Report the pending count and exit without tagging",
         "required": false,
