@@ -79,6 +79,10 @@ class UpdateConditionRegionsIn(BaseModel):
     enabled_region_ids: list[int]
 
 
+class UpdateClipRegionsIn(BaseModel):
+    priority_region_ids: list[int]
+
+
 # --- skills ---------------------------------------------------------------
 
 @router.get("/skills")
@@ -585,6 +589,79 @@ def _condition_regions_payload(conn: "psycopg.Connection") -> dict[str, Any]:
         ],
         "parked_no_geo": counts.get(None, 0),
         "enabled_region_ids": enabled_ids,
+    }
+
+
+# --- CLIP tagging: per-kraj drain priority ----------------------------------
+
+_CLIP_REGIONS_SETTING = "clip_tagging_priority_region_ids"
+
+
+@router.get("/clip-tagging/regions")
+def get_clip_tagging_regions(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Per-kraj CLIP-tagging switchboard: every kraj with its priority flag + how many
+    of its active listings already have a CLIP tag (coverage). Marking a kraj priority
+    makes the scheduled clip_tag runs drain it (and its embeddings, so its dedup cosine
+    is ready) BEFORE the global sweep — same app_settings key the backfill reads."""
+    return {"data": _clip_regions_payload(conn)}
+
+
+@router.put("/clip-tagging/regions")
+def put_clip_tagging_regions(
+    body: UpdateClipRegionsIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    import json
+    known = {kid for kid, _name in _fetch_kraje(conn)}
+    unknown = sorted(set(body.priority_region_ids) - known)
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"unknown kraj ids: {unknown}")
+    priority = sorted(set(body.priority_region_ids))
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_settings "
+            "  (key, value, description, updated_at, updated_by) "
+            "VALUES (%s, %s::jsonb, %s, now(), %s) "
+            "ON CONFLICT (key) DO UPDATE "
+            "  SET value = excluded.value, updated_at = now(), "
+            "      updated_by = excluded.updated_by",
+            (
+                _CLIP_REGIONS_SETTING,
+                json.dumps(priority),
+                "admin_boundaries ids (level=kraj) the scheduled CLIP tagging "
+                "drains before the global sweep",
+                "settings_ui",
+            ),
+        )
+    return {"data": _clip_regions_payload(conn)}
+
+
+def _clip_regions_payload(conn: "psycopg.Connection") -> dict[str, Any]:
+    kraje = _fetch_kraje(conn)
+    setting = _fetch_app_setting(conn, _CLIP_REGIONS_SETTING)
+    raw = setting["value"] if setting is not None else []
+    priority_ids = sorted({int(v) for v in raw}) if isinstance(raw, list) else []
+    with conn.cursor() as cur:
+        # The kraj's active-listing volume — the signal for picking what to drain first.
+        # (Per-kraj tag COVERAGE would need a 5.2M-image aggregation; overall tagging
+        # progress lives in the /dedup pipeline overview instead.)
+        cur.execute(
+            "SELECT region_id, count(*) FROM listings WHERE is_active GROUP BY region_id"
+        )
+        counts = {r[0]: int(r[1]) for r in cur.fetchall()}
+    priority = set(priority_ids)
+    return {
+        "regions": [
+            {
+                "id": kid, "name": name, "priority": kid in priority,
+                "active_listings": counts.get(kid, 0),
+            }
+            for kid, name in kraje
+        ],
+        "parked_no_geo": counts.get(None, 0),
+        "priority_region_ids": priority_ids,
     }
 
 
