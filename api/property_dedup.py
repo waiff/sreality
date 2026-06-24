@@ -352,16 +352,27 @@ def decision_images(
 def pipeline_overview(conn: psycopg.Connection) -> dict[str, Any]:
     """The top-of-page dedup funnel: one cheap number per stage plus its last-24h
     movement, so the operator can see work flowing top→bottom (photos tagged →
-    listings eligible → candidate pairs → decisions). All counts are indexed
-    aggregates or the single latest run row — no full image-table scan."""
+    listings eligible → candidate pairs → decisions). Polled every 60s, so it must
+    not scan the multi-million-row CLIP tables: cumulative CLIP totals are O(1)
+    pg_class.reltuples planner estimates (exact magnitude doesn't matter on a
+    dashboard), the 24h tag delta is a bounded index range scan
+    (image_clip_tags_tagged_at_idx, migration 231), and the rest are small-table
+    aggregates + the single latest run row."""
     with conn.cursor() as cur:
+        # Cumulative CLIP totals: planner estimates, not exact counts (those would
+        # seq-scan tables on a 5M-row growth path on every poll).
         cur.execute(
-            "SELECT count(*), count(*) FILTER (WHERE tagged_at > now() - interval '24 hours') "
-            "FROM image_clip_tags"
+            "SELECT relname, greatest(reltuples, 0)::bigint FROM pg_class "
+            "WHERE relname IN ('image_clip_tags', 'image_clip_embeddings')"
         )
-        tags_total, tags_24h = cur.fetchone()
-        cur.execute("SELECT count(*) FROM image_clip_embeddings")
-        emb_total = int(cur.fetchone()[0])
+        est = {row[0]: int(row[1]) for row in cur.fetchall()}
+        tags_total = est.get("image_clip_tags", 0)
+        emb_total = est.get("image_clip_embeddings", 0)
+        # The moving number: exact, but bounded by the tagged_at index.
+        cur.execute(
+            "SELECT count(*) FROM image_clip_tags WHERE tagged_at > now() - interval '24 hours'"
+        )
+        tags_24h = int(cur.fetchone()[0])
         cur.execute(
             "SELECT count(*) FILTER (WHERE status='proposed'), "
             "count(*) FILTER (WHERE status='proposed' AND created_at > now() - interval '24 hours') "

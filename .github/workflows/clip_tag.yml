@@ -95,7 +95,9 @@ jobs:
       - name: Tag images
         run: |
           ARGS="--limit ${{ inputs.limit || '20000' }} --workers ${{ inputs.workers || '16' }} --shard ${{ matrix.shard }} --shards 4"
-          REGION="${{ inputs.region_id || '27' }}"
+          # 'none' on a schedule trigger (inputs.region_id is empty on non-dispatch
+          # events, so this fallback governs cron) => global full-scale, the default.
+          REGION="${{ inputs.region_id || 'none' }}"
           if [ -n "$REGION" ] && [ "$REGION" != "none" ] && [ "$REGION" != "0" ]; then
             ARGS="$ARGS --region-id $REGION --categories ${{ inputs.categories || 'dum,komercni' }}"
           fi
