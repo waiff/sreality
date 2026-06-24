@@ -60,129 +60,224 @@ export default function Settings() {
         </p>
       </header>
 
-      <section className="mt-8">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          Skills
-        </h2>
+      <CollapsibleSection id="skills" eyebrow="Agent" title="Skills">
         <SkillsSection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          Delivery
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          Where watchdog &amp; collection-monitoring alerts reach you, beyond
-          the in-app feed. Pick the channels per watchdog / collection; set the
-          destination address here. (Each channel also needs its transport key
-          on the API service.)
-        </p>
+      <CollapsibleSection
+        id="delivery"
+        eyebrow="Alerts"
+        title="Delivery"
+        description={
+          <>
+            Where watchdog &amp; collection-monitoring alerts reach you, beyond
+            the in-app feed. Pick the channels per watchdog / collection; set the
+            destination address here. (Each channel also needs its transport key
+            on the API service.)
+          </>
+        }
+      >
         <DeliverySection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          App settings
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          Operator-tunable prompts and model names used outside the agent
-          (URL parser, listing summary, image comparison).
-        </p>
+      <CollapsibleSection
+        id="app-settings"
+        eyebrow="Tuning"
+        title="App settings"
+        description="Operator-tunable prompts and model names used outside the agent (URL parser, listing summary, image comparison)."
+      >
         <AppSettingsSection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          Hodnocení stavu — kraje
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          Condition scoring runs kraj by kraj. Enabling a kraj means the
-          scheduled batch job (every 3 h) starts draining that kraj
-          automatically; the count is how many active listings there still
-          await a condition score.
-        </p>
+      <CollapsibleSection
+        id="condition-regions"
+        eyebrow="Scoring"
+        title="Hodnocení stavu — kraje"
+        description="Condition scoring runs kraj by kraj. Enabling a kraj means the scheduled batch job (every 3 h) starts draining that kraj automatically; the count is how many active listings there still await a condition score."
+      >
         <ConditionRegionsSection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          CLIP tagging — priority kraje
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          CLIP image tagging drains the marked kraje first — tags + embeddings — so
-          their dedup cosine is ready before the global sweep. Unmarked = no priority
-          (everything drains newest-first); the count is the kraj's active listings.
-        </p>
+      <CollapsibleSection
+        id="clip-regions"
+        eyebrow="Tagging"
+        title="CLIP tagging — priority kraje"
+        description="CLIP image tagging drains the marked kraje first — tags + embeddings — so their dedup cosine is ready before the global sweep. Unmarked = no priority (everything drains newest-first); the count is the kraj's active listings."
+      >
         <ClipRegionsSection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          Dedup engine
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          Every rule the cross-portal duplicate matcher uses — as a toggle or a
-          threshold. The CLIP knobs ship <span className="font-mono">off</span>:
-          turning on <span className="font-mono">prefer CLIP tags</span> switches
-          room labelling to the free self-hosted model (and unblocks houses /
-          land / commercial); the cosine tier routes the forensic compare by
-          photo similarity. Changes take effect on the next engine run — no
-          deploy.
-        </p>
+      <CollapsibleSection
+        id="dedup-engine"
+        eyebrow="Matching"
+        title="Dedup engine"
+        description={
+          <>
+            Every rule the cross-portal duplicate matcher uses — as a toggle or a
+            threshold. The CLIP knobs ship <span className="font-mono">off</span>:
+            turning on <span className="font-mono">prefer CLIP tags</span> switches
+            room labelling to the free self-hosted model (and unblocks houses /
+            land / commercial); the cosine tier routes the forensic compare by
+            photo similarity. Changes take effect on the next engine run — no
+            deploy.
+          </>
+        }
+      >
         <DedupEngineSection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          Cenová mapa nájemného (MF)
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          The Ministry of Finance rent price map feeds the secondary rent
-          reference shown on every rental estimate. It auto-grabs monthly from
-          mf.gov.cz; you can also upload a fresh <span className="font-mono">.xlsx</span>{' '}
-          or pull the latest now. Every upload is kept in history; the latest
-          revision is always the one in use.
-        </p>
+      <CollapsibleSection
+        id="rent-map"
+        eyebrow="Rent map"
+        title="Cenová mapa nájemného (MF)"
+        description={
+          <>
+            The Ministry of Finance rent price map feeds the secondary rent
+            reference shown on every rental estimate. It auto-grabs monthly from
+            mf.gov.cz; you can also upload a fresh <span className="font-mono">.xlsx</span>{' '}
+            or pull the latest now. Every upload is kept in history; the latest
+            revision is always the one in use.
+          </>
+        }
+      >
         <RentMapSection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          Filter availability
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          One row per filter from the canonical registry; columns are
-          the agendas (Browse, Watchdog, agent tools, …) where that
-          filter can apply. Toggle a cell off to hide the filter
-          from that surface — backend matchers and UI forms both
-          respect the matrix. Default is on everywhere a filter is
-          declared.
-        </p>
+      <CollapsibleSection
+        id="filter-availability"
+        eyebrow="Filters"
+        title="Filter availability"
+        description="One row per filter from the canonical registry; columns are the agendas (Browse, Watchdog, agent tools, …) where that filter can apply. Toggle a cell off to hide the filter from that surface — backend matchers and UI forms both respect the matrix. Default is on everywhere a filter is declared."
+      >
         <FilterVisibilitySection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          GitHub Actions
-        </h2>
-        <p className="text-sm text-[var(--color-ink-3)] mb-3">
-          Every workflow in <span className="font-mono">.github/workflows/</span>{' '}
-          — what it does, when it runs, the parameters you can set when running
-          it manually, and links to its run history and source. This list is
-          generated from the workflow files themselves and is kept in sync
-          automatically (the build fails if a workflow changes without
-          regenerating).
-        </p>
+      <CollapsibleSection
+        id="workflows"
+        eyebrow="Workflows"
+        title="GitHub Actions"
+        description={
+          <>
+            Every workflow in <span className="font-mono">.github/workflows/</span>{' '}
+            — what it does, when it runs, the parameters you can set when running
+            it manually, and links to its run history and source. This list is
+            generated from the workflow files themselves and is kept in sync
+            automatically (the build fails if a workflow changes without
+            regenerating).
+          </>
+        }
+      >
         <WorkflowsSection />
-      </section>
+      </CollapsibleSection>
 
-      <section className="mt-10">
-        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
-          Appearance
-        </h2>
+      <CollapsibleSection id="appearance" eyebrow="Theme" title="Appearance">
         <ThemeToggle />
-      </section>
+      </CollapsibleSection>
     </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* Collapsible section                                                   */
+/* -------------------------------------------------------------------- */
+
+/* Mirrors the /dedup page's CollapsibleSection so the two operator surfaces read
+ * the same: a clickable header (chevron + eyebrow + display-serif title) with the
+ * body — description + content — hidden when collapsed. Per-section open/closed
+ * state persists in localStorage so the operator's choices survive a reload (the
+ * page is long). */
+function useCollapsed(id: string, defaultOpen: boolean): [boolean, () => void] {
+  const key = `settings.collapsed.${id}`;
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem(key);
+      return v == null ? defaultOpen : v === 'open';
+    } catch {
+      return defaultOpen;
+    }
+  });
+  const toggle = () =>
+    setOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(key, next ? 'open' : 'closed');
+      } catch {
+        /* storage may be unavailable — collapse still works in-session */
+      }
+      return next;
+    });
+  return [open, toggle];
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className={`shrink-0 text-[var(--color-ink-4)] transition-transform ${open ? 'rotate-90' : ''}`}
+    >
+      <path
+        d="M6 4l4 4-4 4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function CollapsibleSection({
+  id,
+  title,
+  eyebrow,
+  description,
+  defaultOpen = true,
+  children,
+}: {
+  id: string;
+  title: string;
+  eyebrow?: string;
+  description?: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, toggle] = useCollapsed(id, defaultOpen);
+  return (
+    <section className="mt-8">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 text-left group"
+      >
+        <Chevron open={open} />
+        <span className="min-w-0">
+          {eyebrow ? (
+            <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+              {eyebrow}
+            </span>
+          ) : null}
+          <span
+            className="block text-xl group-hover:text-[var(--color-copper-2)] transition-colors"
+            style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+          >
+            {title}
+          </span>
+        </span>
+      </button>
+      {open ? (
+        <div className="mt-3">
+          {description ? (
+            <p className="text-sm text-[var(--color-ink-3)] mb-3">{description}</p>
+          ) : null}
+          {children}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
