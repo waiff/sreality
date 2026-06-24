@@ -26,6 +26,16 @@ on:
         required: false
         default: "16"
         type: string
+      region_id:
+        description: Priority kraj id to drain first, then fall through to global ("none" = global only). Default 27 = Středočeský.
+        required: false
+        default: "27"
+        type: string
+      categories:
+        description: Comma category_main list to scope with region_id (e.g. dum,komercni)
+        required: false
+        default: "dum,komercni"
+        type: string
       dry_run:
         description: Report the pending count and exit without tagging
         required: false
@@ -82,5 +92,9 @@ jobs:
       - name: Tag images
         run: |
           ARGS="--limit ${{ inputs.limit || '20000' }} --workers ${{ inputs.workers || '16' }} --shard ${{ matrix.shard }} --shards 4"
+          REGION="${{ inputs.region_id || '27' }}"
+          if [ -n "$REGION" ] && [ "$REGION" != "none" ] && [ "$REGION" != "0" ]; then
+            ARGS="$ARGS --region-id $REGION --categories ${{ inputs.categories || 'dum,komercni' }}"
+          fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python -m scripts.clip_tag_backfill $ARGS
