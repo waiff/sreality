@@ -74,12 +74,14 @@ def get_pipeline_overview(
 
 @router.get("/pipeline-timeline")
 def get_pipeline_timeline(
-    days: int = Query(default=14, ge=1, le=90),
+    bucket: str = Query(default="day", pattern="^(hour|day)$"),
+    points: int | None = Query(default=None, ge=1, le=168),
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    """Daily dedup-funnel throughput (tagged / candidates / merged / dismissed)."""
-    return dedup.pipeline_timeline(conn, days=days)
+    """Dedup-funnel throughput (tagged / candidates / merged / dismissed) per `bucket`
+    ('hour' over ~2 days, or 'day' over ~2 weeks)."""
+    return dedup.pipeline_timeline(conn, bucket=bucket, points=points)
 
 
 @router.get("/decision-images")

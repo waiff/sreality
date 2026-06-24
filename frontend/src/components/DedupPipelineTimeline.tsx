@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   ResponsiveContainer,
@@ -12,11 +13,13 @@ import {
 import { getDedupPipelineTimeline } from '@/lib/api';
 import { fmtCount } from '@/lib/format';
 import { useTokenColors } from '@/lib/useTokenColors';
+import GrainToggle, { type Grain } from '@/components/GrainToggle';
 
-/* How the funnel evolves day by day. Two Y-axes because the scales differ by orders of
- * magnitude: CLIP tagging is tens/hundreds of thousands a day (right, copper — the input
- * flow), while candidates + decisions are tens/hundreds (left). One timeline, so the
- * operator can see the whole machine moving. Civic-archive tokens, lazy recharts. */
+/* How the funnel evolves over time, at Day (~2 weeks) or Hour (~2 days) grain — the same
+ * toggle the Health reconciliation trends use. Two Y-axes because the scales differ by
+ * orders of magnitude: CLIP tagging is tens/hundreds of thousands a bucket (right, copper
+ * — the input flow), while candidates + decisions are tens/hundreds (left). Civic-archive
+ * tokens, lazy recharts. */
 
 const TOKEN_KEYS = [
   '--color-ink-3',
@@ -34,13 +37,21 @@ const SERIES = [
   { key: 'dismissed', label: 'Dismissed', token: '--color-brick', axis: 'left' as const },
 ];
 
-function fmtDay(d: string): string {
-  // d is 'YYYY-MM-DD'; render as cs-CZ day.month
-  const [y, m, dd] = d.split('-').map(Number);
-  return new Date(y, m - 1, dd).toLocaleDateString('cs-CZ', {
-    day: 'numeric',
-    month: 'numeric',
-  });
+// bucket is an ISO timestamp; the X-axis ticks are terse, the tooltip is full.
+function fmtTick(iso: string, grain: Grain): string {
+  const dt = new Date(iso);
+  return grain === 'hour'
+    ? dt.toLocaleTimeString('cs-CZ', { hour: '2-digit', minute: '2-digit' })
+    : dt.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric' });
+}
+
+function fmtFull(iso: string, grain: Grain): string {
+  const dt = new Date(iso);
+  return grain === 'hour'
+    ? dt.toLocaleString('cs-CZ', {
+        day: 'numeric', month: 'numeric', hour: '2-digit', minute: '2-digit',
+      })
+    : dt.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: '2-digit' });
 }
 
 function fmtAxis(v: number): string {
@@ -50,9 +61,10 @@ function fmtAxis(v: number): string {
 
 export default function DedupPipelineTimeline() {
   const colors = useTokenColors(TOKEN_KEYS);
+  const [grain, setGrain] = useState<Grain>('day');
   const q = useQuery({
-    queryKey: ['dedup', 'pipeline-timeline', 14],
-    queryFn: () => getDedupPipelineTimeline(14),
+    queryKey: ['dedup', 'pipeline-timeline', grain],
+    queryFn: () => getDedupPipelineTimeline(grain),
     staleTime: 5 * 60_000,
   });
   const data = q.data?.data ?? [];
@@ -62,9 +74,12 @@ export default function DedupPipelineTimeline() {
   return (
     <div className="mt-3 pt-3 border-t border-[var(--color-rule)]">
       <div className="flex items-center justify-between gap-3 mb-2">
-        <p className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
-          Last 14 days
-        </p>
+        <div className="flex items-center gap-2">
+          <p className="text-[0.7rem] tracking-[0.14em] uppercase text-[var(--color-ink-4)]">
+            {grain === 'hour' ? 'Last 48 hours' : 'Last 14 days'}
+          </p>
+          <GrainToggle grain={grain} onChange={setGrain} />
+        </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {SERIES.map((s) => (
             <span key={s.key} className="inline-flex items-center gap-1.5 text-[0.7rem] text-[var(--color-ink-3)]">
@@ -87,8 +102,8 @@ export default function DedupPipelineTimeline() {
             <LineChart data={data} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid stroke={grid} vertical={false} />
               <XAxis
-                dataKey="day"
-                tickFormatter={fmtDay}
+                dataKey="bucket"
+                tickFormatter={(v) => fmtTick(v as string, grain)}
                 tick={{ fill: axis, fontSize: 11 }}
                 stroke={axis}
                 minTickGap={24}
@@ -115,7 +130,7 @@ export default function DedupPipelineTimeline() {
                 content={({ active, payload, label }) =>
                   active && payload && payload.length ? (
                     <div className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] px-2.5 py-1.5 text-[0.72rem] shadow-sm">
-                      <div className="text-[var(--color-ink-3)] mb-0.5">{fmtDay(label as string)}</div>
+                      <div className="text-[var(--color-ink-3)] mb-0.5">{fmtFull(label as string, grain)}</div>
                       {SERIES.map((s) => {
                         const p = payload.find((x) => x.dataKey === s.key);
                         return (
