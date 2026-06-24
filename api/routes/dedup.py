@@ -54,6 +54,15 @@ def get_summary(
     return dedup.summary(conn, status=status)
 
 
+@router.get("/clip-coverage")
+def get_clip_coverage(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """CLIP backfill progress (totals + priority tiers) for the /dedup tracker."""
+    return dedup.clip_coverage(conn)
+
+
 @router.get("/audit")
 def get_pair_audit(
     outcome: str | None = None,

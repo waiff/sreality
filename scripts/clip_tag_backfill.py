@@ -25,17 +25,35 @@ from scraper import image_storage
 
 LOG = logging.getLogger("clip_tag_backfill")
 
-# Pending = stored image with no tag for THIS model. ACTIVE-listing images first
-# (dedup-relevant), then newest. `id %% shards = shard` partitions across runners.
+# Pending = stored image with no tag for THIS model. PRIORITISED so we reach a
+# flip-ready subset fast (operator's order): (1) images of listings in a PROPOSED
+# dedup candidate, (2) the priority kraj's domy + komerční (the NEW unlock — they
+# had no tagger), (3) the rest of the priority kraj, (4) everything else, active
+# first. `id %% shards = shard` partitions across runners. COALESCE so a foreign
+# (NULL-region) listing sorts last, not first, under DESC.
 _SELECT_SQL = """
+    WITH cand AS (
+        SELECT left_property_id AS pid FROM property_identity_candidates
+        WHERE status = 'proposed'
+        UNION
+        SELECT right_property_id FROM property_identity_candidates
+        WHERE status = 'proposed'
+    )
     SELECT i.id, i.storage_path, (l.is_active IS TRUE) AS is_active
     FROM images i
     LEFT JOIN listings l ON l.sreality_id = i.sreality_id
     LEFT JOIN image_clip_tags t ON t.image_id = i.id AND t.model = %(model)s
+    LEFT JOIN cand c ON c.pid = l.property_id
     WHERE i.storage_path IS NOT NULL
       AND t.image_id IS NULL
       AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
-    ORDER BY (l.is_active IS TRUE) DESC, i.id DESC
+    ORDER BY
+      (c.pid IS NOT NULL) DESC,
+      COALESCE(l.region_id = %(prio_region)s
+               AND l.category_main IN ('dum', 'komercni'), FALSE) DESC,
+      COALESCE(l.region_id = %(prio_region)s, FALSE) DESC,
+      (l.is_active IS TRUE) DESC,
+      i.id DESC
     LIMIT %(limit)s
 """
 
@@ -97,6 +115,9 @@ def main() -> int:
                    help="Images per download+tag+commit cycle (bounds memory).")
     p.add_argument("--batch-size", type=int, default=32, help="CLIP encode batch.")
     p.add_argument("--threads", type=int, default=0, help="torch threads (0=cpus).")
+    p.add_argument("--priority-region-id", type=int, default=27,
+                   help="Kraj id whose domy+komercni (then rest) tag first, after "
+                        "dedup candidates. Default 27 = Stredocesky kraj.")
     p.add_argument("--dry-run", action="store_true",
                    help="Report the pending count and exit without tagging.")
     p.add_argument("--verbose", action="store_true")
@@ -124,7 +145,8 @@ def main() -> int:
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
         with conn.cursor() as cur:
             cur.execute(_SELECT_SQL, {"model": model, "limit": args.limit,
-                                      "shards": args.shards, "shard": args.shard})
+                                      "shards": args.shards, "shard": args.shard,
+                                      "prio_region": args.priority_region_id})
             rows = [(r[0], r[1], r[2]) for r in cur.fetchall()]
         active = {r[0]: r[2] for r in rows}  # store embeddings for active only
         LOG.info("CLIP_TAG pending=%d shard=%d/%d model=%s dry_run=%s",

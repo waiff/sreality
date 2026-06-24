@@ -678,6 +678,23 @@ export const getDedupAudit = (
   );
 };
 
+// CLIP backfill progress (listing-grain), for the /dedup tracker.
+export type DedupCoverageTier = {
+  key: string;
+  label: string;
+  tagged: number;
+  total: number;
+};
+export type DedupClipCoverage = {
+  total_tags: number;
+  total_embeddings: number;
+  priority_region_id: number;
+  grain: string;
+  tiers: DedupCoverageTier[];
+};
+export const getDedupClipCoverage = (): Promise<{ data: DedupClipCoverage }> =>
+  request<{ data: DedupClipCoverage }>('/dedup/clip-coverage');
+
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
 
