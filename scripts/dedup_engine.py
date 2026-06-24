@@ -983,36 +983,37 @@ def _clip_settings(conn: Any) -> dict[str, Any]:
     until the operator flips them via app_settings — no redeploy). `clip_model` is
     the taxonomy's model id, matching what the tagging backfill stored."""
     from scraper.clip_tagger import load_taxonomy
+    from toolkit.dedup_settings import default_for
 
-    def _get(key: str, default: Any = None) -> Any:
+    def _val(key: str) -> Any:  # stored value, else the registry default
         with conn.cursor() as cur:
             cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
             row = cur.fetchone()
-        return row[0] if row and row[0] is not None else default
+        return row[0] if row and row[0] is not None else default_for(key)
 
     def _flag(key: str) -> bool:
-        v = _get(key)
+        v = _val(key)
         if isinstance(v, bool):
             return v
         if isinstance(v, str):
             return v.strip().lower() in ("true", "1", "yes", "on")
-        return bool(v) if v is not None else False
+        return bool(v)
 
-    def _num(key: str, default: float) -> float:
-        v = _get(key)
+    def _num(key: str) -> float:
+        v = _val(key)
         try:
             return float(v)
         except (TypeError, ValueError):
-            return default
+            return float(default_for(key))
 
     return {
         "prefer_clip": _flag("dedup_prefer_clip_tags"),
         "cosine_enabled": _flag("dedup_clip_cosine_enabled"),
         "bands": CosineBands(
-            haiku_min=_num("dedup_cosine_haiku_min", CosineBands().haiku_min),
-            sonnet_min=_num("dedup_cosine_sonnet_min", CosineBands().sonnet_min),
+            haiku_min=_num("dedup_cosine_haiku_min"),
+            sonnet_min=_num("dedup_cosine_sonnet_min"),
         ),
-        "haiku_model": _get("dedup_visual_match_model_haiku", "claude-haiku-4-5"),
+        "haiku_model": _val("dedup_visual_match_model_haiku"),
         "clip_model": load_taxonomy()["model"],
     }
 
