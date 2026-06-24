@@ -192,6 +192,10 @@ export interface DedupCluster {
   /* The engine's room-aware verdict, if any edge recorded one (the new
    * street+disposition engine's queued pairs carry it; old geo pairs don't). */
   visual: ClusterVisual | null;
+  /* The representative edge's full `markers_matched` factor dict (reason, stage,
+   * phash_pairs, cosine, verdict, room_type, rationale) — fed to the shared
+   * <DedupFactors> so a queued card shows the SAME evidence as Decision history. */
+  markers: Record<string, unknown> | null;
 }
 
 /* Union-find over the candidate pairs → connected components. */
@@ -222,14 +226,18 @@ export function clusterCandidates(candidates: DedupCandidate[]): DedupCluster[] 
   const edges = new Map<number, number[]>();   // root → candidate ids
   const tierByRoot = new Map<number, string>();
   const visualByRoot = new Map<number, ClusterVisual>();
+  const markersByRoot = new Map<number, Record<string, unknown>>();
   for (const c of candidates) {
     sideById.set(c.left_property.property_id, c.left_property);
     sideById.set(c.right_property.property_id, c.right_property);
     const root = find(c.left_property.property_id);
     (edges.get(root) ?? edges.set(root, []).get(root)!).push(c.id);
     if (!tierByRoot.has(root)) tierByRoot.set(root, c.tier);
+    const m = c.markers_matched ?? {};
+    if (!markersByRoot.has(root) && Object.keys(m).length > 0) {
+      markersByRoot.set(root, m as Record<string, unknown>);
+    }
     if (!visualByRoot.has(root)) {
-      const m = c.markers_matched ?? {};
       if (typeof m.verdict === 'string') {
         visualByRoot.set(root, {
           verdict: m.verdict,
@@ -258,6 +266,7 @@ export function clusterCandidates(candidates: DedupCandidate[]): DedupCluster[] 
       candidateIds: [...new Set(edges.get(root) ?? [])].sort((a, b) => a - b),
       tier: tierByRoot.get(root) ?? 'tier1',
       visual: visualByRoot.get(root) ?? null,
+      markers: markersByRoot.get(root) ?? null,
     });
   }
   // Biggest clusters first; stable thereafter.

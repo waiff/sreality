@@ -63,16 +63,40 @@ def get_clip_coverage(
     return dedup.clip_coverage(conn)
 
 
+@router.get("/decision-images")
+def get_decision_images(
+    a: int,
+    b: int,
+    room_type: str | None = None,
+    per_side: int = Query(default=4, ge=1, le=8),
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Photos behind a decision row — the deciding room's images for both listings
+    (factor-row drill-in on Decision history / Needs-review)."""
+    return dedup.decision_images(
+        conn, left_sreality_id=a, right_sreality_id=b, room_type=room_type,
+        per_side=per_side,
+    )
+
+
 @router.get("/audit")
 def get_pair_audit(
     outcome: str | None = None,
+    category_main: str | None = None,
+    source: str | None = None,
+    stage: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    """Recent per-pair decision history (merged / dismissed / queued)."""
-    return dedup.list_pair_audit(conn, outcome=outcome, limit=limit, offset=offset)
+    """The unified Decision history feed (merged / dismissed, engine + operator).
+    Filterable by property type (`category_main`), `outcome`, `source`, `stage`."""
+    return dedup.list_pair_audit(
+        conn, outcome=outcome, category_main=category_main, source=source,
+        stage=stage, limit=limit, offset=offset,
+    )
 
 
 @router.get("/candidates")

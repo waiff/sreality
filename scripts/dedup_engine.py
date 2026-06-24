@@ -45,6 +45,7 @@ from typing import Any
 
 from toolkit.dedup_engine import (
     PHASH_IDENTICAL_MAX,
+    PHASH_MIN_IDENTICAL_PAIRS,
     CosineBands,
     ListingKey,
     _area_pct_diff,
@@ -167,8 +168,10 @@ def _eligibility_counts(conn: Any) -> dict[str, int]:
     }
 
 
-def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: dict[str, Any]) -> bool:
-    """Merge the two listings' properties (older survives). Returns True on success.
+def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: dict[str, Any]) -> str | None:
+    """Merge the two listings' properties (older survives). Returns the
+    merge_group_id (the undo handle, recorded in the decision audit) on success,
+    or None on skip.
 
     The in-memory ListingKeys hold the property_id as loaded at run start; a
     merge earlier this run may have retired one of them. merge_properties raises
@@ -177,19 +180,19 @@ def _merge_pair(conn: Any, a: ListingKey, b: ListingKey, reason: str, markers: d
     idempotent and converges over runs, so a deferred chain merge is harmless.
     """
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
-        return False
+        return None
     # Survivor = the older property (smaller id is a stable proxy for first_seen).
     survivor, retired = sorted((a.property_id, b.property_id))
     try:
-        merge_properties(
+        res = merge_properties(
             conn, survivor_id=survivor, retired_id=retired,
             reason=reason, source="auto", confidence=markers.get("confidence"),
             markers=markers,
         )
-        return True
+        return res["data"]["merge_group_id"]
     except MergeError as exc:
         LOG.warning("merge %s<-%s skipped: %s", survivor, retired, exc)
-        return False
+        return None
 
 
 def _canon_pair(a: ListingKey, b: ListingKey) -> tuple[int, int] | None:
@@ -429,11 +432,14 @@ def _resolve_visual(
     tried = 0
     last_verdict = None
     last_rationale = None
+    last_cos: float | None = None
     room_verdicts: dict[str, str] = {}
     room_rationales: dict[str, str | None] = {}
+    room_cos: dict[str, float | None] = {}
     for room in priority:
         if tried >= max_room_attempts or vision_budget[0] <= 0:
             break  # rooms remain untried — captured by the all-rooms-verdicted guard
+        cos: float | None = None
         # Stage 4b: the CLIP cosine recall tier picks WHICH model judges this room
         # (high cosine -> cheap Haiku, uncertain -> Sonnet), or skips the LLM for a
         # too-dissimilar room ('manual'). NEVER merges/dismisses on cosine alone, so
@@ -460,13 +466,16 @@ def _resolve_visual(
         # capping NEW paid comparisons. (Cache-only consume passes a huge budget.)
         if not verdict_obj.get("cache_hit"):
             vision_budget[0] -= 1
-        last_verdict, last_rationale = verdict_obj["verdict"], verdict_obj.get("rationale")
+        last_verdict, last_rationale, last_cos = (
+            verdict_obj["verdict"], verdict_obj.get("rationale"), cos)
         room_verdicts[room] = last_verdict
         room_rationales[room] = last_rationale
+        room_cos[room] = cos
         if verdict_is_merge(last_verdict):
             return {
                 "action": "auto_merge", "reason": "visual_match",
                 "room_type": room, "verdict": last_verdict, "rationale": last_rationale,
+                "cosine": cos,
             }
 
     # No High on any COMPARED room. Only auto-dismiss when EVERY common room produced
@@ -487,11 +496,12 @@ def _resolve_visual(
             "action": "dismiss", "reason": "visual_different",
             "room_type": room, "verdict": "Low",
             "rationale": room_rationales.get(room) if room else last_rationale,
+            "cosine": room_cos.get(room) if room else last_cos,
         }
 
     return {
         "action": "queue", "reason": "visual_inconclusive",
-        "verdict": last_verdict, "rationale": last_rationale,
+        "verdict": last_verdict, "rationale": last_rationale, "cosine": last_cos,
     }
 
 
@@ -519,19 +529,62 @@ def _auto_merge_enabled(conn: Any) -> bool:
     return bool(v)
 
 
+def _factors(
+    stage: str,
+    *,
+    reason: str | None = None,
+    street_key: str | None = None,
+    house_number: str | None = None,
+    floor: Any = None,
+    phash_pairs: int | None = None,
+    cosine: float | None = None,
+    verdict: str | None = None,
+    room_type: str | None = None,
+    rationale: str | None = None,
+) -> dict[str, Any]:
+    """The canonical decision-factor dict — ONE shape feeding BOTH a terminal audit
+    row's `detail` and a queued candidate's `markers_matched`, so Decision history and
+    Needs-review render identical factor detail (the operator's ask). Image-similarity
+    factors carry the threshold the operator tunes in settings, so the UI can show the
+    value against its bar. None entries drop out; the UI hydrates the actual photos by
+    (sreality_id, room_type)."""
+    f: dict[str, Any] = {
+        "stage": stage,
+        "reason": reason,
+        "street_key": street_key,
+        "house_number": house_number,
+        "floor": floor,
+        "verdict": verdict,
+        "room_type": room_type,
+        "rationale": rationale,
+    }
+    if phash_pairs is not None:
+        f["phash_pairs"] = phash_pairs
+        f["phash_threshold"] = PHASH_IDENTICAL_MAX
+        f["phash_min_pairs"] = PHASH_MIN_IDENTICAL_PAIRS
+    if cosine is not None:
+        f["cosine"] = round(float(cosine), 4)
+    return {k: v for k, v in f.items() if v is not None}
+
+
 def _audit(
     audit: list[dict[str, Any]] | None, a: ListingKey, b: ListingKey,
     stage: str, outcome: str, detail: dict[str, Any] | None = None,
+    *, source: str = "engine", merge_group_id: str | None = None,
 ) -> None:
-    """Append one per-pair decision record (opt-in: no-op when audit is None, so
-    tests + the hot loop pay nothing unless main wires a sink)."""
+    """Append one TERMINAL (merged | dismissed) per-pair decision record (opt-in: no-op
+    when audit is None). Queued pairs are NOT audited — a queued pair IS a candidate
+    (the review queue), so its factor detail lives in `markers_matched` instead.
+    `merge_group_id` is the undo handle for a merged row; `source` distinguishes an
+    autonomous engine decision from an operator /dedup action."""
     if audit is None:
         return
     audit.append({
         "left_sreality_id": a.sreality_id, "right_sreality_id": b.sreality_id,
         "left_property_id": a.property_id, "right_property_id": b.property_id,
         "category_main": a.category_main or b.category_main,
-        "stage": stage, "outcome": outcome,
+        "stage": stage, "outcome": outcome, "source": source,
+        "merge_group_id": merge_group_id,
         "detail": {k: v for k, v in (detail or {}).items() if v is not None},
     })
 
@@ -546,12 +599,13 @@ def _write_pair_audit(
         cur.executemany(
             "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
             "right_sreality_id, left_property_id, right_property_id, "
-            "category_main, stage, outcome, detail) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+            "category_main, stage, outcome, source, merge_group_id, detail) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
             [
                 (run_at, r["left_sreality_id"], r["right_sreality_id"],
                  r["left_property_id"], r["right_property_id"], r["category_main"],
-                 r["stage"], r["outcome"], json.dumps(r["detail"]))
+                 r["stage"], r["outcome"], r.get("source", "engine"),
+                 r.get("merge_group_id"), json.dumps(r["detail"]))
                 for r in records
             ],
         )
@@ -677,20 +731,23 @@ def run_engine(
                 seen_property_pairs.add(cp)
 
                 if decision.action == "auto_merge":  # rule B exact address
-                    markers = {"reason": decision.reason, "confidence": 0.99,
-                               "street_key": street_key, "house_number": a.house_number,
-                               "floor": a.floor}
+                    factors = _factors(
+                        "address", reason="address_exact", street_key=street_key,
+                        house_number=a.house_number, floor=a.floor)
                     if auto_merge_enabled:
-                        if dry_run or _merge_pair(conn, a, b, "address_exact", markers):
+                        mg = None if dry_run else _merge_pair(
+                            conn, a, b, "address_exact", {**factors, "confidence": 0.99})
+                        if dry_run or mg:
                             stats["auto_address"] += 1
                             merged_pairs.add(cp)
-                            _audit(audit, a, b, "address", "merged",
-                                   {"reason": "address_exact"})
+                            _audit(audit, a, b, "address", "merged", factors,
+                                   source="engine", merge_group_id=mg)
                     else:
                         if not dry_run:
                             _enqueue_candidate(
                                 conn, a, b,
-                                {**markers, "reason": "auto_merge_off:address_exact"},
+                                {**factors, "reason": "auto_merge_off:address_exact",
+                                 "confidence": 0.99},
                             )
                         stats["queued"] += 1
                     continue
@@ -707,18 +764,22 @@ def run_engine(
                 if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
-                    markers = {"tier": "street_disposition", "reason": "image_phash",
-                               "phash_pairs": phash_pairs, "street_key": street_key,
-                               "confidence": 0.97}
+                    factors = _factors("phash", reason="image_phash",
+                                       street_key=street_key, phash_pairs=phash_pairs)
                     if auto_merge_enabled:
-                        if dry_run or _merge_pair(conn, a, b, "image_phash", markers):
+                        mg = None if dry_run else _merge_pair(
+                            conn, a, b, "image_phash",
+                            {**factors, "tier": "street_disposition", "confidence": 0.97})
+                        if dry_run or mg:
                             stats["auto_phash"] += 1
                             merged_pairs.add(cp)
-                            _audit(audit, a, b, "phash", "merged",
-                                   {"reason": "image_phash", "phash_pairs": phash_pairs})
+                            _audit(audit, a, b, "phash", "merged", factors,
+                                   source="engine", merge_group_id=mg)
                     else:
                         if not dry_run:
-                            _enqueue_candidate(conn, a, b, {**markers, "reason": "auto_merge_off:image_phash"})
+                            _enqueue_candidate(conn, a, b, {
+                                **factors, "tier": "street_disposition",
+                                "reason": "auto_merge_off:image_phash", "confidence": 0.97})
                         stats["queued"] += 1
                     continue
 
@@ -741,10 +802,13 @@ def run_engine(
                 stats["pairs_considered"] += 1
                 if not auto_merge_enabled:
                     # Auto-merge off: queue for manual review without spending vision.
+                    # No forensic verdict here, but pHash already ran — carry it so the
+                    # Needs-review card still shows the one similarity signal we have.
                     if not dry_run:
                         _enqueue_candidate(conn, a, b, {
-                            "tier": "street_disposition", "street_key": street_key,
-                            "reason": "auto_merge_off", "confidence": 0.6,
+                            **_factors("candidate", reason="auto_merge_off",
+                                       street_key=street_key, phash_pairs=phash_pairs),
+                            "tier": "street_disposition", "confidence": 0.6,
                         })
                     stats["queued"] += 1
                     continue
@@ -755,31 +819,39 @@ def run_engine(
                     autodismiss=autodismiss,
                     cosine_fn=cosine_fn, bands=bands, model_for=model_for, stats=stats,
                 )
-                markers = {
-                    "tier": "street_disposition", "street_key": street_key,
-                    "reason": outcome.get("reason"),
-                    "verdict": outcome.get("verdict"), "rationale": outcome.get("rationale"),
-                    "room_type": outcome.get("room_type"),
-                    "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6,
-                }
+                # ONE factor set per pair — fed to BOTH the terminal audit `detail`
+                # (merged/dismissed) AND, when queued, the candidate `markers_matched`,
+                # so Decision history and Needs-review show identical detail. phash_pairs
+                # is carried even on the visual path (it's 0/1 here — the fast-path didn't
+                # fire — which is itself the "photos differ, escalated to vision" signal).
+                factors = _factors(
+                    "visual", reason=outcome.get("reason"), street_key=street_key,
+                    verdict=outcome.get("verdict"), room_type=outcome.get("room_type"),
+                    rationale=outcome.get("rationale"), cosine=outcome.get("cosine"),
+                    phash_pairs=phash_pairs)
+                markers = {**factors, "tier": "street_disposition",
+                           "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6}
                 # pHash already ran (pre-classify); the visual stage only auto-merges via
                 # a High forensic verdict, and auto-dismisses on a confident "different".
-                _vd = {"reason": outcome.get("reason"), "verdict": outcome.get("verdict"),
-                       "room_type": outcome.get("room_type")}
                 if outcome["action"] == "auto_merge":
-                    if dry_run or _merge_pair(conn, a, b, outcome["reason"], markers):
+                    mg = None if dry_run else _merge_pair(
+                        conn, a, b, outcome["reason"], markers)
+                    if dry_run or mg:
                         stats["auto_visual"] += 1
                         merged_pairs.add(cp)
-                        _audit(audit, a, b, "visual", "merged", _vd)
+                        _audit(audit, a, b, "visual", "merged", factors,
+                               source="engine", merge_group_id=mg)
                 elif outcome["action"] == "dismiss":
                     stats["auto_dismissed"] += 1
                     dismissed_pairs.add(cp)
-                    _audit(audit, a, b, "visual", "dismissed", _vd)
+                    _audit(audit, a, b, "visual", "dismissed", factors, source="engine")
                 elif enqueue_unresolved:
                     if not dry_run:
                         _enqueue_candidate(conn, a, b, markers)
                     stats["queued"] += 1
-                    _audit(audit, a, b, "visual", "queued", _vd)
+                    # NOT audited — a queued pair IS the candidate; its factor detail
+                    # lives in markers_matched (Needs-review reads it). Auditing queued
+                    # re-logged the same pair every run (the duplicate-row bug).
                 else:
                     # Free mode: don't pile un-vision'd pairs into the review queue
                     # (they'd just be 'no photos compared' placeholders). pHash /
