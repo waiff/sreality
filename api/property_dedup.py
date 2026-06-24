@@ -182,6 +182,49 @@ def summary(conn: psycopg.Connection, *, status: str = "proposed") -> dict[str, 
     }
 
 
+def list_pair_audit(
+    conn: psycopg.Connection,
+    *,
+    outcome: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Recent per-pair decision audit rows (the /dedup history surface reads this)."""
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    if outcome is not None:
+        clauses.append("outcome = %(outcome)s")
+        params["outcome"] = outcome
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM dedup_pair_audit {where}", params)
+        total = int(cur.fetchone()[0])
+        cur.execute(
+            f"""
+            SELECT run_at, left_sreality_id, right_sreality_id,
+                   left_property_id, right_property_id, category_main,
+                   stage, outcome, detail
+            FROM dedup_pair_audit {where}
+            ORDER BY run_at DESC, id DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+            """,
+            {**params, "limit": limit, "offset": offset},
+        )
+        rows = cur.fetchall()
+    return {
+        "data": [
+            {
+                "run_at": r[0], "left_sreality_id": r[1], "right_sreality_id": r[2],
+                "left_property_id": r[3], "right_property_id": r[4],
+                "category_main": r[5], "stage": r[6], "outcome": r[7], "detail": r[8],
+            }
+            for r in rows
+        ],
+        "total": total,
+        "returned": len(rows),
+    }
+
+
 def merge_candidate(
     conn: psycopg.Connection, candidate_id: int,
 ) -> dict[str, Any] | None:

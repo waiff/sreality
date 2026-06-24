@@ -54,6 +54,18 @@ def get_summary(
     return dedup.summary(conn, status=status)
 
 
+@router.get("/audit")
+def get_pair_audit(
+    outcome: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Recent per-pair decision history (merged / dismissed / queued)."""
+    return dedup.list_pair_audit(conn, outcome=outcome, limit=limit, offset=offset)
+
+
 @router.get("/candidates")
 def get_candidates(
     status: str | None = "proposed",

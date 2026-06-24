@@ -519,6 +519,44 @@ def _auto_merge_enabled(conn: Any) -> bool:
     return bool(v)
 
 
+def _audit(
+    audit: list[dict[str, Any]] | None, a: ListingKey, b: ListingKey,
+    stage: str, outcome: str, detail: dict[str, Any] | None = None,
+) -> None:
+    """Append one per-pair decision record (opt-in: no-op when audit is None, so
+    tests + the hot loop pay nothing unless main wires a sink)."""
+    if audit is None:
+        return
+    audit.append({
+        "left_sreality_id": a.sreality_id, "right_sreality_id": b.sreality_id,
+        "left_property_id": a.property_id, "right_property_id": b.property_id,
+        "category_main": a.category_main or b.category_main,
+        "stage": stage, "outcome": outcome,
+        "detail": {k: v for k, v in (detail or {}).items() if v is not None},
+    })
+
+
+def _write_pair_audit(
+    conn: Any, run_at: Any, records: list[dict[str, Any]],
+) -> None:
+    if not records:
+        return
+    import json
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
+            "right_sreality_id, left_property_id, right_property_id, "
+            "category_main, stage, outcome, detail) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+            [
+                (run_at, r["left_sreality_id"], r["right_sreality_id"],
+                 r["left_property_id"], r["right_property_id"], r["category_main"],
+                 r["stage"], r["outcome"], json.dumps(r["detail"]))
+                for r in records
+            ],
+        )
+
+
 def run_engine(
     conn: Any,
     *,
@@ -528,6 +566,7 @@ def run_engine(
     cosine_fn: Any = None,
     bands: Any = None,
     model_for: dict[str, str] | None = None,
+    audit: list[dict[str, Any]] | None = None,
     max_pairs: int = 2000,
     max_vision_calls: int = 200,
     max_room_attempts: int = 4,
@@ -645,6 +684,8 @@ def run_engine(
                         if dry_run or _merge_pair(conn, a, b, "address_exact", markers):
                             stats["auto_address"] += 1
                             merged_pairs.add(cp)
+                            _audit(audit, a, b, "address", "merged",
+                                   {"reason": "address_exact"})
                     else:
                         if not dry_run:
                             _enqueue_candidate(
@@ -673,6 +714,8 @@ def run_engine(
                         if dry_run or _merge_pair(conn, a, b, "image_phash", markers):
                             stats["auto_phash"] += 1
                             merged_pairs.add(cp)
+                            _audit(audit, a, b, "phash", "merged",
+                                   {"reason": "image_phash", "phash_pairs": phash_pairs})
                     else:
                         if not dry_run:
                             _enqueue_candidate(conn, a, b, {**markers, "reason": "auto_merge_off:image_phash"})
@@ -721,17 +764,22 @@ def run_engine(
                 }
                 # pHash already ran (pre-classify); the visual stage only auto-merges via
                 # a High forensic verdict, and auto-dismisses on a confident "different".
+                _vd = {"reason": outcome.get("reason"), "verdict": outcome.get("verdict"),
+                       "room_type": outcome.get("room_type")}
                 if outcome["action"] == "auto_merge":
                     if dry_run or _merge_pair(conn, a, b, outcome["reason"], markers):
                         stats["auto_visual"] += 1
                         merged_pairs.add(cp)
+                        _audit(audit, a, b, "visual", "merged", _vd)
                 elif outcome["action"] == "dismiss":
                     stats["auto_dismissed"] += 1
                     dismissed_pairs.add(cp)
+                    _audit(audit, a, b, "visual", "dismissed", _vd)
                 elif enqueue_unresolved:
                     if not dry_run:
                         _enqueue_candidate(conn, a, b, markers)
                     stats["queued"] += 1
+                    _audit(audit, a, b, "visual", "queued", _vd)
                 else:
                     # Free mode: don't pile un-vision'd pairs into the review queue
                     # (they'd just be 'no photos compared' placeholders). pHash /
@@ -1163,10 +1211,14 @@ def main() -> int:
             eff_max_vision = 10_000_000 if args.cache_only else args.max_vision_calls
             eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
 
+            from datetime import datetime, timezone
+            run_at = datetime.now(timezone.utc)
+            pair_audit: list[dict[str, Any]] = []
             stats = run_engine(
                 conn, classify_fn=classify_fn, compare_fn=compare_fn,
                 site_plan_fn=site_plan_fn,
                 cosine_fn=cosine_fn, bands=bands, model_for=model_for,
+                audit=pair_audit,
                 max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,
                 max_room_attempts=eff_max_rooms,
                 auto_merge_enabled=auto_merge_enabled,
@@ -1178,6 +1230,7 @@ def main() -> int:
             stats["clip_classified"] = clip_counter[0]
             if not args.shadow:
                 _write_run_row(conn, stats)
+                _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
                 "auto_dismissed=%d reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
