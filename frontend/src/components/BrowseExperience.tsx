@@ -345,14 +345,25 @@ export default function BrowseExperience({
     gcTime: 10 * 60_000,
   });
 
+  /* The ONE canonical cohort total — consumed by the header, the tab badge,
+   * the cards/table "of N" labels, and (as the denominator of its mappable
+   * subset) the map pill. Enabled on EVERY tab so the number never changes
+   * just by switching tabs, and never goes stale-until-refresh because a tab
+   * gate suppressed its refetch. Its fetch/error state is surfaced in the
+   * header (FilterSummary) — a lagging or failed count must look different
+   * from a settled one, never silently pin the previous cohort's value. */
   const browseCountQuery = useQuery<number, Error>({
     queryKey: ['browse-count', filters],
     queryFn: () => fetchBrowseCount(filters),
-    enabled: tab === 'map' || tab === 'table',
     placeholderData: (prev) => prev,
     staleTime: 60_000,
   });
-  const browseTotal = browseCountQuery.data ?? null;
+  const cohortTotal = browseCountQuery.data ?? null;
+  /* True while a refetch for a NEW cohort is in flight and we are still
+   * showing the PREVIOUS cohort's number (placeholderData). This is exactly
+   * the "looks settled but is stale" window that made the count appear stuck. */
+  const cohortCountStale =
+    browseCountQuery.isPlaceholderData && browseCountQuery.isFetching;
 
   const cardsRestorationKey = useMemo(() => {
     const sp = toSearchParams(filters);
@@ -556,11 +567,8 @@ export default function BrowseExperience({
     filters.maxCityPopulation,
   ]);
 
-  const totalForBadge =
-    tab === 'stats' ? statsQuery.data?.total ?? null : browseTotal;
-
   const tabs: ReadonlyArray<Tab<TabKey>> = [
-    { key: 'map', label: 'Listings', badge: totalForBadge != null ? totalForBadge.toLocaleString('cs-CZ') : undefined },
+    { key: 'map', label: 'Listings', badge: cohortTotal != null ? cohortTotal.toLocaleString('cs-CZ') : undefined },
     { key: 'table', label: 'Table' },
     { key: 'stats', label: 'Stats' },
   ];
@@ -605,7 +613,10 @@ export default function BrowseExperience({
         <div className="px-6 pt-5">
           <FilterSummary
             filters={filters}
-            count={totalForBadge}
+            count={cohortTotal}
+            countStale={cohortCountStale}
+            countError={browseCountQuery.error}
+            onRetryCount={() => browseCountQuery.refetch()}
             showTitle={f.title}
             loading={
               tab === 'map' ? mapQuery.isLoading || cards.isLoading :
@@ -653,7 +664,7 @@ export default function BrowseExperience({
             >
               <ListingCards
                 rows={cards.isLoading ? null : cards.rows}
-                total={browseTotal}
+                total={cohortTotal}
                 sort={sort}
                 isLoading={cards.isLoading}
                 isFetchingNextPage={cards.isFetchingNextPage}
@@ -687,6 +698,7 @@ export default function BrowseExperience({
                   <ListingMap
                     rows={mapQuery.data?.rows ?? []}
                     total={mapQuery.data?.total ?? null}
+                    cohortTotal={cohortTotal}
                     capped={mapQuery.data?.capped ?? false}
                     isLoading={mapQuery.isLoading}
                     bounds={filters.bounds}
@@ -744,7 +756,7 @@ export default function BrowseExperience({
             {tab === 'table' && (
               <ListingTable
                 rows={table.isLoading ? null : table.rows}
-                total={browseTotal}
+                total={cohortTotal}
                 sort={sort}
                 isLoading={table.isLoading}
                 isFetchingNextPage={table.isFetchingNextPage}
@@ -817,6 +829,9 @@ function defaultDirectionFor(field: SortField): 'asc' | 'desc' {
 function FilterSummary({
   filters,
   count,
+  countStale,
+  countError,
+  onRetryCount,
   loading,
   showTitle,
   onClearBounds,
@@ -824,6 +839,14 @@ function FilterSummary({
 }: {
   filters: ListingFilters;
   count: number | null;
+  /* The displayed count is the PREVIOUS cohort's value while a refetch for the
+   * new cohort is still in flight. Surfaced so a lagging count is visibly
+   * provisional instead of looking settled (the bug this page had). */
+  countStale: boolean;
+  /* The canonical-count query failed. We show whatever number we still have,
+   * dimmed, plus a retry — never a silently-wrong total with no signal. */
+  countError: Error | null;
+  onRetryCount: () => void;
   loading: boolean;
   showTitle: boolean;
   onClearBounds?: () => void;
@@ -834,9 +857,32 @@ function FilterSummary({
       <div className="min-w-0">
         {showTitle && <h1 className="text-2xl leading-tight">Browse</h1>}
         <div className={showTitle ? 'mt-1 flex items-center gap-2 flex-wrap' : 'flex items-center gap-2 flex-wrap'}>
-          <p className="text-sm text-[var(--color-ink-2)]">
+          <p
+            className={`text-sm text-[var(--color-ink-2)]${
+              countStale || (countError && count != null) ? ' opacity-60' : ''
+            }`}
+            aria-busy={countStale || undefined}
+          >
             {loading && count == null ? 'Loading…' : summarise(filters, count)}
           </p>
+          {countStale && (
+            <span
+              className="inline-flex items-center text-[0.7rem] tracking-wide text-[var(--color-ink-3)]"
+              title="Recounting for the updated filters…"
+            >
+              updating…
+            </span>
+          )}
+          {countError && (
+            <button
+              type="button"
+              onClick={onRetryCount}
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-[0.7rem] tracking-wide rounded-[var(--radius-sm)] bg-[var(--color-brick-soft)] text-[var(--color-brick)] hover:bg-[var(--color-brick)]/15 transition-colors"
+              title={`Couldn't refresh the count: ${countError.message}`}
+            >
+              <span>Count may be stale — retry</span>
+            </button>
+          )}
           {onClearBounds && (
             <button
               type="button"
