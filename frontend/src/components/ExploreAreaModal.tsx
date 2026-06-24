@@ -18,6 +18,8 @@ import {
 } from 'react';
 import { useNavigate } from 'react-router-dom';
 import BrowseExperience from '@/components/BrowseExperience';
+import OriginPropertyPanel from '@/components/OriginPropertyPanel';
+import type { AnchorPoint } from '@/components/ListingMap';
 import {
   browseFiltersForArea,
   browseUrlFromState,
@@ -76,6 +78,25 @@ function ExploreAreaModal({
   const navigate = useNavigate();
   const initialFilters = useMemo(() => browseFiltersForArea(payload), [payload]);
   const view = useMemoryBrowseState({ filters: initialFilters });
+
+  /* The property the operator came FROM — pinned on the map (anchor) and shown
+   * in the top panel, both independent of the filter cohort. Memoized so the
+   * anchor object identity is stable across filter-driven re-renders (else the
+   * map's anchor setData effect would fire on every keystroke). Uses the seed's
+   * guaranteed numeric coords (the same the trigger button passed). */
+  const origin = payload.origin ?? null;
+  const anchor = useMemo<AnchorPoint | null>(
+    () =>
+      origin
+        ? {
+            lat: payload.lat,
+            lng: payload.lng,
+            is_active: origin.listing.is_active,
+            sreality_id: origin.listing.sreality_id,
+          }
+        : null,
+    [origin, payload.lat, payload.lng],
+  );
 
   // ESC closes + lock body scroll while the (tall) modal is open.
   useEffect(() => {
@@ -148,10 +169,14 @@ function ExploreAreaModal({
             </button>
           </div>
         </header>
+        {origin && (
+          <OriginPropertyPanel listing={origin.listing} images={origin.images} />
+        )}
         <div className="flex-1 min-h-0">
           <BrowseExperience
             view={view}
             layout="modal"
+            anchor={anchor}
             features={{ presetBar: false, mergeMode: false, watchdog: false, title: false }}
           />
         </div>

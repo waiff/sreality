@@ -262,7 +262,7 @@ export default function ListingDetail() {
             <BrokerChip srealityId={listing.sreality_id} />
           </div>
         }
-        mapFooter={<ExploreAreaButton listing={listing} />}
+        mapFooter={<ExploreAreaButton listing={listing} images={images} />}
         estimatesSlot={
           /* The estimation chapter: MF reference + our runs, side by side —
              in the prime slot after the description (the map moved into the
@@ -455,7 +455,13 @@ function NewEstimationButton({ prefill }: { prefill?: NewEstimationPrefill }) {
    neighbourhood, pre-filtered to its category + disposition). Rendered under the
    header map via ListingOverview's mapFooter slot, which only shows when the
    listing has coordinates — the null guard here is defensive. */
-function ExploreAreaButton({ listing }: { listing: ListingPublic }) {
+function ExploreAreaButton({
+  listing,
+  images,
+}: {
+  listing: ListingPublic;
+  images: ImagePublic[];
+}) {
   const { open } = useExploreAreaModal();
   if (listing.lat == null || listing.lng == null) return null;
   const label = [placePrimary(listing), listing.disposition]
@@ -472,6 +478,10 @@ function ExploreAreaButton({ listing }: { listing: ListingPublic }) {
           categoryType: listing.category_type,
           disposition: listing.disposition,
           label: label || undefined,
+          // The property we came FROM — already loaded on this page, passed
+          // through (no refetch) to pin it on the modal map + show its photos
+          // and facts in the modal's top panel.
+          origin: { listing, images },
         })
       }
       className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[0.8rem] rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] text-[var(--color-ink-2)] hover:border-[var(--color-copper)] hover:text-[var(--color-copper)] transition-colors"

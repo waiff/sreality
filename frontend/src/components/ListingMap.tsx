@@ -132,6 +132,20 @@ export interface MapFlyToCommand {
   ts: number;
 }
 
+/* The property the operator opened "Explore area" FROM — rendered as a
+ * persistent, highlighted "you are here" pin in its OWN map source, never part
+ * of the filter cohort (`rows`). Because the rows effect writes only the
+ * `listings` source and the anchor effect writes only the `anchor` source,
+ * there is no code path by which a filter edit can remove it: that decoupling
+ * is the structural guarantee behind "the anchor stays no matter the filters,"
+ * not a runtime check. `null` on the Browse page (no anchor). */
+export interface AnchorPoint {
+  lat: number;
+  lng: number;
+  is_active: boolean;
+  sreality_id: number;
+}
+
 /* Phase QUAL — one city's GeoJSON feature properties. The geometry is
  * the municipality boundary polygon. `value` is the active color-by-index
  * reading (or the -1 sentinel when no index is selected / the city has no
@@ -333,6 +347,11 @@ interface Props {
    * write back to the URL bbox — the existing chip-based district
    * filter handles cohort narrowing. */
   flyTo?: MapFlyToCommand | null;
+  /* The "Explore area" origin property, rendered as a persistent highlighted
+   * pin independent of the filter cohort (see AnchorPoint). null/undefined on
+   * the Browse page — the anchor source then stays empty and Browse is
+   * byte-identical to before. */
+  anchor?: AnchorPoint | null;
   /* Phase QUAL — curated-city overlay. The Browse page hands in the
    * subset of `curated_cities_public` that survives the active city-
    * quality filter (or the full ~206 when no filter is active). The
@@ -405,6 +424,7 @@ export default function ListingMap({
   hoverOrigin = null,
   centerCircle,
   flyTo,
+  anchor = null,
   cities,
   cityPolygons,
   showCities = true,
@@ -1037,6 +1057,38 @@ export default function ListingMap({
         },
       });
 
+      /* "Explore area" origin anchor — its OWN source, added LAST so the
+       * copper halo + pin sit on top of any coincident cohort dot (z-order
+       * dedup, no id-matching needed). Reuses the estimation ComparablesMap
+       * subject recipe (#b6612d copper, halo + white-stroked pin) so the
+       * "highlighted landmark" idiom is one vocabulary app-wide; slightly
+       * larger so it reads as "the one you came from" against the green
+       * cohort. The pin dims for an inactive origin, the listings convention.
+       * Style-only: no hover-sync, no click handler (a deliberate non-entry
+       * into the map's interaction surface — it's a fixed "you are here"). */
+      map.addSource('anchor', {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: [] },
+      });
+      map.addLayer({
+        id: 'anchor-halo',
+        type: 'circle',
+        source: 'anchor',
+        paint: { 'circle-radius': 16, 'circle-color': '#b6612d', 'circle-opacity': 0.2 },
+      });
+      map.addLayer({
+        id: 'anchor-pin',
+        type: 'circle',
+        source: 'anchor',
+        paint: {
+          'circle-radius': 9,
+          'circle-color': '#b6612d',
+          'circle-stroke-color': '#ffffff',
+          'circle-stroke-width': 2.5,
+          'circle-opacity': ['case', ['get', 'is_active'], 1, 0.55],
+        },
+      });
+
       setReady(true);
 
       /* Restore the exact viewport captured in the URL on mount.
@@ -1326,6 +1378,32 @@ export default function ListingMap({
         : [];
     src.setData({ type: 'FeatureCollection', features });
   }, [hoveredIds, hoverOrigin, rows, ready]);
+
+  /* Origin anchor data. Writes ONLY the `anchor` source — never `listings` —
+   * so no filter change can reach it (the structural decoupling). `anchor` is
+   * memoized by the caller, so this effect only fires when the origin actually
+   * changes (modal open) or the map remounts (tab switch), not on every
+   * filter-driven re-render. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const src = map.getSource('anchor') as GeoJSONSource | undefined;
+    if (!src) return;
+    src.setData(
+      anchor
+        ? {
+            type: 'FeatureCollection',
+            features: [
+              {
+                type: 'Feature',
+                geometry: { type: 'Point', coordinates: [anchor.lng, anchor.lat] },
+                properties: { is_active: anchor.is_active },
+              },
+            ],
+          }
+        : { type: 'FeatureCollection', features: [] },
+    );
+  }, [anchor, ready]);
 
   /* Reset-view clears the bbox URL param, which triggers the parent
    * to refetch the unbounded cohort. Once those rows arrive the

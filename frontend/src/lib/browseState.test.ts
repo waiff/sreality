@@ -5,10 +5,19 @@ import {
   browseFiltersForArea,
   browseUrlFromState,
   type ExploreAreaSeed,
+  type ExploreOrigin,
 } from './browseState';
 import { DEFAULT_SORT } from './queries';
+import type { ListingPublic } from './types';
 
 const TREBIC: Pick<ExploreAreaSeed, 'lat' | 'lng'> = { lat: 49.2147, lng: 15.8816 };
+
+/* A throwaway origin — the decoupling tests only care that it is IGNORED by the
+ * cohort builders, so its contents are irrelevant. */
+const SOME_ORIGIN: ExploreOrigin = {
+  listing: { sreality_id: 42, is_active: true } as ListingPublic,
+  images: [],
+};
 
 describe('bboxAround', () => {
   it('produces a well-ordered box ~km across centred on the point', () => {
@@ -68,6 +77,20 @@ describe('browseFiltersForArea', () => {
       disposition: null,
     });
     expect(f.categoryMain).toEqual(DEFAULT_FILTERS.categoryMain);
+  });
+
+  it('IGNORES origin — the anchor never leaks into the cohort filters', () => {
+    const seed: ExploreAreaSeed = {
+      ...TREBIC,
+      categoryMain: 'byt',
+      categoryType: 'prodej',
+      disposition: '2+1',
+    };
+    const withoutOrigin = browseFiltersForArea(seed);
+    const withOrigin = browseFiltersForArea({ ...seed, origin: SOME_ORIGIN });
+    // The cohort is computed purely from the seed fields; origin is display-only
+    // (anchor pin + top panel), so the two filter sets must be identical.
+    expect(withOrigin).toEqual(withoutOrigin);
   });
 });
 
