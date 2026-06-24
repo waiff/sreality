@@ -75,6 +75,12 @@ export default function DedupAuditHistory() {
   const [outcome, setOutcome] = useState('');
   const [type, setType] = useState('');
   const [source, setSource] = useState('');
+  // Broadcast "expand/collapse all photos" to every row's DedupFactors; bump seq each
+  // click so a row re-applies it even after individual toggling.
+  const [batchPhotos, setBatchPhotos] =
+    useState<{ open: boolean; seq: number } | undefined>(undefined);
+  const setAllPhotos = (open: boolean) =>
+    setBatchPhotos((b) => ({ open, seq: (b?.seq ?? 0) + 1 }));
   const q = useQuery({
     queryKey: ['dedup', 'audit', outcome, type, source],
     queryFn: () =>
@@ -123,6 +129,27 @@ export default function DedupAuditHistory() {
               onClick={() => setType(t.id)}
             />
           ))}
+          {rows.length > 0 && (
+            <span className="ml-auto flex items-center gap-2 text-[0.72rem]">
+              <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)]">
+                Fotky
+              </span>
+              <button
+                type="button"
+                onClick={() => setAllPhotos(true)}
+                className="text-[var(--color-ink-3)] hover:text-[var(--color-copper)] underline decoration-dotted underline-offset-2"
+              >
+                zobrazit vše
+              </button>
+              <button
+                type="button"
+                onClick={() => setAllPhotos(false)}
+                className="text-[var(--color-ink-3)] hover:text-[var(--color-copper)] underline decoration-dotted underline-offset-2"
+              >
+                skrýt vše
+              </button>
+            </span>
+          )}
         </div>
       </div>
 
@@ -136,7 +163,11 @@ export default function DedupAuditHistory() {
       ) : (
         <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] divide-y divide-[var(--color-rule)] bg-[var(--color-paper)]">
           {rows.map((r, i) => (
-            <AuditRow key={`${r.merge_group_id ?? ''}-${i}`} r={r} />
+            <AuditRow
+              key={`${r.merge_group_id ?? ''}-${i}`}
+              r={r}
+              batchPhotos={batchPhotos}
+            />
           ))}
         </div>
       )}
@@ -144,7 +175,13 @@ export default function DedupAuditHistory() {
   );
 }
 
-function AuditRow({ r }: { r: DedupAuditRow }) {
+function AuditRow({
+  r,
+  batchPhotos,
+}: {
+  r: DedupAuditRow;
+  batchPhotos?: { open: boolean; seq: number };
+}) {
   const qc = useQueryClient();
   const undo = useMutation({
     mutationFn: () => unmergeMergeGroup(r.merge_group_id as string),
@@ -218,6 +255,7 @@ function AuditRow({ r }: { r: DedupAuditRow }) {
         factors={r.detail}
         leftSrealityId={r.left_sreality_id}
         rightSrealityId={r.right_sreality_id}
+        batchPhotos={batchPhotos}
       />
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import { getDedupDecisionImages } from '@/lib/api';
@@ -59,13 +59,23 @@ export default function DedupFactors({
   factors,
   leftSrealityId,
   rightSrealityId,
+  batchPhotos,
 }: {
   factors: Record<string, unknown> | null;
   leftSrealityId: number | null;
   rightSrealityId: number | null;
+  // A broadcast command (open/close) from a parent "expand/collapse all" control. Only
+  // re-applied when `seq` changes, so individual toggling still works between commands.
+  batchPhotos?: { open: boolean; seq: number };
 }) {
   const [showPhotos, setShowPhotos] = useState(false);
   const f = factors ?? {};
+
+  const canShowPhotos = leftSrealityId != null && rightSrealityId != null;
+  useEffect(() => {
+    if (batchPhotos && canShowPhotos) setShowPhotos(batchPhotos.open);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [batchPhotos?.seq]);
 
   const reason = typeof f.reason === 'string' ? f.reason : null;
   const verdict = typeof f.verdict === 'string' ? f.verdict : null;
@@ -74,8 +84,6 @@ export default function DedupFactors({
   const phashPairs = num(f.phash_pairs);
   const phashMin = num(f.phash_min_pairs);
   const cosine = num(f.cosine);
-
-  const canShowPhotos = leftSrealityId != null && rightSrealityId != null;
 
   return (
     <div className="flex flex-col gap-1.5">
