@@ -428,52 +428,59 @@ def pipeline_overview(conn: psycopg.Connection) -> dict[str, Any]:
     }
 
 
-def pipeline_timeline(conn: psycopg.Connection, *, days: int = 14) -> dict[str, Any]:
-    """Daily throughput for the dedup funnel over the last `days` (zero-filled), so the
-    operator can see how it evolves: images tagged (image_clip_tags.tagged_at, indexed),
-    candidates created, and decisions (merged / dismissed). One query, small/indexed
-    aggregates — no image-table scan."""
-    days = max(1, min(days, 90))
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            WITH d AS (
-              SELECT generate_series(
-                       date_trunc('day', now()) - make_interval(days => %(days)s - 1),
-                       date_trunc('day', now()), interval '1 day')::date AS day
-            ),
-            tg AS (
-              SELECT tagged_at::date AS day, count(*) AS n FROM image_clip_tags
-              WHERE tagged_at >= now() - make_interval(days => %(days)s) GROUP BY 1
-            ),
-            de AS (
-              SELECT run_at::date AS day,
-                     count(*) FILTER (WHERE outcome='merged')    AS merged,
-                     count(*) FILTER (WHERE outcome='dismissed') AS dismissed
-              FROM dedup_pair_audit
-              WHERE run_at >= now() - make_interval(days => %(days)s) GROUP BY 1
-            ),
-            ca AS (
-              SELECT created_at::date AS day, count(*) AS n FROM property_identity_candidates
-              WHERE created_at >= now() - make_interval(days => %(days)s) GROUP BY 1
-            )
-            SELECT d.day, coalesce(tg.n,0), coalesce(de.merged,0),
-                   coalesce(de.dismissed,0), coalesce(ca.n,0)
-            FROM d
-            LEFT JOIN tg ON tg.day = d.day
-            LEFT JOIN de ON de.day = d.day
-            LEFT JOIN ca ON ca.day = d.day
-            ORDER BY d.day
-            """,
-            {"days": days},
+def pipeline_timeline(
+    conn: psycopg.Connection, *, bucket: str = "day", points: int | None = None,
+) -> dict[str, Any]:
+    """Throughput for the dedup funnel, zero-filled, per `bucket` ('day' over ~2 weeks,
+    or 'hour' over ~2 days) so the operator can see how it evolves at either grain
+    (mirrors the Health reconciliation Hour/Day toggle). Images tagged
+    (image_clip_tags.tagged_at, indexed), candidates created, and decisions (merged /
+    dismissed). One query, small/indexed aggregates — no image-table scan. `bucket` is
+    validated to a fixed set, so interpolating it (and its make_interval keyword) is safe."""
+    bucket = "hour" if bucket == "hour" else "day"
+    kw = "hours" if bucket == "hour" else "days"
+    default, cap = (48, 168) if bucket == "hour" else (14, 90)
+    n = max(1, min(points or default, cap))
+    sql = f"""
+        WITH d AS (
+          SELECT generate_series(
+                   date_trunc('{bucket}', now()) - make_interval({kw} => %(n)s - 1),
+                   date_trunc('{bucket}', now()), interval '1 {bucket}') AS b
+        ),
+        tg AS (
+          SELECT date_trunc('{bucket}', tagged_at) AS b, count(*) AS n FROM image_clip_tags
+          WHERE tagged_at >= now() - make_interval({kw} => %(n)s) GROUP BY 1
+        ),
+        de AS (
+          SELECT date_trunc('{bucket}', run_at) AS b,
+                 count(*) FILTER (WHERE outcome='merged')    AS merged,
+                 count(*) FILTER (WHERE outcome='dismissed') AS dismissed
+          FROM dedup_pair_audit
+          WHERE run_at >= now() - make_interval({kw} => %(n)s) GROUP BY 1
+        ),
+        ca AS (
+          SELECT date_trunc('{bucket}', created_at) AS b, count(*) AS n
+          FROM property_identity_candidates
+          WHERE created_at >= now() - make_interval({kw} => %(n)s) GROUP BY 1
         )
+        SELECT d.b, coalesce(tg.n,0), coalesce(de.merged,0),
+               coalesce(de.dismissed,0), coalesce(ca.n,0)
+        FROM d
+        LEFT JOIN tg ON tg.b = d.b
+        LEFT JOIN de ON de.b = d.b
+        LEFT JOIN ca ON ca.b = d.b
+        ORDER BY d.b
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, {"n": n})
         rows = cur.fetchall()
     return {
+        "grain": bucket,
         "data": [
-            {"day": r[0].isoformat(), "tagged": int(r[1]), "merged": int(r[2]),
+            {"bucket": r[0].isoformat(), "tagged": int(r[1]), "merged": int(r[2]),
              "dismissed": int(r[3]), "candidates": int(r[4])}
             for r in rows
-        ]
+        ],
     }
 
 
