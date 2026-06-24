@@ -14,10 +14,8 @@ import {
   getDedupSummary,
   isApiConfigured,
   listDedupCandidates,
-  listDedupMerges,
   mergeDedupCluster,
   mergeDedupPropertySet,
-  unmergeMergeGroup,
   updateAppSetting,
 } from '@/lib/api';
 import {
@@ -42,7 +40,8 @@ import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import DedupCandidateReset from '@/components/DedupCandidateReset';
-import { listingPath, propertyListingPath } from '@/lib/listingUrl';
+import DedupFactors from '@/components/DedupFactors';
+import { listingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
   DedupPropertySide,
@@ -50,8 +49,6 @@ import type {
   DedupSummaryResponse,
   DedupSummaryTier,
   ImagePublic,
-  MergeGroup,
-  MergesResponse,
   PropertySource,
 } from '@/lib/types';
 
@@ -101,12 +98,6 @@ export default function Dedup() {
     refetchInterval: POLL_MS,
   });
 
-  const mergesQ = useQuery<MergesResponse, Error>({
-    queryKey: dedupKeys.merges({ limit: 50 }),
-    queryFn: () => listDedupMerges({ limit: 50 }),
-    placeholderData: keepPreviousData,
-  });
-
   const engineRunsQ = useQuery<DedupEngineRun[], Error>({
     queryKey: dedupKeys.engineRuns(14),
     queryFn: () => fetchDedupEngineRuns(14),
@@ -115,8 +106,6 @@ export default function Dedup() {
 
   const candidates = candidatesQ.data?.data ?? [];
   const clusters = useMemo(() => clusterCandidates(candidates), [candidates]);
-  const merges = mergesQ.data?.data ?? [];
-  const activeMerges = useMemo(() => merges.filter((m) => !m.fully_undone), [merges]);
 
   /* Unique ids across both sides of every candidate on screen — the keys for
    * the three batched lookups. ≤100 candidates → ≤200 ids, well under the anon
@@ -168,7 +157,6 @@ export default function Dedup() {
   const mergeMut = useMutation({ mutationFn: mergeDedupCluster, onSuccess: invalidate });
   const mergeSetMut = useMutation({ mutationFn: mergeDedupPropertySet, onSuccess: invalidate });
   const dismissMut = useMutation({ mutationFn: dismissDedupCluster, onSuccess: invalidate });
-  const unmergeMut = useMutation({ mutationFn: unmergeMergeGroup, onSuccess: invalidate });
   const bulkMut = useMutation({ mutationFn: bulkMergeDedupCandidates, onSuccess: invalidate });
 
   // The loaded STRONG geo candidates (same coord + area + price/№) — the scoped
@@ -200,21 +188,15 @@ export default function Dedup() {
 
       <AutoDedupToggle />
 
-      <section className="mt-6">
-        <h2 className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
-          CLIP backfill
-        </h2>
+      <CollapsibleSection id="clip" eyebrow="Backfill" title="CLIP backfill">
         <DedupBackfillProgress />
-      </section>
+      </CollapsibleSection>
 
       <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
 
-      <section className="mt-8">
-        <h2 className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
-          Decision history
-        </h2>
+      <CollapsibleSection id="history" eyebrow="Audit" title="Decision history">
         <DedupAuditHistory />
-      </section>
+      </CollapsibleSection>
 
       <ReviewBacklog
         summary={summaryQ.data?.data}
@@ -238,6 +220,7 @@ export default function Dedup() {
       ) : null}
 
       <Section
+        id="needs-review"
         title="Needs review"
         eyebrow={
           bucket
@@ -276,30 +259,14 @@ export default function Dedup() {
         </div>
       </Section>
 
-      <Section
-        title="Recent merges"
-        eyebrow="Auto + operator — every merge is reversible"
-        isEmpty={activeMerges.length === 0}
-        empty={mergesQ.isLoading ? 'Loading…' : 'No merges yet.'}
+      <CollapsibleSection
+        id="maintenance"
+        eyebrow="Admin"
+        title="Maintenance"
+        defaultOpen={false}
       >
-        <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
-          {activeMerges.map((m) => (
-            <MergeRow
-              key={m.merge_group_id}
-              merge={m}
-              onUndo={() => unmergeMut.mutate(m.merge_group_id)}
-              busy={unmergeMut.isPending && unmergeMut.variables === m.merge_group_id}
-            />
-          ))}
-        </div>
-      </Section>
-
-      <section className="mt-10">
-        <h2 className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-4)] mb-3">
-          Maintenance
-        </h2>
         <DedupCandidateReset />
-      </section>
+      </CollapsibleSection>
     </div>
   );
 }
@@ -321,20 +288,14 @@ function AutomationDashboard({
     ? latest.auto_address + latest.auto_phash + latest.auto_visual
     : 0;
   return (
-    <section className="mt-8">
-      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-        Automation
-      </p>
-      <h2 className="mt-1 text-xl" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
-        Engine activity
-      </h2>
+    <CollapsibleSection id="automation" eyebrow="Automation" title="Engine activity">
       {latest == null ? (
-        <div className="mt-3 px-6 py-8 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
+        <div className="px-6 py-8 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
           {loading ? 'Loading…' : 'The dedup engine hasn’t run yet. Stats appear after its first run.'}
         </div>
       ) : (
         <>
-          <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <Stat label="Eligible" value={latest.eligible} hint="street + disposition" />
             <Stat label="Loc. unclear" value={latest.flagged_location} hint="no street" muted />
             <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
@@ -354,7 +315,7 @@ function AutomationDashboard({
           </p>
         </>
       )}
-    </section>
+    </CollapsibleSection>
   );
 }
 
@@ -477,19 +438,17 @@ function ReviewBacklog({
   const isSel = (b: DedupSummaryBucket) =>
     selected != null && selected.reason === b.reason && selected.verdict === b.verdict;
   return (
-    <section className="mt-8">
-      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-        Backlog
-      </p>
-      <h2 className="mt-1 text-xl" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
-        Review queue · {fmtCount(summary?.total ?? 0)}
-      </h2>
+    <CollapsibleSection
+      id="backlog"
+      eyebrow="Backlog"
+      title={`Review queue · ${fmtCount(summary?.total ?? 0)}`}
+    >
       {summary == null ? (
-        <div className="mt-3 px-6 py-8 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
+        <div className="px-6 py-8 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
           {loading ? 'Loading…' : 'No pending candidates.'}
         </div>
       ) : (
-        <div className="mt-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
+        <div className="rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] overflow-hidden">
           <BacklogRow
             label="All pending"
             hint="clear the filter"
@@ -514,7 +473,7 @@ function ReviewBacklog({
           })}
         </div>
       )}
-    </section>
+    </CollapsibleSection>
   );
 }
 
@@ -762,37 +721,133 @@ function AutoDedupToggle() {
   );
 }
 
+/* Per-section collapse state, persisted in localStorage so the operator's choices
+ * survive a reload (the page is long — "I don't want to scroll a mile down"). */
+function useCollapsed(id: string, defaultOpen: boolean): [boolean, () => void] {
+  const key = `dedup.collapsed.${id}`;
+  const [open, setOpen] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem(key);
+      return v == null ? defaultOpen : v === 'open';
+    } catch {
+      return defaultOpen;
+    }
+  });
+  const toggle = () =>
+    setOpen((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(key, next ? 'open' : 'closed');
+      } catch {
+        /* storage may be unavailable — collapse still works in-session */
+      }
+      return next;
+    });
+  return [open, toggle];
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      className={`shrink-0 text-[var(--color-ink-4)] transition-transform ${open ? 'rotate-90' : ''}`}
+    >
+      <path
+        d="M6 4l4 4-4 4"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+/* Every /dedup section is a collapsible — one clickable header (chevron + eyebrow +
+ * title), an optional right-slot for controls, and a body hidden when collapsed. */
+function CollapsibleSection({
+  id,
+  title,
+  eyebrow,
+  right,
+  defaultOpen = true,
+  children,
+}: {
+  id: string;
+  title: string;
+  eyebrow?: string;
+  right?: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, toggle] = useCollapsed(id, defaultOpen);
+  return (
+    <section className="mt-8">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={open}
+          className="flex items-center gap-2 text-left group min-w-0 flex-1"
+        >
+          <Chevron open={open} />
+          <span className="min-w-0">
+            {eyebrow ? (
+              <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
+                {eyebrow}
+              </span>
+            ) : null}
+            <span
+              className="block text-xl group-hover:text-[var(--color-copper-2)] transition-colors"
+              style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}
+            >
+              {title}
+            </span>
+          </span>
+        </button>
+        {right ? <div className="shrink-0">{right}</div> : null}
+      </div>
+      {open ? <div className="mt-3">{children}</div> : null}
+    </section>
+  );
+}
+
 function Section({
   title,
   eyebrow,
   isEmpty,
   empty,
+  id,
+  defaultOpen = true,
   children,
 }: {
   title: string;
   eyebrow: string;
   isEmpty: boolean;
   empty: string;
+  id?: string;
+  defaultOpen?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <section className="mt-8">
-      <p className="text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
-        {eyebrow}
-      </p>
-      <h2 className="mt-1 text-xl" style={{ fontFamily: 'var(--font-display)', fontWeight: 600 }}>
-        {title}
-      </h2>
-      <div className="mt-3">
-        {isEmpty ? (
-          <div className="px-6 py-10 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
-            {empty}
-          </div>
-        ) : (
-          children
-        )}
-      </div>
-    </section>
+    <CollapsibleSection
+      id={id ?? title}
+      title={title}
+      eyebrow={eyebrow}
+      defaultOpen={defaultOpen}
+    >
+      {isEmpty ? (
+        <div className="px-6 py-10 text-center border border-dashed border-[var(--color-rule)] rounded-[var(--radius-md)] text-sm text-[var(--color-ink-3)]">
+          {empty}
+        </div>
+      ) : (
+        children
+      )}
+    </CollapsibleSection>
   );
 }
 
@@ -930,44 +985,26 @@ function ClusterCard({
           </tbody>
         </table>
       </div>
-      {cluster.visual ? (
-        <VisualVerdictNote
-          verdict={cluster.visual.verdict}
-          rationale={cluster.visual.rationale}
-          room={cluster.visual.room}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-/* The engine's room-aware forensic read, shown when it ran the visual layer but
- * didn't reach a confident-enough verdict to auto-merge — so the operator sees
- * WHY this pair is here, not just that it is. High never reaches the queue
- * (it auto-merges), so this surfaces the Medium/Low/inconclusive cases. */
-function VisualVerdictNote({
-  verdict,
-  rationale,
-  room,
-}: {
-  verdict: string;
-  rationale: string | null;
-  room: string | null;
-}) {
-  const tone =
-    verdict === 'High'
-      ? 'border-[var(--color-sage)]/60 text-[var(--color-sage)]'
-      : verdict === 'Medium'
-        ? 'border-[var(--color-copper)]/50 text-[var(--color-copper-2)]'
-        : 'border-[var(--color-rule)] text-[var(--color-ink-3)]';
-  return (
-    <div className={`mt-3 rounded-[var(--radius-sm)] border ${tone} bg-[var(--color-paper)] p-2.5`}>
-      <div className="flex items-center gap-2 text-[0.62rem] tracking-[0.12em] uppercase">
-        <span className="font-semibold">Visual: {verdict}</span>
-        {room ? <span className="text-[var(--color-ink-4)]">· {room.replace(/_/g, ' ')}</span> : null}
-      </div>
-      {rationale ? (
-        <p className="mt-1 text-[0.78rem] leading-snug text-[var(--color-ink-2)]">{rationale}</p>
+      {cluster.markers || cluster.visual ? (
+        <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-2.5">
+          <p className="mb-1.5 text-[0.62rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
+            Proč ve frontě
+          </p>
+          <DedupFactors
+            factors={
+              cluster.markers ??
+              (cluster.visual
+                ? {
+                    verdict: cluster.visual.verdict,
+                    rationale: cluster.visual.rationale,
+                    room_type: cluster.visual.room,
+                  }
+                : null)
+            }
+            leftSrealityId={members[0]?.sreality_id ?? null}
+            rightSrealityId={members[1]?.sreality_id ?? null}
+          />
+        </div>
       ) : null}
     </div>
   );
@@ -1144,59 +1181,3 @@ function Verdict({ v }: { v: DiffVerdict }) {
   );
 }
 
-function MergeRow({
-  merge,
-  onUndo,
-  busy,
-}: {
-  merge: MergeGroup;
-  onUndo: () => void;
-  busy: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4 px-4 py-3 border-b border-[var(--color-rule-soft)] last:border-b-0">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <SourceBadge source={merge.source} />
-          <Link
-            to={propertyListingPath(merge.survivor_property_id)}
-            className="text-sm text-[var(--color-ink)] hover:text-[var(--color-copper)]"
-          >
-            property #{merge.survivor_property_id}
-          </Link>
-          <span className="text-[0.75rem] text-[var(--color-ink-3)] tabular-nums">
-            absorbed {fmtCount(merge.retired_count)}, moved {fmtCount(merge.listings_moved)} listing
-            {merge.listings_moved === 1 ? '' : 's'}
-          </span>
-        </div>
-        <div className="mt-0.5 text-[0.7rem] text-[var(--color-ink-4)]">
-          {merge.reason} · {fmtRelative(merge.merged_at)}
-        </div>
-      </div>
-      <button
-        type="button"
-        onClick={onUndo}
-        disabled={busy}
-        className={`${BTN} border border-[var(--color-rule)] text-[var(--color-ink-2)] hover:text-[var(--color-ink)] hover:border-[var(--color-rule-strong)] shrink-0`}
-      >
-        {busy ? 'Undoing…' : 'Undo'}
-      </button>
-    </div>
-  );
-}
-
-function SourceBadge({ source }: { source: 'auto' | 'operator' }) {
-  const auto = source === 'auto';
-  return (
-    <span
-      className={[
-        'inline-block px-2 py-0.5 text-[0.6rem] tracking-[0.14em] uppercase rounded-[var(--radius-xs)] border',
-        auto
-          ? 'bg-[var(--color-copper-soft)] border-[var(--color-copper)] text-[var(--color-copper-2)]'
-          : 'bg-[var(--color-paper)] border-[var(--color-rule)] text-[var(--color-ink-3)]',
-      ].join(' ')}
-    >
-      {source}
-    </span>
-  );
-}

@@ -654,7 +654,8 @@ export const updateDedupSetting = (
     { method: 'PUT', json: { value } },
   );
 
-// Per-pair decision history (the engine's audit log).
+// The unified Decision history feed: every terminal dedup decision (merged /
+// dismissed), engine AND operator, with the undo handle + factor detail.
 export type DedupAuditRow = {
   run_at: string;
   left_sreality_id: number | null;
@@ -663,18 +664,59 @@ export type DedupAuditRow = {
   right_property_id: number | null;
   category_main: string | null;
   stage: string;
-  outcome: 'merged' | 'dismissed' | 'queued' | string;
+  outcome: 'merged' | 'dismissed' | string;
+  source: 'engine' | 'operator' | string | null;
+  merge_group_id: string | null;
   detail: Record<string, unknown> | null;
+  undone: boolean;
 };
 
 export const getDedupAudit = (
-  params: { outcome?: string; limit?: number } = {},
+  params: {
+    outcome?: string;
+    category_main?: string;
+    source?: string;
+    stage?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
 ): Promise<{ data: DedupAuditRow[]; total: number; returned: number }> => {
   const q = new URLSearchParams();
   if (params.outcome) q.set('outcome', params.outcome);
+  if (params.category_main) q.set('category_main', params.category_main);
+  if (params.source) q.set('source', params.source);
+  if (params.stage) q.set('stage', params.stage);
   q.set('limit', String(params.limit ?? 100));
+  if (params.offset) q.set('offset', String(params.offset));
   return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
     `/dedup/audit?${q.toString()}`,
+  );
+};
+
+// Photos behind a decision row — the deciding room's images for both listings.
+export type DedupDecisionSide = {
+  sreality_id: number;
+  images: { sreality_url: string | null; storage_path: string | null }[];
+  fallback: boolean;
+};
+export type DedupDecisionImages = {
+  room_type: string | null;
+  left: DedupDecisionSide;
+  right: DedupDecisionSide;
+};
+export const getDedupDecisionImages = (params: {
+  a: number;
+  b: number;
+  room_type?: string | null;
+  per_side?: number;
+}): Promise<{ data: DedupDecisionImages }> => {
+  const q = new URLSearchParams();
+  q.set('a', String(params.a));
+  q.set('b', String(params.b));
+  if (params.room_type) q.set('room_type', params.room_type);
+  if (params.per_side) q.set('per_side', String(params.per_side));
+  return request<{ data: DedupDecisionImages }>(
+    `/dedup/decision-images?${q.toString()}`,
   );
 };
 

@@ -8,11 +8,56 @@ surface. Mounted under `/dedup/*` (see `api.routes.dedup`).
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Any
 
 import psycopg
 
 from toolkit.property_identity import MergeError, merge_properties, unmerge_group
+
+LOG = logging.getLogger(__name__)
+
+
+def _record_operator_decision(
+    conn: psycopg.Connection,
+    *,
+    left_property_id: int,
+    right_property_id: int,
+    outcome: str,
+    markers: dict[str, Any] | None = None,
+    merge_group_id: Any = None,
+) -> None:
+    """Write ONE operator decision (merged | dismissed) into the unified
+    `dedup_pair_audit` log with `source='operator'` — so Decision history shows the
+    operator's own actions alongside the engine's, with the SAME factor detail (from
+    the candidate's `markers_matched`) and, for a merge, the undo handle. Best-effort:
+    a logging failure must never fail the merge/dismiss the operator asked for (the
+    merge itself is already committed + recorded in property_merge_events)."""
+    markers = markers or {}
+    stage = markers.get("stage") or "operator"
+    detail = {k: v for k, v in markers.items() if v is not None}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, repr_listing_id, category_main FROM properties "
+                "WHERE id IN (%s, %s)",
+                (left_property_id, right_property_id),
+            )
+            info = {int(r[0]): (r[1], r[2]) for r in cur.fetchall()}
+            ls, lc = info.get(int(left_property_id), (None, None))
+            rs, rc = info.get(int(right_property_id), (None, None))
+            cur.execute(
+                "INSERT INTO dedup_pair_audit (run_at, left_sreality_id, "
+                "right_sreality_id, left_property_id, right_property_id, "
+                "category_main, stage, outcome, source, merge_group_id, detail) "
+                "VALUES (now(),%s,%s,%s,%s,%s,%s,%s,'operator',%s,%s::jsonb)",
+                (ls, rs, left_property_id, right_property_id, lc or rc, stage,
+                 outcome, str(merge_group_id) if merge_group_id is not None else None,
+                 json.dumps(detail)),
+            )
+    except Exception:  # noqa: BLE001 — audit logging must never break a real write
+        LOG.warning("operator decision audit failed (non-fatal)", exc_info=True)
 
 # A property side rendered on a review card. Built in SQL so geom -> lat/lng and
 # the display fields come straight off the canonical row.
@@ -186,26 +231,51 @@ def list_pair_audit(
     conn: psycopg.Connection,
     *,
     outcome: str | None = None,
+    category_main: str | None = None,
+    source: str | None = None,
+    stage: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
-    """Recent per-pair decision audit rows (the /dedup history surface reads this)."""
+    """The unified Decision history feed: every TERMINAL dedup decision (merged |
+    dismissed), engine AND operator, newest first. Filterable by property type
+    (`category_main`, the Browse/Pipeline TYPE chips), `outcome`, `source`, or `stage`.
+    `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
+    ledger (property_merge_events.undone_at) — the single source of truth for undo state,
+    so an undone merge reads correctly without ever mutating the audit row."""
     clauses: list[str] = []
     params: dict[str, Any] = {}
     if outcome is not None:
-        clauses.append("outcome = %(outcome)s")
+        clauses.append("a.outcome = %(outcome)s")
         params["outcome"] = outcome
+    if category_main is not None:
+        clauses.append("a.category_main = %(category_main)s")
+        params["category_main"] = category_main
+    if source is not None:
+        clauses.append("a.source = %(source)s")
+        params["source"] = source
+    if stage is not None:
+        clauses.append("a.stage = %(stage)s")
+        params["stage"] = stage
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with conn.cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM dedup_pair_audit {where}", params)
+        cur.execute(f"SELECT count(*) FROM dedup_pair_audit a {where}", params)
         total = int(cur.fetchone()[0])
         cur.execute(
             f"""
-            SELECT run_at, left_sreality_id, right_sreality_id,
-                   left_property_id, right_property_id, category_main,
-                   stage, outcome, detail
-            FROM dedup_pair_audit {where}
-            ORDER BY run_at DESC, id DESC
+            SELECT a.run_at, a.left_sreality_id, a.right_sreality_id,
+                   a.left_property_id, a.right_property_id, a.category_main,
+                   a.stage, a.outcome, a.source, a.merge_group_id, a.detail,
+                   m.fully_undone
+            FROM dedup_pair_audit a
+            LEFT JOIN LATERAL (
+              SELECT bool_and(e.undone_at IS NOT NULL) AS fully_undone
+              FROM property_merge_events e
+              WHERE a.merge_group_id IS NOT NULL
+                AND e.merge_group_id = a.merge_group_id::uuid
+            ) m ON true
+            {where}
+            ORDER BY a.run_at DESC, a.id DESC
             LIMIT %(limit)s OFFSET %(offset)s
             """,
             {**params, "limit": limit, "offset": offset},
@@ -216,12 +286,66 @@ def list_pair_audit(
             {
                 "run_at": r[0], "left_sreality_id": r[1], "right_sreality_id": r[2],
                 "left_property_id": r[3], "right_property_id": r[4],
-                "category_main": r[5], "stage": r[6], "outcome": r[7], "detail": r[8],
+                "category_main": r[5], "stage": r[6], "outcome": r[7],
+                "source": r[8], "merge_group_id": r[9], "detail": r[10],
+                "undone": bool(r[11]),
             }
             for r in rows
         ],
         "total": total,
         "returned": len(rows),
+    }
+
+
+def _listing_room_images(
+    cur: Any, sreality_id: int, room_type: str | None, n: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Images for the deciding room of one listing (joined to the engine-internal
+    room classifications, which anon can't read — hence this server hop), falling back
+    to the listing's first images when the room is unset/unclassified. Returns
+    (images, fallback)."""
+    if room_type:
+        cur.execute(
+            "SELECT i.sreality_url, i.storage_path FROM images i "
+            "JOIN image_room_classifications c ON c.image_id = i.id "
+            "WHERE i.sreality_id = %s AND c.room_type = %s "
+            "ORDER BY i.sequence NULLS LAST, i.id LIMIT %s",
+            (sreality_id, room_type, n),
+        )
+        rows = cur.fetchall()
+        if rows:
+            return ([{"sreality_url": r[0], "storage_path": r[1]} for r in rows], False)
+    cur.execute(
+        "SELECT sreality_url, storage_path FROM images WHERE sreality_id = %s "
+        "ORDER BY sequence NULLS LAST, id LIMIT %s",
+        (sreality_id, n),
+    )
+    return ([{"sreality_url": r[0], "storage_path": r[1]} for r in cur.fetchall()],
+            bool(room_type))
+
+
+def decision_images(
+    conn: psycopg.Connection,
+    *,
+    left_sreality_id: int,
+    right_sreality_id: int,
+    room_type: str | None = None,
+    per_side: int = 4,
+) -> dict[str, Any]:
+    """Hydrate the photos behind a dedup decision — the deciding room's images for
+    BOTH listings (so the operator sees what the engine compared), else the first
+    images. Returns `{sreality_url, storage_path}` objects the SPA renders with the
+    shared `imageSrc()` (R2 when stored, CDN fallback otherwise). Read-only."""
+    per_side = max(1, min(per_side, 8))
+    with conn.cursor() as cur:
+        left, lfb = _listing_room_images(cur, left_sreality_id, room_type, per_side)
+        right, rfb = _listing_room_images(cur, right_sreality_id, room_type, per_side)
+    return {
+        "data": {
+            "room_type": room_type,
+            "left": {"sreality_id": left_sreality_id, "images": left, "fallback": lfb},
+            "right": {"sreality_id": right_sreality_id, "images": right, "fallback": rfb},
+        }
     }
 
 
@@ -348,7 +472,7 @@ def merge_candidate(
         survivor = int(cur.fetchone()[0])
     retired = int(right) if survivor == int(left) else int(left)
 
-    return merge_properties(
+    result = merge_properties(
         conn,
         survivor_id=survivor,
         retired_id=retired,
@@ -357,6 +481,12 @@ def merge_candidate(
         confidence=float(confidence) if confidence is not None else None,
         markers=markers,
     )
+    _record_operator_decision(
+        conn, left_property_id=int(left), right_property_id=int(right),
+        outcome="merged", markers=markers,
+        merge_group_id=result["data"]["merge_group_id"],
+    )
+    return result
 
 
 def bulk_merge_candidates(
@@ -462,6 +592,13 @@ def merge_cluster(
                 (group, candidate_ids),
             )
 
+    for retired in retired_ids:
+        _record_operator_decision(
+            conn, left_property_id=survivor, right_property_id=retired,
+            outcome="merged",
+            markers={"reason": "manual_cluster", "stage": "operator"},
+            merge_group_id=group,
+        )
     return {
         "merge_group_id": group,
         "survivor_id": survivor,
@@ -517,6 +654,13 @@ def merge_property_set(
 
         _repoint_proposed_candidates(conn, survivor, retired_ids)
 
+    for retired in retired_ids:
+        _record_operator_decision(
+            conn, left_property_id=survivor, right_property_id=retired,
+            outcome="merged",
+            markers={"reason": "manual_subset", "stage": "operator"},
+            merge_group_id=group,
+        )
     return {
         "merge_group_id": group,
         "survivor_id": survivor,
@@ -585,13 +729,19 @@ def dismiss_cluster(
             "UPDATE property_identity_candidates "
             "SET status = 'dismissed', reviewed_at = now(), "
             "    reviewed_action = 'operator' "
-            "WHERE id = ANY(%s) AND status = 'proposed' RETURNING id",
+            "WHERE id = ANY(%s) AND status = 'proposed' "
+            "RETURNING id, left_property_id, right_property_id, markers_matched",
             (candidate_ids,),
         )
-        dismissed = [int(r[0]) for r in cur.fetchall()]
-    if not dismissed:
+        rows = cur.fetchall()
+    if not rows:
         return None
-    return {"dismissed": dismissed, "status": "dismissed"}
+    for _id, left, right, markers in rows:
+        _record_operator_decision(
+            conn, left_property_id=int(left), right_property_id=int(right),
+            outcome="dismissed", markers=markers,
+        )
+    return {"dismissed": [int(r[0]) for r in rows], "status": "dismissed"}
 
 
 def dismiss_candidate(
@@ -602,12 +752,18 @@ def dismiss_candidate(
             "UPDATE property_identity_candidates "
             "SET status = 'dismissed', reviewed_at = now(), "
             "    reviewed_action = 'operator' "
-            "WHERE id = %s AND status = 'proposed' RETURNING id",
+            "WHERE id = %s AND status = 'proposed' "
+            "RETURNING left_property_id, right_property_id, markers_matched",
             (candidate_id,),
         )
         row = cur.fetchone()
     if row is None:
         return None
+    left, right, markers = row
+    _record_operator_decision(
+        conn, left_property_id=int(left), right_property_id=int(right),
+        outcome="dismissed", markers=markers,
+    )
     return {"id": candidate_id, "status": "dismissed"}
 
 

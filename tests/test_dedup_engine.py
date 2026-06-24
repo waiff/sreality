@@ -663,7 +663,7 @@ def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
 
     def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
         merges.append((survivor_id, retired_id, reason))
-        return {"data": {}}
+        return {"data": {"merge_group_id": "g"}}
 
     monkeypatch.setattr(eng, "merge_properties", fake_merge)
 
@@ -705,7 +705,7 @@ def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
     # A cross-source candidate (sreality + bazos) DOES reach the visual stage.
     import scripts.dedup_engine as eng
 
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     conn = _FakeConn([
         _row(1, 101, hn=None, source="sreality"),
         _row(2, 102, hn=None, source="bazos"),
@@ -738,7 +738,7 @@ def test_run_engine_groups_id_keyed_sreality_with_name_keyed_bazos(monkeypatch: 
 
     def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
         merges.append((survivor_id, retired_id, reason))
-        return {"data": {}}
+        return {"data": {"merge_group_id": "g"}}
 
     monkeypatch.setattr(eng, "merge_properties", fake_merge)
 
@@ -761,7 +761,7 @@ def test_run_engine_dual_keys_act_once_per_listing_pair(monkeypatch: Any) -> Non
 
     def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
         merges.append((survivor_id, retired_id, reason))
-        return {"data": {}}
+        return {"data": {"merge_group_id": "g"}}
 
     monkeypatch.setattr(eng, "merge_properties", fake_merge)
 
@@ -785,7 +785,7 @@ def test_run_engine_same_name_different_street_id_rejects(monkeypatch: Any) -> N
 
     def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
         merges.append((survivor_id, retired_id, reason))
-        return {"data": {}}
+        return {"data": {"merge_group_id": "g"}}
 
     monkeypatch.setattr(eng, "merge_properties", fake_merge)
 
@@ -808,7 +808,7 @@ def test_run_engine_phash_fastpath_merges_before_classify(monkeypatch: Any) -> N
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
@@ -829,7 +829,7 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 4)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
@@ -848,7 +848,7 @@ def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> falls to visual
 
@@ -893,7 +893,7 @@ def test_run_engine_site_plan_different_unit_queues(monkeypatch: Any) -> None:
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 5)
     # Both have a site plan -> pHash defers to the development guard.
@@ -926,7 +926,7 @@ def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any)
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 5)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: True)  # defer to visual stage
@@ -949,7 +949,7 @@ def test_run_engine_site_plan_same_unit_falls_through_to_merge(monkeypatch: Any)
 
 def test_run_engine_rejects_floor_contradiction(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
 
     conn = _FakeConn([_row(1, 101, floor=2), _row(2, 102, floor=8)])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
@@ -964,7 +964,7 @@ def test_run_engine_rejects_sale_vs_rent(monkeypatch: Any) -> None:
     merges: list[Any] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, **kw: merges.append(kw) or {"data": {}},
+        lambda conn, **kw: merges.append(kw) or {"data": {"merge_group_id": "g"}},
     )
     conn = _FakeConn([
         _row(1, 101, category_type="prodej"),
@@ -983,7 +983,7 @@ def test_run_engine_auto_merge_off_queues_exact_address(monkeypatch: Any) -> Non
     merges: list[Any] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, **kw: merges.append(kw) or {"data": {}},
+        lambda conn, **kw: merges.append(kw) or {"data": {"merge_group_id": "g"}},
     )
     conn = _FakeConn([_row(1, 101), _row(2, 102)])  # would normally auto-merge
     stats = eng.run_engine(
@@ -1003,7 +1003,7 @@ def test_run_engine_auto_merge_off_queues_candidate_without_vision(monkeypatch: 
     merges: list[Any] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, **kw: merges.append(kw) or {"data": {}},
+        lambda conn, **kw: merges.append(kw) or {"data": {"merge_group_id": "g"}},
     )
     vision: list[int] = []
 
@@ -1056,7 +1056,7 @@ def test_run_engine_reject_dismisses_stale_candidate(monkeypatch: Any) -> None:
     # A pair the current rules REJECT (floor gap >=2) dismisses any stale proposed
     # candidate for it — recall-neutral queue hygiene.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
 
     conn = _FakeConn([_row(1, 101, floor=2), _row(2, 102, floor=8)])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
@@ -1067,7 +1067,7 @@ def test_run_engine_reject_dismisses_stale_candidate(monkeypatch: Any) -> None:
 
 def test_run_engine_same_source_gate_dismisses_stale_candidate(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
     conn = _FakeConn([
@@ -1086,7 +1086,7 @@ def test_run_engine_visual_high_not_dismissed(monkeypatch: Any) -> None:
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
@@ -1106,7 +1106,7 @@ def test_run_engine_visual_high_not_dismissed(monkeypatch: Any) -> None:
 def test_run_engine_low_on_generic_room_queues_not_dismiss(monkeypatch: Any) -> None:
     # Only a generic room (living_room) compared + Low -> queue for review, NOT dismiss.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
     def classify(sid: int) -> dict:
@@ -1124,7 +1124,7 @@ def test_run_engine_low_on_generic_room_queues_not_dismiss(monkeypatch: Any) -> 
 
 def test_run_engine_autodismiss_off_queues_low(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
     def classify(sid: int) -> dict:
@@ -1142,7 +1142,7 @@ def test_run_engine_autodismiss_off_queues_low(monkeypatch: Any) -> None:
 
 def test_run_engine_reconcile_counts_stale(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     conn = _FakeConn([], stale_count=42)
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
     assert stats["reconciled"] == 42
@@ -1154,7 +1154,7 @@ def test_run_engine_dry_run_writes_nothing(monkeypatch: Any) -> None:
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda *a, **k: merges.append("x") or {"data": {}},
+        lambda *a, **k: merges.append("x") or {"data": {"merge_group_id": "g"}},
     )
     conn = _FakeConn([_row(1, 101), _row(2, 102)])  # exact-address -> would merge
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0, dry_run=True)
@@ -1169,7 +1169,7 @@ def test_run_engine_partial_room_scan_does_not_dismiss(monkeypatch: Any) -> None
     # tried, a confident-Low distinctive room must NOT auto-dismiss — an untried
     # room might still match. kitchen Low but bedroom (untried, cap=1) -> QUEUE.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
     def classify(sid: int) -> dict:
@@ -1193,7 +1193,7 @@ def test_run_engine_warm_cache_hits_do_not_consume_budget(monkeypatch: Any) -> N
     # Cost lever: a warm (cache_hit) compare is free and must NOT consume the cold
     # budget, so a tiny budget still applies unlimited already-paid-for verdicts.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
     def classify(sid: int) -> dict:
@@ -1218,7 +1218,7 @@ def test_run_engine_missing_room_verdict_blocks_dismiss(monkeypatch: Any) -> Non
     # A room whose compare returns None (un-warmed in cache-only / failed call) means
     # NOT every common room was verdicted -> never dismiss (an unseen room may match).
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
     def classify(sid: int) -> dict:
@@ -1244,7 +1244,7 @@ def test_run_engine_free_mode_skips_unresolved(monkeypatch: Any) -> None:
     # Free mode ($0): an un-vision'd cross-source candidate is SKIPPED, not queued
     # as a 'no photos compared' placeholder (so the review queue doesn't inflate).
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {}})
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash
 
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
@@ -1263,7 +1263,7 @@ def test_run_engine_free_mode_phash_still_merges(monkeypatch: Any) -> None:
     merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
@@ -1312,7 +1312,7 @@ def test_cosine_tier_routes_high_cosine_to_haiku(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {"merge_group_id": "g"}},
     )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
 
@@ -1372,7 +1372,7 @@ def test_pair_audit_records_a_merge(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {}},
+        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {"merge_group_id": "g"}},
     )
     # Two rows at the same exact address -> rule B address merge.
     conn = _FakeConn([_row(1, 101), _row(2, 102, source="bazos")])
@@ -1383,6 +1383,64 @@ def test_pair_audit_records_a_merge(monkeypatch: Any) -> None:
     assert len(rec) == 1
     assert rec[0]["outcome"] == "merged"
     assert rec[0]["left_sreality_id"] in (1, 2)
+    # The unified audit row carries the undo handle + provenance + factor detail.
+    assert rec[0]["source"] == "engine"
+    assert rec[0]["merge_group_id"] == "g"
+    assert rec[0]["detail"]["reason"] == "address_exact"
+    assert rec[0]["detail"]["stage"] == "address"
+
+
+def test_pair_audit_does_not_record_queued_pairs(monkeypatch: Any) -> None:
+    # A queued pair IS a candidate (its factor detail lives in markers_matched), so it
+    # must NOT also land in the terminal-decision audit (that was the duplicate-row bug).
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+    monkeypatch.setattr(eng, "_enqueue_candidate", lambda *a, **k: None)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
+                model: str | None = None) -> dict:
+        return {"verdict": "Medium", "rationale": "unsure"}  # inconclusive -> queue
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    audit: list[dict[str, Any]] = []
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=compare, audit=audit,
+        max_vision_calls=10,
+    )
+    assert stats["queued"] == 1
+    assert audit == []
+
+
+def test_pair_audit_records_visual_factors(monkeypatch: Any) -> None:
+    # A visual merge audit carries the room/verdict/rationale + the photo-similarity
+    # signal the operator tunes (so Decision history can render it).
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {"merge_group_id": "v"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
+                model: str | None = None) -> dict:
+        return {"verdict": "High", "rationale": "same tiles"}
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    audit: list[dict[str, Any]] = []
+    eng.run_engine(conn, classify_fn=classify, compare_fn=compare, audit=audit,
+                   max_vision_calls=10)
+    rec = [r for r in audit if r["stage"] == "visual"]
+    assert len(rec) == 1 and rec[0]["outcome"] == "merged"
+    d = rec[0]["detail"]
+    assert d["verdict"] == "High" and d["room_type"] == "kitchen"
+    assert d["rationale"] == "same tiles" and d["reason"] == "visual_match"
+    assert d["phash_pairs"] == 0 and d["phash_threshold"] == 6
 
 
 def test_pair_audit_is_opt_in_no_records_when_none() -> None:
