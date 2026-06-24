@@ -1,7 +1,11 @@
+import { lazy, Suspense } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import { getDedupPipelineOverview, type DedupPipelineOverview } from '@/lib/api';
 import { fmtCount, fmtRelative } from '@/lib/format';
+
+// Lazy so recharts stays out of the /dedup entry chunk (the app's chart convention).
+const DedupPipelineTimeline = lazy(() => import('@/components/DedupPipelineTimeline'));
 
 /* The dedup funnel at a glance — four stages on a vertical spine that reads
  * top→bottom (photos tagged → listings eligible → candidate pairs → decisions).
@@ -156,6 +160,10 @@ export default function DedupPipelineOverview() {
               </span>
             </div>
           )}
+
+          <Suspense fallback={null}>
+            <DedupPipelineTimeline />
+          </Suspense>
         </>
       )}
     </section>

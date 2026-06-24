@@ -428,6 +428,55 @@ def pipeline_overview(conn: psycopg.Connection) -> dict[str, Any]:
     }
 
 
+def pipeline_timeline(conn: psycopg.Connection, *, days: int = 14) -> dict[str, Any]:
+    """Daily throughput for the dedup funnel over the last `days` (zero-filled), so the
+    operator can see how it evolves: images tagged (image_clip_tags.tagged_at, indexed),
+    candidates created, and decisions (merged / dismissed). One query, small/indexed
+    aggregates — no image-table scan."""
+    days = max(1, min(days, 90))
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH d AS (
+              SELECT generate_series(
+                       date_trunc('day', now()) - make_interval(days => %(days)s - 1),
+                       date_trunc('day', now()), interval '1 day')::date AS day
+            ),
+            tg AS (
+              SELECT tagged_at::date AS day, count(*) AS n FROM image_clip_tags
+              WHERE tagged_at >= now() - make_interval(days => %(days)s) GROUP BY 1
+            ),
+            de AS (
+              SELECT run_at::date AS day,
+                     count(*) FILTER (WHERE outcome='merged')    AS merged,
+                     count(*) FILTER (WHERE outcome='dismissed') AS dismissed
+              FROM dedup_pair_audit
+              WHERE run_at >= now() - make_interval(days => %(days)s) GROUP BY 1
+            ),
+            ca AS (
+              SELECT created_at::date AS day, count(*) AS n FROM property_identity_candidates
+              WHERE created_at >= now() - make_interval(days => %(days)s) GROUP BY 1
+            )
+            SELECT d.day, coalesce(tg.n,0), coalesce(de.merged,0),
+                   coalesce(de.dismissed,0), coalesce(ca.n,0)
+            FROM d
+            LEFT JOIN tg ON tg.day = d.day
+            LEFT JOIN de ON de.day = d.day
+            LEFT JOIN ca ON ca.day = d.day
+            ORDER BY d.day
+            """,
+            {"days": days},
+        )
+        rows = cur.fetchall()
+    return {
+        "data": [
+            {"day": r[0].isoformat(), "tagged": int(r[1]), "merged": int(r[2]),
+             "dismissed": int(r[3]), "candidates": int(r[4])}
+            for r in rows
+        ]
+    }
+
+
 def clip_coverage(
     conn: psycopg.Connection, *, priority_region_id: int = 27,
 ) -> dict[str, Any]:

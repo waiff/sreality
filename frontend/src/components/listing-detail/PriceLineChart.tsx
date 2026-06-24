@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import {
   ResponsiveContainer,
   LineChart,
@@ -9,6 +8,7 @@ import {
   Tooltip,
 } from 'recharts';
 import { fmtCzk } from '@/lib/format';
+import { useTokenColors } from '@/lib/useTokenColors';
 import type { PriceSeries } from '@/lib/priceHistory';
 
 /* One price track = one URL/listing under the property (see lib/priceHistory).
@@ -17,34 +17,6 @@ import type { PriceSeries } from '@/lib/priceHistory';
 // Palette mirrors the civic-archive tokens; primary track = copper.
 const PALETTE = ['--color-copper', '--color-brick', '--color-sage', '--color-ink-2'];
 const TOKEN_KEYS = ['--color-ink-3', '--color-rule', ...PALETTE];
-
-function readColors(keys: string[]): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const cs = getComputedStyle(document.documentElement);
-  const out: Record<string, string> = {};
-  for (const k of keys) out[k] = cs.getPropertyValue(k).trim();
-  return out;
-}
-
-/* Resolve the design tokens to concrete colours (recharts strokes are SVG
- * presentation attributes, where `var()` doesn't resolve) and re-read on a
- * light/dark switch — explicit (`data-theme`) or system (prefers-color-scheme). */
-function useTokenColors(): Record<string, string> {
-  const [colors, setColors] = useState(() => readColors(TOKEN_KEYS));
-  useEffect(() => {
-    const update = () => setColors(readColors(TOKEN_KEYS));
-    update();
-    const obs = new MutationObserver(update);
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    mq.addEventListener('change', update);
-    return () => {
-      obs.disconnect();
-      mq.removeEventListener('change', update);
-    };
-  }, []);
-  return colors;
-}
 
 function fmtAxisCzk(v: number): string {
   if (v >= 1_000_000) {
@@ -67,7 +39,7 @@ function fmtFullDate(t: number): string {
 }
 
 export default function PriceLineChart({ series }: { series: PriceSeries[] }) {
-  const colors = useTokenColors();
+  const colors = useTokenColors(TOKEN_KEYS);
 
   // Merge every track onto one sorted time axis, carrying the last known price
   // forward (the step) and leaving NULL outside a track's [start, endT] window.
