@@ -121,6 +121,16 @@ def post_bulk_merge_candidates(
     return dedup.bulk_merge_candidates(conn, body.candidate_ids)
 
 
+@router.post("/candidates/archive-reset")
+def post_archive_reset_candidates(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Archive the proposed candidate queue to a backup table + clear it, so the
+    engine regenerates fresh. Merges/dismissals are untouched."""
+    return dedup.archive_reset_candidates(conn)
+
+
 @router.post("/candidates/{candidate_id}/dismiss")
 def post_dismiss_candidate(
     candidate_id: int,

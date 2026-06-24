@@ -292,6 +292,33 @@ def clip_coverage(
     }
 
 
+def archive_reset_candidates(
+    conn: psycopg.Connection, *, batch: str | None = None,
+) -> dict[str, Any]:
+    """Snapshot the PROPOSED candidate queue to the archive, then clear it so the
+    engine regenerates fresh ("disregard candidates, keep a backup, redo all").
+    Merges/dismissals are untouched (they live in property_merge_events + the
+    property rows). The archive is the backup; the positional INSERT relies on the
+    archive's column order being (candidate cols…, archived_at, archive_batch),
+    guaranteed by migration 228 (LIKE then ALTER ADD)."""
+    from datetime import datetime, timezone
+
+    label = batch or datetime.now(timezone.utc).strftime("reset-%Y%m%d-%H%M%S")
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO property_identity_candidates_archive "
+            "SELECT c.*, now(), %s FROM property_identity_candidates c "
+            "WHERE c.status = 'proposed'",
+            (label,),
+        )
+        archived = cur.rowcount
+        cur.execute(
+            "DELETE FROM property_identity_candidates WHERE status = 'proposed'"
+        )
+        deleted = cur.rowcount
+    return {"archived": archived, "deleted": deleted, "batch": label}
+
+
 def merge_candidate(
     conn: psycopg.Connection, candidate_id: int,
 ) -> dict[str, Any] | None:

@@ -41,6 +41,7 @@ import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
+import DedupCandidateReset from '@/components/DedupCandidateReset';
 import { listingPath, propertyListingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
@@ -292,6 +293,13 @@ export default function Dedup() {
           ))}
         </div>
       </Section>
+
+      <section className="mt-10">
+        <h2 className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-4)] mb-3">
+          Maintenance
+        </h2>
+        <DedupCandidateReset />
+      </section>
     </div>
   );
 }

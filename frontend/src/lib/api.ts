@@ -695,6 +695,16 @@ export type DedupClipCoverage = {
 export const getDedupClipCoverage = (): Promise<{ data: DedupClipCoverage }> =>
   request<{ data: DedupClipCoverage }>('/dedup/clip-coverage');
 
+export const archiveResetDedupCandidates = (): Promise<{
+  archived: number;
+  deleted: number;
+  batch: string;
+}> =>
+  request<{ archived: number; deleted: number; batch: string }>(
+    '/dedup/candidates/archive-reset',
+    { method: 'POST' },
+  );
+
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
 
