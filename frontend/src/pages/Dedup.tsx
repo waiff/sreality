@@ -659,7 +659,10 @@ function Header({ proposed }: { proposed: number }) {
 
 /* Operator on/off switch for the engine's automatic merging (app_settings key
  * `dedup_auto_merge_enabled`). Off ⇒ the engine still finds candidates but
- * queues every one here for manual review instead of merging. */
+ * queues every one here for manual review instead of merging. This is a
+ * convenience MIRROR of Settings → Dedup → "Auto-merge enabled": both write the
+ * same `app_settings` row, so they can never disagree — it lives here too because
+ * it's the one switch you reach for while working the queue. */
 const DEDUP_AUTO_KEY = 'dedup_auto_merge_enabled';
 
 function AutoDedupToggle() {
@@ -695,6 +698,9 @@ function AutoDedupToggle() {
           {mut.isError ? (
             <span className="text-[var(--color-brick)]"> · couldn’t save, try again.</span>
           ) : null}
+        </p>
+        <p className="mt-1 text-[0.7rem] text-[var(--color-ink-4)]">
+          Same switch as Settings → Dedup → “Auto-merge enabled”.
         </p>
       </div>
       <button
