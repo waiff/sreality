@@ -186,6 +186,69 @@ def put_app_setting(
     return row
 
 
+# --- dedup settings registry ----------------------------------------------
+
+
+@router.get("/dedup-settings")
+def get_dedup_settings(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """The dedup-engine knob registry + each knob's current value (its registry
+    default when never edited). One typed source of truth for the Settings panel."""
+    from toolkit.dedup_settings import REGISTRY
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT key, value FROM app_settings WHERE key = ANY(%s)",
+            ([s.key for s in REGISTRY],),
+        )
+        stored = {row[0]: row[1] for row in cur.fetchall()}
+    return {
+        "data": [
+            {
+                "key": s.key, "kind": s.kind, "default": s.default,
+                "label": s.label, "group": s.group, "help": s.help,
+                "min": s.min, "max": s.max,
+                "value": stored.get(s.key, s.default),
+                "is_default": s.key not in stored,
+            }
+            for s in REGISTRY
+        ]
+    }
+
+
+@router.put("/dedup-settings/{key}")
+def put_dedup_setting(
+    key: str,
+    body: UpdateAppSettingIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Validate against the registry, then UPSERT — so editing a not-yet-stored
+    knob just creates its app_settings row. Only registered keys are writable."""
+    import json
+
+    from toolkit.dedup_settings import REGISTRY_BY_KEY, coerce
+
+    setting = REGISTRY_BY_KEY.get(key)
+    if setting is None:
+        raise HTTPException(status_code=404, detail=f"unknown dedup setting {key!r}")
+    try:
+        value = coerce(setting, body.value)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"invalid value: {exc}") from exc
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO app_settings "
+            "  (key, value, description, updated_at, updated_by) "
+            "VALUES (%s, %s::jsonb, %s, now(), %s) "
+            "ON CONFLICT (key) DO UPDATE "
+            "  SET value = excluded.value, updated_at = now(), "
+            "      updated_by = excluded.updated_by",
+            (key, json.dumps(value), setting.label, "settings_ui"),
+        )
+    return {"key": key, "value": value, "is_default": False}
+
+
 # --- agent tool inventory -------------------------------------------------
 
 @router.get("/tools")

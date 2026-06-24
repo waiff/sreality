@@ -43,6 +43,7 @@ import {
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton } from '@/components/controls';
+import DedupEngineSection from '@/components/DedupEngineSection';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
 export default function Settings() {
@@ -98,6 +99,22 @@ export default function Settings() {
           await a condition score.
         </p>
         <ConditionRegionsSection />
+      </section>
+
+      <section className="mt-10">
+        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
+          Dedup engine
+        </h2>
+        <p className="text-sm text-[var(--color-ink-3)] mb-3">
+          Every rule the cross-portal duplicate matcher uses — as a toggle or a
+          threshold. The CLIP knobs ship <span className="font-mono">off</span>:
+          turning on <span className="font-mono">prefer CLIP tags</span> switches
+          room labelling to the free self-hosted model (and unblocks houses /
+          land / commercial); the cosine tier routes the forensic compare by
+          photo similarity. Changes take effect on the next engine run — no
+          deploy.
+        </p>
+        <DedupEngineSection />
       </section>
 
       <section className="mt-10">

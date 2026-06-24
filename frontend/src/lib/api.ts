@@ -628,6 +628,32 @@ export const updateAppSetting = (
     json: { value },
   });
 
+// The dedup-engine knob registry (one typed source of truth, backend-defined).
+export type DedupSetting = {
+  key: string;
+  kind: 'bool' | 'float' | 'model';
+  default: unknown;
+  label: string;
+  group: string;
+  help: string;
+  min: number | null;
+  max: number | null;
+  value: unknown;
+  is_default: boolean;
+};
+
+export const getDedupSettings = (): Promise<{ data: DedupSetting[] }> =>
+  request<{ data: DedupSetting[] }>('/admin/dedup-settings');
+
+export const updateDedupSetting = (
+  key: string,
+  value: unknown,
+): Promise<{ key: string; value: unknown; is_default: boolean }> =>
+  request<{ key: string; value: unknown; is_default: boolean }>(
+    `/admin/dedup-settings/${encodeURIComponent(key)}`,
+    { method: 'PUT', json: { value } },
+  );
+
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
 
