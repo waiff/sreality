@@ -916,6 +916,34 @@ export const updateConditionScoringRegions = (
     { method: 'PUT', json: { enabled_region_ids: enabledRegionIds } },
   );
 
+/* Per-kraj CLIP-tagging drain priority. GET every kraj with its priority flag +
+ * active-listing volume; PUT replaces the full priority list
+ * (app_settings.clip_tagging_priority_region_ids). The scheduled clip_tag runs read
+ * the same key — a priority kraj is drained (tags + embeddings) before the global sweep. */
+export interface ClipTaggingRegion {
+  id: number;
+  name: string;
+  priority: boolean;
+  active_listings: number;
+}
+export interface ClipTaggingRegionsPayload {
+  regions: ClipTaggingRegion[];
+  parked_no_geo: number;
+  priority_region_ids: number[];
+}
+export const getClipTaggingRegions = (): Promise<{
+  data: ClipTaggingRegionsPayload;
+}> =>
+  request<{ data: ClipTaggingRegionsPayload }>('/admin/clip-tagging/regions');
+
+export const updateClipTaggingRegions = (
+  priorityRegionIds: number[],
+): Promise<{ data: ClipTaggingRegionsPayload }> =>
+  request<{ data: ClipTaggingRegionsPayload }>(
+    '/admin/clip-tagging/regions',
+    { method: 'PUT', json: { priority_region_ids: priorityRegionIds } },
+  );
+
 /* ----- filter registry + visibility (PR 1 / migration 059) ----------------
  * The canonical filter list lives in toolkit/filter_registry.py. `getFilterSchema`
  * returns the live registry plus the agenda × filter visibility matrix.

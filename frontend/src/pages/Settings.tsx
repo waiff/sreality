@@ -24,6 +24,8 @@ import {
   listAgentTools,
   getConditionScoringRegions,
   updateConditionScoringRegions,
+  getClipTaggingRegions,
+  updateClipTaggingRegions,
   getFilterSchema,
   setFilterVisibility,
   getRentMapStatus,
@@ -39,6 +41,7 @@ import {
   type RentMapRevision,
   type RentMapIngestResult,
   type ConditionScoringRegionsPayload,
+  type ClipTaggingRegionsPayload,
 } from '@/lib/api';
 import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
@@ -99,6 +102,18 @@ export default function Settings() {
           await a condition score.
         </p>
         <ConditionRegionsSection />
+      </section>
+
+      <section className="mt-10">
+        <h2 className="text-lg font-medium border-b border-[var(--color-rule)] pb-2 mb-3">
+          CLIP tagging — priority kraje
+        </h2>
+        <p className="text-sm text-[var(--color-ink-3)] mb-3">
+          CLIP image tagging drains the marked kraje first — tags + embeddings — so
+          their dedup cosine is ready before the global sweep. Unmarked = no priority
+          (everything drains newest-first); the count is the kraj's active listings.
+        </p>
+        <ClipRegionsSection />
       </section>
 
       <section className="mt-10">
@@ -1182,6 +1197,102 @@ function ConditionRegionsSection() {
       <p className="px-3 py-2 text-[0.7rem] text-[var(--color-ink-4)] border-t border-[var(--color-rule)] bg-[var(--color-paper-2)]/50">
         {parked_no_geo.toLocaleString('cs-CZ')} unscored active listings carry
         no kraj (missing coordinates) and are outside every toggle.
+      </p>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- */
+/* CLIP tagging — priority kraje (per-kraj drain priority)               */
+/* -------------------------------------------------------------------- */
+
+function ClipRegionsSection() {
+  const qc = useQueryClient();
+  const q = useQuery({
+    queryKey: ['admin', 'clip-regions'],
+    queryFn: getClipTaggingRegions,
+  });
+  const [error, setError] = useState<string | null>(null);
+
+  const mut = useMutation({
+    mutationFn: (ids: number[]) => updateClipTaggingRegions(ids),
+    onMutate: async (ids: number[]) => {
+      setError(null);
+      const key = ['admin', 'clip-regions'] as const;
+      await qc.cancelQueries({ queryKey: key });
+      const prev = qc.getQueryData<{ data: ClipTaggingRegionsPayload }>(key);
+      if (prev) {
+        const on = new Set(ids);
+        qc.setQueryData(key, {
+          data: {
+            ...prev.data,
+            priority_region_ids: ids,
+            regions: prev.data.regions.map((r) => ({ ...r, priority: on.has(r.id) })),
+          },
+        });
+      }
+      return { prev };
+    },
+    onError: (err: Error, _ids, ctx) => {
+      if (ctx?.prev) qc.setQueryData(['admin', 'clip-regions'], ctx.prev);
+      setError(err.message);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['admin', 'clip-regions'] });
+    },
+  });
+
+  if (q.error) return <ErrorBanner message={q.error.message} />;
+  if (!q.data) {
+    return <p className="text-sm text-[var(--color-ink-3)]">Loading kraje…</p>;
+  }
+
+  const { regions, parked_no_geo } = q.data.data;
+
+  const toggle = (id: number, next: boolean) => {
+    const current = regions.filter((r) => r.priority).map((r) => r.id);
+    mut.mutate(next ? [...current, id] : current.filter((i) => i !== id));
+  };
+
+  return (
+    <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] overflow-hidden">
+      <table className="w-full text-sm border-collapse">
+        <thead>
+          <tr className="bg-[var(--color-paper-2)] border-b border-[var(--color-rule)] text-[0.65rem] tracking-[0.16em] uppercase text-[var(--color-ink-3)]">
+            <th className="text-left px-3 py-2 font-medium">Kraj</th>
+            <th className="text-right px-3 py-2 font-medium">Active listings</th>
+            <th className="text-center px-3 py-2 font-medium w-24">Priority</th>
+          </tr>
+        </thead>
+        <tbody>
+          {regions.map((r) => (
+            <tr
+              key={r.id}
+              className="border-b border-[var(--color-rule-soft)] last:border-b-0"
+            >
+              <td className="px-3 py-2">{r.name}</td>
+              <td className="px-3 py-2 text-right tabular-nums">
+                {r.active_listings.toLocaleString('cs-CZ')}
+              </td>
+              <td className="px-3 py-2 text-center">
+                <FilterCell
+                  enabled={r.priority}
+                  pending={mut.isPending}
+                  onChange={(next) => toggle(r.id, next)}
+                />
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {error && (
+        <p className="px-3 py-2 text-sm text-[var(--color-brick)] border-t border-[var(--color-rule)]">
+          {error}
+        </p>
+      )}
+      <p className="px-3 py-2 text-[0.7rem] text-[var(--color-ink-4)] border-t border-[var(--color-rule)] bg-[var(--color-paper-2)]/50">
+        {parked_no_geo.toLocaleString('cs-CZ')} active listings carry no kraj (missing
+        coordinates); they tag in the global sweep, after the priority kraje.
       </p>
     </div>
   );
