@@ -1,12 +1,14 @@
-"""Backfill image_clip_tags: the self-hosted CLIP tagger's room/plot tag per image.
+"""Backfill image_clip_tags + image_clip_embeddings: the self-hosted CLIP tagger's
+room/plot tag + 512-d embedding per stored image.
 
-Selects stored images without a CLIP tag (for the current model) — ACTIVE-listing
-images first — downloads bytes from R2 on a worker pool, tags them with the shared
-Tagger (CLIP zero-shot, collapsed to the engine's logical labels), and upserts one
-row per image. Idempotent + resumable (a tagged image drops out of the next select)
-and shardable (image_id % shards), so it parallelises like images.yml. A FREE
-replacement for the paid room classifier on the coarse dedup-relevant tags, and the
-first tagger for dum/pozemek/komercni. No-op (exit 0) if R2 env vars are missing.
+Selects images not yet CLIP-tagged via the in-table marker images.clip_tagged_at
+(migration 232) — priority kraje first (app_settings.clip_tagging_priority_region_ids,
+or a one-off --region-id), then a global newest-first sweep — downloads bytes from R2 on
+a worker pool, tags + embeds them, upserts one row per image, and stamps the marker so
+the image drops out of the needs-clip partial index. Idempotent + resumable + shardable
+(image_id % shards), so it parallelises like images.yml. A FREE replacement for the paid
+room classifier on the coarse dedup-relevant tags, and the first tagger for
+dum/pozemek/komercni. No-op (exit 0) if R2 env vars are missing.
 
 Usage:  python -m scripts.clip_tag_backfill --limit 20000 --shard 0 --shards 4
 Required: SUPABASE_DB_URL (+ R2_* and the `clip` extra to do the work).
@@ -25,35 +27,45 @@ from scraper import image_storage
 
 LOG = logging.getLogger("clip_tag_backfill")
 
-# Pending = stored image with no tag for THIS model, partitioned by id %% shards.
-# TWO index-fast SELECTs, scope-then-global (NOT a global multi-key priority sort —
-# that regressed into a statement timeout: sorting ~1M untagged rows per shard by a
-# computed cand/region/active key has no index to lean on, so some shards exceeded
-# the pooler's statement_timeout). Instead:
-#   - SCOPED drains the operator's priority subset first — a selective region +
-#     category filter backed by listings_region_id_idx + listings_category_main_idx
-#     (EXPLAIN: bitmap-AND on listings -> index-join images -> tiny sort).
-#   - when the scope is exhausted the run falls through to the proven GLOBAL query
-#     (active-first). Exhausting the scope IS the transition — no app-level state.
-# The active-first ORDER BY sort shrinks as coverage grows, so the global query only
-# gets cheaper over time.
-_SELECT_TMPL = """
+# "Pending" = a stored image not yet CLIP-tagged. The source of truth is the in-table
+# marker images.clip_tagged_at (migration 232), set in the same write that upserts the
+# tag — NOT a cross-table anti-join against image_clip_tags, which forced a full seq-scan
+# + sort of the ~5.2M-row images table every run and intermittently blew the pooler's
+# 2-min statement timeout (the failed shards). The marker is backed by partial indexes
+# (images_needs_clip_{id,sid}_idx) that become selective as coverage rises, so the SELECT
+# trends to sub-second. During the initial bulk backfill (most images still untagged) the
+# partial index is NOT selective and a scan is unavoidable, so the SELECT runs under a
+# generous batch statement_timeout (the 2-min pooler default is an OLTP limit, wrong for a
+# backfill). Region scope lets the operator make one kraj's dedup ready first
+# (app_settings.clip_tagging_priority_region_ids, ordered) — drained before the global
+# newest-first fallback that covers every remaining region + the region-NULL (foreign) tail.
+_SELECT_REGION = """
     SELECT i.id, i.storage_path, (l.is_active IS TRUE) AS is_active
-    FROM images i
-    LEFT JOIN listings l ON l.sreality_id = i.sreality_id
-    LEFT JOIN image_clip_tags t ON t.image_id = i.id AND t.model = %(model)s
-    WHERE i.storage_path IS NOT NULL
-      AND t.image_id IS NULL
+    FROM listings l
+    JOIN images i ON i.sreality_id = l.sreality_id
+    WHERE l.region_id = %(region)s
+      AND i.clip_tagged_at IS NULL AND i.storage_path IS NOT NULL
       AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
-      {scope}
     ORDER BY (l.is_active IS TRUE) DESC, i.id DESC
     LIMIT %(limit)s
 """
-_SELECT_GLOBAL = _SELECT_TMPL.format(scope="")
-_SELECT_SCOPED = _SELECT_TMPL.format(
-    scope="AND l.region_id = %(region)s "
-          "AND (%(cats)s::text[] IS NULL OR l.category_main = ANY(%(cats)s))"
-)
+_SELECT_GLOBAL = """
+    SELECT i.id, i.storage_path, (l.is_active IS TRUE) AS is_active
+    FROM images i
+    LEFT JOIN listings l ON l.sreality_id = i.sreality_id
+    WHERE i.clip_tagged_at IS NULL AND i.storage_path IS NOT NULL
+      AND (%(shards)s = 1 OR i.id %% %(shards)s = %(shard)s)
+    ORDER BY i.id DESC
+    LIMIT %(limit)s
+"""
+
+# Bridges the initial bulk-backfill scan; once coverage is high the marker partial index
+# makes the SELECT sub-second and this margin is never approached. Well under the 55-min job.
+SELECT_TIMEOUT_MS = 300_000
+
+# Set the marker in the SAME write that records the tags, so a tagged image drops out of
+# the partial index immediately (idempotent; only flips NULL -> now()).
+_MARK_SQL = "UPDATE images SET clip_tagged_at = now() WHERE id = ANY(%s) AND clip_tagged_at IS NULL"
 
 _UPSERT_SQL = """
     INSERT INTO image_clip_tags (image_id, model, fine_tag, logical_tag, confidence)
@@ -103,6 +115,52 @@ def _download_decode(r2: image_storage.R2Client, rows: list,
     return out
 
 
+def _priority_region_ids(conn, cli_region: int | None) -> list[int]:
+    """Ordered kraj ids to drain before the global fallback. A CLI --region-id wins (ad-hoc
+    dispatch); otherwise the operator's app_settings.clip_tagging_priority_region_ids list
+    (empty = no priority, straight to the global newest-first sweep)."""
+    if cli_region is not None:
+        return [cli_region]
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT value FROM app_settings WHERE key = 'clip_tagging_priority_region_ids'"
+        )
+        row = cur.fetchone()
+    val = row[0] if row and row[0] is not None else None
+    if isinstance(val, list):
+        return [int(x) for x in val]
+    return []
+
+
+def _select_pending(conn, *, limit: int, shards: int, shard: int,
+                    priority_regions: list[int]) -> tuple[list, str]:
+    """The run's pending images: priority kraje first (in order), then the global
+    newest-first fallback for everything else, up to `limit`. One read transaction with a
+    batch statement_timeout (SET LOCAL) so the bulk-phase scan can't be killed by the
+    OLTP pooler default. Returns (rows, phase_label)."""
+    base = {"shards": shards, "shard": shard}
+    rows: list[tuple[int, str, bool]] = []
+    phases: list[str] = []
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = %s", (SELECT_TIMEOUT_MS,))
+        for region in priority_regions:
+            if len(rows) >= limit:
+                break
+            cur.execute(_SELECT_REGION,
+                        {**base, "region": region, "limit": limit - len(rows)})
+            got = [(r[0], r[1], r[2]) for r in cur.fetchall()]
+            if got:
+                rows += got
+                phases.append(f"r{region}:{len(got)}")
+        if len(rows) < limit:
+            cur.execute(_SELECT_GLOBAL, {**base, "limit": limit - len(rows)})
+            got = [(r[0], r[1], r[2]) for r in cur.fetchall()]
+            if got:
+                rows += got
+                phases.append(f"global:{len(got)}")
+    return rows, ("+".join(phases) or "empty")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--limit", type=int, default=20000, help="Max images per run.")
@@ -114,11 +172,11 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=32, help="CLIP encode batch.")
     p.add_argument("--threads", type=int, default=0, help="torch threads (0=cpus).")
     p.add_argument("--region-id", type=int, default=None,
-                   help="Drain this kraj's images first (index-fast scope), then "
-                        "fall through to the global backfill. None = global only.")
+                   help="One-off: drain this kraj first, then the global fallback. "
+                        "Overrides app_settings.clip_tagging_priority_region_ids. "
+                        "Unset = use that operator priority list (empty = global only).")
     p.add_argument("--categories", type=str, default="",
-                   help="Comma list of category_main to scope with --region-id "
-                        "(e.g. 'dum,komercni'). Empty = all categories in the kraj.")
+                   help="Deprecated + ignored (the marker selector tags all categories).")
     p.add_argument("--dry-run", action="store_true",
                    help="Report the pending count and exit without tagging.")
     p.add_argument("--verbose", action="store_true")
@@ -141,25 +199,13 @@ def main() -> int:
 
     from scraper.clip_tagger import Tagger, load_taxonomy
 
-    model = load_taxonomy()["model"]  # the SELECT keys on it; cheap, no torch
-
-    cats = [c.strip() for c in args.categories.split(",") if c.strip()]
-    base = {"model": model, "limit": args.limit,
-            "shards": args.shards, "shard": args.shard}
+    model = load_taxonomy()["model"]  # for the tag/embedding upsert + the log; no torch load
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
-        with conn.cursor() as cur:
-            phase = "global"
-            rows: list[tuple[int, str, bool]] = []
-            if args.region_id is not None:  # priority scope first
-                cur.execute(_SELECT_SCOPED, {**base, "region": args.region_id,
-                                             "cats": cats or None})
-                rows = [(r[0], r[1], r[2]) for r in cur.fetchall()]
-                if rows:
-                    phase = f"scope region={args.region_id} cats={cats or 'all'}"
-            if not rows:  # scope exhausted (or unset) -> proven global query
-                cur.execute(_SELECT_GLOBAL, base)
-                rows = [(r[0], r[1], r[2]) for r in cur.fetchall()]
+        priority = _priority_region_ids(conn, args.region_id)
+        rows, phase = _select_pending(
+            conn, limit=args.limit, shards=args.shards, shard=args.shard,
+            priority_regions=priority)
         active = {r[0]: r[2] for r in rows}  # store embeddings for active only
         LOG.info("CLIP_TAG pending=%d phase=%s shard=%d/%d model=%s dry_run=%s",
                  len(rows), phase, args.shard, args.shards, model, args.dry_run)
@@ -189,6 +235,7 @@ def main() -> int:
                 cur.executemany(_UPSERT_SQL, tag_params)
                 if emb_params:
                     cur.executemany(_UPSERT_EMB_SQL, emb_params)
+                cur.execute(_MARK_SQL, (ids,))  # drop these from the needs-clip partial index
             written += len(tag_params)
             embedded += len(emb_params)
             LOG.info("CLIP_TAG progress=%d/%d embedded=%d errors=%d",
