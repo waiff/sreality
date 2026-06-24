@@ -319,6 +319,8 @@ interface Props {
    * canonical count. When it exceeds `total` the pill shows "X of Y mapped"
    * so the map never silently understates the cohort. */
   cohortTotal: number | null;
+  /* `cohortTotal` is an approximate (planner-estimate) cohort size — render "~Y". */
+  cohortTotalApprox: boolean;
   capped: boolean;
   isLoading: boolean;
   /* Bounds the URL says the map should be showing. The map applies it
@@ -422,6 +424,7 @@ export default function ListingMap({
   rows,
   total,
   cohortTotal,
+  cohortTotalApprox,
   capped,
   isLoading,
   bounds,
@@ -1459,7 +1462,7 @@ export default function ListingMap({
             : total == null
               ? '—'
               : cohortTotal != null && cohortTotal > total
-                ? `${total.toLocaleString('cs-CZ')} of ${cohortTotal.toLocaleString('cs-CZ')} mapped`
+                ? `${total.toLocaleString('cs-CZ')} of ${cohortTotalApprox ? '~' : ''}${cohortTotal.toLocaleString('cs-CZ')} mapped`
                 : `${total.toLocaleString('cs-CZ')} ${total === 1 ? 'listing' : 'listings'}`}
           {capped && (
             <span className="ml-2 text-[var(--color-ochre)]">

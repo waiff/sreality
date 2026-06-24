@@ -932,10 +932,16 @@ const fmtDaysRange = (lo: number | null, hi: number | null): string => {
   return `≤ ${hi} d`;
 };
 
-export const summarise = (f: ListingFilters, count: number | null): string => {
+export const summarise = (
+  f: ListingFilters,
+  count: number | null,
+  approx = false,
+): string => {
   const bits: string[] = [];
   bits.push(f.status === 'active' ? 'active' : f.status === 'inactive' ? 'inactive' : 'all');
-  bits.push(`${count == null ? '…' : count.toLocaleString('cs-CZ')} ${categoryMainLabel(f.categoryMain)}`);
+  const countStr =
+    count == null ? '…' : `${approx ? '~' : ''}${count.toLocaleString('cs-CZ')}`;
+  bits.push(`${countStr} ${categoryMainLabel(f.categoryMain)}`);
   bits.push(CATEGORY_TYPE_LABEL[f.categoryType]);
   if (f.districts.length) {
     const shown = f.districts
