@@ -125,13 +125,15 @@ def test_merge_cluster_empty_returns_none(monkeypatch):
 def test_dismiss_cluster_marks_all(monkeypatch):
     conn = _FakeConn([], survivor=0)
 
-    # dismiss_cluster only runs the UPDATE ... RETURNING; script it to return ids.
+    # dismiss_cluster runs UPDATE ... RETURNING id, left_property_id,
+    # right_property_id, markers_matched (4 cols, so each dismissal can be logged to
+    # the unified decision audit); the operator-audit SELECT/INSERT fall to else.
     class _DCur(_Cur):
         def execute(self, sql: str, params: Any = None) -> None:
             s = " ".join(sql.split())
             self._conn.executed.append((s, params))
             if "SET status = 'dismissed'" in s:
-                self._rows = [(10,), (11,)]
+                self._rows = [(10, 100, 101, {}), (11, 110, 111, {})]
             else:
                 self._rows = []
 
