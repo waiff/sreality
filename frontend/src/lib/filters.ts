@@ -1,4 +1,5 @@
 import type { Disposition } from './types';
+import { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL } from './filterRegistry.generated';
 import {
   DEFAULT_WATCHDOG_FILTER_SPEC,
   type WatchdogFilterSpec,
@@ -375,11 +376,13 @@ const ALL_DISPOSITIONS: ReadonlyArray<Disposition> = [
 const TRI_VALUES: ReadonlyArray<TriState> = ['any', 'yes', 'no'];
 const STATUS_VALUES: ReadonlyArray<ListingStatus> = ['active', 'inactive', 'any'];
 /* Multi-select wire values incl. the '__unknown__' sentinel (NULL / non-canonical).
- * The canonical sets mirror toolkit.filter_registry.{FURNISHED,OWNERSHIP}_CANONICAL
- * and are what queries.ts:applyFilters uses for the `not.in.(…)` unknown predicate. */
+ * The canonical sets are re-exported from the generated registry
+ * (toolkit.filter_registry.{FURNISHED,OWNERSHIP}_CANONICAL) — one source, no
+ * hand-coded duplicate that can drift from the SQL RPC / Watchdog / toolkit
+ * (architectural rule #16). queries.ts:applyFilters uses them for the
+ * `not.in.(…)` unknown predicate. */
 export const UNKNOWN_FILTER_VALUE = '__unknown__';
-export const FURNISHED_CANONICAL = ['ano', 'ne', 'castecne'] as const;
-export const OWNERSHIP_CANONICAL = ['osobni', 'druzstevni', 'statni'] as const;
+export { FURNISHED_CANONICAL, OWNERSHIP_CANONICAL };
 const FURNISHED_VALUES: ReadonlyArray<string> = [...FURNISHED_CANONICAL, UNKNOWN_FILTER_VALUE];
 const OWNERSHIP_VALUES: ReadonlyArray<string> = [...OWNERSHIP_CANONICAL, UNKNOWN_FILTER_VALUE];
 const CONDITION_VALUES: ReadonlyArray<string> = [

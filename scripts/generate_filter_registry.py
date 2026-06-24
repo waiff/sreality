@@ -119,6 +119,27 @@ export const UI_CONTROLS = FILTER_REGISTRY.ui_controls;
 """
 
 
+def _render_constants() -> str:
+    # Canonical enum tuples emitted from the registry so the frontend's
+    # `__unknown__`-sentinel logic (queries.ts enumOrUnknown) reads the SAME
+    # values as the SQL RPC / Watchdog / toolkit — one source, no hand-coded
+    # duplicate that can silently drift (architectural rule #16).
+    def _arr(name: str, values: tuple[str, ...]) -> str:
+        items = ", ".join(f'"{v}"' for v in values)
+        return f"export const {name} = [{items}] as const;"
+
+    return "\n".join(
+        [
+            "/* Canonical enum values — single source for the `__unknown__`-sentinel",
+            " * multi-select logic (a value that also matches NULL / non-canonical).",
+            " * Generated from toolkit.filter_registry; do not hand-edit. */",
+            _arr("FURNISHED_CANONICAL", fr.FURNISHED_CANONICAL),
+            _arr("OWNERSHIP_CANONICAL", fr.OWNERSHIP_CANONICAL),
+            "",
+        ]
+    )
+
+
 def generate() -> str:
     payload = fr.registry_to_json(visibility=None)
     types = TS_TYPES.format(
@@ -128,7 +149,15 @@ def generate() -> str:
             sorted({f["type"] for f in payload["filters"]})
         ),
     )
-    return "\n".join([HEADER, types, _render_payload(payload), _render_helpers()])
+    return "\n".join(
+        [
+            HEADER,
+            types,
+            _render_payload(payload),
+            _render_helpers(),
+            _render_constants(),
+        ]
+    )
 
 
 def main() -> int:

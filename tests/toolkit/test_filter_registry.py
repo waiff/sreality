@@ -65,6 +65,19 @@ def test_enum_constraints_match_enum_values() -> None:
         )
 
 
+def test_price_change_count_columns_match_window_enum() -> None:
+    """The window→precomputed-column map and the `price_change_window_days`
+    enum are the single source for the same set of windows — they must agree,
+    or Browse/Watchdog read a column the UI can never select (or vice versa).
+    A new window added to one without the other silently breaks the filter."""
+    enum_windows = sorted(fr.by_id("price_change_window_days").constraints["enum"])
+    mapped_windows = sorted(k for k in fr.PRICE_CHANGE_COUNT_COLUMNS if k is not None)
+    assert enum_windows == mapped_windows, (
+        f"price_change_window_days enum {enum_windows} != "
+        f"PRICE_CHANGE_COUNT_COLUMNS keys {mapped_windows}"
+    )
+
+
 def test_pg_columns_subset_of_known_listings_columns() -> None:
     """Every column-backed filter points at a real listings or
     property-grain column.
