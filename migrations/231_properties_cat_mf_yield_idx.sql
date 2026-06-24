@@ -1,0 +1,25 @@
+-- Browse's "Výnos MF: high → low" sort (sort=-mf_gross_yield_pct) over a
+-- category-scoped cohort was unservable under the anon 3s statement_timeout.
+-- The keyset card/table queries are LIMIT 24/50, but with no index leading
+-- (category_main, category_type, mf_gross_yield_pct) the planner had to
+-- BitmapAnd the residual filters (near_pop_5km / near_jobs_15km / …), heap-
+-- fetch every ~18k matching row to read mf_gross_yield_pct for the sort, then
+-- top-N. Cold that is ~3.5s -> timeout -> "No listings match" + a Query-failed
+-- banner for any heavy filter combined with this sort.
+--
+-- This index lets the LIMITed page scan in mf_gross_yield order under the
+-- category prefix and stop after collecting the page (residual filters applied
+-- as an index-scan Filter): measured 3501ms -> 33ms for the reported preset,
+-- 12251 cold block reads -> 108. The leading (category_main, category_type)
+-- equality also scopes the keyset's nullable-column `OR mf_gross_yield_pct IS
+-- NULL` tail term (see frontend keyset.ts) to a sub-range, so page 2+ stays
+-- index-driven (~150ms) instead of falling back to a seq-scan + sort.
+--
+-- DESC NULLS LAST + id DESC mirrors the app's ORDER BY exactly (the "high ->
+-- low" lane, property_id tiebreak in the sort direction). Non-partial so the
+-- planner can satisfy the full NULLS-LAST ordering without proving the cohort
+-- is non-null. On prod this was built CONCURRENTLY to avoid locking the live
+-- ~347k-row table; IF NOT EXISTS makes this file a no-op there and a clean
+-- build on a fresh database.
+CREATE INDEX IF NOT EXISTS properties_cat_mf_yield_idx
+ON public.properties (category_main, category_type, mf_gross_yield_pct DESC NULLS LAST, id DESC);
