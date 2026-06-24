@@ -2415,3 +2415,9 @@ export function filtersForAgenda(agenda: Agenda): FilterDef[] {
 export const AGENDAS = FILTER_REGISTRY.agendas;
 export const CATEGORIES = FILTER_REGISTRY.categories;
 export const UI_CONTROLS = FILTER_REGISTRY.ui_controls;
+
+/* Canonical enum values — single source for the `__unknown__`-sentinel
+ * multi-select logic (a value that also matches NULL / non-canonical).
+ * Generated from toolkit.filter_registry; do not hand-edit. */
+export const FURNISHED_CANONICAL = ["ano", "ne", "castecne"] as const;
+export const OWNERSHIP_CANONICAL = ["osobni", "druzstevni", "statni"] as const;
