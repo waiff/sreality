@@ -95,24 +95,37 @@ def _vec_str(row) -> str:
     return "[" + ",".join(f"{x:.6f}" for x in row.tolist()) + "]"
 
 
-def _download_decode(r2: image_storage.R2Client, rows: list,
-                     workers: int):
+def _download_decode(r2: image_storage.R2Client, rows: list, workers: int):
+    """Returns (decoded, terminal): decoded = [(image_id, RGB image)] that tagged
+    successfully; terminal = [image_id] whose STORED bytes won't ever decode (corrupt /
+    non-image — e.g. a video cover that slipped past the download reject-list). The
+    caller marks BOTH so a permanently-undecodable image leaves the needs-clip partial
+    index instead of being re-fetched + re-failed every run (the image-download pipeline
+    terminal-marks the same way). A DOWNLOAD exception is treated as TRANSIENT (R2 blip)
+    and left unmarked to retry — mirroring how the download pipeline distinguishes a gone
+    object from a transient miss."""
     from PIL import Image  # base dep
 
     def _one(row):
         image_id, key = row[0], row[1]
         try:
-            img = Image.open(io.BytesIO(r2.download_bytes(key))).convert("RGB")
-            return image_id, img
-        except Exception:  # noqa: BLE001 - one bad image must not kill the run
-            return image_id, None
+            data = r2.download_bytes(key)
+        except Exception:  # noqa: BLE001 - transient R2 error: retry on the next run
+            return image_id, None, False
+        try:
+            return image_id, Image.open(io.BytesIO(data)).convert("RGB"), False
+        except Exception:  # noqa: BLE001 - stored bytes won't decode: terminal, mark it
+            return image_id, None, True
 
-    out = []
+    decoded: list = []
+    terminal: list = []
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        for image_id, img in pool.map(_one, rows):
+        for image_id, img, is_terminal in pool.map(_one, rows):
             if img is not None:
-                out.append((image_id, img))
-    return out
+                decoded.append((image_id, img))
+            elif is_terminal:
+                terminal.append(image_id)
+    return decoded, terminal
 
 
 def _priority_region_ids(conn, cli_region: int | None) -> list[int]:
@@ -142,7 +155,9 @@ def _select_pending(conn, *, limit: int, shards: int, shard: int,
     rows: list[tuple[int, str, bool]] = []
     phases: list[str] = []
     with conn.transaction(), conn.cursor() as cur:
-        cur.execute("SET LOCAL statement_timeout = %s", (SELECT_TIMEOUT_MS,))
+        # SET is a utility statement — it can't take a bound parameter ($1), so the
+        # (module-constant int) value is interpolated, not passed as %s.
+        cur.execute(f"SET LOCAL statement_timeout = {int(SELECT_TIMEOUT_MS)}")
         for region in priority_regions:
             if len(rows) >= limit:
                 break
@@ -158,7 +173,12 @@ def _select_pending(conn, *, limit: int, shards: int, shard: int,
             if got:
                 rows += got
                 phases.append(f"global:{len(got)}")
-    return rows, ("+".join(phases) or "empty")
+    # The global fallback has no region exclusion, so a just-returned priority-region
+    # image can reappear there — de-dup by image_id (keep first) so it isn't downloaded
+    # + CLIP-encoded twice in one run.
+    seen: set[int] = set()
+    deduped = [r for r in rows if not (r[0] in seen or seen.add(r[0]))]
+    return deduped, ("+".join(phases) or "empty")
 
 
 def main() -> int:
@@ -214,35 +234,44 @@ def main() -> int:
 
         tagger = Tagger.load(args.threads)  # loads the model once
         r2 = image_storage.R2Client.from_env(max_pool_connections=args.workers + 4)
-        written = embedded = errors = 0
+        written = embedded = errors = terminal_n = 0
         for chunk in _chunks(rows, args.chunk):
-            decoded = _download_decode(r2, chunk, args.workers)
+            decoded, terminal = _download_decode(r2, chunk, args.workers)
             errors += len(chunk) - len(decoded)
-            if not decoded:
-                continue
+            terminal_n += len(terminal)
             ids = [d[0] for d in decoded]
-            emb = tagger.embed([d[1] for d in decoded], args.batch_size)
-            results = tagger.tags_from_emb(emb)
-            tag_params = [
-                (image_id, model, r.fine_tag, r.logical_tag, r.confidence)
-                for image_id, r in zip(ids, results)
-            ]
-            emb_params = [
-                (image_id, model, _vec_str(emb[i]))
-                for i, image_id in enumerate(ids) if active.get(image_id)
-            ]
+            # Mark successes AND terminally-undecodable images — both leave the partial
+            # index. Skip only when the whole chunk was a transient download miss (mark
+            # nothing → those retry next run). Idempotent: _MARK_SQL flips NULL->now() once.
+            mark_ids = ids + terminal
+            if not mark_ids:
+                continue
+            tag_params = []
+            emb_params = []
+            if decoded:
+                emb = tagger.embed([d[1] for d in decoded], args.batch_size)
+                results = tagger.tags_from_emb(emb)
+                tag_params = [
+                    (image_id, model, r.fine_tag, r.logical_tag, r.confidence)
+                    for image_id, r in zip(ids, results)
+                ]
+                emb_params = [
+                    (image_id, model, _vec_str(emb[i]))
+                    for i, image_id in enumerate(ids) if active.get(image_id)
+                ]
             with conn.cursor() as cur:
-                cur.executemany(_UPSERT_SQL, tag_params)
+                if tag_params:
+                    cur.executemany(_UPSERT_SQL, tag_params)
                 if emb_params:
                     cur.executemany(_UPSERT_EMB_SQL, emb_params)
-                cur.execute(_MARK_SQL, (ids,))  # drop these from the needs-clip partial index
+                cur.execute(_MARK_SQL, (mark_ids,))  # drop from the needs-clip partial index
             written += len(tag_params)
             embedded += len(emb_params)
-            LOG.info("CLIP_TAG progress=%d/%d embedded=%d errors=%d",
-                     written, len(rows), embedded, errors)
+            LOG.info("CLIP_TAG progress=%d/%d embedded=%d errors=%d terminal=%d",
+                     written, len(rows), embedded, errors, terminal_n)
 
-    LOG.info("CLIP_TAG done written=%d embedded=%d errors=%d",
-             written, embedded, errors)
+    LOG.info("CLIP_TAG done written=%d embedded=%d errors=%d terminal=%d",
+             written, embedded, errors, terminal_n)
     return 0
 
 
