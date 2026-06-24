@@ -682,21 +682,59 @@ export const fetchListingsForTable = async (
   };
 };
 
-/* The cohort total for the infinite-scroll progress label. Fetched ONCE per
- * filter set (keyed on filters, not on the cursor) via a head-only exact
- * count — measured ~80-110ms on properties_public, well under the anon 3s
- * budget, and the LEFT JOIN to listings is absent from a count plan. Serves
- * both the cards and the table tab (same cohort, same filters). */
-export const fetchBrowseCount = async (f: ListingFilters): Promise<number> => {
+export interface CohortCount {
+  /* The cohort size — exact when an exact count fit the budget, otherwise the
+   * query planner's estimate. */
+  value: number;
+  /* False when `value` is the planner estimate (the exact count would exceed
+   * the anon statement_timeout). The UI renders an approximate value as "~N". */
+  precise: boolean;
+}
+
+/* The ONE cohort total — header, tab badge, and the infinite-scroll progress
+ * labels. Exact-when-affordable with a planner-estimate floor: an exact head
+ * count is attempted under a client budget kept inside the anon 3s
+ * statement_timeout; for large/heavy cohorts an exact count must heap-scan
+ * every matching row (O(matches)) and can't finish, so we fall back to
+ * PostgREST's planner estimate (`count=planned`, O(1)) and flag the value
+ * approximate. Result: exact for the vast majority of cohorts, an honest "~N"
+ * for the rest, and NEVER a timeout — the industry-standard hybrid for a
+ * filtered count over a large table. (`count=estimated` is NOT used: Supabase's
+ * threshold still runs an exact count for mid-size cohorts, so it times out
+ * cold exactly like `exact`.) Shares the exact filter chain
+ * (resolveBrowsePrefilters + applyFilters) with the Map/Table/Cards fetchers,
+ * so the total can never disagree with the listed rows. */
+const EXACT_COUNT_BUDGET_MS = 2500;
+export const fetchBrowseCount = async (
+  f: ListingFilters,
+): Promise<CohortCount> => {
   const pre = await resolveBrowsePrefilters(f);
-  if (pre.empty) return 0;
-  const base = supabase
-    .from('properties_public')
-    .select('property_id', { count: 'exact', head: true });
-  const scoped = applyPrefilters(applyFilters(base, f), pre);
-  const { count, error } = await scoped;
-  if (error) throw error;
-  return count ?? 0;
+  if (pre.empty) return { value: 0, precise: true };
+  type CountResp = { count: number | null; error: { message: string } | null };
+  type CountQuery = PromiseLike<CountResp> & {
+    abortSignal: (s: AbortSignal) => PromiseLike<CountResp>;
+  };
+  const build = (mode: 'exact' | 'planned') =>
+    applyPrefilters(
+      applyFilters(
+        supabase
+          .from('properties_public')
+          .select('property_id', { count: mode, head: true }),
+        f,
+      ),
+      pre,
+    ) as unknown as CountQuery;
+  try {
+    const { count, error } = await build('exact').abortSignal(
+      AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
+    );
+    if (error) throw error;
+    return { value: count ?? 0, precise: true };
+  } catch {
+    const { count, error } = await build('planned');
+    if (error) throw error;
+    return { value: count ?? 0, precise: false };
+  }
 };
 
 /* -------------------------------------------------------------------------- */

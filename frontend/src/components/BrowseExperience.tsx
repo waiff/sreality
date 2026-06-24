@@ -72,6 +72,7 @@ import {
   TABLE_PAGE_SIZE,
   type BrowseStats,
   type CardRow,
+  type CohortCount,
   type CityIndexDefinition,
   type CityIndexValue,
   type CityPolygon,
@@ -356,13 +357,17 @@ export default function BrowseExperience({
    * gate suppressed its refetch. Its fetch/error state is surfaced in the
    * header (FilterSummary) — a lagging or failed count must look different
    * from a settled one, never silently pin the previous cohort's value. */
-  const browseCountQuery = useQuery<number, Error>({
+  const browseCountQuery = useQuery<CohortCount, Error>({
     queryKey: ['browse-count', filters],
     queryFn: () => fetchBrowseCount(filters),
     placeholderData: (prev) => prev,
     staleTime: 60_000,
   });
-  const cohortTotal = browseCountQuery.data ?? null;
+  const cohortTotal = browseCountQuery.data?.value ?? null;
+  /* The total is the planner's estimate (exact count exceeded the budget for a
+   * large/heavy cohort) — rendered as "~N" so the figure is never silently
+   * approximate. */
+  const cohortTotalApprox = browseCountQuery.data?.precise === false;
   /* True while a refetch for a NEW cohort is in flight and we are still
    * showing the PREVIOUS cohort's number (placeholderData). This is exactly
    * the "looks settled but is stale" window that made the count appear stuck. */
@@ -572,7 +577,7 @@ export default function BrowseExperience({
   ]);
 
   const tabs: ReadonlyArray<Tab<TabKey>> = [
-    { key: 'map', label: 'Listings', badge: cohortTotal != null ? cohortTotal.toLocaleString('cs-CZ') : undefined },
+    { key: 'map', label: 'Listings', badge: cohortTotal != null ? `${cohortTotalApprox ? '~' : ''}${cohortTotal.toLocaleString('cs-CZ')}` : undefined },
     { key: 'table', label: 'Table' },
     { key: 'stats', label: 'Stats' },
   ];
@@ -618,6 +623,7 @@ export default function BrowseExperience({
           <FilterSummary
             filters={filters}
             count={cohortTotal}
+            countApprox={cohortTotalApprox}
             countStale={cohortCountStale}
             countError={browseCountQuery.error}
             onRetryCount={() => browseCountQuery.refetch()}
@@ -669,6 +675,7 @@ export default function BrowseExperience({
               <ListingCards
                 rows={cards.isLoading ? null : cards.rows}
                 total={cohortTotal}
+                totalApprox={cohortTotalApprox}
                 sort={sort}
                 isLoading={cards.isLoading}
                 isFetchingNextPage={cards.isFetchingNextPage}
@@ -703,6 +710,7 @@ export default function BrowseExperience({
                     rows={mapQuery.data?.rows ?? []}
                     total={mapQuery.data?.total ?? null}
                     cohortTotal={cohortTotal}
+                    cohortTotalApprox={cohortTotalApprox}
                     capped={mapQuery.data?.capped ?? false}
                     isLoading={mapQuery.isLoading}
                     bounds={filters.bounds}
@@ -762,6 +770,7 @@ export default function BrowseExperience({
               <ListingTable
                 rows={table.isLoading ? null : table.rows}
                 total={cohortTotal}
+                totalApprox={cohortTotalApprox}
                 sort={sort}
                 isLoading={table.isLoading}
                 isFetchingNextPage={table.isFetchingNextPage}
@@ -834,6 +843,7 @@ function defaultDirectionFor(field: SortField): 'asc' | 'desc' {
 function FilterSummary({
   filters,
   count,
+  countApprox,
   countStale,
   countError,
   onRetryCount,
@@ -844,6 +854,9 @@ function FilterSummary({
 }: {
   filters: ListingFilters;
   count: number | null;
+  /* `count` is the planner estimate (exact count exceeded budget) — render
+   * "~N" so the headline figure is never silently approximate. */
+  countApprox: boolean;
   /* The displayed count is the PREVIOUS cohort's value while a refetch for the
    * new cohort is still in flight. Surfaced so a lagging count is visibly
    * provisional instead of looking settled (the bug this page had). */
@@ -868,7 +881,7 @@ function FilterSummary({
             }`}
             aria-busy={countStale || undefined}
           >
-            {loading && count == null ? 'Loading…' : summarise(filters, count)}
+            {loading && count == null ? 'Loading…' : summarise(filters, count, countApprox)}
           </p>
           {countStale && (
             <span

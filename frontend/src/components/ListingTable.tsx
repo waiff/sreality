@@ -39,6 +39,8 @@ const COLUMNS: ReadonlyArray<Column> = [
 interface Props {
   rows: TableRow[] | null;
   total: number | null;
+  /* `total` is an approximate (planner-estimate) cohort size — render "~N". */
+  totalApprox?: boolean;
   sort: SortSpec;
   isLoading: boolean;
   isFetchingNextPage: boolean;
@@ -54,6 +56,7 @@ interface Props {
 export default function ListingTable({
   rows,
   total,
+  totalApprox = false,
   sort,
   isLoading,
   isFetchingNextPage,
@@ -117,7 +120,7 @@ export default function ListingTable({
             ? <>—</>
             : total === 0
               ? <>No listings</>
-              : <>Showing <span className="text-[var(--color-ink-2)]">{fmtCount(loaded)}</span> of <span className="text-[var(--color-ink-2)]">{fmtCount(total)}</span></>}
+              : <>Showing <span className="text-[var(--color-ink-2)]">{fmtCount(loaded)}</span> of <span className="text-[var(--color-ink-2)]">{totalApprox ? '~' : ''}{fmtCount(total)}</span></>}
         </p>
       </div>
     </div>

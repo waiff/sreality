@@ -36,6 +36,8 @@ import { listingPath } from '@/lib/listingUrl';
 interface Props {
   rows: CardRow[] | null;
   total: number | null;
+  /* `total` is an approximate (planner-estimate) cohort size — render "~N". */
+  totalApprox?: boolean;
   sort: SortSpec;
   isLoading: boolean;
   /* Infinite scroll: the next page is in flight, there are more pages, and
@@ -84,6 +86,7 @@ interface Props {
 export default function ListingCards({
   rows,
   total,
+  totalApprox = false,
   sort,
   isLoading,
   isFetchingNextPage,
@@ -141,7 +144,7 @@ export default function ListingCards({
               ? '—'
               : total === 0
                 ? '0 listings'
-                : `${loaded.toLocaleString('cs-CZ')} of ${total.toLocaleString('cs-CZ')}`}
+                : `${loaded.toLocaleString('cs-CZ')} of ${totalApprox ? '~' : ''}${total.toLocaleString('cs-CZ')}`}
         </span>
         <div className="flex items-center gap-2 shrink-0">
           <SortDropdown sort={sort} onChange={onSort} />
