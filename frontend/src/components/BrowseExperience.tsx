@@ -26,7 +26,7 @@ import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
 import BrowseStatsView from '@/components/BrowseStats';
-import type { MapFlyToCommand } from '@/components/ListingMap';
+import type { AnchorPoint, MapFlyToCommand } from '@/components/ListingMap';
 import type { MapySuggestion } from '@/lib/maps';
 import { fetchDatasets, fetchGrowth, fetchSeries, priceStatsKeys } from '@/lib/priceStats';
 import { buildHoverData, type GrowthMetric } from '@/lib/growthChoropleth';
@@ -111,10 +111,14 @@ export default function BrowseExperience({
   view,
   layout = 'page',
   features,
+  anchor = null,
 }: {
   view: BrowseViewState;
   layout?: 'page' | 'modal';
   features?: BrowseFeatures;
+  /* The "Explore area" origin property, pinned on the map independent of the
+   * filter cohort (Explore-area modal only; undefined on the Browse page). */
+  anchor?: AnchorPoint | null;
 }) {
   const f = { ...DEFAULT_FEATURES, ...features };
   const isModal = layout === 'modal';
@@ -700,6 +704,7 @@ export default function BrowseExperience({
                         : null
                     }
                     flyTo={mapFlyTo}
+                    anchor={anchor}
                     cities={cityOverlay.cities}
                     cityPolygons={cityPolygonsMap}
                     showCities={overlay.showCities}

@@ -30,7 +30,8 @@ import {
   sortToParam,
   type SortSpec,
 } from '@/lib/queries';
-import type { Disposition, FilterPreset } from '@/lib/types';
+import type { ImageRef } from '@/lib/imageUrl';
+import type { Disposition, FilterPreset, ListingPublic } from '@/lib/types';
 
 export type TabKey = 'map' | 'table' | 'stats';
 
@@ -223,12 +224,25 @@ const CATEGORY_TYPES = ['prodej', 'pronajem'] as const;
  * frames ~5 km across and the cohort is "everything in that viewport". */
 export const EXPLORE_VIEWPORT_KM = 5;
 
+/* The property the operator opened "Explore area" FROM. Carried through the
+ * payload from the trigger site (where it's already fully loaded), never
+ * re-fetched — so the anchor pin + the origin-property panel show EXACTLY the
+ * bytes the operator saw one click ago (no skew, no loading flicker). OPTIONAL:
+ * a trigger that only has coordinates (a future Region "explore here") still
+ * opens the modal, just with no anchor/panel. Images typed as the minimal
+ * ImageRef shape; ImagePublic satisfies it structurally. */
+export interface ExploreOrigin {
+  listing: ListingPublic;
+  images: ImageRef[];
+}
+
 export interface ExploreAreaSeed {
   lat: number;
   lng: number;
   categoryMain: string | null;
   categoryType: string | null;
   disposition: Disposition | null;
+  origin?: ExploreOrigin;
 }
 
 /* Build the modal's initial cohort filter from a listing: same category +
