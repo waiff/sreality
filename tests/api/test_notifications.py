@@ -669,6 +669,46 @@ def test_collection_monitor_emits_the_five_clean_kinds() -> None:
     assert "'broker_change'" not in joined          # reserved, no clean signal yet
 
 
+def test_collection_monitor_gates_every_detector_on_monitor_since() -> None:
+    """Each detector fires only for changes AFTER monitoring began for the
+    (collection, property) pair. The shared `monitored` CTE computes the anchor
+    `monitor_since = greatest(added_at, monitoring_enabled_at)`, and price /
+    inactive / new_source gate their change-time on it (reactivated is gated
+    transitively via the inactive dispatch). This is the false-positive the fix
+    closes: a price drop that predates membership must not notify."""
+    script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
+        (lambda s: "FROM collections WHERE monitoring_enabled = true" in s, [(1,)], 0),
+        (lambda s: "FROM app_settings" in s, [], 0),
+        (lambda s: "INSERT INTO notification_dispatches" in s, [], 0),
+    ]
+    conn = _FakeConn(script)
+    match_monitored_collections_once(conn)  # type: ignore[arg-type]
+
+    inserts = [
+        sql for sql, _ in conn.executed
+        if "INSERT INTO notification_dispatches" in sql
+    ]
+    assert len(inserts) == 4
+    anchor = (
+        "greatest(cp.added_at, coalesce(c.monitoring_enabled_at, cp.added_at)) "
+        "AS monitor_since"
+    )
+    for sql in inserts:
+        assert anchor in sql  # every detector shares the anchored CTE
+
+    price_sql = next(s for s in inserts if "'price_drop'" in s)
+    assert "st.scraped_at > st.monitor_since" in price_sql
+
+    # The inactive insert references 'inactive' but not 'reactivated'.
+    inactive_sql = next(
+        s for s in inserts if "'inactive'" in s and "'reactivated'" not in s
+    )
+    assert "max(l.inactive_at) > m.monitor_since" in inactive_sql
+
+    new_source_sql = next(s for s in inserts if "'new_source'" in s)
+    assert "src.first_seen_at > src.monitor_since" in new_source_sql
+
+
 def test_get_unread_count_breaks_down_by_source() -> None:
     script: list[tuple[Any, list[tuple[Any, ...]], int]] = [
         (

@@ -667,7 +667,13 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `listings.inactive_at` is cleared on reactivation), and `new_source` (a sibling listing on a
     new portal). It is set-based (one `INSERT…SELECT` per kind across all monitored collections),
     collection-scoped dedupe (`cm:{collection}:{kind}:{discriminator}`), `target_channels` stamped
-    from the collection's `notify_channels`. `broker_change` is in the `change_kind` CHECK
+    from the collection's `notify_channels`. Every detector is **anchored on `monitor_since`**
+    (= `greatest(collection_properties.added_at, collections.monitoring_enabled_at)`, migration 230)
+    so it fires only for changes observed AFTER the operator started watching that property — a
+    price drop / delisting / new source that PREDATES membership never notifies (the false-positive
+    the anchor closes). `monitoring_enabled_at` is stamped by a trigger on every false→true
+    monitoring transition, so the anchor is correct across all write paths.
+    `broker_change` is in the `change_kind` CHECK
     (migration 209) but NOT yet emitted — `listing_broker_public` is current-state-only with no
     change signal; the kind is reserved for when one exists. The unified in-app **Notifications**
     page (`/notifications`) reads BOTH producers off one LEFT-join feed (the watchdog-only INNER

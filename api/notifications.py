@@ -1517,10 +1517,17 @@ def _read_monitor_window_days(conn: "psycopg.Connection") -> int:
 # a collection with monitoring_enabled, carrying the collection's notify_channels
 # (which become the dispatch's target_channels). status='active' skips
 # merged-away properties.
+# `monitor_since` is the anchor that makes every detector fire only for changes
+# AFTER monitoring began for this (collection, property) pair: the later of when
+# the property was added (collection_properties.added_at) and when the collection
+# last had monitoring turned on (collections.monitoring_enabled_at, migration 230).
+# A pre-membership change never notifies.
 _MONITORED_CTE = (
     "monitored AS ("
     "  SELECT cp.collection_id, p.id AS property_id, p.repr_listing_id, "
-    "         c.notify_channels "
+    "         c.notify_channels, "
+    "         greatest(cp.added_at, coalesce(c.monitoring_enabled_at, cp.added_at)) "
+    "           AS monitor_since "
     "  FROM collection_properties cp "
     "  JOIN collections c ON c.id = cp.collection_id AND c.monitoring_enabled = true "
     "  JOIN properties p ON p.id = cp.property_id AND p.status = 'active' "
@@ -1546,6 +1553,11 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
     A property in N monitored collections fires N times (once per collection):
     the source_ck requires a collection_id, so monitoring is per-collection by
     design (the operator chose which collections alert).
+
+    Every detector is anchored on `monitored.monitor_since` (the later of the
+    property's `added_at` and the collection's `monitoring_enabled_at`), so a
+    change that predates the operator starting to watch the property never
+    notifies — only changes observed AFTER monitoring began do.
 
     `broker_change` is intentionally NOT emitted yet: there is no property-level
     broker nor a broker-change timestamp to key a stable, non-fragile event off
@@ -1573,7 +1585,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
         cur.execute(
             f"WITH {_MONITORED_CTE}, "
             "steps AS ("
-            "  SELECT m.collection_id, m.notify_channels, l.property_id, "
+            "  SELECT m.collection_id, m.notify_channels, m.monitor_since, l.property_id, "
             "         l.sreality_id, s.id AS snapshot_id, s.scraped_at, s.price_czk, "
             "         lag(s.price_czk) OVER ("
             "           PARTITION BY m.collection_id, l.property_id "
@@ -1596,6 +1608,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "FROM steps st "
             "WHERE st.prev IS NOT NULL AND st.price_czk <> st.prev "
             "  AND st.scraped_at > now() - %(win)s::interval "
+            "  AND st.scraped_at > st.monitor_since "
             "ON CONFLICT (dedupe_key) DO NOTHING",
             {"win": win},
         )
@@ -1612,8 +1625,10 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "  FROM monitored m "
             "  JOIN properties p ON p.id = m.property_id AND p.is_active = false "
             "  JOIN listings l ON l.property_id = m.property_id "
-            "  GROUP BY m.collection_id, m.property_id, m.repr_listing_id, m.notify_channels "
-            "  HAVING max(l.inactive_at) > now() - %(win)s::interval"
+            "  GROUP BY m.collection_id, m.property_id, m.repr_listing_id, m.notify_channels, "
+            "           m.monitor_since "
+            "  HAVING max(l.inactive_at) > now() - %(win)s::interval "
+            "     AND max(l.inactive_at) > m.monitor_since"
             ") "
             "INSERT INTO notification_dispatches "
             "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
@@ -1631,6 +1646,10 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
         # 4) reactivated — a property we ALREADY alerted as inactive came back
         # active. The prior 'inactive' dispatch is the durable "was dead" marker
         # (listings.inactive_at is cleared on reactivation, so we can't read it).
+        # No explicit monitor_since gate: it keys on that prior 'inactive'
+        # dispatch, which is itself monitor_since-gated (above), so a
+        # reactivation can only fire for a property that went inactive while
+        # being monitored.
         cur.execute(
             f"WITH {_MONITORED_CTE}, "
             "back AS ("
@@ -1678,7 +1697,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
         cur.execute(
             f"WITH {_MONITORED_CTE}, "
             "src AS ("
-            "  SELECT m.collection_id, m.notify_channels, l.property_id, l.sreality_id, "
+            "  SELECT m.collection_id, m.notify_channels, m.monitor_since, l.property_id, l.sreality_id, "
             "         l.first_seen_at, "
             "         row_number() OVER (PARTITION BY m.collection_id, l.property_id, l.source "
             "                            ORDER BY l.first_seen_at, l.sreality_id) AS rn, "
@@ -1697,6 +1716,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "WHERE src.rn = 1 AND src.n_sources >= 2 "
             "  AND src.first_seen_at > src.prop_first "
             "  AND src.first_seen_at > now() - %(win)s::interval "
+            "  AND src.first_seen_at > src.monitor_since "
             "ON CONFLICT (dedupe_key) DO NOTHING",
             {"win": win},
         )
