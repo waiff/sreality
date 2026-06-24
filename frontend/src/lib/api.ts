@@ -757,6 +757,19 @@ export type DedupPipelineOverview = {
 export const getDedupPipelineOverview = (): Promise<{ data: DedupPipelineOverview }> =>
   request<{ data: DedupPipelineOverview }>('/dedup/pipeline-overview');
 
+// Daily dedup-funnel throughput, for the overview's timeline chart.
+export type DedupTimelinePoint = {
+  day: string;
+  tagged: number;
+  candidates: number;
+  merged: number;
+  dismissed: number;
+};
+export const getDedupPipelineTimeline = (
+  days = 14,
+): Promise<{ data: DedupTimelinePoint[] }> =>
+  request<{ data: DedupTimelinePoint[] }>(`/dedup/pipeline-timeline?days=${days}`);
+
 export const archiveResetDedupCandidates = (): Promise<{
   archived: number;
   deleted: number;
