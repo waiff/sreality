@@ -40,6 +40,7 @@ import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
 import DedupAuditHistory from '@/components/DedupAuditHistory';
+import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import { listingPath, propertyListingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
@@ -197,6 +198,13 @@ export default function Dedup() {
       <Header proposed={summaryQ.data?.data.total ?? candidates.length} />
 
       <AutoDedupToggle />
+
+      <section className="mt-6">
+        <h2 className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
+          CLIP backfill
+        </h2>
+        <DedupBackfillProgress />
+      </section>
 
       <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
 

@@ -225,6 +225,73 @@ def list_pair_audit(
     }
 
 
+def clip_coverage(
+    conn: psycopg.Connection, *, priority_region_id: int = 27,
+) -> dict[str, Any]:
+    """CLIP backfill progress — totals + the priority tiers the operator tracks to
+    time the flip. LISTING-grain (a listing counts as covered once ANY of its images
+    is tagged): far cheaper than image-grain (one scan of the small listings table +
+    two hash semi-joins) and clearer to read ("X of Y listings"). Model-agnostic
+    (one CLIP model is in use) so the API needs no taxonomy file."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM image_clip_tags")
+        total_tags = int(cur.fetchone()[0])
+        cur.execute("SELECT count(*) FROM image_clip_embeddings")
+        total_emb = int(cur.fetchone()[0])
+
+        cur.execute(
+            """
+            WITH tagged AS (
+              SELECT DISTINCT i.sreality_id
+              FROM image_clip_tags t JOIN images i ON i.id = t.image_id
+            ),
+            cand AS (
+              SELECT left_property_id AS pid FROM property_identity_candidates
+              WHERE status = 'proposed'
+              UNION
+              SELECT right_property_id FROM property_identity_candidates
+              WHERE status = 'proposed'
+            )
+            SELECT
+              count(*) FILTER (WHERE inc.cand)                  AS cand_total,
+              count(*) FILTER (WHERE inc.cand AND inc.tagged)   AS cand_tagged,
+              count(*) FILTER (WHERE inc.sc_dk)                 AS scdk_total,
+              count(*) FILTER (WHERE inc.sc_dk AND inc.tagged)  AS scdk_tagged,
+              count(*) FILTER (WHERE inc.sc_byt)                AS scbyt_total,
+              count(*) FILTER (WHERE inc.sc_byt AND inc.tagged) AS scbyt_tagged
+            FROM (
+              SELECT
+                (l.property_id IN (SELECT pid FROM cand)) AS cand,
+                (l.region_id = %(r)s
+                 AND l.category_main IN ('dum', 'komercni')) AS sc_dk,
+                (l.region_id = %(r)s AND l.category_main = 'byt') AS sc_byt,
+                (l.sreality_id IN (SELECT sreality_id FROM tagged)) AS tagged
+              FROM listings l WHERE l.is_active
+            ) inc
+            """,
+            {"r": priority_region_id},
+        )
+        r = cur.fetchone()
+
+    return {
+        "data": {
+            "total_tags": total_tags,
+            "total_embeddings": total_emb,
+            "priority_region_id": priority_region_id,
+            "grain": "listings",
+            "tiers": [
+                {"key": "candidates", "label": "Dedup candidates",
+                 "tagged": int(r[1]), "total": int(r[0])},
+                {"key": "sc_dum_komercni",
+                 "label": "Středočeský — domy & komerční",
+                 "tagged": int(r[3]), "total": int(r[2])},
+                {"key": "sc_byt", "label": "Středočeský — byty",
+                 "tagged": int(r[5]), "total": int(r[4])},
+            ],
+        }
+    }
+
+
 def merge_candidate(
     conn: psycopg.Connection, candidate_id: int,
 ) -> dict[str, Any] | None:
