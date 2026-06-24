@@ -52,15 +52,32 @@ class Tagger:
 
     @classmethod
     def load(cls, threads: int = 0) -> "Tagger":
+        import time
+
         import torch
         from transformers import CLIPModel, CLIPProcessor
 
+        os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "60")
         torch.set_num_threads(threads or (os.cpu_count() or 4))
         tax = load_taxonomy()
         model_id = tax["model"]
-        model = CLIPModel.from_pretrained(model_id)
+        # The sharded backfill runs 4 jobs in parallel; concurrent HF downloads of
+        # the ~600 MB weights occasionally 503 / time out (the single-job trial
+        # never did). Retry with backoff; the workflow also caches
+        # ~/.cache/huggingface so every run after the first restores warm.
+        model = processor = None
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                model = CLIPModel.from_pretrained(model_id)
+                processor = CLIPProcessor.from_pretrained(model_id)
+                break
+            except Exception as exc:  # noqa: BLE001 - transient HF hub error -> retry
+                last_exc = exc
+                time.sleep(5 * (attempt + 1))
+        if model is None or processor is None:
+            raise RuntimeError(f"CLIP model load failed after retries: {last_exc}")
         model.eval()
-        processor = CLIPProcessor.from_pretrained(model_id)
         prompts = tax["prompts"]
         labels = list(prompts)
         with torch.no_grad():
