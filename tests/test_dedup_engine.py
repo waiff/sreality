@@ -1366,3 +1366,28 @@ def test_cosine_tier_low_cosine_skips_room_and_queues_not_dismiss(
     assert stats["auto_visual"] == 0
     assert stats["auto_dismissed"] == 0
     assert stats["queued"] == 1
+
+
+def test_pair_audit_records_a_merge(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {}},
+    )
+    # Two rows at the same exact address -> rule B address merge.
+    conn = _FakeConn([_row(1, 101), _row(2, 102, source="bazos")])
+    audit: list[dict[str, Any]] = []
+    stats = eng.run_engine(conn, audit=audit, max_vision_calls=0)
+    assert stats["auto_address"] == 1
+    rec = [r for r in audit if r["stage"] == "address"]
+    assert len(rec) == 1
+    assert rec[0]["outcome"] == "merged"
+    assert rec[0]["left_sreality_id"] in (1, 2)
+
+
+def test_pair_audit_is_opt_in_no_records_when_none() -> None:
+    # audit defaults to None -> the hot loop appends nothing (tests/engine unaffected).
+    import scripts.dedup_engine as eng
+    conn = _FakeConn([_row(1, 101), _row(2, 102, source="bazos")])
+    # Should not raise even though no audit sink is provided.
+    eng.run_engine(conn, max_vision_calls=0)
