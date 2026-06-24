@@ -39,6 +39,7 @@ import { imageSrc } from '@/lib/imageUrl';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
+import DedupAuditHistory from '@/components/DedupAuditHistory';
 import { listingPath, propertyListingPath } from '@/lib/listingUrl';
 import type {
   DedupCandidatesResponse,
@@ -198,6 +199,13 @@ export default function Dedup() {
       <AutoDedupToggle />
 
       <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
+
+      <section className="mt-8">
+        <h2 className="text-xs tracking-[0.18em] uppercase text-[var(--color-ink-3)] mb-3">
+          Decision history
+        </h2>
+        <DedupAuditHistory />
+      </section>
 
       <ReviewBacklog
         summary={summaryQ.data?.data}

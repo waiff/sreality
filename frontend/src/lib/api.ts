@@ -654,6 +654,30 @@ export const updateDedupSetting = (
     { method: 'PUT', json: { value } },
   );
 
+// Per-pair decision history (the engine's audit log).
+export type DedupAuditRow = {
+  run_at: string;
+  left_sreality_id: number | null;
+  right_sreality_id: number | null;
+  left_property_id: number | null;
+  right_property_id: number | null;
+  category_main: string | null;
+  stage: string;
+  outcome: 'merged' | 'dismissed' | 'queued' | string;
+  detail: Record<string, unknown> | null;
+};
+
+export const getDedupAudit = (
+  params: { outcome?: string; limit?: number } = {},
+): Promise<{ data: DedupAuditRow[]; total: number; returned: number }> => {
+  const q = new URLSearchParams();
+  if (params.outcome) q.set('outcome', params.outcome);
+  q.set('limit', String(params.limit ?? 100));
+  return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
+    `/dedup/audit?${q.toString()}`,
+  );
+};
+
 export const listAgentTools = (): Promise<{ data: AgentTool[] }> =>
   request<{ data: AgentTool[] }>('/admin/tools');
 
