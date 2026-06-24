@@ -707,6 +707,16 @@ def test_collection_monitor_gates_every_detector_on_monitor_since() -> None:
 
     new_source_sql = next(s for s in inserts if "'new_source'" in s)
     assert "src.first_seen_at > src.monitor_since" in new_source_sql
+    # new_source must NOT use count(DISTINCT ...) OVER (...): Postgres rejects it
+    # (0A000), which threw on every producer run pre-fix. The distinct-source
+    # count is a filtered window count over the rn=1 rows instead.
+    assert "count(DISTINCT" not in new_source_sql
+    assert "count(*) FILTER (WHERE rn = 1)" in new_source_sql
+
+    # reactivated is hardened: the prior 'inactive' dispatch it keys on must
+    # itself postdate monitor_since (no leak off a pre-fix ungated dispatch).
+    reactivated_sql = next(s for s in inserts if "'reactivated'" in s)
+    assert "nd.dispatched_at > m.monitor_since" in reactivated_sql
 
 
 def test_get_unread_count_breaks_down_by_source() -> None:

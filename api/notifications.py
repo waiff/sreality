@@ -1646,10 +1646,10 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
         # 4) reactivated — a property we ALREADY alerted as inactive came back
         # active. The prior 'inactive' dispatch is the durable "was dead" marker
         # (listings.inactive_at is cleared on reactivation, so we can't read it).
-        # No explicit monitor_since gate: it keys on that prior 'inactive'
-        # dispatch, which is itself monitor_since-gated (above), so a
-        # reactivation can only fire for a property that went inactive while
-        # being monitored.
+        # The prior 'inactive' dispatch must itself postdate monitor_since (the
+        # LATERAL ON below), so a reactivation can only fire for a property that
+        # went inactive while being monitored — never off a pre-fix, ungated
+        # 'inactive' dispatch that predates monitoring.
         cur.execute(
             f"WITH {_MONITORED_CTE}, "
             "back AS ("
@@ -1667,6 +1667,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "      AND change_kind = 'inactive' "
             "    ORDER BY dispatched_at DESC LIMIT 1"
             "  ) nd ON p.last_seen_at > nd.dispatched_at "
+            "       AND nd.dispatched_at > m.monitor_since "
             "  WHERE NOT EXISTS ("
             "    SELECT 1 FROM notification_dispatches r "
             "    WHERE r.source_kind = 'collection_monitor' "
@@ -1701,10 +1702,18 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "         l.first_seen_at, "
             "         row_number() OVER (PARTITION BY m.collection_id, l.property_id, l.source "
             "                            ORDER BY l.first_seen_at, l.sreality_id) AS rn, "
-            "         min(l.first_seen_at) OVER (PARTITION BY m.collection_id, l.property_id) AS prop_first, "
-            "         count(DISTINCT l.source) OVER (PARTITION BY m.collection_id, l.property_id) AS n_sources "
+            "         min(l.first_seen_at) OVER (PARTITION BY m.collection_id, l.property_id) AS prop_first "
             "  FROM monitored m "
             "  JOIN listings l ON l.property_id = m.property_id"
+            "), "
+            # count(DISTINCT ...) OVER (...) is unsupported in Postgres; exactly
+            # one row per source has rn=1, so a filtered count over the property
+            # partition IS the distinct-source count.
+            "src_counted AS ("
+            "  SELECT src.*, "
+            "         count(*) FILTER (WHERE rn = 1) "
+            "           OVER (PARTITION BY collection_id, property_id) AS n_sources "
+            "  FROM src"
             ") "
             "INSERT INTO notification_dispatches "
             "  (source_kind, collection_id, property_id, sreality_id, change_kind, "
@@ -1712,7 +1721,7 @@ def match_monitored_collections_once(conn: "psycopg.Connection") -> dict[str, in
             "SELECT 'collection_monitor', src.collection_id, src.property_id, src.sreality_id, "
             "       'new_source', 'sent', src.notify_channels, "
             "       'cm:' || src.collection_id::text || ':new_source:' || src.sreality_id::text "
-            "FROM src "
+            "FROM src_counted src "
             "WHERE src.rn = 1 AND src.n_sources >= 2 "
             "  AND src.first_seen_at > src.prop_first "
             "  AND src.first_seen_at > now() - %(win)s::interval "
