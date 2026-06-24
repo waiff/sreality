@@ -1,9 +1,12 @@
 name: Dedup — CLIP image tagging (sharded)
 
-# Backfills image_clip_tags: the self-hosted CLIP zero-shot tag per stored image
-# (free replacement for the paid room classifier on the coarse dedup-relevant
-# tags, and the FIRST tagger for dum/pozemek/komercni). ACTIVE-listing images
-# first; idempotent + resumable (a tagged image drops out of the next select).
+# Backfills image_clip_tags + image_clip_embeddings: the self-hosted CLIP zero-shot
+# tag per stored image (free replacement for the paid room classifier on the coarse
+# dedup-relevant tags, and the FIRST tagger for dum/pozemek/komercni). Runs GLOBAL
+# full-scale by default (the Středočeský priority drain is complete; pass region_id
+# on dispatch to re-prioritise a kraj). ACTIVE-listing images first; idempotent +
+# resumable (a tagged image drops out of the next select), so once caught up the
+# hourly runs are cheap no-ops that just keep pace with new inflow.
 # Horizontally sharded into 4 parallel jobs (image_id %% 4), each with its own
 # runner + cap, like images.yml. Installs CPU torch + the `clip` extra
 # (transformers); the production CLIP could move to int8-ONNX later as an
@@ -13,7 +16,7 @@ name: Dedup — CLIP image tagging (sharded)
 
 on:
   schedule:
-    - cron: "40 */2 * * *"
+    - cron: "40 * * * *"
   workflow_dispatch:
     inputs:
       limit:
@@ -27,9 +30,9 @@ on:
         default: "16"
         type: string
       region_id:
-        description: Priority kraj id to drain first, then fall through to global ("none" = global only). Default 27 = Středočeský.
+        description: Priority kraj id to drain first, then fall through to global ("none" = global full-scale, the default now that Středočeský is complete).
         required: false
-        default: "27"
+        default: "none"
         type: string
       categories:
         description: Comma category_main list to scope with region_id (e.g. dum,komercni)
@@ -92,7 +95,9 @@ jobs:
       - name: Tag images
         run: |
           ARGS="--limit ${{ inputs.limit || '20000' }} --workers ${{ inputs.workers || '16' }} --shard ${{ matrix.shard }} --shards 4"
-          REGION="${{ inputs.region_id || '27' }}"
+          # 'none' on a schedule trigger (inputs.region_id is empty on non-dispatch
+          # events, so this fallback governs cron) => global full-scale, the default.
+          REGION="${{ inputs.region_id || 'none' }}"
           if [ -n "$REGION" ] && [ "$REGION" != "none" ] && [ "$REGION" != "0" ]; then
             ARGS="$ARGS --region-id $REGION --categories ${{ inputs.categories || 'dum,komercni' }}"
           fi

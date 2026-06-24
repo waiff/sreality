@@ -63,6 +63,15 @@ def get_clip_coverage(
     return dedup.clip_coverage(conn)
 
 
+@router.get("/pipeline-overview")
+def get_pipeline_overview(
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """The top-of-page dedup funnel: per-stage count + last-24h movement."""
+    return dedup.pipeline_overview(conn)
+
+
 @router.get("/decision-images")
 def get_decision_images(
     a: int,
