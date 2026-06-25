@@ -662,10 +662,10 @@ class _Cur:
             self._rows = [(False,)]  # _phash_distinctive_match default (monkeypatch for a match)
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
-        elif "FROM images i WHERE i.sreality_id" in s:
+        elif "FROM images i WHERE i.sreality_id" in s and "storage_path IS NOT NULL" in s:
             self._rows = []  # _floor_plan_image_ids default (no floor plan -> gate passes)
         elif "image_room_classifications" in s:
-            self._rows = [(False,)]  # _both_have_site_plan default
+            self._rows = [(False,)]  # _both_have_site_plan default (CLIP-OR-LLM query)
         elif "UPDATE property_identity_candidates" in s:
             self._conn.resolved.append((s, params))  # reconcile / _resolve_candidates
             self._rows = []

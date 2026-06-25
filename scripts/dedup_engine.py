@@ -422,19 +422,26 @@ def _floor_plan_gate(
 
 
 def _both_have_site_plan(conn: Any, a_id: int, b_id: int) -> bool:
-    """True if BOTH listings already have a classified site/situation plan.
+    """True if BOTH listings carry a site/situation plan (CLIP tag OR LLM
+    classification), so the pHash fast-path defers to the site-plan development
+    guard instead of auto-merging two units of one development.
 
-    The pHash fast-path runs before classify, so it would otherwise bypass the
-    site-plan development guard (rule C, 'different_unit' -> queue). When both sides
-    carry a site plan, defer the pair to the visual stage so that guard adjudicates
-    rather than pHash auto-merging two units of one development.
+    Prefers the full-inventory CLIP image_clip_tags, falling back to the LLM
+    image_room_classifications cache — mirroring _floor_plan_image_ids. The LLM
+    classifier never tagged a single dum/pozemek/komercni site plan, so reading
+    CLIP is what lets this guard fire on house/land developments (where shared
+    masterplans drive most false merges), not just the ~1% of classified flats.
     """
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FILTER (WHERE i.sreality_id = %(a)s) > 0 "
             "   AND count(*) FILTER (WHERE i.sreality_id = %(b)s) > 0 "
-            "FROM images i JOIN image_room_classifications c ON c.image_id = i.id "
-            "WHERE i.sreality_id IN (%(a)s, %(b)s) AND c.room_type = %(sp)s",
+            "FROM images i "
+            "WHERE i.sreality_id IN (%(a)s, %(b)s) AND ("
+            "  EXISTS (SELECT 1 FROM image_clip_tags t "
+            "          WHERE t.image_id = i.id AND t.logical_tag = %(sp)s) "
+            "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
+            "             WHERE c.image_id = i.id AND c.room_type = %(sp)s))",
             {"a": a_id, "b": b_id, "sp": SITE_PLAN_ROOM_TYPE},
         )
         return bool(cur.fetchone()[0])

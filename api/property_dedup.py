@@ -342,17 +342,21 @@ def list_pair_audit(
 def _listing_room_images(
     cur: Any, sreality_id: int, room_type: str | None, n: int,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Images for the deciding room of one listing (joined to the engine-internal
-    room classifications, which anon can't read — hence this server hop), falling back
-    to the listing's first images when the room is unset/unclassified. Returns
-    (images, fallback)."""
+    """Images for the deciding room of one listing (CLIP image_clip_tags OR the
+    LLM image_room_classifications cache — both backend-only, hence this server
+    hop), falling back to the listing's first images when the room is unset /
+    untagged. Prefers CLIP so the photos reflect what the engine actually paired
+    on (the engine runs dedup_prefer_clip_tags). Returns (images, fallback)."""
     if room_type:
         cur.execute(
             "SELECT i.sreality_url, i.storage_path FROM images i "
-            "JOIN image_room_classifications c ON c.image_id = i.id "
-            "WHERE i.sreality_id = %s AND c.room_type = %s "
-            "ORDER BY i.sequence NULLS LAST, i.id LIMIT %s",
-            (sreality_id, room_type, n),
+            "WHERE i.sreality_id = %(sid)s AND ("
+            "  EXISTS (SELECT 1 FROM image_clip_tags t "
+            "          WHERE t.image_id = i.id AND t.logical_tag = %(rt)s) "
+            "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
+            "             WHERE c.image_id = i.id AND c.room_type = %(rt)s)) "
+            "ORDER BY i.sequence NULLS LAST, i.id LIMIT %(n)s",
+            {"sid": sreality_id, "rt": room_type, "n": n},
         )
         rows = cur.fetchall()
         if rows:
