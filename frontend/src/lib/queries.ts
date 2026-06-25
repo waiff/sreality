@@ -610,17 +610,23 @@ export const fetchListingsForMap = async (
   if (pre.empty) return { rows: [], total: 0, capped: false };
   const base = supabase
     .from('properties_public')
-    .select(MAP_COLS, { count: 'exact' })
+    .select(MAP_COLS)
     .not('lat', 'is', null)
     .not('lng', 'is', null);
   const scoped = applyPrefilters(applyFilters(base, f), pre);
-  const { data, count, error } = await scoped.limit(MAP_CAP);
+  const { data, error } = await scoped.limit(MAP_CAP);
   if (error) throw error;
   const rows = (data ?? []) as unknown as MapRow[];
+  /* The cohort total (which also counts coordinate-less listings) comes from
+   * fetchBrowseCount; the map only needs how many points it actually plotted
+   * and whether it hit the cap. Counting the whole cohort here too was a
+   * redundant O(cohort) exact count — the heaviest part of the map fetch,
+   * left over from before fetchBrowseCount existed. `total` is now the
+   * plotted-point count; `capped` is whether more points exist than shown. */
   return {
     rows,
-    total: count ?? null,
-    capped: count != null && count > MAP_CAP,
+    total: rows.length,
+    capped: rows.length >= MAP_CAP,
   };
 };
 

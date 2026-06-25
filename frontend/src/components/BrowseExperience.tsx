@@ -1004,9 +1004,24 @@ function MergeModeBar({
 }
 
 function ErrorBanner({ error }: { error: Error }) {
+  /* A statement-timeout means the current cohort was too broad to page under
+   * the anon 3s budget (e.g. a country-wide map area combined with a sort that
+   * has no serving index, such as price/m²). The data-model fix (migration 239)
+   * makes this rare, but the guard keeps the failure graceful — actionable
+   * guidance instead of the raw Postgres error. */
+  const isTimeout = /statement timeout|57014/i.test(error.message);
   return (
     <div className="mt-4 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)]">
-      <strong className="font-medium">Query failed:</strong> {error.message}
+      {isTimeout ? (
+        <>
+          <strong className="font-medium">This area is too broad to list.</strong>{' '}
+          Zoom the map in or add a filter to narrow the results.
+        </>
+      ) : (
+        <>
+          <strong className="font-medium">Query failed:</strong> {error.message}
+        </>
+      )}
     </div>
   );
 }
