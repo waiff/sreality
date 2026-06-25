@@ -226,6 +226,25 @@ def test_parse_detail_full():
     ]
 
 
+def test_parse_detail_extracts_floor_from_description():
+    # parse_detail feeds the title+description haystack to the shared floor miner;
+    # an explicit unit-floor cue lands as a ground=0 integer (the fixture above has
+    # no floor cue, so listing.floor stays None there — no regression).
+    html = (
+        "<html><body>"
+        '<h1 class="nadpisdetail">Prodám byt 2+kk</h1>'
+        '<div class="popisdetail">Byt se nachází ve 3. patře cihlového domu.</div>'
+        "</body></html>"
+    )
+    listing = parse_detail(
+        html,
+        source_url="https://reality.bazos.cz/inzerat/1/x.php",
+        category_main="byt",
+        category_type="prodej",
+    )
+    assert listing.floor == 3
+
+
 def test_parse_detail_images_are_fullsize_deduped_and_own():
     # bazos detail pages carry the full cover + a thumbnail strip + a "similar ads"
     # footer; store the full-size variant of every OWN photo, never a thumbnail,

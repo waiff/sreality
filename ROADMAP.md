@@ -6,6 +6,30 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Bazos floor — shared `normalize_floor` + deterministic miner (PR2 of the enrichment fix)
+
+bazos apartment `floor` coverage was 0.0% (2/13,976) vs 94–99.9% on every other portal —
+the deterministic `bazos_parser` extracted area/disposition but no floor, leaving the whole
+field to the (de-facto-dead) LLM enrichment. New shared `scraper/floor.py` mirrors
+`scraper/street.py`: one canonical Czech-floor grammar `normalize_floor()` (ground=0:
+přízemí=0, 1.patro=1, 1.NP=0, suterén=−1 — the idnes + LLM-rubric convention; sreality's
+ground=1/NP stays the rule-#15 clash, converting it is a follow-up) plus a HIGH-PRECISION
+free-text miner `floor_from_text()` wired into `bazos_parser.parse_detail` as a deterministic
+first pass (like area/disposition). The miner fires only on explicit numeric cues and
+guards the building-total trap (unit-floor NOUN '6. patře' captured; adjectival
+'šestipodlažní' / 'z celkových N pater' read only as `total_floors`); the ambiguous tail
+(word ordinals, mezonet, bare 'suterén') is left to the LLM. Validated on real data:
+16/16 clauses correct, 0 false positives, ~50% recall at 100% precision. A shared
+`is_plausible_floor()` (reject floor>total_floors / out-of-band) guards BOTH the miner and
+the LLM fill (`columns_from_extraction`), and the enrichment prompt now states floor is the
+unit's storey, never the building total. The LLM enrichment still fills the residual + the
+other 7 gap fields (`floor` stays NULL-guarded → the deterministic value always wins).
+
+- **Next:** route idnes/maxima's extracted floor values through `normalize_floor()` to
+  retire their duplicated regexes; then tighten the dedup engine's `abs(floor diff) ≥ 2`
+  convention tolerance to exact equality once sreality's ground=1 floors are converted +
+  backfilled (its own PR — touches merge behaviour). Sticky-miss cache fix is the next PR.
+
 ### 2026-06: Property identity — category-aware dedup (P0 foundation, landed dark)
 
 The dedup engine keys on `street + disposition`, but `disposition` is an apartment-shaped

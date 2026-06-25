@@ -70,6 +70,26 @@ def test_deterministic_fields_are_not_mapped():
     assert columns_from_extraction(extraction, dict(_EMPTY)) == {}
 
 
+def test_floor_plausibility_guard():
+    # floor above the building's total (both from this extraction) -> dropped,
+    # total kept.
+    out = columns_from_extraction(
+        {"floor": _env(8), "total_floors": _env(5)}, dict(_EMPTY)
+    )
+    assert out == {"total_floors": 5}
+    # total from the already-stored column (e.g. the deterministic parser) guards
+    # an LLM floor too.
+    out = columns_from_extraction({"floor": _env(9)}, dict(_EMPTY, total_floors=4))
+    assert out == {}
+    # an out-of-band floor is dropped.
+    assert columns_from_extraction({"floor": _env(99)}, dict(_EMPTY)) == {}
+    # a plausible floor under the total is kept.
+    out = columns_from_extraction(
+        {"floor": _env(3), "total_floors": _env(6)}, dict(_EMPTY)
+    )
+    assert out == {"floor": 3, "total_floors": 6}
+
+
 def test_normalizers():
     assert _norm_condition("Po rekonstrukci") == "po_rekonstrukci"
     assert _norm_condition("velmi dobrý stav") == "velmi_dobry"
