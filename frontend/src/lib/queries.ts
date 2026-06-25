@@ -1673,6 +1673,7 @@ export interface DedupEngineRun {
   vision_calls: number;
   cost_usd: number;
   auto_dismissed: number;
+  floor_plan_deferred: number;
 }
 
 /* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
@@ -1686,7 +1687,7 @@ export const fetchDedupEngineRuns = async (
     .select(
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
-        'vision_calls,cost_usd,auto_dismissed',
+        'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred',
     )
     .order('started_at', { ascending: false })
     .limit(limit);

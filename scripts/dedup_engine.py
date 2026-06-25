@@ -435,22 +435,27 @@ def _floor_plan_gate(
     conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
 ) -> str:
     """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
-    Returns 'merge' | 'dismiss' | 'queue'. It ONLY adds conservatism:
-      * both sides carry a floor plan -> Sonnet compares them; 'different_layout' ->
-        'dismiss' (the only new auto-dismiss), else 'merge';
-      * exactly one side has a floor plan -> 'queue' (can't compare plan-to-plan);
-      * a both-plan pair we cannot validate (no fn / no budget / error) -> 'queue'
-        rather than merge unchecked;
+    Returns 'merge' | 'dismiss' | 'queue' | 'defer'. It only adds conservatism, and
+    crucially distinguishes "a human must decide" (queue) from "validate it later"
+    (defer):
+      * both sides carry a floor plan + a Sonnet verdict is available -> the verdict
+        decides: 'different_layout' -> 'dismiss', else (same_layout / inconclusive) ->
+        'merge' (auto-confirm — the verdict already weighs layout + the OCR'd
+        unit/area/floor labels);
+      * both sides carry a plan but the verdict isn't available yet (no fn / no budget /
+        cache-miss) -> 'defer': skip this run and re-try next, once the batch lane warms
+        the verdict — NOT the operator queue (this pair is automatable, not a human call);
+      * exactly ONE side has a plan -> 'queue' (manual review: no plan-to-plan compare);
       * neither side has a plan -> 'merge' (existing path unchanged).
     """
     ids_a = _floor_plan_image_ids(conn, a_id)
     ids_b = _floor_plan_image_ids(conn, b_id)
     if ids_a and ids_b:
         if floor_plan_fn is None or vision_budget[0] <= 0:
-            return "queue"
+            return "defer"
         res = floor_plan_fn(a_id, b_id, ids_a, ids_b)
         if res is None:
-            return "queue"
+            return "defer"
         if not res.get("cache_hit"):
             vision_budget[0] -= 1
         return "dismiss" if res.get("verdict") == "different_layout" else "merge"
@@ -611,9 +616,10 @@ def _resolve_visual(
         room_rationales[room] = last_rationale
         room_cos[room] = cos
         if verdict_is_merge(last_verdict):
-            # Floor-plan validation gate (migration 234): even a High forensic verdict
-            # is overridden by a different floor plan (dismiss) or a one-sided plan
-            # (queue). Same/inconclusive/none -> the auto-merge stands.
+            # Floor-plan validation gate (migration 234): a different floor plan overrides
+            # even a High forensic verdict (dismiss); a one-sided plan -> manual queue; an
+            # unwarmed both-plan verdict -> defer (re-try next run once the batch warms it,
+            # NOT queue). same/inconclusive/none -> the auto-merge stands.
             fp = _floor_plan_gate(
                 conn, a.sreality_id, b.sreality_id,
                 floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
@@ -625,6 +631,8 @@ def _resolve_visual(
                 return {**base, "action": "dismiss", "reason": "floor_plan_different_layout"}
             if fp == "queue":
                 return {**base, "action": "queue", "reason": "floor_plan_review"}
+            if fp == "defer":
+                return {**base, "action": "defer", "reason": "floor_plan_pending"}
             return {**base, "action": "auto_merge", "reason": "visual_match"}
 
     # No High on any COMPARED room. Only auto-dismiss when EVERY common room produced
@@ -809,6 +817,7 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
+        "floor_plan_deferred": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
     })
@@ -939,8 +948,9 @@ def run_engine(
                         stats["queued"] += 1
                         continue
                     # Floor-plan validation gate (migration 234): a different floor plan
-                    # DISMISSES, a one-sided floor plan QUEUES; otherwise the pHash merge
-                    # proceeds. Only ever adds conservatism — never a new merge.
+                    # DISMISSES, a one-sided plan goes to MANUAL queue, an unwarmed both-plan
+                    # verdict DEFERS (skip, re-try next run once the batch warms it — never
+                    # the manual queue); otherwise the pHash merge proceeds.
                     fp = _floor_plan_gate(
                         conn, a.sreality_id, b.sreality_id,
                         floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
@@ -957,6 +967,9 @@ def run_engine(
                                 **factors, "tier": "street_disposition",
                                 "reason": "floor_plan_review", "confidence": 0.6})
                         stats["queued"] += 1
+                        continue
+                    if fp == "defer":
+                        stats["floor_plan_deferred"] += 1
                         continue
                     mg = None if dry_run else _merge_pair(
                         conn, a, b, "image_phash",
@@ -1030,6 +1043,10 @@ def run_engine(
                     stats["auto_dismissed"] += 1
                     dismissed_pairs.add(cp)
                     _audit(audit, a, b, "visual", "dismissed", factors, source="engine")
+                elif outcome["action"] == "defer":
+                    # Floor-plan verdict not warmed yet -> skip, re-try next run (the
+                    # batch lane warms it). NOT the manual queue.
+                    stats["floor_plan_deferred"] += 1
                 elif enqueue_unresolved:
                     if not dry_run:
                         _enqueue_candidate(conn, a, b, markers)
@@ -1228,6 +1245,25 @@ def _build_floor_plan_fn(conn: Any) -> Any:
     return _fn
 
 
+def _build_cache_only_floor_plan_fn(conn: Any) -> Any:
+    """A $0 floor_plan_fn that ONLY reads the batch-warmed verdict cache (never the LLM),
+    so even the FREE scheduled run can apply the floor-plan gate on warmed verdicts and
+    DEFER the rest — the same warm-then-consume pattern as the other vision tools, light
+    enough for the free run (a single app_settings read, no provider). The model MUST be
+    resolved via the SAME `LLMClient.resolve_model` the batch warm-up (submit_dedup_batch
+    `_warm_floor_plan`) and the live `_build_floor_plan_fn` use — the verdict cache is keyed
+    on the model string, so any divergence here would permanently cache-miss the free run
+    (defer forever). `LLMClient(conn)` needs no providers for a pure resolve_model read."""
+    from api.llm_client import LLMClient
+    from toolkit.visual_match import cached_floor_plan_verdict
+    model = LLMClient(conn).resolve_model("llm_floor_plan_match_model")
+
+    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        v = cached_floor_plan_verdict(conn, sreality_id_a=a, sreality_id_b=b, model=model)
+        return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
+    return _fn
+
+
 def _build_cache_only_fns(
     conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
     clip_counter: list[int] | None = None,
@@ -1359,11 +1395,12 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
             INSERT INTO dedup_engine_runs (
                 ended_at, eligible, flagged_location, flagged_disposition,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
-                queued, vision_calls, auto_dismissed,
+                queued, vision_calls, auto_dismissed, floor_plan_deferred,
                 clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet
             ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
                 %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s,
+                %(floor_plan_deferred)s,
                 %(clip_classified)s, %(clip_cosine_calls)s, %(routed_haiku)s,
                 %(routed_sonnet)s)
             """,
@@ -1461,9 +1498,12 @@ def main() -> int:
             site_plan_fn = None
             floor_plan_fn = None
             if args.free:
-                # FREE mode: no vision fns at all -> pHash / rule-B / reconcile /
-                # reject-gate only ($0); un-vision'd pairs are skipped, not queued.
-                pass
+                # FREE mode: no PAID vision -> pHash / rule-B / reconcile / reject-gate
+                # only. It DOES get a $0 cache-only floor_plan_fn so the floor-plan gate
+                # on the pHash fast-path consumes batch-warmed verdicts (confirm/dismiss)
+                # and DEFERS the rest — instead of dumping every both-floor-plan pHash
+                # match into the manual queue.
+                floor_plan_fn = _build_cache_only_floor_plan_fn(conn)
             elif auto_merge_enabled and args.cache_only:
                 # Cost-efficient consume: read warm caches only, never call the LLM.
                 classify_fn, compare_fn, site_plan_fn, floor_plan_fn = _build_cache_only_fns(
@@ -1523,11 +1563,13 @@ def main() -> int:
                 _write_pair_audit(conn, run_at, pair_audit)
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
-                "auto_dismissed=%d reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
+                "auto_dismissed=%d floor_plan_deferred=%d reconciled=%d queued=%d "
+                "skipped_unresolved=%d rejected=%d "
                 "skipped_same_source=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 stats["eligible"], stats["auto_address"], stats["auto_phash"],
-                stats["auto_visual"], stats["auto_dismissed"], stats["reconciled"],
+                stats["auto_visual"], stats["auto_dismissed"],
+                stats.get("floor_plan_deferred", 0), stats["reconciled"],
                 stats["queued"], stats["skipped_unresolved"], stats["rejected"],
                 stats.get("skipped_same_source", 0),
                 stats["pairs_considered"], stats["vision_calls"],
