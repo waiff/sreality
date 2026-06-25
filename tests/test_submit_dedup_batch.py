@@ -101,7 +101,7 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
     monkeypatch.setattr(sub, "_load_eligible", lambda conn: list(keys))
-    monkeypatch.setattr(sub, "_phash_identical_pairs", lambda conn, a, b: phash)
+    monkeypatch.setattr(sub, "_phash_identical_pairs", lambda conn, a, b, excluded_tags=(): phash)
     monkeypatch.setattr(sub, "_both_have_site_plan", lambda conn, a, b: both_site_plan)
     monkeypatch.setattr(sub, "_in_flight_custom_ids", lambda conn: set(in_flight or set()))
     monkeypatch.setattr(

@@ -549,8 +549,14 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     so it stays matchable; gating the scan on `is_active` would orphan that history. **(B)** same street + house
     number + disposition + floor → auto-merge, with a 5% area guard that demotes
     mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
-    a >20%-area / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
-    that doesn't share street + disposition, AND no **same-development guard** fires. (Floor is a
+    an **area-gap** / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
+    that doesn't share street + disposition, AND no **same-development guard** fires. The area-gap
+    reject is **per-category** (`MatchProfile.candidate_area_max_pct`): **10% for byt**, 20% for
+    single-dwelling families (house/land/commercial, whose cross-portal built-up-vs-usable-vs-plot
+    area varies more). The tighter byt gate is the "Rezidence Na Bradle" fix — units one area-band
+    apart (73→87 = 16%, 87→99 = 12%) used to each slip under 20% and then chain-merge via transitivity
+    once pHash matched their shared renders; the 10% reject now hard-stops them *before* the pHash
+    fast-path. (Floor is a
     SOFT cross-portal signal — idnes counts the ground floor as 0 (patro), sreality as 1 (NP), so the
     same flat reads one floor apart on the two portals, and sreality is itself lister-inconsistent;
     a gap of exactly 1 is convention noise that falls through to the visual layer, only a gap of 2+
@@ -566,15 +572,21 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     whether they highlight the SAME unit — a `different_unit` verdict **queues** the pair
     for the operator (never auto-merges, never auto-rejects — the conservative choice).
     **pHash fast-path (FREE, runs FIRST — before classify, all sources).** `_phash_identical_pairs`:
-    ≥2 near-identical image pairs (`PHASH_MIN_IDENTICAL_PAIRS`, any image, Hamming ≤6) → auto-merge
+    ≥2 near-identical image pairs (`PHASH_MIN_IDENTICAL_PAIRS`, Hamming ≤6) → auto-merge
     with NO LLM. Runs before the cross-source gate, so identical-photo re-posts merge for free —
     including SAME-source ones the gate would otherwise drop (a price-history/recall win) — and
-    cross-posted cross-source pairs skip classify AND compare. The raw any-image **count** is the
+    cross-posted cross-source pairs skip classify AND compare. The **count** is the
     safety bar (a development sharing one stock facade/plan gives 1 match; an actual re-post shares
-    many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. To preserve the site-plan
-    development guard (which is post-classify), the fast-path **defers** (falls through to the visual
-    stage) when both listings already carry a classified `site_plan` (`_both_have_site_plan`). This
-    REPLACES the old interior-gated fast-path that needed classify first. NOTE: pHash only catches
+    many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. **For byt the count excludes
+    KNOWN-exterior / shared-marketing images** (`phash_excluded_tags_for` → `NON_INTERIOR_TAGS`:
+    exterior_facade / balcony_terrace / garden / site_plan / floor_plan, sourced from CLIP
+    `image_clip_tags`) — a development reuses the same facade/plan/render across its units, so those
+    images carry no unit identity and must not feed the byt fast-path; other categories count any
+    image (exterior IS a house/plot's identity). Untagged images still count, so byt recall holds for
+    the not-yet-CLIP-tagged majority and tightens toward interior-only as coverage fills in (the count
+    bar + the 10% area reject above are the other two rails). To preserve the site-plan development
+    guard (which is post-classify), the fast-path **defers** (falls through to the visual
+    stage) when both listings already carry a classified `site_plan` (`_both_have_site_plan`). NOTE: pHash only catches
     listings that SHARE photos — most cross-source dups have DIFFERENT photos (different portals), so
     pHash resolves a minority; the forensic compare below is still needed for the rest. (pHash
     coverage on the `images` table must keep up — `compute_image_phash.yml` — or the fast-path
@@ -587,7 +599,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     **(D)** forensic visual confirmation (cross-source, the pair reached here only because pHash did
     NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
     forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
-    priority order, stop at the first **High** verdict → auto-merge. **(E)**
+    priority order (`rooms_in_priority(common, category_main)` → `room_priority_for`), stop at the
+    first **High** verdict → auto-merge. **For byt the compared rooms — and the CLIP cosine tier
+    below — are INTERIOR only** (`BYT_ROOM_PRIORITY`: kitchen, bathroom, toilet, living_room, bedroom,
+    hallway); exterior_facade / balcony_terrace / garden are dropped, so a shared facade render can't
+    produce the auto-merging High verdict. Other categories keep the full `ROOM_PRIORITY`. **(E)**
     everything else queues on the operator's `/dedup` review page.
     **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
     zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by

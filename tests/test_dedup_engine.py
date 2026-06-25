@@ -15,6 +15,7 @@ import pytest
 
 from toolkit.dedup_engine import (
     ADDRESS_AREA_GUARD_PCT,
+    BYT_CANDIDATE_AREA_MAX_PCT,
     CANDIDATE_AREA_MAX_PCT,
     CosineBands,
     ListingKey,
@@ -26,7 +27,9 @@ from toolkit.dedup_engine import (
     disposition_compatible,
     geo_cell_key,
     normalize_street,
+    phash_excluded_tags_for,
     profile_for,
+    room_priority_for,
     rooms_in_priority,
     route_by_cosine,
     street_group_keys,
@@ -156,8 +159,9 @@ def test_exact_address_works_same_source() -> None:
 
 
 def test_exact_address_area_guard_demotes_to_candidate() -> None:
-    # same street+no+disp+floor but areas 60 vs 70 (>5%) -> visual, not blind merge
-    d = classify_pair(_key(1, area=60.0), _key(2, area=70.0))
+    # same street+no+disp+floor, areas 60 vs 65 (7.7%: >5% guard, <10% byt reject)
+    # -> visual, not blind merge (and not a hard area_contradiction reject either).
+    d = classify_pair(_key(1, area=60.0), _key(2, area=65.0))
     assert d.action == "candidate"
     assert d.reason == "area_guard"
 
@@ -196,10 +200,27 @@ def test_floor_gap_of_two_still_rejects() -> None:
     assert d.detail == "floor_contradiction"
 
 
-def test_area_contradiction_rejects_beyond_20pct() -> None:
+def test_area_contradiction_rejects_large_gap() -> None:
     d = classify_pair(_key(1, hn=None, area=50.0), _key(2, hn=None, area=80.0))
     assert d.action == "reject"
     assert d.detail == "area_contradiction"
+
+
+def test_byt_area_gap_over_10pct_rejects() -> None:
+    # The "Rezidence Na Bradle" fix: byt units one area-band apart (73 vs 87 = 16%,
+    # 87 vs 99 = 12%) are now a hard reject before pHash, so shared renders can't
+    # chain-merge them. 60 vs 70 = 14.3% > 10%.
+    d = classify_pair(_key(1, hn=None, area=60.0), _key(2, hn=None, area=70.0))
+    assert d.action == "reject"
+    assert d.detail == "area_contradiction"
+
+
+def test_byt_area_gate_is_tighter_than_single_dwelling() -> None:
+    # byt rejects at 10%; houses/land/commercial keep the looser 20% (cross-portal
+    # built-up vs usable vs plot area varies more there).
+    assert profile_for("byt").candidate_area_max_pct == 0.10
+    for fam in ("dum", "pozemek", "komercni", "ostatni"):
+        assert profile_for(fam).candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT == 0.20, fam
 
 
 def test_house_number_contradiction_rejects() -> None:
@@ -354,14 +375,14 @@ def test_profile_for_null_or_unknown_is_byt() -> None:
     assert profile_for("garaz").family == "byt"
 
 
-def test_byt_profile_reproduces_legacy_constants() -> None:
-    # The byt profile IS today's behavior: same area guards, disposition mandatory,
-    # street-blocked (not geo), never geo-auto-merges. This is why landing the
-    # abstraction is byte-identical for apartments (and NULL-category rows).
+def test_byt_profile_constants() -> None:
+    # The byt profile: disposition mandatory, street-blocked (not geo), never
+    # geo-auto-merges. Its candidate area gap is TIGHTER than the single-dwelling 20%
+    # (10%) — a development stacks near-identical units that a 20% gate let chain-merge.
     byt = profile_for("byt")
     assert byt.disposition_required is True
     assert byt.address_area_guard_pct == ADDRESS_AREA_GUARD_PCT
-    assert byt.candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT
+    assert byt.candidate_area_max_pct == BYT_CANDIDATE_AREA_MAX_PCT == 0.10
     assert byt.geo_blocked is False
     assert byt.geo_auto_merge_allowed is False
 
@@ -558,8 +579,40 @@ def test_phash_fastpath_needs_two_identical_pairs() -> None:
 
 def test_rooms_in_priority_orders_and_filters() -> None:
     common = {"bedroom", "kitchen", "bathroom", "floor_plan"}
-    # floor_plan is not in ROOM_PRIORITY -> excluded; kitchen before bathroom before bedroom
+    # floor_plan is not a comparison room -> excluded; kitchen before bathroom before bedroom
     assert rooms_in_priority(common) == ["kitchen", "bathroom", "bedroom"]
+
+
+def test_rooms_in_priority_byt_excludes_exterior() -> None:
+    # byt (default / explicit) compares INTERIOR rooms only — exterior_facade,
+    # balcony_terrace and garden are dropped however the pair shares them.
+    common = {"kitchen", "exterior_facade", "balcony_terrace", "garden", "bedroom"}
+    assert rooms_in_priority(common, "byt") == ["kitchen", "bedroom"]
+    assert rooms_in_priority(common) == ["kitchen", "bedroom"]  # default == byt
+
+
+def test_rooms_in_priority_house_keeps_exterior() -> None:
+    # Houses may use exterior — it is part of the property's identity there.
+    common = {"kitchen", "exterior_facade", "bedroom"}
+    assert "exterior_facade" in rooms_in_priority(common, "dum")
+
+
+def test_room_priority_for_by_category() -> None:
+    assert room_priority_for("byt")[0] == "kitchen"
+    assert "exterior_facade" not in room_priority_for("byt")
+    assert room_priority_for(None) == room_priority_for("byt")  # NULL -> apartment
+    assert "exterior_facade" in room_priority_for("dum")
+
+
+def test_phash_excluded_tags_for_by_category() -> None:
+    # byt disqualifies known-exterior/shared images from the pHash count; other
+    # categories exclude nothing (any image can carry their identity).
+    excl = phash_excluded_tags_for("byt")
+    assert "exterior_facade" in excl and "site_plan" in excl and "floor_plan" in excl
+    assert "kitchen" not in excl and "bathroom" not in excl
+    assert phash_excluded_tags_for(None) == excl  # NULL -> apartment
+    assert phash_excluded_tags_for("dum") == ()
+    assert phash_excluded_tags_for("pozemek") == ()
 
 
 def test_verdict_gate_high_only() -> None:

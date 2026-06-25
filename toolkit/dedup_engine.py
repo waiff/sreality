@@ -36,8 +36,16 @@ from toolkit.comparables import _DISPOSITION_LOOSE
 
 # Rule B: exact-address merge is blocked when areas disagree by more than this.
 ADDRESS_AREA_GUARD_PCT = 0.05
-# Rule C disqualifier: a >20% area gap means "not the same property".
+# Rule C disqualifier: an area gap this large means "not the same property" — a HARD
+# reject on BOTH the exact-address and candidate paths. Apartments are tighter (10%):
+# one development stacks near-identical units differing mainly in area, and the loose
+# 20% gate let 73/87/99 m2 units of "Rezidence Na Bradle" chain-merge via transitivity
+# (73->87 = 16%, 87->99 = 12% each slipped under 20%, then pHash on shared renders
+# auto-merged the bands into one property). Houses / land / commercial keep 20% — their
+# cross-portal area (built-up vs usable vs plot) varies more, so 10% would reject true
+# matches there.
 CANDIDATE_AREA_MAX_PCT = 0.20
+BYT_CANDIDATE_AREA_MAX_PCT = 0.10
 # pHash fast-path: an image pair this close (Hamming) counts as identical.
 PHASH_IDENTICAL_MAX = 6
 # pHash fast-path: need at least this many identical image pairs (any image) to
@@ -52,6 +60,26 @@ PHASH_MIN_IDENTICAL_PAIRS = 2
 ROOM_PRIORITY: tuple[str, ...] = (
     "kitchen", "bathroom", "toilet", "living_room", "hallway",
     "balcony_terrace", "garden", "exterior_facade", "bedroom",
+)
+
+# Apartments compare INTERIOR images ONLY. A development reuses the SAME exterior /
+# garden / site-plan / floor-plan marketing shots (and renders) across its units, so
+# those images carry zero unit identity for a byt — they defeated the pHash count
+# fast-path on "Rezidence Na Bradle". Only a unit's own interior photos disambiguate it.
+# Priority is the operator's order: distinctive wet rooms first, generic sleeping then
+# shared hallway last. Other categories (house/land/commercial) may use exterior, where
+# it IS the property's identity.
+BYT_ROOM_PRIORITY: tuple[str, ...] = (
+    "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
+)
+INTERIOR_ROOMS: frozenset[str] = frozenset(BYT_ROOM_PRIORITY)
+# Image tags (CLIP `image_clip_tags.logical_tag` / classifier room_type) that mark a
+# SHARED-marketing / exterior image. For byt these NEVER feed a pHash or cosine merge
+# signal. Untagged / 'other' are deliberately NOT here: only KNOWN-exterior images are
+# disqualified, so pHash recall holds for the untagged majority and tightens toward
+# interior-only as CLIP coverage fills in.
+NON_INTERIOR_TAGS: tuple[str, ...] = (
+    "exterior_facade", "balcony_terrace", "garden", "site_plan", "floor_plan",
 )
 
 
@@ -85,7 +113,7 @@ class MatchProfile:
 _BYT_PROFILE = MatchProfile(
     family="byt", disposition_required=True,
     address_area_guard_pct=ADDRESS_AREA_GUARD_PCT,
-    candidate_area_max_pct=CANDIDATE_AREA_MAX_PCT,
+    candidate_area_max_pct=BYT_CANDIDATE_AREA_MAX_PCT,
     geo_blocked=False, geo_auto_merge_allowed=False, requires_development_guard=False,
 )
 # Houses: one dwelling per address, so coord + area (+ house number / price) identifies
@@ -129,6 +157,19 @@ def profile_for(category_main: str | None) -> MatchProfile:
     """The MatchProfile for a category. Unknown / NULL → the byt profile, so a row
     with no category behaves exactly as the street+disposition engine always has."""
     return _PROFILES.get(category_main or "", _BYT_PROFILE)
+
+
+def room_priority_for(category_main: str | None) -> tuple[str, ...]:
+    """Comparison room order for a category's image layers. Apartments (the byt profile,
+    incl. NULL/unknown) use INTERIOR rooms only; other categories may use exterior."""
+    return BYT_ROOM_PRIORITY if profile_for(category_main).family == "byt" else ROOM_PRIORITY
+
+
+def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
+    """Image tags that disqualify a pHash pair for this category. Apartments exclude
+    KNOWN-exterior / shared-marketing images (NON_INTERIOR_TAGS); other categories
+    exclude nothing (any image can carry a house/plot's identity)."""
+    return NON_INTERIOR_TAGS if profile_for(category_main).family == "byt" else ()
 
 
 @dataclass(frozen=True)
@@ -543,14 +584,18 @@ class VisualOutcome:
     rooms_tried: list[str] = field(default_factory=list)
 
 
-def decide_phash_fastpath(identical_interior_pairs: int) -> bool:
-    """pHash fast-path: >=2 near-identical image pairs (any image) => same property."""
-    return identical_interior_pairs >= PHASH_MIN_IDENTICAL_PAIRS
+def decide_phash_fastpath(identical_image_pairs: int) -> bool:
+    """pHash fast-path: >=2 near-identical image pairs => same property. For byt the
+    count is taken over interior/unknown images only (known-exterior excluded upstream
+    via phash_excluded_tags_for); other categories count any image."""
+    return identical_image_pairs >= PHASH_MIN_IDENTICAL_PAIRS
 
 
-def rooms_in_priority(common_rooms: set[str]) -> list[str]:
-    """The room types present in BOTH listings, in comparison priority order."""
-    return [r for r in ROOM_PRIORITY if r in common_rooms]
+def rooms_in_priority(common_rooms: set[str], category_main: str | None = None) -> list[str]:
+    """The room types present in BOTH listings, in comparison priority order for the
+    category. Apartments (default / NULL) compare INTERIOR rooms only; other categories
+    may compare exterior rooms too."""
+    return [r for r in room_priority_for(category_main) if r in common_rooms]
 
 
 def verdict_is_merge(verdict: str | None) -> bool:

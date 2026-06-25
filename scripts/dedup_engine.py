@@ -56,6 +56,7 @@ from toolkit.dedup_engine import (
     decide_phash_fastpath,
     decide_visual_dismiss,
     geo_cell_key,
+    phash_excluded_tags_for,
     profile_for,
     rooms_in_priority,
     route_by_cosine,
@@ -319,22 +320,37 @@ def _load_geo_eligible(conn: Any) -> list[ListingKey]:
     return keys
 
 
-def _phash_identical_pairs(conn: Any, a_id: int, b_id: int) -> int:
-    """Count near-identical image pairs (Hamming <= PHASH_IDENTICAL_MAX) across ALL
-    stored images of the two listings — no classify needed, so this runs BEFORE the
-    LLM stage. A development sharing one stock facade/plan yields 1 such pair; an
-    actual re-post of the same listing shares many. The PHASH_MIN_IDENTICAL_PAIRS
-    count threshold is what separates them (validated against the dismissed-pairs set),
-    which is why this can drop the old interior-only gate (which needed the classifier).
+def _phash_identical_pairs(
+    conn: Any, a_id: int, b_id: int, excluded_tags: tuple[str, ...] = ()
+) -> int:
+    """Count near-identical image pairs (Hamming <= PHASH_IDENTICAL_MAX) across the two
+    listings' stored images — no classify needed, so this runs BEFORE the LLM stage. A
+    development sharing one stock facade/plan yields 1 such pair; an actual re-post of the
+    same listing shares many; the PHASH_MIN_IDENTICAL_PAIRS count threshold separates them.
+
+    `excluded_tags` (byt: NON_INTERIOR_TAGS) drops any pair touching a KNOWN-exterior /
+    shared-marketing image, sourced from CLIP `image_clip_tags` — so a reused facade /
+    site-plan / render never feeds the byt fast-path. Untagged images still count, so
+    recall holds for the not-yet-tagged majority and tightens toward interior-only as CLIP
+    coverage fills in. Empty (non-byt) -> count any image, unchanged.
     """
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT count(*) FROM images ia JOIN images ib ON true "
-            "WHERE ia.sreality_id = %s AND ib.sreality_id = %s "
-            "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
-            "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %s",
-            (a_id, b_id, PHASH_IDENTICAL_MAX),
+    sql = (
+        "SELECT count(*) FROM images ia JOIN images ib ON true "
+        "WHERE ia.sreality_id = %(a)s AND ib.sreality_id = %(b)s "
+        "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
+        "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
+    )
+    params: dict[str, Any] = {"a": a_id, "b": b_id, "max": PHASH_IDENTICAL_MAX}
+    if excluded_tags:
+        sql += (
+            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
+            "   WHERE t.image_id = ia.id AND t.logical_tag = ANY(%(excl)s))"
+            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
+            "   WHERE t.image_id = ib.id AND t.logical_tag = ANY(%(excl)s))"
         )
+        params["excl"] = list(excluded_tags)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
         return int(cur.fetchone()[0])
 
 
@@ -428,7 +444,7 @@ def _resolve_visual(
     by_room_a = _group_ids_by_room(imgs_a)
     by_room_b = _group_ids_by_room(imgs_b)
 
-    priority = rooms_in_priority(common)
+    priority = rooms_in_priority(common, a.category_main)
     tried = 0
     last_verdict = None
     last_rationale = None
@@ -488,7 +504,7 @@ def _resolve_visual(
     all_rooms_verdicted = len(room_verdicts) == len(priority)
     if autodismiss and all_rooms_verdicted and decide_visual_dismiss(room_verdicts):
         room = next(
-            (r for r in rooms_in_priority(set(room_verdicts))
+            (r for r in rooms_in_priority(set(room_verdicts), a.category_main)
              if room_verdicts[r] == "Low"),
             None,
         )
@@ -753,14 +769,18 @@ def run_engine(
                     continue
 
                 # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw
-                # photo match (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over any
-                # images) is a same-property signal that needs no LLM. The pair already
+                # photo match (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the
+                # listings' images) is a same-property signal that needs no LLM. The pair already
                 # passed rule C (no house#/floor/area/unit-token contradiction), so a
                 # match here auto-merges. Runs before the cross-source gate so identical-
                 # photo re-posts (incl. same-source, which the gate would otherwise drop)
                 # merge for free — and cross-posted cross-source pairs skip classify AND
-                # compare. (Replaces the old interior-gated fast-path that needed classify.)
-                phash_pairs = _phash_identical_pairs(conn, a.sreality_id, b.sreality_id)
+                # compare. For byt, known-exterior/shared images are excluded from the
+                # count (phash_excluded_tags_for) so a development's reused renders can't
+                # reach the >=2 threshold; other categories count any image.
+                phash_pairs = _phash_identical_pairs(
+                    conn, a.sreality_id, b.sreality_id,
+                    phash_excluded_tags_for(a.category_main))
                 if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):

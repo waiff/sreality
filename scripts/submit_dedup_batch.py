@@ -52,7 +52,12 @@ from scripts.dedup_engine import (
     _phash_identical_pairs,
 )
 from scripts.submit_condition_batch import should_flush
-from toolkit.dedup_engine import classify_pair, decide_phash_fastpath, rooms_in_priority
+from toolkit.dedup_engine import (
+    classify_pair,
+    decide_phash_fastpath,
+    phash_excluded_tags_for,
+    rooms_in_priority,
+)
 from toolkit.image_classification import (
     DEFAULT_CLASSIFY_N_IMAGES,
     SITE_PLAN_ROOM_TYPE,
@@ -244,8 +249,12 @@ def collect(
                     continue
 
                 # pHash fast-path — replay merges for free (unless both site_plan,
-                # which defers to the development guard below).
-                phash_pairs = _phash_identical_pairs(conn, a.sreality_id, b.sreality_id)
+                # which defers to the development guard below). Byt excludes known-
+                # exterior images (mirrors run_engine), so the warm-up funnel and the
+                # daily engine agree on which byt pairs the fast-path resolves.
+                phash_pairs = _phash_identical_pairs(
+                    conn, a.sreality_id, b.sreality_id,
+                    phash_excluded_tags_for(a.category_main))
                 if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
@@ -331,7 +340,7 @@ def _collect_visual(
     # at the first High, so warming this priority-ordered prefix is the recall-safe
     # superset (whatever room replay stops at is among these and is warm).
     common = set(rooms_a) & set(rooms_b)
-    for room in rooms_in_priority(common)[:max_room_attempts]:
+    for room in rooms_in_priority(common, a.category_main)[:max_room_attempts]:
         if s.exhausted:
             break
         if cached_visual_verdict(
