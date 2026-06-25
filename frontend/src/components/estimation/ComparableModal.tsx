@@ -10,6 +10,7 @@ import {
 import type { ImagePublic, ListingPublic, ListingSummaryBody } from '@/lib/types';
 import { listingKindLabel } from '@/lib/enums';
 import { imageSrc } from '@/lib/imageUrl';
+import ImageTagBadge from '@/components/ImageTagBadge';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { listingPath } from '@/lib/listingUrl';
 
@@ -203,13 +204,20 @@ function CarouselImage({ img, dim }: { img: ImagePublic; dim: string }) {
   const [errored, setErrored] = useState(false);
   if (errored) return <BrokenPlaceholder />;
   return (
-    <img
-      key={img.id}
-      src={imageSrc(img)}
-      alt=""
-      onError={() => setErrored(true)}
-      className={['w-full h-full object-cover', dim].join(' ')}
-    />
+    <>
+      <img
+        key={img.id}
+        src={imageSrc(img)}
+        alt=""
+        onError={() => setErrored(true)}
+        className={['w-full h-full object-cover', dim].join(' ')}
+      />
+      <ImageTagBadge
+        tag={img.clip_fine_tag}
+        confidence={img.clip_confidence}
+        className="absolute bottom-1 left-1 z-[1] max-w-[calc(100%-0.5rem)] truncate"
+      />
+    </>
   );
 }
 

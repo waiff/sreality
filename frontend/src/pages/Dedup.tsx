@@ -34,6 +34,7 @@ import {
   type ListingDetailLite,
 } from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
+import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
@@ -884,9 +885,13 @@ function Section({
   );
 }
 
-function urlsFor(side: DedupPropertySide, imagesMap: ImagesMap): string[] {
+function imagesFor(side: DedupPropertySide, imagesMap: ImagesMap): TaggedImageUrl[] {
   if (side.sreality_id == null) return [];
-  return (imagesMap.get(side.sreality_id) ?? []).map(imageSrc);
+  return (imagesMap.get(side.sreality_id) ?? []).map((im) => ({
+    url: imageSrc(im),
+    tag: im.clip_fine_tag,
+    confidence: im.clip_confidence,
+  }));
 }
 
 /* One review card per CLUSTER — N member columns (not always two). Each member
@@ -988,7 +993,7 @@ function ClusterCard({
                 <td key={side.property_id} className="align-top px-1 pb-2">
                   <PropertyPanel
                     side={side}
-                    urls={urlsFor(side, imagesMap)}
+                    images={imagesFor(side, imagesMap)}
                     sources={sourcesMap.get(side.property_id) ?? []}
                     detailMap={detailMap}
                     checked={checked.has(side.property_id)}
@@ -1045,14 +1050,14 @@ function ClusterCard({
 
 function PropertyPanel({
   side,
-  urls,
+  images,
   sources,
   detailMap,
   checked,
   onToggle,
 }: {
   side: DedupPropertySide;
-  urls: string[];
+  images: TaggedImageUrl[];
   sources: PropertySource[];
   detailMap: DetailMap;
   checked: boolean;
@@ -1062,7 +1067,7 @@ function PropertyPanel({
   return (
     <div className={`rounded-[var(--radius-sm)] border ${ring} bg-[var(--color-paper)] p-3`}>
       <ImageCarousel
-        urls={urls}
+        images={images}
         className="rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)] mb-2"
       >
         {/* Top-right selection checkbox — tick ≥2 in a cluster to merge only
