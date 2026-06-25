@@ -681,6 +681,7 @@ export const getDedupAudit = (
     factor_min?: number;
     factor_max?: number;
     verdict?: string; // High | Medium | Low
+    property_id?: number; // scope to one property's merge decisions
     limit?: number;
     offset?: number;
   } = {},
@@ -694,6 +695,7 @@ export const getDedupAudit = (
   if (params.factor_min != null) q.set('factor_min', String(params.factor_min));
   if (params.factor_max != null) q.set('factor_max', String(params.factor_max));
   if (params.verdict) q.set('verdict', params.verdict);
+  if (params.property_id != null) q.set('property_id', String(params.property_id));
   q.set('limit', String(params.limit ?? 100));
   if (params.offset) q.set('offset', String(params.offset));
   return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
