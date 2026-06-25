@@ -60,8 +60,10 @@ jobs:
           pip install -e ".[clip]"
 
       - name: Validate render detection
+        # Use the --opt=value form: the listing ids are often negative (idnes/bazos),
+        # and argparse would read a leading '-' value as a flag in the space form.
         run: |
           python -m scripts.validate_render_detection \
-            --sreality-ids "${{ inputs.sreality_ids }}" \
-            --control-sreality-ids "${{ inputs.control_sreality_ids }}" \
-            --threshold "${{ inputs.threshold || '0.5' }}"
+            "--sreality-ids=${{ inputs.sreality_ids }}" \
+            "--control-sreality-ids=${{ inputs.control_sreality_ids }}" \
+            "--threshold=${{ inputs.threshold || '0.5' }}"
