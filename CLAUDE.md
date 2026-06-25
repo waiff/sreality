@@ -609,6 +609,20 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     hallway); exterior_facade / balcony_terrace / garden are dropped, so a shared facade render can't
     produce the auto-merging High verdict. Other categories keep the full `ROOM_PRIORITY`. **(E)**
     everything else queues on the operator's `/dedup` review page.
+    **Floor-plan validation gate (migration 234).** Whenever the engine WOULD merge a pair — via the
+    pHash fast-path OR a visual High — `_floor_plan_gate` runs a Sonnet floor-plan check (the
+    `DOCUMENT_MAX_EDGE=1568` tier; pHash conflates line-art plans and CLIP cosine can't read layout,
+    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (CLIP tag OR
+    classifier room_type) → `compare_listing_floor_plans` (operator prompt
+    `app_settings.llm_floor_plan_match_prompt`, cache `listing_floor_plan_matches`, write-allowed rule
+    #5; verdict same_layout / different_layout / inconclusive + per-plan OCR in `extracted`, used
+    plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
+    auto-dismiss** (the visual model stays the sole thing that can dismiss); same_layout / inconclusive
+    → the merge proceeds; a both-plan pair we can't validate (no fn / no budget / error) → queue rather
+    than merge unchecked. Exactly ONE side has a plan → **queue** (can't compare plan-to-plan). Neither
+    → the existing path is untouched. It applies to pHash + visual merges, NOT rule-B exact-address.
+    The `dedup_batches` lane warms the floor-plan verdicts (`_warm_floor_plan` → `floor_plan` request
+    kind) so the cache-only daily engine consumes them for free, like the other vision caches.
     **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
     zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by
     `clip_tag.yml`/`scripts/clip_tag_backfill.py`) tags every image — room/plot type into

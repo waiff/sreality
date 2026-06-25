@@ -47,6 +47,7 @@ from typing import Any, Callable
 from scripts.dedup_engine import (
     MAX_GROUP_SIZE,
     _both_have_site_plan,
+    _floor_plan_image_ids,
     _group_by_street,
     _load_eligible,
     _phash_distinctive_match,
@@ -68,7 +69,9 @@ from toolkit.image_classification import (
 )
 from toolkit.visual_match import (
     build_compare_request,
+    build_floor_plan_request,
     build_site_plan_request,
+    cached_floor_plan_verdict,
     cached_site_plan_verdict,
     cached_visual_verdict,
 )
@@ -78,6 +81,7 @@ LOG = logging.getLogger("submit_dedup_batch")
 _CLASSIFY_MODEL_KEY = "llm_room_classify_model"
 _COMPARE_MODEL_KEY = "llm_visual_match_model"
 _SITE_PLAN_MODEL_KEY = "llm_site_plan_match_model"
+_FLOOR_PLAN_MODEL_KEY = "llm_floor_plan_match_model"
 
 
 @dataclass
@@ -210,11 +214,12 @@ def collect(
     classify_model = llm_client.resolve_model(_CLASSIFY_MODEL_KEY)
     compare_model = llm_client.resolve_model(_COMPARE_MODEL_KEY)
     site_plan_model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
+    floor_plan_model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
 
     keys = _load_eligible(conn)
     groups = _group_by_street(keys)
 
-    funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0}
+    funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0, "floor_plan_warmed": 0}
     seen_listing_pairs: set[tuple[int, int]] = set()
     seen_property_pairs: set[tuple[int, int]] = set()
     pairs_left = max_pairs
@@ -250,6 +255,13 @@ def collect(
                 if decision.action == "auto_merge":
                     continue
 
+                # Warm the floor-plan verdict for any both-floor-plan pair (migration
+                # 234): the engine's floor-plan gate runs on a pHash OR a visual merge
+                # (incl. same-source), so warm it BEFORE the pHash skip + cross-source
+                # gate, or the cache-only daily run would queue every floor-plan pair.
+                _warm_floor_plan(
+                    conn, llm_client, submitter, a, b, floor_plan_model, funnel)
+
                 # pHash fast-path — replay merges for free (unless both site_plan,
                 # which defers to the development guard below). Byt excludes known-
                 # exterior images (mirrors run_engine), so the warm-up funnel and the
@@ -279,6 +291,35 @@ def collect(
                 )
 
     return {**funnel, **submitter.stats}
+
+
+def _warm_floor_plan(
+    conn: Any, llm_client: Any, submitter: "_Submitter",
+    a: Any, b: Any, floor_plan_model: str, funnel: dict[str, int],
+) -> None:
+    """Enqueue a floor-plan compare for a both-floor-plan pair if not already cached.
+    The engine's floor-plan gate (migration 234) reads this verdict on any pHash/visual
+    merge, so warming it keeps the cache-only daily run from queueing every such pair."""
+    if submitter.exhausted:
+        return
+    ids_a = _floor_plan_image_ids(conn, a.sreality_id)
+    ids_b = _floor_plan_image_ids(conn, b.sreality_id)
+    if not (ids_a and ids_b):
+        return
+    if cached_floor_plan_verdict(
+        conn, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
+        model=floor_plan_model,
+    ) is not None:
+        return
+    ca, cb = sorted((a.sreality_id, b.sreality_id))
+    submitter.add(
+        custom_id=f"fpl-{ca}-{cb}", kind="floor_plan", model=floor_plan_model,
+        a=ca, b=cb, room_type=None,
+        build_fn=lambda: build_floor_plan_request(
+            conn, llm_client, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
+            image_ids_a=ids_a, image_ids_b=ids_b),
+    )
+    funnel["floor_plan_warmed"] += 1
 
 
 def _collect_visual(

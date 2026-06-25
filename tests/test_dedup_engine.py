@@ -662,6 +662,8 @@ class _Cur:
             self._rows = [(False,)]  # _phash_distinctive_match default (monkeypatch for a match)
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
+        elif "FROM images i WHERE i.sreality_id" in s:
+            self._rows = []  # _floor_plan_image_ids default (no floor plan -> gate passes)
         elif "image_room_classifications" in s:
             self._rows = [(False,)]  # _both_have_site_plan default
         elif "UPDATE property_identity_candidates" in s:
@@ -935,6 +937,122 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
     assert stats["auto_phash"] == 1
     assert stats["skipped_same_source"] == 0  # pHash resolved it before the gate
     assert merges == ["image_phash"]
+
+
+# --- #4 floor-plan validation gate (migration 234) -------------------------- #
+
+def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+
+    # neither side has a floor plan -> merge (existing path unchanged)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
+
+    # exactly one side has a plan -> queue (can't compare plan-to-plan)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
+
+    # both have plans
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
+    diff = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
+    same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
+    # can't validate (no fn / no budget) -> queue, never merge unchecked
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[0]) == "queue"
+    # a COLD verdict consumes one budget unit
+    budget = [3]
+    eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=budget)
+    assert budget[0] == 2
+
+
+def test_run_engine_phash_floor_plan_different_dismisses(monkeypatch: Any) -> None:
+    # pHash would merge, but the two floor plans differ -> dismiss (no merge).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])  # both have a plan
+    fp = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
+    assert stats["auto_dismissed"] == 1
+    assert merges == []
+
+
+def test_run_engine_phash_floor_plan_same_merges(monkeypatch: Any) -> None:
+    # pHash would merge, the floor plans agree -> the merge proceeds.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
+    fp = lambda a, b, ia, ib: {"verdict": "same_layout"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
+    # pHash would merge, but only ONE side has a floor plan -> operator queue.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid] if sid == 1 else [])
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
+    assert stats["queued"] >= 1
+
+
+def test_run_engine_visual_high_but_different_floor_plan_dismisses(monkeypatch: Any) -> None:
+    # A High forensic verdict is overridden by a different floor plan -> dismiss.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> visual
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
+                model: str | None = None) -> dict:
+        return {"verdict": "High", "rationale": "matching tiles"}
+
+    fp = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=compare, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_visual"] == 0
+    assert stats["auto_dismissed"] == 1
+    assert merges == []
 
 
 def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:

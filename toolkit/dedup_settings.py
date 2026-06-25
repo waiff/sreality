@@ -97,6 +97,12 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "Checks whether two site/situation plans highlight the same unit "
         "(blocks near-identical units of one development from auto-merging).",
     ),
+    DedupSetting(
+        "llm_floor_plan_match_model", "model", "claude-sonnet-4-5",
+        "Floor-plan validation gate model", "Vision models",
+        "Validates a would-be merge when both listings carry a floor plan: a "
+        "different layout dismisses, a one-sided floor plan queues for the operator.",
+    ),
 )
 
 REGISTRY_BY_KEY: dict[str, DedupSetting] = {s.key: s for s in REGISTRY}

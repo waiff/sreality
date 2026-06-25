@@ -16,6 +16,7 @@ via boto3 (scraper.image_storage), base64 into the vision payload.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
@@ -34,6 +35,11 @@ _SITE_PLAN_PROMPT_KEY = "llm_site_plan_match_prompt"
 _SITE_PLAN_MODEL_KEY = "llm_site_plan_match_model"
 _SITE_PLAN_CALLED_FOR = "compare_listing_site_plans"
 _SITE_PLAN_VERDICTS = ("same_unit", "different_unit", "inconclusive")
+
+_FLOOR_PLAN_PROMPT_KEY = "llm_floor_plan_match_prompt"
+_FLOOR_PLAN_MODEL_KEY = "llm_floor_plan_match_model"
+_FLOOR_PLAN_CALLED_FOR = "compare_listing_floor_plans"
+_FLOOR_PLAN_VERDICTS = ("same_layout", "different_layout", "inconclusive")
 
 # The forensic compare is the only call whose verdict auto-merges, so its resolution
 # is gated: it stays at the (quality-neutral) document tier until the Haiku+768 A/B
@@ -570,6 +576,287 @@ def _site_plan_envelope(
         },
         "metadata": {
             "tool": "compare_listing_site_plans",
+            "filters_used": {"sreality_id_a": a, "sreality_id_b": b},
+            "result_count": 1,
+            "queried_at": queried_at,
+            "data_freshness": None,
+        },
+    }
+
+
+# --- floor-plan comparison (per-unit layout guard, migration 234) ----------- #
+# Mirrors the site-plan guard but its verdict CAN auto-dismiss a merge: the engine
+# runs it whenever it WOULD merge a pair that has floor plans on both sides; a
+# `different_layout` verdict is the only new auto-dismiss. `extracted` carries the
+# per-plan OCR (unit number / floor / area / balcony) used plan-to-plan only.
+
+_PLAN_OCR_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "unit_number": {"type": "string", "description": "byt č. / apartment number, if printed"},
+        "floor": {"type": "string", "description": "podlaží / NP / patro, if printed"},
+        "total_area_m2": {"type": "number", "description": "total m² printed on the plan"},
+        "has_balcony": {"type": "boolean"},
+        "has_terrace": {"type": "boolean"},
+    },
+}
+
+RECORD_FLOOR_PLAN_MATCH_TOOL: dict[str, Any] = {
+    "name": "record_floor_plan_match",
+    "description": (
+        "Record whether two listings' floor plans show the SAME apartment layout "
+        "(same unit) or DIFFERENT layouts/units. Call exactly once."
+    ),
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": list(_FLOOR_PLAN_VERDICTS),
+                "description": (
+                    "same_layout = same wall arrangement + room positions + no "
+                    "contradicting label; different_layout = different arrangement / "
+                    "room count / positions OR a contradicting unit-number / floor / "
+                    "area label; inconclusive = illegible or insufficient."
+                ),
+            },
+            "rationale": {
+                "type": "string",
+                "description": "1-3 sentences citing the deciding layout/label evidence.",
+            },
+            "plan_a": _PLAN_OCR_SCHEMA,
+            "plan_b": _PLAN_OCR_SCHEMA,
+        },
+        "required": ["verdict", "rationale"],
+    },
+}
+
+
+def compare_listing_floor_plans(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    image_ids_a: list[int],
+    image_ids_b: list[int],
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """Compare two listings' FLOOR-PLAN images (the per-unit layout guard, cache on miss).
+
+    Returns data.verdict ∈ same_layout | different_layout | inconclusive. The engine
+    uses different_layout to DISMISS a merge it would otherwise make; same_layout /
+    inconclusive let it proceed. Write-allowed toolkit exception (rule #5); cache in
+    listing_floor_plan_matches.
+    """
+    from toolkit import _now_iso
+
+    if sreality_id_a == sreality_id_b:
+        raise VisualMatchError("cannot compare a listing to itself")
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
+
+    if not force_refresh:
+        cached = _floor_plan_cache_lookup(conn, a, b, model)
+        if cached is not None:
+            return _floor_plan_envelope(cached, a, b, model, cache_hit=True, queried_at=_now_iso())
+
+    verdict, rationale, extracted, cost_usd, llm_call_id = _produce_floor_plan(
+        conn, llm_client, a, b,
+        image_ids_a if a == sreality_id_a else image_ids_b,
+        image_ids_b if a == sreality_id_a else image_ids_a,
+        model,
+    )
+    _floor_plan_cache_store(conn, a, b, verdict, rationale, extracted, model, llm_call_id, cost_usd)
+    return _floor_plan_envelope(
+        {"verdict": verdict, "rationale": rationale, "extracted": extracted, "cost_usd": cost_usd},
+        a, b, model, cache_hit=False, queried_at=_now_iso(),
+    )
+
+
+def _produce_floor_plan(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    a: int,
+    b: int,
+    keys_a_ids: list[int],
+    keys_b_ids: list[int],
+    model: str,
+) -> tuple[str, str, dict[str, Any] | None, float, int]:
+    content = _build_floor_plan_content(conn, keys_a_ids, keys_b_ids)
+    system = llm_client.resolve_system_prompt(_FLOOR_PLAN_PROMPT_KEY)
+    response = llm_client.call(
+        called_for=_FLOOR_PLAN_CALLED_FOR,
+        messages=[{"role": "user", "content": content}],
+        system=system,
+        tools=[RECORD_FLOOR_PLAN_MATCH_TOOL],
+        model=model,
+    )
+    verdict, rationale, extracted = _extract_floor_plan(response.tool_calls)
+    return verdict, rationale, extracted, float(response.cost_usd or 0.0), response.llm_call_id
+
+
+def _build_floor_plan_content(
+    conn: "psycopg.Connection",
+    keys_a_ids: list[int],
+    keys_b_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Assemble the floor-plan payload for two listings (shared by the sync tool and
+    the batch lane's build_floor_plan_request)."""
+    if not image_storage.is_configured():
+        raise VisualMatchError("R2 is not configured; cannot fetch image bytes for vision")
+
+    keys_a = _storage_paths(conn, keys_a_ids)
+    keys_b = _storage_paths(conn, keys_b_ids)
+    if not keys_a or not keys_b:
+        raise VisualMatchError("missing floor-plan images for one side")
+
+    r2 = image_storage.R2Client.from_env()
+    content: list[dict[str, Any]] = [
+        {"type": "text", "text": f"Listing A — floor plan(s) ({len(keys_a)}):"}
+    ]
+    content.extend(_blocks(r2, keys_a, DOCUMENT_MAX_EDGE))
+    content.append({"type": "text", "text": f"Listing B — floor plan(s) ({len(keys_b)}):"})
+    content.extend(_blocks(r2, keys_b, DOCUMENT_MAX_EDGE))
+    content.append({
+        "type": "text",
+        "text": "Decide same_layout vs different_layout, then call record_floor_plan_match once.",
+    })
+    return content
+
+
+def build_floor_plan_request(
+    conn: "psycopg.Connection",
+    llm_client: "LLMClient",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    image_ids_a: list[int],
+    image_ids_b: list[int],
+) -> dict[str, Any]:
+    """Build one floor-plan-guard request for the async batch lane."""
+    if sreality_id_a == sreality_id_b:
+        raise VisualMatchError("cannot compare a listing to itself")
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
+    keys_a_ids = image_ids_a if a == sreality_id_a else image_ids_b
+    keys_b_ids = image_ids_b if a == sreality_id_a else image_ids_a
+    content = _build_floor_plan_content(conn, keys_a_ids, keys_b_ids)
+    system = llm_client.resolve_system_prompt(_FLOOR_PLAN_PROMPT_KEY)
+    return {
+        "system": system,
+        "messages": [{"role": "user", "content": content}],
+        "tools": [RECORD_FLOOR_PLAN_MATCH_TOOL],
+        "model": model,
+    }
+
+
+def cached_floor_plan_verdict(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    model: str,
+) -> str | None:
+    """Cache-only floor-plan verdict read for the batch lane / engine consume path."""
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    row = _floor_plan_cache_lookup(conn, a, b, model)
+    return row["verdict"] if row else None
+
+
+def persist_floor_plan_match(
+    conn: "psycopg.Connection",
+    *,
+    sreality_id_a: int,
+    sreality_id_b: int,
+    tool_calls: list[dict[str, Any]],
+    model: str,
+    llm_call_id: int,
+    cost_usd: float,
+) -> None:
+    """Write a batched record_floor_plan_match result to the cache (same row the sync
+    tool writes), keyed on the canonical pair + model."""
+    a, b = sorted((sreality_id_a, sreality_id_b))
+    verdict, rationale, extracted = _extract_floor_plan(tool_calls)
+    _floor_plan_cache_store(conn, a, b, verdict, rationale, extracted, model, llm_call_id, cost_usd)
+
+
+def _extract_floor_plan(
+    tool_calls: list[dict[str, Any]],
+) -> tuple[str, str, dict[str, Any] | None]:
+    matching = [tc for tc in tool_calls if tc.get("name") == "record_floor_plan_match"]
+    if not matching:
+        raise VisualMatchError("LLM did not invoke record_floor_plan_match; refusing to guess")
+    payload = matching[0].get("input") or {}
+    verdict = payload.get("verdict")
+    if verdict not in _FLOOR_PLAN_VERDICTS:
+        raise VisualMatchError(f"record_floor_plan_match returned bad verdict: {verdict!r}")
+    rationale = payload.get("rationale")
+    extracted: dict[str, Any] = {}
+    for side in ("plan_a", "plan_b"):
+        if isinstance(payload.get(side), dict) and payload[side]:
+            extracted[side] = payload[side]
+    return verdict, rationale if isinstance(rationale, str) else "", (extracted or None)
+
+
+def _floor_plan_cache_lookup(
+    conn: "psycopg.Connection", a: int, b: int, model: str,
+) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT verdict, rationale, extracted, cost_usd FROM listing_floor_plan_matches "
+            "WHERE sreality_id_a = %s AND sreality_id_b = %s AND model = %s",
+            (a, b, model),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return {
+        "verdict": row[0], "rationale": row[1], "extracted": row[2],
+        "cost_usd": float(row[3]) if row[3] is not None else None,
+    }
+
+
+def _floor_plan_cache_store(
+    conn: "psycopg.Connection",
+    a: int, b: int, verdict: str, rationale: str, extracted: dict[str, Any] | None,
+    model: str, llm_call_id: int, cost_usd: float,
+) -> None:
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO listing_floor_plan_matches "
+            "(sreality_id_a, sreality_id_b, verdict, rationale, extracted, "
+            " model, llm_call_id, cost_usd) "
+            "VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s) "
+            "ON CONFLICT (sreality_id_a, sreality_id_b, model) DO UPDATE SET "
+            "  verdict = EXCLUDED.verdict, rationale = EXCLUDED.rationale, "
+            "  extracted = EXCLUDED.extracted, llm_call_id = EXCLUDED.llm_call_id, "
+            "  cost_usd = EXCLUDED.cost_usd, created_at = now()",
+            (a, b, verdict, rationale,
+             json.dumps(extracted) if extracted is not None else None,
+             model, llm_call_id, cost_usd),
+        )
+
+
+def _floor_plan_envelope(
+    payload: dict[str, Any], a: int, b: int, model: str,
+    *, cache_hit: bool, queried_at: str,
+) -> dict[str, Any]:
+    return {
+        "data": {
+            "sreality_id_a": a,
+            "sreality_id_b": b,
+            "verdict": payload["verdict"],
+            "rationale": payload.get("rationale"),
+            "extracted": payload.get("extracted"),
+            "model": model,
+            "cost_usd": payload.get("cost_usd"),
+            "cache_hit": cache_hit,
+        },
+        "metadata": {
+            "tool": "compare_listing_floor_plans",
             "filters_used": {"sreality_id_a": a, "sreality_id_b": b},
             "result_count": 1,
             "queried_at": queried_at,
