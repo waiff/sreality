@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   keepPreviousData,
   useMutation,
@@ -67,6 +67,20 @@ type DetailMap = Map<number, ListingDetailLite>;
 
 export default function Dedup() {
   const qc = useQueryClient();
+
+  // The listing-detail "merge decisions" link lands here as /dedup?audit_property=ID
+  // — scope Decision history to that property, force its section open, scroll to it.
+  const [searchParams] = useSearchParams();
+  const auditPropertyRaw = searchParams.get('audit_property');
+  const scopeProperty =
+    auditPropertyRaw && /^\d+$/.test(auditPropertyRaw) ? Number(auditPropertyRaw) : null;
+  useEffect(() => {
+    if (scopeProperty != null) {
+      document
+        .getElementById('history')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [scopeProperty]);
 
   // Which backlog bucket the operator drilled into (null = the whole queue).
   const [bucket, setBucket] = useState<Bucket | null>(null);
@@ -197,8 +211,13 @@ export default function Dedup() {
 
       <AutomationDashboard runs={engineRunsQ.data ?? []} loading={engineRunsQ.isLoading} />
 
-      <CollapsibleSection id="history" eyebrow="Audit" title="Decision history">
-        <DedupAuditHistory />
+      <CollapsibleSection
+        id="history"
+        eyebrow="Audit"
+        title="Decision history"
+        forceOpen={scopeProperty != null}
+      >
+        <DedupAuditHistory scopeProperty={scopeProperty} />
       </CollapsibleSection>
 
       <ReviewBacklog
@@ -784,6 +803,7 @@ function CollapsibleSection({
   eyebrow,
   right,
   defaultOpen = true,
+  forceOpen = false,
   children,
 }: {
   id: string;
@@ -791,19 +811,23 @@ function CollapsibleSection({
   eyebrow?: string;
   right?: React.ReactNode;
   defaultOpen?: boolean;
+  // When true (e.g. a deep link targets this section), render open regardless of
+  // the operator's stored collapse preference.
+  forceOpen?: boolean;
   children: React.ReactNode;
 }) {
   const [open, toggle] = useCollapsed(id, defaultOpen);
+  const isOpen = open || forceOpen;
   return (
-    <section className="mt-8">
+    <section id={id} className="mt-8 scroll-mt-4">
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={toggle}
-          aria-expanded={open}
+          aria-expanded={isOpen}
           className="flex items-center gap-2 text-left group min-w-0 flex-1"
         >
-          <Chevron open={open} />
+          <Chevron open={isOpen} />
           <span className="min-w-0">
             {eyebrow ? (
               <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
@@ -820,7 +844,7 @@ function CollapsibleSection({
         </button>
         {right ? <div className="shrink-0">{right}</div> : null}
       </div>
-      {open ? <div className="mt-3">{children}</div> : null}
+      {isOpen ? <div className="mt-3">{children}</div> : null}
     </section>
   );
 }

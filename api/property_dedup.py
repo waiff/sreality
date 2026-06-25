@@ -251,6 +251,7 @@ def list_pair_audit(
     factor_min: float | None = None,
     factor_max: float | None = None,
     verdict: str | None = None,
+    property_id: int | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -259,8 +260,11 @@ def list_pair_audit(
     (`category_main`), `outcome`, `source`, `stage`, and by the decision FACTOR: `factor`
     ∈ {phash, cosine, visual, address} with a numeric `factor_min`/`factor_max` on its
     signal (phash_pairs / cosine), or a `verdict` for visual rows — so the operator can
-    audit the borderline decisions of one signal. `merge_group_id` is the inline-undo
-    handle; `undone` is DERIVED by joining the merge ledger (the single source of truth)."""
+    audit the borderline decisions of one signal. `property_id` scopes to the decisions
+    that touch one property's child listings (the listing-detail "merge decisions" link) —
+    keyed on the stable `sreality_id` since `property_id` re-points on every merge.
+    `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
+    ledger (the single source of truth)."""
     clauses: list[str] = []
     params: dict[str, Any] = {}
     if outcome is not None:
@@ -287,6 +291,14 @@ def list_pair_audit(
     if verdict is not None:
         clauses.append("a.detail->>'verdict' = %(verdict)s")
         params["verdict"] = verdict
+    if property_id is not None:
+        clauses.append(
+            "(a.left_sreality_id IN "
+            "  (SELECT sreality_id FROM listings WHERE property_id = %(audit_pid)s)"
+            " OR a.right_sreality_id IN "
+            "  (SELECT sreality_id FROM listings WHERE property_id = %(audit_pid)s))"
+        )
+        params["audit_pid"] = property_id
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with conn.cursor() as cur:
         cur.execute(f"SELECT count(*) FROM dedup_pair_audit a {where}", params)

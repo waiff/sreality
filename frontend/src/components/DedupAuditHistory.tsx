@@ -87,8 +87,16 @@ function Chip({
   );
 }
 
-export default function DedupAuditHistory() {
-  const [outcome, setOutcome] = useState('');
+export default function DedupAuditHistory({
+  scopeProperty,
+}: {
+  // When set, restrict the feed to the decisions touching ONE property's child
+  // listings — the listing-detail "merge decisions" deep link (?audit_property=).
+  scopeProperty?: number | null;
+} = {}) {
+  // Scoped to one property → default to the merges that BUILT it; the operator
+  // can broaden to dismissed/all from the chips. Unscoped → the full ledger.
+  const [outcome, setOutcome] = useState(scopeProperty != null ? 'merged' : '');
   const [type, setType] = useState('');
   const [source, setSource] = useState('');
   const [factor, setFactor] = useState('');
@@ -117,7 +125,9 @@ export default function DedupAuditHistory() {
 
   const numericFactor = factor === 'phash' || factor === 'cosine';
   const q = useQuery({
-    queryKey: ['dedup', 'audit', outcome, type, source, factor, factorMax, verdict],
+    queryKey: [
+      'dedup', 'audit', outcome, type, source, factor, factorMax, verdict, scopeProperty ?? null,
+    ],
     queryFn: () =>
       getDedupAudit({
         outcome: outcome || undefined,
@@ -126,6 +136,7 @@ export default function DedupAuditHistory() {
         factor: factor || undefined,
         factor_max: numericFactor && factorMax != null ? factorMax : undefined,
         verdict: factor === 'visual' && verdict ? verdict : undefined,
+        property_id: scopeProperty ?? undefined,
         limit: 150,
       }),
   });
@@ -133,6 +144,20 @@ export default function DedupAuditHistory() {
 
   return (
     <div className="flex flex-col gap-3">
+      {scopeProperty != null && (
+        <div className="flex flex-wrap items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-copper)]/30 bg-[var(--color-copper-soft)] px-3 py-2 text-[0.8rem] text-[var(--color-copper)]">
+          <span>
+            Rozhodnutí pro nemovitost{' '}
+            <span className="font-mono tabular-nums">#{scopeProperty}</span>
+          </span>
+          <Link
+            to="/dedup#history"
+            className="ml-auto text-[var(--color-ink-3)] hover:text-[var(--color-copper)] underline decoration-dotted underline-offset-2"
+          >
+            zobrazit vše
+          </Link>
+        </div>
+      )}
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
           {OUTCOMES.map((o) => (
