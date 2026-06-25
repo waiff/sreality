@@ -643,6 +643,20 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     tag consistency 86%, cosine AUC 0.80. Both knobs ship OFF; flip via `app_settings` after a
     `--shadow` merge-diff confirms merges hold. Run counters: `dedup_engine_runs.clip_classified` /
     `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`.
+    **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
+    render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
+    `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,
+    so it is NOT part of the room argmax). For **byt**, an image scoring >=
+    `RENDER_SCORE_EXCLUDE_MIN` (0.65) is a shared development RENDER and is dropped from the pHash
+    count, the distinctive single-match override, AND the forensic room compare
+    (`phash_render_exclude_for` / `_render_exclusion_predicate` / `_high_render_image_ids`) — closing
+    the same-area dev-unit case area + room-type couldn't (Na Bradle's two 99 m² units share a kitchen
+    render). The "vizualizace" caption is NOT used (verified absent on those units) — the IMAGE is the
+    signal. Validated (`scripts/validate_render_detection.py`): Na Bradle renders 0.55-0.99 vs a bazos
+    amateur-photo control 0.05-0.20. Exposed on `images_public.clip_render_score`; the listing-detail
+    gallery + carousels show a Render/Foto badge with the score (`ImageRenderBadge`) so the operator
+    can eyeball the detector. Untagged/not-yet-scored images are never excluded (recall holds as the
+    CLIP backfill ramps).
     **Self-healing queue (migration 198):** the engine doesn't only ADD to the review queue — each
     run it RESOLVES stale proposed candidates so they don't pile up. Recall-neutral dismissals: a
     pair the current rules now hard-reject, one the cross-source gate skips, or a candidate pointing

@@ -59,6 +59,7 @@ from toolkit.dedup_engine import (
     classify_pair,
     decide_phash_fastpath,
     phash_excluded_tags_for,
+    phash_render_exclude_for,
     rooms_in_priority,
 )
 from toolkit.image_classification import (
@@ -266,12 +267,14 @@ def collect(
                 # which defers to the development guard below). Byt excludes known-
                 # exterior images (mirrors run_engine), so the warm-up funnel and the
                 # daily engine agree on which byt pairs the fast-path resolves.
+                _rmin = phash_render_exclude_for(a.category_main)
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
-                    phash_excluded_tags_for(a.category_main))
+                    phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
                 distinctive = (
                     phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                    and _phash_distinctive_match(
+                        conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
                 if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):

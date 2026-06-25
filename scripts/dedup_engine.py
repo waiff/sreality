@@ -58,6 +58,7 @@ from toolkit.dedup_engine import (
     decide_visual_dismiss,
     geo_cell_key,
     phash_excluded_tags_for,
+    phash_render_exclude_for,
     profile_for,
     rooms_in_priority,
     route_by_cosine,
@@ -322,19 +323,40 @@ def _load_geo_eligible(conn: Any) -> list[ListingKey]:
     return keys
 
 
+def _render_exclusion_predicate(
+    params: dict[str, Any], alias: str,
+    excluded_tags: tuple[str, ...], render_exclude_min: float | None,
+) -> str:
+    """A `NOT EXISTS (... image_clip_tags ...)` clause excluding an image (by `alias`) that
+    is a KNOWN-exterior/shared tag OR scores >= render_exclude_min on the render axis.
+    Empty when neither filter applies. Mutates `params` with the bound values."""
+    conds: list[str] = []
+    if excluded_tags:
+        conds.append("t.logical_tag = ANY(%(excl)s)")
+        params["excl"] = list(excluded_tags)
+    if render_exclude_min is not None:
+        conds.append("t.render_score >= %(rmin)s")
+        params["rmin"] = render_exclude_min
+    if not conds:
+        return ""
+    return (f" AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
+            f"   WHERE t.image_id = {alias}.id AND ({' OR '.join(conds)}))")
+
+
 def _phash_identical_pairs(
-    conn: Any, a_id: int, b_id: int, excluded_tags: tuple[str, ...] = ()
+    conn: Any, a_id: int, b_id: int, excluded_tags: tuple[str, ...] = (),
+    render_exclude_min: float | None = None,
 ) -> int:
     """Count near-identical image pairs (Hamming <= PHASH_IDENTICAL_MAX) across the two
     listings' stored images — no classify needed, so this runs BEFORE the LLM stage. A
     development sharing one stock facade/plan yields 1 such pair; an actual re-post of the
     same listing shares many; the PHASH_MIN_IDENTICAL_PAIRS count threshold separates them.
 
-    `excluded_tags` (byt: NON_INTERIOR_TAGS) drops any pair touching a KNOWN-exterior /
-    shared-marketing image, sourced from CLIP `image_clip_tags` — so a reused facade /
-    site-plan / render never feeds the byt fast-path. Untagged images still count, so
-    recall holds for the not-yet-tagged majority and tightens toward interior-only as CLIP
-    coverage fills in. Empty (non-byt) -> count any image, unchanged.
+    For byt, `excluded_tags` (NON_INTERIOR_TAGS) drops any pair touching a KNOWN-exterior /
+    shared image, and `render_exclude_min` drops any pair touching a high render_score image
+    (a shared development RENDER) — both sourced from CLIP `image_clip_tags`. Untagged /
+    not-yet-scored images still count, so recall holds as CLIP coverage fills in. Empty /
+    None (non-byt) -> count any image, unchanged.
     """
     sql = (
         "SELECT count(*) FROM images ia JOIN images ib ON true "
@@ -343,37 +365,53 @@ def _phash_identical_pairs(
         "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
     )
     params: dict[str, Any] = {"a": a_id, "b": b_id, "max": PHASH_IDENTICAL_MAX}
-    if excluded_tags:
-        sql += (
-            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
-            "   WHERE t.image_id = ia.id AND t.logical_tag = ANY(%(excl)s))"
-            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
-            "   WHERE t.image_id = ib.id AND t.logical_tag = ANY(%(excl)s))"
-        )
-        params["excl"] = list(excluded_tags)
+    sql += _render_exclusion_predicate(params, "ia", excluded_tags, render_exclude_min)
+    sql += _render_exclusion_predicate(params, "ib", excluded_tags, render_exclude_min)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return int(cur.fetchone()[0])
 
 
 def _phash_distinctive_match(
-    conn: Any, a_id: int, b_id: int, rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS
+    conn: Any, a_id: int, b_id: int, rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS,
+    render_exclude_min: float | None = None,
 ) -> bool:
     """True if the two listings share >=1 near-identical image pair where BOTH images are
     a DISTINCTIVE room (kitchen/bathroom, CLIP-tagged). A single such match auto-merges
     (operator policy): wet rooms are unit-specific, not shared development marketing, so
-    one identical match there is conclusive — unlike the >=2 needed for generic images."""
+    one identical match there is conclusive — unlike the >=2 needed for generic images.
+    `render_exclude_min` drops a shared kitchen/bathroom RENDER (it is tagged kitchen but
+    high render_score), so a reused render can't trigger the single-match override."""
+    rfilter = ""
+    params: dict[str, Any] = {"a": a_id, "b": b_id, "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX}
+    if render_exclude_min is not None:
+        rfilter = " AND coalesce({t}.render_score, 0) < %(rmin)s"
+        params["rmin"] = render_exclude_min
     with conn.cursor() as cur:
         cur.execute(
             "SELECT EXISTS (SELECT 1 FROM images ia"
             "  JOIN image_clip_tags ta ON ta.image_id = ia.id AND ta.logical_tag = ANY(%(rooms)s)"
+            + rfilter.format(t="ta") +
             "  JOIN images ib ON ib.sreality_id = %(b)s AND ib.phash IS NOT NULL"
             "  JOIN image_clip_tags tb ON tb.image_id = ib.id AND tb.logical_tag = ANY(%(rooms)s)"
+            + rfilter.format(t="tb") +
             "  WHERE ia.sreality_id = %(a)s AND ia.phash IS NOT NULL"
             "    AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s)",
-            {"a": a_id, "b": b_id, "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX},
+            params,
         )
         return bool(cur.fetchone()[0])
+
+
+def _high_render_image_ids(conn: Any, a_id: int, b_id: int, threshold: float) -> set[int]:
+    """image_ids of the two listings whose CLIP render_score >= threshold — shared
+    development RENDERS excluded from the forensic compare (migration 239)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.image_id FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
+            "WHERE i.sreality_id IN (%(a)s, %(b)s) AND t.render_score >= %(rmin)s",
+            {"a": a_id, "b": b_id, "rmin": threshold},
+        )
+        return {int(r[0]) for r in cur.fetchall()}
 
 
 def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
@@ -511,6 +549,16 @@ def _resolve_visual(
     # did NOT resolve it, so the visual layer is purely the forensic room compare.
     if compare_fn is None:
         return {"action": "queue", "reason": "vision_unavailable"}
+
+    # Drop shared development RENDERS from the forensic compare for byt (migration 239):
+    # a reused render is not a real photo of THE unit, so two units sharing one must not
+    # score High on it. Untagged / not-yet-scored images are kept (recall holds).
+    rmin = phash_render_exclude_for(a.category_main)
+    if rmin is not None:
+        render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
+        if render_ids:
+            imgs_a = [i for i in imgs_a if i["image_id"] not in render_ids]
+            imgs_b = [i for i in imgs_b if i["image_id"] not in render_ids]
 
     # Room-aware forensic comparison, priority order, stop at first High.
     rooms_a = {i["room_type"] for i in imgs_a}
@@ -869,12 +917,14 @@ def run_engine(
                 # reach the >=2 threshold; other categories count any image. A single
                 # near-identical KITCHEN/BATHROOM match also qualifies (distinctive override,
                 # only checked when the generic count fell short).
+                _rmin = phash_render_exclude_for(a.category_main)
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
-                    phash_excluded_tags_for(a.category_main))
+                    phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
                 distinctive = (
                     phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                    and _phash_distinctive_match(
+                        conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
                 if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):

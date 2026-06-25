@@ -31,3 +31,11 @@ def test_collapse_targets_are_logical_labels():
 def test_prompts_nonempty():
     assert _TAX["prompts"]
     assert all(isinstance(v, str) and v for v in _TAX["prompts"].values())
+
+
+def test_render_photo_anchors_present_and_nonempty():
+    # The orthogonal render-vs-photo axis (migration 239): both sides must exist + be
+    # non-empty, else the tagger silently scores every image render_score 0.
+    for key in ("render_anchors", "photo_anchors"):
+        assert _TAX.get(key), f"{key} missing/empty"
+        assert all(isinstance(v, str) and v for v in _TAX[key])

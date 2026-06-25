@@ -104,8 +104,12 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
     monkeypatch.setattr(sub, "_load_eligible", lambda conn: list(keys))
-    monkeypatch.setattr(sub, "_phash_identical_pairs", lambda conn, a, b, excluded_tags=(): phash)
-    monkeypatch.setattr(sub, "_phash_distinctive_match", lambda conn, a, b, rooms=(): distinctive)
+    monkeypatch.setattr(
+        sub, "_phash_identical_pairs",
+        lambda conn, a, b, excluded_tags=(), render_exclude_min=None: phash)
+    monkeypatch.setattr(
+        sub, "_phash_distinctive_match",
+        lambda conn, a, b, rooms=(), render_exclude_min=None: distinctive)
     monkeypatch.setattr(sub, "_both_have_site_plan", lambda conn, a, b: both_site_plan)
     monkeypatch.setattr(
         sub, "_floor_plan_image_ids", lambda conn, sid: [sid] if floor_plan else [])

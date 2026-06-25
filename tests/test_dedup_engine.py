@@ -16,6 +16,7 @@ import pytest
 from toolkit.dedup_engine import (
     ADDRESS_AREA_GUARD_PCT,
     CANDIDATE_AREA_MAX_PCT,
+    RENDER_SCORE_EXCLUDE_MIN,
     CosineBands,
     ListingKey,
     MatchProfile,
@@ -27,6 +28,7 @@ from toolkit.dedup_engine import (
     geo_cell_key,
     normalize_street,
     phash_excluded_tags_for,
+    phash_render_exclude_for,
     profile_for,
     room_priority_for,
     rooms_in_priority,
@@ -618,6 +620,39 @@ def test_phash_excluded_tags_for_by_category() -> None:
     assert phash_excluded_tags_for(None) == excl  # NULL -> apartment
     assert phash_excluded_tags_for("dum") == ()
     assert phash_excluded_tags_for("pozemek") == ()
+
+
+def test_phash_render_exclude_for_by_category() -> None:
+    # byt excludes high render_score images from the pHash/cosine signal; other
+    # categories don't (a render of a house IS that house's identity here).
+    assert phash_render_exclude_for("byt") == RENDER_SCORE_EXCLUDE_MIN == 0.65
+    assert phash_render_exclude_for(None) == RENDER_SCORE_EXCLUDE_MIN  # NULL -> apartment
+    assert phash_render_exclude_for("dum") is None
+    assert phash_render_exclude_for("pozemek") is None
+
+
+def test_render_exclusion_predicate_builds_clause() -> None:
+    import scripts.dedup_engine as eng
+
+    # neither filter -> empty string, no params bound
+    p: dict = {}
+    assert eng._render_exclusion_predicate(p, "ia", (), None) == ""
+    assert p == {}
+    # tags only
+    p = {}
+    sql = eng._render_exclusion_predicate(p, "ia", ("exterior_facade",), None)
+    assert "ia.id" in sql and "logical_tag = ANY" in sql and "render_score" not in sql
+    assert p["excl"] == ["exterior_facade"]
+    # render only
+    p = {}
+    sql = eng._render_exclusion_predicate(p, "ib", (), 0.65)
+    assert "ib.id" in sql and "render_score >= " in sql and "logical_tag" not in sql
+    assert p["rmin"] == 0.65
+    # both -> OR'd into one NOT EXISTS
+    p = {}
+    sql = eng._render_exclusion_predicate(p, "ia", ("garden",), 0.7)
+    assert " OR " in sql and "logical_tag = ANY" in sql and "render_score >= " in sql
+    assert p["excl"] == ["garden"] and p["rmin"] == 0.7
 
 
 def test_verdict_gate_high_only() -> None:

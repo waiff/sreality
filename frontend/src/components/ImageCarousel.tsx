@@ -1,5 +1,6 @@
 import { useState, type MouseEvent, type ReactNode } from 'react';
 import ImageTagBadge from './ImageTagBadge';
+import ImageRenderBadge from './ImageRenderBadge';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 
 /* Compact inline image carousel — the photo strip shared by Browse listing
@@ -85,6 +86,11 @@ export default function ImageCarousel({
         tag={current?.tag}
         confidence={current?.confidence}
         className="absolute bottom-1 left-1 z-[1] max-w-[calc(100%-3.5rem)] truncate"
+      />
+
+      <ImageRenderBadge
+        renderScore={current?.renderScore}
+        className="absolute top-1 left-1 z-[1]"
       />
 
       {hasMany && (

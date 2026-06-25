@@ -152,6 +152,22 @@ def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
     return NON_INTERIOR_TAGS if profile_for(category_main).family == "byt" else ()
 
 
+# A byt image scoring >= this on the CLIP render axis (image_clip_tags.render_score,
+# migration 239) is a shared development RENDER, not a real photo of THE unit, so it
+# never feeds the byt pHash/cosine merge signal. Validated on "Rezidence Na Bradle":
+# renders 0.55-0.99, bazos amateur-photo control 0.05-0.20 — 0.65 sits in the gap, and
+# for an EXCLUSION a false-positive only mildly trims the signal while a false-negative
+# is the harm we're removing.
+RENDER_SCORE_EXCLUDE_MIN = 0.65
+
+
+def phash_render_exclude_for(category_main: str | None) -> float | None:
+    """The render_score threshold above which an image is excluded from this category's
+    pHash / cosine merge signal. Apartments only (the validated case); None = no exclusion
+    (untagged / not-yet-scored images are never excluded — recall holds as coverage ramps)."""
+    return RENDER_SCORE_EXCLUDE_MIN if profile_for(category_main).family == "byt" else None
+
+
 @dataclass(frozen=True)
 class ListingKey:
     """The matchable identity of one eligible listing."""

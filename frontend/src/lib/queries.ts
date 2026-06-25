@@ -823,6 +823,7 @@ export const fetchListingsForCards = async (
         url: imageSrc(im),
         tag: im.clip_fine_tag,
         confidence: im.clip_confidence,
+        renderScore: im.clip_render_score,
       })),
     };
   });
@@ -1114,7 +1115,7 @@ export const fetchListingsByIds = async (
  * (clip_fine_tag / clip_logical_tag / clip_confidence, migration 236) so every
  * photo surface can render its bottom-left tag badge from the same read. */
 const IMAGE_PUBLIC_COLS =
-  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence';
+  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score';
 
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,

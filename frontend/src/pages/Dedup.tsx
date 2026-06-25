@@ -891,6 +891,7 @@ function imagesFor(side: DedupPropertySide, imagesMap: ImagesMap): TaggedImageUr
     url: imageSrc(im),
     tag: im.clip_fine_tag,
     confidence: im.clip_confidence,
+    renderScore: im.clip_render_score,
   }));
 }
 

@@ -49,4 +49,6 @@ export interface TaggedImageUrl {
   tag: string | null;
   /** CLIP softmax confidence 0..1 of the winning anchor, for the tooltip. */
   confidence: number | null;
+  /** CLIP render-vs-photo score 0..1 (migration 239); null until scored. */
+  renderScore: number | null;
 }
