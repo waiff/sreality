@@ -61,7 +61,6 @@ PHASH_IDENTICAL_MAX = 6
 # pairs reach 2). DISTINCTIVE rooms override this: a SINGLE near-identical kitchen/bathroom
 # match is enough (those rooms are unit-specific, not shared marketing) — operator policy.
 PHASH_MIN_IDENTICAL_PAIRS = 2
-PHASH_DISTINCTIVE_MIN_PAIRS = 1
 
 
 @dataclass(frozen=True)

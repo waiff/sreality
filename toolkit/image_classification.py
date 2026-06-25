@@ -24,8 +24,6 @@ from toolkit.room_taxonomy import (  # single-source taxonomy (re-exported here)
 )
 from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
 
-__all__ = ["INTERIOR_ROOM_TYPES", "ROOM_TYPES", "SITE_PLAN_ROOM_TYPE"]
-
 try:
     from psycopg.types.json import Jsonb as _Jsonb
 except ImportError:

@@ -282,6 +282,18 @@ def test_phash_fastpath_pair_is_not_warmed(monkeypatch: Any) -> None:
     assert conn.inserted_requests == []
 
 
+def test_distinctive_single_phash_match_pair_is_not_warmed(monkeypatch: Any) -> None:
+    # #5 parity: only 1 pHash match, but it is a kitchen/bathroom (distinctive) -> the
+    # engine merges it, so the batch lane must also treat it as resolved (warm nothing).
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={1: ("classified", {"kitchen": [1]}), 2: ("classified", {"kitchen": [2]})},
+        phash=1, distinctive=True,
+    )
+    assert conn.inserted_requests == []
+
+
 def test_same_source_candidate_is_gated_out(monkeypatch: Any) -> None:
     conn = _run(
         monkeypatch,
