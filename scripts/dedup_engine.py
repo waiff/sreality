@@ -1248,13 +1248,15 @@ def _build_floor_plan_fn(conn: Any) -> Any:
 def _build_cache_only_floor_plan_fn(conn: Any) -> Any:
     """A $0 floor_plan_fn that ONLY reads the batch-warmed verdict cache (never the LLM),
     so even the FREE scheduled run can apply the floor-plan gate on warmed verdicts and
-    DEFER the rest — the same warm-then-consume pattern as the other vision tools, just
-    light enough for the free run (a single app_settings read, no LLMClient)."""
+    DEFER the rest — the same warm-then-consume pattern as the other vision tools, light
+    enough for the free run (a single app_settings read, no provider). The model MUST be
+    resolved via the SAME `LLMClient.resolve_model` the batch warm-up (submit_dedup_batch
+    `_warm_floor_plan`) and the live `_build_floor_plan_fn` use — the verdict cache is keyed
+    on the model string, so any divergence here would permanently cache-miss the free run
+    (defer forever). `LLMClient(conn)` needs no providers for a pure resolve_model read."""
+    from api.llm_client import LLMClient
     from toolkit.visual_match import cached_floor_plan_verdict
-    with conn.cursor() as cur:
-        cur.execute("SELECT value #>> '{}' FROM app_settings WHERE key='llm_floor_plan_match_model'")
-        row = cur.fetchone()
-    model = row[0] if row and row[0] else "claude-sonnet-4-5"
+    model = LLMClient(conn).resolve_model("llm_floor_plan_match_model")
 
     def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
         v = cached_floor_plan_verdict(conn, sreality_id_a=a, sreality_id_b=b, model=model)
