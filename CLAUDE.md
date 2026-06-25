@@ -618,11 +618,21 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     #5; verdict same_layout / different_layout / inconclusive + per-plan OCR in `extracted`, used
     plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
     auto-dismiss** (the visual model stays the sole thing that can dismiss); same_layout / inconclusive
-    → the merge proceeds; a both-plan pair we can't validate (no fn / no budget / error) → queue rather
-    than merge unchecked. Exactly ONE side has a plan → **queue** (can't compare plan-to-plan). Neither
-    → the existing path is untouched. It applies to pHash + visual merges, NOT rule-B exact-address.
-    The `dedup_batches` lane warms the floor-plan verdicts (`_warm_floor_plan` → `floor_plan` request
-    kind) so the cache-only daily engine consumes them for free, like the other vision caches.
+    → the merge proceeds. The gate distinguishes **"a human must decide" (queue)** from **"validate it
+    later" (defer)**: a both-plan pair whose Sonnet verdict isn't warmed yet (no fn / no budget /
+    cache-miss) → **`defer`** — skip this run, re-try next once the batch lane warms it (the pair is
+    automatable, not a human call), never the manual queue; exactly ONE side has a plan → **`queue`**
+    (genuinely a human call — no plan-to-plan compare possible); neither → the existing path is
+    untouched. It applies to pHash + visual merges, NOT rule-B exact-address. The `dedup_batches`
+    lane warms the floor-plan verdicts (`_warm_floor_plan` → `floor_plan` request kind), and crucially
+    **even the FREE scheduled engine run gets a $0 cache-only `floor_plan_fn`**
+    (`_build_cache_only_floor_plan_fn`, a single `app_settings` read — no LLMClient) so it CONSUMES
+    those batch-warmed verdicts (confirm/dismiss) and DEFERS the rest — instead of dumping every
+    both-floor-plan pHash match onto the operator queue (the regression this fixed: the `--free` run
+    had `floor_plan_fn=None`, so every both-plan pHash match returned `queue`). The per-run
+    `dedup_engine_runs.floor_plan_deferred` counter (migration 241, on the `/dedup` dashboard's stat
+    grid) is the silent-stall guard: it should trend to ~0 in steady state; a persistently high value
+    means the `dedup_batches` floor-plan warming is broken (those pairs would never merge).
     **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
     zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by
     `clip_tag.yml`/`scripts/clip_tag_backfill.py`) tags every image — room/plot type into
@@ -656,7 +666,14 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     amateur-photo control 0.05-0.20. Exposed on `images_public.clip_render_score`; the listing-detail
     gallery + carousels show a Render/Foto badge with the score (`ImageRenderBadge`) so the operator
     can eyeball the detector. Untagged/not-yet-scored images are never excluded (recall holds as the
-    CLIP backfill ramps).
+    CLIP backfill ramps). **One-shot `render_score` backfill (migration 240 + `backfill_render_score.yml`):**
+    `clip_tag_backfill` SKIPS already-tagged images (`clip_tagged_at IS NOT NULL`), so every image tagged
+    BEFORE the render axis shipped has `render_score` NULL — the badge stays hidden and the byt exclusion
+    is inert on it. `scripts/backfill_render_score.py` re-scores the render axis from each image's STORED
+    CLIP embedding (`image_clip_embeddings` — NO R2 download, NO re-inference; just the
+    `Tagger.render_scores_from_emb` text-anchor dot product), so it is fast and resumable (a partial
+    index on `render_score IS NULL`, migration 240, self-empties as it completes). Dispatch-only, sharded
+    4× (`image_id %% 4`), `SUPABASE_DB_URL` only.
     **Self-healing queue (migration 198):** the engine doesn't only ADD to the review queue — each
     run it RESOLVES stale proposed candidates so they don't pile up. Recall-neutral dismissals: a
     pair the current rules now hard-reject, one the cross-source gate skips, or a candidate pointing

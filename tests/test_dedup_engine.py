@@ -987,15 +987,18 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
 
-    # both have plans
+    # both have plans + a verdict available -> confirm/dismiss
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
     diff = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
     same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
+    none = lambda a, b, ia, ib: None                             # noqa: E731 (unwarmed)
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
-    # can't validate (no fn / no budget) -> queue, never merge unchecked
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[0]) == "queue"
+    # both have plans but can't validate now (no fn / no budget / unwarmed) -> DEFER,
+    # NOT the manual queue (the pair is automatable once the batch warms the verdict)
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "defer"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[0]) == "defer"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=none, vision_budget=[5]) == "defer"
     # a COLD verdict consumes one budget unit
     budget = [3]
     eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=budget)
@@ -1058,6 +1061,32 @@ def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
 
     assert stats["auto_phash"] == 0
     assert stats["queued"] >= 1
+
+
+def test_run_engine_phash_floor_plan_unwarmed_defers(monkeypatch: Any) -> None:
+    # pHash would merge and BOTH sides have a floor plan, but no warm verdict is
+    # available (floor_plan_fn=None, the free run before the batch lane warms the
+    # cache) -> DEFER: not merged, not queued. The pair re-tries next run once warm.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])  # both have a plan
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
+    assert stats.get("floor_plan_deferred", 0) == 1
+    assert stats["queued"] == 0
+    assert merges == []
+    # the pair is NOT resolved either way -> still 'proposed' for a later warm run
+    assert (101, 102) not in _dismissed_pairs(conn)
 
 
 def test_run_engine_visual_high_but_different_floor_plan_dismisses(monkeypatch: Any) -> None:

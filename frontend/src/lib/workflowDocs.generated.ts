@@ -295,6 +295,44 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
   },
   {
+    "filename": "backfill_render_score.yml",
+    "name": "Backfill image render_score (one-shot, from stored embeddings)",
+    "description": "One-shot corrective for migration 239: the clip_tag backfill skips already-tagged images, so images tagged before the render axis shipped have render_score NULL (the listing-detail render badge is hidden and the byt render exclusion is inert on them). This re-scores the render-vs-photo axis from each image's STORED CLIP embedding — no R2 download, no image re-inference — so it is fast (vector dot products). Horizontally sharded into 4 jobs (image_id %% 4). Resumable + idempotent (a scored row drops out of the render_score-IS-NULL partial index, migration 240). Dispatch-only. Secret: SUPABASE_DB_URL (no R2 needed). NOT a portal ingest (portal: null).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "Per-shard wall-clock budget",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Per-shard cap (0 = until time budget)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_render_score.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_render_score.yml"
+  },
+  {
     "filename": "bazos_detail_drain.yml",
     "name": "Scraping: Bazos detail drain",
     "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",

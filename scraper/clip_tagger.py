@@ -145,6 +145,17 @@ class Tagger:
                                  round(float(c), 4), round(float(r), 4)))
         return out
 
+    def render_scores_from_emb(self, emb) -> list[float]:
+        """render_score per row from precomputed (L2-normalized) image embeddings — the
+        same orthogonal render-vs-photo axis tag() scores. Lets a backfill re-score the
+        already-tagged images from their STORED embeddings without re-downloading or
+        re-embedding. 0.0 for every row if the render anchors aren't configured."""
+        if self._render_emb is None:
+            return [0.0] * int(emb.shape[0])
+        scale = self._model.logit_scale.exp()
+        rprobs = (scale * emb @ self._render_emb.T).softmax(dim=-1)
+        return [round(float(r), 4) for r in rprobs[:, : self._n_render].sum(dim=-1).tolist()]
+
     def tag(self, images: list, batch_size: int = 32) -> list[TagResult]:
         emb = self.embed(images, batch_size)
         return self.tags_from_emb(emb) if emb is not None else []
