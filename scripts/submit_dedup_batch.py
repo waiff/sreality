@@ -49,6 +49,7 @@ from scripts.dedup_engine import (
     _both_have_site_plan,
     _floor_plan_image_ids,
     _group_by_street,
+    _high_render_image_ids,
     _load_eligible,
     _phash_distinctive_match,
     _phash_identical_pairs,
@@ -384,6 +385,20 @@ def _collect_visual(
             return
         if verdict == "different_unit":
             return
+
+    # Render exclusion (migration 239): MUST mirror _resolve_visual — drop shared
+    # development RENDER images from the room compare for byt. The visual-verdict cache is
+    # keyed (a, b, room, model) and ignores the image_ids on a hit, so if the warm-up
+    # compared the render-INCLUDED set the engine would replay that render-inflated High;
+    # both lanes have to compare the SAME filtered set. Empty rooms drop (like the engine).
+    rmin = phash_render_exclude_for(a.category_main)
+    if rmin is not None:
+        render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
+        if render_ids:
+            rooms_a = {r: f for r, ids in rooms_a.items()
+                       if (f := [i for i in ids if i not in render_ids])}
+            rooms_b = {r: f for r, ids in rooms_b.items()
+                       if (f := [i for i in ids if i not in render_ids])}
 
     # Forensic compare: common rooms in priority order, capped — the replay stops
     # at the first High, so warming this priority-ordered prefix is the recall-safe
