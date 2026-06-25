@@ -69,10 +69,11 @@ ROOM_PRIORITY: tuple[str, ...] = (
 # Priority is the operator's order: distinctive wet rooms first, generic sleeping then
 # shared hallway last. Other categories (house/land/commercial) may use exterior, where
 # it IS the property's identity.
+# (Ordered counterpart of image_classification.INTERIOR_ROOM_TYPES — the same six
+# interior rooms, in the operator's comparison priority.)
 BYT_ROOM_PRIORITY: tuple[str, ...] = (
     "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
 )
-INTERIOR_ROOMS: frozenset[str] = frozenset(BYT_ROOM_PRIORITY)
 # Image tags (CLIP `image_clip_tags.logical_tag` / classifier room_type) that mark a
 # SHARED-marketing / exterior image. For byt these NEVER feed a pHash or cosine merge
 # signal. Untagged / 'other' are deliberately NOT here: only KNOWN-exterior images are

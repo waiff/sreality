@@ -45,9 +45,11 @@ ROOM_TYPES = (
     "other",
 )
 
-# Interior types carry the strongest same-flat signal; the pHash fast-path uses
-# this set to exclude facade / floor-plan / site-plan shots (whole developments
-# reuse one such image across distinct units).
+# Interior types carry the strongest same-flat signal. The byt dedup image layers
+# compare these only and exclude the rest, since a development reuses one
+# facade / plan / render across distinct units. The ordered priority + the exterior
+# exclusion live in `toolkit.dedup_engine` (`BYT_ROOM_PRIORITY` mirrors this set;
+# `NON_INTERIOR_TAGS` is the excluded complement minus 'other').
 INTERIOR_ROOM_TYPES = frozenset({
     "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
 })
