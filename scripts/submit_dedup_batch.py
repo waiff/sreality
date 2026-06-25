@@ -47,12 +47,20 @@ from typing import Any, Callable
 from scripts.dedup_engine import (
     MAX_GROUP_SIZE,
     _both_have_site_plan,
+    _floor_plan_image_ids,
     _group_by_street,
     _load_eligible,
+    _phash_distinctive_match,
     _phash_identical_pairs,
 )
 from scripts.submit_condition_batch import should_flush
-from toolkit.dedup_engine import classify_pair, decide_phash_fastpath, rooms_in_priority
+from toolkit.dedup_engine import (
+    PHASH_MIN_IDENTICAL_PAIRS,
+    classify_pair,
+    decide_phash_fastpath,
+    phash_excluded_tags_for,
+    rooms_in_priority,
+)
 from toolkit.image_classification import (
     DEFAULT_CLASSIFY_N_IMAGES,
     SITE_PLAN_ROOM_TYPE,
@@ -61,7 +69,9 @@ from toolkit.image_classification import (
 )
 from toolkit.visual_match import (
     build_compare_request,
+    build_floor_plan_request,
     build_site_plan_request,
+    cached_floor_plan_verdict,
     cached_site_plan_verdict,
     cached_visual_verdict,
 )
@@ -71,6 +81,7 @@ LOG = logging.getLogger("submit_dedup_batch")
 _CLASSIFY_MODEL_KEY = "llm_room_classify_model"
 _COMPARE_MODEL_KEY = "llm_visual_match_model"
 _SITE_PLAN_MODEL_KEY = "llm_site_plan_match_model"
+_FLOOR_PLAN_MODEL_KEY = "llm_floor_plan_match_model"
 
 
 @dataclass
@@ -104,7 +115,7 @@ class _Submitter:
         self._chunk_bytes = 0
         self.stats: dict[str, int] = {
             "want_classify": 0, "want_compare": 0, "want_site_plan": 0,
-            "skipped_in_flight": 0, "batches": 0,
+            "want_floor_plan": 0, "skipped_in_flight": 0, "batches": 0,
         }
 
     @property
@@ -203,11 +214,12 @@ def collect(
     classify_model = llm_client.resolve_model(_CLASSIFY_MODEL_KEY)
     compare_model = llm_client.resolve_model(_COMPARE_MODEL_KEY)
     site_plan_model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
+    floor_plan_model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
 
     keys = _load_eligible(conn)
     groups = _group_by_street(keys)
 
-    funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0}
+    funnel = {"visual_candidates": 0, "pairs_deferred_classify": 0, "floor_plan_warmed": 0}
     seen_listing_pairs: set[tuple[int, int]] = set()
     seen_property_pairs: set[tuple[int, int]] = set()
     pairs_left = max_pairs
@@ -243,10 +255,24 @@ def collect(
                 if decision.action == "auto_merge":
                     continue
 
+                # Warm the floor-plan verdict for any both-floor-plan pair (migration
+                # 234): the engine's floor-plan gate runs on a pHash OR a visual merge
+                # (incl. same-source), so warm it BEFORE the pHash skip + cross-source
+                # gate, or the cache-only daily run would queue every floor-plan pair.
+                _warm_floor_plan(
+                    conn, llm_client, submitter, a, b, floor_plan_model, funnel)
+
                 # pHash fast-path — replay merges for free (unless both site_plan,
-                # which defers to the development guard below).
-                phash_pairs = _phash_identical_pairs(conn, a.sreality_id, b.sreality_id)
-                if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
+                # which defers to the development guard below). Byt excludes known-
+                # exterior images (mirrors run_engine), so the warm-up funnel and the
+                # daily engine agree on which byt pairs the fast-path resolves.
+                phash_pairs = _phash_identical_pairs(
+                    conn, a.sreality_id, b.sreality_id,
+                    phash_excluded_tags_for(a.category_main))
+                distinctive = (
+                    phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
+                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
                     continue
@@ -265,6 +291,35 @@ def collect(
                 )
 
     return {**funnel, **submitter.stats}
+
+
+def _warm_floor_plan(
+    conn: Any, llm_client: Any, submitter: "_Submitter",
+    a: Any, b: Any, floor_plan_model: str, funnel: dict[str, int],
+) -> None:
+    """Enqueue a floor-plan compare for a both-floor-plan pair if not already cached.
+    The engine's floor-plan gate (migration 234) reads this verdict on any pHash/visual
+    merge, so warming it keeps the cache-only daily run from queueing every such pair."""
+    if submitter.exhausted:
+        return
+    ids_a = _floor_plan_image_ids(conn, a.sreality_id)
+    ids_b = _floor_plan_image_ids(conn, b.sreality_id)
+    if not (ids_a and ids_b):
+        return
+    if cached_floor_plan_verdict(
+        conn, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
+        model=floor_plan_model,
+    ) is not None:
+        return
+    ca, cb = sorted((a.sreality_id, b.sreality_id))
+    submitter.add(
+        custom_id=f"fpl-{ca}-{cb}", kind="floor_plan", model=floor_plan_model,
+        a=ca, b=cb, room_type=None,
+        build_fn=lambda: build_floor_plan_request(
+            conn, llm_client, sreality_id_a=a.sreality_id, sreality_id_b=b.sreality_id,
+            image_ids_a=ids_a, image_ids_b=ids_b),
+    )
+    funnel["floor_plan_warmed"] += 1
 
 
 def _collect_visual(
@@ -331,7 +386,7 @@ def _collect_visual(
     # at the first High, so warming this priority-ordered prefix is the recall-safe
     # superset (whatever room replay stops at is among these and is warm).
     common = set(rooms_a) & set(rooms_b)
-    for room in rooms_in_priority(common)[:max_room_attempts]:
+    for room in rooms_in_priority(common, a.category_main)[:max_room_attempts]:
         if s.exhausted:
             break
         if cached_visual_verdict(
@@ -438,9 +493,11 @@ def main() -> int:
 
     LOG.info(
         "BATCH done visual_candidates=%d want_classify=%d want_compare=%d "
-        "want_site_plan=%d skipped_in_flight=%d deferred_classify=%d batches=%d dry_run=%s",
+        "want_site_plan=%d want_floor_plan=%d floor_plan_warmed=%d skipped_in_flight=%d "
+        "deferred_classify=%d batches=%d dry_run=%s",
         stats["visual_candidates"], stats["want_classify"], stats["want_compare"],
-        stats["want_site_plan"], stats["skipped_in_flight"],
+        stats["want_site_plan"], stats.get("want_floor_plan", 0),
+        stats.get("floor_plan_warmed", 0), stats["skipped_in_flight"],
         stats["pairs_deferred_classify"], stats["batches"], args.dry_run,
     )
     return 0

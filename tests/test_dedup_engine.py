@@ -26,7 +26,9 @@ from toolkit.dedup_engine import (
     disposition_compatible,
     geo_cell_key,
     normalize_street,
+    phash_excluded_tags_for,
     profile_for,
+    room_priority_for,
     rooms_in_priority,
     route_by_cosine,
     street_group_keys,
@@ -156,8 +158,9 @@ def test_exact_address_works_same_source() -> None:
 
 
 def test_exact_address_area_guard_demotes_to_candidate() -> None:
-    # same street+no+disp+floor but areas 60 vs 70 (>5%) -> visual, not blind merge
-    d = classify_pair(_key(1, area=60.0), _key(2, area=70.0))
+    # same street+no+disp+floor, areas 60 vs 65 (7.7%: >5% guard, <10% byt reject)
+    # -> visual, not blind merge (and not a hard area_contradiction reject either).
+    d = classify_pair(_key(1, area=60.0), _key(2, area=65.0))
     assert d.action == "candidate"
     assert d.reason == "area_guard"
 
@@ -196,10 +199,25 @@ def test_floor_gap_of_two_still_rejects() -> None:
     assert d.detail == "floor_contradiction"
 
 
-def test_area_contradiction_rejects_beyond_20pct() -> None:
+def test_area_contradiction_rejects_large_gap() -> None:
     d = classify_pair(_key(1, hn=None, area=50.0), _key(2, hn=None, area=80.0))
     assert d.action == "reject"
     assert d.detail == "area_contradiction"
+
+
+def test_byt_area_gap_over_10pct_rejects() -> None:
+    # The "Rezidence Na Bradle" fix: byt units one area-band apart (73 vs 87 = 16%,
+    # 87 vs 99 = 12%) are now a hard reject before pHash, so shared renders can't
+    # chain-merge them. 60 vs 70 = 14.3% > 10%.
+    d = classify_pair(_key(1, hn=None, area=60.0), _key(2, hn=None, area=70.0))
+    assert d.action == "reject"
+    assert d.detail == "area_contradiction"
+
+
+def test_area_gate_unified_10pct_across_categories() -> None:
+    # The candidate area gap is unified at 10% for every category (operator decision).
+    for fam in ("byt", "dum", "pozemek", "komercni", "ostatni"):
+        assert profile_for(fam).candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT == 0.10, fam
 
 
 def test_house_number_contradiction_rejects() -> None:
@@ -354,14 +372,13 @@ def test_profile_for_null_or_unknown_is_byt() -> None:
     assert profile_for("garaz").family == "byt"
 
 
-def test_byt_profile_reproduces_legacy_constants() -> None:
-    # The byt profile IS today's behavior: same area guards, disposition mandatory,
-    # street-blocked (not geo), never geo-auto-merges. This is why landing the
-    # abstraction is byte-identical for apartments (and NULL-category rows).
+def test_byt_profile_constants() -> None:
+    # The byt profile: disposition mandatory, street-blocked (not geo), never
+    # geo-auto-merges. The candidate area gap is unified at 10% across all categories.
     byt = profile_for("byt")
     assert byt.disposition_required is True
     assert byt.address_area_guard_pct == ADDRESS_AREA_GUARD_PCT
-    assert byt.candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT
+    assert byt.candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT == 0.10
     assert byt.geo_blocked is False
     assert byt.geo_auto_merge_allowed is False
 
@@ -556,10 +573,51 @@ def test_phash_fastpath_needs_two_identical_pairs() -> None:
     assert decide_phash_fastpath(5)
 
 
+def test_phash_fastpath_distinctive_single_match_overrides() -> None:
+    # A single near-identical kitchen/bathroom match is enough (operator policy);
+    # one generic match is not.
+    assert decide_phash_fastpath(0, distinctive_match=True)
+    assert decide_phash_fastpath(1, distinctive_match=True)
+    assert not decide_phash_fastpath(1, distinctive_match=False)
+    assert decide_phash_fastpath(2, distinctive_match=False)
+
+
 def test_rooms_in_priority_orders_and_filters() -> None:
     common = {"bedroom", "kitchen", "bathroom", "floor_plan"}
-    # floor_plan is not in ROOM_PRIORITY -> excluded; kitchen before bathroom before bedroom
+    # floor_plan is not a comparison room -> excluded; kitchen before bathroom before bedroom
     assert rooms_in_priority(common) == ["kitchen", "bathroom", "bedroom"]
+
+
+def test_rooms_in_priority_byt_excludes_exterior() -> None:
+    # byt (default / explicit) compares INTERIOR rooms only — exterior_facade,
+    # balcony_terrace and garden are dropped however the pair shares them.
+    common = {"kitchen", "exterior_facade", "balcony_terrace", "garden", "bedroom"}
+    assert rooms_in_priority(common, "byt") == ["kitchen", "bedroom"]
+    assert rooms_in_priority(common) == ["kitchen", "bedroom"]  # default == byt
+
+
+def test_rooms_in_priority_house_keeps_exterior() -> None:
+    # Houses may use exterior — it is part of the property's identity there.
+    common = {"kitchen", "exterior_facade", "bedroom"}
+    assert "exterior_facade" in rooms_in_priority(common, "dum")
+
+
+def test_room_priority_for_by_category() -> None:
+    assert room_priority_for("byt")[0] == "kitchen"
+    assert "exterior_facade" not in room_priority_for("byt")
+    assert room_priority_for(None) == room_priority_for("byt")  # NULL -> apartment
+    assert "exterior_facade" in room_priority_for("dum")
+
+
+def test_phash_excluded_tags_for_by_category() -> None:
+    # byt disqualifies known-exterior/shared images from the pHash count; other
+    # categories exclude nothing (any image can carry their identity).
+    excl = phash_excluded_tags_for("byt")
+    assert "exterior_facade" in excl and "site_plan" in excl and "floor_plan" in excl
+    assert "kitchen" not in excl and "bathroom" not in excl
+    assert phash_excluded_tags_for(None) == excl  # NULL -> apartment
+    assert phash_excluded_tags_for("dum") == ()
+    assert phash_excluded_tags_for("pozemek") == ()
 
 
 def test_verdict_gate_high_only() -> None:
@@ -600,8 +658,12 @@ class _Cur:
             self._rows = list(self._conn.eligible_rows)
         elif "count(*)" in s and "JOIN properties pl" in s:
             self._rows = [(self._conn.stale_count,)]  # _reconcile_stale_candidates count
+        elif "EXISTS (SELECT 1 FROM images ia" in s:
+            self._rows = [(False,)]  # _phash_distinctive_match default (monkeypatch for a match)
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
+        elif "FROM images i WHERE i.sreality_id" in s:
+            self._rows = []  # _floor_plan_image_ids default (no floor plan -> gate passes)
         elif "image_room_classifications" in s:
             self._rows = [(False,)]  # _both_have_site_plan default
         elif "UPDATE property_identity_candidates" in s:
@@ -821,6 +883,41 @@ def test_run_engine_phash_fastpath_merges_before_classify(monkeypatch: Any) -> N
     assert merges == ["image_phash"]
 
 
+def test_run_engine_phash_distinctive_single_match_merges(monkeypatch: Any) -> None:
+    # #5: only ONE near-identical pair (below the >=2 generic bar), but it is a
+    # kitchen/bathroom match -> distinctive override auto-merges.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 1)  # below generic >=2
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: True)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_single_generic_match_does_not_merge(monkeypatch: Any) -> None:
+    # One generic (non-distinctive) near-identical pair is NOT enough -> no pHash merge.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 1)
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
+
+
 def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
     # The pHash tier runs before the cross-source gate, so an identical-photo
     # SAME-source re-post merges for free (the recall the gate would otherwise drop).
@@ -840,6 +937,122 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
     assert stats["auto_phash"] == 1
     assert stats["skipped_same_source"] == 0  # pHash resolved it before the gate
     assert merges == ["image_phash"]
+
+
+# --- #4 floor-plan validation gate (migration 234) -------------------------- #
+
+def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
+    import scripts.dedup_engine as eng
+
+    # neither side has a floor plan -> merge (existing path unchanged)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
+
+    # exactly one side has a plan -> queue (can't compare plan-to-plan)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
+
+    # both have plans
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
+    diff = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
+    same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
+    # can't validate (no fn / no budget) -> queue, never merge unchecked
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[0]) == "queue"
+    # a COLD verdict consumes one budget unit
+    budget = [3]
+    eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=budget)
+    assert budget[0] == 2
+
+
+def test_run_engine_phash_floor_plan_different_dismisses(monkeypatch: Any) -> None:
+    # pHash would merge, but the two floor plans differ -> dismiss (no merge).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])  # both have a plan
+    fp = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
+    assert stats["auto_dismissed"] == 1
+    assert merges == []
+
+
+def test_run_engine_phash_floor_plan_same_merges(monkeypatch: Any) -> None:
+    # pHash would merge, the floor plans agree -> the merge proceeds.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
+    fp = lambda a, b, ia, ib: {"verdict": "same_layout"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
+    # pHash would merge, but only ONE side has a floor plan -> operator queue.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid] if sid == 1 else [])
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
+    assert stats["queued"] >= 1
+
+
+def test_run_engine_visual_high_but_different_floor_plan_dismisses(monkeypatch: Any) -> None:
+    # A High forensic verdict is overridden by a different floor plan -> dismiss.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)  # no pHash -> visual
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])
+
+    def classify(sid: int) -> dict:
+        return {"data": {"images": [{"image_id": sid * 10 + 1, "room_type": "kitchen"}]}}
+
+    def compare(a: int, b: int, room: str, ids_a: list, ids_b: list,
+                model: str | None = None) -> dict:
+        return {"verdict": "High", "rationale": "matching tiles"}
+
+    fp = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(
+        conn, classify_fn=classify, compare_fn=compare, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_visual"] == 0
+    assert stats["auto_dismissed"] == 1
+    assert merges == []
 
 
 def test_run_engine_visual_high_merges_low_queues(monkeypatch: Any) -> None:

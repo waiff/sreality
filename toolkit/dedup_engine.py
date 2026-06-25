@@ -33,26 +33,34 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from toolkit.comparables import _DISPOSITION_LOOSE
+# Single-source image-tag taxonomy + family grouping (interior / exterior / plan) and the
+# comparison priority orders. See toolkit/room_taxonomy.py — one place defines which tag
+# is interior vs exterior and in what order rooms are compared.
+from toolkit.room_taxonomy import (
+    DISTINCTIVE_ROOMS,
+    FULL_PRIORITY as ROOM_PRIORITY,
+    INTERIOR_PRIORITY as BYT_ROOM_PRIORITY,
+    NON_INTERIOR_TAGS,
+)
 
 # Rule B: exact-address merge is blocked when areas disagree by more than this.
 ADDRESS_AREA_GUARD_PCT = 0.05
-# Rule C disqualifier: a >20% area gap means "not the same property".
-CANDIDATE_AREA_MAX_PCT = 0.20
+# Rule C disqualifier: an area gap this large means "not the same property" — a HARD
+# reject on BOTH the exact-address and candidate paths, for EVERY category (unified at
+# 10% per operator). One development stacks near-identical units differing mainly in
+# area; the old 20% gate let 73/87/99 m2 units of "Rezidence Na Bradle" chain-merge via
+# transitivity (73->87 = 16%, 87->99 = 12% each slipped under 20%, then pHash on shared
+# renders auto-merged the bands), and a NULL-floor bridge similarly chained 59/62/74 m2
+# units on "Budovatelů". 10% rejects both before the image layers ever run.
+CANDIDATE_AREA_MAX_PCT = 0.10
 # pHash fast-path: an image pair this close (Hamming) counts as identical.
 PHASH_IDENTICAL_MAX = 6
-# pHash fast-path: need at least this many identical image pairs (any image) to
-# auto-merge. One shared photo can be a reused stock/marketing shot (a development
-# sharing a facade/site-plan across units); two distinct matches is a real same-
-# property signal — validated against the operator-dismissed set (only 0.34% reach 2).
+# pHash fast-path: this many near-identical pairs over generic images => auto-merge. One
+# shared photo can be a reused stock/marketing shot (a development sharing a facade across
+# units); two distinct matches is a real same-property signal (only 0.34% of dismissed
+# pairs reach 2). DISTINCTIVE rooms override this: a SINGLE near-identical kitchen/bathroom
+# match is enough (those rooms are unit-specific, not shared marketing) — operator policy.
 PHASH_MIN_IDENTICAL_PAIRS = 2
-
-# Rule D priority order: cheap, distinctive rooms first; bedrooms last (most
-# generic / interchangeable). exterior_facade sits late — a shared facade is
-# weak evidence for a specific unit. floor_plan / other are never compared.
-ROOM_PRIORITY: tuple[str, ...] = (
-    "kitchen", "bathroom", "toilet", "living_room", "hallway",
-    "balcony_terrace", "garden", "exterior_facade", "bedroom",
-)
 
 
 @dataclass(frozen=True)
@@ -129,6 +137,19 @@ def profile_for(category_main: str | None) -> MatchProfile:
     """The MatchProfile for a category. Unknown / NULL → the byt profile, so a row
     with no category behaves exactly as the street+disposition engine always has."""
     return _PROFILES.get(category_main or "", _BYT_PROFILE)
+
+
+def room_priority_for(category_main: str | None) -> tuple[str, ...]:
+    """Comparison room order for a category's image layers. Apartments (the byt profile,
+    incl. NULL/unknown) use INTERIOR rooms only; other categories may use exterior."""
+    return BYT_ROOM_PRIORITY if profile_for(category_main).family == "byt" else ROOM_PRIORITY
+
+
+def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
+    """Image tags that disqualify a pHash pair for this category. Apartments exclude
+    KNOWN-exterior / shared-marketing images (NON_INTERIOR_TAGS); other categories
+    exclude nothing (any image can carry a house/plot's identity)."""
+    return NON_INTERIOR_TAGS if profile_for(category_main).family == "byt" else ()
 
 
 @dataclass(frozen=True)
@@ -543,14 +564,23 @@ class VisualOutcome:
     rooms_tried: list[str] = field(default_factory=list)
 
 
-def decide_phash_fastpath(identical_interior_pairs: int) -> bool:
-    """pHash fast-path: >=2 near-identical image pairs (any image) => same property."""
-    return identical_interior_pairs >= PHASH_MIN_IDENTICAL_PAIRS
+def decide_phash_fastpath(
+    identical_image_pairs: int, distinctive_match: bool = False
+) -> bool:
+    """pHash fast-path: >=2 near-identical generic image pairs OR a single near-identical
+    DISTINCTIVE-room (kitchen/bathroom) pair => same property. The distinctive override
+    (operator policy) reflects that wet rooms are unit-specific, not shared marketing, so
+    one identical match there is conclusive. For byt the generic count excludes
+    known-exterior images upstream (phash_excluded_tags_for); other categories count any
+    image. The distinctive match is always kitchen/bathroom-tagged (DISTINCTIVE_ROOMS)."""
+    return identical_image_pairs >= PHASH_MIN_IDENTICAL_PAIRS or distinctive_match
 
 
-def rooms_in_priority(common_rooms: set[str]) -> list[str]:
-    """The room types present in BOTH listings, in comparison priority order."""
-    return [r for r in ROOM_PRIORITY if r in common_rooms]
+def rooms_in_priority(common_rooms: set[str], category_main: str | None = None) -> list[str]:
+    """The room types present in BOTH listings, in comparison priority order for the
+    category. Apartments (default / NULL) compare INTERIOR rooms only; other categories
+    may compare exterior rooms too."""
+    return [r for r in room_priority_for(category_main) if r in common_rooms]
 
 
 def verdict_is_merge(verdict: str | None) -> bool:

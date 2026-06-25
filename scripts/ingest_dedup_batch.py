@@ -41,6 +41,7 @@ _CALLED_FOR = {
     "classify": "classify_listing_images",
     "compare": "compare_listings_visually",
     "site_plan": "compare_listing_site_plans",
+    "floor_plan": "compare_listing_floor_plans",
 }
 
 
@@ -172,6 +173,7 @@ def _ingest_one(
     from toolkit.image_classification import ClassifyError, persist_room_classifications
     from toolkit.visual_match import (
         VisualMatchError,
+        persist_floor_plan_match,
         persist_site_plan_match,
         persist_visual_match,
     )
@@ -202,6 +204,11 @@ def _ingest_one(
             )
         elif kind == "site_plan":
             persist_site_plan_match(
+                conn, sreality_id_a=req["sreality_id_a"], sreality_id_b=req["sreality_id_b"],
+                tool_calls=tool_calls, model=model, llm_call_id=llm_call_id, cost_usd=cost,
+            )
+        elif kind == "floor_plan":
+            persist_floor_plan_match(
                 conn, sreality_id_a=req["sreality_id_a"], sreality_id_b=req["sreality_id_b"],
                 tool_calls=tool_calls, model=model, llm_call_id=llm_call_id, cost_usd=cost,
             )

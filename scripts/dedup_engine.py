@@ -53,9 +53,11 @@ from toolkit.dedup_engine import (
     _price_match,
     classify_geo_pair,
     classify_pair,
+    DISTINCTIVE_ROOMS,
     decide_phash_fastpath,
     decide_visual_dismiss,
     geo_cell_key,
+    phash_excluded_tags_for,
     profile_for,
     rooms_in_priority,
     route_by_cosine,
@@ -64,6 +66,7 @@ from toolkit.dedup_engine import (
 )
 from toolkit.image_classification import SITE_PLAN_ROOM_TYPE
 from toolkit.property_identity import MergeError, merge_properties
+from toolkit.room_taxonomy import FLOOR_PLAN_ROOM_TYPE
 
 LOG = logging.getLogger("dedup_engine")
 
@@ -319,23 +322,103 @@ def _load_geo_eligible(conn: Any) -> list[ListingKey]:
     return keys
 
 
-def _phash_identical_pairs(conn: Any, a_id: int, b_id: int) -> int:
-    """Count near-identical image pairs (Hamming <= PHASH_IDENTICAL_MAX) across ALL
-    stored images of the two listings — no classify needed, so this runs BEFORE the
-    LLM stage. A development sharing one stock facade/plan yields 1 such pair; an
-    actual re-post of the same listing shares many. The PHASH_MIN_IDENTICAL_PAIRS
-    count threshold is what separates them (validated against the dismissed-pairs set),
-    which is why this can drop the old interior-only gate (which needed the classifier).
+def _phash_identical_pairs(
+    conn: Any, a_id: int, b_id: int, excluded_tags: tuple[str, ...] = ()
+) -> int:
+    """Count near-identical image pairs (Hamming <= PHASH_IDENTICAL_MAX) across the two
+    listings' stored images — no classify needed, so this runs BEFORE the LLM stage. A
+    development sharing one stock facade/plan yields 1 such pair; an actual re-post of the
+    same listing shares many; the PHASH_MIN_IDENTICAL_PAIRS count threshold separates them.
+
+    `excluded_tags` (byt: NON_INTERIOR_TAGS) drops any pair touching a KNOWN-exterior /
+    shared-marketing image, sourced from CLIP `image_clip_tags` — so a reused facade /
+    site-plan / render never feeds the byt fast-path. Untagged images still count, so
+    recall holds for the not-yet-tagged majority and tightens toward interior-only as CLIP
+    coverage fills in. Empty (non-byt) -> count any image, unchanged.
     """
+    sql = (
+        "SELECT count(*) FROM images ia JOIN images ib ON true "
+        "WHERE ia.sreality_id = %(a)s AND ib.sreality_id = %(b)s "
+        "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
+        "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
+    )
+    params: dict[str, Any] = {"a": a_id, "b": b_id, "max": PHASH_IDENTICAL_MAX}
+    if excluded_tags:
+        sql += (
+            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
+            "   WHERE t.image_id = ia.id AND t.logical_tag = ANY(%(excl)s))"
+            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
+            "   WHERE t.image_id = ib.id AND t.logical_tag = ANY(%(excl)s))"
+        )
+        params["excl"] = list(excluded_tags)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return int(cur.fetchone()[0])
+
+
+def _phash_distinctive_match(
+    conn: Any, a_id: int, b_id: int, rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS
+) -> bool:
+    """True if the two listings share >=1 near-identical image pair where BOTH images are
+    a DISTINCTIVE room (kitchen/bathroom, CLIP-tagged). A single such match auto-merges
+    (operator policy): wet rooms are unit-specific, not shared development marketing, so
+    one identical match there is conclusive — unlike the >=2 needed for generic images."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT count(*) FROM images ia JOIN images ib ON true "
-            "WHERE ia.sreality_id = %s AND ib.sreality_id = %s "
-            "AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
-            "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %s",
-            (a_id, b_id, PHASH_IDENTICAL_MAX),
+            "SELECT EXISTS (SELECT 1 FROM images ia"
+            "  JOIN image_clip_tags ta ON ta.image_id = ia.id AND ta.logical_tag = ANY(%(rooms)s)"
+            "  JOIN images ib ON ib.sreality_id = %(b)s AND ib.phash IS NOT NULL"
+            "  JOIN image_clip_tags tb ON tb.image_id = ib.id AND tb.logical_tag = ANY(%(rooms)s)"
+            "  WHERE ia.sreality_id = %(a)s AND ia.phash IS NOT NULL"
+            "    AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s)",
+            {"a": a_id, "b": b_id, "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX},
         )
-        return int(cur.fetchone()[0])
+        return bool(cur.fetchone()[0])
+
+
+def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
+    """Stored floor-plan image ids for a listing (CLIP tag OR LLM classification),
+    storage_path present so they can be sent to vision. Empty -> no floor plan."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT i.id FROM images i "
+            "WHERE i.sreality_id = %(sid)s AND i.storage_path IS NOT NULL AND ("
+            "  EXISTS (SELECT 1 FROM image_clip_tags t "
+            "          WHERE t.image_id = i.id AND t.logical_tag = %(fp)s)"
+            "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
+            "             WHERE c.image_id = i.id AND c.room_type = %(fp)s)) "
+            "ORDER BY i.sequence ASC NULLS LAST, i.id ASC",
+            {"sid": sreality_id, "fp": FLOOR_PLAN_ROOM_TYPE},
+        )
+        return [r[0] for r in cur.fetchall()]
+
+
+def _floor_plan_gate(
+    conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
+) -> str:
+    """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
+    Returns 'merge' | 'dismiss' | 'queue'. It ONLY adds conservatism:
+      * both sides carry a floor plan -> Sonnet compares them; 'different_layout' ->
+        'dismiss' (the only new auto-dismiss), else 'merge';
+      * exactly one side has a floor plan -> 'queue' (can't compare plan-to-plan);
+      * a both-plan pair we cannot validate (no fn / no budget / error) -> 'queue'
+        rather than merge unchecked;
+      * neither side has a plan -> 'merge' (existing path unchanged).
+    """
+    ids_a = _floor_plan_image_ids(conn, a_id)
+    ids_b = _floor_plan_image_ids(conn, b_id)
+    if ids_a and ids_b:
+        if floor_plan_fn is None or vision_budget[0] <= 0:
+            return "queue"
+        res = floor_plan_fn(a_id, b_id, ids_a, ids_b)
+        if res is None:
+            return "queue"
+        if not res.get("cache_hit"):
+            vision_budget[0] -= 1
+        return "dismiss" if res.get("verdict") == "different_layout" else "merge"
+    if ids_a or ids_b:
+        return "queue"
+    return "merge"
 
 
 def _both_have_site_plan(conn: Any, a_id: int, b_id: int) -> bool:
@@ -378,6 +461,7 @@ def _resolve_visual(
     classify_fn: Any,
     compare_fn: Any,
     site_plan_fn: Any,
+    floor_plan_fn: Any = None,
     vision_budget: list[int],
     max_room_attempts: int,
     autodismiss: bool = True,
@@ -428,7 +512,7 @@ def _resolve_visual(
     by_room_a = _group_ids_by_room(imgs_a)
     by_room_b = _group_ids_by_room(imgs_b)
 
-    priority = rooms_in_priority(common)
+    priority = rooms_in_priority(common, a.category_main)
     tried = 0
     last_verdict = None
     last_rationale = None
@@ -472,11 +556,21 @@ def _resolve_visual(
         room_rationales[room] = last_rationale
         room_cos[room] = cos
         if verdict_is_merge(last_verdict):
-            return {
-                "action": "auto_merge", "reason": "visual_match",
-                "room_type": room, "verdict": last_verdict, "rationale": last_rationale,
-                "cosine": cos,
+            # Floor-plan validation gate (migration 234): even a High forensic verdict
+            # is overridden by a different floor plan (dismiss) or a one-sided plan
+            # (queue). Same/inconclusive/none -> the auto-merge stands.
+            fp = _floor_plan_gate(
+                conn, a.sreality_id, b.sreality_id,
+                floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
+            base = {
+                "room_type": room, "verdict": last_verdict,
+                "rationale": last_rationale, "cosine": cos,
             }
+            if fp == "dismiss":
+                return {**base, "action": "dismiss", "reason": "floor_plan_different_layout"}
+            if fp == "queue":
+                return {**base, "action": "queue", "reason": "floor_plan_review"}
+            return {**base, "action": "auto_merge", "reason": "visual_match"}
 
     # No High on any COMPARED room. Only auto-dismiss when EVERY common room produced
     # a verdict (`len(room_verdicts) == len(priority)`): if the room cap / vision
@@ -488,7 +582,7 @@ def _resolve_visual(
     all_rooms_verdicted = len(room_verdicts) == len(priority)
     if autodismiss and all_rooms_verdicted and decide_visual_dismiss(room_verdicts):
         room = next(
-            (r for r in rooms_in_priority(set(room_verdicts))
+            (r for r in rooms_in_priority(set(room_verdicts), a.category_main)
              if room_verdicts[r] == "Low"),
             None,
         )
@@ -537,6 +631,7 @@ def _factors(
     house_number: str | None = None,
     floor: Any = None,
     phash_pairs: int | None = None,
+    phash_distinctive: bool = False,
     cosine: float | None = None,
     verdict: str | None = None,
     room_type: str | None = None,
@@ -562,6 +657,8 @@ def _factors(
         f["phash_pairs"] = phash_pairs
         f["phash_threshold"] = PHASH_IDENTICAL_MAX
         f["phash_min_pairs"] = PHASH_MIN_IDENTICAL_PAIRS
+    if phash_distinctive:
+        f["phash_distinctive"] = True  # merged on a single kitchen/bathroom match
     if cosine is not None:
         f["cosine"] = round(float(cosine), 4)
     return {k: v for k, v in f.items() if v is not None}
@@ -617,6 +714,7 @@ def run_engine(
     classify_fn: Any = None,
     compare_fn: Any = None,
     site_plan_fn: Any = None,
+    floor_plan_fn: Any = None,
     cosine_fn: Any = None,
     bands: Any = None,
     model_for: dict[str, str] | None = None,
@@ -753,34 +851,64 @@ def run_engine(
                     continue
 
                 # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw
-                # photo match (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over any
-                # images) is a same-property signal that needs no LLM. The pair already
+                # photo match (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the
+                # listings' images) is a same-property signal that needs no LLM. The pair already
                 # passed rule C (no house#/floor/area/unit-token contradiction), so a
                 # match here auto-merges. Runs before the cross-source gate so identical-
                 # photo re-posts (incl. same-source, which the gate would otherwise drop)
                 # merge for free — and cross-posted cross-source pairs skip classify AND
-                # compare. (Replaces the old interior-gated fast-path that needed classify.)
-                phash_pairs = _phash_identical_pairs(conn, a.sreality_id, b.sreality_id)
-                if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
+                # compare. For byt, known-exterior/shared images are excluded from the
+                # count (phash_excluded_tags_for) so a development's reused renders can't
+                # reach the >=2 threshold; other categories count any image. A single
+                # near-identical KITCHEN/BATHROOM match also qualifies (distinctive override,
+                # only checked when the generic count fell short).
+                phash_pairs = _phash_identical_pairs(
+                    conn, a.sreality_id, b.sreality_id,
+                    phash_excluded_tags_for(a.category_main))
+                distinctive = (
+                    phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
+                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
                     factors = _factors("phash", reason="image_phash",
-                                       street_key=street_key, phash_pairs=phash_pairs)
-                    if auto_merge_enabled:
-                        mg = None if dry_run else _merge_pair(
-                            conn, a, b, "image_phash",
-                            {**factors, "tier": "street_disposition", "confidence": 0.97})
-                        if dry_run or mg:
-                            stats["auto_phash"] += 1
-                            merged_pairs.add(cp)
-                            _audit(audit, a, b, "phash", "merged", factors,
-                                   source="engine", merge_group_id=mg)
-                    else:
+                                       street_key=street_key, phash_pairs=phash_pairs,
+                                       phash_distinctive=distinctive)
+                    if not auto_merge_enabled:
                         if not dry_run:
                             _enqueue_candidate(conn, a, b, {
                                 **factors, "tier": "street_disposition",
                                 "reason": "auto_merge_off:image_phash", "confidence": 0.97})
                         stats["queued"] += 1
+                        continue
+                    # Floor-plan validation gate (migration 234): a different floor plan
+                    # DISMISSES, a one-sided floor plan QUEUES; otherwise the pHash merge
+                    # proceeds. Only ever adds conservatism — never a new merge.
+                    fp = _floor_plan_gate(
+                        conn, a.sreality_id, b.sreality_id,
+                        floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
+                    if fp == "dismiss":
+                        stats["auto_dismissed"] += 1
+                        dismissed_pairs.add(cp)
+                        _audit(audit, a, b, "phash", "dismissed",
+                               {**factors, "reason": "floor_plan_different_layout"},
+                               source="engine")
+                        continue
+                    if fp == "queue":
+                        if not dry_run:
+                            _enqueue_candidate(conn, a, b, {
+                                **factors, "tier": "street_disposition",
+                                "reason": "floor_plan_review", "confidence": 0.6})
+                        stats["queued"] += 1
+                        continue
+                    mg = None if dry_run else _merge_pair(
+                        conn, a, b, "image_phash",
+                        {**factors, "tier": "street_disposition", "confidence": 0.97})
+                    if dry_run or mg:
+                        stats["auto_phash"] += 1
+                        merged_pairs.add(cp)
+                        _audit(audit, a, b, "phash", "merged", factors,
+                               source="engine", merge_group_id=mg)
                     continue
 
                 # Cross-source gate: the paid visual layer (classify + forensic compare)
@@ -814,7 +942,7 @@ def run_engine(
                     continue
                 outcome = _resolve_visual(
                     conn, a, b, classify_fn=classify_fn, compare_fn=compare_fn,
-                    site_plan_fn=site_plan_fn,
+                    site_plan_fn=site_plan_fn, floor_plan_fn=floor_plan_fn,
                     vision_budget=vision_budget, max_room_attempts=max_room_attempts,
                     autodismiss=autodismiss,
                     cosine_fn=cosine_fn, bands=bands, model_for=model_for, stats=stats,
@@ -1024,26 +1152,50 @@ def _build_site_plan_fn(conn: Any) -> Any:
     return _fn
 
 
+def _build_floor_plan_fn(conn: Any) -> Any:
+    from api.dependencies import get_providers
+    from api.llm_client import LLMClient
+    from toolkit.visual_match import compare_listing_floor_plans
+    llm = LLMClient(conn, providers=get_providers())
+
+    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        try:
+            res = compare_listing_floor_plans(
+                conn, llm, sreality_id_a=a, sreality_id_b=b,
+                image_ids_a=ids_a, image_ids_b=ids_b,
+            )
+            return res["data"]
+        except Exception as exc:  # noqa: BLE001 - one bad pair must not kill the run
+            LOG.warning("floor-plan compare %s/%s failed: %s", a, b, exc)
+            return None
+    return _fn
+
+
 def _build_cache_only_fns(
     conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
     clip_counter: list[int] | None = None,
-) -> tuple[Any, Any, Any]:
-    """classify/compare/site-plan fns that ONLY READ the warm caches (the ones the
-    batch lane filled at 50% off) and NEVER call the LLM — so the engine applies
-    already-paid-for verdicts for $0. Un-warmed listings/rooms return None and the
-    pair stays queued until the batch lane warms it. This is the cost-efficient
+) -> tuple[Any, Any, Any, Any]:
+    """classify/compare/site-plan/floor-plan fns that ONLY READ the warm caches (the
+    ones the batch lane filled at 50% off) and NEVER call the LLM — so the engine
+    applies already-paid-for verdicts for $0. Un-warmed listings/rooms return None and
+    the pair stays queued until the batch lane warms it. This is the cost-efficient
     consume half: the batch lane is the sole (discounted) payer. CLIP room tags
     (free) are preferred for the room grouping when present."""
     from api.llm_client import LLMClient
     from api.providers.anthropic import AnthropicProvider
     from toolkit.clip_dedup import clip_room_grouping
     from toolkit.image_classification import cached_classification
-    from toolkit.visual_match import cached_site_plan_verdict, cached_visual_verdict
+    from toolkit.visual_match import (
+        cached_floor_plan_verdict,
+        cached_site_plan_verdict,
+        cached_visual_verdict,
+    )
 
     llm = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
     classify_model = llm.resolve_model("llm_room_classify_model")
     compare_model = llm.resolve_model("llm_visual_match_model")
     site_plan_model = llm.resolve_model("llm_site_plan_match_model")
+    floor_plan_model = llm.resolve_model("llm_floor_plan_match_model")
 
     def classify_fn(sreality_id: int) -> dict[str, Any] | None:
         if prefer_clip and clip_model:
@@ -1077,7 +1229,12 @@ def _build_cache_only_fns(
             conn, sreality_id_a=a, sreality_id_b=b, model=site_plan_model)
         return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
 
-    return classify_fn, compare_fn, site_plan_fn
+    def floor_plan_fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        v = cached_floor_plan_verdict(
+            conn, sreality_id_a=a, sreality_id_b=b, model=floor_plan_model)
+        return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
+
+    return classify_fn, compare_fn, site_plan_fn, floor_plan_fn
 
 
 def _visual_autodismiss_enabled(conn: Any) -> bool:
@@ -1245,17 +1402,20 @@ def main() -> int:
             classify_fn = None
             compare_fn = None
             site_plan_fn = None
+            floor_plan_fn = None
             if args.free:
                 # FREE mode: no vision fns at all -> pHash / rule-B / reconcile /
                 # reject-gate only ($0); un-vision'd pairs are skipped, not queued.
                 pass
             elif auto_merge_enabled and args.cache_only:
                 # Cost-efficient consume: read warm caches only, never call the LLM.
-                classify_fn, compare_fn, site_plan_fn = _build_cache_only_fns(conn, **ck)
+                classify_fn, compare_fn, site_plan_fn, floor_plan_fn = _build_cache_only_fns(
+                    conn, **ck)
             elif auto_merge_enabled and args.max_vision_calls > 0:
                 classify_fn = _build_classify_fn(conn, **ck)
                 compare_fn = _build_compare_fn(conn)
                 site_plan_fn = _build_site_plan_fn(conn)
+                floor_plan_fn = _build_floor_plan_fn(conn)
             elif auto_merge_enabled:
                 # pHash fast-path still needs room labels to gate on interior shots.
                 classify_fn = _build_classify_fn(conn, **ck)
@@ -1289,6 +1449,7 @@ def main() -> int:
             stats = run_engine(
                 conn, classify_fn=classify_fn, compare_fn=compare_fn,
                 site_plan_fn=site_plan_fn,
+                floor_plan_fn=floor_plan_fn,
                 cosine_fn=cosine_fn, bands=bands, model_for=model_for,
                 audit=pair_audit,
                 max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,

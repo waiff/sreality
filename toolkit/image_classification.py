@@ -17,6 +17,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
+from toolkit.room_taxonomy import (  # single-source taxonomy (re-exported here)
+    INTERIOR_ROOM_TYPES,
+    ROOM_TYPES,
+    SITE_PLAN_ROOM_TYPE,
+)
 from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
 
 try:
@@ -38,25 +43,6 @@ _CALLED_FOR = "classify_listing_images"
 # classified?" check must use the SAME bound as the synchronous tool, or it
 # would mis-decide warm vs. cold — so both read this one constant.
 DEFAULT_CLASSIFY_N_IMAGES = 12
-
-ROOM_TYPES = (
-    "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
-    "exterior_facade", "balcony_terrace", "garden", "floor_plan", "site_plan",
-    "other",
-)
-
-# Interior types carry the strongest same-flat signal; the pHash fast-path uses
-# this set to exclude facade / floor-plan / site-plan shots (whole developments
-# reuse one such image across distinct units).
-INTERIOR_ROOM_TYPES = frozenset({
-    "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
-})
-
-# Site/situation plans: a development masterplan or a unit highlighted within a
-# building layout. The development guard compares these across two listings to
-# tell same-unit from different-unit-in-one-project (dedup_engine rule).
-SITE_PLAN_ROOM_TYPE = "site_plan"
-
 
 class ClassifyError(RuntimeError):
     """Raised when classification cannot be produced (no images, R2 missing, LLM refused)."""
