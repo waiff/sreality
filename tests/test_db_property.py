@@ -167,6 +167,59 @@ def test_ingest_reuses_pk_on_refetch(monkeypatch):
     assert _find(conn.executed, "UPDATE properties p SET") is not None  # rollup
 
 
+# --- broker work enqueue (the incremental resolver's sole feed) ------------
+
+
+def test_ingest_enqueues_broker_work_for_idnes(monkeypatch):
+    """A content-changed idnes write enqueues dirty_broker_listings so the
+    incremental resolver re-attributes it within its cadence — the queue is the
+    resolver's sole feed (there is no straggler scan). Mirrors the enqueue
+    write_detail_batch does for sreality."""
+    _stub_upsert(monkeypatch, "new")
+    conn = _FakeConn([
+        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, []),  # unseen
+        (lambda s: "SELECT nextval('synthetic_listing_id_seq')" in s, [(-9,)]),
+        (lambda s: "SELECT property_id FROM listings" in s, [(None,)]),
+        (lambda s: "INSERT INTO properties" in s, [(50,)]),
+    ])
+
+    pk, result = db.ingest_scraped_listing(conn, _listing(source="idnes"))
+
+    assert pk == -9 and result == "new"
+    enq = _find(conn.executed, "INSERT INTO dirty_broker_listings")
+    assert enq is not None and enq[1] == (-9,)
+
+
+def test_ingest_skips_broker_enqueue_for_non_broker_source(monkeypatch):
+    """Sources the resolver doesn't attribute (bazos/bezrealitky/remax/...) never
+    enter the broker queue — keeps the queue and the run metrics clean."""
+    _stub_upsert(monkeypatch, "new")
+    conn = _FakeConn([
+        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, []),
+        (lambda s: "SELECT nextval('synthetic_listing_id_seq')" in s, [(-9,)]),
+        (lambda s: "SELECT property_id FROM listings" in s, [(None,)]),
+        (lambda s: "INSERT INTO properties" in s, [(50,)]),
+    ])
+
+    db.ingest_scraped_listing(conn, _listing(source="bazos"))
+
+    assert _find(conn.executed, "INSERT INTO dirty_broker_listings") is None
+
+
+def test_ingest_skips_broker_enqueue_when_unchanged(monkeypatch):
+    """An unchanged re-fetch produces no snapshot, so it must not re-enqueue
+    broker work — the resolver already attributed it (no churn)."""
+    _stub_upsert(monkeypatch, "unchanged")
+    conn = _FakeConn([
+        (lambda s: "SELECT sreality_id FROM listings WHERE source" in s, [(-9,)]),  # seen
+        (lambda s: "SELECT property_id FROM listings" in s, [(3,)]),  # linked
+    ])
+
+    db.ingest_scraped_listing(conn, _listing(source="idnes"))
+
+    assert _find(conn.executed, "INSERT INTO dirty_broker_listings") is None
+
+
 # --- ScrapedListing contract ----------------------------------------------
 
 
