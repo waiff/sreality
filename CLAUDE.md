@@ -619,20 +619,28 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
     auto-dismiss** (the visual model stays the sole thing that can dismiss); same_layout / inconclusive
     → the merge proceeds. The gate distinguishes **"a human must decide" (queue)** from **"validate it
-    later" (defer)**: a both-plan pair whose Sonnet verdict isn't warmed yet (no fn / no budget /
-    cache-miss) → **`defer`** — skip this run, re-try next once the batch lane warms it (the pair is
-    automatable, not a human call), never the manual queue; exactly ONE side has a plan → **`queue`**
-    (genuinely a human call — no plan-to-plan compare possible); neither → the existing path is
-    untouched. It applies to pHash + visual merges, NOT rule-B exact-address. The `dedup_batches`
-    lane warms the floor-plan verdicts (`_warm_floor_plan` → `floor_plan` request kind), and crucially
-    **even the FREE scheduled engine run gets a $0 cache-only `floor_plan_fn`**
-    (`_build_cache_only_floor_plan_fn`, a single `app_settings` read — no LLMClient) so it CONSUMES
-    those batch-warmed verdicts (confirm/dismiss) and DEFERS the rest — instead of dumping every
-    both-floor-plan pHash match onto the operator queue (the regression this fixed: the `--free` run
-    had `floor_plan_fn=None`, so every both-plan pHash match returned `queue`). The per-run
-    `dedup_engine_runs.floor_plan_deferred` counter (migration 241, on the `/dedup` dashboard's stat
-    grid) is the silent-stall guard: it should trend to ~0 in steady state; a persistently high value
-    means the `dedup_batches` floor-plan warming is broken (those pairs would never merge).
+    later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run (budget exhausted /
+    cache-miss in the $0 escape hatch) → **`defer`** — skip, re-try next run, never the manual queue
+    (the pair is automatable, not a human call); exactly ONE side has a plan → **`queue`** (genuinely a
+    human call — no plan-to-plan compare possible); neither → the existing path is untouched. It applies
+    to pHash + visual merges, NOT rule-B exact-address. **The floor-plan check runs autonomously on the
+    SCHEDULED free run (the operator-chosen posture, Option C):** even though the free run skips the
+    expensive all-rooms classify/compare, it gets the LIVE `_build_floor_plan_fn` with a bounded
+    `--free-floor-plan-budget` (default 120) — the ONE paid call on a free run, firing only on the SMALL
+    set of would-merge both-plan pairs, so they auto-confirm / auto-dismiss inline instead of piling onto
+    the manual queue. Beyond the budget, pairs DEFER to the next run; budget 0 is a $0 escape hatch
+    (`_build_cache_only_floor_plan_fn` — consume only warmed verdicts, defer the rest). The cap is wired
+    through the pure `_effective_vision_cap` (free → the floor-plan budget; cache-only → unthrottled;
+    else → `max_vision_calls`). The cache-only fn AND the live fn resolve the model via the SAME
+    `LLMClient.resolve_model("llm_floor_plan_match_model")` the batch warm-up uses, so the model-keyed
+    verdict cache never silently misses. A raised `free_floor_plan_budget` on a `free=true` dispatch is a
+    **compare-free floor-plan sweep** (floor-plan checks only, no all-rooms compare spend) — how the
+    initial 379-pair backlog was cleared. The per-run `dedup_engine_runs.floor_plan_deferred` counter
+    (migration 241, on the `/dedup` dashboard's stat grid) is the silent-stall guard: it should trend to
+    ~0; a persistently high value means the free run's floor-plan budget is too small for the inflow (or,
+    if budget 0, that the disabled `dedup_batches` warmer isn't filling the cache). (`dedup_batches`'s
+    `_warm_floor_plan` → `floor_plan` request kind still warms the cache when that lane is enabled; it is
+    `disabled_manually` today, which is why the free run pays inline rather than consuming warm verdicts.)
     **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
     zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by
     `clip_tag.yml`/`scripts/clip_tag_backfill.py`) tags every image — room/plot type into

@@ -1109,7 +1109,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "free",
-        "description": "FREE mode ($0) — pHash + rule merges + reconcile only, no vision, no placeholders",
+        "description": "FREE mode — pHash + rule merges + reconcile + bounded inline floor-plan gate only",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -1117,6 +1117,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "free_floor_plan_budget",
+        "description": "[free] Inline cold Sonnet floor-plan checks allowed on a free run (0 = cache-only $0). Raise for a one-time compare-free sweep.",
+        "required": false,
+        "type": "string",
+        "default": "120",
+        "options": null
       }
     ],
     "secrets": [
