@@ -146,6 +146,9 @@ export interface ImagePublic {
   clip_fine_tag: string | null;
   clip_logical_tag: string | null;
   clip_confidence: number | null;
+  /* CLIP render-vs-photo score 0..1 (migration 239): >= ~0.65 is a 3D render /
+   * visualization (excluded from the byt merge signal). NULL until scored. */
+  clip_render_score: number | null;
 }
 
 /* Distributional shapes — used by EstimationDetail's RangeStrip and by

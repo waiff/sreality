@@ -31,7 +31,7 @@ export default function MapImagePreview({
       className="w-56 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[0_12px_32px_rgba(0,0,0,0.16)]"
     >
       <ImageCarousel
-        images={urls.map((url) => ({ url, tag: null, confidence: null }))}
+        images={urls.map((url) => ({ url, tag: null, confidence: null, renderScore: null }))}
         aspect="aspect-[4/3]"
       />
       <div className="px-3 py-2">

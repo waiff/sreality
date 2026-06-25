@@ -34,5 +34,18 @@
     "aerial_plot": "site_plan",
     "location_map": "other",
     "other": "other"
-  }
+  },
+  "render_note": "An ORTHOGONAL axis to the room argmax above (a render IS a kitchen-render): render_score = softmax over render_anchors + photo_anchors, summed over the render side. Validated on the 'Rezidence Na Bradle' development (renders 0.55-0.99) vs a bazos amateur-photo control (0.05-0.20) — a clean split. Used to exclude shared development RENDERS from the byt pHash/cosine merge signal (the 'vizualizace' caption is absent on those units, so the IMAGE is the signal).",
+  "render_anchors": [
+    "a 3D architectural rendering of an interior",
+    "a computer-generated interior visualization",
+    "a CGI rendered apartment room",
+    "an architectural visualization, not a real photograph"
+  ],
+  "photo_anchors": [
+    "a real photograph of an interior taken with a camera",
+    "an amateur smartphone photo of a room",
+    "a real-estate listing photograph of an apartment",
+    "a real photo of a room with natural lighting and imperfections"
+  ]
 }

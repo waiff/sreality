@@ -49,6 +49,7 @@ from scripts.dedup_engine import (
     _both_have_site_plan,
     _floor_plan_image_ids,
     _group_by_street,
+    _high_render_image_ids,
     _load_eligible,
     _phash_distinctive_match,
     _phash_identical_pairs,
@@ -59,6 +60,7 @@ from toolkit.dedup_engine import (
     classify_pair,
     decide_phash_fastpath,
     phash_excluded_tags_for,
+    phash_render_exclude_for,
     rooms_in_priority,
 )
 from toolkit.image_classification import (
@@ -266,12 +268,14 @@ def collect(
                 # which defers to the development guard below). Byt excludes known-
                 # exterior images (mirrors run_engine), so the warm-up funnel and the
                 # daily engine agree on which byt pairs the fast-path resolves.
+                _rmin = phash_render_exclude_for(a.category_main)
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
-                    phash_excluded_tags_for(a.category_main))
+                    phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
                 distinctive = (
                     phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                    and _phash_distinctive_match(
+                        conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
                 if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
@@ -381,6 +385,20 @@ def _collect_visual(
             return
         if verdict == "different_unit":
             return
+
+    # Render exclusion (migration 239): MUST mirror _resolve_visual — drop shared
+    # development RENDER images from the room compare for byt. The visual-verdict cache is
+    # keyed (a, b, room, model) and ignores the image_ids on a hit, so if the warm-up
+    # compared the render-INCLUDED set the engine would replay that render-inflated High;
+    # both lanes have to compare the SAME filtered set. Empty rooms drop (like the engine).
+    rmin = phash_render_exclude_for(a.category_main)
+    if rmin is not None:
+        render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
+        if render_ids:
+            rooms_a = {r: f for r, ids in rooms_a.items()
+                       if (f := [i for i in ids if i not in render_ids])}
+            rooms_b = {r: f for r, ids in rooms_b.items()
+                       if (f := [i for i in ids if i not in render_ids])}
 
     # Forensic compare: common rooms in priority order, capped — the replay stops
     # at the first High, so warming this priority-ordered prefix is the recall-safe

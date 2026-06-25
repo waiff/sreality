@@ -99,16 +99,23 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
          site_plan_verdict: Any = None, visual_cached: Any = None,
          phash: int = 0, distinctive: bool = False,
          both_site_plan: bool = False, floor_plan: bool = False,
-         floor_plan_cached: Any = None, in_flight: set[str] | None = None,
+         floor_plan_cached: Any = None, render_ids: set[int] | None = None,
+         in_flight: set[str] | None = None,
          max_requests: int = 100, max_room_attempts: int = 4) -> _FakeConn:
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
     monkeypatch.setattr(sub, "_load_eligible", lambda conn: list(keys))
-    monkeypatch.setattr(sub, "_phash_identical_pairs", lambda conn, a, b, excluded_tags=(): phash)
-    monkeypatch.setattr(sub, "_phash_distinctive_match", lambda conn, a, b, rooms=(): distinctive)
+    monkeypatch.setattr(
+        sub, "_phash_identical_pairs",
+        lambda conn, a, b, excluded_tags=(), render_exclude_min=None: phash)
+    monkeypatch.setattr(
+        sub, "_phash_distinctive_match",
+        lambda conn, a, b, rooms=(), render_exclude_min=None: distinctive)
     monkeypatch.setattr(sub, "_both_have_site_plan", lambda conn, a, b: both_site_plan)
     monkeypatch.setattr(
         sub, "_floor_plan_image_ids", lambda conn, sid: [sid] if floor_plan else [])
+    monkeypatch.setattr(
+        sub, "_high_render_image_ids", lambda conn, a, b, rmin: set(render_ids or set()))
     monkeypatch.setattr(
         sub, "cached_floor_plan_verdict",
         lambda conn, *, sreality_id_a, sreality_id_b, model: floor_plan_cached,
@@ -193,6 +200,27 @@ def test_enqueued_compare_rooms_match_engine_walk(monkeypatch: Any) -> None:
     # canonical pair on every row
     for r in by_kind["compare"]:
         assert (r[4], r[5]) == (1, 2)
+
+
+def test_render_images_excluded_from_compare_warmup(monkeypatch: Any) -> None:
+    # PARITY with _resolve_visual (migration 239): a high-render image must be dropped
+    # from the warm-up compare too — the verdict cache is keyed (a,b,room,model) and
+    # ignores the image set, so the warmed verdict must be over the SAME render-excluded
+    # set the engine compares, or the engine replays a render-inflated High. Here the
+    # kitchen is render-only on both sides -> the kitchen compare is NOT warmed; the
+    # bathroom (real) still is.
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={
+            1: ("classified", {"kitchen": [11], "bathroom": [12]}),
+            2: ("classified", {"kitchen": [21], "bathroom": [22]}),
+        },
+        render_ids={11, 21},  # both kitchens are renders
+    )
+    rooms = [r[6] for r in _rows_by_kind(conn).get("compare", [])]
+    assert "kitchen" not in rooms
+    assert "bathroom" in rooms
 
 
 def test_room_attempts_cap_limits_enqueued_compares(monkeypatch: Any) -> None:
