@@ -35,6 +35,22 @@ const TYPES = [
   ...CATEGORY_MAIN_ENUM.map((o) => ({ id: String(o.value), label: o.label_cs })),
 ];
 
+// The decision-factor (signal) a decision turned on. phash/cosine carry a numeric
+// threshold (review the borderline tail); visual carries a verdict; address has neither.
+const FACTORS = [
+  { id: '', label: 'Vše' },
+  { id: 'phash', label: 'pHash' },
+  { id: 'cosine', label: 'Cosine' },
+  { id: 'visual', label: 'Vize' },
+  { id: 'address', label: 'Adresa' },
+];
+const VERDICTS = [
+  { id: '', label: 'Vše' },
+  { id: 'High', label: 'High' },
+  { id: 'Medium', label: 'Medium' },
+  { id: 'Low', label: 'Low' },
+];
+
 const OUTCOME_STYLE: Record<string, string> = {
   merged:
     'text-[var(--color-copper)] border-[var(--color-copper)] bg-[var(--color-copper-soft)]',
@@ -75,19 +91,41 @@ export default function DedupAuditHistory() {
   const [outcome, setOutcome] = useState('');
   const [type, setType] = useState('');
   const [source, setSource] = useState('');
+  const [factor, setFactor] = useState('');
+  const [verdict, setVerdict] = useState('');
+  const [maxText, setMaxText] = useState(''); // raw threshold buffer (un-committed)
+  const [factorMax, setFactorMax] = useState<number | null>(null); // committed
   // Broadcast "expand/collapse all photos" to every row's DedupFactors; bump seq each
   // click so a row re-applies it even after individual toggling.
   const [batchPhotos, setBatchPhotos] =
     useState<{ open: boolean; seq: number } | undefined>(undefined);
   const setAllPhotos = (open: boolean) =>
     setBatchPhotos((b) => ({ open, seq: (b?.seq ?? 0) + 1 }));
+
+  // Switching the factor resets its threshold/verdict so stale bounds don't carry over.
+  const pickFactor = (f: string) => {
+    setFactor(f);
+    setMaxText('');
+    setFactorMax(null);
+    setVerdict('');
+  };
+  const commitMax = () => {
+    const t = maxText.trim().replace(',', '.');
+    const v = t === '' ? NaN : parseFloat(t);
+    setFactorMax(Number.isFinite(v) ? v : null);
+  };
+
+  const numericFactor = factor === 'phash' || factor === 'cosine';
   const q = useQuery({
-    queryKey: ['dedup', 'audit', outcome, type, source],
+    queryKey: ['dedup', 'audit', outcome, type, source, factor, factorMax, verdict],
     queryFn: () =>
       getDedupAudit({
         outcome: outcome || undefined,
         category_main: type || undefined,
         source: source || undefined,
+        factor: factor || undefined,
+        factor_max: numericFactor && factorMax != null ? factorMax : undefined,
+        verdict: factor === 'visual' && verdict ? verdict : undefined,
         limit: 150,
       }),
   });
@@ -150,6 +188,48 @@ export default function DedupAuditHistory() {
               </button>
             </span>
           )}
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[0.62rem] uppercase tracking-[0.1em] text-[var(--color-ink-4)] mr-1">
+            Faktor
+          </span>
+          {FACTORS.map((f) => (
+            <Chip
+              key={f.id}
+              on={factor === f.id}
+              label={f.label}
+              onClick={() => pickFactor(f.id)}
+            />
+          ))}
+          {numericFactor && (
+            <span className="inline-flex items-center gap-1 text-[0.78rem] text-[var(--color-ink-3)]">
+              ≤
+              <input
+                value={maxText}
+                onChange={(e) => setMaxText(e.target.value)}
+                onBlur={commitMax}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') commitMax();
+                }}
+                inputMode="decimal"
+                placeholder={factor === 'cosine' ? '0,95' : 'počet'}
+                aria-label="Horní práh faktoru"
+                className="w-16 px-1.5 py-0.5 text-[0.78rem] font-mono tabular-nums rounded-[var(--radius-xs)] border border-[var(--color-rule)] bg-[var(--color-paper)] text-[var(--color-ink)] placeholder:text-[var(--color-ink-4)] focus:outline-none focus:border-[var(--color-rule-strong)]"
+              />
+              <span className="text-[0.66rem] text-[var(--color-ink-4)]">
+                {factor === 'cosine' ? 'cosine' : 'shod fotek'}
+              </span>
+            </span>
+          )}
+          {factor === 'visual' &&
+            VERDICTS.map((v) => (
+              <Chip
+                key={v.id}
+                on={verdict === v.id}
+                label={v.label}
+                onClick={() => setVerdict(v.id)}
+              />
+            ))}
         </div>
       </div>
 

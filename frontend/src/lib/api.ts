@@ -677,6 +677,10 @@ export const getDedupAudit = (
     category_main?: string;
     source?: string;
     stage?: string;
+    factor?: string; // phash | cosine | visual | address
+    factor_min?: number;
+    factor_max?: number;
+    verdict?: string; // High | Medium | Low
     limit?: number;
     offset?: number;
   } = {},
@@ -686,6 +690,10 @@ export const getDedupAudit = (
   if (params.category_main) q.set('category_main', params.category_main);
   if (params.source) q.set('source', params.source);
   if (params.stage) q.set('stage', params.stage);
+  if (params.factor) q.set('factor', params.factor);
+  if (params.factor_min != null) q.set('factor_min', String(params.factor_min));
+  if (params.factor_max != null) q.set('factor_max', String(params.factor_max));
+  if (params.verdict) q.set('verdict', params.verdict);
   q.set('limit', String(params.limit ?? 100));
   if (params.offset) q.set('offset', String(params.offset));
   return request<{ data: DedupAuditRow[]; total: number; returned: number }>(

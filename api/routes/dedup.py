@@ -107,16 +107,22 @@ def get_pair_audit(
     category_main: str | None = None,
     source: str | None = None,
     stage: str | None = None,
+    factor: str | None = Query(default=None, pattern="^(phash|cosine|visual|address)$"),
+    factor_min: float | None = None,
+    factor_max: float | None = None,
+    verdict: str | None = Query(default=None, pattern="^(High|Medium|Low)$"),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     """The unified Decision history feed (merged / dismissed, engine + operator).
-    Filterable by property type (`category_main`), `outcome`, `source`, `stage`."""
+    Filterable by property type, outcome, source, stage, and the decision FACTOR
+    (`factor` + numeric `factor_min`/`factor_max`, or `verdict` for visual)."""
     return dedup.list_pair_audit(
         conn, outcome=outcome, category_main=category_main, source=source,
-        stage=stage, limit=limit, offset=offset,
+        stage=stage, factor=factor, factor_min=factor_min, factor_max=factor_max,
+        verdict=verdict, limit=limit, offset=offset,
     )
 
 

@@ -227,6 +227,19 @@ def summary(conn: psycopg.Connection, *, status: str = "proposed") -> dict[str, 
     }
 
 
+# The decision-FACTOR filter (the photo/score signal a decision turned on): each maps to
+# a row predicate and, where the factor is numeric, the detail key to threshold. Lets the
+# operator review the borderline tail of one signal — e.g. pHash merges with the fewest
+# matching photos, or cosine routings just below a cutoff — to validate the engine's bars.
+# Keys come from this fixed dict (never the request), so interpolating them is injection-safe.
+_FACTOR_FILTER: dict[str, tuple[str, str | None]] = {
+    "phash":   ("a.stage = 'phash'",   "phash_pairs"),
+    "cosine":  ("a.detail ? 'cosine'", "cosine"),
+    "visual":  ("a.stage = 'visual'",  None),
+    "address": ("a.stage = 'address'", None),
+}
+
+
 def list_pair_audit(
     conn: psycopg.Connection,
     *,
@@ -234,15 +247,20 @@ def list_pair_audit(
     category_main: str | None = None,
     source: str | None = None,
     stage: str | None = None,
+    factor: str | None = None,
+    factor_min: float | None = None,
+    factor_max: float | None = None,
+    verdict: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
     """The unified Decision history feed: every TERMINAL dedup decision (merged |
     dismissed), engine AND operator, newest first. Filterable by property type
-    (`category_main`, the Browse/Pipeline TYPE chips), `outcome`, `source`, or `stage`.
-    `merge_group_id` is the inline-undo handle; `undone` is DERIVED by joining the merge
-    ledger (property_merge_events.undone_at) — the single source of truth for undo state,
-    so an undone merge reads correctly without ever mutating the audit row."""
+    (`category_main`), `outcome`, `source`, `stage`, and by the decision FACTOR: `factor`
+    ∈ {phash, cosine, visual, address} with a numeric `factor_min`/`factor_max` on its
+    signal (phash_pairs / cosine), or a `verdict` for visual rows — so the operator can
+    audit the borderline decisions of one signal. `merge_group_id` is the inline-undo
+    handle; `undone` is DERIVED by joining the merge ledger (the single source of truth)."""
     clauses: list[str] = []
     params: dict[str, Any] = {}
     if outcome is not None:
@@ -257,6 +275,18 @@ def list_pair_audit(
     if stage is not None:
         clauses.append("a.stage = %(stage)s")
         params["stage"] = stage
+    if factor in _FACTOR_FILTER:
+        clause, key = _FACTOR_FILTER[factor]
+        clauses.append(clause)
+        if key is not None and factor_min is not None:
+            clauses.append(f"(a.detail->>'{key}')::numeric >= %(factor_min)s")
+            params["factor_min"] = factor_min
+        if key is not None and factor_max is not None:
+            clauses.append(f"(a.detail->>'{key}')::numeric <= %(factor_max)s")
+            params["factor_max"] = factor_max
+    if verdict is not None:
+        clauses.append("a.detail->>'verdict' = %(verdict)s")
+        params["verdict"] = verdict
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     with conn.cursor() as cur:
         cur.execute(f"SELECT count(*) FROM dedup_pair_audit a {where}", params)
