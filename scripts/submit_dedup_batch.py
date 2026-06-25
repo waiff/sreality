@@ -115,7 +115,7 @@ class _Submitter:
         self._chunk_bytes = 0
         self.stats: dict[str, int] = {
             "want_classify": 0, "want_compare": 0, "want_site_plan": 0,
-            "skipped_in_flight": 0, "batches": 0,
+            "want_floor_plan": 0, "skipped_in_flight": 0, "batches": 0,
         }
 
     @property
@@ -493,9 +493,11 @@ def main() -> int:
 
     LOG.info(
         "BATCH done visual_candidates=%d want_classify=%d want_compare=%d "
-        "want_site_plan=%d skipped_in_flight=%d deferred_classify=%d batches=%d dry_run=%s",
+        "want_site_plan=%d want_floor_plan=%d floor_plan_warmed=%d skipped_in_flight=%d "
+        "deferred_classify=%d batches=%d dry_run=%s",
         stats["visual_candidates"], stats["want_classify"], stats["want_compare"],
-        stats["want_site_plan"], stats["skipped_in_flight"],
+        stats["want_site_plan"], stats.get("want_floor_plan", 0),
+        stats.get("floor_plan_warmed", 0), stats["skipped_in_flight"],
         stats["pairs_deferred_classify"], stats["batches"], args.dry_run,
     )
     return 0
