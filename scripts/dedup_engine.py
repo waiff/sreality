@@ -1264,6 +1264,21 @@ def _build_cache_only_floor_plan_fn(conn: Any) -> Any:
     return _fn
 
 
+def _effective_vision_cap(*, free: bool, cache_only: bool, free_floor_plan_budget: int,
+                          max_vision_calls: int) -> int:
+    """The vision-budget cap handed to run_engine, by mode. Cache-only reads are free, so a
+    large cap keeps the budget from throttling them. In --free mode the ONLY vision consumer
+    is the floor-plan validation gate: a positive --free-floor-plan-budget caps its inline
+    COLD floor-plan checks; 0 selects the cache-only floor_plan_fn (which never makes a cold
+    call) -> a large cap so a zero budget can't pre-empt the gate before it reads the warm
+    cache (the gate defers when vision_budget<=0)."""
+    if cache_only:
+        return 10_000_000
+    if free:
+        return free_floor_plan_budget if free_floor_plan_budget > 0 else 10_000_000
+    return max_vision_calls
+
+
 def _build_cache_only_fns(
     conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
     clip_counter: list[int] | None = None,
@@ -1433,11 +1448,19 @@ def main() -> int:
                              "applies cached merge/dismiss results the batch lane paid for; "
                              "un-warmed pairs stay queued. The cost-efficient drain half.")
     parser.add_argument("--free", action="store_true",
-                        help="FREE mode ($0, no LLM at all): pHash + exact-address merges + "
-                             "reconcile + reject/gate dismissals only. Un-vision'd cross-source "
-                             "pairs are skipped (NOT queued as placeholders), so the review queue "
-                             "doesn't inflate. Captures every photo-sharing dup; different-photo "
-                             "dups are left for a future run (more free pHash, or vision if enabled).")
+                        help="FREE mode: pHash + exact-address merges + reconcile + reject/gate "
+                             "dismissals, NO paid all-rooms classify/compare. Un-vision'd "
+                             "cross-source pairs are skipped (NOT queued as placeholders), so the "
+                             "review queue doesn't inflate. The ONE bounded exception is the "
+                             "floor-plan validation gate (see --free-floor-plan-budget) — a "
+                             "targeted safety check on the small set of would-merge both-plan pairs.")
+    parser.add_argument("--free-floor-plan-budget", type=int, default=120,
+                        help="In --free mode, let the floor-plan validation gate PAY for up to N "
+                             "cold Sonnet floor-plan checks inline (the only paid call on a free "
+                             "run; it fires solely on pairs the engine WOULD merge — pHash matches "
+                             "/ visual Highs — so it's bounded and high-value). Beyond N, both-plan "
+                             "pairs DEFER to the next run. 0 = cache-only ($0): consume only "
+                             "batch-warmed verdicts, defer every un-warmed both-plan pair.")
     parser.add_argument("--geo", action="store_true",
                         help="ALSO run the geo candidate pass for single-dwelling families "
                              "(dum/pozemek/komercni/ostatni) the street+disposition engine "
@@ -1498,12 +1521,17 @@ def main() -> int:
             site_plan_fn = None
             floor_plan_fn = None
             if args.free:
-                # FREE mode: no PAID vision -> pHash / rule-B / reconcile / reject-gate
-                # only. It DOES get a $0 cache-only floor_plan_fn so the floor-plan gate
-                # on the pHash fast-path consumes batch-warmed verdicts (confirm/dismiss)
-                # and DEFERS the rest — instead of dumping every both-floor-plan pHash
-                # match into the manual queue.
-                floor_plan_fn = _build_cache_only_floor_plan_fn(conn)
+                # FREE mode: no PAID all-rooms classify/compare -> pHash / rule-B /
+                # reconcile / reject-gate only. The ONE bounded paid exception is the
+                # floor-plan validation gate: with a positive --free-floor-plan-budget it
+                # gets the LIVE fn and pays its single Sonnet check inline for the small set
+                # of would-merge both-plan pairs (auto-confirm / auto-dismiss, Option C),
+                # capped by the budget (beyond it, pairs DEFER to the next run). Budget 0 =
+                # the $0 cache-only fn: consume only batch-warmed verdicts, defer the rest.
+                floor_plan_fn = (
+                    _build_floor_plan_fn(conn) if args.free_floor_plan_budget > 0
+                    else _build_cache_only_floor_plan_fn(conn)
+                )
             elif auto_merge_enabled and args.cache_only:
                 # Cost-efficient consume: read warm caches only, never call the LLM.
                 classify_fn, compare_fn, site_plan_fn, floor_plan_fn = _build_cache_only_fns(
@@ -1536,8 +1564,12 @@ def main() -> int:
                         conn, image_ids_a=ids_a, image_ids_b=ids_b, model=_cm)
 
             # Cache-only calls are free, so don't let the vision budget / room cap
-            # throttle consumption — try every warmed room of every warmed pair.
-            eff_max_vision = 10_000_000 if args.cache_only else args.max_vision_calls
+            # throttle consumption — try every warmed room of every warmed pair. In --free
+            # mode the cap bounds the inline floor-plan checks (see _effective_vision_cap).
+            eff_max_vision = _effective_vision_cap(
+                free=args.free, cache_only=args.cache_only,
+                free_floor_plan_budget=args.free_floor_plan_budget,
+                max_vision_calls=args.max_vision_calls)
             eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
 
             from datetime import datetime, timezone

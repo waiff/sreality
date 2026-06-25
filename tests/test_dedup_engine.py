@@ -976,6 +976,26 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
 
 # --- #4 floor-plan validation gate (migration 234) -------------------------- #
 
+def test_effective_vision_cap() -> None:
+    import scripts.dedup_engine as eng
+
+    # cache-only: never throttle warm reads
+    assert eng._effective_vision_cap(
+        free=False, cache_only=True, free_floor_plan_budget=0, max_vision_calls=300) == 10_000_000
+    # free + a positive floor-plan budget -> the cap IS that budget (bounds inline
+    # cold floor-plan checks; nothing else consumes vision in free mode)
+    assert eng._effective_vision_cap(
+        free=True, cache_only=False, free_floor_plan_budget=120, max_vision_calls=300) == 120
+    # free + budget 0 -> cache-only floor_plan_fn: a large cap so a zero budget can't
+    # pre-empt the gate before it reads the warm cache (the cache-only fn never makes a
+    # cold call, so it can't overspend)
+    assert eng._effective_vision_cap(
+        free=True, cache_only=False, free_floor_plan_budget=0, max_vision_calls=300) == 10_000_000
+    # live dispatch: the plain vision budget
+    assert eng._effective_vision_cap(
+        free=False, cache_only=False, free_floor_plan_budget=120, max_vision_calls=300) == 300
+
+
 def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
 

@@ -13,18 +13,25 @@ name: Dedup engine (street + disposition)
 # Every auto-merge is reversible (property_merge_events ledger + one-click Undo).
 # A per-run dedup_engine_runs row powers the /dedup automation dashboard.
 #
-# Cadence: every 6h. The SCHEDULED run is FREE (--free, $0, no LLM): pHash +
-# exact-address merges + reconcile + reject/gate dismissals only; un-vision'd
+# Cadence: every 6h. The SCHEDULED run is FREE-mostly (--free): pHash +
+# exact-address merges + reconcile + reject/gate dismissals; un-vision'd
 # cross-source pairs are skipped (not queued as placeholders). It captures every
 # dup that SHARES a photo (pHash, whose coverage keeps growing) plus all free
-# cleanup, for $0 — the operator-chosen cost posture. Different-photo dups are
-# left un-found until vision is explicitly enabled.
+# cleanup. The ONE bounded paid call is the floor-plan validation gate
+# (--free-floor-plan-budget 120): a single Sonnet floor-plan check on the SMALL set
+# of pairs the engine WOULD merge (pHash matches / visual Highs), so both-plan
+# duplicates auto-confirm / auto-dismiss instead of piling onto the manual queue
+# (the all-rooms compare/classify stays off; that's the expensive part). Beyond the
+# budget, both-plan pairs DEFER to the next run. Different-photo dups still need the
+# dispatch forensic compare below.
 #
-# Paid VISION is dispatch-only: workflow_dispatch with max_vision_calls>0 runs the
-# forensic compare (stop-at-first-High; warm cache hits are free via the cold-only
-# budget), cache_only=true does a $0 consume of already-warmed verdicts, shadow=true
-# previews with no writes. (The dedup_batches warmer is disabled — for stop-at-
-# first-High dedup the engine's own sync is cheaper than all-rooms batch warming.)
+# Paid all-rooms VISION is dispatch-only: workflow_dispatch with max_vision_calls>0
+# runs the forensic compare (stop-at-first-High; warm cache hits are free via the
+# cold-only budget), cache_only=true does a $0 consume of already-warmed verdicts,
+# shadow=true previews with no writes, free=true + a raised free_floor_plan_budget is
+# a compare-free floor-plan sweep. (The dedup_batches warmer is disabled — for
+# stop-at-first-High dedup the engine's own sync is cheaper than all-rooms batch
+# warming.)
 #
 # Required GitHub secret: SUPABASE_DB_URL; paid vision additionally needs
 # ANTHROPIC_API_KEY + R2_* for image bytes.
@@ -79,13 +86,18 @@ on:
           - "false"
           - "true"
       free:
-        description: FREE mode ($0) — pHash + rule merges + reconcile only, no vision, no placeholders
+        description: FREE mode — pHash + rule merges + reconcile + bounded inline floor-plan gate only
         required: false
         default: "false"
         type: choice
         options:
           - "false"
           - "true"
+      free_floor_plan_budget:
+        description: "[free] Inline cold Sonnet floor-plan checks allowed on a free run (0 = cache-only $0). Raise for a one-time compare-free sweep."
+        required: false
+        default: "120"
+        type: string
 
 concurrency:
   group: dedup-engine
@@ -120,15 +132,18 @@ jobs:
       - name: Run dedup engine
         run: |
           if [ "${{ github.event_name }}" = "schedule" ]; then
-            # SCHEDULED = FREE ($0): pHash + rule merges + reconcile, no vision,
-            # no placeholders. The operator-chosen cost posture.
-            ARGS="--free --max-pairs 200000 --max-seconds 4800"
+            # SCHEDULED = FREE: pHash + rule merges + reconcile, NO paid all-rooms
+            # compare/classify, no placeholders. The ONE bounded paid exception is the
+            # floor-plan validation gate (--free-floor-plan-budget) — a targeted Sonnet
+            # check only on the small set of would-merge both-plan pairs (Option C).
+            ARGS="--free --max-pairs 200000 --max-seconds 4800 --free-floor-plan-budget 120"
           else
             # Dispatch: paid vision / cache-only / free / shadow per inputs.
             ARGS="--max-pairs ${{ inputs.max_pairs || '20000' }}"
             ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '300' }}"
             ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
             ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
+            ARGS="$ARGS --free-floor-plan-budget ${{ inputs.free_floor_plan_budget || '120' }}"
             if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
             if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
