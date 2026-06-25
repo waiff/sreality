@@ -438,7 +438,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "broker_resolution.yml",
     "name": "Broker resolution (incremental)",
-    "description": "Broker intelligence: the incremental identity resolver. Attributes new (unattributed-straggler) + content-changed (dirty_broker_listings) sreality listings to their per-source broker_identities, ensures their firms, attaches singleton canonical brokers, and recomputes ONLY the affected brokers' rollups + firm memberships. O(changes); never refreshes the leaderboard matview (that is the daily full sweep's job). Source-agnostic maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution concurrency group with the full sweep so the two never mutate the broker tables at once.",
+    "description": "Broker intelligence: the incremental identity resolver. Drains the dirty_broker_listings queue — new + content-changed listings enqueued at write time by the detail writers (rule #20), so there is no full-table straggler scan — attributes them to their per-source broker_identities, ensures their firms, attaches singleton canonical brokers, and recomputes ONLY the affected brokers' rollups + firm memberships. O(changes); never refreshes the leaderboard matview (that is the daily full sweep's job). Source-agnostic maintenance job, so it carries NO `# portal:` tag. Shares the broker-resolution concurrency group with the full sweep so the two never mutate the broker tables at once.",
     "portal": null,
     "manual": true,
     "schedules": [

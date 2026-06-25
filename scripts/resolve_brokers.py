@@ -3,10 +3,16 @@
 Mirrors scripts.recompute_property_stats: a pure-SQL, set-based, idempotent driver
 that runs OFF the scrape hot path. Three modes:
 
-  * --incremental (cron */10): attribute unattributed-straggler + dirty listings
-    (cheap, scoped), then recompute only the affected brokers' rollups + firm
-    memberships. O(changes); never touches the leaderboard matview. The expensive
-    raw_json scan is avoided here.
+  * --incremental (cron */10): drain the dirty_broker_listings queue (new +
+    content-changed listings, enqueued at write time by the detail writers —
+    db.write_detail_batch for sreality, db.ingest_scraped_listing for idnes —
+    rule #20), re-attribute exactly those, then recompute only the affected
+    brokers' rollups + firm memberships. O(changes); never touches the leaderboard
+    matview. There is deliberately NO full-table straggler scan here: broker_
+    identity_id IS NULL is a permanent state for the ~110k listings that carry no
+    broker block (index-only stubs, FSBO, other portals), so scanning for it every
+    run cost a full raw_json detoast pass for ~7 genuine stragglers and timed out.
+    Anything the queue misses is reconciled by the daily full sweep below.
   * full (default, daily reconcile): re-attribute EVERY sreality listing (batched by
     id range), recompute all rollups, rebuild memberships + firm counts, run the
     cross-source merge step, REFRESH the leaderboard matview, clear the queue. The
@@ -420,15 +426,6 @@ FROM personal p JOIN multi m ON m.kind = p.kind AND m.value = p.value
 _CLAIM_DIRTY = "SELECT sreality_id FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s ORDER BY marked_at LIMIT %(limit)s"
 _DELETE_DIRTY = "DELETE FROM dirty_broker_listings WHERE sreality_id = ANY(%(ids)s) AND marked_at <= %(cutoff)s"
 _CLEAR_DIRTY = "DELETE FROM dirty_broker_listings WHERE marked_at <= %(cutoff)s"
-_STRAGGLERS = """
-SELECT sreality_id FROM listings
-WHERE broker_identity_id IS NULL
-  AND (
-    (source = 'sreality' AND raw_json ? 'user'   AND (raw_json->'user'->>'user_id') IS NOT NULL)
-    OR (source = 'idnes'  AND raw_json ? 'broker' AND (raw_json->'broker'->>'account_oid') IS NOT NULL)
-  )
-LIMIT %(limit)s
-"""
 
 
 def _settings(conn: Any) -> tuple[list[str], list[str], list[str]]:
@@ -807,10 +804,13 @@ def _run_incremental(conn: Any, free: list[str], franchise: list[str],
         cutoff = cur.fetchone()[0]
         cur.execute("INSERT INTO broker_resolution_runs (mode) VALUES ('incremental') RETURNING id")
         run_id = int(cur.fetchone()[0])
-        cur.execute(_STRAGGLERS, {"limit": batch_size})
-        sids = {int(r[0]) for r in cur.fetchall()}
+        # Drain the work queue only. New + content-changed listings are enqueued
+        # at write time by the detail writers (write_detail_batch / ingest_scraped_
+        # listing), so this is the complete set of listings whose broker block may
+        # need (re)attribution since the last pass. The claim is bounded by cutoff
+        # so a write mid-run survives to the next pass (dirty_properties, rule #20).
         cur.execute(_CLAIM_DIRTY, {"cutoff": cutoff, "limit": batch_size})
-        sids |= {int(r[0]) for r in cur.fetchall()}
+        sids = {int(r[0]) for r in cur.fetchall()}
 
     if not sids:
         with conn.cursor() as cur:
@@ -868,13 +868,10 @@ def main() -> int:
         free, franchise, auto = _settings(conn)
         if args.dry_run:
             with conn.cursor() as cur:
-                cur.execute("SELECT count(*) FROM listings WHERE source='sreality' "
-                            "AND broker_identity_id IS NULL AND raw_json ? 'user'")
-                stragglers = int(cur.fetchone()[0])
                 cur.execute("SELECT count(*) FROM dirty_broker_listings")
                 dirty = int(cur.fetchone()[0])
-            LOG.info("RESOLVE dry-run mode=%s free=%d franchise=%d stragglers=%d dirty=%d; exit",
-                     mode, len(free), len(franchise), stragglers, dirty)
+            LOG.info("RESOLVE dry-run mode=%s free=%d franchise=%d dirty=%d; exit",
+                     mode, len(free), len(franchise), dirty)
             return 0
 
         # Pooler-safe mutual exclusion (migration 192). The incremental yields when the

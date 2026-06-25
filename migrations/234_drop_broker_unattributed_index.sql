@@ -1,0 +1,35 @@
+-- 234_drop_broker_unattributed_index.sql
+--
+-- Drop the partial index that backed the incremental broker resolver's
+-- straggler scan. That scan (scripts.resolve_brokers._STRAGGLERS) is removed in
+-- the same change: it was the sole consumer of this index.
+--
+-- Why it goes: the index covers EVERY unattributed listing
+-- (broker_identity_id IS NULL AND raw_json IS NOT NULL) — ~110k rows across all
+-- sources. But broker_identity_id IS NULL is a PERMANENT state for the ~41k
+-- sreality/idnes listings that carry no broker block (index-only stubs, FSBO,
+-- delisted) plus ~67k other-portal rows, so the LIMIT-bounded straggler scan
+-- (only ~7 genuine stragglers) could never short-circuit and walked the whole
+-- index every 10 min, detoasting ~41k raw_json blobs and intermittently blowing
+-- the pooler statement timeout (the "Broker resolution (incremental)" failures).
+--
+-- The incremental now drains dirty_broker_listings only (new + content-changed
+-- listings are enqueued at write time — db.write_detail_batch for sreality,
+-- db.ingest_scraped_listing for idnes — rule #20); the daily full sweep
+-- reconciles everything by PK scan and never used this index. So the index is
+-- dead weight on every NULL-broker listings write. The daily full sweep's keyset
+-- scan drives off the PK, not this index.
+--
+-- This supersedes migration 186's straggler-scan design (its comments describing
+-- the unattributed scan are now historical; the authoritative description of the
+-- incremental's behavior lives in scripts/resolve_brokers.py and scraper/db.py).
+--
+-- ORDERING: apply this only AFTER the code that removes the straggler scan is
+-- deployed. While the old code is live, its straggler scan would fall back to a
+-- seq scan without this index and time out every run. On prod, drop CONCURRENTLY
+-- (DROP INDEX CONCURRENTLY IF EXISTS listings_broker_unattributed_idx;) to avoid
+-- an ACCESS EXCLUSIVE lock on the live listings table — that cannot run inside a
+-- transaction, so it is applied separately, mirroring migration 231. IF EXISTS
+-- keeps this committed (plain, txn-safe) form idempotent: a no-op on prod once
+-- the concurrent drop has run, and a clean drop on a fresh database build.
+DROP INDEX IF EXISTS listings_broker_unattributed_idx;

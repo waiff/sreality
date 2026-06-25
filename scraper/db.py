@@ -386,6 +386,19 @@ def upsert_listing_with_property(
     return result
 
 
+# Sources whose listings carry a broker block that scripts.resolve_brokers
+# attributes (raw_json->'user' for sreality, raw_json->'broker' for idnes). A
+# content-changed listing of one of these sources is enqueued into
+# dirty_broker_listings so the incremental resolver re-attributes it within its
+# cadence (it has no full-table straggler scan). Keep this in sync with the
+# resolver's attribution coverage (scripts.resolve_brokers._attribute and the
+# `source IN (...)` scan in its full sweep); a missed source degrades gracefully
+# to daily-sweep-only attribution rather than breaking. sreality flows through
+# write_detail_batch (which enqueues directly), not this path, but is listed for
+# completeness so the set reads as the full broker-attributed source list.
+BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes"})
+
+
 def ingest_scraped_listing(
     conn: psycopg.Connection, listing: ScrapedListing,
 ) -> tuple[int, UpsertResult]:
@@ -401,6 +414,11 @@ def ingest_scraped_listing(
     source identity + Tier-1 property matching then commit in one transaction.
     `upsert_listing` doesn't manage the source columns, so they're stamped
     right after the write, before the matcher reads `source`.
+
+    A content-changed write of a broker-attributed source also enqueues the row
+    into dirty_broker_listings (the incremental resolver's sole feed — same role
+    write_detail_batch plays for sreality), so e.g. new idnes listings are
+    attributed within the resolver's cadence, not only by the daily full sweep.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -426,6 +444,13 @@ def ingest_scraped_listing(
                 (listing.source, listing.source_url, listing.source_id_native, pk),
             )
         _ensure_property(conn, pk, listing.source)
+        if result != "unchanged" and listing.source in BROKER_ATTRIBUTED_SOURCES:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO dirty_broker_listings (sreality_id) VALUES (%s) "
+                    "ON CONFLICT (sreality_id) DO UPDATE SET marked_at = now()",
+                    (pk,),
+                )
     return pk, result
 
 
@@ -1666,9 +1691,11 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
 
 # Broker intelligence (phase 1): a content change can alter a listing's broker
 # block (it is part of the content hash), so enqueue the changed listings for
-# re-attribution by scripts.resolve_brokers --incremental. New listings are also
-# covered by the resolver's unattributed-straggler scan; enqueuing them too is a
-# harmless idempotent overlap.
+# re-attribution by scripts.resolve_brokers --incremental. This is the sreality
+# feed of the incremental resolver (idnes feeds the same queue via
+# ingest_scraped_listing); the resolver has no full-table straggler scan. A
+# brand-new listing is a content change (no prior snapshot), so it lands here
+# too. Anything missed is reconciled by the daily full sweep.
 _BATCH_DIRTY_BROKERS_FROM_SIDS_SQL = """
     INSERT INTO dirty_broker_listings (sreality_id)
     SELECT unnest(%s::bigint[])
