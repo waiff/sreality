@@ -2353,6 +2353,55 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resplit_mixed.yml"
   },
   {
+    "filename": "resweep_incoherent.yml",
+    "name": "Re-sweep incoherent byt properties (one-shot corrective)",
+    "description": "One-shot corrective for pre-PR-#598 apartment groupings the post-#598 engine would now reject. The old engine merged byt listings up to a 20% area gap, and pHash on shared development RENDER photos chained adjacent area-bands into one property via transitivity (\"Rezidence Na Bradle\" 73/87/99 m²; \"Budovatelů\" 59/62/74 m²). PR #598 unified the area-gap reject to 10% + added the floor-plan / distinctive gates, so the engine would never form these now. This re-singletonizes every active byt property whose active members' max/min area ratio exceeds min_ratio: the representative child stays, every other detaches onto its own fresh singleton. Operator-merged properties are excluded. Nothing is deleted (rule #3); the dedup engine re-merges legit same-unit pairs on its next daily run.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "apply",
+        "description": "Actually re-singletonize (false = dry-run report only)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "min_ratio",
+        "description": "max/min area ratio threshold (1.25 ~ >20% safe; 1.111 ~ >10% gray zone)",
+        "required": false,
+        "type": "string",
+        "default": "1.25",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Cap properties processed, worst-first (0 = no cap)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "sreality-property-maintenance",
+    "cancelInProgress": false,
+    "timeoutMinutes": 20,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resweep_incoherent.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resweep_incoherent.yml"
+  },
+  {
     "filename": "scrape.yml",
     "name": "Scraping: Sreality combined walk (Phase-2 fallback, dispatch-only)",
     "description": "DISPATCH-ONLY FALLBACK as of Phase 2. The hourly cron was removed: the live pipeline is now the cadence split — index_walk.yml (fast, frequent, marks delistings + enqueues) feeds detail_drain.yml (async, batched writes). This combined index+detail walk (_run_full) is kept intact as the instant revert: if the split misbehaves, re-add `schedule: - cron: \"0 * * * *\"` here and disable the two new crons — no code change, the proven pipeline is back. It also remains the way to run an ad-hoc full walk by hand.",
