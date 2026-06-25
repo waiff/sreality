@@ -139,6 +139,13 @@ export interface ImagePublic {
   sequence: number | null;
   sreality_url: string;
   storage_path: string | null;
+  /* CLIP per-image tag (image_clip_tags via images_public, migration 236).
+   * clip_fine_tag is the raw winning anchor we display; clip_logical_tag is the
+   * collapsed engine vocabulary; clip_confidence is the softmax score 0..1.
+   * All NULL until the image is CLIP-tagged. */
+  clip_fine_tag: string | null;
+  clip_logical_tag: string | null;
+  clip_confidence: number | null;
 }
 
 /* Distributional shapes — used by EstimationDetail's RangeStrip and by

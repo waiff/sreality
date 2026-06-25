@@ -531,7 +531,7 @@ function Card({
   // component — keeps ImageCarousel's internal state across re-renders.
   const body = (
     <>
-      <ImageCarousel urls={r.image_urls} imgClassName={imageFilter} hoverZoom fadeChevrons>
+      <ImageCarousel images={r.images} imgClassName={imageFilter} hoverZoom fadeChevrons>
         {mergeMode && (
           <div className="absolute top-1 left-1 z-10">
             <span

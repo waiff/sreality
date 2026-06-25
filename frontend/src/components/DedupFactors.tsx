@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import { getDedupDecisionImages } from '@/lib/api';
 import { imageSrc } from '@/lib/imageUrl';
+import { imageTagLabel } from '@/lib/imageTags';
 
 /* The evidence behind one dedup decision — the SAME component on Decision history
  * (merged / dismissed) and Needs-review (queued), so a row and a card read alike.
@@ -10,21 +11,6 @@ import { imageSrc } from '@/lib/imageUrl';
  * CLIP cosine, vision verdict) as compact pills, with a drawer that hydrates the
  * deciding room's photos for both listings. Civic-archive: copper = match signal,
  * brick = mismatch, borders-only depth, tabular numerals. */
-
-const ROOM_LABELS: Record<string, string> = {
-  kitchen: 'kuchyně',
-  bathroom: 'koupelna',
-  toilet: 'WC',
-  living_room: 'obývací pokoj',
-  bedroom: 'ložnice',
-  hallway: 'chodba',
-  exterior_facade: 'fasáda',
-  balcony_terrace: 'balkon/terasa',
-  garden: 'zahrada',
-  floor_plan: 'půdorys',
-  site_plan: 'situační plán',
-  other: 'ostatní',
-};
 
 const REASON_LABELS: Record<string, string> = {
   address_exact: 'shoda adresy',
@@ -101,7 +87,7 @@ export default function DedupFactors({
         )}
         {roomType && (
           <span className={PILL_NEUTRAL} title="Porovnaná místnost">
-            {ROOM_LABELS[roomType] ?? roomType}
+            {imageTagLabel(roomType)}
           </span>
         )}
         {phashPairs != null && (
