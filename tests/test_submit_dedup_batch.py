@@ -96,12 +96,14 @@ def _key(sid: int, pid: int, *, source: str, street: str = "name:5001:hlavni",
 
 def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int, Any],
          site_plan_verdict: Any = None, visual_cached: Any = None,
-         phash: int = 0, both_site_plan: bool = False, in_flight: set[str] | None = None,
+         phash: int = 0, distinctive: bool = False,
+         both_site_plan: bool = False, in_flight: set[str] | None = None,
          max_requests: int = 100, max_room_attempts: int = 4) -> _FakeConn:
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
     monkeypatch.setattr(sub, "_load_eligible", lambda conn: list(keys))
     monkeypatch.setattr(sub, "_phash_identical_pairs", lambda conn, a, b, excluded_tags=(): phash)
+    monkeypatch.setattr(sub, "_phash_distinctive_match", lambda conn, a, b, rooms=(): distinctive)
     monkeypatch.setattr(sub, "_both_have_site_plan", lambda conn, a, b: both_site_plan)
     monkeypatch.setattr(sub, "_in_flight_custom_ids", lambda conn: set(in_flight or set()))
     monkeypatch.setattr(

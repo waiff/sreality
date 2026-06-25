@@ -49,10 +49,12 @@ from scripts.dedup_engine import (
     _both_have_site_plan,
     _group_by_street,
     _load_eligible,
+    _phash_distinctive_match,
     _phash_identical_pairs,
 )
 from scripts.submit_condition_batch import should_flush
 from toolkit.dedup_engine import (
+    PHASH_MIN_IDENTICAL_PAIRS,
     classify_pair,
     decide_phash_fastpath,
     phash_excluded_tags_for,
@@ -255,7 +257,10 @@ def collect(
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
                     phash_excluded_tags_for(a.category_main))
-                if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
+                distinctive = (
+                    phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
+                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
                     continue

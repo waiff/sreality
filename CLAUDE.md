@@ -551,12 +551,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
     an **area-gap** / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
     that doesn't share street + disposition, AND no **same-development guard** fires. The area-gap
-    reject is **per-category** (`MatchProfile.candidate_area_max_pct`): **10% for byt**, 20% for
-    single-dwelling families (house/land/commercial, whose cross-portal built-up-vs-usable-vs-plot
-    area varies more). The tighter byt gate is the "Rezidence Na Bradle" fix — units one area-band
-    apart (73→87 = 16%, 87→99 = 12%) used to each slip under 20% and then chain-merge via transitivity
-    once pHash matched their shared renders; the 10% reject now hard-stops them *before* the pHash
-    fast-path. (Floor is a
+    reject is **unified at 10%** for every category (`MatchProfile.candidate_area_max_pct`). It is
+    the "Rezidence Na Bradle" / "Budovatelů" fix — units one area-band apart (73→87 = 16%, 87→99 =
+    12%; or 59/62/74 m² bridged by a NULL-floor listing) used to each slip under the old 20% gate and
+    then chain-merge via transitivity once pHash matched their shared renders; the 10% reject now
+    hard-stops them *before* the pHash fast-path. (Floor is a
     SOFT cross-portal signal — idnes counts the ground floor as 0 (patro), sreality as 1 (NP), so the
     same flat reads one floor apart on the two portals, and sreality is itself lister-inconsistent;
     a gap of exactly 1 is convention noise that falls through to the visual layer, only a gap of 2+
@@ -577,7 +576,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     including SAME-source ones the gate would otherwise drop (a price-history/recall win) — and
     cross-posted cross-source pairs skip classify AND compare. The **count** is the
     safety bar (a development sharing one stock facade/plan gives 1 match; an actual re-post shares
-    many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. **For byt the count excludes
+    many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. **A single near-identical
+    DISTINCTIVE-room match overrides the count** (`_phash_distinctive_match` →
+    `decide_phash_fastpath(count, distinctive)`): one Hamming-≤6 kitchen/bathroom pair
+    (`DISTINCTIVE_ROOMS`, CLIP-tagged) is enough, since wet rooms are unit-specific not shared
+    marketing (operator policy; the distinctive query only runs when the generic count fell short).
+    **For byt the count excludes
     KNOWN-exterior / shared-marketing images** (`phash_excluded_tags_for` → `NON_INTERIOR_TAGS`:
     exterior_facade / balcony_terrace / garden / site_plan / floor_plan, sourced from CLIP
     `image_clip_tags`) — a development reuses the same facade/plan/render across its units, so those

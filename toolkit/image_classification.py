@@ -17,7 +17,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from scraper import image_storage
+from toolkit.room_taxonomy import (  # single-source taxonomy (re-exported here)
+    INTERIOR_ROOM_TYPES,
+    ROOM_TYPES,
+    SITE_PLAN_ROOM_TYPE,
+)
 from toolkit.vision_images import COMPARISON_MAX_EDGE, image_block
+
+__all__ = ["INTERIOR_ROOM_TYPES", "ROOM_TYPES", "SITE_PLAN_ROOM_TYPE"]
 
 try:
     from psycopg.types.json import Jsonb as _Jsonb
@@ -38,27 +45,6 @@ _CALLED_FOR = "classify_listing_images"
 # classified?" check must use the SAME bound as the synchronous tool, or it
 # would mis-decide warm vs. cold — so both read this one constant.
 DEFAULT_CLASSIFY_N_IMAGES = 12
-
-ROOM_TYPES = (
-    "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
-    "exterior_facade", "balcony_terrace", "garden", "floor_plan", "site_plan",
-    "other",
-)
-
-# Interior types carry the strongest same-flat signal. The byt dedup image layers
-# compare these only and exclude the rest, since a development reuses one
-# facade / plan / render across distinct units. The ordered priority + the exterior
-# exclusion live in `toolkit.dedup_engine` (`BYT_ROOM_PRIORITY` mirrors this set;
-# `NON_INTERIOR_TAGS` is the excluded complement minus 'other').
-INTERIOR_ROOM_TYPES = frozenset({
-    "kitchen", "bathroom", "toilet", "living_room", "bedroom", "hallway",
-})
-
-# Site/situation plans: a development masterplan or a unit highlighted within a
-# building layout. The development guard compares these across two listings to
-# tell same-unit from different-unit-in-one-project (dedup_engine rule).
-SITE_PLAN_ROOM_TYPE = "site_plan"
-
 
 class ClassifyError(RuntimeError):
     """Raised when classification cannot be produced (no images, R2 missing, LLM refused)."""

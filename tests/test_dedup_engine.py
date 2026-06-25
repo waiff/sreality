@@ -15,7 +15,6 @@ import pytest
 
 from toolkit.dedup_engine import (
     ADDRESS_AREA_GUARD_PCT,
-    BYT_CANDIDATE_AREA_MAX_PCT,
     CANDIDATE_AREA_MAX_PCT,
     CosineBands,
     ListingKey,
@@ -215,12 +214,10 @@ def test_byt_area_gap_over_10pct_rejects() -> None:
     assert d.detail == "area_contradiction"
 
 
-def test_byt_area_gate_is_tighter_than_single_dwelling() -> None:
-    # byt rejects at 10%; houses/land/commercial keep the looser 20% (cross-portal
-    # built-up vs usable vs plot area varies more there).
-    assert profile_for("byt").candidate_area_max_pct == 0.10
-    for fam in ("dum", "pozemek", "komercni", "ostatni"):
-        assert profile_for(fam).candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT == 0.20, fam
+def test_area_gate_unified_10pct_across_categories() -> None:
+    # The candidate area gap is unified at 10% for every category (operator decision).
+    for fam in ("byt", "dum", "pozemek", "komercni", "ostatni"):
+        assert profile_for(fam).candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT == 0.10, fam
 
 
 def test_house_number_contradiction_rejects() -> None:
@@ -377,12 +374,11 @@ def test_profile_for_null_or_unknown_is_byt() -> None:
 
 def test_byt_profile_constants() -> None:
     # The byt profile: disposition mandatory, street-blocked (not geo), never
-    # geo-auto-merges. Its candidate area gap is TIGHTER than the single-dwelling 20%
-    # (10%) — a development stacks near-identical units that a 20% gate let chain-merge.
+    # geo-auto-merges. The candidate area gap is unified at 10% across all categories.
     byt = profile_for("byt")
     assert byt.disposition_required is True
     assert byt.address_area_guard_pct == ADDRESS_AREA_GUARD_PCT
-    assert byt.candidate_area_max_pct == BYT_CANDIDATE_AREA_MAX_PCT == 0.10
+    assert byt.candidate_area_max_pct == CANDIDATE_AREA_MAX_PCT == 0.10
     assert byt.geo_blocked is False
     assert byt.geo_auto_merge_allowed is False
 
@@ -577,6 +573,15 @@ def test_phash_fastpath_needs_two_identical_pairs() -> None:
     assert decide_phash_fastpath(5)
 
 
+def test_phash_fastpath_distinctive_single_match_overrides() -> None:
+    # A single near-identical kitchen/bathroom match is enough (operator policy);
+    # one generic match is not.
+    assert decide_phash_fastpath(0, distinctive_match=True)
+    assert decide_phash_fastpath(1, distinctive_match=True)
+    assert not decide_phash_fastpath(1, distinctive_match=False)
+    assert decide_phash_fastpath(2, distinctive_match=False)
+
+
 def test_rooms_in_priority_orders_and_filters() -> None:
     common = {"bedroom", "kitchen", "bathroom", "floor_plan"}
     # floor_plan is not a comparison room -> excluded; kitchen before bathroom before bedroom
@@ -653,6 +658,8 @@ class _Cur:
             self._rows = list(self._conn.eligible_rows)
         elif "count(*)" in s and "JOIN properties pl" in s:
             self._rows = [(self._conn.stale_count,)]  # _reconcile_stale_candidates count
+        elif "EXISTS (SELECT 1 FROM images ia" in s:
+            self._rows = [(False,)]  # _phash_distinctive_match default (monkeypatch for a match)
         elif "FROM images ia JOIN images ib" in s:
             self._rows = [(0,)]  # _phash_identical_pairs default (tests monkeypatch when needed)
         elif "image_room_classifications" in s:
@@ -872,6 +879,41 @@ def test_run_engine_phash_fastpath_merges_before_classify(monkeypatch: Any) -> N
     assert stats["auto_phash"] == 1
     assert stats["vision_calls"] == 0
     assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_distinctive_single_match_merges(monkeypatch: Any) -> None:
+    # #5: only ONE near-identical pair (below the >=2 generic bar), but it is a
+    # kitchen/bathroom match -> distinctive override auto-merges.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 1)  # below generic >=2
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: True)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_single_generic_match_does_not_merge(monkeypatch: Any) -> None:
+    # One generic (non-distinctive) near-identical pair is NOT enough -> no pHash merge.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 1)
+    monkeypatch.setattr(eng, "_phash_distinctive_match", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
 
 
 def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:

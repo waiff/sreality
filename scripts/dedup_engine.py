@@ -53,6 +53,7 @@ from toolkit.dedup_engine import (
     _price_match,
     classify_geo_pair,
     classify_pair,
+    DISTINCTIVE_ROOMS,
     decide_phash_fastpath,
     decide_visual_dismiss,
     geo_cell_key,
@@ -354,6 +355,26 @@ def _phash_identical_pairs(
         return int(cur.fetchone()[0])
 
 
+def _phash_distinctive_match(
+    conn: Any, a_id: int, b_id: int, rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS
+) -> bool:
+    """True if the two listings share >=1 near-identical image pair where BOTH images are
+    a DISTINCTIVE room (kitchen/bathroom, CLIP-tagged). A single such match auto-merges
+    (operator policy): wet rooms are unit-specific, not shared development marketing, so
+    one identical match there is conclusive — unlike the >=2 needed for generic images."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM images ia"
+            "  JOIN image_clip_tags ta ON ta.image_id = ia.id AND ta.logical_tag = ANY(%(rooms)s)"
+            "  JOIN images ib ON ib.sreality_id = %(b)s AND ib.phash IS NOT NULL"
+            "  JOIN image_clip_tags tb ON tb.image_id = ib.id AND tb.logical_tag = ANY(%(rooms)s)"
+            "  WHERE ia.sreality_id = %(a)s AND ia.phash IS NOT NULL"
+            "    AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s)",
+            {"a": a_id, "b": b_id, "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX},
+        )
+        return bool(cur.fetchone()[0])
+
+
 def _both_have_site_plan(conn: Any, a_id: int, b_id: int) -> bool:
     """True if BOTH listings already have a classified site/situation plan.
 
@@ -553,6 +574,7 @@ def _factors(
     house_number: str | None = None,
     floor: Any = None,
     phash_pairs: int | None = None,
+    phash_distinctive: bool = False,
     cosine: float | None = None,
     verdict: str | None = None,
     room_type: str | None = None,
@@ -578,6 +600,8 @@ def _factors(
         f["phash_pairs"] = phash_pairs
         f["phash_threshold"] = PHASH_IDENTICAL_MAX
         f["phash_min_pairs"] = PHASH_MIN_IDENTICAL_PAIRS
+    if phash_distinctive:
+        f["phash_distinctive"] = True  # merged on a single kitchen/bathroom match
     if cosine is not None:
         f["cosine"] = round(float(cosine), 4)
     return {k: v for k, v in f.items() if v is not None}
@@ -777,15 +801,21 @@ def run_engine(
                 # merge for free — and cross-posted cross-source pairs skip classify AND
                 # compare. For byt, known-exterior/shared images are excluded from the
                 # count (phash_excluded_tags_for) so a development's reused renders can't
-                # reach the >=2 threshold; other categories count any image.
+                # reach the >=2 threshold; other categories count any image. A single
+                # near-identical KITCHEN/BATHROOM match also qualifies (distinctive override,
+                # only checked when the generic count fell short).
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
                     phash_excluded_tags_for(a.category_main))
-                if decide_phash_fastpath(phash_pairs) and not _both_have_site_plan(
+                distinctive = (
+                    phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
+                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
                     factors = _factors("phash", reason="image_phash",
-                                       street_key=street_key, phash_pairs=phash_pairs)
+                                       street_key=street_key, phash_pairs=phash_pairs,
+                                       phash_distinctive=distinctive)
                     if auto_merge_enabled:
                         mg = None if dry_run else _merge_pair(
                             conn, a, b, "image_phash",
