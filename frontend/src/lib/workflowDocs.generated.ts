@@ -3011,6 +3011,56 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/test.yml"
   },
   {
+    "filename": "validate_render_detection.yml",
+    "name": "Validate CLIP render detection (one-shot, validate-first)",
+    "description": "The operator's #3 VALIDATE-FIRST gate: does CLIP zero-shot confidently flag a 3D render / visualization vs a real photo? This does NOT touch the engine — it embeds the given listings' images fresh from R2 with the tagger's CLIP model and reports render_score per image, so we can confirm KNOWN renders (the \"Rezidence Na Bradle\" development units) score high while KNOWN amateur photos (a control set) score low BEFORE building/wiring anything. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_*.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "sreality_ids",
+        "description": "Target listing ids (suspected renders), comma-separated",
+        "required": true,
+        "type": "string",
+        "default": "1461609804,476259148,877790028,1796105548,-36083,-36037,-35415,-39488",
+        "options": null
+      },
+      {
+        "name": "control_sreality_ids",
+        "description": "Control listing ids (known amateur photos), comma-separated",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "threshold",
+        "description": "render_score >= this is flagged RENDER",
+        "required": false,
+        "type": "string",
+        "default": "0.5",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 25,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_render_detection.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/validate_render_detection.yml"
+  },
+  {
     "filename": "validate_vision_models.yml",
     "name": "Jobs: validate vision model/resolution A/B",
     "description": "Read-only A/B gate for a dedup-vision (model, max_edge) change. Re-runs the forensic compare on every historical 'High' verdict and re-classifies a sample, then reports whether the candidate (default Haiku @ 768px) reproduces the ground-truth recall. Writes NO cache / app_settings — only the standard llm_calls audit rows. Exits non-zero (red run) when a gate is missed, so the model flip is only made after a green run. See scripts/validate_vision_models.py.",
