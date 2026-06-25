@@ -78,6 +78,7 @@ class _FakeLLM:
         "llm_room_classify_model": "claude-haiku-4-5",
         "llm_visual_match_model": "claude-sonnet-4-5",
         "llm_site_plan_match_model": "claude-sonnet-4-5",
+        "llm_floor_plan_match_model": "claude-sonnet-4-5",
     }
 
     def resolve_model(self, key: str) -> str:
@@ -97,7 +98,8 @@ def _key(sid: int, pid: int, *, source: str, street: str = "name:5001:hlavni",
 def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int, Any],
          site_plan_verdict: Any = None, visual_cached: Any = None,
          phash: int = 0, distinctive: bool = False,
-         both_site_plan: bool = False, in_flight: set[str] | None = None,
+         both_site_plan: bool = False, floor_plan: bool = False,
+         floor_plan_cached: Any = None, in_flight: set[str] | None = None,
          max_requests: int = 100, max_room_attempts: int = 4) -> _FakeConn:
     """Drive collect() over `keys` with all I/O monkeypatched; return the conn so
     the test can inspect the enqueued dedup_batch_requests rows."""
@@ -105,6 +107,18 @@ def _run(monkeypatch: Any, *, keys: list[ListingKey], classifications: dict[int,
     monkeypatch.setattr(sub, "_phash_identical_pairs", lambda conn, a, b, excluded_tags=(): phash)
     monkeypatch.setattr(sub, "_phash_distinctive_match", lambda conn, a, b, rooms=(): distinctive)
     monkeypatch.setattr(sub, "_both_have_site_plan", lambda conn, a, b: both_site_plan)
+    monkeypatch.setattr(
+        sub, "_floor_plan_image_ids", lambda conn, sid: [sid] if floor_plan else [])
+    monkeypatch.setattr(
+        sub, "cached_floor_plan_verdict",
+        lambda conn, *, sreality_id_a, sreality_id_b, model: floor_plan_cached,
+    )
+    monkeypatch.setattr(
+        sub, "build_floor_plan_request",
+        lambda conn, llm, *, sreality_id_a, sreality_id_b, image_ids_a, image_ids_b: {
+            "system": "s", "messages": [], "tools": [], "model": "claude-sonnet-4-5",
+        },
+    )
     monkeypatch.setattr(sub, "_in_flight_custom_ids", lambda conn: set(in_flight or set()))
     monkeypatch.setattr(
         sub, "cached_classification",
@@ -292,6 +306,31 @@ def test_distinctive_single_phash_match_pair_is_not_warmed(monkeypatch: Any) -> 
         phash=1, distinctive=True,
     )
     assert conn.inserted_requests == []
+
+
+def test_both_floor_plan_pair_warms_floor_plan_request(monkeypatch: Any) -> None:
+    # #4: a both-floor-plan pair is warmed BEFORE the pHash skip (the engine's gate
+    # needs the verdict even on a pHash merge), so a floor_plan request is enqueued.
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={1: ("classified", {"kitchen": [1]}), 2: ("classified", {"kitchen": [2]})},
+        phash=3, floor_plan=True,
+    )
+    by_kind = _rows_by_kind(conn)
+    assert "floor_plan" in by_kind
+    assert by_kind["floor_plan"][0][1] == "fpl-1-2"  # canonical custom_id
+
+
+def test_cached_floor_plan_pair_is_not_rewarmed(monkeypatch: Any) -> None:
+    # Already-cached floor-plan verdict -> no re-warm.
+    conn = _run(
+        monkeypatch,
+        keys=[_key(1, 101, source="sreality"), _key(2, 102, source="bazos")],
+        classifications={1: ("classified", {"kitchen": [1]}), 2: ("classified", {"kitchen": [2]})},
+        phash=3, floor_plan=True, floor_plan_cached="same_layout",
+    )
+    assert "floor_plan" not in _rows_by_kind(conn)
 
 
 def test_same_source_candidate_is_gated_out(monkeypatch: Any) -> None:
