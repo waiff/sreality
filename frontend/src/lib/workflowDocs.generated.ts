@@ -2748,6 +2748,60 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bezrealitky.yml"
   },
   {
+    "filename": "scrape_ceskereality.yml",
+    "name": "Scraping: Českéreality scraper (pilot)",
+    "description": "Scraper for ceskereality.cz on the shared portal framework. ceskereality is a structured HTML portal (like idnes): the index walk pages the search results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, parses it to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + property singleton). One job runs both phases via ceskereality_main. The client crawls with an honest, identifying User-Agent at a polite rate (the site disallows generic bots in robots.txt).",
+    "portal": "ceskereality",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "cap detail-drain claims this run",
+        "required": false,
+        "type": "string",
+        "default": "1500",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "detail-fetch requests/second ceiling (keep polite)",
+        "required": false,
+        "type": "string",
+        "default": "0.7",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "detail-fetch workers (concurrency)",
+        "required": false,
+        "type": "string",
+        "default": "2",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "ceskereality-scrape",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_ceskereality.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_ceskereality.yml"
+  },
+  {
     "filename": "scrape_maxima.yml",
     "name": "Scraping: Maxima Reality scraper (pilot)",
     "description": "Scheduled (every 6h) + manual scraper for nemovitosti.maxima.cz on the shared portal framework. Maxima is a single real-estate agency that publishes its whole catalogue (~220 listings) as one server-rendered WordPress index (no JSON API, no per-category URL): the index walk pages the catalogue and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each /nemovitosti/{id}/ page, parses to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",

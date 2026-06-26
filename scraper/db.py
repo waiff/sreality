@@ -396,7 +396,7 @@ def upsert_listing_with_property(
 # to daily-sweep-only attribution rather than breaking. sreality flows through
 # write_detail_batch (which enqueues directly), not this path, but is listed for
 # completeness so the set reads as the full broker-attributed source list.
-BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes"})
+BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes", "ceskereality"})
 
 
 def ingest_scraped_listing(

@@ -14,13 +14,20 @@ from __future__ import annotations
 
 import pytest
 
-from scraper.source_parsers import bezrealitky, generic, idnes_reality, remax
+from scraper.source_parsers import (
+    bezrealitky,
+    ceskereality,
+    generic,
+    idnes_reality,
+    remax,
+)
 
 
 @pytest.mark.parametrize("module,source_cue", [
     (bezrealitky, "bezrealitky.cz"),
     (idnes_reality, "reality.idnes.cz"),
     (remax, "remax-czech.cz"),
+    (ceskereality, "ceskereality.cz"),
     (generic, "UNKNOWN"),
 ])
 def test_build_messages_embeds_url_and_html_and_source_cue(module, source_cue):
@@ -35,7 +42,7 @@ def test_build_messages_embeds_url_and_html_and_source_cue(module, source_cue):
     assert source_cue in content
 
 
-@pytest.mark.parametrize("module", [bezrealitky, idnes_reality, remax, generic])
+@pytest.mark.parametrize("module", [bezrealitky, idnes_reality, remax, ceskereality, generic])
 def test_post_process_passthrough_default(module):
     extraction = {"area_m2": {"value": 65, "confidence": "high"}}
     warnings = ["one"]
@@ -64,6 +71,14 @@ def test_remax_prompt_warns_about_nbsp_and_default_assumption():
     content = msgs[0]["content"]
     assert "NBSP" in content or "\\u00A0" in content
     assert "prodej" in content.lower()
+
+
+def test_ceskereality_prompt_mentions_jsonld_and_ignores_agent_address():
+    msgs = ceskereality.build_messages("https://www.ceskereality.cz/x", "<html/>")
+    content = msgs[0]["content"]
+    assert "json-ld" in content.lower() or "JSON-LD" in content
+    # The agent's office address must not be mistaken for the listing's location.
+    assert "offeredby.address" in content
 
 
 def test_generic_prompt_admits_unknown_layout():
