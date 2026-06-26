@@ -547,8 +547,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     new id — can still merge into the surviving group. The merge chokepoint gates on the
     *property* `status='active'` and an inactive listing keeps its own active singleton property,
     so it stays matchable; gating the scan on `is_active` would orphan that history. **(B)** same street + house
-    number + disposition + floor → auto-merge, with a 5% area guard that demotes
-    mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
+    number + disposition + floor → exact-address merge, with a 5% area guard that demotes
+    mismatched-area pairs to visual. **As of Wave 3 rule B is NOT a blind auto-merge: it routes through
+    the same floor-plan gate as the pHash path** — the same address + disposition + floor can still be
+    DIFFERENT units of one building (two 2+kk on one floor), so a different floor plan DISMISSES, a
+    one-sided/unwarmed plan queues/defers, and a matching or absent plan merges (no-plan exact relists
+    still merge for free — recall preserved). **(C)** same street + disposition → visual candidate unless
     an **area-gap** / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
     that doesn't share street + disposition, AND no **same-development guard** fires. The area-gap
     reject is **unified at 10%** for every category (`MatchProfile.candidate_area_max_pct`). It is
@@ -572,9 +576,8 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     for the operator (never auto-merges, never auto-rejects — the conservative choice).
     **pHash fast-path (FREE, runs FIRST — before classify, all sources).** `_phash_identical_pairs`:
     ≥2 near-identical image pairs (`PHASH_MIN_IDENTICAL_PAIRS`, Hamming ≤6) → auto-merge
-    with NO LLM. Runs before the cross-source gate, so identical-photo re-posts merge for free —
-    including SAME-source ones the gate would otherwise drop (a price-history/recall win) — and
-    cross-posted cross-source pairs skip classify AND compare. The **count** is the
+    with NO LLM. Identical-photo re-posts (same- OR cross-source) merge for free here, skipping
+    classify AND compare. The **count** is the
     safety bar (a development sharing one stock facade/plan gives 1 match; an actual re-post shares
     many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. **A single near-identical
     DISTINCTIVE-room match overrides the count** (`_phash_distinctive_match` →
@@ -595,12 +598,16 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     pHash resolves a minority; the forensic compare below is still needed for the rest. (pHash
     coverage on the `images` table must keep up — `compute_image_phash.yml` — or the fast-path
     under-fires.)
-    **Cross-source gate (cost):** the paid visual layer (D) runs only on CROSS-source pairs —
-    same-portal pairs that pHash didn't resolve are skipped (no classify, no compare, no queue),
-    since dedup's payoff is matching one portal against another (73/74 historical visual auto-merges
-    were cross-source). Rule B above still auto-merges exact same-source relists for free. This
-    cut ~36% of candidate pairs off the LLM stage at ~1.4% recall cost.
-    **(D)** forensic visual confirmation (cross-source, the pair reached here only because pHash did
+    **Cross-source gate — REMOVED in Wave 3 (recall).** It previously ran the paid visual layer (D)
+    only on CROSS-source pairs, skipping same-portal non-exact pairs (73/74 historical visual
+    auto-merges were cross-source) — which cut ~36% of pairs off the LLM stage but cost ~1.4% recall
+    (a same-portal relist with changed photos, or two cross-posts on one portal, were dropped). Now
+    ALL rule-C candidates reach the visual stage; the forensic **High** verdict + the floor/site-plan
+    gates remain the precision guards, so recall rises without false merges (pHash still auto-merges
+    identical-photo same-source relists for free, above). The trade-off is more pairs at the (paid)
+    visual stage — the per-run vision budget + the batch warmer (which now warms same-source pairs too)
+    bound the cost.
+    **(D)** forensic visual confirmation (the pair reached here only because pHash did
     NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
     forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
     priority order (`rooms_in_priority(common, category_main)` → `room_priority_for`), stop at the

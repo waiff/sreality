@@ -966,30 +966,70 @@ def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
     assert stats["auto_phash"] == 0 and stats["auto_visual"] == 0
 
 
-def test_run_engine_skips_same_source_candidates(monkeypatch: Any) -> None:
-    # The cross-source gate: a same-source rule-C candidate (shares street+disposition,
-    # no exact-address rule B because house_number is absent) must NOT reach the paid
-    # visual stage — no classify, no compare, no merge, no queue.
+def test_run_engine_exact_address_floor_plan_different_dismisses(monkeypatch: Any) -> None:
+    # Wave 3: rule B no longer blind-merges. Same street/house/disposition/floor but the floor
+    # plans show DIFFERENT layouts (two units of one building) -> dismiss, not merge.
     import scripts.dedup_engine as eng
 
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])  # both have a plan
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # exact-address pair (rule B)
+    stats = eng.run_engine(
+        conn, classify_fn=None, compare_fn=None, max_vision_calls=5,
+        floor_plan_fn=lambda a, b, ia, ib: {"verdict": "different_layout"})
+    assert stats["auto_address"] == 0
+    assert stats["auto_dismissed"] == 1
 
-    classified: list[int] = []
 
-    def fake_classify(sid: int) -> dict:
-        classified.append(sid)
-        return {"data": {"images": []}}
+def test_run_engine_exact_address_floor_plan_same_still_merges(monkeypatch: Any) -> None:
+    # Same address + a MATCHING floor plan -> the merge still proceeds (recall preserved).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])
+    stats = eng.run_engine(
+        conn, classify_fn=None, compare_fn=None, max_vision_calls=5,
+        floor_plan_fn=lambda a, b, ia, ib: {"verdict": "same_layout"})
+    assert stats["auto_address"] == 1 and merges == ["address_exact"]
+
+
+def test_run_engine_now_visually_compares_same_source(monkeypatch: Any) -> None:
+    # Wave 3 removed the cross-source gate: a same-source rule-C candidate (shares
+    # street+disposition, no exact-address rule B because house_number is absent) NOW reaches
+    # the visual stage instead of being skipped — the recall change.
+    import scripts.dedup_engine as eng
 
     conn = _FakeConn([
         _row(1, 101, hn=None, source="sreality"),
         _row(2, 102, hn=None, source="sreality"),
     ])
-    stats = eng.run_engine(conn, classify_fn=fake_classify, compare_fn=None, max_vision_calls=10)
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 1
-    assert stats["pairs_considered"] == 0      # never reached the visual stage
-    assert classified == []                    # classify never spent
-    assert stats["queued"] == 0 and stats["auto_visual"] == 0
+    assert stats["skipped_same_source"] == 0   # the gate is gone
+    assert stats["pairs_considered"] == 1      # reached the visual stage
+
+
+def test_run_engine_same_source_free_run_skips_not_queues(monkeypatch: Any) -> None:
+    # The no-flood guarantee after removing the cross-source gate: on a FREE run
+    # (enqueue_unresolved=False, no compare_fn) a same-source non-pHash pair reaches the visual
+    # stage but is skipped_unresolved, NOT piled into the manual queue.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="sreality"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           enqueue_unresolved=False)
+
+    assert stats["pairs_considered"] == 1
+    assert stats["skipped_unresolved"] == 1
+    assert stats["queued"] == 0
 
 
 def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
@@ -1663,21 +1703,6 @@ def test_run_engine_reject_dismisses_stale_candidate(monkeypatch: Any) -> None:
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
 
     assert stats["rejected"] == 1
-    assert (101, 102) in _dismissed_pairs(conn)
-
-
-def test_run_engine_same_source_gate_dismisses_stale_candidate(monkeypatch: Any) -> None:
-    import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
-    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
-
-    conn = _FakeConn([
-        _row(1, 101, hn=None, source="sreality"),
-        _row(2, 102, hn=None, source="sreality"),
-    ])
-    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
-
-    assert stats["skipped_same_source"] == 1
     assert (101, 102) in _dismissed_pairs(conn)
 
 

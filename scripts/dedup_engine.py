@@ -873,12 +873,6 @@ class _RunContext:
     # shared, so houses/land/commercial run the exact same free-first flow as apartments.
     classify: Any = classify_pair
     tier: str = "street_disposition"
-    # The cross-source gate (skip same-source non-exact pairs) is justified ONLY where rule B
-    # already auto-merges same-source exact-address relists for free — i.e. the street path.
-    # Geo has no rule B (its classify maps auto_merge→candidate), so a same-portal re-post of a
-    # house would otherwise be silently dropped; geo sets this False so those pairs reach the
-    # visual stage. (Wave 3 revisits the gate holistically for recall.)
-    cross_source_only: bool = True
     # Operator-reordered per-family comparison-tag priorities (app_settings.dedup_tag_priorities);
     # None / partial → the coded defaults (rooms_in_priority normalizes per family).
     tag_overrides: dict[str, list[str]] | None = None
@@ -937,15 +931,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         factors = _factors(
             "address", reason="address_exact", street_key=street_key,
             house_number=a.house_number, floor=a.floor)
-        if ctx.auto_merge_enabled:
-            mg = None if ctx.dry_run else _merge_pair(
-                conn, a, b, "address_exact", {**factors, "confidence": 0.99})
-            if ctx.dry_run or mg:
-                stats["auto_address"] += 1
-                ctx.merged_pairs.add(cp)
-                _audit(ctx.audit, a, b, "address", "merged", factors,
-                       source="engine", merge_group_id=mg)
-        else:
+        if not ctx.auto_merge_enabled:
             if not ctx.dry_run:
                 _enqueue_candidate(
                     conn, a, b,
@@ -953,6 +939,40 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                      "confidence": 0.99},
                 )
             stats["queued"] += 1
+            return
+        # Wave 3: route the exact-address merge through the SAME floor-plan gate as pHash
+        # (was a blind auto-merge). The same street + house number + disposition + floor can
+        # still be DIFFERENT units of one building (two 2+kk on one floor), and the floor plan
+        # is the disambiguator: a different layout DISMISSES, a different/one-sided plan
+        # queues/defers, a matching or absent plan merges — so no-plan exact relists still
+        # merge for free (recall preserved) while same-address-different-unit pairs are caught.
+        fp = _floor_plan_gate(
+            conn, a.sreality_id, b.sreality_id,
+            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
+            inconclusive_to_review=ctx.inconclusive_to_review)
+        if fp == "dismiss":
+            stats["auto_dismissed"] += 1
+            ctx.dismissed_pairs.add(cp)
+            _audit(ctx.audit, a, b, "address", "dismissed",
+                   {**factors, "reason": "floor_plan_different_layout"}, source="engine")
+            return
+        if fp == "queue":
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": ctx.tier,
+                    "reason": "floor_plan_review", "confidence": 0.6})
+            stats["queued"] += 1
+            return
+        if fp == "defer":
+            stats["floor_plan_deferred"] += 1
+            return
+        mg = None if ctx.dry_run else _merge_pair(
+            conn, a, b, "address_exact", {**factors, "confidence": 0.99})
+        if ctx.dry_run or mg:
+            stats["auto_address"] += 1
+            ctx.merged_pairs.add(cp)
+            _audit(ctx.audit, a, b, "address", "merged", factors,
+                   source="engine", merge_group_id=mg)
         return
 
     # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw photo match
@@ -1025,19 +1045,12 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                    source="engine", merge_group_id=mg)
         return
 
-    # Cross-source gate (street path only): the paid visual layer exists to match one
-    # portal's listing against ANOTHER portal's — same-source pairs buy nothing there
-    # (73/74 historical visual auto-merges were cross-source). Rule B above already
-    # auto-merges exact same-source relists for free; a same-source non-exact pair is
-    # skipped (no LLM, no queue), which cut ~36% of candidate pairs off the visual stage
-    # at ~1.4% recall cost. The geo path (cross_source_only=False) has no rule B, so it does
-    # NOT skip same-source pairs — a same-portal house re-post must still reach the visual stage.
-    if ctx.cross_source_only and a.source == b.source:
-        stats["skipped_same_source"] += 1
-        # Same-source non-exact: the engine won't pursue this visually (cross-source
-        # gate). Dismiss any stale proposed candidate for it — recall-neutral.
-        ctx.dismissed_pairs.add(cp)
-        return
+    # Wave 3 removed the cross-source gate: the engine no longer skips same-source non-exact
+    # pairs. The gate cut ~36% of pairs off the (paid) visual stage but cost ~1.4% recall —
+    # a same-portal relist with changed photos, or two cross-posts on one portal, were dropped.
+    # Now ALL rule-C candidates reach the visual stage; the forensic High verdict + the
+    # floor/site-plan gates remain the precision guards, so recall rises without false merges.
+    # (pHash already auto-merged identical-photo same-source relists for free, above.)
 
     # rule C candidate -> rule D visual
     ctx.pairs_left -= 1
@@ -1210,7 +1223,7 @@ def run_engine(
     tag_overrides = load_tag_priority_overrides(conn)
     ctx = _RunContext(
         classify=classify, tier=("geo" if geo else "street_disposition"),
-        cross_source_only=not geo, tag_overrides=tag_overrides,
+        tag_overrides=tag_overrides,
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
         floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
