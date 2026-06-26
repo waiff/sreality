@@ -1014,6 +1014,24 @@ def test_run_engine_now_visually_compares_same_source(monkeypatch: Any) -> None:
     assert stats["pairs_considered"] == 1      # reached the visual stage
 
 
+def test_run_engine_same_source_free_run_skips_not_queues(monkeypatch: Any) -> None:
+    # The no-flood guarantee after removing the cross-source gate: on a FREE run
+    # (enqueue_unresolved=False, no compare_fn) a same-source non-pHash pair reaches the visual
+    # stage but is skipped_unresolved, NOT piled into the manual queue.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="sreality"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           enqueue_unresolved=False)
+
+    assert stats["pairs_considered"] == 1
+    assert stats["skipped_unresolved"] == 1
+    assert stats["queued"] == 0
+
+
 def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
     # A cross-source candidate (sreality + bazos) DOES reach the visual stage.
     import scripts.dedup_engine as eng
