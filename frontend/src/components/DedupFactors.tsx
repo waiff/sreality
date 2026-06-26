@@ -169,8 +169,9 @@ function DecisionEvidence({
   roomType: string | null;
   categoryMain: string | null;
 }) {
+  const perSide = 4;
   const q = useQuery({
-    queryKey: ['dedup', 'decision-evidence', a, b, stage, reason, roomType, categoryMain],
+    queryKey: ['dedup', 'decision-evidence', a, b, stage, reason, roomType, categoryMain, perSide],
     queryFn: () =>
       getDedupDecisionEvidence({
         a,
@@ -179,7 +180,7 @@ function DecisionEvidence({
         reason,
         room_type: roomType,
         category_main: categoryMain,
-        per_side: 4,
+        per_side: perSide,
       }),
     staleTime: 5 * 60_000,
   });

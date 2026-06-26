@@ -62,6 +62,10 @@ function useScrollToSettingHash(hash: string): void {
     if (!id) return;
     let tries = 0;
     let timer = 0;
+    let raf = 0;
+    // The target row may render after an async settings fetch resolves, so retry until it
+    // appears (then flash it). ~3s budget covers a cold-cache load; outline via inline
+    // style so there's no Tailwind-JIT class to miss.
     const focus = () => {
       const el = document.getElementById(id);
       if (el) {
@@ -73,12 +77,16 @@ function useScrollToSettingHash(hash: string): void {
           el.style.outline = '';
           el.style.outlineOffset = '';
         }, 2200);
-      } else if (tries++ < 12) {
-        timer = window.setTimeout(focus, 80);
+      } else if (tries++ < 30) {
+        timer = window.setTimeout(focus, 100);
       }
     };
-    focus();
-    return () => window.clearTimeout(timer);
+    // Defer the first attempt one frame so a freshly force-opened section can mount.
+    raf = window.requestAnimationFrame(focus);
+    return () => {
+      window.clearTimeout(timer);
+      window.cancelAnimationFrame(raf);
+    };
   }, [hash]);
 }
 

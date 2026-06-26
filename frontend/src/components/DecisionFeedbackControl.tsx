@@ -10,9 +10,9 @@ import type { DecisionFeedback } from '@/lib/types';
 
 /* The "this dedup decision was wrong" control — one shared component on BOTH the Decision
  * history feed and the Needs-review queue (the operator's ask: flag + note, filterable,
- * a labelled corpus for improving the flow). Pair-keyed (left/right sreality_id), so the
- * flag follows the pair across both surfaces. Civic-archive: brick = "wrong", a native
- * <select> for the single-choice direction, commit-on-Save. */
+ * a labelled corpus for improving the flow). PROPERTY-pair-keyed (left/right property_id),
+ * so the flag follows the pair across both surfaces and never orphans on a recompute.
+ * Civic-archive: brick = "wrong", a native <select> for the single-choice direction. */
 
 type Direction = '' | 'should_merge' | 'should_dismiss' | 'unsure';
 
@@ -27,13 +27,13 @@ const DIRECTION_LABEL: Record<string, string> = Object.fromEntries(
 );
 
 export default function DecisionFeedbackControl({
-  leftSrealityId,
-  rightSrealityId,
+  leftPropertyId,
+  rightPropertyId,
   categoryMain,
   feedback,
 }: {
-  leftSrealityId: number | null;
-  rightSrealityId: number | null;
+  leftPropertyId: number | null;
+  rightPropertyId: number | null;
   categoryMain?: string | null;
   feedback: DecisionFeedback | null | undefined;
 }) {
@@ -51,7 +51,7 @@ export default function DecisionFeedbackControl({
     setNote(feedback?.note ?? '');
   }, [feedback?.expected_outcome, feedback?.note]);
 
-  const canFlag = leftSrealityId != null && rightSrealityId != null;
+  const canFlag = leftPropertyId != null && rightPropertyId != null;
 
   const save = useMutation({
     mutationFn: (body: DecisionFeedbackInput) => setDecisionFeedback(body),
@@ -62,7 +62,7 @@ export default function DecisionFeedbackControl({
   });
   const remove = useMutation({
     mutationFn: () =>
-      deleteDecisionFeedback(leftSrealityId as number, rightSrealityId as number),
+      deleteDecisionFeedback(leftPropertyId as number, rightPropertyId as number),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['dedup'] });
       setOpen(false);
@@ -73,8 +73,8 @@ export default function DecisionFeedbackControl({
 
   const onSave = () =>
     save.mutate({
-      left_sreality_id: leftSrealityId as number,
-      right_sreality_id: rightSrealityId as number,
+      left_property_id: leftPropertyId as number,
+      right_property_id: rightPropertyId as number,
       is_incorrect: true,
       expected_outcome: direction || null,
       note: note.trim() || null,

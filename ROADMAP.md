@@ -12,9 +12,10 @@ The operator can now FLAG any dedup decision as incorrect and audit exactly why 
 decided it — a labelled corpus for improving the flow, with every threshold and picture
 traceable.
 
-- **migration 248** — `dedup_decision_feedback`, **pair-keyed** (canonical
-  `left_sreality_id < right_sreality_id`, not an audit-row id) so one flag spans the
-  Decision-history feed AND the Needs-review queue and persists across the pair's lifecycle.
+- **migration 248** — `dedup_decision_feedback`, **property-pair-keyed** (canonical
+  `left_property_id < right_property_id`, not an audit-row id and not the drifting repr-listing
+  pair) so one flag spans the Decision-history feed AND the Needs-review queue and persists across
+  the pair's lifecycle without orphaning on a recompute.
   Carries `is_incorrect` + `expected_outcome` (should_merge / should_dismiss / unsure) + a free
   note. Writes via bearer-gated `POST/DELETE /dedup/feedback`; the feed gains a `flagged`-only
   filter. Shared `<DecisionFeedbackControl>` on both surfaces.

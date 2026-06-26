@@ -92,10 +92,11 @@ def test_no_property_id_omits_the_scope_clause() -> None:
 def test_feedback_join_present_and_unflagged_row_has_null_feedback() -> None:
     conn = _FakeConn(total=1, page_rows=[_audit_row()])
     out = dedup.list_pair_audit(conn)
-    # The pair-keyed feedback join is on BOTH queries (so flagged-only filters correctly).
+    # The property-pair-keyed feedback join is on BOTH queries (so flagged-only filters
+    # correctly), keyed on the audit row's snapshotted property pair (not the repr listing).
     for s, _ in conn.executed:
         assert "LEFT JOIN dedup_decision_feedback f" in s
-        assert "least(a.left_sreality_id, a.right_sreality_id)" in s
+        assert "least(a.left_property_id, a.right_property_id)" in s
     assert out["data"][0]["feedback"] is None
 
 

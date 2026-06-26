@@ -31,6 +31,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from typing import Any
 
 from toolkit.comparables import _DISPOSITION_LOOSE
 # Single-source image-tag taxonomy + family grouping (interior / exterior / plan) and the
@@ -222,6 +223,29 @@ def phash_render_exclude_for(
     (untagged / not-yet-scored images are never excluded — recall holds as coverage ramps).
     `threshold` is the live `dedup_render_exclude_min` setting (the caller reads it once)."""
     return threshold if profile_for(category_main).family == "byt" else None
+
+
+def render_exclusion_clause(
+    params: dict[str, Any], alias: str,
+    excluded_tags: tuple[str, ...], render_exclude_min: float | None,
+) -> str:
+    """A `AND NOT EXISTS (... image_clip_tags ...)` SQL fragment excluding an image (by
+    `alias`) that is a KNOWN-exterior/shared tag OR scores >= render_exclude_min on the
+    render axis — the ONE source of the pHash exclusion predicate, shared by the engine's
+    pHash count (`_phash_identical_pairs`) and the /dedup evidence reader
+    (`_phash_pair_evidence`), so the two never drift. Empty when neither filter applies;
+    mutates `params` with the bound values (`%(excl)s` / `%(rmin)s`)."""
+    conds: list[str] = []
+    if excluded_tags:
+        conds.append("t.logical_tag = ANY(%(excl)s)")
+        params["excl"] = list(excluded_tags)
+    if render_exclude_min is not None:
+        conds.append("t.render_score >= %(rmin)s")
+        params["rmin"] = render_exclude_min
+    if not conds:
+        return ""
+    return (f" AND NOT EXISTS (SELECT 1 FROM image_clip_tags t "
+            f"WHERE t.image_id = {alias}.id AND ({' OR '.join(conds)}))")
 
 
 @dataclass(frozen=True)

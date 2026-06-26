@@ -765,11 +765,17 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     `dedup_engine_runs` row (migration 130) per run powers the `/dedup` automation dashboard.
     **Decision feedback + auditability (migration 248).** Every decision is FULLY auditable from
     the `/dedup` Decision-history feed AND the Needs-review queue, and the operator can FLAG a
-    wrong one: `dedup_decision_feedback` is a **pair-keyed** ("this merge/dismissal was wrong" +
-    `expected_outcome` should_merge/should_dismiss/unsure + free note) operator-state table —
-    keyed on the canonical `(left_sreality_id < right_sreality_id)` pair, NOT an audit-row id, so
-    ONE flag attaches to whichever surface shows that pair and persists across the pair's lifecycle
-    (a queued candidate flagged "should dismiss" stays flagged once it becomes a terminal decision).
+    wrong one: `dedup_decision_feedback` is a **PROPERTY-pair-keyed** ("this merge/dismissal was
+    wrong" + `expected_outcome` should_merge/should_dismiss/unsure + free note) operator-state
+    table — keyed on the canonical `(left_property_id < right_property_id)` pair, NOT an audit-row id
+    and NOT the listing pair, so ONE flag attaches to whichever surface shows that pair and persists
+    across the pair's lifecycle (a queued candidate flagged "should dismiss" stays flagged once it
+    becomes a terminal decision — the merge/dismiss audit row carries the SAME two property_ids).
+    **Property-grain, not the listing (sreality) pair, is deliberate:** a property's representative
+    listing (`repr_listing_id`) DRIFTS when `recompute_property_stats` re-picks it, so a listing-pair
+    key would silently orphan the flag off the Needs-review card after a recompute; the audit row
+    SNAPSHOTS its `left/right_property_id` at decision time (immutable) and a candidate's property
+    pair is stable while pending, so the property pair is the stable identity on BOTH surfaces.
     It is a labelled corpus for improving the engine; the feed filters to flagged-only. Writes via
     the bearer-gated `POST/DELETE /dedup/feedback`; anon never reads it. **Auditability is computed,
     not stored:** `toolkit/dedup_audit.build_audit_breakdown(detail)` is a PURE function turning a

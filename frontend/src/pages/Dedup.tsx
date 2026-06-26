@@ -1051,8 +1051,8 @@ function ClusterCard({
           {n === 2 && (
             <div className="mt-2 border-t border-[var(--color-rule-soft)] pt-2">
               <DecisionFeedbackControl
-                leftSrealityId={members[0]?.sreality_id ?? null}
-                rightSrealityId={members[1]?.sreality_id ?? null}
+                leftPropertyId={members[0]?.property_id ?? null}
+                rightPropertyId={members[1]?.property_id ?? null}
                 categoryMain={members[0]?.category_main ?? null}
                 feedback={cluster.feedback}
               />

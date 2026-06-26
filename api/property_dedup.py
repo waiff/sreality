@@ -20,6 +20,7 @@ from toolkit.dedup_engine import (
     RENDER_SCORE_EXCLUDE_MIN,
     phash_excluded_tags_for,
     phash_render_exclude_for,
+    render_exclusion_clause,
 )
 from toolkit.property_identity import MergeError, merge_properties, unmerge_group
 from toolkit.room_taxonomy import FLOOR_PLAN_ROOM_TYPE, SITE_PLAN_ROOM_TYPE
@@ -30,7 +31,7 @@ _EXPECTED_OUTCOMES = ("should_merge", "should_dismiss", "unsure")
 
 
 def _canon_pair(a: int, b: int) -> tuple[int, int]:
-    """Canonical (low, high) listing pair — the dedup_decision_feedback key order."""
+    """Canonical (low, high) property pair — the dedup_decision_feedback key order."""
     a, b = int(a), int(b)
     return (a, b) if a < b else (b, a)
 
@@ -53,29 +54,30 @@ def _feedback_obj(
 def set_decision_feedback(
     conn: psycopg.Connection,
     *,
-    left_sreality_id: int,
-    right_sreality_id: int,
+    left_property_id: int,
+    right_property_id: int,
     is_incorrect: bool = True,
     expected_outcome: str | None = None,
     note: str | None = None,
     category_main: str | None = None,
     created_by: str = "operator",
 ) -> dict[str, Any]:
-    """Upsert the operator's "this decision was wrong" flag for ONE canonical listing
-    pair (the Decision-history AND Needs-review flag — same store). Idempotent: a repeat
-    call edits the existing row's direction/note."""
-    lo, hi = _canon_pair(left_sreality_id, right_sreality_id)
+    """Upsert the operator's "this decision was wrong" flag for ONE canonical PROPERTY
+    pair (the Decision-history AND Needs-review flag — same store; property-grain so it
+    never orphans on a repr-listing recompute). Idempotent: a repeat call edits the
+    existing row's direction/note."""
+    lo, hi = _canon_pair(left_property_id, right_property_id)
     if lo == hi:
-        raise ValueError("a decision pair needs two distinct listings")
+        raise ValueError("a decision pair needs two distinct properties")
     if expected_outcome is not None and expected_outcome not in _EXPECTED_OUTCOMES:
         raise ValueError(f"expected_outcome must be one of {_EXPECTED_OUTCOMES}")
     clean_note = (note or "").strip() or None
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO dedup_decision_feedback (left_sreality_id, right_sreality_id, "
+            "INSERT INTO dedup_decision_feedback (left_property_id, right_property_id, "
             "  is_incorrect, expected_outcome, note, category_main, created_by) "
             "VALUES (%s,%s,%s,%s,%s,%s,%s) "
-            "ON CONFLICT (left_sreality_id, right_sreality_id) DO UPDATE SET "
+            "ON CONFLICT (left_property_id, right_property_id) DO UPDATE SET "
             "  is_incorrect = excluded.is_incorrect, "
             "  expected_outcome = excluded.expected_outcome, "
             "  note = excluded.note, "
@@ -88,21 +90,21 @@ def set_decision_feedback(
         r = cur.fetchone()
     return {
         "data": {
-            "left_sreality_id": lo, "right_sreality_id": hi,
+            "left_property_id": lo, "right_property_id": hi,
             **(_feedback_obj(r[0], r[1], r[2], r[3]) or {}),
         }
     }
 
 
 def delete_decision_feedback(
-    conn: psycopg.Connection, *, left_sreality_id: int, right_sreality_id: int,
+    conn: psycopg.Connection, *, left_property_id: int, right_property_id: int,
 ) -> dict[str, Any]:
     """Un-flag a pair (delete its feedback row). No-op if it wasn't flagged."""
-    lo, hi = _canon_pair(left_sreality_id, right_sreality_id)
+    lo, hi = _canon_pair(left_property_id, right_property_id)
     with conn.cursor() as cur:
         cur.execute(
             "DELETE FROM dedup_decision_feedback "
-            "WHERE left_sreality_id = %s AND right_sreality_id = %s",
+            "WHERE left_property_id = %s AND right_property_id = %s",
             (lo, hi),
         )
         deleted = cur.rowcount
@@ -237,9 +239,8 @@ def list_candidates(
             JOIN properties l ON l.id = c.left_property_id
             JOIN properties r ON r.id = c.right_property_id
             LEFT JOIN dedup_decision_feedback f
-              ON l.repr_listing_id IS NOT NULL AND r.repr_listing_id IS NOT NULL
-             AND f.left_sreality_id = least(l.repr_listing_id, r.repr_listing_id)
-             AND f.right_sreality_id = greatest(l.repr_listing_id, r.repr_listing_id)
+              ON f.left_property_id = least(c.left_property_id, c.right_property_id)
+             AND f.right_property_id = greatest(c.left_property_id, c.right_property_id)
             {where_sql}
             ORDER BY c.created_at DESC, c.id DESC
             LIMIT %(limit)s OFFSET %(offset)s
@@ -401,13 +402,14 @@ def list_pair_audit(
         clauses.append("f.is_incorrect IS TRUE")
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     # The pair-keyed feedback flag (Decision history + Needs-review share one store):
-    # join on the canonical (low, high) sreality pair, in EITHER stored order, guarded
-    # against a NULL sreality id (an audit row with no representative listing).
+    # join on the canonical (low, high) PROPERTY pair the audit row SNAPSHOTTED at
+    # decision time (immutable — unlike the drifting repr listing), in EITHER stored
+    # order, guarded against a NULL property id.
     feedback_join = (
         "LEFT JOIN dedup_decision_feedback f "
-        "  ON a.left_sreality_id IS NOT NULL AND a.right_sreality_id IS NOT NULL "
-        " AND f.left_sreality_id = least(a.left_sreality_id, a.right_sreality_id) "
-        " AND f.right_sreality_id = greatest(a.left_sreality_id, a.right_sreality_id) "
+        "  ON a.left_property_id IS NOT NULL AND a.right_property_id IS NOT NULL "
+        " AND f.left_property_id = least(a.left_property_id, a.right_property_id) "
+        " AND f.right_property_id = greatest(a.left_property_id, a.right_property_id) "
     )
     with conn.cursor() as cur:
         cur.execute(
@@ -488,51 +490,6 @@ def _listing_room_images(
             bool(room_type))
 
 
-def decision_images(
-    conn: psycopg.Connection,
-    *,
-    left_sreality_id: int,
-    right_sreality_id: int,
-    room_type: str | None = None,
-    per_side: int = 4,
-) -> dict[str, Any]:
-    """Hydrate the photos behind a dedup decision — the deciding room's images for
-    BOTH listings (so the operator sees what the engine compared), else the first
-    images. Returns `{sreality_url, storage_path}` objects the SPA renders with the
-    shared `imageSrc()` (R2 when stored, CDN fallback otherwise). Read-only."""
-    per_side = max(1, min(per_side, 8))
-    with conn.cursor() as cur:
-        left, lfb = _listing_room_images(cur, left_sreality_id, room_type, per_side)
-        right, rfb = _listing_room_images(cur, right_sreality_id, room_type, per_side)
-    return {
-        "data": {
-            "room_type": room_type,
-            "left": {"sreality_id": left_sreality_id, "images": left, "fallback": lfb},
-            "right": {"sreality_id": right_sreality_id, "images": right, "fallback": rfb},
-        }
-    }
-
-
-def _evidence_exclusion(
-    params: dict[str, Any], alias: str, excluded_tags: tuple[str, ...],
-    render_exclude_min: float | None,
-) -> str:
-    """Mirror the engine's `_render_exclusion_predicate`: exclude a KNOWN-exterior/shared
-    or high-render image so the EVIDENCE shows the pairs that actually COUNTED toward the
-    pHash decision (faithful to what the engine saw). Empty when neither filter applies."""
-    conds: list[str] = []
-    if excluded_tags:
-        conds.append("t.logical_tag = ANY(%(excl)s)")
-        params["excl"] = list(excluded_tags)
-    if render_exclude_min is not None:
-        conds.append("t.render_score >= %(rmin)s")
-        params["rmin"] = render_exclude_min
-    if not conds:
-        return ""
-    return (f" AND NOT EXISTS (SELECT 1 FROM image_clip_tags t "
-            f"WHERE t.image_id = {alias}.id AND ({' OR '.join(conds)}))")
-
-
 def _phash_pair_evidence(
     cur: Any, a_id: int, b_id: int, category_main: str | None, limit: int,
 ) -> list[dict[str, Any]]:
@@ -552,8 +509,8 @@ def _phash_pair_evidence(
         "  AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
         "  AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
     )
-    sql += _evidence_exclusion(params, "ia", excluded, rmin)
-    sql += _evidence_exclusion(params, "ib", excluded, rmin)
+    sql += render_exclusion_clause(params, "ia", excluded, rmin)
+    sql += render_exclusion_clause(params, "ib", excluded, rmin)
     sql += " ORDER BY hamming ASC, ia.id, ib.id LIMIT %(lim)s"
     cur.execute(sql, params)
     return [

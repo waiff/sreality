@@ -1,5 +1,5 @@
-"""api.property_dedup decision-feedback writes: canonical pair ordering, validation,
-note cleaning, delete. Hermetic fake conn — no DB."""
+"""api.property_dedup decision-feedback writes: canonical PROPERTY-pair ordering,
+validation, note cleaning, delete. Hermetic fake conn — no DB."""
 
 from __future__ import annotations
 
@@ -48,32 +48,32 @@ class _FakeConn:
 def test_set_feedback_canonicalises_pair_and_cleans_note() -> None:
     conn = _FakeConn()
     out = dedup.set_decision_feedback(
-        conn, left_sreality_id=200, right_sreality_id=100,
+        conn, left_property_id=200, right_property_id=100,
         expected_outcome="should_dismiss", note="  bad merge  ", category_main="byt",
     )
     _, params = conn.executed[0]
-    assert params[0] == 100 and params[1] == 200  # low, high
+    assert params[0] == 100 and params[1] == 200  # low, high property id
     assert params[3] == "should_dismiss"
     assert params[4] == "bad merge"  # trimmed
-    assert out["data"]["left_sreality_id"] == 100
-    assert out["data"]["right_sreality_id"] == 200
+    assert out["data"]["left_property_id"] == 100
+    assert out["data"]["right_property_id"] == 200
     assert out["data"]["expected_outcome"] == "should_dismiss"
 
 
 def test_set_feedback_blank_note_becomes_null() -> None:
     conn = _FakeConn()
     dedup.set_decision_feedback(
-        conn, left_sreality_id=-9, right_sreality_id=-5, note="   ",
+        conn, left_property_id=42, right_property_id=7, note="   ",
     )
     _, params = conn.executed[0]
-    assert params[0] == -9 and params[1] == -5  # negatives order numerically
+    assert params[0] == 7 and params[1] == 42  # canonical low, high
     assert params[4] is None
 
 
 def test_set_feedback_rejects_bad_expected_outcome() -> None:
     with pytest.raises(ValueError):
         dedup.set_decision_feedback(
-            _FakeConn(), left_sreality_id=1, right_sreality_id=2,
+            _FakeConn(), left_property_id=1, right_property_id=2,
             expected_outcome="nonsense",
         )
 
@@ -81,17 +81,17 @@ def test_set_feedback_rejects_bad_expected_outcome() -> None:
 def test_set_feedback_rejects_identical_pair() -> None:
     with pytest.raises(ValueError):
         dedup.set_decision_feedback(
-            _FakeConn(), left_sreality_id=7, right_sreality_id=7,
+            _FakeConn(), left_property_id=7, right_property_id=7,
         )
 
 
 def test_delete_feedback_canonicalises_and_reports() -> None:
     conn = _FakeConn(delete_count=1)
-    out = dedup.delete_decision_feedback(conn, left_sreality_id=200, right_sreality_id=100)
+    out = dedup.delete_decision_feedback(conn, left_property_id=200, right_property_id=100)
     _, params = conn.executed[0]
     assert params == (100, 200)
     assert out["data"]["deleted"] is True
 
     conn2 = _FakeConn(delete_count=0)
-    out2 = dedup.delete_decision_feedback(conn2, left_sreality_id=1, right_sreality_id=2)
+    out2 = dedup.delete_decision_feedback(conn2, left_property_id=1, right_property_id=2)
     assert out2["data"]["deleted"] is False

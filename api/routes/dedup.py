@@ -45,8 +45,8 @@ class AssetUnlinkAction(BaseModel):
 
 
 class DecisionFeedbackAction(BaseModel):
-    left_sreality_id: int
-    right_sreality_id: int
+    left_property_id: int
+    right_property_id: int
     is_incorrect: bool = True
     expected_outcome: str | None = None  # should_merge | should_dismiss | unsure
     note: str | None = None
@@ -91,23 +91,6 @@ def get_pipeline_timeline(
     """Dedup-funnel throughput (tagged / candidates / merged / dismissed) per `bucket`
     ('hour' over ~2 days, or 'day' over ~2 weeks)."""
     return dedup.pipeline_timeline(conn, bucket=bucket, points=points)
-
-
-@router.get("/decision-images")
-def get_decision_images(
-    a: int,
-    b: int,
-    room_type: str | None = None,
-    per_side: int = Query(default=4, ge=1, le=8),
-    conn: Any = Depends(deps.get_db_conn),
-    _: None = Depends(deps.require_token),
-) -> dict[str, Any]:
-    """Photos behind a decision row — the deciding room's images for both listings
-    (factor-row drill-in on Decision history / Needs-review)."""
-    return dedup.decision_images(
-        conn, left_sreality_id=a, right_sreality_id=b, room_type=room_type,
-        per_side=per_side,
-    )
 
 
 @router.get("/audit")
@@ -168,12 +151,12 @@ def post_decision_feedback(
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
     """Flag a dedup decision/candidate pair as INCORRECT (with a note + the expected
-    correct outcome). Pair-keyed, so it attaches on both the history feed and the queue;
-    idempotent upsert."""
+    correct outcome). Property-pair-keyed, so it attaches on both the history feed and
+    the queue and never orphans on a recompute; idempotent upsert."""
     try:
         return dedup.set_decision_feedback(
-            conn, left_sreality_id=body.left_sreality_id,
-            right_sreality_id=body.right_sreality_id, is_incorrect=body.is_incorrect,
+            conn, left_property_id=body.left_property_id,
+            right_property_id=body.right_property_id, is_incorrect=body.is_incorrect,
             expected_outcome=body.expected_outcome, note=body.note,
             category_main=body.category_main,
         )
@@ -188,8 +171,9 @@ def delete_decision_feedback(
     conn: Any = Depends(deps.get_db_conn),
     _: None = Depends(deps.require_token),
 ) -> dict[str, Any]:
-    """Un-flag a pair (remove its incorrect-decision flag)."""
-    return dedup.delete_decision_feedback(conn, left_sreality_id=a, right_sreality_id=b)
+    """Un-flag a pair (remove its incorrect-decision flag). `a`/`b` are the two
+    property_ids of the pair."""
+    return dedup.delete_decision_feedback(conn, left_property_id=a, right_property_id=b)
 
 
 @router.get("/candidates")

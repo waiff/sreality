@@ -729,11 +729,12 @@ export const getDedupAudit = (
   );
 };
 
-// Flag a dedup decision / candidate PAIR as incorrect (with direction + note). Pair-keyed,
-// so the same flag shows on both the history feed and the queue.
+// Flag a dedup decision / candidate PAIR as incorrect (with direction + note).
+// PROPERTY-pair-keyed, so the same flag shows on both the history feed and the queue and
+// never orphans on a repr-listing recompute.
 export type DecisionFeedbackInput = {
-  left_sreality_id: number;
-  right_sreality_id: number;
+  left_property_id: number;
+  right_property_id: number;
   is_incorrect?: boolean;
   expected_outcome?: 'should_merge' | 'should_dismiss' | 'unsure' | null;
   note?: string | null;
@@ -747,12 +748,12 @@ export const setDecisionFeedback = (
     json: body,
   });
 export const deleteDecisionFeedback = (
-  left_sreality_id: number,
-  right_sreality_id: number,
+  left_property_id: number,
+  right_property_id: number,
 ): Promise<{ data: { deleted: boolean } }> =>
   request<{ data: { deleted: boolean } }>('/dedup/feedback', {
     method: 'DELETE',
-    query: { a: left_sreality_id, b: right_sreality_id },
+    query: { a: left_property_id, b: right_property_id },
   });
 
 // The SPECIFIC pictures behind a decision, resolved at read time: the pHash matched

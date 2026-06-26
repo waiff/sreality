@@ -286,12 +286,8 @@ export default function DedupAuditHistory({
         </p>
       ) : (
         <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] divide-y divide-[var(--color-rule)] bg-[var(--color-paper)]">
-          {rows.map((r, i) => (
-            <AuditRow
-              key={`${r.merge_group_id ?? ''}-${i}`}
-              r={r}
-              batchPhotos={batchPhotos}
-            />
+          {rows.map((r) => (
+            <AuditRow key={r.audit_id} r={r} batchPhotos={batchPhotos} />
           ))}
         </div>
       )}
@@ -384,8 +380,8 @@ function AuditRow({
         batchPhotos={batchPhotos}
       />
       <DecisionFeedbackControl
-        leftSrealityId={r.left_sreality_id}
-        rightSrealityId={r.right_sreality_id}
+        leftPropertyId={r.left_property_id}
+        rightPropertyId={r.right_property_id}
         categoryMain={r.category_main}
         feedback={r.feedback}
       />
