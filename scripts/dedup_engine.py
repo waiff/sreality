@@ -498,6 +498,34 @@ def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
         return [r[0] for r in cur.fetchall()]
 
 
+def _has_clip_tags(conn: Any, sreality_id: int, model: str) -> bool:
+    """True if the listing has any CLIP room tag under `model` — the CLIP-only gap check."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
+            "WHERE i.sreality_id = %s AND t.model = %s)",
+            (sreality_id, model),
+        )
+        return bool(cur.fetchone()[0])
+
+
+def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> None:
+    """Re-queue a CLIP-untagged listing's images for the tagger (clip_tag.yml drains
+    `clip_tagged_at IS NULL`): reset the marker on every stored image of these listings that
+    has no CLIP tag for `model`. A never-tagged image is already pending (no-op); a stuck one
+    (marked done but tagless — a failed/old run) gets re-queued, so a gap can self-heal
+    instead of deferring forever."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE images SET clip_tagged_at = NULL "
+            "WHERE sreality_id = ANY(%s) AND storage_path IS NOT NULL "
+            "  AND clip_tagged_at IS NOT NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM image_clip_tags t "
+            "                  WHERE t.image_id = images.id AND t.model = %s)",
+            (sreality_ids, model),
+        )
+
+
 def _floor_plan_gate(
     conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
     inconclusive_to_review: bool = True,
@@ -876,6 +904,11 @@ class _RunContext:
     # Operator-reordered per-family comparison-tag priorities (app_settings.dedup_tag_priorities);
     # None / partial → the coded defaults (rooms_in_priority normalizes per family).
     tag_overrides: dict[str, list[str]] | None = None
+    # CLIP-only mode (dedup_clip_only): no LLM room-classifier fallback. A pair with a
+    # CLIP-untagged listing re-queues it for the CLIP tagger and DEFERS, instead of paying
+    # Haiku or treating it as untagged. clip_model is the taxonomy model the tags are keyed on.
+    clip_only: bool = False
+    clip_model: str | None = None
     # tunables (read-only)
     auto_merge_enabled: bool = True
     autodismiss: bool = True
@@ -1067,6 +1100,17 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             })
         stats["queued"] += 1
         return
+    # CLIP-only mode: the room classifier is CLIP, no LLM fallback. If either listing isn't
+    # CLIP-tagged yet, re-queue its images for the tagger and DEFER (re-try next run once
+    # tagged) — never pay Haiku, never treat it as untagged.
+    if ctx.clip_only and ctx.clip_model and (
+        not _has_clip_tags(conn, a.sreality_id, ctx.clip_model)
+        or not _has_clip_tags(conn, b.sreality_id, ctx.clip_model)
+    ):
+        if not ctx.dry_run:
+            _trigger_clip_tagging(conn, [a.sreality_id, b.sreality_id], ctx.clip_model)
+        stats["clip_deferred"] += 1
+        return
     outcome = _resolve_visual(
         conn, a, b, classify_fn=ctx.classify_fn, compare_fn=ctx.compare_fn,
         site_plan_fn=ctx.site_plan_fn, floor_plan_fn=ctx.floor_plan_fn,
@@ -1160,6 +1204,8 @@ def run_engine(
     only_groups_with_property_ids: set[int] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
+    clip_only: bool = False,
+    clip_model: str | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
 
@@ -1205,7 +1251,7 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
-        "floor_plan_deferred": 0, "truncated": 0,
+        "floor_plan_deferred": 0, "clip_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
     })
@@ -1223,7 +1269,7 @@ def run_engine(
     tag_overrides = load_tag_priority_overrides(conn)
     ctx = _RunContext(
         classify=classify, tier=("geo" if geo else "street_disposition"),
-        tag_overrides=tag_overrides,
+        tag_overrides=tag_overrides, clip_only=clip_only, clip_model=clip_model,
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
         floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
@@ -1516,6 +1562,7 @@ def _clip_settings(conn: Any) -> dict[str, Any]:
 
     return {
         "prefer_clip": _flag("dedup_prefer_clip_tags"),
+        "clip_only": _flag("dedup_clip_only"),
         "cosine_enabled": _flag("dedup_clip_cosine_enabled"),
         "bands": CosineBands(
             haiku_min=_num("dedup_cosine_haiku_min"),
@@ -1766,6 +1813,10 @@ def main() -> int:
             auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
             enqueue_unresolved=not args.free, dry_run=args.shadow, deadline=deadline,
             restrict_property_ids=restrict,
+            # clip_only only takes effect WITH prefer_clip — else a CLIP-tagged listing would
+            # still be Haiku-classified, contradicting CLIP-only. (Setting help says as much.)
+            clip_only=clip["clip_only"] and clip["prefer_clip"],
+            clip_model=clip["clip_model"],
         )
 
         if not args.geo_only:
@@ -1790,13 +1841,14 @@ def main() -> int:
                     LOG.info("DIRTY drain: cleared %d drained properties", cleared)
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
-                "auto_dismissed=%d floor_plan_deferred=%d reconciled=%d queued=%d "
+                "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
                 "skipped_unresolved=%d rejected=%d "
                 "skipped_same_source=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 stats["eligible"], stats["auto_address"], stats["auto_phash"],
                 stats["auto_visual"], stats["auto_dismissed"],
-                stats.get("floor_plan_deferred", 0), stats["reconciled"],
+                stats.get("floor_plan_deferred", 0), stats.get("clip_deferred", 0),
+                stats["reconciled"],
                 stats["queued"], stats["skipped_unresolved"], stats["rejected"],
                 stats.get("skipped_same_source", 0),
                 stats["pairs_considered"], stats["vision_calls"],

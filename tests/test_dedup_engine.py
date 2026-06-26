@@ -1032,6 +1032,63 @@ def test_run_engine_same_source_free_run_skips_not_queues(monkeypatch: Any) -> N
     assert stats["queued"] == 0
 
 
+def test_run_engine_clip_only_defers_and_triggers_on_gap(monkeypatch: Any) -> None:
+    # CLIP-only: a pair with a CLIP-UNTAGGED listing re-queues its images for the tagger and
+    # DEFERS (no Haiku fallback, not queued, not merged).
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_has_clip_tags", lambda conn, sid, model: sid == 1)  # only 1 tagged
+    triggered: list[list[int]] = []
+    monkeypatch.setattr(eng, "_trigger_clip_tagging",
+                        lambda conn, sids, model: triggered.append(list(sids)))
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])  # rule-C pair
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           clip_only=True, clip_model="clip-x")
+    assert stats["clip_deferred"] == 1
+    assert stats["queued"] == 0 and stats["pairs_considered"] == 1
+    assert triggered == [[1, 2]]
+
+
+def test_run_engine_clip_only_both_tagged_reaches_visual(monkeypatch: Any) -> None:
+    # Both CLIP-tagged -> no defer, the pair reaches the visual stage normally.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_has_clip_tags", lambda conn, sid, model: True)
+    monkeypatch.setattr(eng, "_trigger_clip_tagging",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not trigger")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           clip_only=True, clip_model="clip-x")
+    assert stats["clip_deferred"] == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_run_engine_clip_only_off_skips_the_gap_check(monkeypatch: Any) -> None:
+    # Default (clip_only off): the gap check never runs, so the Haiku-fallback path is intact.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_has_clip_tags",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("gap check must not run")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+    assert stats["clip_deferred"] == 0
+
+
+def test_trigger_clip_tagging_requeues_only_stuck_images() -> None:
+    # The trigger resets clip_tagged_at ONLY on stuck images (marked done but tagless) — a
+    # never-tagged image (clip_tagged_at IS NULL) is already pending, so it's left alone.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([])
+    eng._trigger_clip_tagging(conn, [1, 2], "clip-x")
+    sql = " ".join(conn.executed[-1].split())
+    assert "UPDATE images SET clip_tagged_at = NULL" in sql
+    assert "clip_tagged_at IS NOT NULL" in sql
+    assert "NOT EXISTS" in sql and "image_clip_tags" in sql
+
+
 def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
     # A cross-source candidate (sreality + bazos) DOES reach the visual stage.
     import scripts.dedup_engine as eng
