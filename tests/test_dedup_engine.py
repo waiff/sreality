@@ -999,6 +999,37 @@ def test_effective_vision_cap() -> None:
         free=False, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 300
 
 
+def test_proposed_candidate_property_ids() -> None:
+    """The candidate-drain work-list = every property in a still-proposed candidate
+    (both sides, NULLs skipped, deduped)."""
+    import scripts.dedup_engine as eng
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self.sql = sql
+        def fetchall(self): return [(101, 102), (103, None), (None, 104), (101, 105)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    assert eng._proposed_candidate_property_ids(_Conn()) == {101, 102, 103, 104, 105}
+
+
+def test_load_eligible_restrict_scopes() -> None:
+    """restrict=None -> no property filter (full scan); restrict=set() -> the filter IS
+    applied (so an empty candidate queue loads NOTHING, never a full market scan)."""
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([_row(1, 101)])
+    eng._load_eligible(conn, restrict_property_ids=None)
+    assert not any("l.property_id = ANY" in s for s in conn.executed)
+
+    conn2 = _FakeConn([_row(1, 101)])
+    eng._load_eligible(conn2, restrict_property_ids=set())  # empty != None
+    assert any("l.property_id = ANY" in s for s in conn2.executed)
+
+
 def test_resolve_pair_seam_standalone() -> None:
     """resolve_pair is callable standalone with a hand-built _RunContext — the exact seam
     the candidate-priority drain + the real-time per-listing path reuse (one decision tree,
