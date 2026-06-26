@@ -88,10 +88,19 @@ export default function ImageCarousel({
         className="absolute bottom-1 left-1 z-[1] max-w-[calc(100%-3.5rem)] truncate"
       />
 
-      <ImageRenderBadge
-        renderScore={current?.renderScore}
-        className="absolute top-1 left-1 z-[1]"
-      />
+      {/* Bottom-RIGHT metadata stack: the render-vs-photo pill above the photo
+          counter (mirrors the listing-detail gallery's placement; the room tag
+          owns bottom-left). Kept off the top-left corner, which the caller's
+          overlay controls (the Browse card's bookmark + collection buttons,
+          z-10) own — the badge used to sit behind them. */}
+      <div className="absolute bottom-1 right-1 z-[1] flex flex-col items-end gap-1">
+        <ImageRenderBadge renderScore={current?.renderScore} />
+        {hasMany && (
+          <span className="px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm">
+            {safeIndex + 1} / {images.length}
+          </span>
+        )}
+      </div>
 
       {hasMany && (
         <>
@@ -111,9 +120,6 @@ export default function ImageCarousel({
           >
             <Chevron dir="right" />
           </button>
-          <span className="absolute bottom-1 right-1 px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm">
-            {safeIndex + 1} / {images.length}
-          </span>
         </>
       )}
     </div>
