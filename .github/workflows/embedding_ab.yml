@@ -51,9 +51,9 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: hf-dinov2-small
-      - name: Install (CPU torch + clip extra)
+      - name: Install (CPU torch + torchvision + clip extra)
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[clip]"
       - name: Run embedding A/B
         run: |
