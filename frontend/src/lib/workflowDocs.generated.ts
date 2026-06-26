@@ -1282,6 +1282,56 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/discover_condition_markers.yml"
   },
   {
+    "filename": "embedding_ab.yml",
+    "name": "Dedup — embedding A/B (DINOv2 vs CLIP)",
+    "description": "One-shot OFFLINE analysis (read-only, no merges/writes): does a candidate instance-biased embedding (DINOv2) separate same-property from different-unit-same-development where CLIP's semantic embedding collapsed (negatives cosine >= positives)? Reports max same-room cosine percentiles by is_same for DINOv2 vs the stored CLIP, on the labelled same-disposition set (floor-plan-confirmed different units as negatives). The gate before any re-embed commitment. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_* (downloads image bytes). NOT a portal ingest.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "model",
+        "description": "HF image model id (DINOv2 CLS embedding)",
+        "required": false,
+        "type": "string",
+        "default": "facebook/dinov2-small",
+        "options": null
+      },
+      {
+        "name": "npos",
+        "description": "Positive (same-property) pairs sampled",
+        "required": false,
+        "type": "string",
+        "default": "400",
+        "options": null
+      },
+      {
+        "name": "nneg",
+        "description": "Negative (different-unit) pairs sampled",
+        "required": false,
+        "type": "string",
+        "default": "400",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/embedding_ab.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/embedding_ab.yml"
+  },
+  {
     "filename": "enrich_bazos.yml",
     "name": "Scraping: Bazos description enrichment (LLM, every 6h + manual)",
     "description": "Decoupled enrichment job. bazos listings carry no structured floor / amenities / condition / building_type / energy — only price, area, disposition, coords, and the seller's free text. This reads the description of active listings whose latest snapshot isn't yet enriched, extracts those typed fields with a cheap model (Haiku 4.5), caches the extraction in listing_description_enrichments, and fills ONLY the currently-NULL listings columns (the deterministic HTML-parsed price/area/disposition are never overwritten). Resumable: enriched snapshots drop out of the next selection.",
