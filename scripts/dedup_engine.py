@@ -510,7 +510,10 @@ def _floor_plan_gate(
         decides: 'different_layout' -> 'dismiss'; 'inconclusive' -> 'queue' when
         `inconclusive_to_review` (default on, app_settings.dedup_floor_plan_inconclusive_to_review),
         else 'merge'; 'same_layout' -> 'merge' (auto-confirm — the verdict weighs layout +
-        the OCR'd unit/area/floor labels);
+        the OCR'd unit/area/floor labels). When a side carries SEVERAL plans the verdict is
+        N×N (migration 243): one call sees every labelled plan of both, 'same_layout' if ANY
+        A-plan matches ANY B-plan, 'different_layout' only if NONE do — so a matching plan
+        among several can never be missed into a wrong dismiss;
       * both sides carry a plan but the verdict isn't available yet (no fn / no budget /
         cache-miss) -> 'defer': skip this run and re-try next, once the batch lane warms
         the verdict — NOT the operator queue (this pair is automatable, not a human call);

@@ -630,7 +630,14 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     #5; verdict same_layout / different_layout / inconclusive + per-plan OCR in `extracted`, used
     plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
     auto-dismiss** (the visual model stays the sole thing that can dismiss); same_layout / inconclusive
-    → the merge proceeds. The gate distinguishes **"a human must decide" (queue)** from **"validate it
+    → the merge proceeds. **N×N over multiple plans (migration 243):** a listing can carry several
+    floor/site plans (a multi-unit building, a multi-floor home); the one vision call sends EVERY
+    labelled plan of both listings and the prompt matches the cross-product — `same_layout` if ANY
+    A-plan matches ANY B-plan, `different_layout` only if NONE do (and `compare_listing_site_plans`
+    the same: `same_unit` if any pair shares a unit). So a matching plan among several is never missed
+    into a wrong dismiss. No schema / cost change — one call, the model reasons over all pairs; the
+    payload labels each plan ("Listing A plan 2") so the rationale can cite the matching pair. The
+    prompt update is `updated_by`-guarded so an operator-customised prompt is never clobbered. The gate distinguishes **"a human must decide" (queue)** from **"validate it
     later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run (budget exhausted /
     cache-miss in the $0 escape hatch) → **`defer`** — skip, re-try next run, never the manual queue
     (the pair is automatable, not a human call); exactly ONE side has a plan → **`queue`** (genuinely a

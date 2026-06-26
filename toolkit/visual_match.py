@@ -262,6 +262,19 @@ def _blocks(r2: Any, keys: list[str], max_edge: int) -> list[dict[str, Any]]:
     return [image_block(r2, key, max_edge) for key in keys]
 
 
+def _labelled_plan_blocks(
+    r2: Any, keys: list[str], label_prefix: str, max_edge: int
+) -> list[dict[str, Any]]:
+    """One labelled image block per plan ("<prefix> plan k:" then the image) so the N×N
+    plan gate can reference a specific plan ("A plan 2 matches B plan 1") and the model
+    treats each as a distinct candidate rather than one blurred set."""
+    out: list[dict[str, Any]] = []
+    for i, key in enumerate(keys, 1):
+        out.append({"type": "text", "text": f"{label_prefix} plan {i}:"})
+        out.append(image_block(r2, key, max_edge))
+    return out
+
+
 def _extract(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:
     matching = [tc for tc in tool_calls if tc.get("name") == "record_visual_match"]
     if not matching:
@@ -447,14 +460,16 @@ def _build_site_plan_content(
 
     r2 = image_storage.R2Client.from_env()
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": f"Listing A — site/situation plan(s) ({len(keys_a)}):"}
+        {"type": "text", "text": f"Listing A — {len(keys_a)} site/situation plan(s):"}
     ]
-    content.extend(_blocks(r2, keys_a, DOCUMENT_MAX_EDGE))
-    content.append({"type": "text", "text": f"Listing B — site/situation plan(s) ({len(keys_b)}):"})
-    content.extend(_blocks(r2, keys_b, DOCUMENT_MAX_EDGE))
+    content.extend(_labelled_plan_blocks(r2, keys_a, "Listing A", DOCUMENT_MAX_EDGE))
+    content.append({"type": "text", "text": f"Listing B — {len(keys_b)} site/situation plan(s):"})
+    content.extend(_labelled_plan_blocks(r2, keys_b, "Listing B", DOCUMENT_MAX_EDGE))
     content.append({
         "type": "text",
-        "text": "Decide same_unit vs different_unit, then call record_site_plan_match once.",
+        "text": "Identify the unit each listing highlights across its plans, then compare A vs B. "
+                "same_unit if ANY pair shares a unit; different_unit only if NO pair does. "
+                "Call record_site_plan_match once.",
     })
     return content
 
@@ -715,14 +730,15 @@ def _build_floor_plan_content(
 
     r2 = image_storage.R2Client.from_env()
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": f"Listing A — floor plan(s) ({len(keys_a)}):"}
+        {"type": "text", "text": f"Listing A — {len(keys_a)} floor plan(s):"}
     ]
-    content.extend(_blocks(r2, keys_a, DOCUMENT_MAX_EDGE))
-    content.append({"type": "text", "text": f"Listing B — floor plan(s) ({len(keys_b)}):"})
-    content.extend(_blocks(r2, keys_b, DOCUMENT_MAX_EDGE))
+    content.extend(_labelled_plan_blocks(r2, keys_a, "Listing A", DOCUMENT_MAX_EDGE))
+    content.append({"type": "text", "text": f"Listing B — {len(keys_b)} floor plan(s):"})
+    content.extend(_labelled_plan_blocks(r2, keys_b, "Listing B", DOCUMENT_MAX_EDGE))
     content.append({
         "type": "text",
-        "text": "Decide same_layout vs different_layout, then call record_floor_plan_match once.",
+        "text": "Compare EVERY plan of A against EVERY plan of B (N×N). same_layout if ANY pair "
+                "matches; different_layout only if NO pair matches. Call record_floor_plan_match once.",
     })
     return content
 
