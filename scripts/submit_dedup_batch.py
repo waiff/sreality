@@ -1,11 +1,11 @@
 """Submit dedup VISION work to the Anthropic Message Batches API (50% off).
 
 PRE-WARMS the dedup engine's vision caches. Runs the engine's FREE funnel
-(rules A/B/C + the pHash fast-path + the cross-source gate — reusing the very
-same pure rules and SQL helpers the synchronous engine uses) to find the
-cross-source pairs that would reach the paid visual stage, then enqueues their
-classify / compare / site_plan requests as one or more size-bounded batches into
-dedup_batches / dedup_batch_requests.
+(rules A/B/C + the pHash fast-path — reusing the very same pure rules and SQL
+helpers the synchronous engine uses) to find the pairs that would reach the paid
+visual stage (Wave 3 removed the cross-source gate, so same-source pairs warm too),
+then enqueues their classify / compare / site_plan requests as one or more
+size-bounded batches into dedup_batches / dedup_batch_requests.
 
 It NEVER merges and NEVER calls the LLM synchronously: a request is enqueued
 only when its result isn't already cached and isn't already in flight. The daily
@@ -257,21 +257,22 @@ def collect(
                     continue
                 seen_property_pairs.add(ppair)
 
-                # rule B exact address — replay merges it for free, no LLM.
-                if decision.action == "auto_merge":
-                    continue
-
-                # Warm the floor-plan verdict for any both-floor-plan pair (migration
-                # 234): the engine's floor-plan gate runs on a pHash OR a visual merge
-                # (incl. same-source), so warm it BEFORE the pHash skip + cross-source
-                # gate, or the cache-only daily run would queue every floor-plan pair.
+                # Warm the floor-plan verdict for any both-floor-plan pair (migration 234):
+                # the engine's floor-plan gate runs on a pHash, a visual, OR a rule-B
+                # exact-address merge (Wave 3), so warm it FIRST — before any skip — or the
+                # cache-only run would queue/defer every floor-plan pair.
                 _warm_floor_plan(
                     conn, llm_client, submitter, a, b, floor_plan_model, funnel)
 
-                # pHash fast-path — replay merges for free (unless both site_plan,
-                # which defers to the development guard below). Byt excludes known-
-                # exterior images (mirrors run_engine), so the warm-up funnel and the
-                # daily engine agree on which byt pairs the fast-path resolves.
+                # rule B exact address — the engine merges it via the floor-plan gate (now
+                # warmed above), no all-rooms compare needed.
+                if decision.action == "auto_merge":
+                    continue
+
+                # pHash fast-path — replay merges for free (unless both site_plan, which
+                # defers to the development guard below). Byt excludes known-exterior images
+                # (mirrors run_engine), so the warm-up funnel and the daily engine agree on
+                # which byt pairs the fast-path resolves.
                 _rmin = phash_render_exclude_for(a.category_main)
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
@@ -285,9 +286,8 @@ def collect(
                 ):
                     continue
 
-                # cross-source gate — same-source pairs never reach the paid stage.
-                if a.source == b.source:
-                    continue
+                # Wave 3 removed the cross-source gate: same-source non-exact pairs now reach
+                # the visual stage in the engine, so the warmer must warm them too.
 
                 pairs_left -= 1
                 funnel["visual_candidates"] += 1
