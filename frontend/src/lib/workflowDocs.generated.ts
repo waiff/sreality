@@ -2750,7 +2750,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "scrape_ceskereality.yml",
     "name": "Scraping: Českéreality scraper (pilot)",
-    "description": "",
+    "description": "Scraper for ceskereality.cz on the shared portal framework. ceskereality is a structured HTML portal (like idnes): the index walk pages the search results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, parses it to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + property singleton). One job runs both phases via ceskereality_main. The client crawls with an honest, identifying User-Agent at a polite rate (the site disallows generic bots in robots.txt).",
     "portal": "ceskereality",
     "manual": true,
     "schedules": [],

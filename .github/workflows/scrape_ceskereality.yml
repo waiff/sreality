@@ -1,7 +1,6 @@
 name: "Scraping: Českéreality scraper (pilot)"
 
 # portal: ceskereality
-
 # Scraper for ceskereality.cz on the shared portal framework.
 # ceskereality is a structured HTML portal (like idnes): the index walk pages the
 # search results and enqueues new/price-changed ids into listing_detail_queue,

@@ -29,8 +29,8 @@ Layout notes specific to ceskereality.cz:
   nemovitosti", "Energetická náročnost".
 - Building type values: "Cihlová" → cihla, "Panelová" → panel,
   "Smíšená" → smisena. Lowercase, no diacritics on the enum.
-- The detail URL path is /{prodej|pronajem}/{category}/… — use it to
-  set category_type (prodej = sale, pronajem = rent).
+- The detail URL path is /{{prodej|pronajem}}/{{category}}/… — use it
+  to set category_type (prodej = sale, pronajem = rent).
 - Strip "Kč" and thousands separators (NBSP \\u00A0) from any price
   taken from text rather than the JSON-LD integer.
 
