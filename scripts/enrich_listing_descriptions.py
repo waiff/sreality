@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
 from typing import Any
 
 LOG = logging.getLogger("enrich_listing_descriptions")
@@ -23,25 +24,34 @@ LOG = logging.getLogger("enrich_listing_descriptions")
 def _select_pending(
     conn: Any, *, source: str, max_age_days: int, limit: int
 ) -> list[int]:
-    """Active listings of `source` with a description and an un-enriched latest snapshot."""
+    """Active listings of `source` with a description whose latest snapshot isn't enriched.
+
+    Source-scoped and freshest-first off the existing (source, first_seen_at)
+    index; the latest-snapshot check is a per-listing correlated subquery, NOT a
+    global `MAX(id) ... GROUP BY` over the whole ~1M-row listing_snapshots table.
+    The old global-CTE form aggregated every listing's history before filtering to
+    one source and timed out (21s+); this form lets the planner walk only this
+    source's rows and short-circuit at the LIMIT (~0.7s). Re-enriches a listing
+    whose content changed since its last enrichment (its latest snapshot id moved).
+    """
     freshness = " AND l.last_seen_at > now() - %s::interval" if max_age_days > 0 else ""
     sql = (
-        "WITH latest AS ( "
-        "  SELECT sreality_id, MAX(id) AS snapshot_id "
-        "  FROM listing_snapshots GROUP BY sreality_id "
-        ") "
         "SELECT l.sreality_id "
         "FROM listings l "
-        "JOIN latest ls ON ls.sreality_id = l.sreality_id "
-        "LEFT JOIN listing_description_enrichments e "
-        "  ON e.sreality_id = ls.sreality_id AND e.snapshot_id = ls.snapshot_id "
         "WHERE l.is_active = true "
         "  AND l.source = %s "
         "  AND l.description IS NOT NULL "
         "  AND length(btrim(l.description)) > 0 "
         + freshness +
-        "  AND e.id IS NULL "
-        "ORDER BY l.last_seen_at DESC "
+        "  AND NOT EXISTS ( "
+        "    SELECT 1 FROM listing_description_enrichments e "
+        "    WHERE e.sreality_id = l.sreality_id "
+        "      AND e.snapshot_id = ( "
+        "        SELECT MAX(id) FROM listing_snapshots s "
+        "        WHERE s.sreality_id = l.sreality_id "
+        "      ) "
+        "  ) "
+        "ORDER BY l.first_seen_at DESC "
         "LIMIT %s"
     )
     params: tuple[Any, ...] = (
@@ -58,6 +68,12 @@ def main() -> int:
     ap.add_argument("--source", default="bazos")
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--max-cost-usd", type=float, default=10.0)
+    ap.add_argument(
+        "--max-seconds", type=int, default=0,
+        help="Wall-clock budget; finalize cleanly when reached (0 = no budget). "
+             "Keep below the workflow's timeout-minutes so a run is never cancelled "
+             "mid-flight (the next cron tick resumes from the queue).",
+    )
     ap.add_argument(
         "--max-age-days", type=int, default=0,
         help="0 = every active listing regardless of last_seen_at.",
@@ -77,8 +93,8 @@ def main() -> int:
 
     model = args.model or DEFAULT_MODEL
     LOG.info(
-        "ENRICH config source=%s limit=%d max_cost=%.2f model=%s dry_run=%s",
-        args.source, args.limit, args.max_cost_usd, model, args.dry_run,
+        "ENRICH config source=%s limit=%d max_cost=%.2f max_seconds=%d model=%s dry_run=%s",
+        args.source, args.limit, args.max_cost_usd, args.max_seconds, model, args.dry_run,
     )
 
     with db.connect() as conn:
@@ -91,6 +107,7 @@ def main() -> int:
             return 0
 
         llm_client = LLMClient(conn, providers={"anthropic": AnthropicProvider()})
+        start = time.monotonic()
         spent = 0.0
         ok = filled_total = skipped = errors = 0
         for i, sid in enumerate(ids, 1):
@@ -98,6 +115,12 @@ def main() -> int:
                 LOG.info(
                     "ENRICH cost cap reached spent=%.2f cap=%.2f at %d/%d",
                     spent, args.max_cost_usd, i - 1, len(ids),
+                )
+                break
+            if args.max_seconds > 0 and time.monotonic() - start >= args.max_seconds:
+                LOG.info(
+                    "ENRICH time budget %ds reached at %d/%d; finalizing cleanly",
+                    args.max_seconds, i - 1, len(ids),
                 )
                 break
             try:
