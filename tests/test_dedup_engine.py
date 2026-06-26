@@ -574,11 +574,6 @@ def test_classify_geo_cross_type_dum_komercni_not_a_contradiction() -> None:
     assert d.action == "auto_merge" and d.reason == "geo_exact"
 
 
-def test_classify_geo_byt_vs_dum_still_a_contradiction() -> None:
-    d = classify_geo_pair(_gk(1, 101, cat="byt"), _gk(2, 102, cat="dum"), profile_for("dum"))
-    assert d.action == "reject" and d.detail == "category_main_contradiction"
-
-
 def test_classify_geo_area_contradiction_rejects() -> None:
     d = classify_geo_pair(_gk(1, 101, area=100.0), _gk(2, 102, area=150.0), profile_for("dum"))
     assert d.action == "reject" and d.detail == "area_contradiction"
@@ -608,7 +603,9 @@ def test_classify_geo_unit_marker_contradiction_rejects() -> None:
 
 
 def test_classify_geo_category_contradiction_rejects() -> None:
-    d = classify_geo_pair(_gk(1, 101, cat="dum"), _gk(2, 102, cat="komercni"), profile_for("dum"))
+    # A genuine cross-category pair still rejects (byt vs dum). dum<->komercni is the ONE
+    # sanctioned cross-type and is covered separately below.
+    d = classify_geo_pair(_gk(1, 101, cat="byt"), _gk(2, 102, cat="dum"), profile_for("dum"))
     assert d.action == "reject" and d.detail == "category_main_contradiction"
 
 
