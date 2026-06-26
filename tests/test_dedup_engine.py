@@ -517,7 +517,7 @@ def test_classify_geo_category_contradiction_rejects() -> None:
 def test_run_geo_candidates_queues_only_in_p1(monkeypatch: Any) -> None:
     # A strong house pair would auto-merge by rule, but P1 keeps it queue-only.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
         _gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"),
     ])
     enq: list[tuple[Any, Any]] = []
@@ -533,7 +533,7 @@ def test_run_geo_candidates_queues_only_in_p1(monkeypatch: Any) -> None:
 
 def test_run_geo_candidates_auto_merges_when_enabled(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [_gk(1, 101), _gk(2, 102)])
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [_gk(1, 101), _gk(2, 102)])
     merges: list[str] = []
     monkeypatch.setattr(eng, "_merge_pair",
                         lambda conn, x, y, reason, markers: merges.append(reason) or True)
@@ -546,7 +546,7 @@ def test_run_geo_candidates_auto_merges_when_enabled(monkeypatch: Any) -> None:
 
 def test_run_geo_candidates_dry_run_writes_nothing(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [_gk(1, 101), _gk(2, 102)])
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [_gk(1, 101), _gk(2, 102)])
     monkeypatch.setattr(eng, "_merge_pair",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not merge")))
     monkeypatch.setattr(eng, "_enqueue_candidate",
@@ -558,7 +558,7 @@ def test_run_geo_candidates_dry_run_writes_nothing(monkeypatch: Any) -> None:
 def test_run_geo_candidates_skips_large_cell(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
     members = [_gk(i, 100 + i) for i in range(1, eng.MAX_GEO_GROUP_SIZE + 3)]  # one oversized cell
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: members)
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: members)
     monkeypatch.setattr(eng, "_enqueue_candidate",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("oversized cell must skip")))
     stats = eng.run_geo_candidates(object())
