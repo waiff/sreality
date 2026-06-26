@@ -546,13 +546,15 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     is only complete if a listing taken down on one portal — or delisted then relisted under a
     new id — can still merge into the surviving group. The merge chokepoint gates on the
     *property* `status='active'` and an inactive listing keeps its own active singleton property,
-    so it stays matchable; gating the scan on `is_active` would orphan that history. **(B)** same street + house
-    number + disposition + floor → exact-address merge, with a 5% area guard that demotes
-    mismatched-area pairs to visual. **As of Wave 3 rule B is NOT a blind auto-merge: it routes through
-    the same floor-plan gate as the pHash path** — the same address + disposition + floor can still be
-    DIFFERENT units of one building (two 2+kk on one floor), so a different floor plan DISMISSES, a
-    one-sided/unwarmed plan queues/defers, and a matching or absent plan merges (no-plan exact relists
-    still merge for free — recall preserved). **(C)** same street + disposition → visual candidate unless
+    so it stays matchable; gating the scan on `is_active` would orphan that history. **(B) RETIRED
+    (2026-06): exact address (street + house_number + disposition + floor) is no longer an
+    auto-merge.** It was the ONLY merge path that produced false merges — 6.7% of `address_exact`
+    merges were later unmerged (two DIFFERENT units at the same address+floor) vs **0%** for pHash
+    (0/23.6k) and visual (0/753), because address alone is not unit-conclusive. `classify_pair` now
+    returns an exact-address pair as a normal rule-C **candidate** (the `address_exact` reason is kept
+    for provenance), so it flows through the pHash fast-path → forensic visual → floor-plan gate (the
+    0%-reversal paths) like any street+disposition pair. The rare same-address-different-photos-no-
+    matching-room pair queues for the operator instead of auto-merging. **(C)** same street + disposition → visual candidate unless
     an **area-gap** / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
     that doesn't share street + disposition, AND no **same-development guard** fires. The area-gap
     reject is **unified at 10%** for every category (`MatchProfile.candidate_area_max_pct`). It is
@@ -700,16 +702,24 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (PRs around the trial): pozemek 77% → plot/site family, coarse room agreement 87%, same-property
     tag consistency 86%, cosine AUC 0.80. Both knobs ship OFF; flip via `app_settings` after a
     `--shadow` merge-diff confirms merges hold. Run counters: `dedup_engine_runs.clip_classified` /
-    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`. (3) `dedup_clip_only` (default OFF, needs
-    `prefer_clip`) removes the **paid Haiku room-classifier fallback** entirely — a pair with a
-    CLIP-**untagged** listing is NOT Haiku-classified or treated as untagged: the engine RE-QUEUES that
-    listing's images for the CLIP tagger (`_trigger_clip_tagging` resets `images.clip_tagged_at=NULL` on
-    its tagless-but-marked images so `clip_tag.yml` re-tags them; never-tagged images are already
-    pending) and **DEFERS** the pair (`clip_deferred` counter), re-trying once tagged. Only flip it on at
-    HIGH CLIP coverage — at low coverage many pairs defer (coverage was ~65% of active images when
-    shipped). The batch warmer (`submit_dedup_batch`, currently `disabled_manually`) still groups rooms
-    via the Haiku cache, so re-enabling it under `clip_only` would need CLIP-aware grouping — a
-    reconciliation deferred until the warmer is revived.
+    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`. (3) **Tagging-readiness gate (2026-06,
+    DEFAULT whenever CLIP is the tagger).** A pair is DEFERRED — before pHash, the floor-plan gate, or
+    visual — if EITHER listing has any stored image still pending the tagger
+    (`resolve_pair._clip_incomplete`: a `storage_path` image with `clip_tagged_at IS NULL`; a
+    processed-but-untaggable image is terminal so it never blocks forever). Reason: an
+    incompletely-tagged listing's floor-plan / room images may still be in the tag queue, so the
+    floor-plan gate would mis-read a pending plan as ABSENT (the false `floor_plan_review` "one-sided"
+    queue — 77% of the old review backlog) and the visual flow would under-pair rooms. The engine never
+    decides on partial tag data: it `_trigger_clip_tagging`s the gaps and waits. The **trigger half** of
+    the same invariant: `scraper.db.mark_properties_dedup_dirty_for_images` (called by `clip_tag.yml`
+    after each tag batch) enqueues a property into `dedup_dirty_properties` ONLY when the just-tagged
+    listing is now FULLY tagged (`NOT EXISTS` a pending image) — NOT on a partial batch (the old bug that
+    shoved a 1-of-N-tagged listing into the `--dirty` drain). So the hourly `--dirty` drain re-decides a
+    pair only once BOTH sides are complete → a real two-sided floor-plan compare merges on MATCHING
+    plans (the correct, transparent path). This SUPERSEDES the old `dedup_clip_only` flag (which gated
+    the same defer behind a setting + only the no-Haiku-fallback case); the readiness gate is now always
+    on, so every pair reaching the visual stage is fully CLIP-tagged and the Haiku fallback is never
+    needed. `clip_deferred` counts deferrals per run.
     **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
     render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
     `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,

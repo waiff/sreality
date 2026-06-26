@@ -534,21 +534,20 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
     if _unit_markers_contradict(a.description, b.description):
         return PairDecision("reject", None, "unit_marker_contradiction")
 
-    # Rule B: exact address (street + house number + disposition + floor), with
-    # the 5% area guard. house_number must be present + equal on both, floor
-    # present + equal on both, disposition exactly equal (not just loose).
+    # Rule B (exact address) is RETIRED (2026-06): exact street+house_number+disposition+floor
+    # was the ONLY auto-merge path that produced false merges (6.7% later unmerged — two
+    # different units at the same address+floor — vs 0% for pHash + visual). Exact address is
+    # not unit-conclusive, so it is now just a (strong) rule-C CANDIDATE: the pair flows
+    # through the pHash fast-path → forensic visual → floor-plan gate (the 0%-reversal paths)
+    # like any street+disposition pair. The `address_exact` reason is kept for provenance.
     exact_address = (
         a.house_number is not None and b.house_number is not None
         and a.house_number.strip().lower() == b.house_number.strip().lower()
         and a.floor is not None and b.floor is not None and a.floor == b.floor
         and a.disposition == b.disposition
     )
-    if exact_address:
-        if area_diff is not None and area_diff > profile.address_area_guard_pct:
-            # Same address+floor+disposition but materially different area: most
-            # likely two distinct units — let vision settle it.
-            return PairDecision("candidate", "area_guard")
-        return PairDecision("auto_merge", "address_exact")
+    if exact_address and not (area_diff is not None and area_diff > profile.address_area_guard_pct):
+        return PairDecision("candidate", "address_exact")
 
     # Rule C: shares street + disposition, no contradiction — a visual candidate.
     return PairDecision("candidate", None)

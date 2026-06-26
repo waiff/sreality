@@ -6,6 +6,23 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup — fully-tagged-before-decide invariant + rule B retired
+
+Cross-portal duplicates (near-identical photos) sat unmerged in the `/dedup` queue as false
+`floor_plan_review` "one-sided" cases (77% of the backlog). Root cause: the engine decided pairs
+before their images finished CLIP-tagging, so a still-pending floor plan looked absent.
+
+- **Trigger fix** (`scraper/db.py mark_properties_dedup_dirty_for_images`): mark a property
+  dedup-ready ONLY when the just-tagged listing is FULLY tagged (`NOT EXISTS` a pending stored
+  image) — not after each partial batch (the bug).
+- **Readiness gate** (`scripts/dedup_engine.py resolve_pair._clip_incomplete`): DEFAULT defer (when
+  CLIP is the tagger) of any pair with a not-fully-tagged listing — up front, before pHash/visual —
+  so the engine never decides on partial tag data. The `--dirty` drain re-decides once both sides are
+  complete → a real two-sided floor-plan compare merges on MATCHING plans. Supersedes `dedup_clip_only`.
+- **Rule B retired** (`toolkit/dedup_engine.classify_pair`): exact-address auto-merge removed — it was
+  the only path with false merges (6.7% unmerged vs 0% for pHash/visual). Exact address is now a
+  rule-C candidate flowing through pHash → visual (the `address_exact` reason kept for provenance).
+
 ### 2026-06: Dedup decision feedback + full auditability (`/dedup`)
 
 The operator can now FLAG any dedup decision as incorrect and audit exactly why the engine
