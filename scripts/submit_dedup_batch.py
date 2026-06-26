@@ -1,11 +1,11 @@
 """Submit dedup VISION work to the Anthropic Message Batches API (50% off).
 
 PRE-WARMS the dedup engine's vision caches. Runs the engine's FREE funnel
-(rules A/B/C + the pHash fast-path + the cross-source gate — reusing the very
-same pure rules and SQL helpers the synchronous engine uses) to find the
-cross-source pairs that would reach the paid visual stage, then enqueues their
-classify / compare / site_plan requests as one or more size-bounded batches into
-dedup_batches / dedup_batch_requests.
+(rules A/B/C + the pHash fast-path — reusing the very same pure rules and SQL
+helpers the synchronous engine uses) to find the pairs that would reach the paid
+visual stage (Wave 3 removed the cross-source gate, so same-source pairs warm too),
+then enqueues their classify / compare / site_plan requests as one or more
+size-bounded batches into dedup_batches / dedup_batch_requests.
 
 It NEVER merges and NEVER calls the LLM synchronously: a request is enqueued
 only when its result isn't already cached and isn't already in flight. The daily
@@ -49,6 +49,7 @@ from scripts.dedup_engine import (
     _both_have_site_plan,
     _floor_plan_image_ids,
     _group_by_street,
+    _high_render_image_ids,
     _load_eligible,
     _phash_distinctive_match,
     _phash_identical_pairs,
@@ -59,6 +60,7 @@ from toolkit.dedup_engine import (
     classify_pair,
     decide_phash_fastpath,
     phash_excluded_tags_for,
+    phash_render_exclude_for,
     rooms_in_priority,
 )
 from toolkit.image_classification import (
@@ -215,6 +217,10 @@ def collect(
     compare_model = llm_client.resolve_model(_COMPARE_MODEL_KEY)
     site_plan_model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
     floor_plan_model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
+    # Same operator-reordered tag priorities the engine warms against — so this lane warms
+    # the SAME priority-ordered room prefix the replay will stop at (recall-safe superset).
+    from toolkit.dedup_priorities import load_tag_priority_overrides
+    tag_overrides = load_tag_priority_overrides(conn)
 
     keys = _load_eligible(conn)
     groups = _group_by_street(keys)
@@ -251,35 +257,37 @@ def collect(
                     continue
                 seen_property_pairs.add(ppair)
 
-                # rule B exact address — replay merges it for free, no LLM.
-                if decision.action == "auto_merge":
-                    continue
-
-                # Warm the floor-plan verdict for any both-floor-plan pair (migration
-                # 234): the engine's floor-plan gate runs on a pHash OR a visual merge
-                # (incl. same-source), so warm it BEFORE the pHash skip + cross-source
-                # gate, or the cache-only daily run would queue every floor-plan pair.
+                # Warm the floor-plan verdict for any both-floor-plan pair (migration 234):
+                # the engine's floor-plan gate runs on a pHash, a visual, OR a rule-B
+                # exact-address merge (Wave 3), so warm it FIRST — before any skip — or the
+                # cache-only run would queue/defer every floor-plan pair.
                 _warm_floor_plan(
                     conn, llm_client, submitter, a, b, floor_plan_model, funnel)
 
-                # pHash fast-path — replay merges for free (unless both site_plan,
-                # which defers to the development guard below). Byt excludes known-
-                # exterior images (mirrors run_engine), so the warm-up funnel and the
-                # daily engine agree on which byt pairs the fast-path resolves.
+                # rule B exact address — the engine merges it via the floor-plan gate (now
+                # warmed above), no all-rooms compare needed.
+                if decision.action == "auto_merge":
+                    continue
+
+                # pHash fast-path — replay merges for free (unless both site_plan, which
+                # defers to the development guard below). Byt excludes known-exterior images
+                # (mirrors run_engine), so the warm-up funnel and the daily engine agree on
+                # which byt pairs the fast-path resolves.
+                _rmin = phash_render_exclude_for(a.category_main)
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
-                    phash_excluded_tags_for(a.category_main))
+                    phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
                 distinctive = (
                     phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
+                    and _phash_distinctive_match(
+                        conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
                 if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
                     conn, a.sreality_id, b.sreality_id
                 ):
                     continue
 
-                # cross-source gate — same-source pairs never reach the paid stage.
-                if a.source == b.source:
-                    continue
+                # Wave 3 removed the cross-source gate: same-source non-exact pairs now reach
+                # the visual stage in the engine, so the warmer must warm them too.
 
                 pairs_left -= 1
                 funnel["visual_candidates"] += 1
@@ -288,6 +296,7 @@ def collect(
                     classify_model=classify_model, compare_model=compare_model,
                     site_plan_model=site_plan_model, n_images=n_images,
                     max_room_attempts=max_room_attempts, funnel=funnel,
+                    tag_overrides=tag_overrides,
                 )
 
     return {**funnel, **submitter.stats}
@@ -335,6 +344,7 @@ def _collect_visual(
     n_images: int,
     max_room_attempts: int,
     funnel: dict[str, int],
+    tag_overrides: dict[str, list[str]] | None = None,
 ) -> None:
     """Mirror of run_engine._resolve_visual, but it ENQUEUES batch requests for
     the LLM calls the synchronous resolver would make, instead of making them."""
@@ -382,11 +392,25 @@ def _collect_visual(
         if verdict == "different_unit":
             return
 
+    # Render exclusion (migration 239): MUST mirror _resolve_visual — drop shared
+    # development RENDER images from the room compare for byt. The visual-verdict cache is
+    # keyed (a, b, room, model) and ignores the image_ids on a hit, so if the warm-up
+    # compared the render-INCLUDED set the engine would replay that render-inflated High;
+    # both lanes have to compare the SAME filtered set. Empty rooms drop (like the engine).
+    rmin = phash_render_exclude_for(a.category_main)
+    if rmin is not None:
+        render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
+        if render_ids:
+            rooms_a = {r: f for r, ids in rooms_a.items()
+                       if (f := [i for i in ids if i not in render_ids])}
+            rooms_b = {r: f for r, ids in rooms_b.items()
+                       if (f := [i for i in ids if i not in render_ids])}
+
     # Forensic compare: common rooms in priority order, capped — the replay stops
     # at the first High, so warming this priority-ordered prefix is the recall-safe
     # superset (whatever room replay stops at is among these and is warm).
     common = set(rooms_a) & set(rooms_b)
-    for room in rooms_in_priority(common, a.category_main)[:max_room_attempts]:
+    for room in rooms_in_priority(common, a.category_main, tag_overrides)[:max_room_attempts]:
         if s.exhausted:
             break
         if cached_visual_verdict(
@@ -480,6 +504,10 @@ def main() -> int:
     )
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+        from toolkit.dedup_settings import read_setting
+        if not read_setting(conn, "dedup_batch_warmer_enabled"):
+            LOG.info("WARMER disabled (dedup_batch_warmer_enabled=false); nothing to submit")
+            return 0
         llm_client = LLMClient(conn, providers={"anthropic": provider})
         submitter = _Submitter(conn, provider, max_requests=args.max_requests, dry_run=args.dry_run)
         stats = collect(

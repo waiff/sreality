@@ -182,8 +182,10 @@ export default function BrowseExperience({
     },
   });
   /* Link selected properties as the SAME physical building without collapsing
-   * them — the cross-category case (a `dum` + a `komercni` at one address) a
-   * merge correctly refuses. Errors surface via the global MutationCache. */
+   * them — the same-building-but-distinct-unit case (e.g. a `byt` + a `komercni`,
+   * or a `dum` + a `pozemek`, at one address) a merge correctly refuses. (dum <->
+   * komercni IS now a single mergeable unit, so it is no longer an asset-link-only
+   * case.) Errors surface via the global MutationCache. */
   const linkMut = useMutation({
     mutationFn: (propertyIds: number[]) => linkAssetProperties(propertyIds),
     onSuccess: (res) => {

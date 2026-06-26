@@ -28,7 +28,7 @@ export default function OriginPropertyPanel({
   // tag/confidence are null → ImageCarousel shows no badge here (same posture as
   // the map-hover previews).
   const carouselImages = useMemo(
-    () => images.map((im) => ({ url: imageSrc(im), tag: null, confidence: null })),
+    () => images.map((im) => ({ url: imageSrc(im), tag: null, confidence: null, renderScore: null })),
     [images],
   );
   const amenities = useMemo(() => buildAmenities(listing), [listing]);

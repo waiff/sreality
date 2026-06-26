@@ -295,6 +295,44 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
   },
   {
+    "filename": "backfill_render_score.yml",
+    "name": "Backfill image render_score (one-shot, from stored embeddings)",
+    "description": "One-shot corrective for migration 239: the clip_tag backfill skips already-tagged images, so images tagged before the render axis shipped have render_score NULL (the listing-detail render badge is hidden and the byt render exclusion is inert on them). This re-scores the render-vs-photo axis from each image's STORED CLIP embedding — no R2 download, no image re-inference — so it is fast (vector dot products). Horizontally sharded into 4 jobs (image_id %% 4). Resumable + idempotent (a scored row drops out of the render_score-IS-NULL partial index, migration 240). Dispatch-only. Secret: SUPABASE_DB_URL (no R2 needed). NOT a portal ingest (portal: null).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "Per-shard wall-clock budget",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Per-shard cap (0 = until time budget)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_render_score.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_render_score.yml"
+  },
+  {
     "filename": "bazos_detail_drain.yml",
     "name": "Scraping: Bazos detail drain",
     "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
@@ -487,6 +525,49 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/build-extension.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
+  },
+  {
+    "filename": "clip_retag.yml",
+    "name": "Dedup — CLIP re-tag from stored embeddings (sharded)",
+    "description": "Re-runs the CLIP zero-shot tagging over ALREADY-tagged images from their STORED embeddings (image_clip_embeddings) — NO R2 download, NO image re-inference, just the taxonomy's text anchors dotted with each stored vector. How a TAXONOMY change (new logical tags, sharpened anchors) reaches the back catalogue cheaply; new / not-yet-tagged images go through clip_tag.yml, which loads the same live taxonomy.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 * * * *",
+        "human": "Every hour at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "Per-shard wall-clock budget",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Per-shard cap (0 = until time budget)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "clip-retag",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/clip_retag.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/clip_retag.yml"
   },
   {
     "filename": "clip_tag.yml",
@@ -998,6 +1079,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "0 */6 * * *",
         "human": "Every 6 hours"
+      },
+      {
+        "cron": "30 */2 * * *",
+        "human": "Every 2 hours at :30"
+      },
+      {
+        "cron": "45 * * * *",
+        "human": "Every hour at :45"
       }
     ],
     "onPush": false,
@@ -1071,7 +1160,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "free",
-        "description": "FREE mode ($0) — pHash + rule merges + reconcile only, no vision, no placeholders",
+        "description": "FREE mode — pHash + rule merges + reconcile + bounded inline floor-plan gate only",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -1079,6 +1168,36 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "candidates",
+        "description": "Candidate-priority drain — re-decide ONLY the queued /dedup candidates (O(queue), not a full scan)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "dirty",
+        "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "floor_plan_budget",
+        "description": "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
@@ -1234,6 +1353,56 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/discover_condition_markers.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/discover_condition_markers.yml"
+  },
+  {
+    "filename": "embedding_ab.yml",
+    "name": "Dedup — embedding A/B (DINOv2 vs CLIP)",
+    "description": "One-shot OFFLINE analysis (read-only, no merges/writes): does a candidate instance-biased embedding (DINOv2) separate same-property from different-unit-same-development where CLIP's semantic embedding collapsed (negatives cosine >= positives)? Reports max same-room cosine percentiles by is_same for DINOv2 vs the stored CLIP, on the labelled same-disposition set (floor-plan-confirmed different units as negatives). The gate before any re-embed commitment. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_* (downloads image bytes). NOT a portal ingest.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "model",
+        "description": "HF image model id (DINOv2 CLS embedding)",
+        "required": false,
+        "type": "string",
+        "default": "facebook/dinov2-small",
+        "options": null
+      },
+      {
+        "name": "npos",
+        "description": "Positive (same-property) pairs sampled",
+        "required": false,
+        "type": "string",
+        "default": "400",
+        "options": null
+      },
+      {
+        "name": "nneg",
+        "description": "Negative (different-unit) pairs sampled",
+        "required": false,
+        "type": "string",
+        "default": "400",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/embedding_ab.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/embedding_ab.yml"
   },
   {
     "filename": "enrich_bazos.yml",
@@ -3009,6 +3178,56 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/test.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/test.yml"
+  },
+  {
+    "filename": "validate_render_detection.yml",
+    "name": "Validate CLIP render detection (one-shot, validate-first)",
+    "description": "The operator's #3 VALIDATE-FIRST gate: does CLIP zero-shot confidently flag a 3D render / visualization vs a real photo? This does NOT touch the engine — it embeds the given listings' images fresh from R2 with the tagger's CLIP model and reports render_score per image, so we can confirm KNOWN renders (the \"Rezidence Na Bradle\" development units) score high while KNOWN amateur photos (a control set) score low BEFORE building/wiring anything. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_*.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "sreality_ids",
+        "description": "Target listing ids (suspected renders), comma-separated",
+        "required": true,
+        "type": "string",
+        "default": "1461609804,476259148,877790028,1796105548,-36083,-36037,-35415,-39488",
+        "options": null
+      },
+      {
+        "name": "control_sreality_ids",
+        "description": "Control listing ids (known amateur photos), comma-separated",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "threshold",
+        "description": "render_score >= this is flagged RENDER",
+        "required": false,
+        "type": "string",
+        "default": "0.5",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 25,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/validate_render_detection.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/validate_render_detection.yml"
   },
   {
     "filename": "validate_vision_models.yml",

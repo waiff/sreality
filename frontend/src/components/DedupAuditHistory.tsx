@@ -7,6 +7,7 @@ import { FILTER_REGISTRY } from '@/lib/filterRegistry.generated';
 import { fmtRelative } from '@/lib/format';
 import { listingPath } from '@/lib/listingUrl';
 import DedupFactors from '@/components/DedupFactors';
+import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 
 /* The unified decision ledger — every terminal dedup decision (merged / dismissed),
  * engine AND operator, with the evidence + inline undo. Replaces the old separate
@@ -99,6 +100,7 @@ export default function DedupAuditHistory({
   const [outcome, setOutcome] = useState(scopeProperty != null ? 'merged' : '');
   const [type, setType] = useState('');
   const [source, setSource] = useState('');
+  const [onlyFlagged, setOnlyFlagged] = useState(false);
   const [factor, setFactor] = useState('');
   const [verdict, setVerdict] = useState('');
   const [maxText, setMaxText] = useState(''); // raw threshold buffer (un-committed)
@@ -126,13 +128,15 @@ export default function DedupAuditHistory({
   const numericFactor = factor === 'phash' || factor === 'cosine';
   const q = useQuery({
     queryKey: [
-      'dedup', 'audit', outcome, type, source, factor, factorMax, verdict, scopeProperty ?? null,
+      'dedup', 'audit', outcome, type, source, onlyFlagged, factor, factorMax, verdict,
+      scopeProperty ?? null,
     ],
     queryFn: () =>
       getDedupAudit({
         outcome: outcome || undefined,
         category_main: type || undefined,
         source: source || undefined,
+        flagged: onlyFlagged || undefined,
         factor: factor || undefined,
         factor_max: numericFactor && factorMax != null ? factorMax : undefined,
         verdict: factor === 'visual' && verdict ? verdict : undefined,
@@ -177,6 +181,21 @@ export default function DedupAuditHistory({
               onClick={() => setSource(s.id)}
             />
           ))}
+          <span className="mx-1 h-4 w-px bg-[var(--color-rule)]" />
+          <button
+            type="button"
+            onClick={() => setOnlyFlagged((v) => !v)}
+            title="Jen rozhodnutí, která jsi označil/a jako nesprávná"
+            className={[
+              'inline-flex items-center gap-1 px-2.5 py-1 rounded-[var(--radius-sm)] border text-[0.78rem] transition-colors',
+              onlyFlagged
+                ? 'border-[var(--color-brick)] bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
+                : 'border-[var(--color-rule)] text-[var(--color-ink-3)] hover:text-[var(--color-brick)] hover:border-[var(--color-brick)]',
+            ].join(' ')}
+          >
+            <span aria-hidden>⚑</span>
+            Jen nesprávná
+          </button>
           {q.data && (
             <span className="ml-1 text-xs text-[var(--color-ink-4)] tabular-nums">
               {q.data.total} celkem
@@ -267,12 +286,8 @@ export default function DedupAuditHistory({
         </p>
       ) : (
         <div className="border border-[var(--color-rule)] rounded-[var(--radius-sm)] divide-y divide-[var(--color-rule)] bg-[var(--color-paper)]">
-          {rows.map((r, i) => (
-            <AuditRow
-              key={`${r.merge_group_id ?? ''}-${i}`}
-              r={r}
-              batchPhotos={batchPhotos}
-            />
+          {rows.map((r) => (
+            <AuditRow key={r.audit_id} r={r} batchPhotos={batchPhotos} />
           ))}
         </div>
       )}
@@ -358,9 +373,17 @@ function AuditRow({
       </div>
       <DedupFactors
         factors={r.detail}
+        breakdown={r.audit_breakdown}
         leftSrealityId={r.left_sreality_id}
         rightSrealityId={r.right_sreality_id}
+        categoryMain={r.category_main}
         batchPhotos={batchPhotos}
+      />
+      <DecisionFeedbackControl
+        leftPropertyId={r.left_property_id}
+        rightPropertyId={r.right_property_id}
+        categoryMain={r.category_main}
+        feedback={r.feedback}
       />
     </div>
   );

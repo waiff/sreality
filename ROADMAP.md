@@ -30,6 +30,29 @@ other 7 gap fields (`floor` stays NULL-guarded → the deterministic value alway
   convention tolerance to exact equality once sreality's ground=1 floors are converted +
   backfilled (its own PR — touches merge behaviour). Sticky-miss cache fix is the next PR.
 
+### 2026-06: Dedup decision feedback + full auditability (`/dedup`)
+
+The operator can now FLAG any dedup decision as incorrect and audit exactly why the engine
+decided it — a labelled corpus for improving the flow, with every threshold and picture
+traceable.
+
+- **migration 248** — `dedup_decision_feedback`, **property-pair-keyed** (canonical
+  `left_property_id < right_property_id`, not an audit-row id and not the drifting repr-listing
+  pair) so one flag spans the Decision-history feed AND the Needs-review queue and persists across
+  the pair's lifecycle without orphaning on a recompute.
+  Carries `is_incorrect` + `expected_outcome` (should_merge / should_dismiss / unsure) + a free
+  note. Writes via bearer-gated `POST/DELETE /dedup/feedback`; the feed gains a `flagged`-only
+  filter. Shared `<DecisionFeedbackControl>` on both surfaces.
+- **`toolkit/dedup_audit.build_audit_breakdown(detail)`** — a pure decision→rungs mapping
+  (pHash / cosine / forensic verdict / floor-plan / address, each measured-vs-threshold,
+  met/unmet/info), computed server-side from the stored factor `detail` so it renders identically
+  on `list_pair_audit` + `list_candidates` and on historical rows. Each rung deep-links to the exact
+  Settings knob (`settingAnchorId` → `/settings#setting-<key>`; the Settings rows carry stable
+  anchors + a hash-scroll/force-open).
+- **`decision_evidence`** (`GET /dedup/decision-evidence`) — the SPECIFIC pictures, resolved at
+  READ time: the pHash near-identical pairs (recomputed from stored phashes with the engine's
+  category exclusions), the compared plans, or the deciding room. No decision-time `detail` bloat.
+
 ### 2026-06: Property identity — category-aware dedup (P0 foundation, landed dark)
 
 The dedup engine keys on `street + disposition`, but `disposition` is an apartment-shaped

@@ -27,6 +27,7 @@ from toolkit.pipeline_identity import (
     reconcile_pipeline_on_merge,
     reconcile_pipeline_on_unmerge,
 )
+from toolkit.room_taxonomy import category_main_compatible
 
 MergeSource = Literal["auto", "operator"]
 
@@ -79,18 +80,21 @@ def merge_properties(
                 raise MergeError(f"retired {retired_id} is not active")
             # Final category guard at THE chokepoint every merge path funnels
             # through (engine, cluster, operator one-click, Browse merge-mode).
-            # A sale and a rental — or a flat and a house — are never the same
-            # property; refuse even an operator-initiated merge. NULL = unknown,
-            # not a conflict. The engine's classify_pair also gates earlier; this
-            # backstops the manual merge surface (api.property_dedup) that calls
-            # merge_properties directly without classify_pair.
+            # A sale and a rental are never the same property, and a flat and a
+            # house aren't either — but dum <-> komercni IS allowed (the same
+            # building listed as a house on one portal, commercial on another).
+            # `category_main_compatible` encodes that one sanctioned cross-type;
+            # refuse everything else even on an operator-initiated merge. NULL =
+            # unknown, not a conflict. The engine's classify_pair also gates
+            # earlier; this backstops the manual merge surface (api.property_dedup)
+            # that calls merge_properties directly without classify_pair.
             s_ct, s_cm = rows[survivor_id][2], rows[survivor_id][3]
             r_ct, r_cm = rows[retired_id][2], rows[retired_id][3]
             if s_ct is not None and r_ct is not None and s_ct != r_ct:
                 raise MergeError(
                     f"category_type mismatch ({s_ct} vs {r_ct}); refusing to merge"
                 )
-            if s_cm is not None and r_cm is not None and s_cm != r_cm:
+            if not category_main_compatible(s_cm, r_cm):
                 raise MergeError(
                     f"category_main mismatch ({s_cm} vs {r_cm}); refusing to merge"
                 )

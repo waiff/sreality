@@ -16,23 +16,39 @@ import pytest
 from toolkit.dedup_engine import (
     ADDRESS_AREA_GUARD_PCT,
     CANDIDATE_AREA_MAX_PCT,
+    RENDER_SCORE_EXCLUDE_MIN,
     CosineBands,
     ListingKey,
     MatchProfile,
+    category_main_compatible,
     classify_geo_pair,
     classify_pair,
     decide_phash_fastpath,
     decide_visual_dismiss,
     disposition_compatible,
+    distinctive_rooms_for,
+    geo_category_bucket,
     geo_cell_key,
     normalize_street,
     phash_excluded_tags_for,
+    phash_render_exclude_for,
     profile_for,
     room_priority_for,
     rooms_in_priority,
     route_by_cosine,
     street_group_keys,
     verdict_is_merge,
+)
+from toolkit.dedup_engine import (
+    TAG_PRIORITY_FAMILIES,
+    default_priority_for_family,
+    normalize_priority,
+)
+from toolkit.room_taxonomy import (
+    DISTINCTIVE_ROOMS,
+    HOUSE_PRIORITY,
+    INTERIOR_PRIORITY,
+    LAND_PRIORITY,
 )
 
 
@@ -335,6 +351,38 @@ def test_category_main_contradiction_byt_vs_dum() -> None:
     ).detail == "category_main_contradiction"
 
 
+def test_cross_type_dum_komercni_is_not_a_contradiction() -> None:
+    # Operator policy: the ONE sanctioned cross-type. A building listed as a house on
+    # one portal and commercial on another is the same real-world property — it must
+    # NOT reject on category_main, it falls through to merge like a same-category pair.
+    d = classify_pair(
+        _key(1, category_main="dum", disp=None),
+        _key(2, category_main="komercni", disp=None),
+    )
+    assert d.action == "auto_merge"
+    assert d.detail != "category_main_contradiction"
+    # symmetric — order must not matter
+    assert classify_pair(
+        _key(1, category_main="komercni", disp=None),
+        _key(2, category_main="dum", disp=None),
+    ).action == "auto_merge"
+
+
+def test_category_main_compatible_helper() -> None:
+    # Equal, or either side unknown (NULL), is always compatible.
+    assert category_main_compatible("byt", "byt") is True
+    assert category_main_compatible(None, "dum") is True
+    assert category_main_compatible("komercni", None) is True
+    # The one sanctioned cross-type, both directions.
+    assert category_main_compatible("dum", "komercni") is True
+    assert category_main_compatible("komercni", "dum") is True
+    # Every other mismatch stays a contradiction.
+    assert category_main_compatible("byt", "dum") is False
+    assert category_main_compatible("byt", "komercni") is False
+    assert category_main_compatible("dum", "pozemek") is False
+    assert category_main_compatible("pozemek", "komercni") is False
+
+
 def test_category_null_does_not_contradict() -> None:
     # A missing category is unknown, not a conflict — falls through to merge.
     assert classify_pair(
@@ -421,6 +469,75 @@ def test_match_profile_is_a_dataclass_type() -> None:
     assert isinstance(profile_for("byt"), MatchProfile)
 
 
+# --- per-family image comparison priority + distinctive override ------------
+
+def test_room_priority_for_byt_leads_with_interior() -> None:
+    # Apartments compare interior rooms (wet rooms first) — the legacy order, unchanged.
+    pr = room_priority_for("byt")
+    assert pr == INTERIOR_PRIORITY
+    assert pr[0] == "kitchen"
+
+
+def test_room_priority_for_house_and_commercial_lead_with_facade() -> None:
+    # A house/commercial building's identity is its FACADE, so it leads stop-at-first-High.
+    for fam in ("dum", "komercni", "ostatni"):
+        pr = room_priority_for(fam)
+        assert pr == HOUSE_PRIORITY, fam
+        assert pr[0] == "exterior_facade", fam
+
+
+def test_room_priority_for_land_leads_with_site_plan() -> None:
+    # A plot's identity is its SITE PLAN (the development guard reads it).
+    pr = room_priority_for("pozemek")
+    assert pr == LAND_PRIORITY
+    assert pr[0] == "site_plan"
+
+
+def test_room_priority_for_null_or_unknown_is_byt_order() -> None:
+    # Unknown/NULL category behaves as the legacy byt engine.
+    assert room_priority_for(None) == INTERIOR_PRIORITY
+    assert room_priority_for("garaz") == INTERIOR_PRIORITY
+
+
+def test_normalize_priority_keeps_order_drops_unknown_completes_from_default() -> None:
+    default = ("a", "b", "c", "d")
+    # operator order honoured; unknown 'z' dropped; duplicate ignored; missing 'd' appended.
+    assert normalize_priority(["c", "a", "z", "a"], default) == ("c", "a", "b", "d")
+    # empty / all-unknown → exactly the default (never drops a room).
+    assert normalize_priority([], default) == default
+    assert normalize_priority(["z", "y"], default) == default
+
+
+def test_room_priority_for_honours_overrides_per_family() -> None:
+    # A house override that leads with kitchen instead of facade, completed from HOUSE default.
+    ov = {"dum": ["kitchen", "exterior_facade"]}
+    pr = room_priority_for("dum", ov)
+    assert pr[0] == "kitchen" and pr[1] == "exterior_facade"
+    assert set(pr) == set(HOUSE_PRIORITY)  # nothing dropped
+    # a family without an override is untouched.
+    assert room_priority_for("byt", ov) == INTERIOR_PRIORITY
+    # an empty override list falls back to the coded default.
+    assert room_priority_for("dum", {"dum": []}) == HOUSE_PRIORITY
+
+
+def test_default_priority_for_family_matches_room_priority_for() -> None:
+    assert default_priority_for_family("byt") == INTERIOR_PRIORITY
+    assert default_priority_for_family("pozemek") == LAND_PRIORITY
+    for fam in ("dum", "komercni", "ostatni"):
+        assert default_priority_for_family(fam) == HOUSE_PRIORITY
+    assert set(TAG_PRIORITY_FAMILIES) == {"byt", "dum", "komercni", "ostatni", "pozemek"}
+
+
+def test_distinctive_rooms_for_is_byt_only() -> None:
+    # The single-pHash-match override (count-of-1) is a byt-only signal: a wet room is
+    # unit-specific, but a house's facade / a plot's site plan is shared across a
+    # development, so non-apartments get an EMPTY set (require the >=2-match count).
+    assert distinctive_rooms_for("byt") == DISTINCTIVE_ROOMS
+    assert distinctive_rooms_for(None) == DISTINCTIVE_ROOMS
+    for fam in ("dum", "pozemek", "komercni", "ostatni"):
+        assert distinctive_rooms_for(fam) == frozenset(), fam
+
+
 # --- geo path: single-dwelling families -------------------------------------
 
 def _gk(
@@ -438,12 +555,22 @@ def _gk(
 
 
 def test_geo_cell_key_format_and_scoping() -> None:
-    assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej") == "geo:5001:50.1006:14.5374:dum:prodej"
-    # different obec / category / offering → different cell (no cross-bucket pairing)
+    # dum and komercni collapse to one category bucket so the cross-type co-locates.
+    assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej") == "geo:5001:50.1006:14.5374:dum|komercni:prodej"
     base = geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej")
+    # different obec / offering → different cell (no cross-bucket pairing)
     assert geo_cell_key(5002, 50.10064, 14.53742, "dum", "prodej") != base
-    assert geo_cell_key(5001, 50.10064, 14.53742, "komercni", "prodej") != base
     assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "pronajem") != base
+    # dum and komercni SHARE a cell (the sanctioned cross-type); pozemek stays separate.
+    assert geo_cell_key(5001, 50.10064, 14.53742, "komercni", "prodej") == base
+    assert geo_cell_key(5001, 50.10064, 14.53742, "pozemek", "prodej") != base
+
+
+def test_geo_category_bucket_collapses_dum_komercni() -> None:
+    assert geo_category_bucket("dum") == geo_category_bucket("komercni") == "dum|komercni"
+    assert geo_category_bucket("pozemek") == "pozemek"
+    assert geo_category_bucket("byt") == "byt"
+    assert geo_category_bucket(None) is None
 
 
 def test_geo_cell_key_none_when_coord_or_obec_missing() -> None:
@@ -479,6 +606,47 @@ def test_classify_geo_weak_when_no_price_or_houseno_match() -> None:
     assert d.action == "candidate" and d.reason == "geo_weak"
 
 
+def test_classify_geo_area_override_widens_the_candidate_gate() -> None:
+    # A 15% area gap rejects under the profile's unified 10% but is a CANDIDATE when the
+    # operator widens the geo tolerance to 20% (recall into the visual flow, not a merge).
+    a, b = _gk(1, 101, area=100.0), _gk(2, 102, area=115.0)
+    assert classify_geo_pair(a, b, profile_for("dum")).detail == "area_contradiction"
+    d = classify_geo_pair(a, b, profile_for("dum"), max_area_pct=0.20)
+    assert d.action != "reject"
+
+
+def test_classify_geo_cross_type_dum_komercni_not_a_contradiction() -> None:
+    # The geo path honours the same one cross-type as the street path: a dum + a komercni
+    # at the same coordinate is the same building, NOT a category contradiction. But a
+    # cross-type pair never geo-AUTO-merges (komercni isn't geo-auto-merge-validated) — it
+    # QUEUES, symmetrically, regardless of which side arrived first.
+    d = classify_geo_pair(
+        _gk(1, 101, cat="dum", source="sreality"),
+        _gk(2, 102, cat="komercni", source="idnes"),
+        profile_for("dum"),
+    )
+    assert d.detail != "category_main_contradiction"
+    assert d.action == "candidate" and d.reason == "geo_strong"
+
+
+def test_classify_geo_cross_type_auto_merge_gate_is_order_independent() -> None:
+    # The strong signal is identical both ways; the both-families gate must decide the SAME
+    # (queue) whether dum or komercni is the first listing — no ordering-dependent auto-merge.
+    forward = classify_geo_pair(
+        _gk(1, 101, cat="dum"), _gk(2, 102, cat="komercni"), profile_for("dum"))
+    reverse = classify_geo_pair(
+        _gk(1, 101, cat="komercni"), _gk(2, 102, cat="dum"), profile_for("komercni"))
+    assert forward.action == reverse.action == "candidate"
+    assert forward.reason == reverse.reason == "geo_strong"
+
+
+def test_classify_geo_same_type_dum_still_auto_merges() -> None:
+    # Regression guard: the both-families gate must NOT change same-type behavior — a
+    # dum+dum strong pair still auto-merges exactly as before.
+    d = classify_geo_pair(_gk(1, 101), _gk(2, 102), profile_for("dum"))
+    assert d.action == "auto_merge" and d.reason == "geo_exact"
+
+
 def test_classify_geo_area_contradiction_rejects() -> None:
     d = classify_geo_pair(_gk(1, 101, area=100.0), _gk(2, 102, area=150.0), profile_for("dum"))
     assert d.action == "reject" and d.detail == "area_contradiction"
@@ -508,60 +676,85 @@ def test_classify_geo_unit_marker_contradiction_rejects() -> None:
 
 
 def test_classify_geo_category_contradiction_rejects() -> None:
-    d = classify_geo_pair(_gk(1, 101, cat="dum"), _gk(2, 102, cat="komercni"), profile_for("dum"))
+    # A genuine cross-category pair still rejects (byt vs dum). dum<->komercni is the ONE
+    # sanctioned cross-type and is covered separately below.
+    d = classify_geo_pair(_gk(1, 101, cat="byt"), _gk(2, 102, cat="dum"), profile_for("dum"))
     assert d.action == "reject" and d.detail == "category_main_contradiction"
 
 
-def test_run_geo_candidates_queues_only_in_p1(monkeypatch: Any) -> None:
-    # A strong house pair would auto-merge by rule, but P1 keeps it queue-only.
+def test_make_geo_classify_maps_auto_merge_to_candidate() -> None:
+    # The unified geo path NEVER merges on the deterministic geo signal — _make_geo_classify
+    # maps classify_geo_pair's auto_merge to candidate, so the free-first visual flow is the
+    # sole merge gate. Rejects pass through; the operator's area tolerance is applied.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [
+    fn = eng._make_geo_classify(0.20)
+    # A strong same-type dum pair classify_geo_pair would auto_merge → mapped to candidate.
+    strong = fn(_gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"))
+    assert strong.action == "candidate" and strong.reason == "geo_exact"
+    # A genuine contradiction still rejects.
+    assert fn(_gk(1, 101, cat="byt"), _gk(2, 102, cat="dum")).action == "reject"
+    # The 0.20 tolerance accepts a 15% area gap the default 10% profile rejects.
+    assert fn(_gk(1, 101, area=100.0), _gk(2, 102, area=115.0)).action != "reject"
+
+
+def test_run_engine_geo_routes_through_resolve_pair_with_geo_tier(monkeypatch: Any) -> None:
+    # The unification: a geo run loads geo-eligible listings and drives them through the
+    # SAME resolve_pair brain — reaching the visual stage (cross-source), queuing with the
+    # 'geo' tier, and NEVER merging on the deterministic geo signal alone.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
         _gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"),
     ])
-    enq: list[tuple[Any, Any]] = []
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("geo signal must not merge")))
+    enq: list[dict[str, Any]] = []
     monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda conn, x, y, markers, **kw: enq.append((kw.get("tier"), markers["reason"])))
-    monkeypatch.setattr(eng, "_merge_pair",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("P1 must not merge")))
-    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=False)
-    assert stats["geo_candidates"] == 1
-    assert stats["geo_auto"] == 0
-    assert enq == [("geo_dum", "geo_exact")]
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats["pairs_considered"] == 1      # reached the visual stage
+    assert stats["queued"] == 1
+    assert enq and enq[0]["tier"] == "geo"     # queued under the geo tier, not street
 
 
-def test_run_geo_candidates_auto_merges_when_enabled(monkeypatch: Any) -> None:
+def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
+    # The geo path has no rule B, so unlike the street path it must NOT drop same-source
+    # pairs (a portal re-posting its own house) — they reach the visual stage.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [_gk(1, 101), _gk(2, 102)])
-    merges: list[str] = []
-    monkeypatch.setattr(eng, "_merge_pair",
-                        lambda conn, x, y, reason, markers: merges.append(reason) or True)
-    monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should merge")))
-    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=True)
-    assert stats["geo_auto"] == 1
-    assert merges == ["geo_exact"]
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality"), _gk(2, 102, source="sreality"),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats["skipped_same_source"] == 0
+    assert stats["pairs_considered"] == 1
 
 
-def test_run_geo_candidates_dry_run_writes_nothing(monkeypatch: Any) -> None:
+def test_enqueue_candidate_tier_column_from_markers() -> None:
+    # Regression: the tier COLUMN must reflect markers['tier'] (= ctx.tier), not the kwarg
+    # default — else a geo candidate lands as 'street_disposition' and vanishes from the
+    # geo queue even though its markers_matched jsonb says 'geo'.
     import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: [_gk(1, 101), _gk(2, 102)])
-    monkeypatch.setattr(eng, "_merge_pair",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not merge")))
-    monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not enqueue")))
-    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=True, dry_run=True)
-    assert stats["geo_auto"] == 1  # counted, but no merge call
+    conn = _FakeConn([])
+    eng._enqueue_candidate(conn, _gk(1, 101), _gk(2, 102), {"tier": "geo", "confidence": 0.6})
+    assert conn.enqueued and conn.enqueued[0][2] == "geo"   # params = (lo, hi, TIER, conf, jsonb)
+    # markers without a tier falls back to the kwarg default (the street rule-B path).
+    conn2 = _FakeConn([])
+    eng._enqueue_candidate(conn2, _gk(1, 101), _gk(2, 102), {"confidence": 0.9})
+    assert conn2.enqueued[0][2] == "street_disposition"
 
 
-def test_run_geo_candidates_skips_large_cell(monkeypatch: Any) -> None:
+def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
     members = [_gk(i, 100 + i) for i in range(1, eng.MAX_GEO_GROUP_SIZE + 3)]  # one oversized cell
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn: members)
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: members)
     monkeypatch.setattr(eng, "_enqueue_candidate",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("oversized cell must skip")))
-    stats = eng.run_geo_candidates(object())
-    assert stats["geo_skipped_large_cell"] == 1
-    assert stats["geo_pairs"] == 0
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=0, geo=True)
+    assert stats["pairs_considered"] == 0
 
 
 # --- rule D helpers ---------------------------------------------------------
@@ -618,6 +811,42 @@ def test_phash_excluded_tags_for_by_category() -> None:
     assert phash_excluded_tags_for(None) == excl  # NULL -> apartment
     assert phash_excluded_tags_for("dum") == ()
     assert phash_excluded_tags_for("pozemek") == ()
+
+
+def test_phash_render_exclude_for_by_category() -> None:
+    # byt excludes high render_score images from the pHash/cosine signal; other
+    # categories don't (a render of a house IS that house's identity here).
+    assert phash_render_exclude_for("byt") == RENDER_SCORE_EXCLUDE_MIN == 0.95
+    assert phash_render_exclude_for(None) == RENDER_SCORE_EXCLUDE_MIN  # NULL -> apartment
+    assert phash_render_exclude_for("dum") is None
+    assert phash_render_exclude_for("pozemek") is None
+    # the live app_settings value (dedup_render_exclude_min) overrides the default for byt
+    assert phash_render_exclude_for("byt", 0.85) == 0.85
+    assert phash_render_exclude_for("dum", 0.85) is None  # non-byt: still no exclusion
+
+
+def test_render_exclusion_predicate_builds_clause() -> None:
+    import scripts.dedup_engine as eng
+
+    # neither filter -> empty string, no params bound
+    p: dict = {}
+    assert eng._render_exclusion_predicate(p, "ia", (), None) == ""
+    assert p == {}
+    # tags only
+    p = {}
+    sql = eng._render_exclusion_predicate(p, "ia", ("exterior_facade",), None)
+    assert "ia.id" in sql and "logical_tag = ANY" in sql and "render_score" not in sql
+    assert p["excl"] == ["exterior_facade"]
+    # render only
+    p = {}
+    sql = eng._render_exclusion_predicate(p, "ib", (), 0.65)
+    assert "ib.id" in sql and "render_score >= " in sql and "logical_tag" not in sql
+    assert p["rmin"] == 0.65
+    # both -> OR'd into one NOT EXISTS
+    p = {}
+    sql = eng._render_exclusion_predicate(p, "ia", ("garden",), 0.7)
+    assert " OR " in sql and "logical_tag = ANY" in sql and "render_score >= " in sql
+    assert p["excl"] == ["garden"] and p["rmin"] == 0.7
 
 
 def test_verdict_gate_high_only() -> None:
@@ -737,30 +966,127 @@ def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
     assert stats["auto_phash"] == 0 and stats["auto_visual"] == 0
 
 
-def test_run_engine_skips_same_source_candidates(monkeypatch: Any) -> None:
-    # The cross-source gate: a same-source rule-C candidate (shares street+disposition,
-    # no exact-address rule B because house_number is absent) must NOT reach the paid
-    # visual stage — no classify, no compare, no merge, no queue.
+def test_run_engine_exact_address_floor_plan_different_dismisses(monkeypatch: Any) -> None:
+    # Wave 3: rule B no longer blind-merges. Same street/house/disposition/floor but the floor
+    # plans show DIFFERENT layouts (two units of one building) -> dismiss, not merge.
     import scripts.dedup_engine as eng
 
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])  # both have a plan
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # exact-address pair (rule B)
+    stats = eng.run_engine(
+        conn, classify_fn=None, compare_fn=None, max_vision_calls=5,
+        floor_plan_fn=lambda a, b, ia, ib: {"verdict": "different_layout"})
+    assert stats["auto_address"] == 0
+    assert stats["auto_dismissed"] == 1
 
-    classified: list[int] = []
 
-    def fake_classify(sid: int) -> dict:
-        classified.append(sid)
-        return {"data": {"images": []}}
+def test_run_engine_exact_address_floor_plan_same_still_merges(monkeypatch: Any) -> None:
+    # Same address + a MATCHING floor plan -> the merge still proceeds (recall preserved).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}})
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])
+    stats = eng.run_engine(
+        conn, classify_fn=None, compare_fn=None, max_vision_calls=5,
+        floor_plan_fn=lambda a, b, ia, ib: {"verdict": "same_layout"})
+    assert stats["auto_address"] == 1 and merges == ["address_exact"]
+
+
+def test_run_engine_now_visually_compares_same_source(monkeypatch: Any) -> None:
+    # Wave 3 removed the cross-source gate: a same-source rule-C candidate (shares
+    # street+disposition, no exact-address rule B because house_number is absent) NOW reaches
+    # the visual stage instead of being skipped — the recall change.
+    import scripts.dedup_engine as eng
 
     conn = _FakeConn([
         _row(1, 101, hn=None, source="sreality"),
         _row(2, 102, hn=None, source="sreality"),
     ])
-    stats = eng.run_engine(conn, classify_fn=fake_classify, compare_fn=None, max_vision_calls=10)
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
 
-    assert stats["skipped_same_source"] == 1
-    assert stats["pairs_considered"] == 0      # never reached the visual stage
-    assert classified == []                    # classify never spent
-    assert stats["queued"] == 0 and stats["auto_visual"] == 0
+    assert stats["skipped_same_source"] == 0   # the gate is gone
+    assert stats["pairs_considered"] == 1      # reached the visual stage
+
+
+def test_run_engine_same_source_free_run_skips_not_queues(monkeypatch: Any) -> None:
+    # The no-flood guarantee after removing the cross-source gate: on a FREE run
+    # (enqueue_unresolved=False, no compare_fn) a same-source non-pHash pair reaches the visual
+    # stage but is skipped_unresolved, NOT piled into the manual queue.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([
+        _row(1, 101, hn=None, source="sreality"),
+        _row(2, 102, hn=None, source="sreality"),
+    ])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           enqueue_unresolved=False)
+
+    assert stats["pairs_considered"] == 1
+    assert stats["skipped_unresolved"] == 1
+    assert stats["queued"] == 0
+
+
+def test_run_engine_clip_only_defers_and_triggers_on_gap(monkeypatch: Any) -> None:
+    # CLIP-only: a pair with a CLIP-UNTAGGED listing re-queues its images for the tagger and
+    # DEFERS (no Haiku fallback, not queued, not merged).
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_clip_untagged", lambda conn, sids, model: [2])  # 2 is untagged
+    triggered: list[list[int]] = []
+    monkeypatch.setattr(eng, "_trigger_clip_tagging",
+                        lambda conn, sids, model: triggered.append(list(sids)))
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])  # rule-C pair
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           clip_only=True, clip_model="clip-x")
+    assert stats["clip_deferred"] == 1
+    assert stats["queued"] == 0 and stats["pairs_considered"] == 1
+    assert triggered == [[2]]  # only the untagged listing is re-queued
+
+
+def test_run_engine_clip_only_both_tagged_reaches_visual(monkeypatch: Any) -> None:
+    # Both CLIP-tagged -> no defer, the pair reaches the visual stage normally.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_clip_untagged", lambda conn, sids, model: [])  # all tagged
+    monkeypatch.setattr(eng, "_trigger_clip_tagging",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not trigger")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
+                           clip_only=True, clip_model="clip-x")
+    assert stats["clip_deferred"] == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_run_engine_clip_only_off_skips_the_gap_check(monkeypatch: Any) -> None:
+    # Default (clip_only off): the gap check never runs, so the Haiku-fallback path is intact.
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "_clip_untagged",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("gap check must not run")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
+    assert stats["clip_deferred"] == 0
+
+
+def test_trigger_clip_tagging_requeues_only_stuck_images() -> None:
+    # The trigger resets clip_tagged_at ONLY on stuck images (marked done but tagless) — a
+    # never-tagged image (clip_tagged_at IS NULL) is already pending, so it's left alone.
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([])
+    eng._trigger_clip_tagging(conn, [1, 2], "clip-x")
+    sql = " ".join(conn.executed[-1].split())
+    assert "UPDATE images SET clip_tagged_at = NULL" in sql
+    assert "clip_tagged_at IS NOT NULL" in sql
+    assert "NOT EXISTS" in sql and "image_clip_tags" in sql
 
 
 def test_run_engine_does_not_skip_cross_source(monkeypatch: Any) -> None:
@@ -941,6 +1267,128 @@ def test_run_engine_phash_fastpath_merges_same_source(monkeypatch: Any) -> None:
 
 # --- #4 floor-plan validation gate (migration 234) -------------------------- #
 
+def test_effective_vision_cap() -> None:
+    import scripts.dedup_engine as eng
+
+    # cache-only: never throttle warm reads
+    assert eng._effective_vision_cap(
+        free=False, cache_only=True, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
+    # free + a positive floor-plan budget -> the cap IS that budget (bounds inline
+    # cold floor-plan checks; nothing else consumes vision in free mode)
+    assert eng._effective_vision_cap(
+        free=True, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 120
+    # free + budget 0 -> cache-only floor_plan_fn: a large cap so a zero budget can't
+    # pre-empt the gate before it reads the warm cache (the cache-only fn never makes a
+    # cold call, so it can't overspend)
+    assert eng._effective_vision_cap(
+        free=True, cache_only=False, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
+    # live dispatch: the plain vision budget
+    assert eng._effective_vision_cap(
+        free=False, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 300
+
+
+def test_run_engine_only_groups_skips_untouched(monkeypatch: Any) -> None:
+    """only_groups_with_property_ids (the real-time dirty drain): a street group is
+    resolved ONLY if it contains a target property — full load (peers present), O(dirty)
+    pair-work. The same pHash would-merge pair merges when its group is targeted, and is
+    skipped (no merge) when it isn't."""
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)  # would merge
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])  # neither plan -> merge
+
+    # group of two properties (101, 102); not targeted -> skipped, no merge
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, only_groups_with_property_ids={999}, max_vision_calls=10)
+    assert stats["auto_phash"] == 0
+    assert merges == []
+
+    # same group, now targeted (contains 101) -> resolved, merges
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats2 = eng.run_engine(conn2, only_groups_with_property_ids={101}, max_vision_calls=10)
+    assert stats2["auto_phash"] == 1
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_truncated_flag() -> None:
+    """run_engine sets stats['truncated'] when the deadline cuts the scan early (so the
+    dirty drain keeps its claim and never drops unprocessed work); a finished run = 0."""
+    import time
+
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, deadline=time.monotonic() - 1.0, max_vision_calls=0)
+    assert stats["truncated"] == 1
+
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats2 = eng.run_engine(conn2, max_vision_calls=0)
+    assert stats2["truncated"] == 0
+
+
+def test_mark_dedup_dirty_empty_noop() -> None:
+    """The dedup-ready enqueue is a no-op (no SQL) on an empty image-id list."""
+    from scraper import db
+
+    class _Conn:
+        def cursor(self): raise AssertionError("must not touch the DB for an empty batch")
+
+    assert db.mark_properties_dedup_dirty_for_images(_Conn(), []) == 0
+
+
+def test_proposed_candidate_property_ids() -> None:
+    """The candidate-drain work-list = every property in a still-proposed candidate
+    (both sides, NULLs skipped, deduped)."""
+    import scripts.dedup_engine as eng
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self.sql = sql
+        def fetchall(self): return [(101, 102), (103, None), (None, 104), (101, 105)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    assert eng._proposed_candidate_property_ids(_Conn()) == {101, 102, 103, 104, 105}
+
+
+def test_load_eligible_restrict_scopes() -> None:
+    """restrict=None -> no property filter (full scan); restrict=set() -> the filter IS
+    applied (so an empty candidate queue loads NOTHING, never a full market scan)."""
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([_row(1, 101)])
+    eng._load_eligible(conn, restrict_property_ids=None)
+    assert not any("l.property_id = ANY" in s for s in conn.executed)
+
+    conn2 = _FakeConn([_row(1, 101)])
+    eng._load_eligible(conn2, restrict_property_ids=set())  # empty != None
+    assert any("l.property_id = ANY" in s for s in conn2.executed)
+
+
+def test_resolve_pair_seam_standalone() -> None:
+    """resolve_pair is callable standalone with a hand-built _RunContext — the exact seam
+    the candidate-priority drain + the real-time per-listing path reuse (one decision tree,
+    many drivers). A street_id contradiction rejects with no DB access."""
+    import scripts.dedup_engine as eng
+    from toolkit.dedup_engine import ListingKey
+
+    a = ListingKey(1, 101, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0, street_id=1)
+    b = ListingKey(2, 102, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0, street_id=2)
+    ctx = eng._RunContext(stats={"rejected": 0})
+    eng.resolve_pair(None, a, b, street_key="name:5001:nadrazni", ctx=ctx)
+    assert ctx.stats["rejected"] == 1
+    # the rejected pair is collected so the run finalize can dismiss any stale candidate
+    assert (101, 102) in ctx.dismissed_pairs
+
+
 def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
 
@@ -952,15 +1400,26 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
 
-    # both have plans
+    # both have plans + a verdict available -> confirm/dismiss
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
     diff = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
     same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
+    none = lambda a, b, ia, ib: None                             # noqa: E731 (unwarmed)
+    inconc = lambda a, b, ia, ib: {"verdict": "inconclusive"}    # noqa: E731
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
-    # can't validate (no fn / no budget) -> queue, never merge unchecked
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[0]) == "queue"
+    # 'inconclusive' -> manual review by default (toggle on); off -> treat as same -> merge
+    assert eng._floor_plan_gate(
+        None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
+        inconclusive_to_review=True) == "queue"
+    assert eng._floor_plan_gate(
+        None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
+        inconclusive_to_review=False) == "merge"
+    # both have plans but can't validate now (no fn / no budget / unwarmed) -> DEFER,
+    # NOT the manual queue (the pair is automatable once the batch warms the verdict)
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "defer"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[0]) == "defer"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=none, vision_budget=[5]) == "defer"
     # a COLD verdict consumes one budget unit
     budget = [3]
     eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=budget)
@@ -1023,6 +1482,32 @@ def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
 
     assert stats["auto_phash"] == 0
     assert stats["queued"] >= 1
+
+
+def test_run_engine_phash_floor_plan_unwarmed_defers(monkeypatch: Any) -> None:
+    # pHash would merge and BOTH sides have a floor plan, but no warm verdict is
+    # available (floor_plan_fn=None, the free run before the batch lane warms the
+    # cache) -> DEFER: not merged, not queued. The pair re-tries next run once warm.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])  # both have a plan
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 0
+    assert stats.get("floor_plan_deferred", 0) == 1
+    assert stats["queued"] == 0
+    assert merges == []
+    # the pair is NOT resolved either way -> still 'proposed' for a later warm run
+    assert (101, 102) not in _dismissed_pairs(conn)
 
 
 def test_run_engine_visual_high_but_different_floor_plan_dismisses(monkeypatch: Any) -> None:
@@ -1275,21 +1760,6 @@ def test_run_engine_reject_dismisses_stale_candidate(monkeypatch: Any) -> None:
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
 
     assert stats["rejected"] == 1
-    assert (101, 102) in _dismissed_pairs(conn)
-
-
-def test_run_engine_same_source_gate_dismisses_stale_candidate(monkeypatch: Any) -> None:
-    import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
-    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
-
-    conn = _FakeConn([
-        _row(1, 101, hn=None, source="sreality"),
-        _row(2, 102, hn=None, source="sreality"),
-    ])
-    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
-
-    assert stats["skipped_same_source"] == 1
     assert (101, 102) in _dismissed_pairs(conn)
 
 

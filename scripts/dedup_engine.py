@@ -41,6 +41,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from toolkit.dedup_engine import (
@@ -48,17 +49,19 @@ from toolkit.dedup_engine import (
     PHASH_MIN_IDENTICAL_PAIRS,
     CosineBands,
     ListingKey,
-    _area_pct_diff,
-    _haversine_m,
-    _price_match,
+    PairDecision,
     classify_geo_pair,
     classify_pair,
     DISTINCTIVE_ROOMS,
+    distinctive_rooms_for,
     decide_phash_fastpath,
     decide_visual_dismiss,
     geo_cell_key,
     phash_excluded_tags_for,
+    phash_render_exclude_for,
     profile_for,
+    render_exclusion_clause,
+    RENDER_SCORE_EXCLUDE_MIN,
     rooms_in_priority,
     route_by_cosine,
     street_group_keys,
@@ -101,17 +104,29 @@ _ELIGIBLE_SQL = """
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE l.street IS NOT NULL AND l.street <> ''
       AND l.disposition IS NOT NULL
+      {filter}
     ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition
 """
 
 
-def _load_eligible(conn: Any) -> list[ListingKey]:
+def _load_eligible(conn: Any,
+                   restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
     """One ListingKey per (listing, grouping key): a row with both a canonical
     street_id and a street name is dual-keyed into its 'id:' and 'name:' groups
     so cross-portal rows keyed differently can still meet (run_engine dedups
-    the listing pairs that surface in both groups)."""
+    the listing pairs that surface in both groups).
+
+    `restrict_property_ids` scopes the load to those properties' listings — the
+    candidate-priority drain (O(queue) not O(market)): the two properties of a
+    queued candidate share a street+disposition, so they still land in one street
+    group and get re-decided by the SAME resolve_pair, without scanning the world."""
+    params: dict[str, Any] = {}
+    flt = ""
+    if restrict_property_ids is not None:  # an EMPTY set restricts to nothing (not all)
+        flt = "AND l.property_id = ANY(%(pids)s)"
+        params["pids"] = list(restrict_property_ids)
     with conn.cursor() as cur:
-        cur.execute(_ELIGIBLE_SQL)
+        cur.execute(_ELIGIBLE_SQL.format(filter=flt), params)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
@@ -229,6 +244,47 @@ def _reconcile_stale_candidates(conn: Any, *, dry_run: bool) -> int:
     return n
 
 
+def _proposed_candidate_property_ids(conn: Any) -> set[int]:
+    """Every property that appears in a still-`proposed` /dedup candidate — the work-list
+    for the candidate-priority drain. The two properties of a candidate share a street +
+    disposition, so scoping `_load_eligible` to this set re-forms exactly those pairs in
+    their street group and re-decides them via resolve_pair, without a full market scan."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT left_property_id, right_property_id FROM property_identity_candidates "
+            "WHERE status = 'proposed'")
+        rows = cur.fetchall()
+    out: set[int] = set()
+    for left, right in rows:
+        if left is not None:
+            out.add(int(left))
+        if right is not None:
+            out.add(int(right))
+    return out
+
+
+# --- real-time dedup queue drain (dedup_dirty_properties, migration 242; the writer-side
+#     enqueue is scraper.db.mark_properties_dedup_dirty_for_images, mirroring dirty_properties)
+def _claim_dedup_dirty(conn: Any, cutoff: Any) -> set[int]:
+    """Property ids dirtied at/before `cutoff` (claim slice). A row re-dirtied AFTER cutoff
+    (marked_at > cutoff via a writer's ON CONFLICT) is neither claimed nor cleared — it
+    survives to the next pass (race-free + terminating, mirrors recompute's dirty drain)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT property_id FROM dedup_dirty_properties WHERE marked_at <= %s",
+                    (cutoff,))
+        return {int(r[0]) for r in cur.fetchall()}
+
+
+def _clear_dedup_dirty(conn: Any, property_ids: set[int], cutoff: Any) -> int:
+    """Delete the claimed ids that have NOT been re-dirtied since the cutoff."""
+    if not property_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM dedup_dirty_properties WHERE property_id = ANY(%s) "
+                    "AND marked_at <= %s", (list(property_ids), cutoff))
+        return cur.rowcount or 0
+
+
 def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str) -> int:
     """Set-based: mark every still-'proposed' candidate for these (lo, hi) pairs as
     `new_status`. A no-op for pairs that have no proposed candidate. Returns rowcount."""
@@ -254,6 +310,9 @@ def _enqueue_candidate(
     conn: Any, a: ListingKey, b: ListingKey, markers: dict[str, Any],
     *, tier: str = "street_disposition",
 ) -> None:
+    # `markers["tier"]` is the source of truth for the COLUMN (resolve_pair sets it to
+    # ctx.tier — 'street_disposition' or 'geo'); the `tier` kwarg is only the fallback for
+    # the rare markers dict that omits it (the street-only rule-B auto_merge_off path).
     from psycopg.types.json import Jsonb
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
         return
@@ -266,7 +325,7 @@ def _enqueue_candidate(
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (left_property_id, right_property_id) DO NOTHING
             """,
-            (lo, hi, tier, markers.get("confidence"), Jsonb(markers)),
+            (lo, hi, markers.get("tier", tier), markers.get("confidence"), Jsonb(markers)),
         )
 
 
@@ -290,16 +349,26 @@ _GEO_ELIGIBLE_SQL = """
       AND l.obec_id IS NOT NULL
       AND coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL
       AND NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)
+      {filter}
     ORDER BY l.obec_id, l.category_main, l.category_type
 """
 
 
-def _load_geo_eligible(conn: Any) -> list[ListingKey]:
+def _load_geo_eligible(conn: Any,
+                       restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
     """One ListingKey per geo-eligible single-dwelling listing, keyed by its geo cell
     (so the existing _group_by_street groups them). Carries lat/lng/price for the geo
-    classifier; disposition/floor/street_id are unused on this path."""
+    classifier; disposition/floor/street_id are unused on this path.
+
+    `restrict_property_ids` scopes to those properties (the candidate drain), exactly like
+    the street `_load_eligible` — an EMPTY set restricts to nothing (not all)."""
+    params: dict[str, Any] = {}
+    flt = ""
+    if restrict_property_ids is not None:
+        flt = "AND l.property_id = ANY(%(pids)s)"
+        params["pids"] = list(restrict_property_ids)
     with conn.cursor() as cur:
-        cur.execute(_GEO_ELIGIBLE_SQL)
+        cur.execute(_GEO_ELIGIBLE_SQL.format(filter=flt), params)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
@@ -322,19 +391,25 @@ def _load_geo_eligible(conn: Any) -> list[ListingKey]:
     return keys
 
 
+# The pHash exclusion predicate is shared with the /dedup evidence reader via
+# toolkit.dedup_engine.render_exclusion_clause (one source, so they never drift).
+_render_exclusion_predicate = render_exclusion_clause
+
+
 def _phash_identical_pairs(
-    conn: Any, a_id: int, b_id: int, excluded_tags: tuple[str, ...] = ()
+    conn: Any, a_id: int, b_id: int, excluded_tags: tuple[str, ...] = (),
+    render_exclude_min: float | None = None,
 ) -> int:
     """Count near-identical image pairs (Hamming <= PHASH_IDENTICAL_MAX) across the two
     listings' stored images — no classify needed, so this runs BEFORE the LLM stage. A
     development sharing one stock facade/plan yields 1 such pair; an actual re-post of the
     same listing shares many; the PHASH_MIN_IDENTICAL_PAIRS count threshold separates them.
 
-    `excluded_tags` (byt: NON_INTERIOR_TAGS) drops any pair touching a KNOWN-exterior /
-    shared-marketing image, sourced from CLIP `image_clip_tags` — so a reused facade /
-    site-plan / render never feeds the byt fast-path. Untagged images still count, so
-    recall holds for the not-yet-tagged majority and tightens toward interior-only as CLIP
-    coverage fills in. Empty (non-byt) -> count any image, unchanged.
+    For byt, `excluded_tags` (NON_INTERIOR_TAGS) drops any pair touching a KNOWN-exterior /
+    shared image, and `render_exclude_min` drops any pair touching a high render_score image
+    (a shared development RENDER) — both sourced from CLIP `image_clip_tags`. Untagged /
+    not-yet-scored images still count, so recall holds as CLIP coverage fills in. Empty /
+    None (non-byt) -> count any image, unchanged.
     """
     sql = (
         "SELECT count(*) FROM images ia JOIN images ib ON true "
@@ -343,37 +418,53 @@ def _phash_identical_pairs(
         "AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
     )
     params: dict[str, Any] = {"a": a_id, "b": b_id, "max": PHASH_IDENTICAL_MAX}
-    if excluded_tags:
-        sql += (
-            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
-            "   WHERE t.image_id = ia.id AND t.logical_tag = ANY(%(excl)s))"
-            " AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
-            "   WHERE t.image_id = ib.id AND t.logical_tag = ANY(%(excl)s))"
-        )
-        params["excl"] = list(excluded_tags)
+    sql += _render_exclusion_predicate(params, "ia", excluded_tags, render_exclude_min)
+    sql += _render_exclusion_predicate(params, "ib", excluded_tags, render_exclude_min)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return int(cur.fetchone()[0])
 
 
 def _phash_distinctive_match(
-    conn: Any, a_id: int, b_id: int, rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS
+    conn: Any, a_id: int, b_id: int, rooms: tuple[str, ...] | frozenset[str] = DISTINCTIVE_ROOMS,
+    render_exclude_min: float | None = None,
 ) -> bool:
     """True if the two listings share >=1 near-identical image pair where BOTH images are
     a DISTINCTIVE room (kitchen/bathroom, CLIP-tagged). A single such match auto-merges
     (operator policy): wet rooms are unit-specific, not shared development marketing, so
-    one identical match there is conclusive — unlike the >=2 needed for generic images."""
+    one identical match there is conclusive — unlike the >=2 needed for generic images.
+    `render_exclude_min` drops a shared kitchen/bathroom RENDER (it is tagged kitchen but
+    high render_score), so a reused render can't trigger the single-match override."""
+    rfilter = ""
+    params: dict[str, Any] = {"a": a_id, "b": b_id, "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX}
+    if render_exclude_min is not None:
+        rfilter = " AND coalesce({t}.render_score, 0) < %(rmin)s"
+        params["rmin"] = render_exclude_min
     with conn.cursor() as cur:
         cur.execute(
             "SELECT EXISTS (SELECT 1 FROM images ia"
             "  JOIN image_clip_tags ta ON ta.image_id = ia.id AND ta.logical_tag = ANY(%(rooms)s)"
+            + rfilter.format(t="ta") +
             "  JOIN images ib ON ib.sreality_id = %(b)s AND ib.phash IS NOT NULL"
             "  JOIN image_clip_tags tb ON tb.image_id = ib.id AND tb.logical_tag = ANY(%(rooms)s)"
+            + rfilter.format(t="tb") +
             "  WHERE ia.sreality_id = %(a)s AND ia.phash IS NOT NULL"
             "    AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s)",
-            {"a": a_id, "b": b_id, "rooms": list(rooms), "max": PHASH_IDENTICAL_MAX},
+            params,
         )
         return bool(cur.fetchone()[0])
+
+
+def _high_render_image_ids(conn: Any, a_id: int, b_id: int, threshold: float) -> set[int]:
+    """image_ids of the two listings whose CLIP render_score >= threshold — shared
+    development RENDERS excluded from the forensic compare (migration 239)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT t.image_id FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
+            "WHERE i.sreality_id IN (%(a)s, %(b)s) AND t.render_score >= %(rmin)s",
+            {"a": a_id, "b": b_id, "rmin": threshold},
+        )
+        return {int(r[0]) for r in cur.fetchall()}
 
 
 def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
@@ -393,29 +484,74 @@ def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
         return [r[0] for r in cur.fetchall()]
 
 
+def _clip_untagged(conn: Any, sreality_ids: list[int], model: str) -> list[int]:
+    """Which of these listings have NO CLIP room tag under `model` — the CLIP-only gap check,
+    in ONE query for the pair (so resolve_pair does a single round-trip, not one per listing)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT s.sid FROM unnest(%s::bigint[]) AS s(sid) "
+            "WHERE NOT EXISTS (SELECT 1 FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
+            "                  WHERE i.sreality_id = s.sid AND t.model = %s)",
+            (sreality_ids, model),
+        )
+        return [int(r[0]) for r in cur.fetchall()]
+
+
+def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> None:
+    """Re-queue a CLIP-untagged listing's images for the tagger (clip_tag.yml drains
+    `clip_tagged_at IS NULL`): reset the marker on every stored image of these listings that
+    has no CLIP tag for `model`. A never-tagged image is already pending (no-op); a stuck one
+    (marked done but tagless — a failed/old run) gets re-queued, so a gap can self-heal
+    instead of deferring forever."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE images SET clip_tagged_at = NULL "
+            "WHERE sreality_id = ANY(%s) AND storage_path IS NOT NULL "
+            "  AND clip_tagged_at IS NOT NULL "
+            "  AND NOT EXISTS (SELECT 1 FROM image_clip_tags t "
+            "                  WHERE t.image_id = images.id AND t.model = %s)",
+            (sreality_ids, model),
+        )
+
+
 def _floor_plan_gate(
     conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
+    inconclusive_to_review: bool = True,
 ) -> str:
     """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
-    Returns 'merge' | 'dismiss' | 'queue'. It ONLY adds conservatism:
-      * both sides carry a floor plan -> Sonnet compares them; 'different_layout' ->
-        'dismiss' (the only new auto-dismiss), else 'merge';
-      * exactly one side has a floor plan -> 'queue' (can't compare plan-to-plan);
-      * a both-plan pair we cannot validate (no fn / no budget / error) -> 'queue'
-        rather than merge unchecked;
+    Returns 'merge' | 'dismiss' | 'queue' | 'defer'. It only adds conservatism, and
+    crucially distinguishes "a human must decide" (queue) from "validate it later"
+    (defer):
+      * both sides carry a floor plan + a Sonnet verdict is available -> the verdict
+        decides: 'different_layout' -> 'dismiss'; 'inconclusive' -> 'queue' when
+        `inconclusive_to_review` (default on, app_settings.dedup_floor_plan_inconclusive_to_review),
+        else 'merge'; 'same_layout' -> 'merge' (auto-confirm — the verdict weighs layout +
+        the OCR'd unit/area/floor labels). When a side carries SEVERAL plans the verdict is
+        N×N (migration 243): one call sees every labelled plan of both, 'same_layout' if ANY
+        A-plan matches ANY B-plan, 'different_layout' only if NONE do — so a matching plan
+        among several can never be missed into a wrong dismiss;
+      * both sides carry a plan but the verdict isn't available yet (no fn / no budget /
+        cache-miss) -> 'defer': skip this run and re-try next, once the batch lane warms
+        the verdict — NOT the operator queue (this pair is automatable, not a human call);
+      * exactly ONE side has a plan -> 'queue' (manual review: no plan-to-plan compare);
       * neither side has a plan -> 'merge' (existing path unchanged).
     """
     ids_a = _floor_plan_image_ids(conn, a_id)
     ids_b = _floor_plan_image_ids(conn, b_id)
     if ids_a and ids_b:
         if floor_plan_fn is None or vision_budget[0] <= 0:
-            return "queue"
+            return "defer"
         res = floor_plan_fn(a_id, b_id, ids_a, ids_b)
         if res is None:
-            return "queue"
+            return "defer"
         if not res.get("cache_hit"):
             vision_budget[0] -= 1
-        return "dismiss" if res.get("verdict") == "different_layout" else "merge"
+        verdict = res.get("verdict")
+        if verdict == "different_layout":
+            return "dismiss"
+        if verdict == "inconclusive" and inconclusive_to_review:
+            return "queue"
+        return "merge"
     if ids_a or ids_b:
         return "queue"
     return "merge"
@@ -475,6 +611,9 @@ def _resolve_visual(
     cosine_fn: Any = None,
     bands: Any = None,
     model_for: dict[str, str] | None = None,
+    render_min: float = RENDER_SCORE_EXCLUDE_MIN,
+    inconclusive_to_review: bool = True,
+    tag_overrides: dict[str, list[str]] | None = None,
     stats: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
@@ -512,6 +651,16 @@ def _resolve_visual(
     if compare_fn is None:
         return {"action": "queue", "reason": "vision_unavailable"}
 
+    # Drop shared development RENDERS from the forensic compare for byt (migration 239):
+    # a reused render is not a real photo of THE unit, so two units sharing one must not
+    # score High on it. Untagged / not-yet-scored images are kept (recall holds).
+    rmin = phash_render_exclude_for(a.category_main, render_min)
+    if rmin is not None:
+        render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
+        if render_ids:
+            imgs_a = [i for i in imgs_a if i["image_id"] not in render_ids]
+            imgs_b = [i for i in imgs_b if i["image_id"] not in render_ids]
+
     # Room-aware forensic comparison, priority order, stop at first High.
     rooms_a = {i["room_type"] for i in imgs_a}
     rooms_b = {i["room_type"] for i in imgs_b}
@@ -519,7 +668,7 @@ def _resolve_visual(
     by_room_a = _group_ids_by_room(imgs_a)
     by_room_b = _group_ids_by_room(imgs_b)
 
-    priority = rooms_in_priority(common, a.category_main)
+    priority = rooms_in_priority(common, a.category_main, tag_overrides)
     tried = 0
     last_verdict = None
     last_rationale = None
@@ -563,12 +712,14 @@ def _resolve_visual(
         room_rationales[room] = last_rationale
         room_cos[room] = cos
         if verdict_is_merge(last_verdict):
-            # Floor-plan validation gate (migration 234): even a High forensic verdict
-            # is overridden by a different floor plan (dismiss) or a one-sided plan
-            # (queue). Same/inconclusive/none -> the auto-merge stands.
+            # Floor-plan validation gate (migration 234): a different floor plan overrides
+            # even a High forensic verdict (dismiss); a one-sided plan -> manual queue; an
+            # unwarmed both-plan verdict -> defer (re-try next run once the batch warms it,
+            # NOT queue). same/inconclusive/none -> the auto-merge stands.
             fp = _floor_plan_gate(
                 conn, a.sreality_id, b.sreality_id,
-                floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
+                floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
+                inconclusive_to_review=inconclusive_to_review)
             base = {
                 "room_type": room, "verdict": last_verdict,
                 "rationale": last_rationale, "cosine": cos,
@@ -577,6 +728,8 @@ def _resolve_visual(
                 return {**base, "action": "dismiss", "reason": "floor_plan_different_layout"}
             if fp == "queue":
                 return {**base, "action": "queue", "reason": "floor_plan_review"}
+            if fp == "defer":
+                return {**base, "action": "defer", "reason": "floor_plan_pending"}
             return {**base, "action": "auto_merge", "reason": "visual_match"}
 
     # No High on any COMPARED room. Only auto-dismiss when EVERY common room produced
@@ -589,7 +742,7 @@ def _resolve_visual(
     all_rooms_verdicted = len(room_verdicts) == len(priority)
     if autodismiss and all_rooms_verdicted and decide_visual_dismiss(room_verdicts):
         room = next(
-            (r for r in rooms_in_priority(set(room_verdicts), a.category_main)
+            (r for r in rooms_in_priority(set(room_verdicts), a.category_main, tag_overrides)
              if room_verdicts[r] == "Low"),
             None,
         )
@@ -715,6 +868,304 @@ def _write_pair_audit(
         )
 
 
+@dataclass
+class _RunContext:
+    """All per-run state + tunables a pair decision needs. ONE object so the per-pair
+    logic (`resolve_pair`) is reusable by the full-scan loop, the candidate-priority
+    drain, AND the future real-time per-listing path — without re-threading 20 params or
+    duplicating the decision tree. The fns/flags are read-only inputs; the sets, stats,
+    vision_budget and pairs_left are mutated as pairs resolve."""
+    # vision fns + cosine routing (read-only)
+    classify_fn: Any = None
+    compare_fn: Any = None
+    site_plan_fn: Any = None
+    floor_plan_fn: Any = None
+    cosine_fn: Any = None
+    bands: Any = None
+    model_for: dict[str, str] | None = None
+    # candidate FILTER + queue tier — the ONLY things that differ between the street path
+    # (classify_pair, street+disposition keyed) and the geo path (classify_geo_pair wrapper,
+    # geo-proximity keyed). Everything downstream (pHash → cosine → forensic → plan gate) is
+    # shared, so houses/land/commercial run the exact same free-first flow as apartments.
+    classify: Any = classify_pair
+    tier: str = "street_disposition"
+    # Operator-reordered per-family comparison-tag priorities (app_settings.dedup_tag_priorities);
+    # None / partial → the coded defaults (rooms_in_priority normalizes per family).
+    tag_overrides: dict[str, list[str]] | None = None
+    # CLIP-only mode (dedup_clip_only): no LLM room-classifier fallback. A pair with a
+    # CLIP-untagged listing re-queues it for the CLIP tagger and DEFERS, instead of paying
+    # Haiku or treating it as untagged. clip_model is the taxonomy model the tags are keyed on.
+    clip_only: bool = False
+    clip_model: str | None = None
+    # tunables (read-only)
+    auto_merge_enabled: bool = True
+    autodismiss: bool = True
+    enqueue_unresolved: bool = True
+    dry_run: bool = False
+    render_min: float = RENDER_SCORE_EXCLUDE_MIN
+    inconclusive_to_review: bool = True
+    max_room_attempts: int = 4
+    # mutable run state
+    stats: dict[str, int] = field(default_factory=dict)
+    vision_budget: list[int] = field(default_factory=lambda: [0])
+    audit: list[dict[str, Any]] | None = None
+    seen_listing_pairs: set[tuple[int, int]] = field(default_factory=set)
+    seen_property_pairs: set[tuple[int, int]] = field(default_factory=set)
+    merged_pairs: set[tuple[int, int]] = field(default_factory=set)
+    dismissed_pairs: set[tuple[int, int]] = field(default_factory=set)
+    pairs_left: int = 10 ** 9
+
+
+def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
+                 ctx: _RunContext) -> None:
+    """Decide ONE eligible same-street pair and apply the outcome (merge / dismiss /
+    queue / defer / skip), mutating `ctx`. The single source of truth for the dedup
+    decision tree — rule A/B/C, the pHash fast-path + floor-plan gate, the cross-source
+    gate, and rule-D forensic visual — shared by every driver. Returns nothing; its
+    effects are the DB writes (merge/enqueue) plus ctx mutations the caller persists."""
+    stats = ctx.stats
+    # Dual-keyed listings appear in their 'id:' AND 'name:' groups; classify each
+    # listing pair once (first group wins).
+    lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))
+    if lpair in ctx.seen_listing_pairs:
+        return
+    ctx.seen_listing_pairs.add(lpair)
+    decision = ctx.classify(a, b)
+    cp = _canon_pair(a, b)
+    if decision.action == "reject":
+        stats["rejected"] += 1
+        # A pair the current rules reject is a deterministic non-match: dismiss any
+        # stale proposed candidate for it (recall-neutral).
+        if cp is not None:
+            ctx.dismissed_pairs.add(cp)
+        return
+
+    # Re-pointing happens at the property grain; skip a property pair we already acted
+    # on this run (merges mutate property_id live).
+    if cp is None:
+        return
+    if cp in ctx.seen_property_pairs:
+        return
+    ctx.seen_property_pairs.add(cp)
+
+    if decision.action == "auto_merge":  # rule B exact address
+        factors = _factors(
+            "address", reason="address_exact", street_key=street_key,
+            house_number=a.house_number, floor=a.floor)
+        if not ctx.auto_merge_enabled:
+            if not ctx.dry_run:
+                _enqueue_candidate(
+                    conn, a, b,
+                    {**factors, "reason": "auto_merge_off:address_exact",
+                     "confidence": 0.99},
+                )
+            stats["queued"] += 1
+            return
+        # Wave 3: route the exact-address merge through the SAME floor-plan gate as pHash
+        # (was a blind auto-merge). The same street + house number + disposition + floor can
+        # still be DIFFERENT units of one building (two 2+kk on one floor), and the floor plan
+        # is the disambiguator: a different layout DISMISSES, a different/one-sided plan
+        # queues/defers, a matching or absent plan merges — so no-plan exact relists still
+        # merge for free (recall preserved) while same-address-different-unit pairs are caught.
+        fp = _floor_plan_gate(
+            conn, a.sreality_id, b.sreality_id,
+            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
+            inconclusive_to_review=ctx.inconclusive_to_review)
+        if fp == "dismiss":
+            stats["auto_dismissed"] += 1
+            ctx.dismissed_pairs.add(cp)
+            _audit(ctx.audit, a, b, "address", "dismissed",
+                   {**factors, "reason": "floor_plan_different_layout"}, source="engine")
+            return
+        if fp == "queue":
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": ctx.tier,
+                    "reason": "floor_plan_review", "confidence": 0.6})
+            stats["queued"] += 1
+            return
+        if fp == "defer":
+            stats["floor_plan_deferred"] += 1
+            return
+        mg = None if ctx.dry_run else _merge_pair(
+            conn, a, b, "address_exact", {**factors, "confidence": 0.99})
+        if ctx.dry_run or mg:
+            stats["auto_address"] += 1
+            ctx.merged_pairs.add(cp)
+            _audit(ctx.audit, a, b, "address", "merged", factors,
+                   source="engine", merge_group_id=mg)
+        return
+
+    # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw photo match
+    # (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the listings' images) is a
+    # same-property signal that needs no LLM. The pair already passed rule C, so a match
+    # here auto-merges. Runs before the cross-source gate so identical-photo re-posts
+    # (incl. same-source, which the gate would otherwise drop) merge for free — and
+    # cross-posted cross-source pairs skip classify AND compare. For byt, known-exterior/
+    # shared images are excluded from the count so a development's reused renders can't
+    # reach the >=2 threshold; other categories count any image. A single near-identical
+    # KITCHEN/BATHROOM match also qualifies (distinctive override) — but ONLY for byt: a
+    # house's facade/garden is shared across a development's units, so distinctive_rooms_for
+    # returns an empty set for non-byt families and the override is skipped (require >=2).
+    _rmin = phash_render_exclude_for(a.category_main, ctx.render_min)
+    phash_pairs = _phash_identical_pairs(
+        conn, a.sreality_id, b.sreality_id,
+        phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
+    _distinctive_rooms = distinctive_rooms_for(a.category_main)
+    distinctive = (
+        bool(_distinctive_rooms)
+        and phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
+        and _phash_distinctive_match(
+            conn, a.sreality_id, b.sreality_id,
+            rooms=_distinctive_rooms, render_exclude_min=_rmin))
+    if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
+        conn, a.sreality_id, b.sreality_id
+    ):
+        factors = _factors("phash", reason="image_phash",
+                           street_key=street_key, phash_pairs=phash_pairs,
+                           phash_distinctive=distinctive)
+        if not ctx.auto_merge_enabled:
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": ctx.tier,
+                    "reason": "auto_merge_off:image_phash", "confidence": 0.97})
+            stats["queued"] += 1
+            return
+        # Floor-plan validation gate (migration 234): a different floor plan DISMISSES, a
+        # one-sided plan goes to MANUAL queue, an unwarmed both-plan verdict DEFERS (skip,
+        # re-try next run once the batch warms it — never the manual queue); otherwise the
+        # pHash merge proceeds.
+        fp = _floor_plan_gate(
+            conn, a.sreality_id, b.sreality_id,
+            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
+            inconclusive_to_review=ctx.inconclusive_to_review)
+        if fp == "dismiss":
+            stats["auto_dismissed"] += 1
+            ctx.dismissed_pairs.add(cp)
+            _audit(ctx.audit, a, b, "phash", "dismissed",
+                   {**factors, "reason": "floor_plan_different_layout"},
+                   source="engine")
+            return
+        if fp == "queue":
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": ctx.tier,
+                    "reason": "floor_plan_review", "confidence": 0.6})
+            stats["queued"] += 1
+            return
+        if fp == "defer":
+            stats["floor_plan_deferred"] += 1
+            return
+        mg = None if ctx.dry_run else _merge_pair(
+            conn, a, b, "image_phash",
+            {**factors, "tier": ctx.tier, "confidence": 0.97})
+        if ctx.dry_run or mg:
+            stats["auto_phash"] += 1
+            ctx.merged_pairs.add(cp)
+            _audit(ctx.audit, a, b, "phash", "merged", factors,
+                   source="engine", merge_group_id=mg)
+        return
+
+    # Wave 3 removed the cross-source gate: the engine no longer skips same-source non-exact
+    # pairs. The gate cut ~36% of pairs off the (paid) visual stage but cost ~1.4% recall —
+    # a same-portal relist with changed photos, or two cross-posts on one portal, were dropped.
+    # Now ALL rule-C candidates reach the visual stage; the forensic High verdict + the
+    # floor/site-plan gates remain the precision guards, so recall rises without false merges.
+    # (pHash already auto-merged identical-photo same-source relists for free, above.)
+
+    # rule C candidate -> rule D visual
+    ctx.pairs_left -= 1
+    stats["pairs_considered"] += 1
+    if not ctx.auto_merge_enabled:
+        # Auto-merge off: queue for manual review without spending vision. No forensic
+        # verdict here, but pHash already ran — carry it so the Needs-review card still
+        # shows the one similarity signal we have.
+        if not ctx.dry_run:
+            _enqueue_candidate(conn, a, b, {
+                **_factors("candidate", reason="auto_merge_off",
+                           street_key=street_key, phash_pairs=phash_pairs),
+                "tier": ctx.tier, "confidence": 0.6,
+            })
+        stats["queued"] += 1
+        return
+    # CLIP-only mode: the room classifier is CLIP, no LLM fallback. If either listing isn't
+    # CLIP-tagged yet, re-queue its images for the tagger and DEFER (re-try next run once
+    # tagged) — never pay Haiku, never treat it as untagged.
+    if ctx.clip_only and ctx.clip_model:
+        gap = _clip_untagged(conn, [a.sreality_id, b.sreality_id], ctx.clip_model)
+        if gap:
+            if not ctx.dry_run:
+                _trigger_clip_tagging(conn, gap, ctx.clip_model)
+            stats["clip_deferred"] += 1
+            return
+    outcome = _resolve_visual(
+        conn, a, b, classify_fn=ctx.classify_fn, compare_fn=ctx.compare_fn,
+        site_plan_fn=ctx.site_plan_fn, floor_plan_fn=ctx.floor_plan_fn,
+        vision_budget=ctx.vision_budget, max_room_attempts=ctx.max_room_attempts,
+        autodismiss=ctx.autodismiss,
+        cosine_fn=ctx.cosine_fn, bands=ctx.bands, model_for=ctx.model_for,
+        render_min=ctx.render_min, inconclusive_to_review=ctx.inconclusive_to_review,
+        tag_overrides=ctx.tag_overrides,
+        stats=stats,
+    )
+    # ONE factor set per pair — fed to BOTH the terminal audit `detail` (merged/dismissed)
+    # AND, when queued, the candidate `markers_matched`, so Decision history and
+    # Needs-review show identical detail. phash_pairs is carried even on the visual path
+    # (it's 0/1 here — the fast-path didn't fire — which is itself the "photos differ,
+    # escalated to vision" signal).
+    factors = _factors(
+        "visual", reason=outcome.get("reason"), street_key=street_key,
+        verdict=outcome.get("verdict"), room_type=outcome.get("room_type"),
+        rationale=outcome.get("rationale"), cosine=outcome.get("cosine"),
+        phash_pairs=phash_pairs)
+    markers = {**factors, "tier": ctx.tier,
+               "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6}
+    # pHash already ran (pre-classify); the visual stage only auto-merges via a High
+    # forensic verdict, and auto-dismisses on a confident "different".
+    if outcome["action"] == "auto_merge":
+        mg = None if ctx.dry_run else _merge_pair(conn, a, b, outcome["reason"], markers)
+        if ctx.dry_run or mg:
+            stats["auto_visual"] += 1
+            ctx.merged_pairs.add(cp)
+            _audit(ctx.audit, a, b, "visual", "merged", factors,
+                   source="engine", merge_group_id=mg)
+    elif outcome["action"] == "dismiss":
+        stats["auto_dismissed"] += 1
+        ctx.dismissed_pairs.add(cp)
+        _audit(ctx.audit, a, b, "visual", "dismissed", factors, source="engine")
+    elif outcome["action"] == "defer":
+        # Floor-plan verdict not warmed yet -> skip, re-try next run (the batch lane
+        # warms it). NOT the manual queue.
+        stats["floor_plan_deferred"] += 1
+    elif ctx.enqueue_unresolved:
+        if not ctx.dry_run:
+            _enqueue_candidate(conn, a, b, markers)
+        stats["queued"] += 1
+        # NOT audited — a queued pair IS the candidate; its factor detail lives in
+        # markers_matched (Needs-review reads it). Auditing queued re-logged the same
+        # pair every run (the duplicate-row bug).
+    else:
+        # Free mode: don't pile un-vision'd pairs into the review queue (they'd just be
+        # 'no photos compared' placeholders). pHash / rule-B / reconcile already ran; this
+        # pair is left for a future run (free pHash as coverage grows, or vision if
+        # re-enabled).
+        stats["skipped_unresolved"] += 1
+
+
+def _make_geo_classify(area_max_pct: float | None) -> Any:
+    """The geo path's candidate filter for resolve_pair: classify_geo_pair (per the FIRST
+    listing's profile, operator policy) with the operator's geo area tolerance, mapping its
+    deterministic auto_merge → candidate so the geo signal NEVER merges on its own — the
+    shared free-first visual flow is the sole merge gate."""
+    def _fn(a: ListingKey, b: ListingKey) -> PairDecision:
+        d = classify_geo_pair(
+            a, b, profile_for(a.category_main), max_area_pct=area_max_pct)
+        if d.action == "auto_merge":
+            return PairDecision("candidate", d.reason, d.detail)
+        return d
+    return _fn
+
+
 def run_engine(
     conn: Any,
     *,
@@ -725,6 +1176,8 @@ def run_engine(
     cosine_fn: Any = None,
     bands: Any = None,
     model_for: dict[str, str] | None = None,
+    render_min: float = RENDER_SCORE_EXCLUDE_MIN,
+    inconclusive_to_review: bool = True,
     audit: list[dict[str, Any]] | None = None,
     max_pairs: int = 2000,
     max_vision_calls: int = 200,
@@ -734,8 +1187,21 @@ def run_engine(
     enqueue_unresolved: bool = True,
     dry_run: bool = False,
     deadline: float | None = None,
+    restrict_property_ids: set[int] | None = None,
+    only_groups_with_property_ids: set[int] | None = None,
+    geo: bool = False,
+    geo_area_max_pct: float | None = None,
+    clip_only: bool = False,
+    clip_model: str | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
+
+    geo=True runs the SAME flow over single-dwelling families (house/land/commercial)
+    keyed by geo-proximity instead of street+disposition: the only differences are the
+    candidate loader (_load_geo_eligible), the candidate filter (classify_geo_pair, mapped
+    auto_merge→candidate so the free-first visual flow is the sole merge gate), and the
+    queue tier ('geo'). Everything else — pHash → cosine → forensic compare (facade /
+    site-plan priority via room_priority_for) → floor/site-plan gate — is shared.
 
     classify_fn(sreality_id) -> classify_listing_images envelope.
     compare_fn(a, b, room_type, ids_a, ids_b) -> {verdict, rationale} | None.
@@ -755,341 +1221,98 @@ def run_engine(
     dry_run computes every action + counter but writes nothing (no merges, no
     candidate status changes) — a shadow preview of what a live run would do.
     """
-    stats = _eligibility_counts(conn)
+    # Geo runs in the same main() invocation AFTER the street pass, which already
+    # reconciled + counted street eligibility; a geo run reports its own eligible count and
+    # skips the (street-keyed) eligibility scan + the (already-done) reconcile.
+    if geo:
+        keys = _load_geo_eligible(conn, restrict_property_ids=restrict_property_ids)
+        stats = {
+            "eligible": len({k.sreality_id for k in keys}),
+            "flagged_location": 0, "flagged_disposition": 0,
+        }
+    else:
+        keys = _load_eligible(conn, restrict_property_ids=restrict_property_ids)
+        stats = _eligibility_counts(conn)
     stats.update({
         "pairs_considered": 0, "rejected": 0,
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
+        "floor_plan_deferred": 0, "clip_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
     })
 
-    stats["reconciled"] = _reconcile_stale_candidates(conn, dry_run=dry_run)
+    if not geo:
+        stats["reconciled"] = _reconcile_stale_candidates(conn, dry_run=dry_run)
 
-    keys = _load_eligible(conn)
     groups = _group_by_street(keys)
-    vision_budget = [max_vision_calls]
-    seen_property_pairs: set[tuple[int, int]] = set()
-    seen_listing_pairs: set[tuple[int, int]] = set()
-    merged_pairs: set[tuple[int, int]] = set()
-    dismissed_pairs: set[tuple[int, int]] = set()
-    pairs_left = max_pairs
+    max_group_size = MAX_GEO_GROUP_SIZE if geo else MAX_GROUP_SIZE
+    # The candidate FILTER + queue tier are the geo path's only divergence; the geo classify
+    # maps auto_merge → candidate so a deterministic geo signal never merges on its own — the
+    # shared free-first visual flow is the sole merge gate.
+    classify = _make_geo_classify(geo_area_max_pct) if geo else classify_pair
+    from toolkit.dedup_priorities import load_tag_priority_overrides
+    tag_overrides = load_tag_priority_overrides(conn)
+    ctx = _RunContext(
+        classify=classify, tier=("geo" if geo else "street_disposition"),
+        tag_overrides=tag_overrides, clip_only=clip_only, clip_model=clip_model,
+        classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
+        floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
+        auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
+        enqueue_unresolved=enqueue_unresolved, dry_run=dry_run, render_min=render_min,
+        inconclusive_to_review=inconclusive_to_review, max_room_attempts=max_room_attempts,
+        stats=stats, vision_budget=[max_vision_calls], audit=audit, pairs_left=max_pairs,
+    )
 
     def finalize() -> dict[str, int]:
         # Resolve every candidate the engine acted on this run (no-op for pairs
         # without a proposed row); a no-op set-based UPDATE when nothing collected.
         if not dry_run:
-            _resolve_candidates(conn, merged_pairs, "merged")
-            _resolve_candidates(conn, dismissed_pairs, "dismissed")
-        return _finish(stats, vision_budget, max_vision_calls)
+            _resolve_candidates(conn, ctx.merged_pairs, "merged")
+            _resolve_candidates(conn, ctx.dismissed_pairs, "dismissed")
+        return _finish(stats, ctx.vision_budget, max_vision_calls)
 
+    # The decision tree per pair lives in resolve_pair (shared by the candidate-priority
+    # drain + the real-time path); this is just the full-scan driver over street groups.
     for street_key, members in groups.items():
-        if len(members) > MAX_GROUP_SIZE:
-            LOG.info("SKIP large street group key=%s size=%d", street_key, len(members))
+        if len(members) > max_group_size:
+            LOG.info("SKIP large group key=%s size=%d", street_key, len(members))
+            continue
+        # Real-time (dirty) drain: the load is FULL so a dirty property's group still
+        # carries its existing PEERS, but we only resolve groups that actually contain a
+        # dirty/just-ready property — O(dirty) pair-work, no fragile SQL street-key replay.
+        if only_groups_with_property_ids is not None and not any(
+            m.property_id in only_groups_with_property_ids for m in members
+        ):
             continue
         for i in range(len(members)):
-            if pairs_left <= 0:
+            if ctx.pairs_left <= 0:
+                stats["truncated"] = 1  # pair cap exhausted between groups — also truncation
                 break
             for j in range(i + 1, len(members)):
-                if pairs_left <= 0:
+                if ctx.pairs_left <= 0:
                     LOG.info("PAIR cap reached; deferring remainder to next run")
+                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
                     return finalize()
-                # Wall-clock budget: the cold-cache classification flood (one
-                # uncapped vision call per newly-eligible listing) can outrun the
-                # job timeout, which SIGKILLs the run before it writes results.
-                # Stop cleanly so the run row + the inline-committed merges persist
-                # and the next run resumes with a warm cache (mirrors the detail
-                # drain's --max-seconds).
+                # Wall-clock budget: per-pair cold vision can outrun the job timeout,
+                # which SIGKILLs the run before it writes results. Stop cleanly so the run
+                # row + inline-committed merges persist and the next run resumes with a
+                # warm cache (mirrors the detail drain's --max-seconds).
                 if deadline is not None and time.monotonic() >= deadline:
                     LOG.info(
                         "TIME budget reached; finalizing cleanly at pairs_considered=%d",
                         stats["pairs_considered"],
                     )
+                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
                     return finalize()
-                a, b = members[i], members[j]
-                # Dual-keyed listings appear in their 'id:' AND 'name:' groups;
-                # classify each listing pair once (first group wins).
-                lpair = (
-                    min(a.sreality_id, b.sreality_id),
-                    max(a.sreality_id, b.sreality_id),
-                )
-                if lpair in seen_listing_pairs:
-                    continue
-                seen_listing_pairs.add(lpair)
-                decision = classify_pair(a, b)
-                cp = _canon_pair(a, b)
-                if decision.action == "reject":
-                    stats["rejected"] += 1
-                    # A pair the current rules reject is a deterministic non-match:
-                    # dismiss any stale proposed candidate for it (recall-neutral).
-                    if cp is not None:
-                        dismissed_pairs.add(cp)
-                    continue
-
-                # Re-pointing happens at the property grain; skip a property pair
-                # we already acted on this run (merges mutate property_id live).
-                if cp is None:
-                    continue
-                if cp in seen_property_pairs:
-                    continue
-                seen_property_pairs.add(cp)
-
-                if decision.action == "auto_merge":  # rule B exact address
-                    factors = _factors(
-                        "address", reason="address_exact", street_key=street_key,
-                        house_number=a.house_number, floor=a.floor)
-                    if auto_merge_enabled:
-                        mg = None if dry_run else _merge_pair(
-                            conn, a, b, "address_exact", {**factors, "confidence": 0.99})
-                        if dry_run or mg:
-                            stats["auto_address"] += 1
-                            merged_pairs.add(cp)
-                            _audit(audit, a, b, "address", "merged", factors,
-                                   source="engine", merge_group_id=mg)
-                    else:
-                        if not dry_run:
-                            _enqueue_candidate(
-                                conn, a, b,
-                                {**factors, "reason": "auto_merge_off:address_exact",
-                                 "confidence": 0.99},
-                            )
-                        stats["queued"] += 1
-                    continue
-
-                # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw
-                # photo match (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the
-                # listings' images) is a same-property signal that needs no LLM. The pair already
-                # passed rule C (no house#/floor/area/unit-token contradiction), so a
-                # match here auto-merges. Runs before the cross-source gate so identical-
-                # photo re-posts (incl. same-source, which the gate would otherwise drop)
-                # merge for free — and cross-posted cross-source pairs skip classify AND
-                # compare. For byt, known-exterior/shared images are excluded from the
-                # count (phash_excluded_tags_for) so a development's reused renders can't
-                # reach the >=2 threshold; other categories count any image. A single
-                # near-identical KITCHEN/BATHROOM match also qualifies (distinctive override,
-                # only checked when the generic count fell short).
-                phash_pairs = _phash_identical_pairs(
-                    conn, a.sreality_id, b.sreality_id,
-                    phash_excluded_tags_for(a.category_main))
-                distinctive = (
-                    phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-                    and _phash_distinctive_match(conn, a.sreality_id, b.sreality_id))
-                if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
-                    conn, a.sreality_id, b.sreality_id
-                ):
-                    factors = _factors("phash", reason="image_phash",
-                                       street_key=street_key, phash_pairs=phash_pairs,
-                                       phash_distinctive=distinctive)
-                    if not auto_merge_enabled:
-                        if not dry_run:
-                            _enqueue_candidate(conn, a, b, {
-                                **factors, "tier": "street_disposition",
-                                "reason": "auto_merge_off:image_phash", "confidence": 0.97})
-                        stats["queued"] += 1
-                        continue
-                    # Floor-plan validation gate (migration 234): a different floor plan
-                    # DISMISSES, a one-sided floor plan QUEUES; otherwise the pHash merge
-                    # proceeds. Only ever adds conservatism — never a new merge.
-                    fp = _floor_plan_gate(
-                        conn, a.sreality_id, b.sreality_id,
-                        floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
-                    if fp == "dismiss":
-                        stats["auto_dismissed"] += 1
-                        dismissed_pairs.add(cp)
-                        _audit(audit, a, b, "phash", "dismissed",
-                               {**factors, "reason": "floor_plan_different_layout"},
-                               source="engine")
-                        continue
-                    if fp == "queue":
-                        if not dry_run:
-                            _enqueue_candidate(conn, a, b, {
-                                **factors, "tier": "street_disposition",
-                                "reason": "floor_plan_review", "confidence": 0.6})
-                        stats["queued"] += 1
-                        continue
-                    mg = None if dry_run else _merge_pair(
-                        conn, a, b, "image_phash",
-                        {**factors, "tier": "street_disposition", "confidence": 0.97})
-                    if dry_run or mg:
-                        stats["auto_phash"] += 1
-                        merged_pairs.add(cp)
-                        _audit(audit, a, b, "phash", "merged", factors,
-                               source="engine", merge_group_id=mg)
-                    continue
-
-                # Cross-source gate: the paid visual layer (classify + forensic compare)
-                # exists to match one portal's listing against ANOTHER portal's — same-source
-                # pairs buy nothing there (73/74 historical visual auto-merges were
-                # cross-source). Rule B above already auto-merges exact same-source relists for
-                # free; a same-source non-exact pair is skipped (no LLM, no queue), which cut
-                # ~36% of candidate pairs off the visual stage at ~1.4% recall cost.
-                if a.source == b.source:
-                    stats["skipped_same_source"] += 1
-                    # Same-source non-exact: the engine won't pursue this visually
-                    # (cross-source gate). Dismiss any stale proposed candidate for
-                    # it — recall-neutral per the gate's accepted tradeoff.
-                    dismissed_pairs.add(cp)
-                    continue
-
-                # rule C candidate -> rule D visual
-                pairs_left -= 1
-                stats["pairs_considered"] += 1
-                if not auto_merge_enabled:
-                    # Auto-merge off: queue for manual review without spending vision.
-                    # No forensic verdict here, but pHash already ran — carry it so the
-                    # Needs-review card still shows the one similarity signal we have.
-                    if not dry_run:
-                        _enqueue_candidate(conn, a, b, {
-                            **_factors("candidate", reason="auto_merge_off",
-                                       street_key=street_key, phash_pairs=phash_pairs),
-                            "tier": "street_disposition", "confidence": 0.6,
-                        })
-                    stats["queued"] += 1
-                    continue
-                outcome = _resolve_visual(
-                    conn, a, b, classify_fn=classify_fn, compare_fn=compare_fn,
-                    site_plan_fn=site_plan_fn, floor_plan_fn=floor_plan_fn,
-                    vision_budget=vision_budget, max_room_attempts=max_room_attempts,
-                    autodismiss=autodismiss,
-                    cosine_fn=cosine_fn, bands=bands, model_for=model_for, stats=stats,
-                )
-                # ONE factor set per pair — fed to BOTH the terminal audit `detail`
-                # (merged/dismissed) AND, when queued, the candidate `markers_matched`,
-                # so Decision history and Needs-review show identical detail. phash_pairs
-                # is carried even on the visual path (it's 0/1 here — the fast-path didn't
-                # fire — which is itself the "photos differ, escalated to vision" signal).
-                factors = _factors(
-                    "visual", reason=outcome.get("reason"), street_key=street_key,
-                    verdict=outcome.get("verdict"), room_type=outcome.get("room_type"),
-                    rationale=outcome.get("rationale"), cosine=outcome.get("cosine"),
-                    phash_pairs=phash_pairs)
-                markers = {**factors, "tier": "street_disposition",
-                           "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6}
-                # pHash already ran (pre-classify); the visual stage only auto-merges via
-                # a High forensic verdict, and auto-dismisses on a confident "different".
-                if outcome["action"] == "auto_merge":
-                    mg = None if dry_run else _merge_pair(
-                        conn, a, b, outcome["reason"], markers)
-                    if dry_run or mg:
-                        stats["auto_visual"] += 1
-                        merged_pairs.add(cp)
-                        _audit(audit, a, b, "visual", "merged", factors,
-                               source="engine", merge_group_id=mg)
-                elif outcome["action"] == "dismiss":
-                    stats["auto_dismissed"] += 1
-                    dismissed_pairs.add(cp)
-                    _audit(audit, a, b, "visual", "dismissed", factors, source="engine")
-                elif enqueue_unresolved:
-                    if not dry_run:
-                        _enqueue_candidate(conn, a, b, markers)
-                    stats["queued"] += 1
-                    # NOT audited — a queued pair IS the candidate; its factor detail
-                    # lives in markers_matched (Needs-review reads it). Auditing queued
-                    # re-logged the same pair every run (the duplicate-row bug).
-                else:
-                    # Free mode: don't pile un-vision'd pairs into the review queue
-                    # (they'd just be 'no photos compared' placeholders). pHash /
-                    # rule-B / reconcile already ran; this pair is left for a future
-                    # run (free pHash as coverage grows, or vision if re-enabled).
-                    stats["skipped_unresolved"] += 1
+                resolve_pair(conn, members[i], members[j], street_key=street_key, ctx=ctx)
 
     return finalize()
 
 
 def _finish(stats: dict[str, int], vision_budget: list[int], max_vision_calls: int) -> dict[str, int]:
     stats["vision_calls"] = max_vision_calls - vision_budget[0]
-    return stats
-
-
-def run_geo_candidates(
-    conn: Any,
-    *,
-    max_pairs: int = 20000,
-    geo_auto_merge_enabled: bool = False,
-    dry_run: bool = False,
-    deadline: float | None = None,
-) -> dict[str, int]:
-    """Geo path: find duplicate single-dwelling properties (houses/land/commercial) the
-    street+disposition engine structurally can't see. Blocks by geo cell, classifies
-    each co-located pair deterministically (classify_geo_pair — no LLM), and QUEUES the
-    matches into property_identity_candidates (tier 'geo_<family>').
-
-    `geo_auto_merge_enabled` is the P2 switch: when False (P1) even a strong house signal
-    is queued for the operator, never auto-merged — so this pass cannot false-merge. Only
-    `dum` is ever eligible to auto-merge (its profile); land/commercial/other are always
-    queue-only by profile.
-    """
-    keys = _load_geo_eligible(conn)
-    groups = _group_by_street(keys)
-    stats: dict[str, int] = {
-        "geo_eligible": len({k.sreality_id for k in keys}), "geo_cells": len(groups),
-        "geo_pairs": 0, "geo_candidates": 0, "geo_auto": 0, "geo_rejected": 0,
-        "geo_skipped_large_cell": 0,
-    }
-    seen_property_pairs: set[tuple[int, int]] = set()
-    seen_listing_pairs: set[tuple[int, int]] = set()
-    pairs_left = max_pairs
-
-    for cell, members in groups.items():
-        if len(members) > MAX_GEO_GROUP_SIZE:
-            stats["geo_skipped_large_cell"] += 1
-            LOG.info("SKIP large geo cell key=%s size=%d", cell, len(members))
-            continue
-        for i in range(len(members)):
-            if pairs_left <= 0:
-                break
-            for j in range(i + 1, len(members)):
-                if pairs_left <= 0:
-                    LOG.info("GEO pair cap reached; deferring remainder to next run")
-                    return stats
-                if deadline is not None and time.monotonic() >= deadline:
-                    LOG.info("GEO time budget reached; finalizing at geo_pairs=%d", stats["geo_pairs"])
-                    return stats
-                a, b = members[i], members[j]
-                lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))
-                if lpair in seen_listing_pairs:
-                    continue
-                seen_listing_pairs.add(lpair)
-                profile = profile_for(a.category_main)
-                decision = classify_geo_pair(a, b, profile)
-                if decision.action == "reject":
-                    stats["geo_rejected"] += 1
-                    continue
-                cp = _canon_pair(a, b)
-                if cp is None or cp in seen_property_pairs:
-                    continue
-                seen_property_pairs.add(cp)
-                pairs_left -= 1
-                stats["geo_pairs"] += 1
-                dist = (
-                    _haversine_m(a.lat, a.lng, b.lat, b.lng)
-                    if None not in (a.lat, a.lng, b.lat, b.lng) else None
-                )
-                area_ratio = _area_pct_diff(a.area_m2, b.area_m2)
-                house_no_match = (
-                    a.house_number is not None and b.house_number is not None
-                    and a.house_number.strip().lower() == b.house_number.strip().lower()
-                )
-                tier = f"geo_{profile.family}"
-                markers = {
-                    "tier": tier, "reason": decision.reason,
-                    "coord_distance_m": round(dist, 1) if dist is not None else None,
-                    "area_ratio": round(area_ratio, 4) if area_ratio is not None else None,
-                    "price_match": _price_match(a.price_czk, b.price_czk),
-                    "house_number_match": house_no_match,
-                    "confidence": (
-                        0.9 if decision.action == "auto_merge"
-                        else (0.7 if decision.reason == "geo_strong" else 0.5)
-                    ),
-                }
-                if decision.action == "auto_merge" and geo_auto_merge_enabled:
-                    if dry_run or _merge_pair(conn, a, b, "geo_exact", markers):
-                        stats["geo_auto"] += 1
-                else:
-                    if not dry_run:
-                        _enqueue_candidate(conn, a, b, markers, tier=tier)
-                    stats["geo_candidates"] += 1
     return stats
 
 
@@ -1178,6 +1401,40 @@ def _build_floor_plan_fn(conn: Any) -> Any:
     return _fn
 
 
+def _build_cache_only_floor_plan_fn(conn: Any) -> Any:
+    """A $0 floor_plan_fn that ONLY reads the batch-warmed verdict cache (never the LLM),
+    so even the FREE scheduled run can apply the floor-plan gate on warmed verdicts and
+    DEFER the rest — the same warm-then-consume pattern as the other vision tools, light
+    enough for the free run (a single app_settings read, no provider). The model MUST be
+    resolved via the SAME `LLMClient.resolve_model` the batch warm-up (submit_dedup_batch
+    `_warm_floor_plan`) and the live `_build_floor_plan_fn` use — the verdict cache is keyed
+    on the model string, so any divergence here would permanently cache-miss the free run
+    (defer forever). `LLMClient(conn)` needs no providers for a pure resolve_model read."""
+    from api.llm_client import LLMClient
+    from toolkit.visual_match import cached_floor_plan_verdict
+    model = LLMClient(conn).resolve_model("llm_floor_plan_match_model")
+
+    def _fn(a: int, b: int, ids_a: list[int], ids_b: list[int]) -> dict[str, Any] | None:
+        v = cached_floor_plan_verdict(conn, sreality_id_a=a, sreality_id_b=b, model=model)
+        return {"verdict": v, "rationale": None, "cache_hit": True} if v is not None else None
+    return _fn
+
+
+def _effective_vision_cap(*, free: bool, cache_only: bool, floor_plan_budget: int,
+                          max_vision_calls: int) -> int:
+    """The vision-budget cap handed to run_engine, by mode. Cache-only reads are free, so a
+    large cap keeps the budget from throttling them. In --free mode the ONLY vision consumer
+    is the floor-plan validation gate: a positive floor_plan_budget caps its inline COLD
+    floor-plan checks; 0 selects the cache-only floor_plan_fn (which never makes a cold
+    call) -> a large cap so a zero budget can't pre-empt the gate before it reads the warm
+    cache (the gate defers when vision_budget<=0)."""
+    if cache_only:
+        return 10_000_000
+    if free:
+        return floor_plan_budget if floor_plan_budget > 0 else 10_000_000
+    return max_vision_calls
+
+
 def _build_cache_only_fns(
     conn: Any, *, prefer_clip: bool = False, clip_model: str | None = None,
     clip_counter: list[int] | None = None,
@@ -1245,11 +1502,11 @@ def _build_cache_only_fns(
 
 
 def _visual_autodismiss_enabled(conn: Any) -> bool:
-    """Operator toggle for auto-dismissing confident visual 'different' verdicts
-    (app_settings.dedup_visual_autodismiss_enabled). Default on."""
+    """Operator toggle for auto-dismissing confident forensic 'different' verdicts
+    (app_settings.dedup_forensics_autodismiss_enabled). Default on."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT value FROM app_settings WHERE key = 'dedup_visual_autodismiss_enabled'"
+            "SELECT value FROM app_settings WHERE key = 'dedup_forensics_autodismiss_enabled'"
         )
         row = cur.fetchone()
     if row is None or row[0] is None:
@@ -1292,11 +1549,13 @@ def _clip_settings(conn: Any) -> dict[str, Any]:
 
     return {
         "prefer_clip": _flag("dedup_prefer_clip_tags"),
+        "clip_only": _flag("dedup_clip_only"),
         "cosine_enabled": _flag("dedup_clip_cosine_enabled"),
         "bands": CosineBands(
             haiku_min=_num("dedup_cosine_haiku_min"),
             sonnet_min=_num("dedup_cosine_sonnet_min"),
         ),
+        "render_min": _num("dedup_render_exclude_min"),
         "haiku_model": _val("dedup_visual_match_model_haiku"),
         "clip_model": load_taxonomy()["model"],
     }
@@ -1309,11 +1568,12 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
             INSERT INTO dedup_engine_runs (
                 ended_at, eligible, flagged_location, flagged_disposition,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
-                queued, vision_calls, auto_dismissed,
+                queued, vision_calls, auto_dismissed, floor_plan_deferred, clip_deferred,
                 clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet
             ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
                 %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s,
+                %(floor_plan_deferred)s, %(clip_deferred)s,
                 %(clip_classified)s, %(clip_cosine_calls)s, %(routed_haiku)s,
                 %(routed_sonnet)s)
             """,
@@ -1346,17 +1606,40 @@ def main() -> int:
                              "applies cached merge/dismiss results the batch lane paid for; "
                              "un-warmed pairs stay queued. The cost-efficient drain half.")
     parser.add_argument("--free", action="store_true",
-                        help="FREE mode ($0, no LLM at all): pHash + exact-address merges + "
-                             "reconcile + reject/gate dismissals only. Un-vision'd cross-source "
-                             "pairs are skipped (NOT queued as placeholders), so the review queue "
-                             "doesn't inflate. Captures every photo-sharing dup; different-photo "
-                             "dups are left for a future run (more free pHash, or vision if enabled).")
+                        help="FREE mode: pHash + exact-address merges + reconcile + reject/gate "
+                             "dismissals, NO paid all-rooms classify/compare. Un-vision'd "
+                             "cross-source pairs are skipped (NOT queued as placeholders), so the "
+                             "review queue doesn't inflate. The ONE bounded exception is the "
+                             "floor-plan validation gate (see --floor-plan-budget) — a "
+                             "targeted safety check on the small set of would-merge both-plan pairs.")
+    parser.add_argument("--candidates", action="store_true",
+                        help="Candidate-priority drain: re-decide ONLY the properties already in "
+                             "still-proposed /dedup candidates (O(queue), not a full market scan), so "
+                             "the manual queue self-clears regardless of where the full scan's "
+                             "deadline falls. Composes with --free / --cache-only / the floor-plan "
+                             "budget — same decision tree (resolve_pair), scoped work-list.")
+    parser.add_argument("--dirty", action="store_true",
+                        help="Real-time dirty drain: re-decide ONLY the street groups that contain a "
+                             "just-dedup-ready property (dedup_dirty_properties, enqueued when a "
+                             "listing's images get CLIP-tagged), so a new cross-portal listing merges "
+                             "within minutes. Full load (peers present) but O(dirty) pair-work; "
+                             "race-free claim/clear. Composes with --free / the floor-plan budget.")
+    parser.add_argument("--floor-plan-budget", type=int, default=None, dest="floor_plan_budget",
+                        help="Override app_settings.dedup_floor_plan_budget for this run: the cap on "
+                             "inline cold Sonnet floor-plan checks (the only paid call on a free run; "
+                             "it fires solely on pairs the engine WOULD merge — pHash matches / "
+                             "visual Highs). Beyond the cap, both-plan pairs DEFER to the next run. "
+                             "0 = cache-only ($0): consume only warmed verdicts. Unset = use the "
+                             "setting (default 10000). NB the budget is the count of PAID calls — "
+                             "it is not 'free', the run mode is.")
     parser.add_argument("--geo", action="store_true",
-                        help="ALSO run the geo candidate pass for single-dwelling families "
+                        help="ALSO run the geo pass for single-dwelling families "
                              "(dum/pozemek/komercni/ostatni) the street+disposition engine "
-                             "can't reach. QUEUE-ONLY in P1 — never auto-merges.")
+                             "can't reach, through the SAME free-first flow. Forces it on "
+                             "regardless of the dedup_geo_enabled setting; the scheduled run "
+                             "includes it whenever that setting is on. Skipped on --dirty.")
     parser.add_argument("--geo-only", action="store_true",
-                        help="Run ONLY the geo candidate pass (skip the street engine).")
+                        help="Run ONLY the geo pass (skip the street engine).")
     parser.add_argument("--geo-max-pairs", type=int, default=20000,
                         help="Max geo candidate pairs examined per run.")
     parser.add_argument("--verbose", action="store_true")
@@ -1390,113 +1673,197 @@ def main() -> int:
 
         deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
 
-        if not args.geo_only:
-            auto_merge_enabled = _auto_merge_enabled(conn)
-            autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
-            clip = _clip_settings(conn)
-            clip_counter = [0]
-            # Free CLIP room tags (preferred when on); the counter tracks how many
-            # listings were served from CLIP rather than the paid LLM classify.
-            ck = {"prefer_clip": clip["prefer_clip"], "clip_model": clip["clip_model"],
-                  "clip_counter": clip_counter}
-            LOG.info(
-                "ENGINE auto_merge_enabled=%s autodismiss=%s prefer_clip=%s cosine=%s "
-                "shadow=%s cache_only=%s free=%s",
-                auto_merge_enabled, autodismiss, clip["prefer_clip"],
-                clip["cosine_enabled"], args.shadow, args.cache_only, args.free,
+        from toolkit.dedup_settings import read_setting
+        # Geo path (houses/land/commercial): the scheduled run includes it when the operator
+        # flips dedup_geo_enabled; --geo / --geo-only force it ad-hoc. Default off. It runs on
+        # the FULL scan + the (bounded, candidate-scoped) candidate drain, but NOT the
+        # real-time dirty drain — geo isn't dirty-scoped, so running it there would do a full
+        # unscoped scan every :45 tick. Geo real-time is a later enhancement.
+        geo_enabled = bool(read_setting(conn, "dedup_geo_enabled"))
+        run_geo = (args.geo or args.geo_only or geo_enabled) and not args.dirty
+        geo_area_max_pct = float(read_setting(conn, "dedup_geo_area_max_pct"))
+
+        # ----- Shared setup (settings + vision fns + caps) — used by BOTH the street and
+        # geo passes, so they run the identical free-first flow (only the candidate filter
+        # differs). Built once regardless of --geo-only. -----
+        auto_merge_enabled = _auto_merge_enabled(conn)
+        autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
+        clip = _clip_settings(conn)
+        # The inline floor-plan cap (app_settings.dedup_floor_plan_budget, default
+        # 10000); --floor-plan-budget overrides it for an ad-hoc run.
+        floor_plan_budget = (
+            args.floor_plan_budget if args.floor_plan_budget is not None
+            else int(read_setting(conn, "dedup_floor_plan_budget")))
+        inconclusive_to_review = bool(
+            read_setting(conn, "dedup_floor_plan_inconclusive_to_review"))
+        clip_counter = [0]
+        # Free CLIP room tags (preferred when on); the counter tracks how many
+        # listings were served from CLIP rather than the paid LLM classify.
+        ck = {"prefer_clip": clip["prefer_clip"], "clip_model": clip["clip_model"],
+              "clip_counter": clip_counter}
+        LOG.info(
+            "ENGINE auto_merge_enabled=%s autodismiss=%s prefer_clip=%s cosine=%s "
+            "shadow=%s cache_only=%s free=%s geo=%s",
+            auto_merge_enabled, autodismiss, clip["prefer_clip"],
+            clip["cosine_enabled"], args.shadow, args.cache_only, args.free, run_geo,
+        )
+
+        # Real-time dirty drain: claim the dedup-ready properties at/before a cutoff
+        # BEFORE building the (LLM-backed) fns, so an empty queue exits without that work.
+        # The clear after the run is gated on a NON-truncated run, so a deadline-cut run
+        # keeps its whole claim (re-drained next pass) and never loses unprocessed work.
+        only_groups = None
+        dirty_cutoff = None
+        if args.dirty:
+            with conn.cursor() as cur:
+                cur.execute("SELECT now()")
+                dirty_cutoff = cur.fetchone()[0]
+            only_groups = _claim_dedup_dirty(conn, dirty_cutoff)
+            LOG.info("DIRTY drain: %d dedup-ready properties claimed", len(only_groups))
+            if not only_groups:
+                LOG.info("DIRTY drain: queue empty; nothing to do")
+                return 0
+
+        classify_fn = None
+        compare_fn = None
+        site_plan_fn = None
+        floor_plan_fn = None
+        if args.free:
+            # FREE mode: no PAID all-rooms classify/compare -> pHash / rule-B /
+            # reconcile / reject-gate only. The ONE bounded paid exception is the
+            # floor-plan validation gate: with a positive floor-plan budget it
+            # gets the LIVE fn and pays its single Sonnet check inline for the small set
+            # of would-merge both-plan pairs (auto-confirm / auto-dismiss, Option C),
+            # capped by the budget (beyond it, pairs DEFER to the next run). Budget 0 =
+            # the $0 cache-only fn: consume only batch-warmed verdicts, defer the rest.
+            floor_plan_fn = (
+                _build_floor_plan_fn(conn) if floor_plan_budget > 0
+                else _build_cache_only_floor_plan_fn(conn)
             )
+        elif auto_merge_enabled and args.cache_only:
+            # Cost-efficient consume: read warm caches only, never call the LLM.
+            classify_fn, compare_fn, site_plan_fn, floor_plan_fn = _build_cache_only_fns(
+                conn, **ck)
+        elif auto_merge_enabled and args.max_vision_calls > 0:
+            classify_fn = _build_classify_fn(conn, **ck)
+            compare_fn = _build_compare_fn(conn)
+            site_plan_fn = _build_site_plan_fn(conn)
+            floor_plan_fn = _build_floor_plan_fn(conn)
+        elif auto_merge_enabled:
+            # pHash fast-path still needs room labels to gate on interior shots.
+            classify_fn = _build_classify_fn(conn, **ck)
+        # When auto-merge is off the engine never reaches the visual step, so we
+        # skip building the (LLM-backed) classify/compare fns entirely.
 
-            classify_fn = None
-            compare_fn = None
-            site_plan_fn = None
-            floor_plan_fn = None
-            if args.free:
-                # FREE mode: no vision fns at all -> pHash / rule-B / reconcile /
-                # reject-gate only ($0); un-vision'd pairs are skipped, not queued.
-                pass
-            elif auto_merge_enabled and args.cache_only:
-                # Cost-efficient consume: read warm caches only, never call the LLM.
-                classify_fn, compare_fn, site_plan_fn, floor_plan_fn = _build_cache_only_fns(
-                    conn, **ck)
-            elif auto_merge_enabled and args.max_vision_calls > 0:
-                classify_fn = _build_classify_fn(conn, **ck)
-                compare_fn = _build_compare_fn(conn)
-                site_plan_fn = _build_site_plan_fn(conn)
-                floor_plan_fn = _build_floor_plan_fn(conn)
-            elif auto_merge_enabled:
-                # pHash fast-path still needs room labels to gate on interior shots.
-                classify_fn = _build_classify_fn(conn, **ck)
-            # When auto-merge is off the engine never reaches the visual step, so we
-            # skip building the (LLM-backed) classify/compare fns entirely.
+        # Stage 4b: the CLIP cosine recall tier (default OFF). When on it picks
+        # the forensic model per room from the stored-embedding cosine — 'sonnet'
+        # routes via the default model (model_for['sonnet'] = None).
+        cosine_fn = None
+        bands = None
+        model_for = None
+        if clip["cosine_enabled"] and compare_fn is not None:
+            from toolkit.clip_dedup import room_pair_cosine
+            bands = clip["bands"]
+            model_for = {"haiku": clip["haiku_model"], "sonnet": None}
+            _cm = clip["clip_model"]
 
-            # Stage 4b: the CLIP cosine recall tier (default OFF). When on it picks
-            # the forensic model per room from the stored-embedding cosine — 'sonnet'
-            # routes via the default model (model_for['sonnet'] = None).
-            cosine_fn = None
-            bands = None
-            model_for = None
-            if clip["cosine_enabled"] and compare_fn is not None:
-                from toolkit.clip_dedup import room_pair_cosine
-                bands = clip["bands"]
-                model_for = {"haiku": clip["haiku_model"], "sonnet": None}
-                _cm = clip["clip_model"]
+            def cosine_fn(ids_a: list[int], ids_b: list[int]) -> float | None:
+                return room_pair_cosine(
+                    conn, image_ids_a=ids_a, image_ids_b=ids_b, model=_cm)
 
-                def cosine_fn(ids_a: list[int], ids_b: list[int]) -> float | None:
-                    return room_pair_cosine(
-                        conn, image_ids_a=ids_a, image_ids_b=ids_b, model=_cm)
+        # Cache-only calls are free, so don't let the vision budget / room cap
+        # throttle consumption — try every warmed room of every warmed pair. In --free
+        # mode the cap bounds the inline floor-plan checks (see _effective_vision_cap).
+        eff_max_vision = _effective_vision_cap(
+            free=args.free, cache_only=args.cache_only,
+            floor_plan_budget=floor_plan_budget,
+            max_vision_calls=args.max_vision_calls)
+        eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
 
-            # Cache-only calls are free, so don't let the vision budget / room cap
-            # throttle consumption — try every warmed room of every warmed pair.
-            eff_max_vision = 10_000_000 if args.cache_only else args.max_vision_calls
-            eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
+        from datetime import datetime, timezone
+        run_at = datetime.now(timezone.utc)
+        # Candidate-priority drain: scope the scan to the properties in still-proposed
+        # /dedup candidates so the queue self-clears in O(queue), not O(market). An
+        # EMPTY set (no candidates) loads nothing — a clean no-op, NOT a full scan.
+        restrict = (_proposed_candidate_property_ids(conn) if args.candidates else None)
+        if args.candidates:
+            LOG.info("CANDIDATE drain: %d properties across the proposed queue",
+                     len(restrict or set()))
 
-            from datetime import datetime, timezone
-            run_at = datetime.now(timezone.utc)
+        # Shared kwargs every pass passes to run_engine — the free-first flow itself.
+        engine_kw: dict[str, Any] = dict(
+            classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
+            floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands,
+            model_for=model_for, render_min=clip["render_min"],
+            inconclusive_to_review=inconclusive_to_review,
+            max_vision_calls=eff_max_vision, max_room_attempts=eff_max_rooms,
+            auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
+            enqueue_unresolved=not args.free, dry_run=args.shadow, deadline=deadline,
+            restrict_property_ids=restrict,
+            # clip_only only takes effect WITH prefer_clip — else a CLIP-tagged listing would
+            # still be Haiku-classified, contradicting CLIP-only. (Setting help says as much.)
+            clip_only=clip["clip_only"] and clip["prefer_clip"],
+            clip_model=clip["clip_model"],
+        )
+
+        if not args.geo_only:
             pair_audit: list[dict[str, Any]] = []
             stats = run_engine(
-                conn, classify_fn=classify_fn, compare_fn=compare_fn,
-                site_plan_fn=site_plan_fn,
-                floor_plan_fn=floor_plan_fn,
-                cosine_fn=cosine_fn, bands=bands, model_for=model_for,
-                audit=pair_audit,
-                max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,
-                max_room_attempts=eff_max_rooms,
-                auto_merge_enabled=auto_merge_enabled,
-                autodismiss=autodismiss,
-                enqueue_unresolved=not args.free,
-                dry_run=args.shadow,
-                deadline=deadline,
+                conn, audit=pair_audit, max_pairs=args.max_pairs,
+                only_groups_with_property_ids=only_groups, **engine_kw,
             )
             stats["clip_classified"] = clip_counter[0]
             if not args.shadow:
                 _write_run_row(conn, stats)
                 _write_pair_audit(conn, run_at, pair_audit)
+                # Clear the claim ONLY on a run that finished the scan. A truncated run
+                # (deadline / pair-cap) didn't reach every dirty group, so keep the whole
+                # claim — it re-drains next pass; a few already-resolved pairs re-run cheaply
+                # (classify_pair rejects 'already_merged'), but NO unprocessed dirty property
+                # is silently dropped. (Oversized groups are unresolvable everywhere, so a
+                # finished run rightly clears them — the daily full scan handles them if they
+                # shrink below MAX_GROUP_SIZE.)
+                if args.dirty and not stats.get("truncated"):
+                    cleared = _clear_dedup_dirty(conn, only_groups, dirty_cutoff)
+                    LOG.info("DIRTY drain: cleared %d drained properties", cleared)
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
-                "auto_dismissed=%d reconciled=%d queued=%d skipped_unresolved=%d rejected=%d "
+                "auto_dismissed=%d floor_plan_deferred=%d clip_deferred=%d reconciled=%d queued=%d "
+                "skipped_unresolved=%d rejected=%d "
                 "skipped_same_source=%d pairs=%d vision_calls=%d",
                 "shadow" if args.shadow else "done",
                 stats["eligible"], stats["auto_address"], stats["auto_phash"],
-                stats["auto_visual"], stats["auto_dismissed"], stats["reconciled"],
+                stats["auto_visual"], stats["auto_dismissed"],
+                stats.get("floor_plan_deferred", 0), stats.get("clip_deferred", 0),
+                stats["reconciled"],
                 stats["queued"], stats["skipped_unresolved"], stats["rejected"],
                 stats.get("skipped_same_source", 0),
                 stats["pairs_considered"], stats["vision_calls"],
             )
 
-        if args.geo or args.geo_only:
-            # P1: geo_auto_merge_enabled is hard-OFF — every family queues for the
-            # operator; nothing auto-merges until the golden set calibrates it (P2).
-            geo_stats = run_geo_candidates(
-                conn, max_pairs=args.geo_max_pairs,
-                geo_auto_merge_enabled=False, dry_run=args.shadow, deadline=deadline,
+        if run_geo:
+            # Same free-first flow over geo-keyed single-dwelling families; geo=True swaps
+            # the loader + candidate filter (classify_geo_pair, ±area tolerance) + queue
+            # tier. NO separate dedup_engine_runs row — the dashboard reads the latest single
+            # row (ORDER BY started_at DESC LIMIT 1); a geo row (small geo eligible,
+            # auto_address=0) would hide the street pass's headline. Geo decisions still land
+            # in dedup_pair_audit (decision history) + the tier='geo' candidate queue.
+            geo_audit: list[dict[str, Any]] = []
+            geo_stats = run_engine(
+                conn, audit=geo_audit, max_pairs=args.geo_max_pairs,
+                geo=True, geo_area_max_pct=geo_area_max_pct, **engine_kw,
             )
+            if not args.shadow:
+                _write_pair_audit(conn, run_at, geo_audit)
             LOG.info(
-                "GEO %s eligible=%d cells=%d pairs=%d candidates=%d auto=%d rejected=%d "
-                "skipped_large_cell=%d",
+                "GEO %s eligible=%d auto_phash=%d auto_visual=%d auto_dismissed=%d "
+                "floor_plan_deferred=%d queued=%d skipped_unresolved=%d rejected=%d "
+                "pairs=%d vision_calls=%d area_max=%.2f",
                 "shadow" if args.shadow else "done",
-                geo_stats["geo_eligible"], geo_stats["geo_cells"], geo_stats["geo_pairs"],
-                geo_stats["geo_candidates"], geo_stats["geo_auto"], geo_stats["geo_rejected"],
-                geo_stats["geo_skipped_large_cell"],
+                geo_stats["eligible"], geo_stats["auto_phash"], geo_stats["auto_visual"],
+                geo_stats["auto_dismissed"], geo_stats.get("floor_plan_deferred", 0),
+                geo_stats["queued"], geo_stats["skipped_unresolved"], geo_stats["rejected"],
+                geo_stats["pairs_considered"], geo_stats["vision_calls"], geo_area_max_pct,
             )
     return 0
 
