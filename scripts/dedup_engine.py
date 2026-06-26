@@ -309,6 +309,9 @@ def _enqueue_candidate(
     conn: Any, a: ListingKey, b: ListingKey, markers: dict[str, Any],
     *, tier: str = "street_disposition",
 ) -> None:
+    # `markers["tier"]` is the source of truth for the COLUMN (resolve_pair sets it to
+    # ctx.tier — 'street_disposition' or 'geo'); the `tier` kwarg is only the fallback for
+    # the rare markers dict that omits it (the street-only rule-B auto_merge_off path).
     from psycopg.types.json import Jsonb
     if a.property_id is None or b.property_id is None or a.property_id == b.property_id:
         return
@@ -321,7 +324,7 @@ def _enqueue_candidate(
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (left_property_id, right_property_id) DO NOTHING
             """,
-            (lo, hi, tier, markers.get("confidence"), Jsonb(markers)),
+            (lo, hi, markers.get("tier", tier), markers.get("confidence"), Jsonb(markers)),
         )
 
 
@@ -866,6 +869,12 @@ class _RunContext:
     # shared, so houses/land/commercial run the exact same free-first flow as apartments.
     classify: Any = classify_pair
     tier: str = "street_disposition"
+    # The cross-source gate (skip same-source non-exact pairs) is justified ONLY where rule B
+    # already auto-merges same-source exact-address relists for free — i.e. the street path.
+    # Geo has no rule B (its classify maps auto_merge→candidate), so a same-portal re-post of a
+    # house would otherwise be silently dropped; geo sets this False so those pairs reach the
+    # visual stage. (Wave 3 revisits the gate holistically for recall.)
+    cross_source_only: bool = True
     # tunables (read-only)
     auto_merge_enabled: bool = True
     autodismiss: bool = True
@@ -1009,13 +1018,14 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                    source="engine", merge_group_id=mg)
         return
 
-    # Cross-source gate: the paid visual layer (classify + forensic compare) exists to
-    # match one portal's listing against ANOTHER portal's — same-source pairs buy nothing
-    # there (73/74 historical visual auto-merges were cross-source). Rule B above already
+    # Cross-source gate (street path only): the paid visual layer exists to match one
+    # portal's listing against ANOTHER portal's — same-source pairs buy nothing there
+    # (73/74 historical visual auto-merges were cross-source). Rule B above already
     # auto-merges exact same-source relists for free; a same-source non-exact pair is
     # skipped (no LLM, no queue), which cut ~36% of candidate pairs off the visual stage
-    # at ~1.4% recall cost.
-    if a.source == b.source:
+    # at ~1.4% recall cost. The geo path (cross_source_only=False) has no rule B, so it does
+    # NOT skip same-source pairs — a same-portal house re-post must still reach the visual stage.
+    if ctx.cross_source_only and a.source == b.source:
         stats["skipped_same_source"] += 1
         # Same-source non-exact: the engine won't pursue this visually (cross-source
         # gate). Dismiss any stale proposed candidate for it — recall-neutral.
@@ -1190,6 +1200,7 @@ def run_engine(
     classify = _make_geo_classify(geo_area_max_pct) if geo else classify_pair
     ctx = _RunContext(
         classify=classify, tier=("geo" if geo else "street_disposition"),
+        cross_source_only=not geo,
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
         floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,

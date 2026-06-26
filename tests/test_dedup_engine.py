@@ -684,6 +684,34 @@ def test_run_engine_geo_routes_through_resolve_pair_with_geo_tier(monkeypatch: A
     assert enq and enq[0]["tier"] == "geo"     # queued under the geo tier, not street
 
 
+def test_run_engine_geo_does_not_skip_same_source(monkeypatch: Any) -> None:
+    # The geo path has no rule B, so unlike the street path it must NOT drop same-source
+    # pairs (a portal re-posting its own house) — they reach the visual stage.
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
+        _gk(1, 101, source="sreality"), _gk(2, 102, source="sreality"),
+    ])
+    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats["skipped_same_source"] == 0
+    assert stats["pairs_considered"] == 1
+
+
+def test_enqueue_candidate_tier_column_from_markers() -> None:
+    # Regression: the tier COLUMN must reflect markers['tier'] (= ctx.tier), not the kwarg
+    # default — else a geo candidate lands as 'street_disposition' and vanishes from the
+    # geo queue even though its markers_matched jsonb says 'geo'.
+    import scripts.dedup_engine as eng
+    conn = _FakeConn([])
+    eng._enqueue_candidate(conn, _gk(1, 101), _gk(2, 102), {"tier": "geo", "confidence": 0.6})
+    assert conn.enqueued and conn.enqueued[0][2] == "geo"   # params = (lo, hi, TIER, conf, jsonb)
+    # markers without a tier falls back to the kwarg default (the street rule-B path).
+    conn2 = _FakeConn([])
+    eng._enqueue_candidate(conn2, _gk(1, 101), _gk(2, 102), {"confidence": 0.9})
+    assert conn2.enqueued[0][2] == "street_disposition"
+
+
 def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
     members = [_gk(i, 100 + i) for i in range(1, eng.MAX_GEO_GROUP_SIZE + 3)]  # one oversized cell

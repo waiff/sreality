@@ -735,7 +735,10 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (`dedup_geo_area_max_pct`, default ±20% — wider than the street 10% because the visual flow still
     confirms), and the queue tier (`'geo'`). The geo classify maps its deterministic `auto_merge` →
     `candidate`, so a geo signal NEVER merges on its own — the free-first visual flow (with FACADE /
-    SITE-PLAN priority via `room_priority_for`, rule #15 PR-1) is the sole merge gate. Gated by the
+    SITE-PLAN priority via `room_priority_for`, rule #15 PR-1) is the sole merge gate. The geo path
+    also does NOT apply the **cross-source gate** (`_RunContext.cross_source_only=False`): that gate is
+    justified only where rule B auto-merges same-source exact-address relists for free (the street
+    path), and geo has no rule B — so a same-portal house re-post still reaches the visual stage. Gated by the
     `dedup_geo_enabled` setting: when on, the scheduled FULL-SCAN + CANDIDATE-DRAIN runs also run the
     geo pass (after the street pass, sharing the `--max-seconds` budget); the real-time DIRTY drain
     skips it (geo isn't dirty-scoped). `--geo` / `--geo-only` force it ad-hoc. Each geo pass writes its
