@@ -21,6 +21,7 @@ import re
 from typing import TYPE_CHECKING, Any, Callable
 from unicodedata import combining, normalize
 
+from scraper.floor import is_plausible_floor
 from scraper.source_parsers.common import RECORD_LISTING_TOOL
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -40,7 +41,9 @@ _SYSTEM = (
     "statements, 'medium' for strong implications, 'low' for guesses. Do not "
     "invent values. Czech terms: výtah=lift, balkón/lodžie/terasa=balcony, "
     "garáž/parkování/stání=parking, cihla/panel=building material, "
-    "po rekonstrukci/novostavba/před rekonstrukcí=condition."
+    "po rekonstrukci/novostavba/před rekonstrukcí=condition. floor is the "
+    "APARTMENT's own storey (e.g. 've 3. patře', '3. NP'), NEVER the building's "
+    "total number of floors ('třípodlažní dům' / 'z celkových 5 pater')."
 )
 
 
@@ -122,6 +125,16 @@ def columns_from_extraction(
         transformed = transform(value)
         if transformed is not None:
             out[col] = transformed
+    # Plausibility: an apartment's storey can't exceed the building's total and
+    # lives in a sane band — drop a floor that violates either (usually a misread
+    # building-total number). The total may come from this same extraction or the
+    # already-stored column. One shared guard with the deterministic miner.
+    if "floor" in out:
+        total = out.get("total_floors")
+        if total is None:
+            total = current.get("total_floors")
+        if not is_plausible_floor(out["floor"], total):
+            del out["floor"]
     return out
 
 
