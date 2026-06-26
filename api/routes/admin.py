@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from api import dependencies as deps
 from api import rent_map
@@ -84,7 +84,9 @@ class UpdateClipRegionsIn(BaseModel):
 
 
 class UpdateTagPriorityIn(BaseModel):
-    order: list[str]
+    # The largest family has 9 tags; cap well above that (defense-in-depth — normalize_priority
+    # drops anything unknown anyway, but reject an oversized payload before deserializing it).
+    order: list[str] = Field(default_factory=list, max_length=100)
 
 
 # --- skills ---------------------------------------------------------------

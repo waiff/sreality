@@ -78,8 +78,11 @@ function FamilyList({ fam }: { fam: DedupTagPriority }) {
 
   const mut = useMutation({
     mutationFn: (next: string[]) => updateDedupTagPriority(fam.family, next),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['dedup-tag-priorities'] }),
-    onError: () => setOrder(fam.order), // revert the optimistic local order
+    // onSettled (not onError): a refetch re-syncs the local order to the server on BOTH
+    // success and failure — so a failed write reverts the optimistic drag AND surfaces via
+    // the app-wide MutationCache error toast (which is skipped for mutations with their own
+    // onError). No silent failures.
+    onSettled: () => qc.invalidateQueries({ queryKey: ['dedup-tag-priorities'] }),
   });
 
   const sensors = useSensors(
