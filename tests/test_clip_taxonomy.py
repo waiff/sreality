@@ -33,6 +33,22 @@ def test_prompts_nonempty():
     assert all(isinstance(v, str) and v for v in _TAX["prompts"].values())
 
 
+def test_property_document_wired():
+    assert _TAX["collapse"]["energy_certificate"] == "property_document"
+    assert _TAX["collapse"]["document_text"] == "property_document"
+    assert "property_document" in set(ROOM_TYPES)
+
+
+def test_drawing_tags_match_plan_family():
+    # The tagger NULLs render_score for DRAWING/DOCUMENT logical tags (the render-vs-photo
+    # axis is noise on a drawing). That set must stay == the room_taxonomy 'plan' family, so a
+    # new plan/doc tag automatically gets no render score.
+    from scraper.clip_tagger import _DRAWING_LOGICAL_TAGS
+    from toolkit.room_taxonomy import ROOM_FAMILIES
+    plan_family = {t for t, f in ROOM_FAMILIES.items() if f == "plan"}
+    assert _DRAWING_LOGICAL_TAGS == plan_family
+
+
 def test_render_photo_anchors_present_and_nonempty():
     # The orthogonal render-vs-photo axis (migration 239): both sides must exist + be
     # non-empty, else the tagger silently scores every image render_score 0.

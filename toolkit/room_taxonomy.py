@@ -27,6 +27,7 @@ ROOM_FAMILIES: dict[str, str] = {
     "garden": "exterior",
     "floor_plan": "plan",
     "site_plan": "plan",
+    "property_document": "plan",
     "other": "other",
 }
 

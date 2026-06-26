@@ -16,6 +16,8 @@
     "cadastral_map": "a cadastral or land-registry map showing numbered land parcels and property boundaries",
     "aerial_plot": "an aerial or satellite photograph of a plot of land or property seen from above",
     "location_map": "a road or location map showing streets and a place marker",
+    "energy_certificate": "an energy performance certificate document with coloured A-to-G efficiency bars and text",
+    "document_text": "a scanned document, contract, price list or table of text and numbers",
     "other": "a photograph of something else"
   },
   "collapse": {
@@ -33,6 +35,8 @@
     "cadastral_map": "site_plan",
     "aerial_plot": "site_plan",
     "location_map": "other",
+    "energy_certificate": "property_document",
+    "document_text": "property_document",
     "other": "other"
   },
   "render_note": "An ORTHOGONAL axis to the room argmax above (a render IS a kitchen-render): render_score = softmax over render_anchors + photo_anchors, summed over the render side. Validated on the 'Rezidence Na Bradle' development (renders 0.55-0.99) vs a bazos amateur-photo control (0.05-0.20) — a clean split. Used to exclude shared development RENDERS from the byt pHash/cosine merge signal (the 'vizualizace' caption is absent on those units, so the IMAGE is the signal).",

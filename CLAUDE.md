@@ -644,7 +644,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     the same: `same_unit` if any pair shares a unit). So a matching plan among several is never missed
     into a wrong dismiss. No schema / cost change — one call, the model reasons over all pairs; the
     payload labels each plan ("Listing A plan 2") so the rationale can cite the matching pair. The
-    prompt update is `updated_by`-guarded so an operator-customised prompt is never clobbered. The gate distinguishes **"a human must decide" (queue)** from **"validate it
+    prompt update is `updated_by`-guarded so an operator-customised prompt is never clobbered.
+    **2D-plan-aware dismiss (migration 245).** The gate was wrongly dismissing legit same-property
+    pairs whose "floor plans" are 3D perspective RENDERS (a 3+1 flat misread as a "two-level duplex").
+    `render_score` can't separate a 2D plan from a 3D render (its anchors are about *interiors*, so a
+    drawing's score is noise — empirically a flat 0..1 spread), so the distinction is made by the
+    **vision model that sees the images**: the prompt judges layout ONLY from flat 2D floor plans,
+    treats 3D renders as unreliable, and returns `inconclusive` when neither side has a usable 2D plan
+    (only 3D renders) — which the gate routes to the operator queue, NEVER an auto-dismiss. So
+    `different_layout` (→ dismiss) fires only on a confirmed 2D-plan mismatch (the "dismiss only on
+    reliable 2D plans" posture). Migration 245 also SWEPT the cache (deleted every `different_layout`
+    verdict, ~242) so the stale pre-N×N + the 3D-render misreads re-evaluate under the 2D-aware prompt.
+    The gate distinguishes **"a human must decide" (queue)** from **"validate it
     later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run (budget exhausted /
     cache-miss in the $0 escape hatch) → **`defer`** — skip, re-try next run, never the manual queue
     (the pair is automatable, not a human call); exactly ONE side has a plan → **`queue`** (genuinely a
@@ -702,7 +713,15 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
     render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
     `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,
-    so it is NOT part of the room argmax). For **byt**, an image scoring >=
+    so it is NOT part of the room argmax). **The axis is only meaningful for ROOM/photo images** —
+    its anchors are about *interiors*, so it scores a DRAWING (floor/site plan) or DOCUMENT arbitrarily
+    (a flat 0..1 spread). So `render_score` is **left NULL for the plan/document logical tags**
+    (`floor_plan` / `site_plan` / `property_document` — `clip_tagger._DRAWING_LOGICAL_TAGS`, kept ==
+    the `plan` family; the backfill skips them; migration 246 NULLed the ~445k existing). The UI render
+    badge self-hides on a NULL score, so "RENDER" no longer appears on a `půdorys`. The new
+    **`property_document`** logical tag (energy certificates, contracts, spec tables) is added to the
+    taxonomy + `ROOM_TYPES` + the room-classifier CHECK (migration 246); populating it on existing
+    images needs a CLIP re-tag (new/re-tagged images get it automatically). For **byt**, an image scoring >=
     `app_settings.dedup_render_exclude_min` (registry default **0.95**; `RENDER_SCORE_EXCLUDE_MIN` is the
     code fallback) is a shared development RENDER and is dropped from the pHash
     count, the distinctive single-match override, AND the forensic room compare

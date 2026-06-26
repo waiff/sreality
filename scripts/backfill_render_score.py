@@ -28,7 +28,8 @@ _SELECT = """
     SELECT t.image_id, t.model, e.embedding
     FROM image_clip_tags t
     JOIN image_clip_embeddings e ON e.image_id = t.image_id AND e.model = t.model
-    WHERE t.render_score IS NULL {shard}
+    WHERE t.render_score IS NULL
+      AND t.logical_tag NOT IN ('floor_plan', 'site_plan', 'property_document') {shard}
     LIMIT %(limit)s
 """
 _UPDATE = "UPDATE image_clip_tags SET render_score = %s WHERE image_id = %s AND model = %s"
