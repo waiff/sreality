@@ -713,7 +713,15 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
     render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
     `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,
-    so it is NOT part of the room argmax). For **byt**, an image scoring >=
+    so it is NOT part of the room argmax). **The axis is only meaningful for ROOM/photo images** —
+    its anchors are about *interiors*, so it scores a DRAWING (floor/site plan) or DOCUMENT arbitrarily
+    (a flat 0..1 spread). So `render_score` is **left NULL for the plan/document logical tags**
+    (`floor_plan` / `site_plan` / `property_document` — `clip_tagger._DRAWING_LOGICAL_TAGS`, kept ==
+    the `plan` family; the backfill skips them; migration 246 NULLed the ~445k existing). The UI render
+    badge self-hides on a NULL score, so "RENDER" no longer appears on a `půdorys`. The new
+    **`property_document`** logical tag (energy certificates, contracts, spec tables) is added to the
+    taxonomy + `ROOM_TYPES` + the room-classifier CHECK (migration 246); populating it on existing
+    images needs a CLIP re-tag (new/re-tagged images get it automatically). For **byt**, an image scoring >=
     `app_settings.dedup_render_exclude_min` (registry default **0.95**; `RENDER_SCORE_EXCLUDE_MIN` is the
     code fallback) is a shared development RENDER and is dropped from the pHash
     count, the distinctive single-match override, AND the forensic room compare

@@ -22,12 +22,19 @@ from pathlib import Path
 _TAXONOMY_PATH = Path(__file__).resolve().parent.parent / "data" / "clip_taxonomy.json"
 
 
+# The render-vs-photo axis is only meaningful for ROOM/photo images (a real kitchen photo
+# vs a 3D kitchen render). For DRAWINGS / DOCUMENTS (floor plans, site/situation/cadastral
+# plans, property documents) it's noise — the anchors are about interiors, so a flat drawing
+# scores arbitrarily (empirically a flat 0..1 spread). We leave their render_score NULL.
+_DRAWING_LOGICAL_TAGS: frozenset[str] = frozenset({"floor_plan", "site_plan", "property_document"})
+
+
 @dataclass(frozen=True)
 class TagResult:
     fine_tag: str       # the CLIP anchor that won (e.g. 'cadastral_map')
     logical_tag: str    # collapsed to the engine's label space (e.g. 'site_plan')
     confidence: float   # softmax probability of the winning anchor (0..1)
-    render_score: float  # P(3D render/visualization) vs real photo, 0..1 — orthogonal axis
+    render_score: float | None  # P(3D render) vs real photo, 0..1 — NULL for drawings/documents
 
 
 def load_taxonomy() -> dict:
@@ -141,8 +148,9 @@ class Tagger:
         out = []
         for i, c, r in zip(idx.tolist(), conf.tolist(), render):
             fine = self._labels[i]
-            out.append(TagResult(fine, self._collapse.get(fine, fine),
-                                 round(float(c), 4), round(float(r), 4)))
+            logical = self._collapse.get(fine, fine)
+            rs = None if logical in _DRAWING_LOGICAL_TAGS else round(float(r), 4)
+            out.append(TagResult(fine, logical, round(float(c), 4), rs))
         return out
 
     def render_scores_from_emb(self, emb) -> list[float]:

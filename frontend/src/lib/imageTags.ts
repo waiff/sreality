@@ -28,12 +28,15 @@ export const IMAGE_TAG_LABELS: Record<string, string> = {
   garden: 'zahrada',
   floor_plan: 'půdorys',
   site_plan: 'situační plán',
+  property_document: 'dokument',
   other: 'ostatní',
   // CLIP fine sub-styles (data/clip_taxonomy.json) that collapse into the above.
   situation_plan: 'situační plán',
   cadastral_map: 'katastrální mapa',
   aerial_plot: 'letecký snímek',
   location_map: 'mapa lokality',
+  energy_certificate: 'energetický průkaz',
+  document_text: 'dokument',
 };
 
 /** Czech display label for a CLIP/room tag; falls back to the raw tag, null for none. */
