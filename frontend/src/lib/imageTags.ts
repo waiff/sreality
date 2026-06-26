@@ -23,6 +23,8 @@ export const IMAGE_TAG_LABELS: Record<string, string> = {
   living_room: 'obývací pokoj',
   bedroom: 'ložnice',
   hallway: 'chodba',
+  staircase_interior: 'schodiště interiér',
+  staircase_exterior: 'schodiště exteriér',
   exterior_facade: 'fasáda',
   balcony_terrace: 'balkon/terasa',
   garden: 'zahrada',

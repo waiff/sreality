@@ -527,6 +527,49 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
   },
   {
+    "filename": "clip_retag.yml",
+    "name": "Dedup — CLIP re-tag from stored embeddings (sharded)",
+    "description": "Re-runs the CLIP zero-shot tagging over ALREADY-tagged images from their STORED embeddings (image_clip_embeddings) — NO R2 download, NO image re-inference, just the taxonomy's text anchors dotted with each stored vector. How a TAXONOMY change (new logical tags, sharpened anchors) reaches the back catalogue cheaply; new / not-yet-tagged images go through clip_tag.yml, which loads the same live taxonomy.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 * * * *",
+        "human": "Every hour at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "Per-shard wall-clock budget",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Per-shard cap (0 = until time budget)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "clip-retag",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/clip_retag.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/clip_retag.yml"
+  },
+  {
     "filename": "clip_tag.yml",
     "name": "Dedup — CLIP image tagging (sharded)",
     "description": "Backfills image_clip_tags + image_clip_embeddings: the self-hosted CLIP zero-shot tag per stored image (free replacement for the paid room classifier on the coarse dedup-relevant tags, and the FIRST tagger for dum/pozemek/komercni). Runs GLOBAL full-scale by default (the Středočeský priority drain is complete; pass region_id on dispatch to re-prioritise a kraj). ACTIVE-listing images first; idempotent + resumable (a tagged image drops out of the next select), so once caught up the hourly runs are cheap no-ops that just keep pace with new inflow. Horizontally sharded into 4 parallel jobs (image_id %% 4), each with its own runner + cap, like images.yml. Installs CPU torch + the `clip` extra (transformers); the production CLIP could move to int8-ONNX later as an optimization. NOT a portal ingest job (untagged, portal: null).",
