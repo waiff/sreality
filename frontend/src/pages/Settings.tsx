@@ -47,6 +47,7 @@ import { fmtAbsolute } from '@/lib/format';
 import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton } from '@/components/controls';
 import DedupEngineSection from '@/components/DedupEngineSection';
+import DedupTagPrioritiesSection from '@/components/DedupTagPrioritiesSection';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
 export default function Settings() {
@@ -124,6 +125,23 @@ export default function Settings() {
         }
       >
         <DedupEngineSection />
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        id="dedup-tag-priorities"
+        eyebrow="Matching"
+        title="Dedup comparison priority"
+        description={
+          <>
+            The order the visual layer compares matching rooms in — it stops at the
+            first confident match, so the tag at the top leads. Drag to reorder per
+            listing type. The defaults are grounded (facade for houses, situation plan
+            for plots, wet rooms for flats); a reorder only changes which photos are
+            compared first, never which are dropped.
+          </>
+        }
+      >
+        <DedupTagPrioritiesSection />
       </CollapsibleSection>
 
       <CollapsibleSection

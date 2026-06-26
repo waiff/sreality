@@ -217,6 +217,10 @@ def collect(
     compare_model = llm_client.resolve_model(_COMPARE_MODEL_KEY)
     site_plan_model = llm_client.resolve_model(_SITE_PLAN_MODEL_KEY)
     floor_plan_model = llm_client.resolve_model(_FLOOR_PLAN_MODEL_KEY)
+    # Same operator-reordered tag priorities the engine warms against — so this lane warms
+    # the SAME priority-ordered room prefix the replay will stop at (recall-safe superset).
+    from toolkit.dedup_priorities import load_tag_priority_overrides
+    tag_overrides = load_tag_priority_overrides(conn)
 
     keys = _load_eligible(conn)
     groups = _group_by_street(keys)
@@ -292,6 +296,7 @@ def collect(
                     classify_model=classify_model, compare_model=compare_model,
                     site_plan_model=site_plan_model, n_images=n_images,
                     max_room_attempts=max_room_attempts, funnel=funnel,
+                    tag_overrides=tag_overrides,
                 )
 
     return {**funnel, **submitter.stats}
@@ -339,6 +344,7 @@ def _collect_visual(
     n_images: int,
     max_room_attempts: int,
     funnel: dict[str, int],
+    tag_overrides: dict[str, list[str]] | None = None,
 ) -> None:
     """Mirror of run_engine._resolve_visual, but it ENQUEUES batch requests for
     the LLM calls the synchronous resolver would make, instead of making them."""
@@ -404,7 +410,7 @@ def _collect_visual(
     # at the first High, so warming this priority-ordered prefix is the recall-safe
     # superset (whatever room replay stops at is among these and is warm).
     common = set(rooms_a) & set(rooms_b)
-    for room in rooms_in_priority(common, a.category_main)[:max_room_attempts]:
+    for room in rooms_in_priority(common, a.category_main, tag_overrides)[:max_room_attempts]:
         if s.exhausted:
             break
         if cached_visual_verdict(

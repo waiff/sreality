@@ -142,17 +142,51 @@ def profile_for(category_main: str | None) -> MatchProfile:
     return _PROFILES.get(category_main or "", _BYT_PROFILE)
 
 
-def room_priority_for(category_main: str | None) -> tuple[str, ...]:
+# The families that carry their own comparison-priority order. dum/komercni/ostatni share
+# the HOUSE default but are listed separately so the operator can tune each independently.
+TAG_PRIORITY_FAMILIES: tuple[str, ...] = ("byt", "dum", "komercni", "ostatni", "pozemek")
+
+
+def default_priority_for_family(family: str | None) -> tuple[str, ...]:
+    """The coded default comparison-tag order for a family — also the full set of VALID tags
+    for it (the operator can only reorder these). byt → interior rooms; pozemek → site plan
+    first; dum/komercni/ostatni → facade first."""
+    if family == "byt":
+        return BYT_ROOM_PRIORITY
+    if family == "pozemek":
+        return LAND_PRIORITY
+    return HOUSE_PRIORITY
+
+
+def normalize_priority(order: list[str] | tuple[str, ...], default: tuple[str, ...]) -> tuple[str, ...]:
+    """Coerce an operator-supplied order into a COMPLETE, VALID priority for a family: keep
+    only known tags (the default's set) in the operator's order, drop duplicates, then append
+    any default tags the operator omitted (so no room is silently dropped from comparison)."""
+    valid = set(default)
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in order:
+        if tag in valid and tag not in seen:
+            out.append(tag)
+            seen.add(tag)
+    out.extend(t for t in default if t not in seen)
+    return tuple(out)
+
+
+def room_priority_for(
+    category_main: str | None, overrides: dict[str, list[str]] | None = None
+) -> tuple[str, ...]:
     """Comparison tag order for a category's perceptual + forensic image layers — the
     PRIORITY that leads (stop-at-first-High). byt → interior rooms (wet rooms first);
     pozemek → SITE PLAN first (the plot's identity); dum/komercni/ostatni → FACADE first
-    (the building's identity), then interiors. (Stage 2 makes these operator-editable.)"""
+    (the building's identity), then interiors. `overrides` (operator-editable, keyed by
+    family) reorders within the family's valid tag set; an absent / partial entry falls
+    back to (or is completed from) the coded default via `normalize_priority`."""
     fam = profile_for(category_main).family
-    if fam == "byt":
-        return BYT_ROOM_PRIORITY
-    if fam == "pozemek":
-        return LAND_PRIORITY
-    return HOUSE_PRIORITY
+    default = default_priority_for_family(fam)
+    if overrides and fam in overrides and overrides[fam]:
+        return normalize_priority(overrides[fam], default)
+    return default
 
 
 def distinctive_rooms_for(category_main: str | None) -> frozenset[str]:
@@ -632,11 +666,14 @@ def decide_phash_fastpath(
     return identical_image_pairs >= PHASH_MIN_IDENTICAL_PAIRS or distinctive_match
 
 
-def rooms_in_priority(common_rooms: set[str], category_main: str | None = None) -> list[str]:
+def rooms_in_priority(
+    common_rooms: set[str], category_main: str | None = None,
+    overrides: dict[str, list[str]] | None = None,
+) -> list[str]:
     """The room types present in BOTH listings, in comparison priority order for the
-    category. Apartments (default / NULL) compare INTERIOR rooms only; other categories
-    may compare exterior rooms too."""
-    return [r for r in room_priority_for(category_main) if r in common_rooms]
+    category (operator `overrides` honoured per family). Apartments (default / NULL) compare
+    INTERIOR rooms only; other categories may compare exterior rooms too."""
+    return [r for r in room_priority_for(category_main, overrides) if r in common_rooms]
 
 
 def verdict_is_merge(verdict: str | None) -> bool:
