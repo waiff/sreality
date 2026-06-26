@@ -1131,7 +1131,7 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
-        "floor_plan_deferred": 0,
+        "floor_plan_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
     })
@@ -1172,10 +1172,12 @@ def run_engine(
             continue
         for i in range(len(members)):
             if ctx.pairs_left <= 0:
+                stats["truncated"] = 1  # pair cap exhausted between groups — also truncation
                 break
             for j in range(i + 1, len(members)):
                 if ctx.pairs_left <= 0:
                     LOG.info("PAIR cap reached; deferring remainder to next run")
+                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
                     return finalize()
                 # Wall-clock budget: per-pair cold vision can outrun the job timeout,
                 # which SIGKILLs the run before it writes results. Stop cleanly so the run
@@ -1186,6 +1188,7 @@ def run_engine(
                         "TIME budget reached; finalizing cleanly at pairs_considered=%d",
                         stats["pairs_considered"],
                     )
+                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
                     return finalize()
                 resolve_pair(conn, members[i], members[j], street_key=street_key, ctx=ctx)
 
@@ -1667,6 +1670,22 @@ def main() -> int:
                 clip["cosine_enabled"], args.shadow, args.cache_only, args.free,
             )
 
+            # Real-time dirty drain: claim the dedup-ready properties at/before a cutoff
+            # BEFORE building the (LLM-backed) fns, so an empty queue exits without that work.
+            # The clear after the run is gated on a NON-truncated run, so a deadline-cut run
+            # keeps its whole claim (re-drained next pass) and never loses unprocessed work.
+            only_groups = None
+            dirty_cutoff = None
+            if args.dirty:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT now()")
+                    dirty_cutoff = cur.fetchone()[0]
+                only_groups = _claim_dedup_dirty(conn, dirty_cutoff)
+                LOG.info("DIRTY drain: %d dedup-ready properties claimed", len(only_groups))
+                if not only_groups:
+                    LOG.info("DIRTY drain: queue empty; nothing to do")
+                    return 0
+
             classify_fn = None
             compare_fn = None
             site_plan_fn = None
@@ -1733,19 +1752,6 @@ def main() -> int:
             if args.candidates:
                 LOG.info("CANDIDATE drain: %d properties across the proposed queue",
                          len(restrict or set()))
-            # Real-time dirty drain: claim the dedup-ready properties at/before a cutoff,
-            # process only their street groups, then clear the claimed-untouched (race-free).
-            only_groups = None
-            dirty_cutoff = None
-            if args.dirty:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT now()")
-                    dirty_cutoff = cur.fetchone()[0]
-                only_groups = _claim_dedup_dirty(conn, dirty_cutoff)
-                LOG.info("DIRTY drain: %d dedup-ready properties claimed", len(only_groups))
-                if not only_groups:
-                    LOG.info("DIRTY drain: queue empty; nothing to do")
-                    return 0
             stats = run_engine(
                 conn, classify_fn=classify_fn, compare_fn=compare_fn,
                 site_plan_fn=site_plan_fn,
@@ -1768,7 +1774,14 @@ def main() -> int:
             if not args.shadow:
                 _write_run_row(conn, stats)
                 _write_pair_audit(conn, run_at, pair_audit)
-                if args.dirty and only_groups:
+                # Clear the claim ONLY on a run that finished the scan. A truncated run
+                # (deadline / pair-cap) didn't reach every dirty group, so keep the whole
+                # claim — it re-drains next pass; a few already-resolved pairs re-run cheaply
+                # (classify_pair rejects 'already_merged'), but NO unprocessed dirty property
+                # is silently dropped. (Oversized groups are unresolvable everywhere, so a
+                # finished run rightly clears them — the daily full scan handles them if they
+                # shrink below MAX_GROUP_SIZE.)
+                if args.dirty and not stats.get("truncated"):
                     cleared = _clear_dedup_dirty(conn, only_groups, dirty_cutoff)
                     LOG.info("DIRTY drain: cleared %d drained properties", cleared)
             LOG.info(

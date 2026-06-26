@@ -1028,6 +1028,22 @@ def test_run_engine_only_groups_skips_untouched(monkeypatch: Any) -> None:
     assert merges == ["image_phash"]
 
 
+def test_run_engine_truncated_flag() -> None:
+    """run_engine sets stats['truncated'] when the deadline cuts the scan early (so the
+    dirty drain keeps its claim and never drops unprocessed work); a finished run = 0."""
+    import time
+
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, deadline=time.monotonic() - 1.0, max_vision_calls=0)
+    assert stats["truncated"] == 1
+
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats2 = eng.run_engine(conn2, max_vision_calls=0)
+    assert stats2["truncated"] == 0
+
+
 def test_mark_dedup_dirty_empty_noop() -> None:
     """The dedup-ready enqueue is a no-op (no SQL) on an empty image-id list."""
     from scraper import db
