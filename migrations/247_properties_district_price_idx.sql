@@ -34,6 +34,19 @@
 -- band; the statements here are plain + idempotent so a fresh rebuild (no rows)
 -- and any replay are no-ops.
 
+-- properties.{obec_id,okres_id,region_id,subtype} were added to prod out of band
+-- and never landed in a committed migration (the admin-geo + subtype rollups the
+-- recompute job fills + properties_public exposes), so a from-scratch replay
+-- doesn't have them. Guard the columns this index needs so the migration is
+-- self-contained; all four are no-ops on prod. (The wider drift — the matching
+-- properties_public columns + recompute population — is pre-existing and tracked
+-- separately; this only unblocks the index.)
+alter table properties
+  add column if not exists obec_id   bigint,
+  add column if not exists okres_id  bigint,
+  add column if not exists region_id bigint,
+  add column if not exists subtype   text;
+
 create index if not exists properties_region_price_filt_idx
   on properties (region_id, current_price_czk, id, category_main, subtype, is_active)
   where region_id is not null;
