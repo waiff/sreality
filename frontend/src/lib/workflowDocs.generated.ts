@@ -527,6 +527,108 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
   },
   {
+    "filename": "ceskereality_detail_drain.yml",
+    "name": "Scraping: Českéreality detail drain",
+    "description": "The slow half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='ceskereality', enqueued by ceskereality_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+    "portal": "ceskereality",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "50 * * * *",
+        "human": "Every hour at :50"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "hard cap on listings claimed this run (blank = none; the time budget governs)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "concurrent detail-fetch workers (blank = 2)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "global detail-fetch rate cap, req/s (blank = 0.7, polite)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "ceskereality-detail-drain",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/ceskereality_detail_drain.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ceskereality_detail_drain.yml"
+  },
+  {
+    "filename": "ceskereality_index_walk.yml",
+    "name": "Scraping: Českéreality index walk",
+    "description": "The fast half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='ceskereality'). No detail fetch — the drain (ceskereality_detail_drain.yml) consumes the queue. Records run_type='index'.",
+    "portal": "ceskereality",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "25 */6 * * *",
+        "human": "Every 6 hours at :25"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "ceskereality-index-walk",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/ceskereality_index_walk.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ceskereality_index_walk.yml"
+  },
+  {
     "filename": "clip_retag.yml",
     "name": "Dedup — CLIP re-tag from stored embeddings (sharded)",
     "description": "Re-runs the CLIP zero-shot tagging over ALREADY-tagged images from their STORED embeddings (image_clip_embeddings) — NO R2 download, NO image re-inference, just the taxonomy's text anchors dotted with each stored vector. How a TAXONOMY change (new logical tags, sharpened anchors) reaches the back catalogue cheaply; new / not-yet-tagged images go through clip_tag.yml, which loads the same live taxonomy.",
@@ -2746,60 +2848,6 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_bezrealitky.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_bezrealitky.yml"
-  },
-  {
-    "filename": "scrape_ceskereality.yml",
-    "name": "Scraping: Českéreality scraper (pilot)",
-    "description": "Scraper for ceskereality.cz on the shared portal framework. ceskereality is a structured HTML portal (like idnes): the index walk pages the search results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, parses it to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + property singleton). One job runs both phases via ceskereality_main. The client crawls with an honest, identifying User-Agent at a polite rate (the site disallows generic bots in robots.txt).",
-    "portal": "ceskereality",
-    "manual": true,
-    "schedules": [],
-    "onPush": false,
-    "onPullRequest": false,
-    "paths": null,
-    "inputs": [
-      {
-        "name": "max_pages",
-        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
-        "required": false,
-        "type": "string",
-        "default": "",
-        "options": null
-      },
-      {
-        "name": "max_detail",
-        "description": "cap detail-drain claims this run",
-        "required": false,
-        "type": "string",
-        "default": "1500",
-        "options": null
-      },
-      {
-        "name": "rate",
-        "description": "detail-fetch requests/second ceiling (keep polite)",
-        "required": false,
-        "type": "string",
-        "default": "0.7",
-        "options": null
-      },
-      {
-        "name": "workers",
-        "description": "detail-fetch workers (concurrency)",
-        "required": false,
-        "type": "string",
-        "default": "2",
-        "options": null
-      }
-    ],
-    "secrets": [
-      "SUPABASE_DB_URL"
-    ],
-    "concurrencyGroup": "ceskereality-scrape",
-    "cancelInProgress": false,
-    "timeoutMinutes": 50,
-    "permissions": null,
-    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_ceskereality.yml",
-    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_ceskereality.yml"
   },
   {
     "filename": "scrape_maxima.yml",

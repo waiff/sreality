@@ -160,6 +160,31 @@ remax ALSO has an on-demand URL parser (`scraper/source_parsers/remax.py`, LLM,
 unchanged by the scheduled scraper, routed by domain in `source_dispatcher`
 independent of the `portals` row's `kind`.
 
+**Data source (ceskereality.cz).** A scheduled scraper (`scraper/ceskereality_client.py`,
+`ceskereality_parser.py`, `ceskereality_main.py`) tagged `source='ceskereality'`. It is large
+(~49k listings), so — like sreality/idnes — it is **cadence-split**: `ceskereality_index_walk.yml`
+(every 6h, full complete-walk + mark_inactive + enqueue) feeds the hourly bounded
+`ceskereality_detail_drain.yml` (`--max-seconds` budget). ceskereality is a STRUCTURED HTML portal
+like idnes: each detail page carries a `schema.org` `individualProduct` JSON-LD block (clean price +
+broker), an `i-info` spec list, **precise per-listing coordinates** in `data-coord-lat/lng` (and a
+Google-Maps `?q=` link) so there is **no geocoding step**, and an `img.ceskereality.cz/foto/` gallery.
+Typed fields are normalised to the SAME canonical labels sreality emits (verified against the live
+sreality vocabulary: `Zděná→cihla`, `Bezvadný→velmi_dobry`, `K rekonstrukci→pred_rekonstrukci`,
+`soukromé→osobni`). **Street** is taken from the JSON-LD `streetAddress` when present, else mined from
+the SEO detail-URL slug (`…-{street}-{id}.html`) — the broker's `offeredby.address` (the agency office)
+is deliberately never used; both route through the shared `scraper/street.py` guard. **Broker** carries
+a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
+`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and `resolve_brokers` has a
+per-source attribution block (phone-only; no email → no firm). Per-category search pages carry a result
+total ("Máme tady N…") with no deep-pagination cap, so a per-category walk is provable-complete
+(`supports_complete_walk=true`; the runner marks delistings inactive under the completeness guard,
+source-scoped). The detail URL carries the category, so the drain derives each listing's category from
+its own URL — one config (the `portals` row, migration 249) walks all 12 (cm × offer-type) descriptors.
+The client uses an honest identifying `User-Agent` at a polite rate (the site disallows generic bots in
+robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-demand URL parser
+(`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
+preview — a separate entry point unchanged by the scheduled scraper.
+
 ## Territories
 
 The repo is split into **three** top-level territories with deliberately different
