@@ -6,6 +6,26 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Bazos enrichment — model-keyed cache (sticky-miss fix, PR3 of the enrichment fix)
+
+The description-enrichment cache `listing_description_enrichments` was UNIQUE(sreality_id,
+snapshot_id): a MISS (LLM returned null / low-confidence) still wrote a row, so the listing's
+latest snapshot was retired from selection FOREVER — even after a model upgrade that would now
+extract the field. For stable classified ads (rare new snapshots) ~80% of cache rows had floor
+still NULL, never retried. Migration 249 widens the key to `(sreality_id, snapshot_id, model)`
+(mirrors `read_floor_plan` / `building_attachment_analyses`): a model upgrade re-attempts every
+listing; a same-model re-run stays a no-op (no re-bill). `_select_pending`'s correlated NOT EXISTS
++ the enricher's cache-check are scoped to the current model; the INSERT uses a **targetless
+`ON CONFLICT DO NOTHING`** (the cache key is the only conflictable constraint, `id` is GENERATED
+ALWAYS) so the code is tolerant of the constraint swap regardless of apply-vs-deploy order.
+
+- **Considered + rejected:** re-selecting still-NULL gap fields at the SAME model — re-bills the
+  same model on the same text for marginal gain (the #606 deterministic regex already catches the
+  high-precision floor cases) and risks infinite re-bill on truly text-less ads. Re-enrichment is
+  the explicit, bounded model-upgrade lever instead.
+- This closes the enrichment-reliability arc (PR1 #603 selection+budget, PR2 #606 shared floor,
+  PR3 model-keyed cache).
+
 ### 2026-06: Dedup — fully-tagged-before-decide invariant + rule B retired
 
 Cross-portal duplicates (near-identical photos) sat unmerged in the `/dedup` queue as false
