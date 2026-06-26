@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { getDedupSettings, updateDedupSetting, type DedupSetting } from '@/lib/api';
+import { settingAnchorId } from '@/lib/settingsAnchor';
 
 /* The dedup-engine knob panel. Reads the backend registry (one source of truth)
  * and renders it grouped, in the civic-archive system: bordered ledger rows,
@@ -71,7 +72,7 @@ function Row({
   onChange: (v: unknown) => void;
 }) {
   return (
-    <div className="flex items-start gap-4 px-3.5 py-3">
+    <div id={settingAnchorId(s.key)} className="flex items-start gap-4 px-3.5 py-3 scroll-mt-24">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="text-sm text-[var(--color-ink)]">{s.label}</span>

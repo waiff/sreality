@@ -763,6 +763,31 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (migration 129), and `compare_listing_site_plans` (migration 171,
     `listing_site_plan_matches`) — are write-allowed exceptions (toolkit rule #5). A
     `dedup_engine_runs` row (migration 130) per run powers the `/dedup` automation dashboard.
+    **Decision feedback + auditability (migration 248).** Every decision is FULLY auditable from
+    the `/dedup` Decision-history feed AND the Needs-review queue, and the operator can FLAG a
+    wrong one: `dedup_decision_feedback` is a **PROPERTY-pair-keyed** ("this merge/dismissal was
+    wrong" + `expected_outcome` should_merge/should_dismiss/unsure + free note) operator-state
+    table — keyed on the canonical `(left_property_id < right_property_id)` pair, NOT an audit-row id
+    and NOT the listing pair, so ONE flag attaches to whichever surface shows that pair and persists
+    across the pair's lifecycle (a queued candidate flagged "should dismiss" stays flagged once it
+    becomes a terminal decision — the merge/dismiss audit row carries the SAME two property_ids).
+    **Property-grain, not the listing (sreality) pair, is deliberate:** a property's representative
+    listing (`repr_listing_id`) DRIFTS when `recompute_property_stats` re-picks it, so a listing-pair
+    key would silently orphan the flag off the Needs-review card after a recompute; the audit row
+    SNAPSHOTS its `left/right_property_id` at decision time (immutable) and a candidate's property
+    pair is stable while pending, so the property pair is the stable identity on BOTH surfaces.
+    It is a labelled corpus for improving the engine; the feed filters to flagged-only. Writes via
+    the bearer-gated `POST/DELETE /dedup/feedback`; anon never reads it. **Auditability is computed,
+    not stored:** `toolkit/dedup_audit.build_audit_breakdown(detail)` is a PURE function turning a
+    decision's stored factor `detail` into rungs (each signal — pHash / cosine / forensic verdict /
+    floor-plan / address — with its measured value vs the bar it was judged on, met/unmet/info, and
+    the app_settings key(s) that govern it), so it renders identically on the history feed
+    (`list_pair_audit`) and the queue (`list_candidates`) and works on every historical row. The
+    rungs deep-link to the exact Settings knob via `settingAnchorId` (the Settings rows carry stable
+    `id="setting-<key>"` anchors + a hash-scroll/force-open). The SPECIFIC pictures a decision turned
+    on are resolved at READ time by `decision_evidence` (the pHash near-identical PAIRS recomputed
+    from stored phashes with the engine's category exclusions, the compared plans, or the deciding
+    room) — no decision-time `detail` bloat, faithful for any old row.
     **Vision is batch-pre-warmed (cost):** `dedup_batches.yml` (migration 197 — `dedup_batches`
     / `dedup_batch_requests`) runs the engine's FREE funnel and submits the surviving cross-source
     pairs' classify/compare/site_plan vision through the Anthropic Message Batches API (50% off,

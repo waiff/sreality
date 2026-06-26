@@ -60,6 +60,7 @@ from toolkit.dedup_engine import (
     phash_excluded_tags_for,
     phash_render_exclude_for,
     profile_for,
+    render_exclusion_clause,
     RENDER_SCORE_EXCLUDE_MIN,
     rooms_in_priority,
     route_by_cosine,
@@ -390,24 +391,9 @@ def _load_geo_eligible(conn: Any,
     return keys
 
 
-def _render_exclusion_predicate(
-    params: dict[str, Any], alias: str,
-    excluded_tags: tuple[str, ...], render_exclude_min: float | None,
-) -> str:
-    """A `NOT EXISTS (... image_clip_tags ...)` clause excluding an image (by `alias`) that
-    is a KNOWN-exterior/shared tag OR scores >= render_exclude_min on the render axis.
-    Empty when neither filter applies. Mutates `params` with the bound values."""
-    conds: list[str] = []
-    if excluded_tags:
-        conds.append("t.logical_tag = ANY(%(excl)s)")
-        params["excl"] = list(excluded_tags)
-    if render_exclude_min is not None:
-        conds.append("t.render_score >= %(rmin)s")
-        params["rmin"] = render_exclude_min
-    if not conds:
-        return ""
-    return (f" AND NOT EXISTS (SELECT 1 FROM image_clip_tags t"
-            f"   WHERE t.image_id = {alias}.id AND ({' OR '.join(conds)}))")
+# The pHash exclusion predicate is shared with the /dedup evidence reader via
+# toolkit.dedup_engine.render_exclusion_clause (one source, so they never drift).
+_render_exclusion_predicate = render_exclusion_clause
 
 
 def _phash_identical_pairs(

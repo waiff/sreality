@@ -12,7 +12,12 @@
  *   geo    ≤30 m tight (AUTO_RADIUS_M = 30); tier1 pairs are ≤20 m by construction.
  */
 import { fmtArea, fmtCzk } from './format';
-import type { DedupCandidate, DedupPropertySide } from './types';
+import type {
+  AuditRung,
+  DecisionFeedback,
+  DedupCandidate,
+  DedupPropertySide,
+} from './types';
 
 export const PRICE_DRIFT_MAX = 0.02; // AUTO_PRICE_DRIFT_MAX
 export const AREA_DIFF_MAX_M2 = 2.0; // AUTO_AREA_DIFF_MAX_M2
@@ -196,6 +201,11 @@ export interface DedupCluster {
    * phash_pairs, cosine, verdict, room_type, rationale) — fed to the shared
    * <DedupFactors> so a queued card shows the SAME evidence as Decision history. */
   markers: Record<string, unknown> | null;
+  /* The representative edge's auditable breakdown + the operator's "wrong" flag for that
+   * pair (the flag control is shown only on 2-member clusters, where the representative
+   * edge IS the members[0]↔members[1] pair). */
+  audit_breakdown?: AuditRung[];
+  feedback?: DecisionFeedback | null;
 }
 
 /* Union-find over the candidate pairs → connected components. */
@@ -227,12 +237,18 @@ export function clusterCandidates(candidates: DedupCandidate[]): DedupCluster[] 
   const tierByRoot = new Map<number, string>();
   const visualByRoot = new Map<number, ClusterVisual>();
   const markersByRoot = new Map<number, Record<string, unknown>>();
+  const breakdownByRoot = new Map<number, AuditRung[]>();
+  const feedbackByRoot = new Map<number, DecisionFeedback | null>();
   for (const c of candidates) {
     sideById.set(c.left_property.property_id, c.left_property);
     sideById.set(c.right_property.property_id, c.right_property);
     const root = find(c.left_property.property_id);
     (edges.get(root) ?? edges.set(root, []).get(root)!).push(c.id);
     if (!tierByRoot.has(root)) tierByRoot.set(root, c.tier);
+    if (!breakdownByRoot.has(root) && c.audit_breakdown) {
+      breakdownByRoot.set(root, c.audit_breakdown);
+    }
+    if (!feedbackByRoot.has(root)) feedbackByRoot.set(root, c.feedback ?? null);
     const m = c.markers_matched ?? {};
     if (!markersByRoot.has(root) && Object.keys(m).length > 0) {
       markersByRoot.set(root, m as Record<string, unknown>);
@@ -267,6 +283,8 @@ export function clusterCandidates(candidates: DedupCandidate[]): DedupCluster[] 
       tier: tierByRoot.get(root) ?? 'tier1',
       visual: visualByRoot.get(root) ?? null,
       markers: markersByRoot.get(root) ?? null,
+      audit_breakdown: breakdownByRoot.get(root),
+      feedback: feedbackByRoot.get(root) ?? null,
     });
   }
   // Biggest clusters first; stable thereafter.

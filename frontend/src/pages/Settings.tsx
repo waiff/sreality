@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   listSkills,
@@ -48,9 +49,50 @@ import { useTheme, type ThemeMode } from '@/lib/theme';
 import { PickButton } from '@/components/controls';
 import DedupEngineSection from '@/components/DedupEngineSection';
 import DedupTagPrioritiesSection from '@/components/DedupTagPrioritiesSection';
+import { hashTargetsSetting } from '@/lib/settingsAnchor';
 import { WORKFLOW_DOCS, type WorkflowDoc } from '@/lib/workflowDocs.generated';
 
+/* Deep-link arrivals (e.g. a /dedup decision's "→ ⚙ cosine haiku min" link →
+ * /settings#setting-dedup_cosine_haiku_min): scroll the targeted row into view and flash
+ * it, once the force-opened section has rendered it. Outline via inline style so there's
+ * no Tailwind-JIT class to miss. */
+function useScrollToSettingHash(hash: string): void {
+  useEffect(() => {
+    const id = hash.startsWith('#') ? hash.slice(1) : '';
+    if (!id) return;
+    let tries = 0;
+    let timer = 0;
+    let raf = 0;
+    // The target row may render after an async settings fetch resolves, so retry until it
+    // appears (then flash it). ~3s budget covers a cold-cache load; outline via inline
+    // style so there's no Tailwind-JIT class to miss.
+    const focus = () => {
+      const el = document.getElementById(id);
+      if (el) {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        el.style.outline = '2px solid var(--color-copper)';
+        el.style.outlineOffset = '3px';
+        el.style.borderRadius = 'var(--radius-sm)';
+        timer = window.setTimeout(() => {
+          el.style.outline = '';
+          el.style.outlineOffset = '';
+        }, 2200);
+      } else if (tries++ < 30) {
+        timer = window.setTimeout(focus, 100);
+      }
+    };
+    // Defer the first attempt one frame so a freshly force-opened section can mount.
+    raf = window.requestAnimationFrame(focus);
+    return () => {
+      window.clearTimeout(timer);
+      window.cancelAnimationFrame(raf);
+    };
+  }, [hash]);
+}
+
 export default function Settings() {
+  const location = useLocation();
+  useScrollToSettingHash(location.hash);
   return (
     <div className="px-6 pt-5 pb-10 max-w-screen-lg mx-auto">
       <header>
@@ -112,6 +154,7 @@ export default function Settings() {
         id="dedup-engine"
         eyebrow="Matching"
         title="Dedup engine"
+        ownsHash={hashTargetsSetting}
         description={
           <>
             Every rule the cross-portal duplicate matcher uses — as a toggle or a
@@ -254,6 +297,7 @@ function CollapsibleSection({
   eyebrow,
   description,
   defaultOpen = true,
+  ownsHash,
   children,
 }: {
   id: string;
@@ -261,18 +305,24 @@ function CollapsibleSection({
   eyebrow?: string;
   description?: React.ReactNode;
   defaultOpen?: boolean;
+  // When the current URL hash targets an anchor INSIDE this section, force it open so the
+  // target row is in the DOM to scroll to (a deep-link from another page).
+  ownsHash?: (hash: string) => boolean;
   children: React.ReactNode;
 }) {
   const [open, toggle] = useCollapsed(id, defaultOpen);
+  const location = useLocation();
+  const forced = ownsHash ? ownsHash(location.hash) : false;
+  const isOpen = open || forced;
   return (
-    <section className="mt-8">
+    <section id={id} className="mt-8 scroll-mt-20">
       <button
         type="button"
         onClick={toggle}
-        aria-expanded={open}
+        aria-expanded={isOpen}
         className="flex w-full items-center gap-2 text-left group"
       >
-        <Chevron open={open} />
+        <Chevron open={isOpen} />
         <span className="min-w-0">
           {eyebrow ? (
             <span className="block text-[0.7rem] tracking-[0.18em] uppercase text-[var(--color-ink-3)]">
@@ -287,7 +337,7 @@ function CollapsibleSection({
           </span>
         </span>
       </button>
-      {open ? (
+      {isOpen ? (
         <div className="mt-3">
           {description ? (
             <p className="text-sm text-[var(--color-ink-3)] mb-3">{description}</p>
