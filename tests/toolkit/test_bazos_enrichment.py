@@ -129,7 +129,7 @@ def test_select_pending_sql_invariants():
             return self.cur
 
     conn = _Conn()
-    out = m._select_pending(conn, source="bazos", max_age_days=0, limit=500)
+    out = m._select_pending(conn, source="bazos", model="claude-haiku-4-5", max_age_days=0, limit=500)
     assert out == [1, 2]
     sql = conn.cur.sql
     assert "l.source = %s" in sql
@@ -141,13 +141,16 @@ def test_select_pending_sql_invariants():
     # (that form aggregated every listing's history and timed out).
     assert "GROUP BY" not in sql
     assert "MAX(id)" in sql
+    # Model-keyed (migration 249): a model upgrade re-attempts every listing.
+    assert "e.model = %s" in sql
     # Source-scoped + freshest-first reuses the existing (source, first_seen_at) index.
     assert "ORDER BY l.first_seen_at DESC" in sql
     assert "LIMIT %s" in sql
-    assert conn.cur.params == ("bazos", 500)  # no freshness param when max_age_days=0
+    # (source, model, limit) — no freshness param when max_age_days=0.
+    assert conn.cur.params == ("bazos", "claude-haiku-4-5", 500)
 
-    # max_age_days>0 adds the freshness clause and threads (source, interval, limit).
+    # max_age_days>0 adds the freshness clause and threads (source, interval, model, limit).
     conn2 = _Conn()
-    m._select_pending(conn2, source="bazos", max_age_days=7, limit=500)
+    m._select_pending(conn2, source="bazos", model="m2", max_age_days=7, limit=500)
     assert "last_seen_at > now() - %s::interval" in conn2.cur.sql
-    assert conn2.cur.params == ("bazos", "7 days", 500)
+    assert conn2.cur.params == ("bazos", "7 days", "m2", 500)
