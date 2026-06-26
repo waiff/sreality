@@ -18,11 +18,14 @@ def test_interior_set_matches_interior_family() -> None:
     assert set(rt.INTERIOR_PRIORITY) == interior  # ordered form covers the same set
 
 
-def test_non_interior_tags_are_exterior_plus_plan_not_other() -> None:
+def test_non_interior_tags_are_exterior_common_plan_not_other() -> None:
     assert set(rt.NON_INTERIOR_TAGS) == {
-        t for t, f in rt.ROOM_FAMILIES.items() if f in ("exterior", "plan")
+        t for t, f in rt.ROOM_FAMILIES.items() if f in ("exterior", "common", "plan")
     }
     assert "other" not in rt.NON_INTERIOR_TAGS  # untagged/unknown still counts
+    # shared building circulation (stairwells) is excluded from the unit-match signal
+    assert "staircase_interior" in rt.NON_INTERIOR_TAGS
+    assert "staircase_exterior" in rt.NON_INTERIOR_TAGS
 
 
 def test_distinctive_rooms_are_interior_and_lead_priority() -> None:

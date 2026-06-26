@@ -720,8 +720,16 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     the `plan` family; the backfill skips them; migration 246 NULLed the ~445k existing). The UI render
     badge self-hides on a NULL score, so "RENDER" no longer appears on a `půdorys`. The new
     **`property_document`** logical tag (energy certificates, contracts, spec tables) is added to the
-    taxonomy + `ROOM_TYPES` + the room-classifier CHECK (migration 246); populating it on existing
-    images needs a CLIP re-tag (new/re-tagged images get it automatically). For **byt**, an image scoring >=
+    taxonomy + `ROOM_TYPES` + the room-classifier CHECK (migration 246). Two **`staircase_interior` /
+    `staircase_exterior`** tags (migration 247) sit in a new **`common`** family — a shared building
+    stairwell is the same for every unit, so like the exterior/plan families it's excluded from the byt
+    unit-match signal (`NON_INTERIOR_TAGS` = exterior + common + plan). The `toilet` (WC) anchor was
+    sharpened to exclude shower/bathtub so CLIP stops confusing it with `bathroom`. **Applying a taxonomy
+    change to the back catalogue** is `scripts/retag_from_embeddings` + `clip_retag.yml`: it re-runs the
+    zero-shot over each image's STORED embedding (no R2 download / re-inference — text-anchor dot
+    products), driven by `app_settings.clip_taxonomy_retag_after` (set it to `now()` to start a campaign;
+    re-tagged rows stamp `tagged_at=now()` and self-drain; once caught up the scheduled run pre-checks and
+    no-ops). New / not-yet-tagged images go through `clip_tag.yml`, which loads the live taxonomy. For **byt**, an image scoring >=
     `app_settings.dedup_render_exclude_min` (registry default **0.95**; `RENDER_SCORE_EXCLUDE_MIN` is the
     code fallback) is a shared development RENDER and is dropped from the pHash
     count, the distinctive single-match override, AND the forensic room compare

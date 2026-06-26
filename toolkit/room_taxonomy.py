@@ -13,6 +13,8 @@ from __future__ import annotations
 # Every logical_tag the CLIP tagger / LLM classifier can emit, grouped into a FAMILY:
 #   interior — a unit's own rooms; the strongest same-flat signal (used ALONE for byt).
 #   exterior — facade / outdoor shots a whole development reuses across its units.
+#   common   — SHARED building circulation (stairwells): every unit in a building shows the
+#              same one, so it's never a unit identifier — excluded like exterior/plan.
 #   plan     — floor / site plans; shared templates, never a perceptual-match signal.
 #   other    — unclassifiable content; treated as unknown (counts, never excluded).
 ROOM_FAMILIES: dict[str, str] = {
@@ -25,6 +27,8 @@ ROOM_FAMILIES: dict[str, str] = {
     "exterior_facade": "exterior",
     "balcony_terrace": "exterior",
     "garden": "exterior",
+    "staircase_interior": "common",
+    "staircase_exterior": "common",
     "floor_plan": "plan",
     "site_plan": "plan",
     "property_document": "plan",
@@ -62,11 +66,11 @@ LAND_PRIORITY: tuple[str, ...] = (
     "site_plan", "exterior_facade", "garden", "floor_plan",
 )
 
-# Tags excluded from a byt perceptual / cosine MERGE signal: the exterior + plan
-# families (a development reuses these across distinct units). 'other' / untagged are
+# Tags excluded from a byt perceptual / cosine MERGE signal: the exterior + common + plan
+# families (a development/building reuses these across distinct units). 'other' / untagged are
 # deliberately NOT excluded — only KNOWN-shared images are dropped.
 NON_INTERIOR_TAGS: tuple[str, ...] = tuple(
-    t for t, fam in ROOM_FAMILIES.items() if fam in ("exterior", "plan")
+    t for t, fam in ROOM_FAMILIES.items() if fam in ("exterior", "common", "plan")
 )
 
 # The most distinctive rooms: a SINGLE near-identical pHash match on one of these is

@@ -33,6 +33,17 @@ def test_prompts_nonempty():
     assert all(isinstance(v, str) and v for v in _TAX["prompts"].values())
 
 
+def test_staircase_tags_wired():
+    assert _TAX["collapse"]["staircase_interior"] == "staircase_interior"
+    assert _TAX["collapse"]["staircase_exterior"] == "staircase_exterior"
+    assert {"staircase_interior", "staircase_exterior"} <= set(ROOM_TYPES)
+
+
+def test_toilet_anchor_disambiguates_from_bathroom():
+    # The sharpened WC anchor must exclude shower/bathtub so CLIP stops confusing WC <-> koupelna.
+    assert "no shower" in _TAX["prompts"]["toilet"].lower()
+
+
 def test_property_document_wired():
     assert _TAX["collapse"]["energy_certificate"] == "property_document"
     assert _TAX["collapse"]["document_text"] == "property_document"
