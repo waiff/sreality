@@ -54,11 +54,15 @@ CATEGORY_MAIN: dict[str, str] = {
     "ostatni": "ostatni",
 }
 
-# ceskereality construction labels -> canonical codes parser._BUILDING_TYPE_TEXT
-# emits, so a cross-portal "panel" filter matches sreality and ceskereality alike.
+# ceskereality construction labels -> the SAME canonical codes the sreality parser
+# emits (verified against the live sreality vocabulary), so a cross-portal "cihla"
+# filter matches sreality and ceskereality alike. "zděná" (masonry) maps to sreality's
+# "cihla" (its dominant solid-masonry value); "jiná" (other) has no sreality
+# equivalent and is left as-is rather than mis-mapped.
 BUILDING_TYPE: dict[str, str] = {
     "panelova": "panel",
     "cihlova": "cihla",
+    "zdena": "cihla",
     "smisena": "smisena",
     "skeletova": "skelet",
     "drevena": "drevo",
@@ -66,12 +70,13 @@ BUILDING_TYPE: dict[str, str] = {
     "montovana": "montovana",
     "nizkoenergeticka": "nizkoenergeticka",
 }
-OWNERSHIP: dict[str, str] = {
-    "soukrome": "osobni",            # ceskereality "soukromé" == sreality "osobní"
-    "osobni": "osobni",
-    "druzstevni": "druzstevni",
-    "statni": "statni",
-    "obecni": "statni",
+# ceskereality "Stav nemovitosti" labels (diacritics-stripped) -> sreality's canonical
+# condition vocabulary. The already-matching values (dobry, novostavba, po_rekonstrukci,
+# pred_rekonstrukci, spatny) pass through; only the divergent ones are mapped.
+CONDITION: dict[str, str] = {
+    "bezvadny": "velmi_dobry",          # "Bezvadný" == sreality "velmi dobrý"
+    "k_rekonstrukci": "pred_rekonstrukci",
+    "rozestaveny": "ve_vystavbe",
 }
 
 # Czech-bbox guard: a coordinate outside it — a swapped lat/lon or a bad pin — is
@@ -231,14 +236,22 @@ def _norm_condition(text: str | None) -> str | None:
     key = _strip_diacritics(text).lower().strip()
     key = re.sub(r"\s+stav$", "", key)        # "velmi dobrý stav" -> "velmi dobry"
     key = re.sub(r"\s+", "_", key)
-    return key or None
+    return CONDITION.get(key, key or None)    # align to sreality's vocabulary
 
 
 def _norm_ownership(text: str | None) -> str | None:
+    """ceskereality ownership labels (incl. compound "Státní, obecní, jiné") ->
+    sreality's osobni / druzstevni / statni, by substring so the variants collapse."""
     if not text:
         return None
     key = _strip_diacritics(text).lower().strip()
-    return OWNERSHIP.get(key, key or None)
+    if "druzstev" in key:
+        return "druzstevni"
+    if "soukrom" in key or "osob" in key:
+        return "osobni"
+    if "statni" in key or "obecni" in key:
+        return "statni"
+    return key or None
 
 
 def _norm_furnished(text: str | None) -> str | None:

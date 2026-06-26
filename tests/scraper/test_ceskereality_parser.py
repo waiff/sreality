@@ -8,6 +8,9 @@ img.ceskereality.cz/foto gallery.
 from __future__ import annotations
 
 from scraper.ceskereality_parser import (
+    _norm_building_type,
+    _norm_condition,
+    _norm_ownership,
     category_from_url,
     index_price,
     parse_detail,
@@ -239,6 +242,23 @@ def test_category_from_detail_url():
     assert category_from_url(
         "https://www.ceskereality.cz/pronajem/pozemky/stavebni-parcely/chyne/p-3227497.html"
     ) == ("pozemek", "pronajem")
+
+
+def test_enum_normalization_aligned_to_sreality_vocabulary():
+    # Divergent ceskereality labels map onto sreality's canonical values so a
+    # cross-portal filter agrees; already-matching values pass through.
+    assert _norm_condition("Bezvadný") == "velmi_dobry"
+    assert _norm_condition("K rekonstrukci") == "pred_rekonstrukci"
+    assert _norm_condition("Rozestavěný") == "ve_vystavbe"
+    assert _norm_condition("Dobrý") == "dobry"
+    assert _norm_condition("Po rekonstrukci") == "po_rekonstrukci"
+    assert _norm_building_type("Zděná") == "cihla"
+    assert _norm_building_type("Cihlová") == "cihla"
+    assert _norm_building_type("Panelová") == "panel"
+    assert _norm_building_type("Jiná") == "jina"          # no sreality equiv -> left as-is
+    assert _norm_ownership("Státní, obecní, jiné") == "statni"
+    assert _norm_ownership("soukromé") == "osobni"
+    assert _norm_ownership("Družstevní") == "druzstevni"
 
 
 def test_index_price_parsing():
