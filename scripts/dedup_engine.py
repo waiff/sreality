@@ -958,18 +958,16 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # Tagging-readiness gate: a listing must be FULLY CLIP-tagged before the engine decides on
     # it. An incompletely-tagged listing's floor-plan / room images may still be in the tag
     # queue, so the floor-plan gate would mis-read 'one-sided' (a pending plan looks absent — the
-    # false floor_plan_review queue) and the visual flow would under-pair rooms. DEFER until
-    # tagging completes: the clip_tag job enqueues the property into dedup_dirty_properties once
-    # its LAST image is tagged, so the hourly --dirty drain re-decides it within minutes — then
-    # both sides are complete and a real two-sided floor-plan compare merges on matching plans.
-    # Default whenever CLIP is the tagger (clip_model set); supersedes the old clip_only-only gate.
-    if ctx.clip_model:
-        incomplete = _clip_incomplete(conn, [a.sreality_id, b.sreality_id], ctx.clip_model)
-        if incomplete:
-            if not ctx.dry_run:
-                _trigger_clip_tagging(conn, incomplete, ctx.clip_model)
-            stats["clip_deferred"] += 1
-            return
+    # false floor_plan_review queue) and the visual flow would under-pair rooms. DEFER (no
+    # re-queue needed: a pending image already has clip_tagged_at IS NULL, so `clip_tag.yml` will
+    # tag it — re-queuing here would only cycle a terminally-undecodable image). The clip_tag job
+    # enqueues the property into dedup_dirty_properties once its LAST image is tagged, so the
+    # hourly --dirty drain re-decides it within minutes — then both sides are complete and a real
+    # two-sided floor-plan compare merges on matching plans. Default whenever CLIP is the tagger
+    # (clip_model set); supersedes the old clip_only-only gate.
+    if ctx.clip_model and _clip_incomplete(conn, [a.sreality_id, b.sreality_id], ctx.clip_model):
+        stats["clip_deferred"] += 1
+        return
 
     # Rule B (exact address) is RETIRED (2026-06): it was the only auto-merge path with false
     # merges (6.7% later unmerged — two units at one address — vs 0% for pHash/visual). Exact

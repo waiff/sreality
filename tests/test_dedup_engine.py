@@ -1001,16 +1001,16 @@ def test_run_engine_same_source_free_run_skips_not_queues(monkeypatch: Any) -> N
     assert stats["queued"] == 0
 
 
-def test_run_engine_defers_and_triggers_on_incomplete_tagging(monkeypatch: Any) -> None:
+def test_run_engine_defers_on_incomplete_tagging(monkeypatch: Any) -> None:
     # Tagging-readiness gate (DEFAULT when a CLIP tagger is configured): a pair with a
-    # NOT-fully-tagged listing re-queues its pending images and DEFERS up front — before pHash,
-    # the floor-plan gate, or visual — so the engine never decides on partial tag data.
+    # NOT-fully-tagged listing DEFERS up front — before pHash, the floor-plan gate, or visual —
+    # so the engine never decides on partial tag data. No re-queue (the pending image is already
+    # in the clip_tag queue, clip_tagged_at IS NULL).
     import scripts.dedup_engine as eng
 
     monkeypatch.setattr(eng, "_clip_incomplete", lambda conn, sids, model: [2])  # 2 still tagging
-    triggered: list[list[int]] = []
     monkeypatch.setattr(eng, "_trigger_clip_tagging",
-                        lambda conn, sids, model: triggered.append(list(sids)))
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not re-queue")))
     monkeypatch.setattr(eng, "merge_properties",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])  # rule-C pair
@@ -1019,7 +1019,6 @@ def test_run_engine_defers_and_triggers_on_incomplete_tagging(monkeypatch: Any) 
     assert stats["clip_deferred"] == 1
     # Deferred at the TOP of resolve_pair -> never reached the rule-C / visual stage.
     assert stats["queued"] == 0 and stats["pairs_considered"] == 0
-    assert triggered == [[2]]  # only the still-tagging listing is re-queued
 
 
 def test_run_engine_fully_tagged_reaches_visual(monkeypatch: Any) -> None:
