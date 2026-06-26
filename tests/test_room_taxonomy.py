@@ -8,7 +8,7 @@ from toolkit import room_taxonomy as rt
 
 def test_every_tag_has_a_family() -> None:
     assert set(rt.ROOM_TYPES) == set(rt.ROOM_FAMILIES)
-    assert all(fam in ("interior", "exterior", "plan", "other")
+    assert all(fam in ("interior", "exterior", "common", "plan", "other")
                for fam in rt.ROOM_FAMILIES.values())
 
 
