@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import { imageSrc } from './imageUrl';
+import { type TaggedImageUrl } from './imageTags';
 import { fetchListingBrokersByIds, fetchBrokersByIds } from './brokers';
 import type { ListingDetailLite } from './dedupDiff';
 import {
@@ -770,10 +771,10 @@ export interface CardRow {
   /* MF gross rental yield % (migration 133). Non-null only on sale
    * apartments that resolved to an MF territory. */
   mf_gross_yield_pct: number | null;
-  /* Up to 5 image URLs in source-sequence order. Empty when the
-   * listing has no photos yet. The card uses index 0 by default and
-   * the carousel chevrons step through the remaining entries. */
-  image_urls: string[];
+  /* Per-image render data (url + CLIP tag + confidence) in source-sequence
+   * order. Empty when the listing has no photos yet. The card uses index 0 by
+   * default and the carousel chevrons step through the remaining entries. */
+  images: TaggedImageUrl[];
 }
 
 export interface CardsResult {
@@ -799,7 +800,7 @@ export const fetchListingsForCards = async (
   ) as unknown as typeof scoped;
   const { data, error } = await keyed.limit(CARD_PAGE_SIZE);
   if (error) throw error;
-  const baseRows = (data ?? []) as unknown as Omit<CardRow, 'image_urls'>[];
+  const baseRows = (data ?? []) as unknown as Omit<CardRow, 'images'>[];
   const nextCursor = nextCursorFrom(
     baseRows as unknown as Record<string, unknown>[],
     sort,
@@ -818,7 +819,12 @@ export const fetchListingsForCards = async (
     const imgs = images.get(r.sreality_id) ?? [];
     return {
       ...r,
-      image_urls: imgs.map(imageSrc),
+      images: imgs.map((im) => ({
+        url: imageSrc(im),
+        tag: im.clip_fine_tag,
+        confidence: im.clip_confidence,
+        renderScore: im.clip_render_score,
+      })),
     };
   });
   return { rows, nextCursor };
@@ -1105,6 +1111,12 @@ export const fetchListingsByIds = async (
 /* Batch image fetch for the comparables modal — first three per id is
  * enough for the modal's thumbnail strip; the Listing Detail page
  * still pulls the full set independently. */
+/* Columns every image fetch pulls from images_public — incl. the CLIP tag
+ * (clip_fine_tag / clip_logical_tag / clip_confidence, migration 236) so every
+ * photo surface can render its bottom-left tag badge from the same read. */
+const IMAGE_PUBLIC_COLS =
+  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score';
+
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,
   perId = 3,
@@ -1112,7 +1124,7 @@ export const fetchImagesByListingIds = async (
   if (ids.length === 0) return new Map();
   const { data, error } = await supabase
     .from('images_public')
-    .select('id,sreality_id,sequence,sreality_url,storage_path')
+    .select(IMAGE_PUBLIC_COLS)
     .in('sreality_id', ids as number[])
     .order('sequence', { ascending: true, nullsFirst: false })
     .order('id', { ascending: true });
@@ -1182,7 +1194,7 @@ export const fetchImagesByListing = async (
 ): Promise<ImagePublic[]> => {
   const { data, error } = await supabase
     .from('images_public')
-    .select('id,sreality_id,sequence,sreality_url,storage_path')
+    .select(IMAGE_PUBLIC_COLS)
     .eq('sreality_id', sreality_id)
     .order('sequence', { ascending: true, nullsFirst: false })
     .order('id', { ascending: true });
@@ -1661,6 +1673,8 @@ export interface DedupEngineRun {
   vision_calls: number;
   cost_usd: number;
   auto_dismissed: number;
+  floor_plan_deferred: number;
+  clip_deferred: number;
 }
 
 /* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
@@ -1674,7 +1688,7 @@ export const fetchDedupEngineRuns = async (
     .select(
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
-        'vision_calls,cost_usd,auto_dismissed',
+        'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred,clip_deferred',
     )
     .order('started_at', { ascending: false })
     .limit(limit);

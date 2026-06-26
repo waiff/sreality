@@ -1,4 +1,7 @@
 import { useState, type MouseEvent, type ReactNode } from 'react';
+import ImageTagBadge from './ImageTagBadge';
+import ImageRenderBadge from './ImageRenderBadge';
+import { type TaggedImageUrl } from '@/lib/imageTags';
 
 /* Compact inline image carousel — the photo strip shared by Browse listing
  * cards and the /dedup review panels. Local index state (the carousel never
@@ -10,7 +13,9 @@ import { useState, type MouseEvent, type ReactNode } from 'react';
  * the no-image placeholder, the chevrons, and the "n / total" counter. */
 
 interface Props {
-  urls: string[];
+  /* Render-ready images (url + CLIP tag + confidence). The bottom-left tag
+   * badge is read from the current image; callers without tags pass null. */
+  images: TaggedImageUrl[];
   /* Tailwind aspect-ratio class for the frame. Default matches Browse cards. */
   aspect?: string;
   /* Extra classes on the aspect container. */
@@ -26,7 +31,7 @@ interface Props {
 }
 
 export default function ImageCarousel({
-  urls,
+  images,
   aspect = 'aspect-[5/4]',
   className = '',
   imgClassName = '',
@@ -35,14 +40,15 @@ export default function ImageCarousel({
   children,
 }: Props) {
   const [index, setIndex] = useState(0);
-  const safeIndex = urls.length === 0 ? 0 : Math.min(index, urls.length - 1);
-  const hasMany = urls.length > 1;
+  const safeIndex = images.length === 0 ? 0 : Math.min(index, images.length - 1);
+  const hasMany = images.length > 1;
+  const current = images[safeIndex];
 
   const step = (delta: number) => (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (urls.length === 0) return;
-    setIndex((safeIndex + delta + urls.length) % urls.length);
+    if (images.length === 0) return;
+    setIndex((safeIndex + delta + images.length) % images.length);
   };
 
   const chevronBase =
@@ -54,9 +60,9 @@ export default function ImageCarousel({
 
   return (
     <div className={`${aspect} bg-[var(--color-inset)] overflow-hidden relative ${className}`}>
-      {urls.length > 0 ? (
+      {images.length > 0 ? (
         <img
-          src={urls[safeIndex]}
+          src={current.url}
           alt=""
           loading="lazy"
           className={[
@@ -76,6 +82,26 @@ export default function ImageCarousel({
 
       {children}
 
+      <ImageTagBadge
+        tag={current?.tag}
+        confidence={current?.confidence}
+        className="absolute bottom-1 left-1 z-[1] max-w-[calc(100%-3.5rem)] truncate"
+      />
+
+      {/* Bottom-RIGHT metadata stack: the render-vs-photo pill above the photo
+          counter (mirrors the listing-detail gallery's placement; the room tag
+          owns bottom-left). Kept off the top-left corner, which the caller's
+          overlay controls (the Browse card's bookmark + collection buttons,
+          z-10) own — the badge used to sit behind them. */}
+      <div className="absolute bottom-1 right-1 z-[1] flex flex-col items-end gap-1">
+        <ImageRenderBadge renderScore={current?.renderScore} />
+        {hasMany && (
+          <span className="px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm">
+            {safeIndex + 1} / {images.length}
+          </span>
+        )}
+      </div>
+
       {hasMany && (
         <>
           <button
@@ -94,9 +120,6 @@ export default function ImageCarousel({
           >
             <Chevron dir="right" />
           </button>
-          <span className="absolute bottom-1 right-1 px-1.5 py-0.5 text-[0.6rem] tracking-[0.08em] tabular-nums rounded-[var(--radius-xs)] bg-[var(--color-paper-3)]/85 border border-[var(--color-rule)] text-[var(--color-ink-2)] backdrop-blur-sm">
-            {safeIndex + 1} / {urls.length}
-          </span>
         </>
       )}
     </div>

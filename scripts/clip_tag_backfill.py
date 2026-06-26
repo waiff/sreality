@@ -23,7 +23,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from scraper import image_storage
+from scraper import db, image_storage
 
 LOG = logging.getLogger("clip_tag_backfill")
 
@@ -68,11 +68,12 @@ SELECT_TIMEOUT_MS = 300_000
 _MARK_SQL = "UPDATE images SET clip_tagged_at = now() WHERE id = ANY(%s) AND clip_tagged_at IS NULL"
 
 _UPSERT_SQL = """
-    INSERT INTO image_clip_tags (image_id, model, fine_tag, logical_tag, confidence)
-    VALUES (%s, %s, %s, %s, %s)
+    INSERT INTO image_clip_tags (image_id, model, fine_tag, logical_tag, confidence, render_score)
+    VALUES (%s, %s, %s, %s, %s, %s)
     ON CONFLICT (image_id, model) DO UPDATE
       SET fine_tag = EXCLUDED.fine_tag, logical_tag = EXCLUDED.logical_tag,
-          confidence = EXCLUDED.confidence, tagged_at = now()
+          confidence = EXCLUDED.confidence, render_score = EXCLUDED.render_score,
+          tagged_at = now()
 """
 
 # Embeddings (for the cosine recall tier) stored ACTIVE-listing-only — that bounds
@@ -252,7 +253,7 @@ def main() -> int:
                 emb = tagger.embed([d[1] for d in decoded], args.batch_size)
                 results = tagger.tags_from_emb(emb)
                 tag_params = [
-                    (image_id, model, r.fine_tag, r.logical_tag, r.confidence)
+                    (image_id, model, r.fine_tag, r.logical_tag, r.confidence, r.render_score)
                     for image_id, r in zip(ids, results)
                 ]
                 emb_params = [
@@ -265,6 +266,10 @@ def main() -> int:
                 if emb_params:
                     cur.executemany(_UPSERT_EMB_SQL, emb_params)
                 cur.execute(_MARK_SQL, (mark_ids,))  # drop from the needs-clip partial index
+            if tag_params:
+                # Wave 4c: these images are now CLIP-tagged -> their listings are dedup-ready;
+                # enqueue their properties so the dedup --dirty drain merges them in minutes.
+                db.mark_properties_dedup_dirty_for_images(conn, [p[0] for p in tag_params])
             written += len(tag_params)
             embedded += len(emb_params)
             LOG.info("CLIP_TAG progress=%d/%d embedded=%d errors=%d terminal=%d",

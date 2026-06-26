@@ -30,7 +30,10 @@ export default function MapImagePreview({
       onMouseLeave={onMouseLeave}
       className="w-56 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[0_12px_32px_rgba(0,0,0,0.16)]"
     >
-      <ImageCarousel urls={urls} aspect="aspect-[4/3]" />
+      <ImageCarousel
+        images={urls.map((url) => ({ url, tag: null, confidence: null, renderScore: null }))}
+        aspect="aspect-[4/3]"
+      />
       <div className="px-3 py-2">
         <p className="font-mono tabular-nums text-sm text-[var(--color-ink)]">{price}</p>
         <p className="mt-0.5 font-mono tabular-nums text-[0.78rem] text-[var(--color-ink-2)]">

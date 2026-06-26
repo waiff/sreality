@@ -139,6 +139,16 @@ export interface ImagePublic {
   sequence: number | null;
   sreality_url: string;
   storage_path: string | null;
+  /* CLIP per-image tag (image_clip_tags via images_public, migration 236).
+   * clip_fine_tag is the raw winning anchor we display; clip_logical_tag is the
+   * collapsed engine vocabulary; clip_confidence is the softmax score 0..1.
+   * All NULL until the image is CLIP-tagged. */
+  clip_fine_tag: string | null;
+  clip_logical_tag: string | null;
+  clip_confidence: number | null;
+  /* CLIP render-vs-photo score 0..1 (migration 239): >= ~0.65 is a 3D render /
+   * visualization (excluded from the byt merge signal). NULL until scored. */
+  clip_render_score: number | null;
 }
 
 /* Distributional shapes — used by EstimationDetail's RangeStrip and by
@@ -1475,6 +1485,30 @@ export interface DedupPropertySide {
   lng: number | null;
 }
 
+// Operator "this decision was wrong" flag — pair-keyed, shared by the Decision history
+// feed AND the Needs-review queue (one store, one control).
+export interface DecisionFeedback {
+  is_incorrect: boolean;
+  expected_outcome: 'should_merge' | 'should_dismiss' | 'unsure' | null;
+  note: string | null;
+  updated_at: string | null;
+}
+
+// One auditable rung of a decision: a signal (pHash / cosine / verdict / floor-plan /
+// address) with its measured value vs the bar it was judged against, whether it was met,
+// and which Settings knob(s) govern it (for a deep-link). Computed server-side from the
+// stored factor `detail`, so it is identical on the history feed and the queue.
+export interface AuditRung {
+  key: string;
+  label: string;
+  value: string | number;
+  threshold?: string | number | null;
+  comparator?: string | null;
+  status: 'met' | 'unmet' | 'info';
+  settings_keys: string[];
+  note?: string | null;
+}
+
 export interface DedupCandidate {
   id: number;
   tier: string;
@@ -1487,6 +1521,8 @@ export interface DedupCandidate {
   reviewed_at: string | null;
   left_property: DedupPropertySide;
   right_property: DedupPropertySide;
+  feedback?: DecisionFeedback | null;
+  audit_breakdown?: AuditRung[];
 }
 
 export interface DedupCandidatesResponse {

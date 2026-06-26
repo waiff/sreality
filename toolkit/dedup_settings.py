@@ -35,12 +35,35 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "every one for manual review instead of merging — and spends no vision.",
     ),
     DedupSetting(
-        "dedup_visual_autodismiss_enabled", "bool", True,
+        "dedup_forensics_autodismiss_enabled", "bool", True,
         "Auto-dismiss confident 'different'", "Engine",
-        "When the forensic verdicts confidently say 'different property' (a "
+        "When the forensic compare confidently says 'different property' (a "
         "distinctive room — kitchen/bathroom — is Low and no room matched), "
         "close the pair out instead of queuing it. Calibrated safe (0/273 "
         "operator-merged pairs carried a Low).",
+    ),
+    DedupSetting(
+        "dedup_floor_plan_budget", "float", 10000,
+        "Floor-plan checks per free run", "Engine",
+        "Cap on inline Sonnet floor-plan validations on a scheduled (free) run — "
+        "the one paid call there, fired only on pairs the engine WOULD merge. Beyond "
+        "the cap, both-plan pairs defer to the next run. 0 = consume only warmed "
+        "verdicts ($0).",
+        0, 100000,
+    ),
+    DedupSetting(
+        "dedup_floor_plan_inconclusive_to_review", "bool", True,
+        "Floor-plan 'inconclusive' → review", "Engine",
+        "When the floor-plan gate returns 'inconclusive', send the pair to the manual "
+        "review queue instead of letting the merge proceed. Off = treat inconclusive "
+        "as 'same layout' and merge.",
+    ),
+    DedupSetting(
+        "dedup_batch_warmer_enabled", "bool", False,
+        "Batch vision warmer", "Engine",
+        "Pre-warm the vision caches via Anthropic's Message Batches API (50% cheaper, "
+        "async) so the engine merges over warm cache for free. Off = pay cold vision "
+        "inline. The dedup_batches workflow no-ops while this is off.",
     ),
     # --- CLIP (free tagging + the cosine recall tier) ---
     DedupSetting(
@@ -50,6 +73,15 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "of the paid LLM classify. Drops the per-listing tagging cost to zero and "
         "is the FIRST tagger for houses/land/commercial (unblocking their dedup). "
         "Falls back to the LLM where CLIP hasn't tagged a listing yet.",
+    ),
+    DedupSetting(
+        "dedup_clip_only", "bool", False,
+        "CLIP-only room tagging (no LLM fallback)", "CLIP",
+        "When ON, the room classifier is CLIP ONLY — the paid LLM (Haiku) fallback is "
+        "removed. A listing CLIP hasn't tagged yet is not LLM-classified or treated as "
+        "untagged: its images are RE-QUEUED for the CLIP tagger and the pair DEFERS to a "
+        "later run. Only flip this on once CLIP coverage of active listings is high (else "
+        "many pairs defer). Requires 'Use free CLIP room tags'.",
     ),
     DedupSetting(
         "dedup_clip_cosine_enabled", "bool", False,
@@ -71,6 +103,35 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "A cosine in [this, Haiku floor) routes to Sonnet; below this the room is "
         "skipped (not dismissed). Trial: same-property same-tag p25 ≈ 0.81, so "
         "0.70 rarely skips a true match.",
+        0.0, 1.0,
+    ),
+    DedupSetting(
+        "dedup_render_exclude_min", "float", 0.95,
+        "Render-score exclusion floor (byt)", "CLIP",
+        "For apartments, a photo whose CLIP render-score is at/above this is treated "
+        "as a shared development RENDER and dropped from the pHash count + the forensic "
+        "compare (a development reuses renders across distinct units). Higher = only the "
+        "most certain renders are excluded (fewer real photos wrongly dropped).",
+        0.0, 1.0,
+    ),
+    # --- Geo (single-dwelling: house / land / commercial) ---
+    DedupSetting(
+        "dedup_geo_enabled", "bool", False,
+        "Geo dedup enabled (houses / land / commercial)", "Geo",
+        "Master switch for the GEO candidate path. Apartments dedup on street + "
+        "disposition; houses/land/commercial have no usable disposition, so they are "
+        "matched by geo-proximity + area instead. When on, the scheduled full scan also "
+        "runs the geo pass through the SAME free-first flow (pHash → cosine → forensic "
+        "compare with facade/site-plan priority → floor/site-plan gate) — only the "
+        "candidate FILTER differs. Off by default until calibrated.",
+    ),
+    DedupSetting(
+        "dedup_geo_area_max_pct", "float", 0.20,
+        "Geo candidate area tolerance", "Geo",
+        "Two co-located single-dwelling listings are a geo CANDIDATE only when their "
+        "areas are within this fraction (0.20 = ±20%). Wider than the apartment street "
+        "gate because the candidate is still confirmed by the free-first visual flow — "
+        "this controls RECALL into that flow, not the merge itself.",
         0.0, 1.0,
     ),
     # --- Vision models ---
@@ -111,6 +172,17 @@ REGISTRY_BY_KEY: dict[str, DedupSetting] = {s.key: s for s in REGISTRY}
 def default_for(key: str) -> Any:
     """The coded default for a key (raises KeyError if unregistered)."""
     return REGISTRY_BY_KEY[key].default
+
+
+def read_setting(conn: Any, key: str) -> Any:
+    """The LIVE value of a registry setting: the app_settings row if present, else the
+    registry default — coerced to the setting's kind. The one reader every backend caller
+    should use, so a knob is read the same way everywhere (no per-call default drift)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+    raw = row[0] if row and row[0] is not None else default_for(key)
+    return coerce(REGISTRY_BY_KEY[key], raw)
 
 
 def coerce(setting: DedupSetting, value: Any) -> Any:

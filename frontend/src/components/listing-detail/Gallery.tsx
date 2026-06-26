@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ImagePublic } from '@/lib/types';
 import { imageSrc } from '@/lib/imageUrl';
+import ImageTagBadge from '@/components/ImageTagBadge';
+import ImageRenderBadge from '@/components/ImageRenderBadge';
 
 interface Props {
   images: ImagePublic[];
@@ -53,24 +55,35 @@ function Thumbnail({
     <button
       type="button"
       onClick={onClick}
-      className="group block w-full aspect-[4/3] overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)] focus:outline-none focus-visible:border-[var(--color-copper)]"
+      className="group relative block w-full aspect-[4/3] overflow-hidden rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-inset)] focus:outline-none focus-visible:border-[var(--color-copper)]"
       aria-label={`Photo ${image.sequence ?? image.id}`}
     >
       {errored ? (
         <BrokenPlaceholder />
       ) : (
-        <img
-          src={imageSrc(image)}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          onError={() => setErrored(true)}
-          className={[
-            'w-full h-full object-cover transition-transform duration-200',
-            dim ? 'opacity-70' : '',
-            'group-hover:scale-[1.02]',
-          ].join(' ')}
-        />
+        <>
+          <img
+            src={imageSrc(image)}
+            alt=""
+            loading="lazy"
+            decoding="async"
+            onError={() => setErrored(true)}
+            className={[
+              'w-full h-full object-cover transition-transform duration-200',
+              dim ? 'opacity-70' : '',
+              'group-hover:scale-[1.02]',
+            ].join(' ')}
+          />
+          <ImageTagBadge
+            tag={image.clip_fine_tag}
+            confidence={image.clip_confidence}
+            className="absolute bottom-1 left-1 max-w-[calc(100%-0.5rem)] truncate"
+          />
+          <ImageRenderBadge
+            renderScore={image.clip_render_score}
+            className="absolute bottom-1 right-1"
+          />
+        </>
       )}
     </button>
   );
@@ -183,7 +196,7 @@ function Lightbox({
       )}
 
       <div
-        className="max-w-[92vw] max-h-[88vh] flex items-center justify-center"
+        className="relative max-w-[92vw] max-h-[88vh] flex items-center justify-center"
         onClick={(e) => e.stopPropagation()}
       >
         {errored ? (
@@ -193,17 +206,28 @@ function Lightbox({
             Image unavailable
           </div>
         ) : (
-          <img
-            key={current.id}
-            src={imageSrc(current)}
-            alt=""
-            onError={() => setErrored(true)}
-            className={[
-              'max-w-[92vw] max-h-[88vh] object-contain',
-              'border border-[var(--color-copper)]/40',
-              dim,
-            ].join(' ')}
-          />
+          <>
+            <img
+              key={current.id}
+              src={imageSrc(current)}
+              alt=""
+              onError={() => setErrored(true)}
+              className={[
+                'max-w-[92vw] max-h-[88vh] object-contain',
+                'border border-[var(--color-copper)]/40',
+                dim,
+              ].join(' ')}
+            />
+            <ImageTagBadge
+              tag={current.clip_fine_tag}
+              confidence={current.clip_confidence}
+              className="absolute bottom-2 left-2 text-[0.7rem]"
+            />
+            <ImageRenderBadge
+              renderScore={current.clip_render_score}
+              className="absolute bottom-2 right-2 text-[0.7rem]"
+            />
+          </>
         )}
       </div>
     </div>

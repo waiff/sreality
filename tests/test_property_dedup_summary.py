@@ -82,9 +82,11 @@ class _FakeConn:
 
 
 def _candidate_row(cid: int) -> tuple[Any, ...]:
-    # 11 columns matching list_candidates' SELECT
+    # 15 columns matching list_candidates' SELECT (last 4 = LEFT-joined feedback:
+    # is_incorrect, expected_outcome, note, updated_at — NULL for an unflagged pair).
     return (cid, "street_disposition", "proposed", 0.6, {"reason": "no_images"},
-            False, None, "2026-06-18T00:00:00Z", None, {"property_id": 1}, {"property_id": 2})
+            False, None, "2026-06-18T00:00:00Z", None, {"property_id": 1}, {"property_id": 2},
+            None, None, None, None)
 
 
 def test_list_candidates_total_is_real_count_not_page_size() -> None:

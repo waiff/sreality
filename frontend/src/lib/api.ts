@@ -47,6 +47,8 @@ import type {
   DedupCandidatesResponse,
   DedupSummaryResponse,
   MergesResponse,
+  DecisionFeedback,
+  AuditRung,
 } from './types';
 import type { PresetSpec } from './filters';
 
@@ -654,9 +656,29 @@ export const updateDedupSetting = (
     { method: 'PUT', json: { value } },
   );
 
+export type DedupTagPriority = {
+  family: string;
+  order: string[];
+  default_order: string[];
+  is_default: boolean;
+};
+
+export const getDedupTagPriorities = (): Promise<{ data: DedupTagPriority[] }> =>
+  request<{ data: DedupTagPriority[] }>('/admin/dedup-tag-priorities');
+
+export const updateDedupTagPriority = (
+  family: string,
+  order: string[],
+): Promise<DedupTagPriority> =>
+  request<DedupTagPriority>(
+    `/admin/dedup-tag-priorities/${encodeURIComponent(family)}`,
+    { method: 'PUT', json: { order } },
+  );
+
 // The unified Decision history feed: every terminal dedup decision (merged /
 // dismissed), engine AND operator, with the undo handle + factor detail.
 export type DedupAuditRow = {
+  audit_id: number;
   run_at: string;
   left_sreality_id: number | null;
   right_sreality_id: number | null;
@@ -669,6 +691,8 @@ export type DedupAuditRow = {
   merge_group_id: string | null;
   detail: Record<string, unknown> | null;
   undone: boolean;
+  feedback: DecisionFeedback | null;
+  audit_breakdown: AuditRung[];
 };
 
 export const getDedupAudit = (
@@ -682,6 +706,7 @@ export const getDedupAudit = (
     factor_max?: number;
     verdict?: string; // High | Medium | Low
     property_id?: number; // scope to one property's merge decisions
+    flagged?: boolean; // only decisions the operator flagged as incorrect
     limit?: number;
     offset?: number;
   } = {},
@@ -696,6 +721,7 @@ export const getDedupAudit = (
   if (params.factor_max != null) q.set('factor_max', String(params.factor_max));
   if (params.verdict) q.set('verdict', params.verdict);
   if (params.property_id != null) q.set('property_id', String(params.property_id));
+  if (params.flagged) q.set('flagged', 'true');
   q.set('limit', String(params.limit ?? 100));
   if (params.offset) q.set('offset', String(params.offset));
   return request<{ data: DedupAuditRow[]; total: number; returned: number }>(
@@ -703,30 +729,75 @@ export const getDedupAudit = (
   );
 };
 
-// Photos behind a decision row — the deciding room's images for both listings.
-export type DedupDecisionSide = {
+// Flag a dedup decision / candidate PAIR as incorrect (with direction + note).
+// PROPERTY-pair-keyed, so the same flag shows on both the history feed and the queue and
+// never orphans on a repr-listing recompute.
+export type DecisionFeedbackInput = {
+  left_property_id: number;
+  right_property_id: number;
+  is_incorrect?: boolean;
+  expected_outcome?: 'should_merge' | 'should_dismiss' | 'unsure' | null;
+  note?: string | null;
+  category_main?: string | null;
+};
+export const setDecisionFeedback = (
+  body: DecisionFeedbackInput,
+): Promise<{ data: Record<string, unknown> }> =>
+  request<{ data: Record<string, unknown> }>('/dedup/feedback', {
+    method: 'POST',
+    json: body,
+  });
+export const deleteDecisionFeedback = (
+  left_property_id: number,
+  right_property_id: number,
+): Promise<{ data: { deleted: boolean } }> =>
+  request<{ data: { deleted: boolean } }>('/dedup/feedback', {
+    method: 'DELETE',
+    query: { a: left_property_id, b: right_property_id },
+  });
+
+// The SPECIFIC pictures behind a decision, resolved at read time: the pHash matched
+// PAIRS (with Hamming), the compared plans, or the deciding room.
+export type DedupEvidenceImage = {
+  image_id?: number;
+  sreality_url: string | null;
+  storage_path: string | null;
+};
+export type DedupEvidenceSide = {
   sreality_id: number;
-  images: { sreality_url: string | null; storage_path: string | null }[];
+  images: DedupEvidenceImage[];
   fallback: boolean;
 };
-export type DedupDecisionImages = {
-  room_type: string | null;
-  left: DedupDecisionSide;
-  right: DedupDecisionSide;
+export type DedupEvidencePair = {
+  hamming: number;
+  left: DedupEvidenceImage;
+  right: DedupEvidenceImage;
 };
-export const getDedupDecisionImages = (params: {
+export type DedupDecisionEvidence = {
+  pairs: DedupEvidencePair[] | null;
+  room_type: string | null;
+  left: DedupEvidenceSide;
+  right: DedupEvidenceSide;
+};
+export const getDedupDecisionEvidence = (params: {
   a: number;
   b: number;
+  stage?: string | null;
+  reason?: string | null;
   room_type?: string | null;
+  category_main?: string | null;
   per_side?: number;
-}): Promise<{ data: DedupDecisionImages }> => {
+}): Promise<{ data: DedupDecisionEvidence }> => {
   const q = new URLSearchParams();
   q.set('a', String(params.a));
   q.set('b', String(params.b));
+  if (params.stage) q.set('stage', params.stage);
+  if (params.reason) q.set('reason', params.reason);
   if (params.room_type) q.set('room_type', params.room_type);
+  if (params.category_main) q.set('category_main', params.category_main);
   if (params.per_side) q.set('per_side', String(params.per_side));
-  return request<{ data: DedupDecisionImages }>(
-    `/dedup/decision-images?${q.toString()}`,
+  return request<{ data: DedupDecisionEvidence }>(
+    `/dedup/decision-evidence?${q.toString()}`,
   );
 };
 

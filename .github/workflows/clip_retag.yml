@@ -1,0 +1,74 @@
+name: Dedup — CLIP re-tag from stored embeddings (sharded)
+
+# Re-runs the CLIP zero-shot tagging over ALREADY-tagged images from their STORED
+# embeddings (image_clip_embeddings) — NO R2 download, NO image re-inference, just the
+# taxonomy's text anchors dotted with each stored vector. How a TAXONOMY change (new
+# logical tags, sharpened anchors) reaches the back catalogue cheaply; new / not-yet-tagged
+# images go through clip_tag.yml, which loads the same live taxonomy.
+#
+# Campaign-driven: re-tags every row whose image_clip_tags.tagged_at is older than
+# app_settings.clip_taxonomy_retag_after (set it to now() to start a campaign after a
+# taxonomy edit). A re-tagged row is stamped tagged_at=now() and drops out, so the run
+# self-drains; once caught up each scheduled run pre-checks (no model load) and no-ops.
+# No cutoff set -> immediate no-op. Sharded into 4 parallel jobs (image_id %% 4), CPU torch
+# + the `clip` extra. Secret: SUPABASE_DB_URL (no R2 needed). NOT a portal ingest (portal: null).
+
+on:
+  schedule:
+    - cron: "20 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_seconds:
+        description: Per-shard wall-clock budget
+        required: false
+        default: "3000"
+        type: string
+      limit:
+        description: Per-shard cap (0 = until time budget)
+        required: false
+        default: "0"
+        type: string
+
+concurrency:
+  group: clip-retag
+  cancel-in-progress: false
+
+jobs:
+  retag:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      HF_HUB_DOWNLOAD_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Cache Hugging Face weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-clip-vit-b32
+
+      - name: Install (CPU torch + clip extra)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[clip]"
+
+      - name: Re-tag (shard ${{ matrix.shard }}/4)
+        run: |
+          python -m scripts.retag_from_embeddings \
+            --shards 4 --shard ${{ matrix.shard }} \
+            --max-seconds "${{ inputs.max_seconds || '3000' }}" \
+            --limit "${{ inputs.limit || '0' }}"

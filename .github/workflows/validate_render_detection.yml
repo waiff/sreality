@@ -1,0 +1,69 @@
+name: Validate CLIP render detection (one-shot, validate-first)
+
+# The operator's #3 VALIDATE-FIRST gate: does CLIP zero-shot confidently flag a 3D
+# render / visualization vs a real photo? This does NOT touch the engine — it embeds the
+# given listings' images fresh from R2 with the tagger's CLIP model and reports
+# render_score per image, so we can confirm KNOWN renders (the "Rezidence Na Bradle"
+# development units) score high while KNOWN amateur photos (a control set) score low
+# BEFORE building/wiring anything. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_*.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sreality_ids:
+        description: Target listing ids (suspected renders), comma-separated
+        required: true
+        default: "1461609804,476259148,877790028,1796105548,-36083,-36037,-35415,-39488"
+        type: string
+      control_sreality_ids:
+        description: Control listing ids (known amateur photos), comma-separated
+        required: false
+        default: ""
+        type: string
+      threshold:
+        description: render_score >= this is flagged RENDER
+        required: false
+        default: "0.5"
+        type: string
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      HF_HUB_DOWNLOAD_TIMEOUT: "60"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Cache Hugging Face weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-clip-vit-b32
+
+      - name: Install (CPU torch + clip extra)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[clip]"
+
+      - name: Validate render detection
+        # Use the --opt=value form: the listing ids are often negative (idnes/bazos),
+        # and argparse would read a leading '-' value as a flag in the space form.
+        run: |
+          python -m scripts.validate_render_detection \
+            "--sreality-ids=${{ inputs.sreality_ids }}" \
+            "--control-sreality-ids=${{ inputs.control_sreality_ids }}" \
+            "--threshold=${{ inputs.threshold || '0.5' }}"

@@ -14,9 +14,101 @@ from typing import Any
 
 import psycopg
 
+from toolkit.dedup_audit import build_audit_breakdown
+from toolkit.dedup_engine import (
+    PHASH_IDENTICAL_MAX,
+    RENDER_SCORE_EXCLUDE_MIN,
+    phash_excluded_tags_for,
+    phash_render_exclude_for,
+    render_exclusion_clause,
+)
 from toolkit.property_identity import MergeError, merge_properties, unmerge_group
+from toolkit.room_taxonomy import FLOOR_PLAN_ROOM_TYPE, SITE_PLAN_ROOM_TYPE
 
 LOG = logging.getLogger(__name__)
+
+_EXPECTED_OUTCOMES = ("should_merge", "should_dismiss", "unsure")
+
+
+def _canon_pair(a: int, b: int) -> tuple[int, int]:
+    """Canonical (low, high) property pair — the dedup_decision_feedback key order."""
+    a, b = int(a), int(b)
+    return (a, b) if a < b else (b, a)
+
+
+def _feedback_obj(
+    is_incorrect: Any, expected_outcome: Any, note: Any, updated_at: Any,
+) -> dict[str, Any] | None:
+    """Build the per-row `feedback` payload from a LEFT-joined feedback row, or None
+    when the pair carries no flag (is_incorrect is NULL on a no-match)."""
+    if is_incorrect is None:
+        return None
+    return {
+        "is_incorrect": bool(is_incorrect),
+        "expected_outcome": expected_outcome,
+        "note": note,
+        "updated_at": updated_at,
+    }
+
+
+def set_decision_feedback(
+    conn: psycopg.Connection,
+    *,
+    left_property_id: int,
+    right_property_id: int,
+    is_incorrect: bool = True,
+    expected_outcome: str | None = None,
+    note: str | None = None,
+    category_main: str | None = None,
+    created_by: str = "operator",
+) -> dict[str, Any]:
+    """Upsert the operator's "this decision was wrong" flag for ONE canonical PROPERTY
+    pair (the Decision-history AND Needs-review flag — same store; property-grain so it
+    never orphans on a repr-listing recompute). Idempotent: a repeat call edits the
+    existing row's direction/note."""
+    lo, hi = _canon_pair(left_property_id, right_property_id)
+    if lo == hi:
+        raise ValueError("a decision pair needs two distinct properties")
+    if expected_outcome is not None and expected_outcome not in _EXPECTED_OUTCOMES:
+        raise ValueError(f"expected_outcome must be one of {_EXPECTED_OUTCOMES}")
+    clean_note = (note or "").strip() or None
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO dedup_decision_feedback (left_property_id, right_property_id, "
+            "  is_incorrect, expected_outcome, note, category_main, created_by) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (left_property_id, right_property_id) DO UPDATE SET "
+            "  is_incorrect = excluded.is_incorrect, "
+            "  expected_outcome = excluded.expected_outcome, "
+            "  note = excluded.note, "
+            "  category_main = coalesce(excluded.category_main, "
+            "                           dedup_decision_feedback.category_main) "
+            "RETURNING is_incorrect, expected_outcome, note, updated_at",
+            (lo, hi, bool(is_incorrect), expected_outcome, clean_note,
+             category_main, created_by),
+        )
+        r = cur.fetchone()
+    return {
+        "data": {
+            "left_property_id": lo, "right_property_id": hi,
+            **(_feedback_obj(r[0], r[1], r[2], r[3]) or {}),
+        }
+    }
+
+
+def delete_decision_feedback(
+    conn: psycopg.Connection, *, left_property_id: int, right_property_id: int,
+) -> dict[str, Any]:
+    """Un-flag a pair (delete its feedback row). No-op if it wasn't flagged."""
+    lo, hi = _canon_pair(left_property_id, right_property_id)
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM dedup_decision_feedback "
+            "WHERE left_property_id = %s AND right_property_id = %s",
+            (lo, hi),
+        )
+        deleted = cur.rowcount
+    return {"data": {"deleted": bool(deleted)}}
 
 
 def _record_operator_decision(
@@ -141,10 +233,14 @@ def list_candidates(
               c.id, c.tier, c.status, c.confidence, c.markers_matched,
               c.auto_merged, c.merge_group_id::text, c.created_at, c.reviewed_at,
               {_PROP_SIDE_SQL.format(p="l")} AS left_property,
-              {_PROP_SIDE_SQL.format(p="r")} AS right_property
+              {_PROP_SIDE_SQL.format(p="r")} AS right_property,
+              f.is_incorrect, f.expected_outcome, f.note, f.updated_at
             FROM property_identity_candidates c
             JOIN properties l ON l.id = c.left_property_id
             JOIN properties r ON r.id = c.right_property_id
+            LEFT JOIN dedup_decision_feedback f
+              ON f.left_property_id = least(c.left_property_id, c.right_property_id)
+             AND f.right_property_id = greatest(c.left_property_id, c.right_property_id)
             {where_sql}
             ORDER BY c.created_at DESC, c.id DESC
             LIMIT %(limit)s OFFSET %(offset)s
@@ -166,6 +262,8 @@ def list_candidates(
             "reviewed_at": r[8],
             "left_property": r[9],
             "right_property": r[10],
+            "feedback": _feedback_obj(r[11], r[12], r[13], r[14]),
+            "audit_breakdown": build_audit_breakdown(r[4]),
         }
         for r in rows
     ]
@@ -252,6 +350,7 @@ def list_pair_audit(
     factor_max: float | None = None,
     verdict: str | None = None,
     property_id: int | None = None,
+    flagged: bool | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -299,17 +398,33 @@ def list_pair_audit(
             "  (SELECT sreality_id FROM listings WHERE property_id = %(audit_pid)s))"
         )
         params["audit_pid"] = property_id
+    if flagged:
+        clauses.append("f.is_incorrect IS TRUE")
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    # The pair-keyed feedback flag (Decision history + Needs-review share one store):
+    # join on the canonical (low, high) PROPERTY pair the audit row SNAPSHOTTED at
+    # decision time (immutable — unlike the drifting repr listing), in EITHER stored
+    # order, guarded against a NULL property id.
+    feedback_join = (
+        "LEFT JOIN dedup_decision_feedback f "
+        "  ON a.left_property_id IS NOT NULL AND a.right_property_id IS NOT NULL "
+        " AND f.left_property_id = least(a.left_property_id, a.right_property_id) "
+        " AND f.right_property_id = greatest(a.left_property_id, a.right_property_id) "
+    )
     with conn.cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM dedup_pair_audit a {where}", params)
+        cur.execute(
+            f"SELECT count(*) FROM dedup_pair_audit a {feedback_join} {where}", params,
+        )
         total = int(cur.fetchone()[0])
         cur.execute(
             f"""
-            SELECT a.run_at, a.left_sreality_id, a.right_sreality_id,
+            SELECT a.id, a.run_at, a.left_sreality_id, a.right_sreality_id,
                    a.left_property_id, a.right_property_id, a.category_main,
                    a.stage, a.outcome, a.source, a.merge_group_id, a.detail,
-                   m.fully_undone
+                   m.fully_undone,
+                   f.is_incorrect, f.expected_outcome, f.note, f.updated_at
             FROM dedup_pair_audit a
+            {feedback_join}
             LEFT JOIN LATERAL (
               SELECT bool_and(e.undone_at IS NOT NULL) AS fully_undone
               FROM property_merge_events e
@@ -326,11 +441,14 @@ def list_pair_audit(
     return {
         "data": [
             {
-                "run_at": r[0], "left_sreality_id": r[1], "right_sreality_id": r[2],
-                "left_property_id": r[3], "right_property_id": r[4],
-                "category_main": r[5], "stage": r[6], "outcome": r[7],
-                "source": r[8], "merge_group_id": r[9], "detail": r[10],
-                "undone": bool(r[11]),
+                "audit_id": r[0], "run_at": r[1],
+                "left_sreality_id": r[2], "right_sreality_id": r[3],
+                "left_property_id": r[4], "right_property_id": r[5],
+                "category_main": r[6], "stage": r[7], "outcome": r[8],
+                "source": r[9], "merge_group_id": r[10], "detail": r[11],
+                "undone": bool(r[12]),
+                "feedback": _feedback_obj(r[13], r[14], r[15], r[16]),
+                "audit_breakdown": build_audit_breakdown(r[11]),
             }
             for r in rows
         ],
@@ -342,49 +460,105 @@ def list_pair_audit(
 def _listing_room_images(
     cur: Any, sreality_id: int, room_type: str | None, n: int,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """Images for the deciding room of one listing (joined to the engine-internal
-    room classifications, which anon can't read — hence this server hop), falling back
-    to the listing's first images when the room is unset/unclassified. Returns
-    (images, fallback)."""
+    """Images for the deciding room of one listing (CLIP image_clip_tags OR the
+    LLM image_room_classifications cache — both backend-only, hence this server
+    hop), falling back to the listing's first images when the room is unset /
+    untagged. Prefers CLIP so the photos reflect what the engine actually paired
+    on (the engine runs dedup_prefer_clip_tags). Returns (images, fallback)."""
     if room_type:
         cur.execute(
-            "SELECT i.sreality_url, i.storage_path FROM images i "
-            "JOIN image_room_classifications c ON c.image_id = i.id "
-            "WHERE i.sreality_id = %s AND c.room_type = %s "
-            "ORDER BY i.sequence NULLS LAST, i.id LIMIT %s",
-            (sreality_id, room_type, n),
+            "SELECT i.id, i.sreality_url, i.storage_path FROM images i "
+            "WHERE i.sreality_id = %(sid)s AND ("
+            "  EXISTS (SELECT 1 FROM image_clip_tags t "
+            "          WHERE t.image_id = i.id AND t.logical_tag = %(rt)s) "
+            "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
+            "             WHERE c.image_id = i.id AND c.room_type = %(rt)s)) "
+            "ORDER BY i.sequence NULLS LAST, i.id LIMIT %(n)s",
+            {"sid": sreality_id, "rt": room_type, "n": n},
         )
         rows = cur.fetchall()
         if rows:
-            return ([{"sreality_url": r[0], "storage_path": r[1]} for r in rows], False)
+            return ([{"image_id": r[0], "sreality_url": r[1], "storage_path": r[2]}
+                     for r in rows], False)
     cur.execute(
-        "SELECT sreality_url, storage_path FROM images WHERE sreality_id = %s "
+        "SELECT id, sreality_url, storage_path FROM images WHERE sreality_id = %s "
         "ORDER BY sequence NULLS LAST, id LIMIT %s",
         (sreality_id, n),
     )
-    return ([{"sreality_url": r[0], "storage_path": r[1]} for r in cur.fetchall()],
+    return ([{"image_id": r[0], "sreality_url": r[1], "storage_path": r[2]}
+             for r in cur.fetchall()],
             bool(room_type))
 
 
-def decision_images(
+def _phash_pair_evidence(
+    cur: Any, a_id: int, b_id: int, category_main: str | None, limit: int,
+) -> list[dict[str, Any]]:
+    """The actual near-identical image PAIRS (Hamming <= bar) the pHash signal turned on,
+    recomputed from stored phashes with the SAME category exclusions the engine applied —
+    so 'the specific pictures' are exactly the ones that drove the decision, recoverable
+    for ANY historical row (nothing extra had to be stored at decision time)."""
+    excluded = phash_excluded_tags_for(category_main)
+    rmin = phash_render_exclude_for(category_main, RENDER_SCORE_EXCLUDE_MIN)
+    params: dict[str, Any] = {"a": a_id, "b": b_id, "max": PHASH_IDENTICAL_MAX, "lim": limit}
+    sql = (
+        "SELECT ia.id, ia.sreality_url, ia.storage_path, "
+        "       ib.id, ib.sreality_url, ib.storage_path, "
+        "       bit_count((ia.phash # ib.phash)::bit(64)) AS hamming "
+        "FROM images ia JOIN images ib ON true "
+        "WHERE ia.sreality_id = %(a)s AND ib.sreality_id = %(b)s "
+        "  AND ia.phash IS NOT NULL AND ib.phash IS NOT NULL "
+        "  AND bit_count((ia.phash # ib.phash)::bit(64)) <= %(max)s"
+    )
+    sql += render_exclusion_clause(params, "ia", excluded, rmin)
+    sql += render_exclusion_clause(params, "ib", excluded, rmin)
+    sql += " ORDER BY hamming ASC, ia.id, ib.id LIMIT %(lim)s"
+    cur.execute(sql, params)
+    return [
+        {
+            "hamming": int(r[6]),
+            "left": {"image_id": r[0], "sreality_url": r[1], "storage_path": r[2]},
+            "right": {"image_id": r[3], "sreality_url": r[4], "storage_path": r[5]},
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def decision_evidence(
     conn: psycopg.Connection,
     *,
     left_sreality_id: int,
     right_sreality_id: int,
+    stage: str | None = None,
+    reason: str | None = None,
     room_type: str | None = None,
+    category_main: str | None = None,
     per_side: int = 4,
 ) -> dict[str, Any]:
-    """Hydrate the photos behind a dedup decision — the deciding room's images for
-    BOTH listings (so the operator sees what the engine compared), else the first
-    images. Returns `{sreality_url, storage_path}` objects the SPA renders with the
-    shared `imageSrc()` (R2 when stored, CDN fallback otherwise). Read-only."""
+    """The SPECIFIC pictures behind a decision, resolved at READ time from stored data
+    (no decision-time bloat, works on every historical row). The engine's own gate picks
+    the evidence: a pHash decision → the exact near-identical PAIRS; a floor/site-plan
+    override → both sides' PLANS; a forensic verdict → the deciding ROOM; else first
+    photos. Faithful to what the engine compared. Read-only."""
     per_side = max(1, min(per_side, 8))
+    reason = reason or ""
+    # The strip room: a plan override shows the plans; a forensic verdict its room.
+    if "floor_plan" in reason:
+        strip_room: str | None = FLOOR_PLAN_ROOM_TYPE
+    elif reason == "site_plan_different_unit":
+        strip_room = SITE_PLAN_ROOM_TYPE
+    else:
+        strip_room = room_type
+    want_pairs = stage == "phash" or reason == "image_phash"
     with conn.cursor() as cur:
-        left, lfb = _listing_room_images(cur, left_sreality_id, room_type, per_side)
-        right, rfb = _listing_room_images(cur, right_sreality_id, room_type, per_side)
+        pairs = (_phash_pair_evidence(
+            cur, left_sreality_id, right_sreality_id, category_main, per_side * 2)
+            if want_pairs else None)
+        left, lfb = _listing_room_images(cur, left_sreality_id, strip_room, per_side)
+        right, rfb = _listing_room_images(cur, right_sreality_id, strip_room, per_side)
     return {
         "data": {
-            "room_type": room_type,
+            "pairs": pairs or None,
+            "room_type": strip_room,
             "left": {"sreality_id": left_sreality_id, "images": left, "fallback": lfb},
             "right": {"sreality_id": right_sreality_id, "images": right, "fallback": rfb},
         }

@@ -24,7 +24,13 @@ export default function OriginPropertyPanel({
   listing: ListingPublic;
   images: ImageRef[];
 }) {
-  const urls = useMemo(() => images.map(imageSrc), [images]);
+  // ImageRef carries no CLIP tag (the origin strip's data layer is minimal), so
+  // tag/confidence are null → ImageCarousel shows no badge here (same posture as
+  // the map-hover previews).
+  const carouselImages = useMemo(
+    () => images.map((im) => ({ url: imageSrc(im), tag: null, confidence: null, renderScore: null })),
+    [images],
+  );
   const amenities = useMemo(() => buildAmenities(listing), [listing]);
 
   const kindParts = listingKindParts(listing);
@@ -45,7 +51,7 @@ export default function OriginPropertyPanel({
             rather than crushing the facts column. */}
         <div className="w-32 sm:w-40 shrink-0">
           <ImageCarousel
-            urls={urls}
+            images={carouselImages}
             aspect="aspect-[4/3]"
             className="rounded-[var(--radius-sm)] border border-[var(--color-rule)]"
           />

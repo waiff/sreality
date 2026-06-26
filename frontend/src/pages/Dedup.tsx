@@ -34,6 +34,7 @@ import {
   type ListingDetailLite,
 } from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
+import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
 import ImageCarousel from '@/components/ImageCarousel';
@@ -41,6 +42,7 @@ import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import DedupCandidateReset from '@/components/DedupCandidateReset';
 import DedupFactors from '@/components/DedupFactors';
+import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
 import { listingPath } from '@/lib/listingUrl';
 import type {
@@ -323,11 +325,13 @@ function AutomationDashboard({
             <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
-          <div className="mt-2 grid grid-cols-2 sm:grid-cols-5 gap-2">
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-6 gap-2">
             <Stat label="By address" value={latest.auto_address} small />
             <Stat label="By photos" value={latest.auto_phash} small />
             <Stat label="By visual" value={latest.auto_visual} small />
             <Stat label="Auto-dismissed" value={latest.auto_dismissed ?? 0} small />
+            <Stat label="Plan deferred" value={latest.floor_plan_deferred ?? 0} small />
+            <Stat label="CLIP deferred" value={latest.clip_deferred ?? 0} small />
             <Stat label="Queued" value={latest.queued} small />
           </div>
           {runs.length > 1 ? <RunTrend runs={runs} /> : null}
@@ -884,9 +888,14 @@ function Section({
   );
 }
 
-function urlsFor(side: DedupPropertySide, imagesMap: ImagesMap): string[] {
+function imagesFor(side: DedupPropertySide, imagesMap: ImagesMap): TaggedImageUrl[] {
   if (side.sreality_id == null) return [];
-  return (imagesMap.get(side.sreality_id) ?? []).map(imageSrc);
+  return (imagesMap.get(side.sreality_id) ?? []).map((im) => ({
+    url: imageSrc(im),
+    tag: im.clip_fine_tag,
+    confidence: im.clip_confidence,
+    renderScore: im.clip_render_score,
+  }));
 }
 
 /* One review card per CLUSTER — N member columns (not always two). Each member
@@ -988,7 +997,7 @@ function ClusterCard({
                 <td key={side.property_id} className="align-top px-1 pb-2">
                   <PropertyPanel
                     side={side}
-                    urls={urlsFor(side, imagesMap)}
+                    images={imagesFor(side, imagesMap)}
                     sources={sourcesMap.get(side.property_id) ?? []}
                     detailMap={detailMap}
                     checked={checked.has(side.property_id)}
@@ -1018,7 +1027,7 @@ function ClusterCard({
           </tbody>
         </table>
       </div>
-      {cluster.markers || cluster.visual ? (
+      {cluster.markers || cluster.visual || n === 2 ? (
         <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-2.5">
           <p className="mb-1.5 text-[0.62rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
             Proč ve frontě
@@ -1034,9 +1043,21 @@ function ClusterCard({
                   }
                 : null)
             }
+            breakdown={cluster.audit_breakdown}
             leftSrealityId={members[0]?.sreality_id ?? null}
             rightSrealityId={members[1]?.sreality_id ?? null}
+            categoryMain={members[0]?.category_main ?? null}
           />
+          {n === 2 && (
+            <div className="mt-2 border-t border-[var(--color-rule-soft)] pt-2">
+              <DecisionFeedbackControl
+                leftPropertyId={members[0]?.property_id ?? null}
+                rightPropertyId={members[1]?.property_id ?? null}
+                categoryMain={members[0]?.category_main ?? null}
+                feedback={cluster.feedback}
+              />
+            </div>
+          )}
         </div>
       ) : null}
     </div>
@@ -1045,14 +1066,14 @@ function ClusterCard({
 
 function PropertyPanel({
   side,
-  urls,
+  images,
   sources,
   detailMap,
   checked,
   onToggle,
 }: {
   side: DedupPropertySide;
-  urls: string[];
+  images: TaggedImageUrl[];
   sources: PropertySource[];
   detailMap: DetailMap;
   checked: boolean;
@@ -1062,7 +1083,7 @@ function PropertyPanel({
   return (
     <div className={`rounded-[var(--radius-sm)] border ${ring} bg-[var(--color-paper)] p-3`}>
       <ImageCarousel
-        urls={urls}
+        images={images}
         className="rounded-[var(--radius-xs)] border border-[var(--color-rule-soft)] mb-2"
       >
         {/* Top-right selection checkbox — tick ≥2 in a cluster to merge only
