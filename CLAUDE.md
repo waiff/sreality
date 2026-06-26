@@ -725,6 +725,25 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     exact-address / pHash / visual paths or operator review. This is distinct from the **asset-link**
     grain (migration 224), which links genuinely *different* units in one building (a `byt` + its
     ground-floor `komercni`, a `dum` + its `pozemek`) WITHOUT collapsing them.
+    **Geo path (single-dwelling: house / land / commercial), default OFF.** Apartments key on
+    street + disposition; houses/land/commercial have no usable disposition, so they are matched by
+    **geo-proximity** instead — but through the EXACT SAME `resolve_pair` brain (pHash → CLIP cosine
+    → forensic compare → floor/site-plan gate), not a separate deterministic path. `run_engine(geo=True)`
+    swaps only: the loader (`_load_geo_eligible`), the candidate FILTER (`classify_geo_pair`, keyed on
+    `geo_cell_key` = obec + rounded coord + category bucket + offering; `geo_category_bucket` collapses
+    dum+komercni into one cell so the cross-type co-locates), the area tolerance
+    (`dedup_geo_area_max_pct`, default ±20% — wider than the street 10% because the visual flow still
+    confirms), and the queue tier (`'geo'`). The geo classify maps its deterministic `auto_merge` →
+    `candidate`, so a geo signal NEVER merges on its own — the free-first visual flow (with FACADE /
+    SITE-PLAN priority via `room_priority_for`, rule #15 PR-1) is the sole merge gate. The geo path
+    also does NOT apply the **cross-source gate** (`_RunContext.cross_source_only=False`): that gate is
+    justified only where rule B auto-merges same-source exact-address relists for free (the street
+    path), and geo has no rule B — so a same-portal house re-post still reaches the visual stage. Gated by the
+    `dedup_geo_enabled` setting: when on, the scheduled FULL-SCAN + CANDIDATE-DRAIN runs also run the
+    geo pass (after the street pass, sharing the `--max-seconds` budget); the real-time DIRTY drain
+    skips it (geo isn't dirty-scoped). `--geo` / `--geo-only` force it ad-hoc. Each geo pass writes its
+    own `dedup_engine_runs` row. (Stage 2 will make the per-family tag priorities operator-editable;
+    geo real-time + auto-merge calibration are later.)
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so

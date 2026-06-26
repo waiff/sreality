@@ -517,17 +517,27 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * r * math.asin(math.sqrt(h))
 
 
+def geo_category_bucket(category_main: str | None) -> str | None:
+    """The geo-cell category token. dum and komercni collapse to ONE bucket so the
+    sanctioned cross-type co-locates in the same cell (and reaches classify_geo_pair);
+    every other category buckets to itself (a flat never shares a house's cell)."""
+    return "dum|komercni" if category_main in ("dum", "komercni") else category_main
+
+
 def geo_cell_key(
     obec_id: int | None, lat: float | None, lng: float | None,
     category_main: str | None, category_type: str | None, *, precision: int = 4,
 ) -> str | None:
     """Blocking key for the geo path: one municipality + a rounded coordinate + the
     offering. Scoping by obec_id keeps a coordinate collision across towns apart, and
-    by (category_main, category_type) keeps a sale flat and a rental house out of one
-    cell. None when the coordinate / municipality is missing (the row can't geo-block)."""
+    by (category bucket, category_type) keeps a sale flat and a rental house out of one
+    cell — while dum and komercni share a bucket (geo_category_bucket) so the one
+    sanctioned cross-type can pair. None when the coordinate / municipality is missing
+    (the row can't geo-block)."""
     if obec_id is None or lat is None or lng is None:
         return None
-    return f"geo:{obec_id}:{round(lat, precision)}:{round(lng, precision)}:{category_main}:{category_type}"
+    bucket = geo_category_bucket(category_main)
+    return f"geo:{obec_id}:{round(lat, precision)}:{round(lng, precision)}:{bucket}:{category_type}"
 
 
 def _price_match(a: int | None, b: int | None, pct: float = GEO_PRICE_MATCH_PCT) -> bool:
@@ -538,15 +548,17 @@ def _price_match(a: int | None, b: int | None, pct: float = GEO_PRICE_MATCH_PCT)
 
 def classify_geo_pair(
     a: ListingKey, b: ListingKey, profile: MatchProfile, *, max_coord_m: float = GEO_MAX_COORD_M,
+    max_area_pct: float | None = None,
 ) -> PairDecision:
     """Decide two co-located single-dwelling listings (same geo cell). Pure, no images.
 
     'reject' on a hard contradiction (coordinate too far, different house number, area
-    gap > the profile's max, or a same-development unit-marker clash); 'auto_merge' only
-    for a STRONG house signal (near-identical area AND matching price-or-house-number)
-    when the profile permits it; otherwise 'candidate'. The orchestrator decides whether
-    to honour an auto_merge (P1 keeps every family queue-only until the golden set
-    calibrates the threshold)."""
+    gap > `max_area_pct` (defaults to the profile's), or a same-development unit-marker
+    clash); 'auto_merge' only for a STRONG house signal (near-identical area AND matching
+    price-or-house-number) when the profile permits it; otherwise 'candidate'. The
+    orchestrator decides whether to honour an auto_merge — in the unified geo path it maps
+    auto_merge → candidate, so the free-first visual flow is the sole merge gate."""
+    area_max_pct = profile.candidate_area_max_pct if max_area_pct is None else max_area_pct
     if a.sreality_id == b.sreality_id:
         return PairDecision("reject", None, "same_listing")
     if a.property_id is not None and a.property_id == b.property_id:
@@ -566,7 +578,7 @@ def classify_geo_pair(
     if _house_numbers_contradict(a.house_number, b.house_number):
         return PairDecision("reject", None, "house_number_contradiction")
     area_diff = _area_pct_diff(a.area_m2, b.area_m2)
-    if area_diff is not None and area_diff > profile.candidate_area_max_pct:
+    if area_diff is not None and area_diff > area_max_pct:
         return PairDecision("reject", None, "area_contradiction")
     # Same-development text guard (a new estate names "dům 3A" vs "5C", "pozemek č.3"
     # vs "č.4"): distinct units, never the same property — reuse the street path's check.

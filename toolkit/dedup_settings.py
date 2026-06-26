@@ -105,6 +105,26 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "most certain renders are excluded (fewer real photos wrongly dropped).",
         0.0, 1.0,
     ),
+    # --- Geo (single-dwelling: house / land / commercial) ---
+    DedupSetting(
+        "dedup_geo_enabled", "bool", False,
+        "Geo dedup enabled (houses / land / commercial)", "Geo",
+        "Master switch for the GEO candidate path. Apartments dedup on street + "
+        "disposition; houses/land/commercial have no usable disposition, so they are "
+        "matched by geo-proximity + area instead. When on, the scheduled full scan also "
+        "runs the geo pass through the SAME free-first flow (pHash → cosine → forensic "
+        "compare with facade/site-plan priority → floor/site-plan gate) — only the "
+        "candidate FILTER differs. Off by default until calibrated.",
+    ),
+    DedupSetting(
+        "dedup_geo_area_max_pct", "float", 0.20,
+        "Geo candidate area tolerance", "Geo",
+        "Two co-located single-dwelling listings are a geo CANDIDATE only when their "
+        "areas are within this fraction (0.20 = ±20%). Wider than the apartment street "
+        "gate because the candidate is still confirmed by the free-first visual flow — "
+        "this controls RECALL into that flow, not the merge itself.",
+        0.0, 1.0,
+    ),
     # --- Vision models ---
     DedupSetting(
         "llm_visual_match_model", "model", "claude-sonnet-4-5",
