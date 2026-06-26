@@ -44,6 +44,15 @@ class AssetUnlinkAction(BaseModel):
     property_id: int
 
 
+class DecisionFeedbackAction(BaseModel):
+    left_sreality_id: int
+    right_sreality_id: int
+    is_incorrect: bool = True
+    expected_outcome: str | None = None  # should_merge | should_dismiss | unsure
+    note: str | None = None
+    category_main: str | None = None
+
+
 @router.get("/summary")
 def get_summary(
     status: str = "proposed",
@@ -112,6 +121,7 @@ def get_pair_audit(
     factor_max: float | None = None,
     verdict: str | None = Query(default=None, pattern="^(High|Medium|Low)$"),
     property_id: int | None = None,
+    flagged: bool | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     conn: Any = Depends(deps.get_db_conn),
@@ -119,13 +129,67 @@ def get_pair_audit(
 ) -> dict[str, Any]:
     """The unified Decision history feed (merged / dismissed, engine + operator).
     Filterable by property type, outcome, source, stage, the decision FACTOR
-    (`factor` + numeric `factor_min`/`factor_max`, or `verdict` for visual), and
-    `property_id` (the decisions that built one property — the listing-detail link)."""
+    (`factor` + numeric `factor_min`/`factor_max`, or `verdict` for visual),
+    `property_id` (the decisions that built one property — the listing-detail link),
+    and `flagged` (only decisions the operator flagged as incorrect)."""
     return dedup.list_pair_audit(
         conn, outcome=outcome, category_main=category_main, source=source,
         stage=stage, factor=factor, factor_min=factor_min, factor_max=factor_max,
-        verdict=verdict, property_id=property_id, limit=limit, offset=offset,
+        verdict=verdict, property_id=property_id, flagged=flagged,
+        limit=limit, offset=offset,
     )
+
+
+@router.get("/decision-evidence")
+def get_decision_evidence(
+    a: int,
+    b: int,
+    stage: str | None = None,
+    reason: str | None = None,
+    room_type: str | None = None,
+    category_main: str | None = None,
+    per_side: int = Query(default=4, ge=1, le=8),
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """The SPECIFIC pictures behind a decision: the pHash matched pairs, the compared
+    plans, or the deciding room — resolved at read time so it works on every historical
+    row. Stage/reason pick the evidence the engine's gate actually used."""
+    return dedup.decision_evidence(
+        conn, left_sreality_id=a, right_sreality_id=b, stage=stage, reason=reason,
+        room_type=room_type, category_main=category_main, per_side=per_side,
+    )
+
+
+@router.post("/feedback")
+def post_decision_feedback(
+    body: DecisionFeedbackAction,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Flag a dedup decision/candidate pair as INCORRECT (with a note + the expected
+    correct outcome). Pair-keyed, so it attaches on both the history feed and the queue;
+    idempotent upsert."""
+    try:
+        return dedup.set_decision_feedback(
+            conn, left_sreality_id=body.left_sreality_id,
+            right_sreality_id=body.right_sreality_id, is_incorrect=body.is_incorrect,
+            expected_outcome=body.expected_outcome, note=body.note,
+            category_main=body.category_main,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/feedback")
+def delete_decision_feedback(
+    a: int,
+    b: int,
+    conn: Any = Depends(deps.get_db_conn),
+    _: None = Depends(deps.require_token),
+) -> dict[str, Any]:
+    """Un-flag a pair (remove its incorrect-decision flag)."""
+    return dedup.delete_decision_feedback(conn, left_sreality_id=a, right_sreality_id=b)
 
 
 @router.get("/candidates")

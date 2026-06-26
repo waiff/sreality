@@ -42,6 +42,7 @@ import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import DedupCandidateReset from '@/components/DedupCandidateReset';
 import DedupFactors from '@/components/DedupFactors';
+import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
 import { listingPath } from '@/lib/listingUrl';
 import type {
@@ -1026,7 +1027,7 @@ function ClusterCard({
           </tbody>
         </table>
       </div>
-      {cluster.markers || cluster.visual ? (
+      {cluster.markers || cluster.visual || n === 2 ? (
         <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-2.5">
           <p className="mb-1.5 text-[0.62rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
             Proč ve frontě
@@ -1042,9 +1043,21 @@ function ClusterCard({
                   }
                 : null)
             }
+            breakdown={cluster.audit_breakdown}
             leftSrealityId={members[0]?.sreality_id ?? null}
             rightSrealityId={members[1]?.sreality_id ?? null}
+            categoryMain={members[0]?.category_main ?? null}
           />
+          {n === 2 && (
+            <div className="mt-2 border-t border-[var(--color-rule-soft)] pt-2">
+              <DecisionFeedbackControl
+                leftSrealityId={members[0]?.sreality_id ?? null}
+                rightSrealityId={members[1]?.sreality_id ?? null}
+                categoryMain={members[0]?.category_main ?? null}
+                feedback={cluster.feedback}
+              />
+            </div>
+          )}
         </div>
       ) : null}
     </div>
