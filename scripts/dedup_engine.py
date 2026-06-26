@@ -467,20 +467,24 @@ def _high_render_image_ids(conn: Any, a_id: int, b_id: int, threshold: float) ->
         return {int(r[0]) for r in cur.fetchall()}
 
 
-# A floor_plan tag below this confidence is dropped from the gate's plan set. Validated on the
-# live distribution: 95% of CLIP floor_plan tags score >= 0.52 (p05=0.518), 87.5% >= 0.70, and
-# the false positives (a non-plan photo mis-tagged floor_plan — e.g. an idnes location map at
-# 0.36) concentrate BELOW 0.50 (4.4% of tags). Dropping the low-confidence tail stops a phantom
-# plan from creating a false 'one-sided' read that queues an otherwise-mergeable pair. Applies to
-# BOTH vision taggers (image_clip_tags + the LLM image_room_classifications, both carry confidence).
+# A CLIP floor_plan tag below this confidence is dropped from the gate's plan set. Validated on
+# the live distribution: 95% of CLIP floor_plan tags score >= 0.52 (p05=0.518), 87.5% >= 0.70, and
+# the false positives (a non-plan photo mis-tagged floor_plan — e.g. an idnes location map at 0.36)
+# concentrate BELOW 0.50 (4.4% of tags). Dropping the low-confidence tail stops a phantom plan from
+# creating a false 'one-sided' read that queues an otherwise-mergeable pair. The floor is CLIP-only:
+# only `image_clip_tags.confidence` is a numeric 0..1 score. The LLM `image_room_classifications`
+# carries a coarse 'high'/'medium'/'low' TEXT enum (and only ~530 floor_plan rows), so that source
+# is left unfiltered — a numeric floor there would be a type error, and the validated false-positive
+# problem is CLIP-specific.
 FLOOR_PLAN_MIN_CONFIDENCE = 0.50
 
 
 def _floor_plan_image_ids(
     conn: Any, sreality_id: int, min_confidence: float = FLOOR_PLAN_MIN_CONFIDENCE,
 ) -> list[int]:
-    """Stored floor-plan image ids for a listing (CLIP tag OR LLM classification) at or above
-    `min_confidence`, storage_path present so they can be sent to vision. Empty -> no floor plan."""
+    """Stored floor-plan image ids for a listing — a CLIP floor_plan tag at or above
+    `min_confidence` OR an LLM room classification (enum confidence, unfiltered); storage_path
+    present so they can be sent to vision. Empty -> no floor plan."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT i.id FROM images i "
@@ -489,8 +493,7 @@ def _floor_plan_image_ids(
             "          WHERE t.image_id = i.id AND t.logical_tag = %(fp)s "
             "            AND t.confidence >= %(minconf)s)"
             "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
-            "             WHERE c.image_id = i.id AND c.room_type = %(fp)s "
-            "               AND c.confidence >= %(minconf)s)) "
+            "             WHERE c.image_id = i.id AND c.room_type = %(fp)s)) "
             "ORDER BY i.sequence ASC NULLS LAST, i.id ASC",
             {"sid": sreality_id, "fp": FLOOR_PLAN_ROOM_TYPE, "minconf": min_confidence},
         )

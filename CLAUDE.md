@@ -633,11 +633,13 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     **Floor-plan validation gate (migration 234).** Whenever the engine WOULD merge a pair — via the
     pHash fast-path OR a visual High — `_floor_plan_gate` runs a Sonnet floor-plan check (the
     `DOCUMENT_MAX_EDGE=1568` tier; pHash conflates line-art plans and CLIP cosine can't read layout,
-    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (CLIP tag OR
-    classifier room_type, each **at or above `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`** — a low-confidence
-    floor_plan tag is a likely false positive, e.g. an idnes location map mis-tagged at 0.36, and 95% of
-    real CLIP plan tags score ≥ 0.52, so the floor drops the phantom-plan "one-sided" read while keeping
-    the genuine plans) → `compare_listing_floor_plans` (operator prompt
+    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (a CLIP tag
+    **at or above `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`** OR an LLM classifier room_type — the floor is
+    CLIP-only because only `image_clip_tags.confidence` is numeric; the LLM `image_room_classifications`
+    confidence is a coarse high/medium/low enum, left unfiltered. A low-confidence CLIP floor_plan tag
+    is a likely false positive, e.g. an idnes location map mis-tagged at 0.36, and 95% of real CLIP plan
+    tags score ≥ 0.52, so the floor drops the phantom-plan "one-sided" read while keeping genuine plans)
+    → `compare_listing_floor_plans` (operator prompt
     `app_settings.llm_floor_plan_match_prompt`, cache `listing_floor_plan_matches`, write-allowed rule
     #5; verdict same_layout / different_layout / inconclusive + per-plan OCR in `extracted`, used
     plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
