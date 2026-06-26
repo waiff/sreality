@@ -546,7 +546,11 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
         and a.floor is not None and b.floor is not None and a.floor == b.floor
         and a.disposition == b.disposition
     )
-    if exact_address and not (area_diff is not None and area_diff > profile.address_area_guard_pct):
+    if exact_address:
+        if area_diff is not None and area_diff > profile.address_area_guard_pct:
+            # Same address+floor+disposition but materially different area: likely two distinct
+            # units — a candidate the visual flow settles (was already demoted pre-retirement).
+            return PairDecision("candidate", "area_guard")
         return PairDecision("candidate", "address_exact")
 
     # Rule C: shares street + disposition, no contradiction — a visual candidate.
