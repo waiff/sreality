@@ -498,15 +498,17 @@ def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
         return [r[0] for r in cur.fetchall()]
 
 
-def _has_clip_tags(conn: Any, sreality_id: int, model: str) -> bool:
-    """True if the listing has any CLIP room tag under `model` — the CLIP-only gap check."""
+def _clip_untagged(conn: Any, sreality_ids: list[int], model: str) -> list[int]:
+    """Which of these listings have NO CLIP room tag under `model` — the CLIP-only gap check,
+    in ONE query for the pair (so resolve_pair does a single round-trip, not one per listing)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT EXISTS (SELECT 1 FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
-            "WHERE i.sreality_id = %s AND t.model = %s)",
-            (sreality_id, model),
+            "SELECT s.sid FROM unnest(%s::bigint[]) AS s(sid) "
+            "WHERE NOT EXISTS (SELECT 1 FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
+            "                  WHERE i.sreality_id = s.sid AND t.model = %s)",
+            (sreality_ids, model),
         )
-        return bool(cur.fetchone()[0])
+        return [int(r[0]) for r in cur.fetchall()]
 
 
 def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> None:
@@ -1103,14 +1105,13 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # CLIP-only mode: the room classifier is CLIP, no LLM fallback. If either listing isn't
     # CLIP-tagged yet, re-queue its images for the tagger and DEFER (re-try next run once
     # tagged) — never pay Haiku, never treat it as untagged.
-    if ctx.clip_only and ctx.clip_model and (
-        not _has_clip_tags(conn, a.sreality_id, ctx.clip_model)
-        or not _has_clip_tags(conn, b.sreality_id, ctx.clip_model)
-    ):
-        if not ctx.dry_run:
-            _trigger_clip_tagging(conn, [a.sreality_id, b.sreality_id], ctx.clip_model)
-        stats["clip_deferred"] += 1
-        return
+    if ctx.clip_only and ctx.clip_model:
+        gap = _clip_untagged(conn, [a.sreality_id, b.sreality_id], ctx.clip_model)
+        if gap:
+            if not ctx.dry_run:
+                _trigger_clip_tagging(conn, gap, ctx.clip_model)
+            stats["clip_deferred"] += 1
+            return
     outcome = _resolve_visual(
         conn, a, b, classify_fn=ctx.classify_fn, compare_fn=ctx.compare_fn,
         site_plan_fn=ctx.site_plan_fn, floor_plan_fn=ctx.floor_plan_fn,
@@ -1581,12 +1582,12 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
             INSERT INTO dedup_engine_runs (
                 ended_at, eligible, flagged_location, flagged_disposition,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
-                queued, vision_calls, auto_dismissed, floor_plan_deferred,
+                queued, vision_calls, auto_dismissed, floor_plan_deferred, clip_deferred,
                 clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet
             ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
                 %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s,
-                %(floor_plan_deferred)s,
+                %(floor_plan_deferred)s, %(clip_deferred)s,
                 %(clip_classified)s, %(clip_cosine_calls)s, %(routed_haiku)s,
                 %(routed_sonnet)s)
             """,

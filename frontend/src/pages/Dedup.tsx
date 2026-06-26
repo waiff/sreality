@@ -330,6 +330,7 @@ function AutomationDashboard({
             <Stat label="By visual" value={latest.auto_visual} small />
             <Stat label="Auto-dismissed" value={latest.auto_dismissed ?? 0} small />
             <Stat label="Plan deferred" value={latest.floor_plan_deferred ?? 0} small />
+            <Stat label="CLIP deferred" value={latest.clip_deferred ?? 0} small />
             <Stat label="Queued" value={latest.queued} small />
           </div>
           {runs.length > 1 ? <RunTrend runs={runs} /> : null}
