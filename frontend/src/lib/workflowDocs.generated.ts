@@ -1040,6 +1040,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "30 */2 * * *",
         "human": "Every 2 hours at :30"
+      },
+      {
+        "cron": "45 * * * *",
+        "human": "Every hour at :45"
       }
     ],
     "onPush": false,
@@ -1125,6 +1129,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "name": "candidates",
         "description": "Candidate-priority drain — re-decide ONLY the queued /dedup candidates (O(queue), not a full scan)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "dirty",
+        "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property",
         "required": false,
         "type": "choice",
         "default": "false",

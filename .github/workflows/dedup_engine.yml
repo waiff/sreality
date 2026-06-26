@@ -41,6 +41,7 @@ on:
   schedule:
     - cron: "0 */6 * * *"    # FULL SCAN (free) — discover new dups across the market
     - cron: "30 */2 * * *"   # CANDIDATE DRAIN (free) — re-decide only the queued candidates
+    - cron: "45 * * * *"     # DIRTY DRAIN (free) — real-time, just after the hourly CLIP tag job
   workflow_dispatch:
     inputs:
       max_pairs:
@@ -103,6 +104,14 @@ on:
         options:
           - "false"
           - "true"
+      dirty:
+        description: Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
       floor_plan_budget:
         description: "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000)."
         required: false
@@ -141,7 +150,13 @@ jobs:
 
       - name: Run dedup engine
         run: |
-          if [ "${{ github.event.schedule }}" = "30 */2 * * *" ]; then
+          if [ "${{ github.event.schedule }}" = "45 * * * *" ]; then
+            # SCHEDULED DIRTY DRAIN (free, real-time): re-decide ONLY the street groups
+            # touching a just-dedup-ready property (dedup_dirty_properties, filled by the
+            # hourly CLIP tag job), so a new cross-portal listing merges within ~minutes of
+            # being tagged. Empty queue -> fast no-op. Bounded floor-plan vision (300).
+            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --floor-plan-budget 300"
+          elif [ "${{ github.event.schedule }}" = "30 */2 * * *" ]; then
             # SCHEDULED CANDIDATE DRAIN (free): re-decide ONLY the properties in the
             # still-proposed /dedup queue (O(queue), not a market scan), so the queue
             # self-clears regardless of where the 6h full scan's deadline falls. Bounded
@@ -165,6 +180,7 @@ jobs:
             if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
             if [ "${{ inputs.free }}" = "true" ]; then ARGS="$ARGS --free"; fi
             if [ "${{ inputs.candidates }}" = "true" ]; then ARGS="$ARGS --candidates"; fi
+            if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty"; fi
           fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS

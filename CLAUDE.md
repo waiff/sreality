@@ -1362,12 +1362,19 @@ locally. The dedup/properties track adds
 singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
 property + clears the dirty queue), `dedup_engine.yml` (street+disposition dedup engine +
-auto-merge; rule #15 — TWO scheduled modes: a **FULL SCAN** every 6h that DISCOVERS new dups
-across the market, and a **CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the
-properties in still-proposed `/dedup` candidates so the queue **self-clears in O(queue)**
-regardless of where the full scan's deadline frontier falls. Both drive the SAME `resolve_pair`
-decision tree — one brain, scoped vs full work-list; the candidate drain is the foundation the
-real-time per-listing path reuses), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
+auto-merge; rule #15 — THREE scheduled modes, ONE `resolve_pair` decision tree (the brain),
+three work-lists: a **FULL SCAN** every 6h that DISCOVERS new dups across the market; a
+**CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the properties in
+still-proposed `/dedup` candidates so the queue **self-clears in O(queue)** regardless of the
+full scan's deadline frontier; and a **DIRTY DRAIN** hourly at :45 (`--dirty`, Wave 4c) that
+re-decides ONLY the street groups touching a just-dedup-ready property
+(`dedup_dirty_properties`, migration 242 — enqueued by the hourly CLIP tag job when a listing's
+images get tagged, i.e. pHash+CLIP done) so a **new cross-portal listing merges within ~minutes**
+instead of waiting hours (the watchdog-grain goal). The dirty drain does a FULL eligible load
+(so a dirty property's group still carries its existing peers) but only resolves the dirty groups
+(`only_groups_with_property_ids`) — O(dirty) pair-work, no fragile SQL street-key replay; race-free
+claim/clear like `dirty_properties` (rule #20). All three drains compose with `--free` + the
+floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and
 `compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor

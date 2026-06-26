@@ -1689,6 +1689,28 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
+# Wave 4c: a listing becomes DEDUP-ready once its images are CLIP-tagged (pHash runs just
+# before). The clip_tag job enqueues those listings' properties here so the dedup engine's
+# --dirty drain re-decides only their street groups within minutes (migration 242). Same
+# append-and-bump-marked_at discipline as dirty_properties (rule #20).
+_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = """
+    INSERT INTO dedup_dirty_properties (property_id)
+    SELECT DISTINCT l.property_id FROM listings l JOIN images i ON i.sreality_id = l.sreality_id
+    WHERE i.id = ANY(%s) AND l.property_id IS NOT NULL
+    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+"""
+
+
+def mark_properties_dedup_dirty_for_images(conn: "psycopg.Connection",
+                                           image_ids: list[int]) -> int:
+    """Enqueue the properties owning these just-CLIP-tagged images into
+    dedup_dirty_properties (dedup-ready). Set-based + idempotent; returns rows touched."""
+    if not image_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL, (list(image_ids),))
+        return cur.rowcount or 0
+
 # Broker intelligence (phase 1): a content change can alter a listing's broker
 # block (it is part of the content hash), so enqueue the changed listings for
 # re-attribution by scripts.resolve_brokers --incremental. This is the sreality
