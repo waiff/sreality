@@ -41,6 +41,11 @@ _FLOOR_PLAN_MODEL_KEY = "llm_floor_plan_match_model"
 _FLOOR_PLAN_CALLED_FOR = "compare_listing_floor_plans"
 _FLOOR_PLAN_VERDICTS = ("same_layout", "different_layout", "inconclusive")
 
+# N×N plan gate: cap plans per side sent to one vision call. Real listings carry 1-3 plans;
+# this only guards a pathological count from blowing the token limit (20 downscaled plans ≈
+# 32k tokens, well under the 200k cap), and is generous enough to never drop a real plan.
+_MAX_PLANS_PER_SIDE = 20
+
 # The forensic compare is the only call whose verdict auto-merges, so its resolution
 # is gated: it stays at the (quality-neutral) document tier until the Haiku+768 A/B
 # (scripts/validate_vision_models) confirms 768px reproduces every historical High.
@@ -453,8 +458,8 @@ def _build_site_plan_content(
     if not image_storage.is_configured():
         raise VisualMatchError("R2 is not configured; cannot fetch image bytes for vision")
 
-    keys_a = _storage_paths(conn, keys_a_ids)
-    keys_b = _storage_paths(conn, keys_b_ids)
+    keys_a = _storage_paths(conn, keys_a_ids)[:_MAX_PLANS_PER_SIDE]
+    keys_b = _storage_paths(conn, keys_b_ids)[:_MAX_PLANS_PER_SIDE]
     if not keys_a or not keys_b:
         raise VisualMatchError("missing site-plan images for one side")
 
@@ -723,8 +728,8 @@ def _build_floor_plan_content(
     if not image_storage.is_configured():
         raise VisualMatchError("R2 is not configured; cannot fetch image bytes for vision")
 
-    keys_a = _storage_paths(conn, keys_a_ids)
-    keys_b = _storage_paths(conn, keys_b_ids)
+    keys_a = _storage_paths(conn, keys_a_ids)[:_MAX_PLANS_PER_SIDE]
+    keys_b = _storage_paths(conn, keys_b_ids)[:_MAX_PLANS_PER_SIDE]
     if not keys_a or not keys_b:
         raise VisualMatchError("missing floor-plan images for one side")
 

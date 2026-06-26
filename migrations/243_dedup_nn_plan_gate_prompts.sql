@@ -46,3 +46,14 @@ Call record_site_plan_match exactly once with the verdict over ALL pairs:
     updated_by = 'migration_243'
 where key = 'llm_site_plan_match_prompt'
   and updated_by = 'migration_171';
+
+-- Stale-verdict invalidation. The verdict caches key on (a, b, model), NOT the prompt, so a
+-- verdict cached under the OLD single-pair prompt would replay under the new N×N semantics.
+-- The precision-critical case is a DISMISS: the old prompt could have wrongly returned
+-- different_layout / different_unit for a multi-plan pair whose matching plan sat among
+-- several. Drop ONLY those dismiss-causing verdicts so the gate re-evaluates exactly those
+-- decisions under N×N (the same_*/inconclusive verdicts let a merge proceed and are
+-- reversible). The caches re-warm on the next gate run's floor-plan budget. No-op on a fresh
+-- rebuild (empty caches).
+delete from listing_floor_plan_matches where verdict = 'different_layout';
+delete from listing_site_plan_matches where verdict = 'different_unit';
