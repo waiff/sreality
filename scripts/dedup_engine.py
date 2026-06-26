@@ -41,6 +41,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 from toolkit.dedup_engine import (
@@ -782,6 +783,241 @@ def _write_pair_audit(
         )
 
 
+@dataclass
+class _RunContext:
+    """All per-run state + tunables a pair decision needs. ONE object so the per-pair
+    logic (`resolve_pair`) is reusable by the full-scan loop, the candidate-priority
+    drain, AND the future real-time per-listing path — without re-threading 20 params or
+    duplicating the decision tree. The fns/flags are read-only inputs; the sets, stats,
+    vision_budget and pairs_left are mutated as pairs resolve."""
+    # vision fns + cosine routing (read-only)
+    classify_fn: Any = None
+    compare_fn: Any = None
+    site_plan_fn: Any = None
+    floor_plan_fn: Any = None
+    cosine_fn: Any = None
+    bands: Any = None
+    model_for: dict[str, str] | None = None
+    # tunables (read-only)
+    auto_merge_enabled: bool = True
+    autodismiss: bool = True
+    enqueue_unresolved: bool = True
+    dry_run: bool = False
+    render_min: float = RENDER_SCORE_EXCLUDE_MIN
+    inconclusive_to_review: bool = True
+    max_room_attempts: int = 4
+    # mutable run state
+    stats: dict[str, int] = field(default_factory=dict)
+    vision_budget: list[int] = field(default_factory=lambda: [0])
+    audit: list[dict[str, Any]] | None = None
+    seen_listing_pairs: set[tuple[int, int]] = field(default_factory=set)
+    seen_property_pairs: set[tuple[int, int]] = field(default_factory=set)
+    merged_pairs: set[tuple[int, int]] = field(default_factory=set)
+    dismissed_pairs: set[tuple[int, int]] = field(default_factory=set)
+    pairs_left: int = 10 ** 9
+
+
+def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
+                 ctx: _RunContext) -> None:
+    """Decide ONE eligible same-street pair and apply the outcome (merge / dismiss /
+    queue / defer / skip), mutating `ctx`. The single source of truth for the dedup
+    decision tree — rule A/B/C, the pHash fast-path + floor-plan gate, the cross-source
+    gate, and rule-D forensic visual — shared by every driver. Returns nothing; its
+    effects are the DB writes (merge/enqueue) plus ctx mutations the caller persists."""
+    stats = ctx.stats
+    # Dual-keyed listings appear in their 'id:' AND 'name:' groups; classify each
+    # listing pair once (first group wins).
+    lpair = (min(a.sreality_id, b.sreality_id), max(a.sreality_id, b.sreality_id))
+    if lpair in ctx.seen_listing_pairs:
+        return
+    ctx.seen_listing_pairs.add(lpair)
+    decision = classify_pair(a, b)
+    cp = _canon_pair(a, b)
+    if decision.action == "reject":
+        stats["rejected"] += 1
+        # A pair the current rules reject is a deterministic non-match: dismiss any
+        # stale proposed candidate for it (recall-neutral).
+        if cp is not None:
+            ctx.dismissed_pairs.add(cp)
+        return
+
+    # Re-pointing happens at the property grain; skip a property pair we already acted
+    # on this run (merges mutate property_id live).
+    if cp is None:
+        return
+    if cp in ctx.seen_property_pairs:
+        return
+    ctx.seen_property_pairs.add(cp)
+
+    if decision.action == "auto_merge":  # rule B exact address
+        factors = _factors(
+            "address", reason="address_exact", street_key=street_key,
+            house_number=a.house_number, floor=a.floor)
+        if ctx.auto_merge_enabled:
+            mg = None if ctx.dry_run else _merge_pair(
+                conn, a, b, "address_exact", {**factors, "confidence": 0.99})
+            if ctx.dry_run or mg:
+                stats["auto_address"] += 1
+                ctx.merged_pairs.add(cp)
+                _audit(ctx.audit, a, b, "address", "merged", factors,
+                       source="engine", merge_group_id=mg)
+        else:
+            if not ctx.dry_run:
+                _enqueue_candidate(
+                    conn, a, b,
+                    {**factors, "reason": "auto_merge_off:address_exact",
+                     "confidence": 0.99},
+                )
+            stats["queued"] += 1
+        return
+
+    # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw photo match
+    # (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the listings' images) is a
+    # same-property signal that needs no LLM. The pair already passed rule C, so a match
+    # here auto-merges. Runs before the cross-source gate so identical-photo re-posts
+    # (incl. same-source, which the gate would otherwise drop) merge for free — and
+    # cross-posted cross-source pairs skip classify AND compare. For byt, known-exterior/
+    # shared images are excluded from the count so a development's reused renders can't
+    # reach the >=2 threshold; other categories count any image. A single near-identical
+    # KITCHEN/BATHROOM match also qualifies (distinctive override, only checked when the
+    # generic count fell short).
+    _rmin = phash_render_exclude_for(a.category_main, ctx.render_min)
+    phash_pairs = _phash_identical_pairs(
+        conn, a.sreality_id, b.sreality_id,
+        phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
+    distinctive = (
+        phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
+        and _phash_distinctive_match(
+            conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
+    if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
+        conn, a.sreality_id, b.sreality_id
+    ):
+        factors = _factors("phash", reason="image_phash",
+                           street_key=street_key, phash_pairs=phash_pairs,
+                           phash_distinctive=distinctive)
+        if not ctx.auto_merge_enabled:
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": "street_disposition",
+                    "reason": "auto_merge_off:image_phash", "confidence": 0.97})
+            stats["queued"] += 1
+            return
+        # Floor-plan validation gate (migration 234): a different floor plan DISMISSES, a
+        # one-sided plan goes to MANUAL queue, an unwarmed both-plan verdict DEFERS (skip,
+        # re-try next run once the batch warms it — never the manual queue); otherwise the
+        # pHash merge proceeds.
+        fp = _floor_plan_gate(
+            conn, a.sreality_id, b.sreality_id,
+            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
+            inconclusive_to_review=ctx.inconclusive_to_review)
+        if fp == "dismiss":
+            stats["auto_dismissed"] += 1
+            ctx.dismissed_pairs.add(cp)
+            _audit(ctx.audit, a, b, "phash", "dismissed",
+                   {**factors, "reason": "floor_plan_different_layout"},
+                   source="engine")
+            return
+        if fp == "queue":
+            if not ctx.dry_run:
+                _enqueue_candidate(conn, a, b, {
+                    **factors, "tier": "street_disposition",
+                    "reason": "floor_plan_review", "confidence": 0.6})
+            stats["queued"] += 1
+            return
+        if fp == "defer":
+            stats["floor_plan_deferred"] += 1
+            return
+        mg = None if ctx.dry_run else _merge_pair(
+            conn, a, b, "image_phash",
+            {**factors, "tier": "street_disposition", "confidence": 0.97})
+        if ctx.dry_run or mg:
+            stats["auto_phash"] += 1
+            ctx.merged_pairs.add(cp)
+            _audit(ctx.audit, a, b, "phash", "merged", factors,
+                   source="engine", merge_group_id=mg)
+        return
+
+    # Cross-source gate: the paid visual layer (classify + forensic compare) exists to
+    # match one portal's listing against ANOTHER portal's — same-source pairs buy nothing
+    # there (73/74 historical visual auto-merges were cross-source). Rule B above already
+    # auto-merges exact same-source relists for free; a same-source non-exact pair is
+    # skipped (no LLM, no queue), which cut ~36% of candidate pairs off the visual stage
+    # at ~1.4% recall cost.
+    if a.source == b.source:
+        stats["skipped_same_source"] += 1
+        # Same-source non-exact: the engine won't pursue this visually (cross-source
+        # gate). Dismiss any stale proposed candidate for it — recall-neutral.
+        ctx.dismissed_pairs.add(cp)
+        return
+
+    # rule C candidate -> rule D visual
+    ctx.pairs_left -= 1
+    stats["pairs_considered"] += 1
+    if not ctx.auto_merge_enabled:
+        # Auto-merge off: queue for manual review without spending vision. No forensic
+        # verdict here, but pHash already ran — carry it so the Needs-review card still
+        # shows the one similarity signal we have.
+        if not ctx.dry_run:
+            _enqueue_candidate(conn, a, b, {
+                **_factors("candidate", reason="auto_merge_off",
+                           street_key=street_key, phash_pairs=phash_pairs),
+                "tier": "street_disposition", "confidence": 0.6,
+            })
+        stats["queued"] += 1
+        return
+    outcome = _resolve_visual(
+        conn, a, b, classify_fn=ctx.classify_fn, compare_fn=ctx.compare_fn,
+        site_plan_fn=ctx.site_plan_fn, floor_plan_fn=ctx.floor_plan_fn,
+        vision_budget=ctx.vision_budget, max_room_attempts=ctx.max_room_attempts,
+        autodismiss=ctx.autodismiss,
+        cosine_fn=ctx.cosine_fn, bands=ctx.bands, model_for=ctx.model_for,
+        render_min=ctx.render_min, inconclusive_to_review=ctx.inconclusive_to_review,
+        stats=stats,
+    )
+    # ONE factor set per pair — fed to BOTH the terminal audit `detail` (merged/dismissed)
+    # AND, when queued, the candidate `markers_matched`, so Decision history and
+    # Needs-review show identical detail. phash_pairs is carried even on the visual path
+    # (it's 0/1 here — the fast-path didn't fire — which is itself the "photos differ,
+    # escalated to vision" signal).
+    factors = _factors(
+        "visual", reason=outcome.get("reason"), street_key=street_key,
+        verdict=outcome.get("verdict"), room_type=outcome.get("room_type"),
+        rationale=outcome.get("rationale"), cosine=outcome.get("cosine"),
+        phash_pairs=phash_pairs)
+    markers = {**factors, "tier": "street_disposition",
+               "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6}
+    # pHash already ran (pre-classify); the visual stage only auto-merges via a High
+    # forensic verdict, and auto-dismisses on a confident "different".
+    if outcome["action"] == "auto_merge":
+        mg = None if ctx.dry_run else _merge_pair(conn, a, b, outcome["reason"], markers)
+        if ctx.dry_run or mg:
+            stats["auto_visual"] += 1
+            ctx.merged_pairs.add(cp)
+            _audit(ctx.audit, a, b, "visual", "merged", factors,
+                   source="engine", merge_group_id=mg)
+    elif outcome["action"] == "dismiss":
+        stats["auto_dismissed"] += 1
+        ctx.dismissed_pairs.add(cp)
+        _audit(ctx.audit, a, b, "visual", "dismissed", factors, source="engine")
+    elif outcome["action"] == "defer":
+        # Floor-plan verdict not warmed yet -> skip, re-try next run (the batch lane
+        # warms it). NOT the manual queue.
+        stats["floor_plan_deferred"] += 1
+    elif ctx.enqueue_unresolved:
+        if not ctx.dry_run:
+            _enqueue_candidate(conn, a, b, markers)
+        stats["queued"] += 1
+        # NOT audited — a queued pair IS the candidate; its factor detail lives in
+        # markers_matched (Needs-review reads it). Auditing queued re-logged the same
+        # pair every run (the duplicate-row bug).
+    else:
+        # Free mode: don't pile un-vision'd pairs into the review queue (they'd just be
+        # 'no photos compared' placeholders). pHash / rule-B / reconcile already ran; this
+        # pair is left for a future run (free pHash as coverage grows, or vision if
+        # re-enabled).
+        stats["skipped_unresolved"] += 1
+
+
 def run_engine(
     conn: Any,
     *,
@@ -839,243 +1075,47 @@ def run_engine(
 
     keys = _load_eligible(conn)
     groups = _group_by_street(keys)
-    vision_budget = [max_vision_calls]
-    seen_property_pairs: set[tuple[int, int]] = set()
-    seen_listing_pairs: set[tuple[int, int]] = set()
-    merged_pairs: set[tuple[int, int]] = set()
-    dismissed_pairs: set[tuple[int, int]] = set()
-    pairs_left = max_pairs
+    ctx = _RunContext(
+        classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
+        floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
+        auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
+        enqueue_unresolved=enqueue_unresolved, dry_run=dry_run, render_min=render_min,
+        inconclusive_to_review=inconclusive_to_review, max_room_attempts=max_room_attempts,
+        stats=stats, vision_budget=[max_vision_calls], audit=audit, pairs_left=max_pairs,
+    )
 
     def finalize() -> dict[str, int]:
         # Resolve every candidate the engine acted on this run (no-op for pairs
         # without a proposed row); a no-op set-based UPDATE when nothing collected.
         if not dry_run:
-            _resolve_candidates(conn, merged_pairs, "merged")
-            _resolve_candidates(conn, dismissed_pairs, "dismissed")
-        return _finish(stats, vision_budget, max_vision_calls)
+            _resolve_candidates(conn, ctx.merged_pairs, "merged")
+            _resolve_candidates(conn, ctx.dismissed_pairs, "dismissed")
+        return _finish(stats, ctx.vision_budget, max_vision_calls)
 
+    # The decision tree per pair lives in resolve_pair (shared by the candidate-priority
+    # drain + the real-time path); this is just the full-scan driver over street groups.
     for street_key, members in groups.items():
         if len(members) > MAX_GROUP_SIZE:
             LOG.info("SKIP large street group key=%s size=%d", street_key, len(members))
             continue
         for i in range(len(members)):
-            if pairs_left <= 0:
+            if ctx.pairs_left <= 0:
                 break
             for j in range(i + 1, len(members)):
-                if pairs_left <= 0:
+                if ctx.pairs_left <= 0:
                     LOG.info("PAIR cap reached; deferring remainder to next run")
                     return finalize()
-                # Wall-clock budget: the cold-cache classification flood (one
-                # uncapped vision call per newly-eligible listing) can outrun the
-                # job timeout, which SIGKILLs the run before it writes results.
-                # Stop cleanly so the run row + the inline-committed merges persist
-                # and the next run resumes with a warm cache (mirrors the detail
-                # drain's --max-seconds).
+                # Wall-clock budget: per-pair cold vision can outrun the job timeout,
+                # which SIGKILLs the run before it writes results. Stop cleanly so the run
+                # row + inline-committed merges persist and the next run resumes with a
+                # warm cache (mirrors the detail drain's --max-seconds).
                 if deadline is not None and time.monotonic() >= deadline:
                     LOG.info(
                         "TIME budget reached; finalizing cleanly at pairs_considered=%d",
                         stats["pairs_considered"],
                     )
                     return finalize()
-                a, b = members[i], members[j]
-                # Dual-keyed listings appear in their 'id:' AND 'name:' groups;
-                # classify each listing pair once (first group wins).
-                lpair = (
-                    min(a.sreality_id, b.sreality_id),
-                    max(a.sreality_id, b.sreality_id),
-                )
-                if lpair in seen_listing_pairs:
-                    continue
-                seen_listing_pairs.add(lpair)
-                decision = classify_pair(a, b)
-                cp = _canon_pair(a, b)
-                if decision.action == "reject":
-                    stats["rejected"] += 1
-                    # A pair the current rules reject is a deterministic non-match:
-                    # dismiss any stale proposed candidate for it (recall-neutral).
-                    if cp is not None:
-                        dismissed_pairs.add(cp)
-                    continue
-
-                # Re-pointing happens at the property grain; skip a property pair
-                # we already acted on this run (merges mutate property_id live).
-                if cp is None:
-                    continue
-                if cp in seen_property_pairs:
-                    continue
-                seen_property_pairs.add(cp)
-
-                if decision.action == "auto_merge":  # rule B exact address
-                    factors = _factors(
-                        "address", reason="address_exact", street_key=street_key,
-                        house_number=a.house_number, floor=a.floor)
-                    if auto_merge_enabled:
-                        mg = None if dry_run else _merge_pair(
-                            conn, a, b, "address_exact", {**factors, "confidence": 0.99})
-                        if dry_run or mg:
-                            stats["auto_address"] += 1
-                            merged_pairs.add(cp)
-                            _audit(audit, a, b, "address", "merged", factors,
-                                   source="engine", merge_group_id=mg)
-                    else:
-                        if not dry_run:
-                            _enqueue_candidate(
-                                conn, a, b,
-                                {**factors, "reason": "auto_merge_off:address_exact",
-                                 "confidence": 0.99},
-                            )
-                        stats["queued"] += 1
-                    continue
-
-                # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw
-                # photo match (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the
-                # listings' images) is a same-property signal that needs no LLM. The pair already
-                # passed rule C (no house#/floor/area/unit-token contradiction), so a
-                # match here auto-merges. Runs before the cross-source gate so identical-
-                # photo re-posts (incl. same-source, which the gate would otherwise drop)
-                # merge for free — and cross-posted cross-source pairs skip classify AND
-                # compare. For byt, known-exterior/shared images are excluded from the
-                # count (phash_excluded_tags_for) so a development's reused renders can't
-                # reach the >=2 threshold; other categories count any image. A single
-                # near-identical KITCHEN/BATHROOM match also qualifies (distinctive override,
-                # only checked when the generic count fell short).
-                _rmin = phash_render_exclude_for(a.category_main, render_min)
-                phash_pairs = _phash_identical_pairs(
-                    conn, a.sreality_id, b.sreality_id,
-                    phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
-                distinctive = (
-                    phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
-                    and _phash_distinctive_match(
-                        conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
-                if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
-                    conn, a.sreality_id, b.sreality_id
-                ):
-                    factors = _factors("phash", reason="image_phash",
-                                       street_key=street_key, phash_pairs=phash_pairs,
-                                       phash_distinctive=distinctive)
-                    if not auto_merge_enabled:
-                        if not dry_run:
-                            _enqueue_candidate(conn, a, b, {
-                                **factors, "tier": "street_disposition",
-                                "reason": "auto_merge_off:image_phash", "confidence": 0.97})
-                        stats["queued"] += 1
-                        continue
-                    # Floor-plan validation gate (migration 234): a different floor plan
-                    # DISMISSES, a one-sided plan goes to MANUAL queue, an unwarmed both-plan
-                    # verdict DEFERS (skip, re-try next run once the batch warms it — never
-                    # the manual queue); otherwise the pHash merge proceeds.
-                    fp = _floor_plan_gate(
-                        conn, a.sreality_id, b.sreality_id,
-                        floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
-                        inconclusive_to_review=inconclusive_to_review)
-                    if fp == "dismiss":
-                        stats["auto_dismissed"] += 1
-                        dismissed_pairs.add(cp)
-                        _audit(audit, a, b, "phash", "dismissed",
-                               {**factors, "reason": "floor_plan_different_layout"},
-                               source="engine")
-                        continue
-                    if fp == "queue":
-                        if not dry_run:
-                            _enqueue_candidate(conn, a, b, {
-                                **factors, "tier": "street_disposition",
-                                "reason": "floor_plan_review", "confidence": 0.6})
-                        stats["queued"] += 1
-                        continue
-                    if fp == "defer":
-                        stats["floor_plan_deferred"] += 1
-                        continue
-                    mg = None if dry_run else _merge_pair(
-                        conn, a, b, "image_phash",
-                        {**factors, "tier": "street_disposition", "confidence": 0.97})
-                    if dry_run or mg:
-                        stats["auto_phash"] += 1
-                        merged_pairs.add(cp)
-                        _audit(audit, a, b, "phash", "merged", factors,
-                               source="engine", merge_group_id=mg)
-                    continue
-
-                # Cross-source gate: the paid visual layer (classify + forensic compare)
-                # exists to match one portal's listing against ANOTHER portal's — same-source
-                # pairs buy nothing there (73/74 historical visual auto-merges were
-                # cross-source). Rule B above already auto-merges exact same-source relists for
-                # free; a same-source non-exact pair is skipped (no LLM, no queue), which cut
-                # ~36% of candidate pairs off the visual stage at ~1.4% recall cost.
-                if a.source == b.source:
-                    stats["skipped_same_source"] += 1
-                    # Same-source non-exact: the engine won't pursue this visually
-                    # (cross-source gate). Dismiss any stale proposed candidate for
-                    # it — recall-neutral per the gate's accepted tradeoff.
-                    dismissed_pairs.add(cp)
-                    continue
-
-                # rule C candidate -> rule D visual
-                pairs_left -= 1
-                stats["pairs_considered"] += 1
-                if not auto_merge_enabled:
-                    # Auto-merge off: queue for manual review without spending vision.
-                    # No forensic verdict here, but pHash already ran — carry it so the
-                    # Needs-review card still shows the one similarity signal we have.
-                    if not dry_run:
-                        _enqueue_candidate(conn, a, b, {
-                            **_factors("candidate", reason="auto_merge_off",
-                                       street_key=street_key, phash_pairs=phash_pairs),
-                            "tier": "street_disposition", "confidence": 0.6,
-                        })
-                    stats["queued"] += 1
-                    continue
-                outcome = _resolve_visual(
-                    conn, a, b, classify_fn=classify_fn, compare_fn=compare_fn,
-                    site_plan_fn=site_plan_fn, floor_plan_fn=floor_plan_fn,
-                    vision_budget=vision_budget, max_room_attempts=max_room_attempts,
-                    autodismiss=autodismiss,
-                    cosine_fn=cosine_fn, bands=bands, model_for=model_for,
-                    render_min=render_min, inconclusive_to_review=inconclusive_to_review,
-                    stats=stats,
-                )
-                # ONE factor set per pair — fed to BOTH the terminal audit `detail`
-                # (merged/dismissed) AND, when queued, the candidate `markers_matched`,
-                # so Decision history and Needs-review show identical detail. phash_pairs
-                # is carried even on the visual path (it's 0/1 here — the fast-path didn't
-                # fire — which is itself the "photos differ, escalated to vision" signal).
-                factors = _factors(
-                    "visual", reason=outcome.get("reason"), street_key=street_key,
-                    verdict=outcome.get("verdict"), room_type=outcome.get("room_type"),
-                    rationale=outcome.get("rationale"), cosine=outcome.get("cosine"),
-                    phash_pairs=phash_pairs)
-                markers = {**factors, "tier": "street_disposition",
-                           "confidence": 0.97 if outcome["action"] == "auto_merge" else 0.6}
-                # pHash already ran (pre-classify); the visual stage only auto-merges via
-                # a High forensic verdict, and auto-dismisses on a confident "different".
-                if outcome["action"] == "auto_merge":
-                    mg = None if dry_run else _merge_pair(
-                        conn, a, b, outcome["reason"], markers)
-                    if dry_run or mg:
-                        stats["auto_visual"] += 1
-                        merged_pairs.add(cp)
-                        _audit(audit, a, b, "visual", "merged", factors,
-                               source="engine", merge_group_id=mg)
-                elif outcome["action"] == "dismiss":
-                    stats["auto_dismissed"] += 1
-                    dismissed_pairs.add(cp)
-                    _audit(audit, a, b, "visual", "dismissed", factors, source="engine")
-                elif outcome["action"] == "defer":
-                    # Floor-plan verdict not warmed yet -> skip, re-try next run (the
-                    # batch lane warms it). NOT the manual queue.
-                    stats["floor_plan_deferred"] += 1
-                elif enqueue_unresolved:
-                    if not dry_run:
-                        _enqueue_candidate(conn, a, b, markers)
-                    stats["queued"] += 1
-                    # NOT audited — a queued pair IS the candidate; its factor detail
-                    # lives in markers_matched (Needs-review reads it). Auditing queued
-                    # re-logged the same pair every run (the duplicate-row bug).
-                else:
-                    # Free mode: don't pile un-vision'd pairs into the review queue
-                    # (they'd just be 'no photos compared' placeholders). pHash /
-                    # rule-B / reconcile already ran; this pair is left for a future
-                    # run (free pHash as coverage grows, or vision if re-enabled).
-                    stats["skipped_unresolved"] += 1
+                resolve_pair(conn, members[i], members[j], street_key=street_key, ctx=ctx)
 
     return finalize()
 
