@@ -75,6 +75,15 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "Falls back to the LLM where CLIP hasn't tagged a listing yet.",
     ),
     DedupSetting(
+        "dedup_clip_only", "bool", False,
+        "CLIP-only room tagging (no LLM fallback)", "CLIP",
+        "When ON, the room classifier is CLIP ONLY — the paid LLM (Haiku) fallback is "
+        "removed. A listing CLIP hasn't tagged yet is not LLM-classified or treated as "
+        "untagged: its images are RE-QUEUED for the CLIP tagger and the pair DEFERS to a "
+        "later run. Only flip this on once CLIP coverage of active listings is high (else "
+        "many pairs defer). Requires 'Use free CLIP room tags'.",
+    ),
+    DedupSetting(
         "dedup_clip_cosine_enabled", "bool", False,
         "CLIP cosine recall tier", "CLIP",
         "Route each room's forensic compare by the same-room CLIP cosine — high "

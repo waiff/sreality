@@ -689,7 +689,16 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (PRs around the trial): pozemek 77% → plot/site family, coarse room agreement 87%, same-property
     tag consistency 86%, cosine AUC 0.80. Both knobs ship OFF; flip via `app_settings` after a
     `--shadow` merge-diff confirms merges hold. Run counters: `dedup_engine_runs.clip_classified` /
-    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`.
+    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`. (3) `dedup_clip_only` (default OFF, needs
+    `prefer_clip`) removes the **paid Haiku room-classifier fallback** entirely — a pair with a
+    CLIP-**untagged** listing is NOT Haiku-classified or treated as untagged: the engine RE-QUEUES that
+    listing's images for the CLIP tagger (`_trigger_clip_tagging` resets `images.clip_tagged_at=NULL` on
+    its tagless-but-marked images so `clip_tag.yml` re-tags them; never-tagged images are already
+    pending) and **DEFERS** the pair (`clip_deferred` counter), re-trying once tagged. Only flip it on at
+    HIGH CLIP coverage — at low coverage many pairs defer (coverage was ~65% of active images when
+    shipped). The batch warmer (`submit_dedup_batch`, currently `disabled_manually`) still groups rooms
+    via the Haiku cache, so re-enabling it under `clip_only` would need CLIP-aware grouping — a
+    reconciliation deferred until the warmer is revived.
     **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
     render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
     `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,
