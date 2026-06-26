@@ -83,6 +83,10 @@ class UpdateClipRegionsIn(BaseModel):
     priority_region_ids: list[int]
 
 
+class UpdateTagPriorityIn(BaseModel):
+    order: list[str]
+
+
 # --- skills ---------------------------------------------------------------
 
 @router.get("/skills")
@@ -251,6 +255,40 @@ def put_dedup_setting(
             (key, json.dumps(value), setting.label, "settings_ui"),
         )
     return {"key": key, "value": value, "is_default": False}
+
+
+# --- dedup tag-comparison priorities (per family) -------------------------
+
+@router.get("/dedup-tag-priorities")
+def get_dedup_tag_priorities(
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Per-family comparison-tag order for the dedup visual layer: the current order, the
+    coded default (= the full valid tag set the operator may reorder), and an edited flag."""
+    from toolkit.dedup_priorities import priorities_view
+
+    return {"data": priorities_view(conn)}
+
+
+@router.put("/dedup-tag-priorities/{family}")
+def put_dedup_tag_priority(
+    family: str,
+    body: UpdateTagPriorityIn,
+    conn: Any = Depends(deps.get_db_conn),
+) -> dict[str, Any]:
+    """Persist one family's reordering (validated to its tag set + completed from the default,
+    so no room is ever silently dropped). Other families are untouched."""
+    from toolkit.dedup_priorities import set_family_priority
+
+    try:
+        order = set_family_priority(conn, family, body.order)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    from toolkit.dedup_engine import default_priority_for_family
+
+    default = list(default_priority_for_family(family))
+    return {"family": family, "order": order, "default_order": default,
+            "is_default": order == default}
 
 
 # --- agent tool inventory -------------------------------------------------

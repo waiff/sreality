@@ -39,6 +39,11 @@ from toolkit.dedup_engine import (
     street_group_keys,
     verdict_is_merge,
 )
+from toolkit.dedup_engine import (
+    TAG_PRIORITY_FAMILIES,
+    default_priority_for_family,
+    normalize_priority,
+)
 from toolkit.room_taxonomy import (
     DISTINCTIVE_ROOMS,
     HOUSE_PRIORITY,
@@ -492,6 +497,35 @@ def test_room_priority_for_null_or_unknown_is_byt_order() -> None:
     # Unknown/NULL category behaves as the legacy byt engine.
     assert room_priority_for(None) == INTERIOR_PRIORITY
     assert room_priority_for("garaz") == INTERIOR_PRIORITY
+
+
+def test_normalize_priority_keeps_order_drops_unknown_completes_from_default() -> None:
+    default = ("a", "b", "c", "d")
+    # operator order honoured; unknown 'z' dropped; duplicate ignored; missing 'd' appended.
+    assert normalize_priority(["c", "a", "z", "a"], default) == ("c", "a", "b", "d")
+    # empty / all-unknown → exactly the default (never drops a room).
+    assert normalize_priority([], default) == default
+    assert normalize_priority(["z", "y"], default) == default
+
+
+def test_room_priority_for_honours_overrides_per_family() -> None:
+    # A house override that leads with kitchen instead of facade, completed from HOUSE default.
+    ov = {"dum": ["kitchen", "exterior_facade"]}
+    pr = room_priority_for("dum", ov)
+    assert pr[0] == "kitchen" and pr[1] == "exterior_facade"
+    assert set(pr) == set(HOUSE_PRIORITY)  # nothing dropped
+    # a family without an override is untouched.
+    assert room_priority_for("byt", ov) == INTERIOR_PRIORITY
+    # an empty override list falls back to the coded default.
+    assert room_priority_for("dum", {"dum": []}) == HOUSE_PRIORITY
+
+
+def test_default_priority_for_family_matches_room_priority_for() -> None:
+    assert default_priority_for_family("byt") == INTERIOR_PRIORITY
+    assert default_priority_for_family("pozemek") == LAND_PRIORITY
+    for fam in ("dum", "komercni", "ostatni"):
+        assert default_priority_for_family(fam) == HOUSE_PRIORITY
+    assert set(TAG_PRIORITY_FAMILIES) == {"byt", "dum", "komercni", "ostatni", "pozemek"}
 
 
 def test_distinctive_rooms_for_is_byt_only() -> None:

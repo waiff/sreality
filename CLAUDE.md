@@ -612,8 +612,15 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     then interiors; **pozemek** leads with the **SITE PLAN** (`LAND_PRIORITY` — the plot's identity).
     The byt-only **distinctive single-match override** (one near-identical kitchen/bathroom pHash =
     merge, `distinctive_rooms_for`) is empty for non-byt: a facade/site-plan is development-shared, so
-    they always need the ≥2-match count. (Stage 2 will make these orders operator-editable per
-    type/subtype.) **(E)** everything else queues on the operator's `/dedup` review page.
+    they always need the ≥2-match count. These per-family orders are **operator-editable** (Stage 2):
+    `default_priority_for_family` is the coded default + the valid tag set, and the Settings page's
+    "Dedup comparison priority" draggable lists reorder them per family into
+    `app_settings.dedup_tag_priorities` (JSON). `toolkit/dedup_priorities` loads + validates the blob
+    (`normalize_priority` completes any omission from the default, so a list never silently drops a
+    room); the engine threads it via `_RunContext.tag_overrides` → `rooms_in_priority`, and the batch
+    warmer (`submit_dedup_batch`) loads the same overrides so both lanes order rooms identically.
+    Absent / partial → the coded default, so a fresh deploy is unchanged. **(E)** everything else queues
+    on the operator's `/dedup` review page.
     **Floor-plan validation gate (migration 234).** Whenever the engine WOULD merge a pair — via the
     pHash fast-path OR a visual High — `_floor_plan_gate` runs a Sonnet floor-plan check (the
     `DOCUMENT_MAX_EDGE=1568` tier; pHash conflates line-art plans and CLIP cosine can't read layout,

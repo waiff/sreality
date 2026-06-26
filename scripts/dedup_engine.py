@@ -594,6 +594,7 @@ def _resolve_visual(
     model_for: dict[str, str] | None = None,
     render_min: float = RENDER_SCORE_EXCLUDE_MIN,
     inconclusive_to_review: bool = True,
+    tag_overrides: dict[str, list[str]] | None = None,
     stats: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
@@ -648,7 +649,7 @@ def _resolve_visual(
     by_room_a = _group_ids_by_room(imgs_a)
     by_room_b = _group_ids_by_room(imgs_b)
 
-    priority = rooms_in_priority(common, a.category_main)
+    priority = rooms_in_priority(common, a.category_main, tag_overrides)
     tried = 0
     last_verdict = None
     last_rationale = None
@@ -722,7 +723,7 @@ def _resolve_visual(
     all_rooms_verdicted = len(room_verdicts) == len(priority)
     if autodismiss and all_rooms_verdicted and decide_visual_dismiss(room_verdicts):
         room = next(
-            (r for r in rooms_in_priority(set(room_verdicts), a.category_main)
+            (r for r in rooms_in_priority(set(room_verdicts), a.category_main, tag_overrides)
              if room_verdicts[r] == "Low"),
             None,
         )
@@ -875,6 +876,9 @@ class _RunContext:
     # house would otherwise be silently dropped; geo sets this False so those pairs reach the
     # visual stage. (Wave 3 revisits the gate holistically for recall.)
     cross_source_only: bool = True
+    # Operator-reordered per-family comparison-tag priorities (app_settings.dedup_tag_priorities);
+    # None / partial → the coded defaults (rooms_in_priority normalizes per family).
+    tag_overrides: dict[str, list[str]] | None = None
     # tunables (read-only)
     auto_merge_enabled: bool = True
     autodismiss: bool = True
@@ -1054,6 +1058,7 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         autodismiss=ctx.autodismiss,
         cosine_fn=ctx.cosine_fn, bands=ctx.bands, model_for=ctx.model_for,
         render_min=ctx.render_min, inconclusive_to_review=ctx.inconclusive_to_review,
+        tag_overrides=ctx.tag_overrides,
         stats=stats,
     )
     # ONE factor set per pair — fed to BOTH the terminal audit `detail` (merged/dismissed)
@@ -1198,9 +1203,11 @@ def run_engine(
     # maps auto_merge → candidate so a deterministic geo signal never merges on its own — the
     # shared free-first visual flow is the sole merge gate.
     classify = _make_geo_classify(geo_area_max_pct) if geo else classify_pair
+    from toolkit.dedup_priorities import load_tag_priority_overrides
+    tag_overrides = load_tag_priority_overrides(conn)
     ctx = _RunContext(
         classify=classify, tier=("geo" if geo else "street_disposition"),
-        cross_source_only=not geo,
+        cross_source_only=not geo, tag_overrides=tag_overrides,
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
         floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,

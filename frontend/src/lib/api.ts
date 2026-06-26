@@ -654,6 +654,25 @@ export const updateDedupSetting = (
     { method: 'PUT', json: { value } },
   );
 
+export type DedupTagPriority = {
+  family: string;
+  order: string[];
+  default_order: string[];
+  is_default: boolean;
+};
+
+export const getDedupTagPriorities = (): Promise<{ data: DedupTagPriority[] }> =>
+  request<{ data: DedupTagPriority[] }>('/admin/dedup-tag-priorities');
+
+export const updateDedupTagPriority = (
+  family: string,
+  order: string[],
+): Promise<DedupTagPriority> =>
+  request<DedupTagPriority>(
+    `/admin/dedup-tag-priorities/${encodeURIComponent(family)}`,
+    { method: 'PUT', json: { order } },
+  );
+
 // The unified Decision history feed: every terminal dedup decision (merged /
 // dismissed), engine AND operator, with the undo handle + factor detail.
 export type DedupAuditRow = {
