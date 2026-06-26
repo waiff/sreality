@@ -308,9 +308,7 @@ function AutomationDashboard({
   loading: boolean;
 }) {
   const latest = runs[0] ?? null;
-  const autoTotal = latest
-    ? latest.auto_address + latest.auto_phash + latest.auto_visual
-    : 0;
+  const autoTotal = latest ? latest.auto_phash + latest.auto_visual : 0;
   return (
     <CollapsibleSection id="automation" eyebrow="Automation" title="Engine activity">
       {latest == null ? (
@@ -326,7 +324,6 @@ function AutomationDashboard({
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
           <div className="mt-2 grid grid-cols-2 sm:grid-cols-6 gap-2">
-            <Stat label="By address" value={latest.auto_address} small />
             <Stat label="By photos" value={latest.auto_phash} small />
             <Stat label="By visual" value={latest.auto_visual} small />
             <Stat label="Auto-dismissed" value={latest.auto_dismissed ?? 0} small />
@@ -379,11 +376,11 @@ function Stat({
 /* A tiny sparkline-ish bar row: auto-merges per recent run, newest on the right. */
 function RunTrend({ runs }: { runs: DedupEngineRun[] }) {
   const ordered = [...runs].reverse();
-  const max = Math.max(1, ...ordered.map((r) => r.auto_address + r.auto_phash + r.auto_visual));
+  const max = Math.max(1, ...ordered.map((r) => r.auto_phash + r.auto_visual));
   return (
     <div className="mt-3 flex items-end gap-1 h-12" title="Auto-merges per recent run">
       {ordered.map((r) => {
-        const total = r.auto_address + r.auto_phash + r.auto_visual;
+        const total = r.auto_phash + r.auto_visual;
         const h = Math.round((total / max) * 100);
         return (
           <div

@@ -633,8 +633,13 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     **Floor-plan validation gate (migration 234).** Whenever the engine WOULD merge a pair — via the
     pHash fast-path OR a visual High — `_floor_plan_gate` runs a Sonnet floor-plan check (the
     `DOCUMENT_MAX_EDGE=1568` tier; pHash conflates line-art plans and CLIP cosine can't read layout,
-    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (CLIP tag OR
-    classifier room_type) → `compare_listing_floor_plans` (operator prompt
+    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (a CLIP tag
+    **at or above `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`** OR an LLM classifier room_type — the floor is
+    CLIP-only because only `image_clip_tags.confidence` is numeric; the LLM `image_room_classifications`
+    confidence is a coarse high/medium/low enum, left unfiltered. A low-confidence CLIP floor_plan tag
+    is a likely false positive, e.g. an idnes location map mis-tagged at 0.36, and 95% of real CLIP plan
+    tags score ≥ 0.52, so the floor drops the phantom-plan "one-sided" read while keeping genuine plans)
+    → `compare_listing_floor_plans` (operator prompt
     `app_settings.llm_floor_plan_match_prompt`, cache `listing_floor_plan_matches`, write-allowed rule
     #5; verdict same_layout / different_layout / inconclusive + per-plan OCR in `extracted`, used
     plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
@@ -710,16 +715,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     incompletely-tagged listing's floor-plan / room images may still be in the tag queue, so the
     floor-plan gate would mis-read a pending plan as ABSENT (the false `floor_plan_review` "one-sided"
     queue — 77% of the old review backlog) and the visual flow would under-pair rooms. The engine never
-    decides on partial tag data: it `_trigger_clip_tagging`s the gaps and waits. The **trigger half** of
-    the same invariant: `scraper.db.mark_properties_dedup_dirty_for_images` (called by `clip_tag.yml`
-    after each tag batch) enqueues a property into `dedup_dirty_properties` ONLY when the just-tagged
-    listing is now FULLY tagged (`NOT EXISTS` a pending image) — NOT on a partial batch (the old bug that
-    shoved a 1-of-N-tagged listing into the `--dirty` drain). So the hourly `--dirty` drain re-decides a
-    pair only once BOTH sides are complete → a real two-sided floor-plan compare merges on MATCHING
-    plans (the correct, transparent path). This SUPERSEDES the old `dedup_clip_only` flag (which gated
-    the same defer behind a setting + only the no-Haiku-fallback case); the readiness gate is now always
-    on, so every pair reaching the visual stage is fully CLIP-tagged and the Haiku fallback is never
-    needed. `clip_deferred` counts deferrals per run.
+    decides on partial tag data: it DEFERS and waits — no re-queue (a pending image already has
+    `clip_tagged_at IS NULL`, so `clip_tag.yml` will tag it; re-queuing would only cycle a
+    terminally-undecodable image — the `_trigger_clip_tagging` call was removed for that reason). The
+    **trigger half** of the same invariant: `scraper.db.mark_properties_dedup_dirty_for_images` (called
+    by `clip_tag.yml` after each tag batch) enqueues a property into `dedup_dirty_properties` ONLY when
+    the just-tagged listing is now FULLY tagged (`NOT EXISTS` a pending image) — NOT on a partial batch
+    (the old bug that shoved a 1-of-N-tagged listing into the `--dirty` drain). So the hourly `--dirty`
+    drain re-decides a pair only once BOTH sides are complete → a real two-sided floor-plan compare
+    merges on MATCHING plans (the correct, transparent path). The readiness gate is **always on** when
+    CLIP is the tagger (the old `dedup_clip_only` opt-in setting + its dead plumbing were REMOVED — every
+    pair reaching the visual stage is fully CLIP-tagged, so the Haiku fallback is never needed).
+    `clip_deferred` counts deferrals per run.
     **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
     render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
     `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,

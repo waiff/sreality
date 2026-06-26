@@ -6,6 +6,22 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup follow-ups — floor-plan confidence floor + dead-code cleanup
+
+Post-merge follow-ups to the fully-tagged-before-decide PR.
+
+- **Floor-plan confidence floor** (`scripts/dedup_engine._floor_plan_image_ids`,
+  `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`): a CLIP `floor_plan` tag below 0.50 is dropped from the
+  gate's plan set. Data-validated on the live distribution (95% of CLIP floor_plan tags ≥ 0.52,
+  false positives like an idnes location-map mis-tagged at 0.36 concentrate < 0.50), so a phantom
+  plan no longer creates a false "one-sided" read that queues an otherwise-mergeable pair. CLIP-only
+  because only `image_clip_tags.confidence` is numeric — the LLM `image_room_classifications`
+  confidence is a coarse high/medium/low text enum (a numeric floor there is a type error), left
+  unfiltered.
+- **Dead-code cleanup**: removed the inert `dedup_clip_only` setting + its plumbing (superseded by
+  the always-on readiness gate) and the always-zero "By address" dashboard stat (rule B retired →
+  no address auto-merges). Backend `auto_address` counter kept (writes 0, accurate).
+
 ### 2026-06: Bazos enrichment — model-keyed cache (sticky-miss fix, PR3 of the enrichment fix)
 
 The description-enrichment cache `listing_description_enrichments` was UNIQUE(sreality_id,
