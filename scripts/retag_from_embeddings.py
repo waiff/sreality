@@ -29,7 +29,7 @@ _SELECT = """
     SELECT t.image_id, t.model, e.embedding
     FROM image_clip_tags t
     JOIN image_clip_embeddings e ON e.image_id = t.image_id AND e.model = t.model
-    WHERE t.tagged_at < %(cutoff)s {shard}
+    WHERE t.tagged_at < %(cutoff)s::timestamptz {shard}
     LIMIT %(limit)s
 """
 _UPDATE = (
@@ -70,9 +70,12 @@ def main() -> int:
         with conn.cursor() as cur:
             cur.execute(_CUTOFF_SQL)
             row = cur.fetchone()
-        cutoff = row[0] if row else None
+        # Unset key OR a JSON-null value both mean "no campaign" → clean exit. A malformed
+        # value (not a timestamp) surfaces as a clear cast error on the WHERE %(cutoff)s::timestamptz
+        # at the pre-check below, not a cryptic mid-loop failure.
+        cutoff = row[0] if row and row[0] is not None else None
         if not cutoff:
-            LOG.info("RETAG no campaign: app_settings.clip_taxonomy_retag_after is unset")
+            LOG.info("RETAG no campaign: app_settings.clip_taxonomy_retag_after unset/null")
             return 0
         LOG.info("RETAG campaign cutoff=%s shard=%d/%d", cutoff, args.shard, args.shards)
 
