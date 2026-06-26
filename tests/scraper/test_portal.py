@@ -105,6 +105,19 @@ def test_default_config_remax():
     assert all("category_main" in c and "category_type" in c for c in cfg.categories)
 
 
+def test_default_config_ceskereality():
+    cfg = default_config("ceskereality")
+    assert cfg.supports_complete_walk is True   # per-category total, no pagination cap
+    assert cfg.split_threshold is None
+    assert cfg.splits is False
+    assert len(cfg.categories) == 12            # 6 categories × prodej + pronajem
+    assert {c["sale_type"] for c in cfg.categories} == {"prodej", "pronajem"}
+    assert all("sale_type" in c and "category" in c for c in cfg.categories)
+    # houses + land (the categories the original branch config omitted) are present
+    assert {"rodinne-domy", "pozemky"} <= {c["category"] for c in cfg.categories}
+    assert cfg.limits.index_rate == 0.7         # polite (robots disallows generic bots)
+
+
 def test_default_config_unknown_raises():
     with pytest.raises(ValueError):
         default_config("nope")

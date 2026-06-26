@@ -93,10 +93,12 @@ export const PORTALS: Portal[] = [
     detailId: (p) => firstMatch(/\/(?:detail|zakazka)\/[^?#]*?(\d{6,})(?:[/?#]|$)/, p),
   },
   {
-    // UNVERIFIED extractor (no live rows yet) — refine once ceskereality has data.
+    // /{sale}/{cat}/{disp}/{town}/{slug}-{id}.html — id is the trailing run of
+    // digits before ".html" (mirrors the scraper's _ID_RE). Verified on live URLs.
     source: 'ceskereality',
     hosts: ['www.ceskereality.cz', 'ceskereality.cz'],
-    detailId: (p) => firstMatch(/\/[^/?#]*?(\d{6,})(?:[/?#]|$)/, p),
+    detailId: (p) => firstMatch(/-(\d{6,})\.html\b/, p),
+    saleApartmentHint: pathCategoryHint,
   },
 ];
 
