@@ -21,7 +21,7 @@ import {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import Tabs, { type Tab } from '@/components/Tabs';
 import ResizeHandle from '@/components/ResizeHandle';
-import { useSidebarWidth, useMapSplitFraction } from '@/lib/browseLayout';
+import { useSidebarWidth, useMapSplitFraction, useMapCollapsed } from '@/lib/browseLayout';
 import { FilterSidebar } from '@/components/Filters';
 import ListingTable from '@/components/ListingTable';
 import ListingCards from '@/components/ListingCards';
@@ -242,9 +242,16 @@ export default function BrowseExperience({
     [setHovered],
   );
 
-  /* Operator-resizable columns. */
+  /* Operator-resizable columns + the map-collapsed preference (all per-browser
+   * layout state, not part of the shareable view). When the map is collapsed
+   * the cards take the full width and reflow to more columns automatically. */
   const sidebar = useSidebarWidth();
   const mapSplit = useMapSplitFraction();
+  const mapCollapsed = useMapCollapsed();
+  /* The map is only present on the Listings tab AND only when not collapsed —
+   * the single source of truth the data-fetch gates and the layout both read,
+   * so they can never disagree. */
+  const mapVisible = tab === 'map' && !mapCollapsed.value;
   const outerRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
   const onSidebarDrag = useCallback(
@@ -268,7 +275,7 @@ export default function BrowseExperience({
     queryKey: ['map', filters],
     queryFn: () => fetchListingsForMap(filters),
     placeholderData: (prev) => prev,
-    enabled: tab === 'map',
+    enabled: mapVisible,
   });
 
   const citiesQuery = useQuery<CuratedCity[], Error>({
@@ -293,7 +300,7 @@ export default function BrowseExperience({
   const cityPolygonsQuery = useQuery<CityPolygon[], Error>({
     queryKey: ['curated_city_polygons'],
     queryFn: fetchCuratedCityPolygons,
-    enabled: tab === 'map',
+    enabled: mapVisible,
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -306,14 +313,14 @@ export default function BrowseExperience({
   const rentMapQuery = useQuery<RentMapPolygon[], Error>({
     queryKey: ['rent_map_choropleth'],
     queryFn: fetchRentMapChoropleth,
-    enabled: tab === 'map' && overlay.showRentMap,
+    enabled: mapVisible && overlay.showRentMap,
     staleTime: Infinity,
     gcTime: Infinity,
   });
   const rentKrajeQuery = useQuery<RentMapKraj[], Error>({
     queryKey: ['rent_map_kraje'],
     queryFn: fetchRentMapKraje,
-    enabled: tab === 'map' && overlay.showRentMap,
+    enabled: mapVisible && overlay.showRentMap,
     staleTime: Infinity,
     gcTime: Infinity,
   });
@@ -321,20 +328,20 @@ export default function BrowseExperience({
   const psDatasetsQuery = useQuery({
     queryKey: priceStatsKeys.datasets,
     queryFn: fetchDatasets,
-    enabled: tab === 'map' && showGrowth,
+    enabled: mapVisible && showGrowth,
     staleTime: 60_000,
   });
   const psGrowthDatasetId = growthDatasetId ?? psDatasetsQuery.data?.[0]?.id ?? null;
   const psGrowthQuery = useQuery({
     queryKey: priceStatsKeys.growth(psGrowthDatasetId ?? -1, growthFrom, growthTo),
     queryFn: () => fetchGrowth(psGrowthDatasetId as number, growthFrom, growthTo),
-    enabled: tab === 'map' && showGrowth && psGrowthDatasetId != null,
+    enabled: mapVisible && showGrowth && psGrowthDatasetId != null,
     staleTime: 60_000,
   });
   const psSeriesQuery = useQuery({
     queryKey: priceStatsKeys.obecSeries(psGrowthDatasetId ?? -1, growthFrom, growthTo),
     queryFn: () => fetchSeries(psGrowthDatasetId as number, growthFrom, growthTo),
-    enabled: tab === 'map' && showGrowth && growthChartOnHover && psGrowthDatasetId != null,
+    enabled: mapVisible && showGrowth && growthChartOnHover && psGrowthDatasetId != null,
     staleTime: 60_000,
   });
   const psHoverData = useMemo(
@@ -585,7 +592,7 @@ export default function BrowseExperience({
   ];
 
   const activeError =
-    tab === 'map' ? mapQuery.error ?? cards.error :
+    tab === 'map' ? (mapVisible ? mapQuery.error ?? cards.error : cards.error) :
     tab === 'table' ? table.error :
     tab === 'stats' ? statsQuery.error :
     null;
@@ -652,17 +659,25 @@ export default function BrowseExperience({
           )}
           <div className="mt-4 flex items-center justify-between gap-3">
             <Tabs tabs={tabs} active={tab} onChange={view.setTab} />
-            {tab === 'map' && f.mergeMode && (
-              <MergeModeBar
-                active={mergeMode}
-                selectedCount={selectedForMerge.size}
-                busy={mergeMut.isPending || linkMut.isPending}
-                merging={mergeMut.isPending}
-                linking={linkMut.isPending}
-                onToggle={() => (mergeMode ? exitMergeMode() : setMergeMode(true))}
-                onMerge={() => mergeMut.mutate([...selectedForMerge])}
-                onLink={() => linkMut.mutate([...selectedForMerge])}
-              />
+            {tab === 'map' && (
+              <div className="flex items-center gap-2">
+                <MapViewToggle
+                  collapsed={mapCollapsed.value}
+                  onChange={mapCollapsed.set}
+                />
+                {f.mergeMode && (
+                  <MergeModeBar
+                    active={mergeMode}
+                    selectedCount={selectedForMerge.size}
+                    busy={mergeMut.isPending || linkMut.isPending}
+                    merging={mergeMut.isPending}
+                    linking={linkMut.isPending}
+                    onToggle={() => (mergeMode ? exitMergeMode() : setMergeMode(true))}
+                    onMerge={() => mergeMut.mutate([...selectedForMerge])}
+                    onLink={() => linkMut.mutate([...selectedForMerge])}
+                  />
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -671,8 +686,16 @@ export default function BrowseExperience({
           <div className="px-6 pt-5 pb-6 flex-1 min-h-0">
             <div
               ref={innerRef}
-              className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1rem_var(--map-w)] h-full min-h-[560px]"
-              style={{ '--map-w': `${mapSplit.value * 100}%` } as CSSProperties}
+              className={
+                mapCollapsed.value
+                  ? 'grid grid-cols-1 h-full min-h-[560px]'
+                  : 'grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_1rem_var(--map-w)] h-full min-h-[560px]'
+              }
+              style={
+                mapCollapsed.value
+                  ? undefined
+                  : ({ '--map-w': `${mapSplit.value * 100}%` } as CSSProperties)
+              }
             >
               <ListingCards
                 rows={cards.isLoading ? null : cards.rows}
@@ -699,6 +722,8 @@ export default function BrowseExperience({
                 estimatingIds={estimatingIds}
                 onEstimate={(srealityId) => estimateMut.mutate(srealityId)}
               />
+              {!mapCollapsed.value && (
+                <>
               <ResizeHandle
                 ariaLabel="Resize the listings and map columns"
                 onMove={onMapSplitDrag}
@@ -762,6 +787,8 @@ export default function BrowseExperience({
                   />
                 </Suspense>
               </div>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -937,6 +964,95 @@ function MapSkeleton() {
     <div className="h-full min-h-[480px] rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-2)] flex items-center justify-center">
       <p className="text-sm text-[var(--color-ink-3)] tracking-wide">Loading map…</p>
     </div>
+  );
+}
+
+/* Listings-tab layout switch: fold the map panel away to give the cards the
+ * full width (they reflow to more columns automatically), or bring it back.
+ * Reuses the app's segmented-control idiom (LocationModeSection): paper-2
+ * track, copper-fill active, borders-only — civic-archive consistent. The
+ * choice persists per-browser (useMapCollapsed), not in the shareable URL. */
+function MapViewToggle({
+  collapsed,
+  onChange,
+}: {
+  collapsed: boolean;
+  onChange: (collapsed: boolean) => void;
+}) {
+  const seg = (active: boolean) =>
+    [
+      'inline-flex items-center gap-1.5 px-2.5 py-1 text-[0.7rem] rounded-[var(--radius-xs)] transition-colors',
+      active
+        ? 'bg-[var(--color-copper)] text-white'
+        : 'text-[var(--color-ink-3)] hover:text-[var(--color-ink-2)]',
+    ].join(' ');
+  return (
+    <div
+      role="group"
+      aria-label="Listings layout"
+      className="inline-flex items-center gap-0.5 p-0.5 rounded-[var(--radius-sm)] bg-[var(--color-paper-2)] border border-[var(--color-rule)]"
+    >
+      <button
+        type="button"
+        onClick={() => onChange(false)}
+        aria-pressed={!collapsed}
+        title="Show the map beside the cards"
+        className={seg(!collapsed)}
+      >
+        <SplitGlyph />
+        Split
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange(true)}
+        aria-pressed={collapsed}
+        title="Hide the map — full-width cards"
+        className={seg(collapsed)}
+      >
+        <CardsGlyph />
+        Cards
+      </button>
+    </div>
+  );
+}
+
+/* Two panes (wide cards | narrow map). */
+function SplitGlyph() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <line x1="9.5" y1="3" x2="9.5" y2="13" />
+    </svg>
+  );
+}
+
+/* A full grid of cards. */
+function CardsGlyph() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1" />
+      <rect x="9" y="2.5" width="4.5" height="4.5" rx="1" />
+      <rect x="2.5" y="9" width="4.5" height="4.5" rx="1" />
+      <rect x="9" y="9" width="4.5" height="4.5" rx="1" />
+    </svg>
   );
 }
 
