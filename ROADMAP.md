@@ -6,6 +6,23 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Floor-plan gate — one-sided plan no longer blocks a conclusive merge
+
+Diagnosed why obvious cross-portal duplicates (near-identical photos) were sitting unmerged in
+the `/dedup` queue: the floor-plan gate queued any pair where exactly ONE side carried a
+`floor_plan` tag — but a single plan can't be compared to anything, so it added no precision,
+and it mis-fired while the other side's CLIP tagging was still incomplete (the plan present but
+untagged). This was **77% of the review backlog** (`floor_plan_review`), 98% of it strong-pHash
+byt matches.
+
+- `scripts/dedup_engine.py:_floor_plan_gate` — a one-sided plan is now `signal_conclusive`-aware:
+  the pHash fast-path and a visual High (same-unit-conclusive) pass `signal_conclusive=True` and a
+  one-sided plan **MERGES** (consistent with the neither-plan case — neither can compare); the
+  rule-B exact-address path keeps the default (one-sided still queues — address alone isn't
+  unit-conclusive). The two-sided `different_layout` dismiss (the real precision win) is unchanged.
+- The self-healing candidate-drain re-decides the ~159 queued `floor_plan_review` pairs → the
+  conclusive ones auto-merge (reversible).
+
 ### 2026-06: Dedup decision feedback + full auditability (`/dedup`)
 
 The operator can now FLAG any dedup decision as incorrect and audit exactly why the engine

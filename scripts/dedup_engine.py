@@ -516,7 +516,7 @@ def _trigger_clip_tagging(conn: Any, sreality_ids: list[int], model: str) -> Non
 
 def _floor_plan_gate(
     conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
-    inconclusive_to_review: bool = True,
+    inconclusive_to_review: bool = True, signal_conclusive: bool = False,
 ) -> str:
     """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
     Returns 'merge' | 'dismiss' | 'queue' | 'defer'. It only adds conservatism, and
@@ -533,7 +533,15 @@ def _floor_plan_gate(
       * both sides carry a plan but the verdict isn't available yet (no fn / no budget /
         cache-miss) -> 'defer': skip this run and re-try next, once the batch lane warms
         the verdict — NOT the operator queue (this pair is automatable, not a human call);
-      * exactly ONE side has a plan -> 'queue' (manual review: no plan-to-plan compare);
+      * exactly ONE side has a plan -> the gate cannot COMPARE (it takes two plans to detect a
+        layout conflict), so it has no precision to add — it falls back to the strength of the
+        signal that brought the pair here. `signal_conclusive` (pHash fast-path / a visual High:
+        same-UNIT-conclusive — ≥2 identical interior photos, or a matching distinctive room) ->
+        'merge' (a lone plan adds no evidence; queuing would only defeat the free fast-path and
+        flood the queue — AND it mis-fires while one side's CLIP tagging is still incomplete, the
+        plan present-but-untagged). Otherwise (rule-B exact-ADDRESS alone, which two different
+        units of one building CAN share) -> 'queue' (a genuine human call). This is consistent
+        with the neither-plan case below, which also can't compare and also merges;
       * neither side has a plan -> 'merge' (existing path unchanged).
     """
     ids_a = _floor_plan_image_ids(conn, a_id)
@@ -553,7 +561,7 @@ def _floor_plan_gate(
             return "queue"
         return "merge"
     if ids_a or ids_b:
-        return "queue"
+        return "merge" if signal_conclusive else "queue"
     return "merge"
 
 
@@ -719,7 +727,8 @@ def _resolve_visual(
             fp = _floor_plan_gate(
                 conn, a.sreality_id, b.sreality_id,
                 floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
-                inconclusive_to_review=inconclusive_to_review)
+                inconclusive_to_review=inconclusive_to_review,
+                signal_conclusive=True)  # a visual High room is same-unit-conclusive
             base = {
                 "room_type": room, "verdict": last_verdict,
                 "rationale": last_rationale, "cosine": cos,
@@ -1031,14 +1040,17 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                     "reason": "auto_merge_off:image_phash", "confidence": 0.97})
             stats["queued"] += 1
             return
-        # Floor-plan validation gate (migration 234): a different floor plan DISMISSES, a
-        # one-sided plan goes to MANUAL queue, an unwarmed both-plan verdict DEFERS (skip,
-        # re-try next run once the batch warms it — never the manual queue); otherwise the
-        # pHash merge proceeds.
+        # Floor-plan validation gate (migration 234): a different floor plan DISMISSES, an
+        # unwarmed both-plan verdict DEFERS (skip, re-try next run once the batch warms it —
+        # never the manual queue); a ONE-sided plan MERGES (signal_conclusive — ≥2 identical
+        # interior photos already prove same-unit; a lone plan can't compare, and queuing it
+        # only defeats the free fast-path / mis-fires while one side's CLIP tagging is still
+        # incomplete); otherwise the pHash merge proceeds.
         fp = _floor_plan_gate(
             conn, a.sreality_id, b.sreality_id,
             floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
-            inconclusive_to_review=ctx.inconclusive_to_review)
+            inconclusive_to_review=ctx.inconclusive_to_review,
+            signal_conclusive=True)  # pHash fast-path is same-unit-conclusive
         if fp == "dismiss":
             stats["auto_dismissed"] += 1
             ctx.dismissed_pairs.add(cp)

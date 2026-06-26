@@ -1396,9 +1396,19 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
 
-    # exactly one side has a plan -> queue (can't compare plan-to-plan)
+    # exactly one side has a plan -> the gate can't compare (it takes two plans), so it falls
+    # back to the strength of the signal that brought the pair in: a NON-conclusive signal
+    # (rule-B exact-address alone, default) queues; a same-unit-conclusive signal (pHash
+    # fast-path / a visual High) merges -- a lone plan adds no layout evidence, queuing it only
+    # defeats the free fast-path and mis-fires while one side's CLIP tagging is incomplete.
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5],
+                                signal_conclusive=True) == "merge"
+    # symmetric — the plan on the OTHER side, conclusive signal -> still merge
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 2 else [])
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5],
+                                signal_conclusive=True) == "merge"
 
     # both have plans + a verdict available -> confirm/dismiss
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
@@ -1446,6 +1456,30 @@ def test_run_engine_phash_floor_plan_different_dismisses(monkeypatch: Any) -> No
     assert stats["auto_phash"] == 0
     assert stats["auto_dismissed"] == 1
     assert merges == []
+
+
+def test_run_engine_phash_one_sided_plan_merges(monkeypatch: Any) -> None:
+    # pHash would merge; only ONE side has a floor plan (the other has none, or its plan
+    # isn't CLIP-tagged yet). The gate can't compare a lone plan, and pHash is same-unit-
+    # conclusive, so the pair MERGES instead of queuing -- the floor_plan_review fix.
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 4)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    # one-sided: listing 1 carries a plan, listing 2 does not
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid] if sid == 1 else [])
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=None, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert stats["queued"] == 0
+    assert merges == ["image_phash"]
 
 
 def test_run_engine_phash_floor_plan_same_merges(monkeypatch: Any) -> None:

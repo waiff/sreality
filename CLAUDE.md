@@ -658,9 +658,21 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     The gate distinguishes **"a human must decide" (queue)** from **"validate it
     later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run (budget exhausted /
     cache-miss in the $0 escape hatch) → **`defer`** — skip, re-try next run, never the manual queue
-    (the pair is automatable, not a human call); exactly ONE side has a plan → **`queue`** (genuinely a
-    human call — no plan-to-plan compare possible); neither → the existing path is untouched. It applies
-    to pHash + visual merges, NOT rule-B exact-address. **The floor-plan check runs autonomously on the
+    (the pair is automatable, not a human call); neither → the existing path is untouched. It applies
+    to pHash + visual merges, NOT rule-B exact-address.
+    **ONE-sided plan is `signal_conclusive`-aware (the floor_plan_review fix, 2026-06).** The gate
+    takes TWO plans to detect a layout conflict, so with exactly ONE plan it can add no precision — it
+    falls back to the strength of the signal that brought the pair in (just like the neither-plan case,
+    which also can't compare and merges). The **pHash fast-path** (≥2 identical *interior* photos, or a
+    matching distinctive room) and a **visual High** are same-UNIT-conclusive, so they pass
+    `signal_conclusive=True` and a one-sided plan **MERGES** — a lone plan adds no evidence, and queuing
+    it only defeated the free fast-path AND mis-fired while one side's CLIP tagging was still incomplete
+    (the plan present-but-untagged → false "one-sided"). This was the dominant queue source: ~77% of the
+    `/dedup` review backlog was `floor_plan_review`, 98% of it strong-pHash byt matches. The rule-B
+    **exact-address** path keeps the default (`signal_conclusive=False` → one-sided still **queues**):
+    address+disposition+floor alone is NOT unit-conclusive (two different units CAN share it), so there a
+    lone plan is a genuine human call (Wave 3's deliberate caution). The two-sided `different_layout`
+    DISMISS — the gate's actual precision win — is untouched. **The floor-plan check runs autonomously on the
     SCHEDULED free run (the operator-chosen posture, Option C):** even though the free run skips the
     expensive all-rooms classify/compare, it gets the LIVE `_build_floor_plan_fn` with a bounded budget
     `app_settings.dedup_floor_plan_budget` (registry default 10000; `--floor-plan-budget` overrides for an
