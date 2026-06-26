@@ -372,14 +372,16 @@ def test_same_source_candidate_is_now_warmed(monkeypatch: Any) -> None:
     assert conn.inserted_requests != []  # no longer gated out
 
 
-def test_exact_address_pair_is_not_warmed(monkeypatch: Any) -> None:
-    # house numbers present + equal + same floor/area -> rule B (replay merges free).
+def test_exact_address_pair_is_warmed_as_candidate(monkeypatch: Any) -> None:
+    # Rule B retired: an exact-address pair is now an ordinary candidate, so (when pHash doesn't
+    # resolve it) the warmer DOES warm its visual compare — it is no longer skipped as a free
+    # rule-B merge.
     conn = _run(
         monkeypatch,
         keys=[_key(1, 101, source="sreality", hn="10"), _key(2, 102, source="bazos", hn="10")],
         classifications={1: ("classified", {"kitchen": [1]}), 2: ("classified", {"kitchen": [2]})},
     )
-    assert conn.inserted_requests == []
+    assert conn.inserted_requests != []
 
 
 def test_rejected_pair_is_not_warmed(monkeypatch: Any) -> None:

@@ -484,15 +484,22 @@ def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
         return [r[0] for r in cur.fetchall()]
 
 
-def _clip_untagged(conn: Any, sreality_ids: list[int], model: str) -> list[int]:
-    """Which of these listings have NO CLIP room tag under `model` — the CLIP-only gap check,
-    in ONE query for the pair (so resolve_pair does a single round-trip, not one per listing)."""
+def _clip_incomplete(conn: Any, sreality_ids: list[int], model: str) -> list[int]:
+    """Which of these listings are NOT fully CLIP-tagged yet — any STORED image still pending
+    the tagger (`clip_tagged_at IS NULL`). The dedup readiness gate: deciding a pair before a
+    listing's images finish tagging mis-reads the floor-plan gate (a pending plan looks absent,
+    the false 'one-sided') and under-pairs the visual flow, so such a pair is DEFERRED until
+    tagging completes. Gates on `clip_tagged_at` (processed?), NOT on tag presence — a
+    processed-but-untaggable image is terminal, so it never blocks readiness forever. One query
+    for the pair (a single round-trip). `model` is unused here (the tagger stamps `clip_tagged_at`
+    model-agnostically) but kept for call-site symmetry."""
+    del model
     with conn.cursor() as cur:
         cur.execute(
             "SELECT s.sid FROM unnest(%s::bigint[]) AS s(sid) "
-            "WHERE NOT EXISTS (SELECT 1 FROM image_clip_tags t JOIN images i ON i.id = t.image_id "
-            "                  WHERE i.sreality_id = s.sid AND t.model = %s)",
-            (sreality_ids, model),
+            "WHERE EXISTS (SELECT 1 FROM images i WHERE i.sreality_id = s.sid "
+            "              AND i.storage_path IS NOT NULL AND i.clip_tagged_at IS NULL)",
+            (sreality_ids,),
         )
         return [int(r[0]) for r in cur.fetchall()]
 
@@ -948,53 +955,25 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
         return
     ctx.seen_property_pairs.add(cp)
 
-    if decision.action == "auto_merge":  # rule B exact address
-        factors = _factors(
-            "address", reason="address_exact", street_key=street_key,
-            house_number=a.house_number, floor=a.floor)
-        if not ctx.auto_merge_enabled:
-            if not ctx.dry_run:
-                _enqueue_candidate(
-                    conn, a, b,
-                    {**factors, "reason": "auto_merge_off:address_exact",
-                     "confidence": 0.99},
-                )
-            stats["queued"] += 1
-            return
-        # Wave 3: route the exact-address merge through the SAME floor-plan gate as pHash
-        # (was a blind auto-merge). The same street + house number + disposition + floor can
-        # still be DIFFERENT units of one building (two 2+kk on one floor), and the floor plan
-        # is the disambiguator: a different layout DISMISSES, a different/one-sided plan
-        # queues/defers, a matching or absent plan merges — so no-plan exact relists still
-        # merge for free (recall preserved) while same-address-different-unit pairs are caught.
-        fp = _floor_plan_gate(
-            conn, a.sreality_id, b.sreality_id,
-            floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,
-            inconclusive_to_review=ctx.inconclusive_to_review)
-        if fp == "dismiss":
-            stats["auto_dismissed"] += 1
-            ctx.dismissed_pairs.add(cp)
-            _audit(ctx.audit, a, b, "address", "dismissed",
-                   {**factors, "reason": "floor_plan_different_layout"}, source="engine")
-            return
-        if fp == "queue":
-            if not ctx.dry_run:
-                _enqueue_candidate(conn, a, b, {
-                    **factors, "tier": ctx.tier,
-                    "reason": "floor_plan_review", "confidence": 0.6})
-            stats["queued"] += 1
-            return
-        if fp == "defer":
-            stats["floor_plan_deferred"] += 1
-            return
-        mg = None if ctx.dry_run else _merge_pair(
-            conn, a, b, "address_exact", {**factors, "confidence": 0.99})
-        if ctx.dry_run or mg:
-            stats["auto_address"] += 1
-            ctx.merged_pairs.add(cp)
-            _audit(ctx.audit, a, b, "address", "merged", factors,
-                   source="engine", merge_group_id=mg)
+    # Tagging-readiness gate: a listing must be FULLY CLIP-tagged before the engine decides on
+    # it. An incompletely-tagged listing's floor-plan / room images may still be in the tag
+    # queue, so the floor-plan gate would mis-read 'one-sided' (a pending plan looks absent — the
+    # false floor_plan_review queue) and the visual flow would under-pair rooms. DEFER (no
+    # re-queue needed: a pending image already has clip_tagged_at IS NULL, so `clip_tag.yml` will
+    # tag it — re-queuing here would only cycle a terminally-undecodable image). The clip_tag job
+    # enqueues the property into dedup_dirty_properties once its LAST image is tagged, so the
+    # hourly --dirty drain re-decides it within minutes — then both sides are complete and a real
+    # two-sided floor-plan compare merges on matching plans. Default whenever CLIP is the tagger
+    # (clip_model set); supersedes the old clip_only-only gate.
+    if ctx.clip_model and _clip_incomplete(conn, [a.sreality_id, b.sreality_id], ctx.clip_model):
+        stats["clip_deferred"] += 1
         return
+
+    # Rule B (exact address) is RETIRED (2026-06): it was the only auto-merge path with false
+    # merges (6.7% later unmerged — two units at one address — vs 0% for pHash/visual). Exact
+    # address is not unit-conclusive, so classify_pair now returns it as a CANDIDATE: the pair
+    # flows through the pHash fast-path + forensic visual + floor-plan gate below, like any
+    # street+disposition pair.
 
     # pHash fast-path (FREE, BEFORE classify, ALL sources). A strong raw photo match
     # (>= PHASH_MIN_IDENTICAL_PAIRS near-identical pairs over the listings' images) is a
@@ -1088,16 +1067,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
             })
         stats["queued"] += 1
         return
-    # CLIP-only mode: the room classifier is CLIP, no LLM fallback. If either listing isn't
-    # CLIP-tagged yet, re-queue its images for the tagger and DEFER (re-try next run once
-    # tagged) — never pay Haiku, never treat it as untagged.
-    if ctx.clip_only and ctx.clip_model:
-        gap = _clip_untagged(conn, [a.sreality_id, b.sreality_id], ctx.clip_model)
-        if gap:
-            if not ctx.dry_run:
-                _trigger_clip_tagging(conn, gap, ctx.clip_model)
-            stats["clip_deferred"] += 1
-            return
+    # (Tagging readiness is enforced once, up front — see the _clip_incomplete gate at the top
+    # of resolve_pair — so every pair reaching the visual stage is fully CLIP-tagged.)
     outcome = _resolve_visual(
         conn, a, b, classify_fn=ctx.classify_fn, compare_fn=ctx.compare_fn,
         site_plan_fn=ctx.site_plan_fn, floor_plan_fn=ctx.floor_plan_fn,

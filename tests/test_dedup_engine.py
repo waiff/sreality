@@ -159,31 +159,34 @@ def test_disposition_loose_equivalence() -> None:
     assert not disposition_compatible(None, "2+kk")
 
 
-# --- classify_pair: rule B (exact address auto-merge) -----------------------
+# --- classify_pair: exact address (rule B RETIRED -> a strong CANDIDATE) -----
 
-def test_exact_address_auto_merges() -> None:
+def test_exact_address_is_candidate_not_auto_merge() -> None:
+    # Rule B retired (6.7% false merges): exact address is now a rule-C CANDIDATE that flows
+    # through pHash/visual, with the `address_exact` reason kept for provenance.
     d = classify_pair(_key(1, source="sreality"), _key(2, source="bazos"))
-    assert d.action == "auto_merge"
+    assert d.action == "candidate"
     assert d.reason == "address_exact"
 
 
-def test_exact_address_works_same_source() -> None:
-    # operator decision: merge regardless of source
+def test_exact_address_candidate_same_source() -> None:
     d = classify_pair(_key(1, source="sreality"), _key(2, source="sreality"))
-    assert d.action == "auto_merge"
+    assert d.action == "candidate"
+    assert d.reason == "address_exact"
 
 
 def test_exact_address_area_guard_demotes_to_candidate() -> None:
     # same street+no+disp+floor, areas 60 vs 65 (7.7%: >5% guard, <10% byt reject)
-    # -> visual, not blind merge (and not a hard area_contradiction reject either).
+    # -> visual candidate (area_guard), not a hard area_contradiction reject.
     d = classify_pair(_key(1, area=60.0), _key(2, area=65.0))
     assert d.action == "candidate"
     assert d.reason == "area_guard"
 
 
-def test_exact_address_within_area_guard_still_merges() -> None:
+def test_exact_address_within_area_guard_is_candidate() -> None:
     d = classify_pair(_key(1, area=60.0), _key(2, area=62.0))  # ~3% < 5%
-    assert d.action == "auto_merge"
+    assert d.action == "candidate"
+    assert d.reason == "address_exact"
 
 
 # --- classify_pair: rule C (candidate + disqualifiers) ----------------------
@@ -313,11 +316,11 @@ def test_street_id_contradiction_rejects_same_name_different_street() -> None:
     )
     assert d.action == "reject"
     assert d.detail == "street_id_contradiction"
-    # A NULL id (bazos) never contradicts a known one (sreality).
+    # A NULL id (bazos) never contradicts a known one (sreality) -> not rejected (candidate).
     assert classify_pair(
         _key(1, street="name:hlavni", street_id=42),
         _key(2, street="name:hlavni", street_id=None, source="bazos"),
-    ).action == "auto_merge"
+    ).action == "candidate"
 
 
 def test_disposition_mismatch_rejects() -> None:
@@ -359,13 +362,13 @@ def test_cross_type_dum_komercni_is_not_a_contradiction() -> None:
         _key(1, category_main="dum", disp=None),
         _key(2, category_main="komercni", disp=None),
     )
-    assert d.action == "auto_merge"
+    assert d.action == "candidate"
     assert d.detail != "category_main_contradiction"
     # symmetric — order must not matter
     assert classify_pair(
         _key(1, category_main="komercni", disp=None),
         _key(2, category_main="dum", disp=None),
-    ).action == "auto_merge"
+    ).action == "candidate"
 
 
 def test_category_main_compatible_helper() -> None:
@@ -384,11 +387,11 @@ def test_category_main_compatible_helper() -> None:
 
 
 def test_category_null_does_not_contradict() -> None:
-    # A missing category is unknown, not a conflict — falls through to merge.
+    # A missing category is unknown, not a conflict — falls through to a candidate.
     assert classify_pair(
         _key(1, category_type=None),
         _key(2, category_type="pronajem"),
-    ).action == "auto_merge"
+    ).action == "candidate"
 
 
 def test_already_same_property_rejects() -> None:
@@ -947,55 +950,21 @@ def _row(sid: int, pid: int, *, street: str = "Nádražní",
             description, category_type, category_main, obec_id)
 
 
-def test_run_engine_exact_address_merges(monkeypatch: Any) -> None:
+def test_run_engine_exact_address_no_longer_auto_merges(monkeypatch: Any) -> None:
+    # Rule B RETIRED: an exact-address pair (same street/house/disp/floor/area) does NOT
+    # auto-merge on address — it is a candidate that flows through pHash/visual like any other.
+    # With no pHash match + no classifier here it reaches the visual stage and queues, never
+    # `auto_address`. (No clip_model -> the tagging-readiness gate is inert in this test.)
     import scripts.dedup_engine as eng
 
-    merges: list[tuple[int, int, str]] = []
-
-    def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
-        merges.append((survivor_id, retired_id, reason))
-        return {"data": {"merge_group_id": "g"}}
-
-    monkeypatch.setattr(eng, "merge_properties", fake_merge)
-
-    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # same street/no/disp/floor/area
-    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
-
-    assert stats["auto_address"] == 1
-    assert merges == [(101, 102, "address_exact")]
-    assert stats["auto_phash"] == 0 and stats["auto_visual"] == 0
-
-
-def test_run_engine_exact_address_floor_plan_different_dismisses(monkeypatch: Any) -> None:
-    # Wave 3: rule B no longer blind-merges. Same street/house/disposition/floor but the floor
-    # plans show DIFFERENT layouts (two units of one building) -> dismiss, not merge.
-    import scripts.dedup_engine as eng
-
-    monkeypatch.setattr(eng, "merge_properties",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
-    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])  # both have a plan
-    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # exact-address pair (rule B)
-    stats = eng.run_engine(
-        conn, classify_fn=None, compare_fn=None, max_vision_calls=5,
-        floor_plan_fn=lambda a, b, ia, ib: {"verdict": "different_layout"})
-    assert stats["auto_address"] == 0
-    assert stats["auto_dismissed"] == 1
-
-
-def test_run_engine_exact_address_floor_plan_same_still_merges(monkeypatch: Any) -> None:
-    # Same address + a MATCHING floor plan -> the merge still proceeds (recall preserved).
-    import scripts.dedup_engine as eng
-
-    merges: list[str] = []
     monkeypatch.setattr(
         eng, "merge_properties",
-        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}})
-    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
-    conn = _FakeConn([_row(1, 101), _row(2, 102)])
-    stats = eng.run_engine(
-        conn, classify_fn=None, compare_fn=None, max_vision_calls=5,
-        floor_plan_fn=lambda a, b, ia, ib: {"verdict": "same_layout"})
-    assert stats["auto_address"] == 1 and merges == ["address_exact"]
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not auto-merge on address")))
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # exact-address pair
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
+
+    assert stats["auto_address"] == 0
+    assert stats["pairs_considered"] == 1  # reached the rule-C / visual stage, not a rule-B merge
 
 
 def test_run_engine_now_visually_compares_same_source(monkeypatch: Any) -> None:
@@ -1032,45 +1001,47 @@ def test_run_engine_same_source_free_run_skips_not_queues(monkeypatch: Any) -> N
     assert stats["queued"] == 0
 
 
-def test_run_engine_clip_only_defers_and_triggers_on_gap(monkeypatch: Any) -> None:
-    # CLIP-only: a pair with a CLIP-UNTAGGED listing re-queues its images for the tagger and
-    # DEFERS (no Haiku fallback, not queued, not merged).
+def test_run_engine_defers_on_incomplete_tagging(monkeypatch: Any) -> None:
+    # Tagging-readiness gate (DEFAULT when a CLIP tagger is configured): a pair with a
+    # NOT-fully-tagged listing DEFERS up front — before pHash, the floor-plan gate, or visual —
+    # so the engine never decides on partial tag data. No re-queue (the pending image is already
+    # in the clip_tag queue, clip_tagged_at IS NULL).
     import scripts.dedup_engine as eng
 
-    monkeypatch.setattr(eng, "_clip_untagged", lambda conn, sids, model: [2])  # 2 is untagged
-    triggered: list[list[int]] = []
+    monkeypatch.setattr(eng, "_clip_incomplete", lambda conn, sids, model: [2])  # 2 still tagging
     monkeypatch.setattr(eng, "_trigger_clip_tagging",
-                        lambda conn, sids, model: triggered.append(list(sids)))
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not re-queue")))
     monkeypatch.setattr(eng, "merge_properties",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not merge")))
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])  # rule-C pair
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
-                           clip_only=True, clip_model="clip-x")
+                           clip_model="clip-x")
     assert stats["clip_deferred"] == 1
-    assert stats["queued"] == 0 and stats["pairs_considered"] == 1
-    assert triggered == [[2]]  # only the untagged listing is re-queued
+    # Deferred at the TOP of resolve_pair -> never reached the rule-C / visual stage.
+    assert stats["queued"] == 0 and stats["pairs_considered"] == 0
 
 
-def test_run_engine_clip_only_both_tagged_reaches_visual(monkeypatch: Any) -> None:
-    # Both CLIP-tagged -> no defer, the pair reaches the visual stage normally.
+def test_run_engine_fully_tagged_reaches_visual(monkeypatch: Any) -> None:
+    # Both listings fully CLIP-tagged -> no defer, the pair reaches the visual stage normally.
     import scripts.dedup_engine as eng
 
-    monkeypatch.setattr(eng, "_clip_untagged", lambda conn, sids, model: [])  # all tagged
+    monkeypatch.setattr(eng, "_clip_incomplete", lambda conn, sids, model: [])  # all complete
     monkeypatch.setattr(eng, "_trigger_clip_tagging",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not trigger")))
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10,
-                           clip_only=True, clip_model="clip-x")
+                           clip_model="clip-x")
     assert stats["clip_deferred"] == 0
     assert stats["pairs_considered"] == 1
 
 
-def test_run_engine_clip_only_off_skips_the_gap_check(monkeypatch: Any) -> None:
-    # Default (clip_only off): the gap check never runs, so the Haiku-fallback path is intact.
+def test_run_engine_no_clip_model_skips_readiness_gate(monkeypatch: Any) -> None:
+    # No CLIP tagger configured (clip_model None): the readiness check never runs (the engine
+    # falls back to its tag-agnostic flow — the readiness gate is CLIP-driven).
     import scripts.dedup_engine as eng
 
-    monkeypatch.setattr(eng, "_clip_untagged",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("gap check must not run")))
+    monkeypatch.setattr(eng, "_clip_incomplete",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("readiness must not run")))
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
     assert stats["clip_deferred"] == 0
@@ -1116,19 +1087,25 @@ def test_eligible_sql_includes_inactive_listings() -> None:
     assert "is_active" not in src
 
 
+def _force_phash_merge(monkeypatch: Any, eng: Any) -> None:
+    # Make any candidate pair merge via the pHash fast-path (>=2 matches, no site/floor plan),
+    # the way exact-address pairs used to merge via the retired rule B.
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
+
+
 def test_run_engine_groups_id_keyed_sreality_with_name_keyed_bazos(monkeypatch: Any) -> None:
-    # The cross-portal lever: the sreality row is id-keyed (street_id 42) but
-    # dual-keying also lands it in the 'name:hlavni' group, where the bazos row
-    # (decorated street string, no street_id) meets it and rule B fires.
+    # The cross-portal lever: the sreality row is id-keyed (street_id 42) but dual-keying also
+    # lands it in the 'name:hlavni' group, where the bazos row (decorated street, no street_id)
+    # meets it and the pHash fast-path merges them.
     import scripts.dedup_engine as eng
 
     merges: list[tuple[int, int, str]] = []
-
-    def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
-        merges.append((survivor_id, retired_id, reason))
-        return {"data": {"merge_group_id": "g"}}
-
-    monkeypatch.setattr(eng, "merge_properties", fake_merge)
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append((survivor_id, retired_id, reason)) or {"data": {"merge_group_id": "g"}})
+    _force_phash_merge(monkeypatch, eng)
 
     conn = _FakeConn([
         _row(1, 101, street="Hlavní", street_id=42),
@@ -1136,8 +1113,8 @@ def test_run_engine_groups_id_keyed_sreality_with_name_keyed_bazos(monkeypatch: 
     ])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
 
-    assert stats["auto_address"] == 1
-    assert merges == [(101, 102, "address_exact")]
+    assert stats["auto_phash"] == 1
+    assert merges == [(101, 102, "image_phash")]
 
 
 def test_run_engine_dual_keys_act_once_per_listing_pair(monkeypatch: Any) -> None:
@@ -1146,12 +1123,10 @@ def test_run_engine_dual_keys_act_once_per_listing_pair(monkeypatch: Any) -> Non
     import scripts.dedup_engine as eng
 
     merges: list[tuple[int, int, str]] = []
-
-    def fake_merge(conn: Any, *, survivor_id: int, retired_id: int, reason: str, **kw: Any) -> dict:
-        merges.append((survivor_id, retired_id, reason))
-        return {"data": {"merge_group_id": "g"}}
-
-    monkeypatch.setattr(eng, "merge_properties", fake_merge)
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append((survivor_id, retired_id, reason)) or {"data": {"merge_group_id": "g"}})
+    _force_phash_merge(monkeypatch, eng)
 
     conn = _FakeConn([
         _row(1, 101, street="Hlavní", street_id=42),
@@ -1159,8 +1134,8 @@ def test_run_engine_dual_keys_act_once_per_listing_pair(monkeypatch: Any) -> Non
     ])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0)
 
-    assert stats["auto_address"] == 1
-    assert merges == [(101, 102, "address_exact")]
+    assert stats["auto_phash"] == 1
+    assert merges == [(101, 102, "image_phash")]
     assert stats["rejected"] == 0
 
 
@@ -1839,9 +1814,10 @@ def test_run_engine_dry_run_writes_nothing(monkeypatch: Any) -> None:
         eng, "merge_properties",
         lambda *a, **k: merges.append("x") or {"data": {"merge_group_id": "g"}},
     )
-    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # exact-address -> would merge
+    _force_phash_merge(monkeypatch, eng)
+    conn = _FakeConn([_row(1, 101), _row(2, 102)])  # pHash -> would merge
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=0, dry_run=True)
-    assert stats["auto_address"] == 1   # counted
+    assert stats["auto_phash"] == 1     # counted
     assert merges == []                 # but not merged
     assert conn.resolved == []          # no candidate status writes
     assert conn.enqueued == []
@@ -2057,20 +2033,20 @@ def test_pair_audit_records_a_merge(monkeypatch: Any) -> None:
         eng, "merge_properties",
         lambda conn, *, survivor_id, retired_id, reason, **kw: {"data": {"merge_group_id": "g"}},
     )
-    # Two rows at the same exact address -> rule B address merge.
+    _force_phash_merge(monkeypatch, eng)  # two cross-portal rows that pHash-merge
     conn = _FakeConn([_row(1, 101), _row(2, 102, source="bazos")])
     audit: list[dict[str, Any]] = []
     stats = eng.run_engine(conn, audit=audit, max_vision_calls=0)
-    assert stats["auto_address"] == 1
-    rec = [r for r in audit if r["stage"] == "address"]
+    assert stats["auto_phash"] == 1
+    rec = [r for r in audit if r["stage"] == "phash"]
     assert len(rec) == 1
     assert rec[0]["outcome"] == "merged"
     assert rec[0]["left_sreality_id"] in (1, 2)
     # The unified audit row carries the undo handle + provenance + factor detail.
     assert rec[0]["source"] == "engine"
     assert rec[0]["merge_group_id"] == "g"
-    assert rec[0]["detail"]["reason"] == "address_exact"
-    assert rec[0]["detail"]["stage"] == "address"
+    assert rec[0]["detail"]["reason"] == "image_phash"
+    assert rec[0]["detail"]["stage"] == "phash"
 
 
 def test_pair_audit_does_not_record_queued_pairs(monkeypatch: Any) -> None:

@@ -1689,14 +1689,24 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
-# Wave 4c: a listing becomes DEDUP-ready once its images are CLIP-tagged (pHash runs just
-# before). The clip_tag job enqueues those listings' properties here so the dedup engine's
-# --dirty drain re-decides only their street groups within minutes (migration 242). Same
-# append-and-bump-marked_at discipline as dirty_properties (rule #20).
+# Wave 4c: a listing becomes DEDUP-ready once ALL its images are CLIP-tagged (pHash runs just
+# before). The clip_tag job calls this after each batch of tags; we enqueue the owning property
+# ONLY when the listing whose image was just tagged has NO remaining un-tagged stored image —
+# i.e. it is now FULLY tagged. Enqueuing on a PARTIAL batch (the old behaviour) shoved a listing
+# into the real-time --dirty drain at 1-of-N images tagged, so the floor-plan gate mis-read its
+# still-pending plan as absent (the false floor_plan_review queue). The dedup engine ALSO defers
+# any incompletely-tagged pair (resolve_pair `_clip_incomplete` gate), so this is the trigger
+# half of one invariant: the engine only ever decides a pair when both sides are fully tagged.
+# Same append-and-bump-marked_at discipline as dirty_properties (rule #20).
 _DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = """
     INSERT INTO dedup_dirty_properties (property_id)
     SELECT DISTINCT l.property_id FROM listings l JOIN images i ON i.sreality_id = l.sreality_id
     WHERE i.id = ANY(%s) AND l.property_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM images i2
+        WHERE i2.sreality_id = l.sreality_id
+          AND i2.storage_path IS NOT NULL AND i2.clip_tagged_at IS NULL
+      )
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
 
