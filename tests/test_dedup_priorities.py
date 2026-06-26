@@ -6,12 +6,12 @@ from typing import Any
 
 import pytest
 
-from toolkit.dedup_engine import HOUSE_PRIORITY, INTERIOR_PRIORITY, LAND_PRIORITY
 from toolkit.dedup_priorities import (
     load_tag_priority_overrides,
     priorities_view,
     set_family_priority,
 )
+from toolkit.room_taxonomy import HOUSE_PRIORITY, INTERIOR_PRIORITY, LAND_PRIORITY
 
 
 class _Cur:
