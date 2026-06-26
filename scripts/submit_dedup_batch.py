@@ -258,16 +258,12 @@ def collect(
                 seen_property_pairs.add(ppair)
 
                 # Warm the floor-plan verdict for any both-floor-plan pair (migration 234):
-                # the engine's floor-plan gate runs on a pHash, a visual, OR a rule-B
-                # exact-address merge (Wave 3), so warm it FIRST — before any skip — or the
-                # cache-only run would queue/defer every floor-plan pair.
+                # the engine's floor-plan gate runs on a pHash OR a visual merge, so warm it
+                # FIRST — before any skip — or the cache-only run would queue/defer every
+                # floor-plan pair. (Rule B exact-address is retired; exact-address pairs are now
+                # ordinary candidates warmed through the pHash/visual path below.)
                 _warm_floor_plan(
                     conn, llm_client, submitter, a, b, floor_plan_model, funnel)
-
-                # rule B exact address — the engine merges it via the floor-plan gate (now
-                # warmed above), no all-rooms compare needed.
-                if decision.action == "auto_merge":
-                    continue
 
                 # pHash fast-path — replay merges for free (unless both site_plan, which
                 # defers to the development guard below). Byt excludes known-exterior images
