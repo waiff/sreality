@@ -55,6 +55,7 @@ from toolkit.dedup_engine import (
     classify_geo_pair,
     classify_pair,
     DISTINCTIVE_ROOMS,
+    distinctive_rooms_for,
     decide_phash_fastpath,
     decide_visual_dismiss,
     geo_cell_key,
@@ -942,16 +943,20 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # cross-posted cross-source pairs skip classify AND compare. For byt, known-exterior/
     # shared images are excluded from the count so a development's reused renders can't
     # reach the >=2 threshold; other categories count any image. A single near-identical
-    # KITCHEN/BATHROOM match also qualifies (distinctive override, only checked when the
-    # generic count fell short).
+    # KITCHEN/BATHROOM match also qualifies (distinctive override) — but ONLY for byt: a
+    # house's facade/garden is shared across a development's units, so distinctive_rooms_for
+    # returns an empty set for non-byt families and the override is skipped (require >=2).
     _rmin = phash_render_exclude_for(a.category_main, ctx.render_min)
     phash_pairs = _phash_identical_pairs(
         conn, a.sreality_id, b.sreality_id,
         phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
+    _distinctive_rooms = distinctive_rooms_for(a.category_main)
     distinctive = (
-        phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
+        bool(_distinctive_rooms)
+        and phash_pairs < PHASH_MIN_IDENTICAL_PAIRS
         and _phash_distinctive_match(
-            conn, a.sreality_id, b.sreality_id, render_exclude_min=_rmin))
+            conn, a.sreality_id, b.sreality_id,
+            rooms=_distinctive_rooms, render_exclude_min=_rmin))
     if decide_phash_fastpath(phash_pairs, distinctive) and not _both_have_site_plan(
         conn, a.sreality_id, b.sreality_id
     ):

@@ -604,11 +604,16 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
     forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
     priority order (`rooms_in_priority(common, category_main)` → `room_priority_for`), stop at the
-    first **High** verdict → auto-merge. **For byt the compared rooms — and the CLIP cosine tier
-    below — are INTERIOR only** (`BYT_ROOM_PRIORITY`: kitchen, bathroom, toilet, living_room, bedroom,
-    hallway); exterior_facade / balcony_terrace / garden are dropped, so a shared facade render can't
-    produce the auto-merging High verdict. Other categories keep the full `ROOM_PRIORITY`. **(E)**
-    everything else queues on the operator's `/dedup` review page.
+    first **High** verdict → auto-merge. The compare order is **per-family** (`room_priority_for`):
+    **byt** compares INTERIOR rooms only (`BYT_ROOM_PRIORITY`: kitchen, bathroom, toilet, living_room,
+    bedroom, hallway) — exterior_facade / balcony_terrace / garden are dropped (a shared facade render
+    can't produce the auto-merging High verdict), and the CLIP cosine tier below is interior-only too;
+    **dum / komercni / ostatni** lead with the **FACADE** (`HOUSE_PRIORITY` — the building's identity)
+    then interiors; **pozemek** leads with the **SITE PLAN** (`LAND_PRIORITY` — the plot's identity).
+    The byt-only **distinctive single-match override** (one near-identical kitchen/bathroom pHash =
+    merge, `distinctive_rooms_for`) is empty for non-byt: a facade/site-plan is development-shared, so
+    they always need the ≥2-match count. (Stage 2 will make these orders operator-editable per
+    type/subtype.) **(E)** everything else queues on the operator's `/dedup` review page.
     **Floor-plan validation gate (migration 234).** Whenever the engine WOULD merge a pair — via the
     pHash fast-path OR a visual High — `_floor_plan_gate` runs a Sonnet floor-plan check (the
     `DOCUMENT_MAX_EDGE=1568` tier; pHash conflates line-art plans and CLIP cosine can't read layout,
@@ -708,6 +713,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (`scripts/submit_dedup_batch.py` + `ingest_dedup_batch.py`). The daily engine run then REPLAYS
     unchanged over the warm caches → identical merges for free (a cache miss falls back to a sync
     call). The lane NEVER merges; merging stays the engine's job.
+    **Category compatibility** is enforced at every classify site AND the `merge_properties`
+    chokepoint via the single `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental
+    (`category_type`), and a flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔
+    komercni** (the same building listed as a house on one portal, commercial on another, is one
+    real-world property — irrespective of sub-type). A cross-type pair takes the FIRST listing's
+    `MatchProfile` / priority order (no special-case logic). **The geo strong-signal auto-merge gates
+    on BOTH families** (`profile.geo_auto_merge_allowed and profile_for(b).geo_auto_merge_allowed`), so
+    a cross-type pair never geo-auto-merges on a weak proximity signal alone (komercni isn't
+    geo-auto-merge-validated) — it queues, symmetrically regardless of order, and still merges via the
+    exact-address / pHash / visual paths or operator review. This is distinct from the **asset-link**
+    grain (migration 224), which links genuinely *different* units in one building (a `byt` + its
+    ground-floor `komercni`, a `dum` + its `pozemek`) WITHOUT collapsing them.
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so

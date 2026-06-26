@@ -39,8 +39,11 @@ from toolkit.comparables import _DISPOSITION_LOOSE
 from toolkit.room_taxonomy import (
     DISTINCTIVE_ROOMS,
     FULL_PRIORITY as ROOM_PRIORITY,
+    HOUSE_PRIORITY,
     INTERIOR_PRIORITY as BYT_ROOM_PRIORITY,
+    LAND_PRIORITY,
     NON_INTERIOR_TAGS,
+    category_main_compatible,
 )
 
 # Rule B: exact-address merge is blocked when areas disagree by more than this.
@@ -140,9 +143,24 @@ def profile_for(category_main: str | None) -> MatchProfile:
 
 
 def room_priority_for(category_main: str | None) -> tuple[str, ...]:
-    """Comparison room order for a category's image layers. Apartments (the byt profile,
-    incl. NULL/unknown) use INTERIOR rooms only; other categories may use exterior."""
-    return BYT_ROOM_PRIORITY if profile_for(category_main).family == "byt" else ROOM_PRIORITY
+    """Comparison tag order for a category's perceptual + forensic image layers — the
+    PRIORITY that leads (stop-at-first-High). byt → interior rooms (wet rooms first);
+    pozemek → SITE PLAN first (the plot's identity); dum/komercni/ostatni → FACADE first
+    (the building's identity), then interiors. (Stage 2 makes these operator-editable.)"""
+    fam = profile_for(category_main).family
+    if fam == "byt":
+        return BYT_ROOM_PRIORITY
+    if fam == "pozemek":
+        return LAND_PRIORITY
+    return HOUSE_PRIORITY
+
+
+def distinctive_rooms_for(category_main: str | None) -> frozenset[str]:
+    """The tags where a SINGLE near-identical pHash match auto-merges (the count-of-1
+    override). byt → kitchen/bathroom (wet rooms are unit-specific). Non-apartments →
+    EMPTY: a facade / site plan is shared across a development's units (like a render), so
+    one match there is NOT conclusive — they require the >=2-match count instead."""
+    return DISTINCTIVE_ROOMS if profile_for(category_main).family == "byt" else frozenset()
 
 
 def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
@@ -415,14 +433,13 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
         and a.category_type != b.category_type
     ):
         return PairDecision("reject", None, "category_type_contradiction")
-    if (
-        a.category_main is not None and b.category_main is not None
-        and a.category_main != b.category_main
-    ):
+    if not category_main_compatible(a.category_main, b.category_main):
         return PairDecision("reject", None, "category_main_contradiction")
-    # Category drives the matching policy. The pair shares a category_main here (the
-    # contradiction above rejected mismatches), so either side's family is the profile;
-    # a NULL/unknown category falls back to the byt profile (unchanged behavior).
+    # Category drives the matching policy. The pair's categories are COMPATIBLE here
+    # (equal, or the one sanctioned dum<->komercni cross-type), so the FIRST listing's
+    # family is the profile (operator policy: no special cross-type logic — the side that
+    # reached the engine first sets the priorities); a NULL/unknown category falls back to
+    # the byt profile (unchanged behavior).
     profile = profile_for(a.category_main if a.category_main is not None else b.category_main)
     # Disposition is mandatory for apartments; for single-dwelling families it's absent,
     # so only enforce compatibility when the profile requires it OR both rows carry one.
@@ -539,10 +556,7 @@ def classify_geo_pair(
         and a.category_type != b.category_type
     ):
         return PairDecision("reject", None, "category_type_contradiction")
-    if (
-        a.category_main is not None and b.category_main is not None
-        and a.category_main != b.category_main
-    ):
+    if not category_main_compatible(a.category_main, b.category_main):
         return PairDecision("reject", None, "category_main_contradiction")
     if (
         a.lat is not None and a.lng is not None and b.lat is not None and b.lng is not None
@@ -567,7 +581,17 @@ def classify_geo_pair(
         area_diff is not None and area_diff <= GEO_STRONG_AREA_PCT
         and (_price_match(a.price_czk, b.price_czk) or house_no_match)
     )
-    if strong and profile.geo_auto_merge_allowed:
+    # Geo-auto-merge gates on BOTH families, not just `a`'s. For a same-type pair this is
+    # exactly `profile.geo_auto_merge_allowed` (one family). For the dum<->komercni cross-type
+    # it is the SYMMETRIC, conservative choice: komercni isn't geo-auto-merge-validated, so the
+    # pair QUEUES regardless of which side arrived first — it never auto-merges on a geo signal
+    # alone (it still merges via the exact-address / pHash / visual paths, or operator review).
+    # Without this, (dum, komercni) and (komercni, dum) would decide differently by order.
+    both_allow_auto_merge = (
+        profile.geo_auto_merge_allowed
+        and profile_for(b.category_main).geo_auto_merge_allowed
+    )
+    if strong and both_allow_auto_merge:
         return PairDecision("auto_merge", "geo_exact")
     return PairDecision("candidate", "geo_strong" if strong else "geo_weak")
 

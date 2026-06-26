@@ -232,7 +232,7 @@ def test_merge_property_set_partial_failure_rolls_back(monkeypatch):
 
     def fake_merge(conn, *, survivor_id, retired_id, **kwargs):
         if retired_id == 9:
-            raise MergeError("category_main mismatch (dum vs komercni)")
+            raise MergeError("category_main mismatch (byt vs dum)")
         return {"data": {"merge_group_id": "grp-1", "listings_moved": 1}}
 
     monkeypatch.setattr(dedup, "merge_properties", fake_merge)
