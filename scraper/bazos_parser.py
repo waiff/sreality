@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from selectolax.parser import HTMLParser, Node
 
+from scraper.floor import floor_from_text
 from scraper.geocoding import GeocodeResult, GeocodingError
 from scraper.scraped_listing import ScrapedListing
 from scraper.street import clean_street
@@ -526,6 +527,10 @@ def parse_detail(
     title = _text(tree.css_first("h1.nadpisdetail")) or ""
     description = _text(tree.css_first("div.popisdetail"))
     haystack = f"{title}\n{description or ''}"
+    # Deterministic floor (ground=0, like idnes + the LLM rubric) from the same
+    # haystack area/disposition come from; the LLM enrichment fills only what this
+    # high-precision pass leaves NULL (ambiguous/word-ordinal/mezonet cases).
+    floor, total_floors = floor_from_text(haystack)
 
     table = _detail_table(tree)
     price_cell = table.get("cena")
@@ -587,6 +592,8 @@ def parse_detail(
         price_unit=price_unit,
         area_m2=_parse_area(haystack),
         disposition=_parse_disposition(haystack),
+        floor=floor,
+        total_floors=total_floors,
         locality=locality,
         district=None,
         # The raw extract (with its "ul." prefix) is the better geocoder query;

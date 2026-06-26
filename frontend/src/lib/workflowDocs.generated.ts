@@ -1430,10 +1430,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "limit",
-        "description": "Maximum number of listings to enrich in this run",
+        "description": "Max listings selected this run (the wall-clock budget usually stops it first)",
         "required": true,
         "type": "string",
-        "default": "1000",
+        "default": "3000",
         "options": null
       },
       {
@@ -1441,7 +1441,15 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "Stop early when this run's LLM cost exceeds this cap (USD)",
         "required": true,
         "type": "string",
-        "default": "10",
+        "default": "20",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget; finalize cleanly when reached (keep below timeout-minutes)",
+        "required": true,
+        "type": "string",
+        "default": "3000",
         "options": null
       },
       {
