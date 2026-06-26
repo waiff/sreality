@@ -1036,6 +1036,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "0 */6 * * *",
         "human": "Every 6 hours"
+      },
+      {
+        "cron": "30 */2 * * *",
+        "human": "Every 2 hours at :30"
       }
     ],
     "onPush": false,
@@ -1110,6 +1114,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "name": "free",
         "description": "FREE mode — pHash + rule merges + reconcile + bounded inline floor-plan gate only",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "candidates",
+        "description": "Candidate-priority drain — re-decide ONLY the queued /dedup candidates (O(queue), not a full scan)",
         "required": false,
         "type": "choice",
         "default": "false",

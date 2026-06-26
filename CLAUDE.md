@@ -1361,8 +1361,13 @@ locally. The dedup/properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
 singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
-property + clears the dirty queue), `dedup_engine.yml` (daily street+disposition dedup engine +
-auto-merge; rule #15), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
+property + clears the dirty queue), `dedup_engine.yml` (street+disposition dedup engine +
+auto-merge; rule #15 — TWO scheduled modes: a **FULL SCAN** every 6h that DISCOVERS new dups
+across the market, and a **CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the
+properties in still-proposed `/dedup` candidates so the queue **self-clears in O(queue)**
+regardless of where the full scan's deadline frontier falls. Both drive the SAME `resolve_pair`
+decision tree — one brain, scoped vs full work-list; the candidate drain is the foundation the
+real-time per-listing path reuses), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and
 `compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor

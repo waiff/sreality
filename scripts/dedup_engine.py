@@ -104,17 +104,29 @@ _ELIGIBLE_SQL = """
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
     WHERE l.street IS NOT NULL AND l.street <> ''
       AND l.disposition IS NOT NULL
+      {filter}
     ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition
 """
 
 
-def _load_eligible(conn: Any) -> list[ListingKey]:
+def _load_eligible(conn: Any,
+                   restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
     """One ListingKey per (listing, grouping key): a row with both a canonical
     street_id and a street name is dual-keyed into its 'id:' and 'name:' groups
     so cross-portal rows keyed differently can still meet (run_engine dedups
-    the listing pairs that surface in both groups)."""
+    the listing pairs that surface in both groups).
+
+    `restrict_property_ids` scopes the load to those properties' listings — the
+    candidate-priority drain (O(queue) not O(market)): the two properties of a
+    queued candidate share a street+disposition, so they still land in one street
+    group and get re-decided by the SAME resolve_pair, without scanning the world."""
+    params: dict[str, Any] = {}
+    flt = ""
+    if restrict_property_ids is not None:  # an EMPTY set restricts to nothing (not all)
+        flt = "AND l.property_id = ANY(%(pids)s)"
+        params["pids"] = list(restrict_property_ids)
     with conn.cursor() as cur:
-        cur.execute(_ELIGIBLE_SQL)
+        cur.execute(_ELIGIBLE_SQL.format(filter=flt), params)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
@@ -232,6 +244,25 @@ def _reconcile_stale_candidates(conn: Any, *, dry_run: bool) -> int:
     return n
 
 
+def _proposed_candidate_property_ids(conn: Any) -> set[int]:
+    """Every property that appears in a still-`proposed` /dedup candidate — the work-list
+    for the candidate-priority drain. The two properties of a candidate share a street +
+    disposition, so scoping `_load_eligible` to this set re-forms exactly those pairs in
+    their street group and re-decides them via resolve_pair, without a full market scan."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT left_property_id, right_property_id FROM property_identity_candidates "
+            "WHERE status = 'proposed'")
+        rows = cur.fetchall()
+    out: set[int] = set()
+    for left, right in rows:
+        if left is not None:
+            out.add(int(left))
+        if right is not None:
+            out.add(int(right))
+    return out
+
+
 def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str) -> int:
     """Set-based: mark every still-'proposed' candidate for these (lo, hi) pairs as
     `new_status`. A no-op for pairs that have no proposed candidate. Returns rowcount."""
@@ -293,16 +324,26 @@ _GEO_ELIGIBLE_SQL = """
       AND l.obec_id IS NOT NULL
       AND coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL
       AND NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)
+      {filter}
     ORDER BY l.obec_id, l.category_main, l.category_type
 """
 
 
-def _load_geo_eligible(conn: Any) -> list[ListingKey]:
+def _load_geo_eligible(conn: Any,
+                       restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
     """One ListingKey per geo-eligible single-dwelling listing, keyed by its geo cell
     (so the existing _group_by_street groups them). Carries lat/lng/price for the geo
-    classifier; disposition/floor/street_id are unused on this path."""
+    classifier; disposition/floor/street_id are unused on this path.
+
+    `restrict_property_ids` scopes to those properties (the candidate drain), exactly like
+    the street `_load_eligible` — an EMPTY set restricts to nothing (not all)."""
+    params: dict[str, Any] = {}
+    flt = ""
+    if restrict_property_ids is not None:
+        flt = "AND l.property_id = ANY(%(pids)s)"
+        params["pids"] = list(restrict_property_ids)
     with conn.cursor() as cur:
-        cur.execute(_GEO_ELIGIBLE_SQL)
+        cur.execute(_GEO_ELIGIBLE_SQL.format(filter=flt), params)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
@@ -1039,6 +1080,7 @@ def run_engine(
     enqueue_unresolved: bool = True,
     dry_run: bool = False,
     deadline: float | None = None,
+    restrict_property_ids: set[int] | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
 
@@ -1073,7 +1115,7 @@ def run_engine(
 
     stats["reconciled"] = _reconcile_stale_candidates(conn, dry_run=dry_run)
 
-    keys = _load_eligible(conn)
+    keys = _load_eligible(conn, restrict_property_ids=restrict_property_ids)
     groups = _group_by_street(keys)
     ctx = _RunContext(
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
@@ -1132,6 +1174,7 @@ def run_geo_candidates(
     geo_auto_merge_enabled: bool = False,
     dry_run: bool = False,
     deadline: float | None = None,
+    restrict_property_ids: set[int] | None = None,
 ) -> dict[str, int]:
     """Geo path: find duplicate single-dwelling properties (houses/land/commercial) the
     street+disposition engine structurally can't see. Blocks by geo cell, classifies
@@ -1143,7 +1186,7 @@ def run_geo_candidates(
     `dum` is ever eligible to auto-merge (its profile); land/commercial/other are always
     queue-only by profile.
     """
-    keys = _load_geo_eligible(conn)
+    keys = _load_geo_eligible(conn, restrict_property_ids=restrict_property_ids)
     groups = _group_by_street(keys)
     stats: dict[str, int] = {
         "geo_eligible": len({k.sreality_id for k in keys}), "geo_cells": len(groups),
@@ -1511,6 +1554,12 @@ def main() -> int:
                              "review queue doesn't inflate. The ONE bounded exception is the "
                              "floor-plan validation gate (see --floor-plan-budget) — a "
                              "targeted safety check on the small set of would-merge both-plan pairs.")
+    parser.add_argument("--candidates", action="store_true",
+                        help="Candidate-priority drain: re-decide ONLY the properties already in "
+                             "still-proposed /dedup candidates (O(queue), not a full market scan), so "
+                             "the manual queue self-clears regardless of where the full scan's "
+                             "deadline falls. Composes with --free / --cache-only / the floor-plan "
+                             "budget — same decision tree (resolve_pair), scoped work-list.")
     parser.add_argument("--floor-plan-budget", type=int, default=None, dest="floor_plan_budget",
                         help="Override app_settings.dedup_floor_plan_budget for this run: the cap on "
                              "inline cold Sonnet floor-plan checks (the only paid call on a free run; "
@@ -1641,6 +1690,13 @@ def main() -> int:
             from datetime import datetime, timezone
             run_at = datetime.now(timezone.utc)
             pair_audit: list[dict[str, Any]] = []
+            # Candidate-priority drain: scope the scan to the properties in still-proposed
+            # /dedup candidates so the queue self-clears in O(queue), not O(market). An
+            # EMPTY set (no candidates) loads nothing — a clean no-op, NOT a full scan.
+            restrict = (_proposed_candidate_property_ids(conn) if args.candidates else None)
+            if args.candidates:
+                LOG.info("CANDIDATE drain: %d properties across the proposed queue",
+                         len(restrict or set()))
             stats = run_engine(
                 conn, classify_fn=classify_fn, compare_fn=compare_fn,
                 site_plan_fn=site_plan_fn,
@@ -1656,6 +1712,7 @@ def main() -> int:
                 enqueue_unresolved=not args.free,
                 dry_run=args.shadow,
                 deadline=deadline,
+                restrict_property_ids=restrict,
             )
             stats["clip_classified"] = clip_counter[0]
             if not args.shadow:
@@ -1681,6 +1738,8 @@ def main() -> int:
             geo_stats = run_geo_candidates(
                 conn, max_pairs=args.geo_max_pairs,
                 geo_auto_merge_enabled=False, dry_run=args.shadow, deadline=deadline,
+                restrict_property_ids=(
+                    _proposed_candidate_property_ids(conn) if args.candidates else None),
             )
             LOG.info(
                 "GEO %s eligible=%d cells=%d pairs=%d candidates=%d auto=%d rejected=%d "
