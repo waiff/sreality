@@ -6,6 +6,20 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup follow-ups — floor-plan confidence floor + dead-code cleanup
+
+Post-merge follow-ups to the fully-tagged-before-decide PR.
+
+- **Floor-plan confidence floor** (`scripts/dedup_engine._floor_plan_image_ids`,
+  `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`): a floor_plan tag below 0.50 (from EITHER vision tagger —
+  CLIP `image_clip_tags` or the LLM `image_room_classifications`) is dropped from the gate's plan
+  set. Data-validated on the live distribution (95% of CLIP floor_plan tags ≥ 0.52, false
+  positives like an idnes location-map mis-tagged at 0.36 concentrate < 0.50), so a phantom plan
+  no longer creates a false "one-sided" read that queues an otherwise-mergeable pair.
+- **Dead-code cleanup**: removed the inert `dedup_clip_only` setting + its plumbing (superseded by
+  the always-on readiness gate) and the always-zero "By address" dashboard stat (rule B retired →
+  no address auto-merges). Backend `auto_address` counter kept (writes 0, accurate).
+
 ### 2026-06: Dedup — fully-tagged-before-decide invariant + rule B retired
 
 Cross-portal duplicates (near-identical photos) sat unmerged in the `/dedup` queue as false

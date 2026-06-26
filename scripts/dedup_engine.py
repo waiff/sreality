@@ -467,19 +467,32 @@ def _high_render_image_ids(conn: Any, a_id: int, b_id: int, threshold: float) ->
         return {int(r[0]) for r in cur.fetchall()}
 
 
-def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
-    """Stored floor-plan image ids for a listing (CLIP tag OR LLM classification),
-    storage_path present so they can be sent to vision. Empty -> no floor plan."""
+# A floor_plan tag below this confidence is dropped from the gate's plan set. Validated on the
+# live distribution: 95% of CLIP floor_plan tags score >= 0.52 (p05=0.518), 87.5% >= 0.70, and
+# the false positives (a non-plan photo mis-tagged floor_plan — e.g. an idnes location map at
+# 0.36) concentrate BELOW 0.50 (4.4% of tags). Dropping the low-confidence tail stops a phantom
+# plan from creating a false 'one-sided' read that queues an otherwise-mergeable pair. Applies to
+# BOTH vision taggers (image_clip_tags + the LLM image_room_classifications, both carry confidence).
+FLOOR_PLAN_MIN_CONFIDENCE = 0.50
+
+
+def _floor_plan_image_ids(
+    conn: Any, sreality_id: int, min_confidence: float = FLOOR_PLAN_MIN_CONFIDENCE,
+) -> list[int]:
+    """Stored floor-plan image ids for a listing (CLIP tag OR LLM classification) at or above
+    `min_confidence`, storage_path present so they can be sent to vision. Empty -> no floor plan."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT i.id FROM images i "
             "WHERE i.sreality_id = %(sid)s AND i.storage_path IS NOT NULL AND ("
             "  EXISTS (SELECT 1 FROM image_clip_tags t "
-            "          WHERE t.image_id = i.id AND t.logical_tag = %(fp)s)"
+            "          WHERE t.image_id = i.id AND t.logical_tag = %(fp)s "
+            "            AND t.confidence >= %(minconf)s)"
             "  OR EXISTS (SELECT 1 FROM image_room_classifications c "
-            "             WHERE c.image_id = i.id AND c.room_type = %(fp)s)) "
+            "             WHERE c.image_id = i.id AND c.room_type = %(fp)s "
+            "               AND c.confidence >= %(minconf)s)) "
             "ORDER BY i.sequence ASC NULLS LAST, i.id ASC",
-            {"sid": sreality_id, "fp": FLOOR_PLAN_ROOM_TYPE},
+            {"sid": sreality_id, "fp": FLOOR_PLAN_ROOM_TYPE, "minconf": min_confidence},
         )
         return [r[0] for r in cur.fetchall()]
 
@@ -899,10 +912,8 @@ class _RunContext:
     # Operator-reordered per-family comparison-tag priorities (app_settings.dedup_tag_priorities);
     # None / partial → the coded defaults (rooms_in_priority normalizes per family).
     tag_overrides: dict[str, list[str]] | None = None
-    # CLIP-only mode (dedup_clip_only): no LLM room-classifier fallback. A pair with a
-    # CLIP-untagged listing re-queues it for the CLIP tagger and DEFERS, instead of paying
-    # Haiku or treating it as untagged. clip_model is the taxonomy model the tags are keyed on.
-    clip_only: bool = False
+    # clip_model is the taxonomy model the CLIP tags are keyed on; set => the always-on
+    # tagging-readiness gate (_clip_incomplete) is active.
     clip_model: str | None = None
     # tunables (read-only)
     auto_merge_enabled: bool = True
@@ -963,8 +974,8 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
     # tag it — re-queuing here would only cycle a terminally-undecodable image). The clip_tag job
     # enqueues the property into dedup_dirty_properties once its LAST image is tagged, so the
     # hourly --dirty drain re-decides it within minutes — then both sides are complete and a real
-    # two-sided floor-plan compare merges on matching plans. Default whenever CLIP is the tagger
-    # (clip_model set); supersedes the old clip_only-only gate.
+    # two-sided floor-plan compare merges on matching plans. Always on whenever CLIP is the tagger
+    # (clip_model set) — there is no opt-out (it replaced the retired dedup_clip_only setting).
     if ctx.clip_model and _clip_incomplete(conn, [a.sreality_id, b.sreality_id], ctx.clip_model):
         stats["clip_deferred"] += 1
         return
@@ -1162,7 +1173,6 @@ def run_engine(
     only_groups_with_property_ids: set[int] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
-    clip_only: bool = False,
     clip_model: str | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
@@ -1227,7 +1237,7 @@ def run_engine(
     tag_overrides = load_tag_priority_overrides(conn)
     ctx = _RunContext(
         classify=classify, tier=("geo" if geo else "street_disposition"),
-        tag_overrides=tag_overrides, clip_only=clip_only, clip_model=clip_model,
+        tag_overrides=tag_overrides, clip_model=clip_model,
         classify_fn=classify_fn, compare_fn=compare_fn, site_plan_fn=site_plan_fn,
         floor_plan_fn=floor_plan_fn, cosine_fn=cosine_fn, bands=bands, model_for=model_for,
         auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
@@ -1520,7 +1530,6 @@ def _clip_settings(conn: Any) -> dict[str, Any]:
 
     return {
         "prefer_clip": _flag("dedup_prefer_clip_tags"),
-        "clip_only": _flag("dedup_clip_only"),
         "cosine_enabled": _flag("dedup_clip_cosine_enabled"),
         "bands": CosineBands(
             haiku_min=_num("dedup_cosine_haiku_min"),
@@ -1771,9 +1780,6 @@ def main() -> int:
             auto_merge_enabled=auto_merge_enabled, autodismiss=autodismiss,
             enqueue_unresolved=not args.free, dry_run=args.shadow, deadline=deadline,
             restrict_property_ids=restrict,
-            # clip_only only takes effect WITH prefer_clip — else a CLIP-tagged listing would
-            # still be Haiku-classified, contradicting CLIP-only. (Setting help says as much.)
-            clip_only=clip["clip_only"] and clip["prefer_clip"],
             clip_model=clip["clip_model"],
         )
 
