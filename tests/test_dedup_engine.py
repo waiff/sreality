@@ -563,14 +563,33 @@ def test_classify_geo_weak_when_no_price_or_houseno_match() -> None:
 
 def test_classify_geo_cross_type_dum_komercni_not_a_contradiction() -> None:
     # The geo path honours the same one cross-type as the street path: a dum + a komercni
-    # at the same coordinate (same strong area+price signal) is the same building, not a
-    # category contradiction. Profile follows the first listing (operator policy).
+    # at the same coordinate is the same building, NOT a category contradiction. But a
+    # cross-type pair never geo-AUTO-merges (komercni isn't geo-auto-merge-validated) — it
+    # QUEUES, symmetrically, regardless of which side arrived first.
     d = classify_geo_pair(
         _gk(1, 101, cat="dum", source="sreality"),
         _gk(2, 102, cat="komercni", source="idnes"),
         profile_for("dum"),
     )
     assert d.detail != "category_main_contradiction"
+    assert d.action == "candidate" and d.reason == "geo_strong"
+
+
+def test_classify_geo_cross_type_auto_merge_gate_is_order_independent() -> None:
+    # The strong signal is identical both ways; the both-families gate must decide the SAME
+    # (queue) whether dum or komercni is the first listing — no ordering-dependent auto-merge.
+    forward = classify_geo_pair(
+        _gk(1, 101, cat="dum"), _gk(2, 102, cat="komercni"), profile_for("dum"))
+    reverse = classify_geo_pair(
+        _gk(1, 101, cat="komercni"), _gk(2, 102, cat="dum"), profile_for("komercni"))
+    assert forward.action == reverse.action == "candidate"
+    assert forward.reason == reverse.reason == "geo_strong"
+
+
+def test_classify_geo_same_type_dum_still_auto_merges() -> None:
+    # Regression guard: the both-families gate must NOT change same-type behavior — a
+    # dum+dum strong pair still auto-merges exactly as before.
+    d = classify_geo_pair(_gk(1, 101), _gk(2, 102), profile_for("dum"))
     assert d.action == "auto_merge" and d.reason == "geo_exact"
 
 

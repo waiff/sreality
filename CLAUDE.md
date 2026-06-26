@@ -718,7 +718,11 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (`category_type`), and a flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔
     komercni** (the same building listed as a house on one portal, commercial on another, is one
     real-world property — irrespective of sub-type). A cross-type pair takes the FIRST listing's
-    `MatchProfile` / priority order (no special-case logic). This is distinct from the **asset-link**
+    `MatchProfile` / priority order (no special-case logic). **The geo strong-signal auto-merge gates
+    on BOTH families** (`profile.geo_auto_merge_allowed and profile_for(b).geo_auto_merge_allowed`), so
+    a cross-type pair never geo-auto-merges on a weak proximity signal alone (komercni isn't
+    geo-auto-merge-validated) — it queues, symmetrically regardless of order, and still merges via the
+    exact-address / pHash / visual paths or operator review. This is distinct from the **asset-link**
     grain (migration 224), which links genuinely *different* units in one building (a `byt` + its
     ground-floor `komercni`, a `dum` + its `pozemek`) WITHOUT collapsing them.
     Merges are **reversible**:

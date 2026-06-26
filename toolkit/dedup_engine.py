@@ -581,7 +581,17 @@ def classify_geo_pair(
         area_diff is not None and area_diff <= GEO_STRONG_AREA_PCT
         and (_price_match(a.price_czk, b.price_czk) or house_no_match)
     )
-    if strong and profile.geo_auto_merge_allowed:
+    # Geo-auto-merge gates on BOTH families, not just `a`'s. For a same-type pair this is
+    # exactly `profile.geo_auto_merge_allowed` (one family). For the dum<->komercni cross-type
+    # it is the SYMMETRIC, conservative choice: komercni isn't geo-auto-merge-validated, so the
+    # pair QUEUES regardless of which side arrived first — it never auto-merges on a geo signal
+    # alone (it still merges via the exact-address / pHash / visual paths, or operator review).
+    # Without this, (dum, komercni) and (komercni, dum) would decide differently by order.
+    both_allow_auto_merge = (
+        profile.geo_auto_merge_allowed
+        and profile_for(b.category_main).geo_auto_merge_allowed
+    )
+    if strong and both_allow_auto_merge:
         return PairDecision("auto_merge", "geo_exact")
     return PairDecision("candidate", "geo_strong" if strong else "geo_weak")
 
