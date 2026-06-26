@@ -27,6 +27,7 @@ from toolkit.dedup_engine import (
     decide_visual_dismiss,
     disposition_compatible,
     distinctive_rooms_for,
+    geo_category_bucket,
     geo_cell_key,
     normalize_street,
     phash_excluded_tags_for,
@@ -520,12 +521,22 @@ def _gk(
 
 
 def test_geo_cell_key_format_and_scoping() -> None:
-    assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej") == "geo:5001:50.1006:14.5374:dum:prodej"
-    # different obec / category / offering → different cell (no cross-bucket pairing)
+    # dum and komercni collapse to one category bucket so the cross-type co-locates.
+    assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej") == "geo:5001:50.1006:14.5374:dum|komercni:prodej"
     base = geo_cell_key(5001, 50.10064, 14.53742, "dum", "prodej")
+    # different obec / offering → different cell (no cross-bucket pairing)
     assert geo_cell_key(5002, 50.10064, 14.53742, "dum", "prodej") != base
-    assert geo_cell_key(5001, 50.10064, 14.53742, "komercni", "prodej") != base
     assert geo_cell_key(5001, 50.10064, 14.53742, "dum", "pronajem") != base
+    # dum and komercni SHARE a cell (the sanctioned cross-type); pozemek stays separate.
+    assert geo_cell_key(5001, 50.10064, 14.53742, "komercni", "prodej") == base
+    assert geo_cell_key(5001, 50.10064, 14.53742, "pozemek", "prodej") != base
+
+
+def test_geo_category_bucket_collapses_dum_komercni() -> None:
+    assert geo_category_bucket("dum") == geo_category_bucket("komercni") == "dum|komercni"
+    assert geo_category_bucket("pozemek") == "pozemek"
+    assert geo_category_bucket("byt") == "byt"
+    assert geo_category_bucket(None) is None
 
 
 def test_geo_cell_key_none_when_coord_or_obec_missing() -> None:
@@ -559,6 +570,15 @@ def test_classify_geo_land_strong_is_candidate_never_auto_merge() -> None:
 def test_classify_geo_weak_when_no_price_or_houseno_match() -> None:
     d = classify_geo_pair(_gk(1, 101, price=5_000_000), _gk(2, 102, price=9_000_000), profile_for("dum"))
     assert d.action == "candidate" and d.reason == "geo_weak"
+
+
+def test_classify_geo_area_override_widens_the_candidate_gate() -> None:
+    # A 15% area gap rejects under the profile's unified 10% but is a CANDIDATE when the
+    # operator widens the geo tolerance to 20% (recall into the visual flow, not a merge).
+    a, b = _gk(1, 101, area=100.0), _gk(2, 102, area=115.0)
+    assert classify_geo_pair(a, b, profile_for("dum")).detail == "area_contradiction"
+    d = classify_geo_pair(a, b, profile_for("dum"), max_area_pct=0.20)
+    assert d.action != "reject"
 
 
 def test_classify_geo_cross_type_dum_komercni_not_a_contradiction() -> None:
@@ -628,56 +648,51 @@ def test_classify_geo_category_contradiction_rejects() -> None:
     assert d.action == "reject" and d.detail == "category_main_contradiction"
 
 
-def test_run_geo_candidates_queues_only_in_p1(monkeypatch: Any) -> None:
-    # A strong house pair would auto-merge by rule, but P1 keeps it queue-only.
+def test_make_geo_classify_maps_auto_merge_to_candidate() -> None:
+    # The unified geo path NEVER merges on the deterministic geo signal — _make_geo_classify
+    # maps classify_geo_pair's auto_merge to candidate, so the free-first visual flow is the
+    # sole merge gate. Rejects pass through; the operator's area tolerance is applied.
+    import scripts.dedup_engine as eng
+    fn = eng._make_geo_classify(0.20)
+    # A strong same-type dum pair classify_geo_pair would auto_merge → mapped to candidate.
+    strong = fn(_gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"))
+    assert strong.action == "candidate" and strong.reason == "geo_exact"
+    # A genuine contradiction still rejects.
+    assert fn(_gk(1, 101, cat="byt"), _gk(2, 102, cat="dum")).action == "reject"
+    # The 0.20 tolerance accepts a 15% area gap the default 10% profile rejects.
+    assert fn(_gk(1, 101, area=100.0), _gk(2, 102, area=115.0)).action != "reject"
+
+
+def test_run_engine_geo_routes_through_resolve_pair_with_geo_tier(monkeypatch: Any) -> None:
+    # The unification: a geo run loads geo-eligible listings and drives them through the
+    # SAME resolve_pair brain — reaching the visual stage (cross-source), queuing with the
+    # 'geo' tier, and NEVER merging on the deterministic geo signal alone.
     import scripts.dedup_engine as eng
     monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
         _gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"),
     ])
-    enq: list[tuple[Any, Any]] = []
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("geo signal must not merge")))
+    enq: list[dict[str, Any]] = []
     monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda conn, x, y, markers, **kw: enq.append((kw.get("tier"), markers["reason"])))
-    monkeypatch.setattr(eng, "_merge_pair",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("P1 must not merge")))
-    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=False)
-    assert stats["geo_candidates"] == 1
-    assert stats["geo_auto"] == 0
-    assert enq == [("geo_dum", "geo_exact")]
+                        lambda conn, x, y, markers, **kw: enq.append(markers))
+    conn = _FakeConn([])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None,
+                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
+    assert stats["pairs_considered"] == 1      # reached the visual stage
+    assert stats["queued"] == 1
+    assert enq and enq[0]["tier"] == "geo"     # queued under the geo tier, not street
 
 
-def test_run_geo_candidates_auto_merges_when_enabled(monkeypatch: Any) -> None:
-    import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [_gk(1, 101), _gk(2, 102)])
-    merges: list[str] = []
-    monkeypatch.setattr(eng, "_merge_pair",
-                        lambda conn, x, y, reason, markers: merges.append(reason) or True)
-    monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should merge")))
-    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=True)
-    assert stats["geo_auto"] == 1
-    assert merges == ["geo_exact"]
-
-
-def test_run_geo_candidates_dry_run_writes_nothing(monkeypatch: Any) -> None:
-    import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [_gk(1, 101), _gk(2, 102)])
-    monkeypatch.setattr(eng, "_merge_pair",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not merge")))
-    monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("dry run must not enqueue")))
-    stats = eng.run_geo_candidates(object(), geo_auto_merge_enabled=True, dry_run=True)
-    assert stats["geo_auto"] == 1  # counted, but no merge call
-
-
-def test_run_geo_candidates_skips_large_cell(monkeypatch: Any) -> None:
+def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
     members = [_gk(i, 100 + i) for i in range(1, eng.MAX_GEO_GROUP_SIZE + 3)]  # one oversized cell
     monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: members)
     monkeypatch.setattr(eng, "_enqueue_candidate",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("oversized cell must skip")))
-    stats = eng.run_geo_candidates(object())
-    assert stats["geo_skipped_large_cell"] == 1
-    assert stats["geo_pairs"] == 0
+    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
+                           max_vision_calls=0, geo=True)
+    assert stats["pairs_considered"] == 0
 
 
 # --- rule D helpers ---------------------------------------------------------
