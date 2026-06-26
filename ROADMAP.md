@@ -212,7 +212,6 @@ lands paired with live Resend provisioning rather than blind.
 via `ChannelClient`, gated to start only when a transport is configured) + `compose_notification_message`
 + recipient resolution + `SPA_BASE_URL` + the Delivery UI; operator provisions Resend
 (`RESEND_API_KEY`/`EMAIL_FROM` + SPF/DKIM/DMARC DNS). Then PR 4 Telegram, PR 5 outreach unification.
->>>>>>> origin/main
 
 ### 2026-06: Notification channel-delivery foundation (Sprint N PR 1 — ships dark)
 
