@@ -999,6 +999,22 @@ def test_effective_vision_cap() -> None:
         free=False, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 300
 
 
+def test_resolve_pair_seam_standalone() -> None:
+    """resolve_pair is callable standalone with a hand-built _RunContext — the exact seam
+    the candidate-priority drain + the real-time per-listing path reuse (one decision tree,
+    many drivers). A street_id contradiction rejects with no DB access."""
+    import scripts.dedup_engine as eng
+    from toolkit.dedup_engine import ListingKey
+
+    a = ListingKey(1, 101, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0, street_id=1)
+    b = ListingKey(2, 102, "sreality", "name:5001:nadrazni", "2+kk", "10", 3, 60.0, street_id=2)
+    ctx = eng._RunContext(stats={"rejected": 0})
+    eng.resolve_pair(None, a, b, street_key="name:5001:nadrazni", ctx=ctx)
+    assert ctx.stats["rejected"] == 1
+    # the rejected pair is collected so the run finalize can dismiss any stale candidate
+    assert (101, 102) in ctx.dismissed_pairs
+
+
 def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     import scripts.dedup_engine as eng
 
