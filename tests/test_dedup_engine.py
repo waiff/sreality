@@ -20,11 +20,13 @@ from toolkit.dedup_engine import (
     CosineBands,
     ListingKey,
     MatchProfile,
+    category_main_compatible,
     classify_geo_pair,
     classify_pair,
     decide_phash_fastpath,
     decide_visual_dismiss,
     disposition_compatible,
+    distinctive_rooms_for,
     geo_cell_key,
     normalize_street,
     phash_excluded_tags_for,
@@ -35,6 +37,12 @@ from toolkit.dedup_engine import (
     route_by_cosine,
     street_group_keys,
     verdict_is_merge,
+)
+from toolkit.room_taxonomy import (
+    DISTINCTIVE_ROOMS,
+    HOUSE_PRIORITY,
+    INTERIOR_PRIORITY,
+    LAND_PRIORITY,
 )
 
 
@@ -337,6 +345,38 @@ def test_category_main_contradiction_byt_vs_dum() -> None:
     ).detail == "category_main_contradiction"
 
 
+def test_cross_type_dum_komercni_is_not_a_contradiction() -> None:
+    # Operator policy: the ONE sanctioned cross-type. A building listed as a house on
+    # one portal and commercial on another is the same real-world property — it must
+    # NOT reject on category_main, it falls through to merge like a same-category pair.
+    d = classify_pair(
+        _key(1, category_main="dum", disp=None),
+        _key(2, category_main="komercni", disp=None),
+    )
+    assert d.action == "auto_merge"
+    assert d.detail != "category_main_contradiction"
+    # symmetric — order must not matter
+    assert classify_pair(
+        _key(1, category_main="komercni", disp=None),
+        _key(2, category_main="dum", disp=None),
+    ).action == "auto_merge"
+
+
+def test_category_main_compatible_helper() -> None:
+    # Equal, or either side unknown (NULL), is always compatible.
+    assert category_main_compatible("byt", "byt") is True
+    assert category_main_compatible(None, "dum") is True
+    assert category_main_compatible("komercni", None) is True
+    # The one sanctioned cross-type, both directions.
+    assert category_main_compatible("dum", "komercni") is True
+    assert category_main_compatible("komercni", "dum") is True
+    # Every other mismatch stays a contradiction.
+    assert category_main_compatible("byt", "dum") is False
+    assert category_main_compatible("byt", "komercni") is False
+    assert category_main_compatible("dum", "pozemek") is False
+    assert category_main_compatible("pozemek", "komercni") is False
+
+
 def test_category_null_does_not_contradict() -> None:
     # A missing category is unknown, not a conflict — falls through to merge.
     assert classify_pair(
@@ -423,6 +463,46 @@ def test_match_profile_is_a_dataclass_type() -> None:
     assert isinstance(profile_for("byt"), MatchProfile)
 
 
+# --- per-family image comparison priority + distinctive override ------------
+
+def test_room_priority_for_byt_leads_with_interior() -> None:
+    # Apartments compare interior rooms (wet rooms first) — the legacy order, unchanged.
+    pr = room_priority_for("byt")
+    assert pr == INTERIOR_PRIORITY
+    assert pr[0] == "kitchen"
+
+
+def test_room_priority_for_house_and_commercial_lead_with_facade() -> None:
+    # A house/commercial building's identity is its FACADE, so it leads stop-at-first-High.
+    for fam in ("dum", "komercni", "ostatni"):
+        pr = room_priority_for(fam)
+        assert pr == HOUSE_PRIORITY, fam
+        assert pr[0] == "exterior_facade", fam
+
+
+def test_room_priority_for_land_leads_with_site_plan() -> None:
+    # A plot's identity is its SITE PLAN (the development guard reads it).
+    pr = room_priority_for("pozemek")
+    assert pr == LAND_PRIORITY
+    assert pr[0] == "site_plan"
+
+
+def test_room_priority_for_null_or_unknown_is_byt_order() -> None:
+    # Unknown/NULL category behaves as the legacy byt engine.
+    assert room_priority_for(None) == INTERIOR_PRIORITY
+    assert room_priority_for("garaz") == INTERIOR_PRIORITY
+
+
+def test_distinctive_rooms_for_is_byt_only() -> None:
+    # The single-pHash-match override (count-of-1) is a byt-only signal: a wet room is
+    # unit-specific, but a house's facade / a plot's site plan is shared across a
+    # development, so non-apartments get an EMPTY set (require the >=2-match count).
+    assert distinctive_rooms_for("byt") == DISTINCTIVE_ROOMS
+    assert distinctive_rooms_for(None) == DISTINCTIVE_ROOMS
+    for fam in ("dum", "pozemek", "komercni", "ostatni"):
+        assert distinctive_rooms_for(fam) == frozenset(), fam
+
+
 # --- geo path: single-dwelling families -------------------------------------
 
 def _gk(
@@ -479,6 +559,24 @@ def test_classify_geo_land_strong_is_candidate_never_auto_merge() -> None:
 def test_classify_geo_weak_when_no_price_or_houseno_match() -> None:
     d = classify_geo_pair(_gk(1, 101, price=5_000_000), _gk(2, 102, price=9_000_000), profile_for("dum"))
     assert d.action == "candidate" and d.reason == "geo_weak"
+
+
+def test_classify_geo_cross_type_dum_komercni_not_a_contradiction() -> None:
+    # The geo path honours the same one cross-type as the street path: a dum + a komercni
+    # at the same coordinate (same strong area+price signal) is the same building, not a
+    # category contradiction. Profile follows the first listing (operator policy).
+    d = classify_geo_pair(
+        _gk(1, 101, cat="dum", source="sreality"),
+        _gk(2, 102, cat="komercni", source="idnes"),
+        profile_for("dum"),
+    )
+    assert d.detail != "category_main_contradiction"
+    assert d.action == "auto_merge" and d.reason == "geo_exact"
+
+
+def test_classify_geo_byt_vs_dum_still_a_contradiction() -> None:
+    d = classify_geo_pair(_gk(1, 101, cat="byt"), _gk(2, 102, cat="dum"), profile_for("dum"))
+    assert d.action == "reject" and d.detail == "category_main_contradiction"
 
 
 def test_classify_geo_area_contradiction_rejects() -> None:

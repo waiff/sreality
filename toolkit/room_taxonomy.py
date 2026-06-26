@@ -48,6 +48,19 @@ FULL_PRIORITY: tuple[str, ...] = (
     "balcony_terrace", "garden", "exterior_facade", "bedroom",
 )
 
+# House / commercial: the FACADE is the building's identity, so it leads the perceptual +
+# forensic order; then the interior rooms, then the rest.
+HOUSE_PRIORITY: tuple[str, ...] = (
+    "exterior_facade", "kitchen", "bathroom", "living_room", "toilet",
+    "garden", "balcony_terrace", "hallway", "bedroom",
+)
+
+# Land / plot: the SITE PLAN is the plot's identity (the site-plan development guard reads
+# it), then outdoor views. Plots rarely have interior rooms.
+LAND_PRIORITY: tuple[str, ...] = (
+    "site_plan", "exterior_facade", "garden", "floor_plan",
+)
+
 # Tags excluded from a byt perceptual / cosine MERGE signal: the exterior + plan
 # families (a development reuses these across distinct units). 'other' / untagged are
 # deliberately NOT excluded — only KNOWN-shared images are dropped.
@@ -61,6 +74,22 @@ DISTINCTIVE_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom"})
 
 SITE_PLAN_ROOM_TYPE = "site_plan"
 FLOOR_PLAN_ROOM_TYPE = "floor_plan"
+
+# Cross-category merge compatibility. A sale ≠ a rental and (by default) a flat ≠ a house,
+# so the dedup classifiers AND the merge_properties chokepoint hard-reject a category_main
+# mismatch. The ONE sanctioned cross-type is dum <-> komercni (a building listed as a house
+# on one portal and commercial on another is the same real-world property) — irrespective
+# of sub-type. Lives here (pure, no heavy imports) so dedup_engine AND property_identity can
+# share it without an import cycle.
+_CROSS_TYPE_OK: frozenset[frozenset[str]] = frozenset({frozenset({"dum", "komercni"})})
+
+
+def category_main_compatible(a_cat: str | None, b_cat: str | None) -> bool:
+    """True if two category_main values may be the same property. Equal (or either NULL =
+    unknown) is compatible; the only allowed cross-type is dum <-> komercni."""
+    if a_cat is None or b_cat is None or a_cat == b_cat:
+        return True
+    return frozenset({a_cat, b_cat}) in _CROSS_TYPE_OK
 
 
 def family_of(tag: str | None) -> str | None:
