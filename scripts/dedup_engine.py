@@ -324,16 +324,26 @@ _GEO_ELIGIBLE_SQL = """
       AND l.obec_id IS NOT NULL
       AND coalesce(l.area_m2, l.estate_area, l.usable_area) IS NOT NULL
       AND NOT (l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL)
+      {filter}
     ORDER BY l.obec_id, l.category_main, l.category_type
 """
 
 
-def _load_geo_eligible(conn: Any) -> list[ListingKey]:
+def _load_geo_eligible(conn: Any,
+                       restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
     """One ListingKey per geo-eligible single-dwelling listing, keyed by its geo cell
     (so the existing _group_by_street groups them). Carries lat/lng/price for the geo
-    classifier; disposition/floor/street_id are unused on this path."""
+    classifier; disposition/floor/street_id are unused on this path.
+
+    `restrict_property_ids` scopes to those properties (the candidate drain), exactly like
+    the street `_load_eligible` — an EMPTY set restricts to nothing (not all)."""
+    params: dict[str, Any] = {}
+    flt = ""
+    if restrict_property_ids is not None:
+        flt = "AND l.property_id = ANY(%(pids)s)"
+        params["pids"] = list(restrict_property_ids)
     with conn.cursor() as cur:
-        cur.execute(_GEO_ELIGIBLE_SQL)
+        cur.execute(_GEO_ELIGIBLE_SQL.format(filter=flt), params)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:
@@ -1164,6 +1174,7 @@ def run_geo_candidates(
     geo_auto_merge_enabled: bool = False,
     dry_run: bool = False,
     deadline: float | None = None,
+    restrict_property_ids: set[int] | None = None,
 ) -> dict[str, int]:
     """Geo path: find duplicate single-dwelling properties (houses/land/commercial) the
     street+disposition engine structurally can't see. Blocks by geo cell, classifies
@@ -1175,7 +1186,7 @@ def run_geo_candidates(
     `dum` is ever eligible to auto-merge (its profile); land/commercial/other are always
     queue-only by profile.
     """
-    keys = _load_geo_eligible(conn)
+    keys = _load_geo_eligible(conn, restrict_property_ids=restrict_property_ids)
     groups = _group_by_street(keys)
     stats: dict[str, int] = {
         "geo_eligible": len({k.sreality_id for k in keys}), "geo_cells": len(groups),
@@ -1727,6 +1738,8 @@ def main() -> int:
             geo_stats = run_geo_candidates(
                 conn, max_pairs=args.geo_max_pairs,
                 geo_auto_merge_enabled=False, dry_run=args.shadow, deadline=deadline,
+                restrict_property_ids=(
+                    _proposed_candidate_property_ids(conn) if args.candidates else None),
             )
             LOG.info(
                 "GEO %s eligible=%d cells=%d pairs=%d candidates=%d auto=%d rejected=%d "
