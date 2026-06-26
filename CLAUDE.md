@@ -625,15 +625,18 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     human call — no plan-to-plan compare possible); neither → the existing path is untouched. It applies
     to pHash + visual merges, NOT rule-B exact-address. **The floor-plan check runs autonomously on the
     SCHEDULED free run (the operator-chosen posture, Option C):** even though the free run skips the
-    expensive all-rooms classify/compare, it gets the LIVE `_build_floor_plan_fn` with a bounded
-    `--free-floor-plan-budget` (default 120) — the ONE paid call on a free run, firing only on the SMALL
-    set of would-merge both-plan pairs, so they auto-confirm / auto-dismiss inline instead of piling onto
-    the manual queue. Beyond the budget, pairs DEFER to the next run; budget 0 is a $0 escape hatch
-    (`_build_cache_only_floor_plan_fn` — consume only warmed verdicts, defer the rest). The cap is wired
-    through the pure `_effective_vision_cap` (free → the floor-plan budget; cache-only → unthrottled;
-    else → `max_vision_calls`). The cache-only fn AND the live fn resolve the model via the SAME
-    `LLMClient.resolve_model("llm_floor_plan_match_model")` the batch warm-up uses, so the model-keyed
-    verdict cache never silently misses. A raised `free_floor_plan_budget` on a `free=true` dispatch is a
+    expensive all-rooms classify/compare, it gets the LIVE `_build_floor_plan_fn` with a bounded budget
+    `app_settings.dedup_floor_plan_budget` (registry default 10000; `--floor-plan-budget` overrides for an
+    ad-hoc run) — the ONE paid call on a free run, firing only on the SMALL set of would-merge both-plan
+    pairs, so they auto-confirm / auto-dismiss inline instead of piling onto the manual queue. (The budget
+    is the count of PAID calls — "free" is the run MODE, not the cost.) An **`inconclusive`** floor-plan
+    verdict routes to manual review when `dedup_floor_plan_inconclusive_to_review` (default on); off →
+    treat as `same_layout` and merge. Beyond the budget, pairs DEFER to the next run; budget 0 is a $0
+    escape hatch (`_build_cache_only_floor_plan_fn` — consume only warmed verdicts, defer the rest). The
+    cap is wired through the pure `_effective_vision_cap` (free → the floor-plan budget; cache-only →
+    unthrottled; else → `max_vision_calls`). The cache-only fn AND the live fn resolve the model via the
+    SAME `LLMClient.resolve_model("llm_floor_plan_match_model")` the batch warm-up uses, so the model-keyed
+    verdict cache never silently misses. A raised `floor_plan_budget` on a `free=true` dispatch is a
     **compare-free floor-plan sweep** (floor-plan checks only, no all-rooms compare spend) — how the
     initial 379-pair backlog was cleared. The per-run `dedup_engine_runs.floor_plan_deferred` counter
     (migration 241, on the `/dedup` dashboard's stat grid) is the silent-stall guard: it should trend to
@@ -665,7 +668,8 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
     `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,
     so it is NOT part of the room argmax). For **byt**, an image scoring >=
-    `RENDER_SCORE_EXCLUDE_MIN` (0.65) is a shared development RENDER and is dropped from the pHash
+    `app_settings.dedup_render_exclude_min` (registry default **0.95**; `RENDER_SCORE_EXCLUDE_MIN` is the
+    code fallback) is a shared development RENDER and is dropped from the pHash
     count, the distinctive single-match override, AND the forensic room compare
     (`phash_render_exclude_for` / `_render_exclusion_predicate` / `_high_render_image_ids`) — closing
     the same-area dev-unit case area + room-type couldn't (Na Bradle's two 99 m² units share a kitchen
@@ -689,7 +693,7 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (e.g. exact-address pairs queued while the toggle was off) auto-merge. The one calibration-gated
     dismissal: a confident visual **"different"** — `decide_visual_dismiss` auto-dismisses when NO
     room reached High and a DISTINCTIVE room (kitchen/bathroom) is Low (operator toggle
-    `app_settings.dedup_visual_autodismiss_enabled`, default on; `--no-autodismiss` /
+    `app_settings.dedup_forensics_autodismiss_enabled`, default on; `--no-autodismiss` /
     `--shadow` CLI overrides). Calibrated safe: the verdict is ~binary (High/Low), the High OR-gate
     already rescues any same-property pair with one matching room, and 0/273 operator-merged pairs
     carried a Low. Per-run counts land in `dedup_engine_runs.auto_dismissed`. The visual layer's cached

@@ -60,6 +60,7 @@ from toolkit.dedup_engine import (
     phash_excluded_tags_for,
     phash_render_exclude_for,
     profile_for,
+    RENDER_SCORE_EXCLUDE_MIN,
     rooms_in_priority,
     route_by_cosine,
     street_group_keys,
@@ -433,15 +434,17 @@ def _floor_plan_image_ids(conn: Any, sreality_id: int) -> list[int]:
 
 def _floor_plan_gate(
     conn: Any, a_id: int, b_id: int, *, floor_plan_fn: Any, vision_budget: list[int],
+    inconclusive_to_review: bool = True,
 ) -> str:
     """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
     Returns 'merge' | 'dismiss' | 'queue' | 'defer'. It only adds conservatism, and
     crucially distinguishes "a human must decide" (queue) from "validate it later"
     (defer):
       * both sides carry a floor plan + a Sonnet verdict is available -> the verdict
-        decides: 'different_layout' -> 'dismiss', else (same_layout / inconclusive) ->
-        'merge' (auto-confirm — the verdict already weighs layout + the OCR'd
-        unit/area/floor labels);
+        decides: 'different_layout' -> 'dismiss'; 'inconclusive' -> 'queue' when
+        `inconclusive_to_review` (default on, app_settings.dedup_floor_plan_inconclusive_to_review),
+        else 'merge'; 'same_layout' -> 'merge' (auto-confirm — the verdict weighs layout +
+        the OCR'd unit/area/floor labels);
       * both sides carry a plan but the verdict isn't available yet (no fn / no budget /
         cache-miss) -> 'defer': skip this run and re-try next, once the batch lane warms
         the verdict — NOT the operator queue (this pair is automatable, not a human call);
@@ -458,7 +461,12 @@ def _floor_plan_gate(
             return "defer"
         if not res.get("cache_hit"):
             vision_budget[0] -= 1
-        return "dismiss" if res.get("verdict") == "different_layout" else "merge"
+        verdict = res.get("verdict")
+        if verdict == "different_layout":
+            return "dismiss"
+        if verdict == "inconclusive" and inconclusive_to_review:
+            return "queue"
+        return "merge"
     if ids_a or ids_b:
         return "queue"
     return "merge"
@@ -518,6 +526,8 @@ def _resolve_visual(
     cosine_fn: Any = None,
     bands: Any = None,
     model_for: dict[str, str] | None = None,
+    render_min: float = RENDER_SCORE_EXCLUDE_MIN,
+    inconclusive_to_review: bool = True,
     stats: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Rule D for one candidate pair. Returns a dict describing the outcome.
@@ -558,7 +568,7 @@ def _resolve_visual(
     # Drop shared development RENDERS from the forensic compare for byt (migration 239):
     # a reused render is not a real photo of THE unit, so two units sharing one must not
     # score High on it. Untagged / not-yet-scored images are kept (recall holds).
-    rmin = phash_render_exclude_for(a.category_main)
+    rmin = phash_render_exclude_for(a.category_main, render_min)
     if rmin is not None:
         render_ids = _high_render_image_ids(conn, a.sreality_id, b.sreality_id, rmin)
         if render_ids:
@@ -622,7 +632,8 @@ def _resolve_visual(
             # NOT queue). same/inconclusive/none -> the auto-merge stands.
             fp = _floor_plan_gate(
                 conn, a.sreality_id, b.sreality_id,
-                floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
+                floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
+                inconclusive_to_review=inconclusive_to_review)
             base = {
                 "room_type": room, "verdict": last_verdict,
                 "rationale": last_rationale, "cosine": cos,
@@ -781,6 +792,8 @@ def run_engine(
     cosine_fn: Any = None,
     bands: Any = None,
     model_for: dict[str, str] | None = None,
+    render_min: float = RENDER_SCORE_EXCLUDE_MIN,
+    inconclusive_to_review: bool = True,
     audit: list[dict[str, Any]] | None = None,
     max_pairs: int = 2000,
     max_vision_calls: int = 200,
@@ -926,7 +939,7 @@ def run_engine(
                 # reach the >=2 threshold; other categories count any image. A single
                 # near-identical KITCHEN/BATHROOM match also qualifies (distinctive override,
                 # only checked when the generic count fell short).
-                _rmin = phash_render_exclude_for(a.category_main)
+                _rmin = phash_render_exclude_for(a.category_main, render_min)
                 phash_pairs = _phash_identical_pairs(
                     conn, a.sreality_id, b.sreality_id,
                     phash_excluded_tags_for(a.category_main), render_exclude_min=_rmin)
@@ -953,7 +966,8 @@ def run_engine(
                     # the manual queue); otherwise the pHash merge proceeds.
                     fp = _floor_plan_gate(
                         conn, a.sreality_id, b.sreality_id,
-                        floor_plan_fn=floor_plan_fn, vision_budget=vision_budget)
+                        floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
+                        inconclusive_to_review=inconclusive_to_review)
                     if fp == "dismiss":
                         stats["auto_dismissed"] += 1
                         dismissed_pairs.add(cp)
@@ -1015,7 +1029,9 @@ def run_engine(
                     site_plan_fn=site_plan_fn, floor_plan_fn=floor_plan_fn,
                     vision_budget=vision_budget, max_room_attempts=max_room_attempts,
                     autodismiss=autodismiss,
-                    cosine_fn=cosine_fn, bands=bands, model_for=model_for, stats=stats,
+                    cosine_fn=cosine_fn, bands=bands, model_for=model_for,
+                    render_min=render_min, inconclusive_to_review=inconclusive_to_review,
+                    stats=stats,
                 )
                 # ONE factor set per pair — fed to BOTH the terminal audit `detail`
                 # (merged/dismissed) AND, when queued, the candidate `markers_matched`,
@@ -1264,18 +1280,18 @@ def _build_cache_only_floor_plan_fn(conn: Any) -> Any:
     return _fn
 
 
-def _effective_vision_cap(*, free: bool, cache_only: bool, free_floor_plan_budget: int,
+def _effective_vision_cap(*, free: bool, cache_only: bool, floor_plan_budget: int,
                           max_vision_calls: int) -> int:
     """The vision-budget cap handed to run_engine, by mode. Cache-only reads are free, so a
     large cap keeps the budget from throttling them. In --free mode the ONLY vision consumer
-    is the floor-plan validation gate: a positive --free-floor-plan-budget caps its inline
-    COLD floor-plan checks; 0 selects the cache-only floor_plan_fn (which never makes a cold
+    is the floor-plan validation gate: a positive floor_plan_budget caps its inline COLD
+    floor-plan checks; 0 selects the cache-only floor_plan_fn (which never makes a cold
     call) -> a large cap so a zero budget can't pre-empt the gate before it reads the warm
     cache (the gate defers when vision_budget<=0)."""
     if cache_only:
         return 10_000_000
     if free:
-        return free_floor_plan_budget if free_floor_plan_budget > 0 else 10_000_000
+        return floor_plan_budget if floor_plan_budget > 0 else 10_000_000
     return max_vision_calls
 
 
@@ -1346,11 +1362,11 @@ def _build_cache_only_fns(
 
 
 def _visual_autodismiss_enabled(conn: Any) -> bool:
-    """Operator toggle for auto-dismissing confident visual 'different' verdicts
-    (app_settings.dedup_visual_autodismiss_enabled). Default on."""
+    """Operator toggle for auto-dismissing confident forensic 'different' verdicts
+    (app_settings.dedup_forensics_autodismiss_enabled). Default on."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT value FROM app_settings WHERE key = 'dedup_visual_autodismiss_enabled'"
+            "SELECT value FROM app_settings WHERE key = 'dedup_forensics_autodismiss_enabled'"
         )
         row = cur.fetchone()
     if row is None or row[0] is None:
@@ -1398,6 +1414,7 @@ def _clip_settings(conn: Any) -> dict[str, Any]:
             haiku_min=_num("dedup_cosine_haiku_min"),
             sonnet_min=_num("dedup_cosine_sonnet_min"),
         ),
+        "render_min": _num("dedup_render_exclude_min"),
         "haiku_model": _val("dedup_visual_match_model_haiku"),
         "clip_model": load_taxonomy()["model"],
     }
@@ -1452,15 +1469,16 @@ def main() -> int:
                              "dismissals, NO paid all-rooms classify/compare. Un-vision'd "
                              "cross-source pairs are skipped (NOT queued as placeholders), so the "
                              "review queue doesn't inflate. The ONE bounded exception is the "
-                             "floor-plan validation gate (see --free-floor-plan-budget) — a "
+                             "floor-plan validation gate (see --floor-plan-budget) — a "
                              "targeted safety check on the small set of would-merge both-plan pairs.")
-    parser.add_argument("--free-floor-plan-budget", type=int, default=120,
-                        help="In --free mode, let the floor-plan validation gate PAY for up to N "
-                             "cold Sonnet floor-plan checks inline (the only paid call on a free "
-                             "run; it fires solely on pairs the engine WOULD merge — pHash matches "
-                             "/ visual Highs — so it's bounded and high-value). Beyond N, both-plan "
-                             "pairs DEFER to the next run. 0 = cache-only ($0): consume only "
-                             "batch-warmed verdicts, defer every un-warmed both-plan pair.")
+    parser.add_argument("--floor-plan-budget", type=int, default=None, dest="floor_plan_budget",
+                        help="Override app_settings.dedup_floor_plan_budget for this run: the cap on "
+                             "inline cold Sonnet floor-plan checks (the only paid call on a free run; "
+                             "it fires solely on pairs the engine WOULD merge — pHash matches / "
+                             "visual Highs). Beyond the cap, both-plan pairs DEFER to the next run. "
+                             "0 = cache-only ($0): consume only warmed verdicts. Unset = use the "
+                             "setting (default 10000). NB the budget is the count of PAID calls — "
+                             "it is not 'free', the run mode is.")
     parser.add_argument("--geo", action="store_true",
                         help="ALSO run the geo candidate pass for single-dwelling families "
                              "(dum/pozemek/komercni/ostatni) the street+disposition engine "
@@ -1501,9 +1519,17 @@ def main() -> int:
         deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
 
         if not args.geo_only:
+            from toolkit.dedup_settings import read_setting
             auto_merge_enabled = _auto_merge_enabled(conn)
             autodismiss = _visual_autodismiss_enabled(conn) and not args.no_autodismiss
             clip = _clip_settings(conn)
+            # The inline floor-plan cap (app_settings.dedup_floor_plan_budget, default
+            # 10000); --floor-plan-budget overrides it for an ad-hoc run.
+            floor_plan_budget = (
+                args.floor_plan_budget if args.floor_plan_budget is not None
+                else int(read_setting(conn, "dedup_floor_plan_budget")))
+            inconclusive_to_review = bool(
+                read_setting(conn, "dedup_floor_plan_inconclusive_to_review"))
             clip_counter = [0]
             # Free CLIP room tags (preferred when on); the counter tracks how many
             # listings were served from CLIP rather than the paid LLM classify.
@@ -1523,13 +1549,13 @@ def main() -> int:
             if args.free:
                 # FREE mode: no PAID all-rooms classify/compare -> pHash / rule-B /
                 # reconcile / reject-gate only. The ONE bounded paid exception is the
-                # floor-plan validation gate: with a positive --free-floor-plan-budget it
+                # floor-plan validation gate: with a positive floor-plan budget it
                 # gets the LIVE fn and pays its single Sonnet check inline for the small set
                 # of would-merge both-plan pairs (auto-confirm / auto-dismiss, Option C),
                 # capped by the budget (beyond it, pairs DEFER to the next run). Budget 0 =
                 # the $0 cache-only fn: consume only batch-warmed verdicts, defer the rest.
                 floor_plan_fn = (
-                    _build_floor_plan_fn(conn) if args.free_floor_plan_budget > 0
+                    _build_floor_plan_fn(conn) if floor_plan_budget > 0
                     else _build_cache_only_floor_plan_fn(conn)
                 )
             elif auto_merge_enabled and args.cache_only:
@@ -1568,7 +1594,7 @@ def main() -> int:
             # mode the cap bounds the inline floor-plan checks (see _effective_vision_cap).
             eff_max_vision = _effective_vision_cap(
                 free=args.free, cache_only=args.cache_only,
-                free_floor_plan_budget=args.free_floor_plan_budget,
+                floor_plan_budget=floor_plan_budget,
                 max_vision_calls=args.max_vision_calls)
             eff_max_rooms = 99 if args.cache_only else args.max_room_attempts
 
@@ -1580,6 +1606,8 @@ def main() -> int:
                 site_plan_fn=site_plan_fn,
                 floor_plan_fn=floor_plan_fn,
                 cosine_fn=cosine_fn, bands=bands, model_for=model_for,
+                render_min=clip["render_min"],
+                inconclusive_to_review=inconclusive_to_review,
                 audit=pair_audit,
                 max_pairs=args.max_pairs, max_vision_calls=eff_max_vision,
                 max_room_attempts=eff_max_rooms,

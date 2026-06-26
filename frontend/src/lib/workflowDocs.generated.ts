@@ -1119,11 +1119,11 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         ]
       },
       {
-        "name": "free_floor_plan_budget",
-        "description": "[free] Inline cold Sonnet floor-plan checks allowed on a free run (0 = cache-only $0). Raise for a one-time compare-free sweep.",
+        "name": "floor_plan_budget",
+        "description": "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000).",
         "required": false,
         "type": "string",
-        "default": "120",
+        "default": "",
         "options": null
       }
     ],

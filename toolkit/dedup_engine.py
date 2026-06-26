@@ -154,18 +154,22 @@ def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
 
 # A byt image scoring >= this on the CLIP render axis (image_clip_tags.render_score,
 # migration 239) is a shared development RENDER, not a real photo of THE unit, so it
-# never feeds the byt pHash/cosine merge signal. Validated on "Rezidence Na Bradle":
-# renders 0.55-0.99, bazos amateur-photo control 0.05-0.20 — 0.65 sits in the gap, and
-# for an EXCLUSION a false-positive only mildly trims the signal while a false-negative
-# is the harm we're removing.
-RENDER_SCORE_EXCLUDE_MIN = 0.65
+# never feeds the byt pHash/cosine merge signal. The LIVE value is the operator-tunable
+# app_setting `dedup_render_exclude_min` (registry default 0.95); this constant is only
+# the fallback when no threshold is passed. 0.95 keeps only the most certain renders
+# excluded — at 0.65 the [0.85,0.95) band over-excluded real photos and suppressed
+# legitimate pHash matches (a false EXCLUSION costs recall, the harm we now minimise).
+RENDER_SCORE_EXCLUDE_MIN = 0.95
 
 
-def phash_render_exclude_for(category_main: str | None) -> float | None:
+def phash_render_exclude_for(
+    category_main: str | None, threshold: float = RENDER_SCORE_EXCLUDE_MIN
+) -> float | None:
     """The render_score threshold above which an image is excluded from this category's
     pHash / cosine merge signal. Apartments only (the validated case); None = no exclusion
-    (untagged / not-yet-scored images are never excluded — recall holds as coverage ramps)."""
-    return RENDER_SCORE_EXCLUDE_MIN if profile_for(category_main).family == "byt" else None
+    (untagged / not-yet-scored images are never excluded — recall holds as coverage ramps).
+    `threshold` is the live `dedup_render_exclude_min` setting (the caller reads it once)."""
+    return threshold if profile_for(category_main).family == "byt" else None
 
 
 @dataclass(frozen=True)
