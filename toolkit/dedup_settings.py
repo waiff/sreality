@@ -35,12 +35,35 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "every one for manual review instead of merging — and spends no vision.",
     ),
     DedupSetting(
-        "dedup_visual_autodismiss_enabled", "bool", True,
+        "dedup_forensics_autodismiss_enabled", "bool", True,
         "Auto-dismiss confident 'different'", "Engine",
-        "When the forensic verdicts confidently say 'different property' (a "
+        "When the forensic compare confidently says 'different property' (a "
         "distinctive room — kitchen/bathroom — is Low and no room matched), "
         "close the pair out instead of queuing it. Calibrated safe (0/273 "
         "operator-merged pairs carried a Low).",
+    ),
+    DedupSetting(
+        "dedup_floor_plan_budget", "float", 10000,
+        "Floor-plan checks per free run", "Engine",
+        "Cap on inline Sonnet floor-plan validations on a scheduled (free) run — "
+        "the one paid call there, fired only on pairs the engine WOULD merge. Beyond "
+        "the cap, both-plan pairs defer to the next run. 0 = consume only warmed "
+        "verdicts ($0).",
+        0, 100000,
+    ),
+    DedupSetting(
+        "dedup_floor_plan_inconclusive_to_review", "bool", True,
+        "Floor-plan 'inconclusive' → review", "Engine",
+        "When the floor-plan gate returns 'inconclusive', send the pair to the manual "
+        "review queue instead of letting the merge proceed. Off = treat inconclusive "
+        "as 'same layout' and merge.",
+    ),
+    DedupSetting(
+        "dedup_batch_warmer_enabled", "bool", False,
+        "Batch vision warmer", "Engine",
+        "Pre-warm the vision caches via Anthropic's Message Batches API (50% cheaper, "
+        "async) so the engine merges over warm cache for free. Off = pay cold vision "
+        "inline. The dedup_batches workflow no-ops while this is off.",
     ),
     # --- CLIP (free tagging + the cosine recall tier) ---
     DedupSetting(
@@ -71,6 +94,15 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "A cosine in [this, Haiku floor) routes to Sonnet; below this the room is "
         "skipped (not dismissed). Trial: same-property same-tag p25 ≈ 0.81, so "
         "0.70 rarely skips a true match.",
+        0.0, 1.0,
+    ),
+    DedupSetting(
+        "dedup_render_exclude_min", "float", 0.95,
+        "Render-score exclusion floor (byt)", "CLIP",
+        "For apartments, a photo whose CLIP render-score is at/above this is treated "
+        "as a shared development RENDER and dropped from the pHash count + the forensic "
+        "compare (a development reuses renders across distinct units). Higher = only the "
+        "most certain renders are excluded (fewer real photos wrongly dropped).",
         0.0, 1.0,
     ),
     # --- Vision models ---
@@ -111,6 +143,17 @@ REGISTRY_BY_KEY: dict[str, DedupSetting] = {s.key: s for s in REGISTRY}
 def default_for(key: str) -> Any:
     """The coded default for a key (raises KeyError if unregistered)."""
     return REGISTRY_BY_KEY[key].default
+
+
+def read_setting(conn: Any, key: str) -> Any:
+    """The LIVE value of a registry setting: the app_settings row if present, else the
+    registry default — coerced to the setting's kind. The one reader every backend caller
+    should use, so a knob is read the same way everywhere (no per-call default drift)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+    raw = row[0] if row and row[0] is not None else default_for(key)
+    return coerce(REGISTRY_BY_KEY[key], raw)
 
 
 def coerce(setting: DedupSetting, value: Any) -> Any:

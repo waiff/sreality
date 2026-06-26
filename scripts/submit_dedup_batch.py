@@ -498,6 +498,10 @@ def main() -> int:
     )
 
     with psycopg.connect(db_url, autocommit=True, prepare_threshold=None) as conn:
+        from toolkit.dedup_settings import read_setting
+        if not read_setting(conn, "dedup_batch_warmer_enabled"):
+            LOG.info("WARMER disabled (dedup_batch_warmer_enabled=false); nothing to submit")
+            return 0
         llm_client = LLMClient(conn, providers={"anthropic": provider})
         submitter = _Submitter(conn, provider, max_requests=args.max_requests, dry_run=args.dry_run)
         stats = collect(

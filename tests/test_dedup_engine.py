@@ -625,10 +625,13 @@ def test_phash_excluded_tags_for_by_category() -> None:
 def test_phash_render_exclude_for_by_category() -> None:
     # byt excludes high render_score images from the pHash/cosine signal; other
     # categories don't (a render of a house IS that house's identity here).
-    assert phash_render_exclude_for("byt") == RENDER_SCORE_EXCLUDE_MIN == 0.65
+    assert phash_render_exclude_for("byt") == RENDER_SCORE_EXCLUDE_MIN == 0.95
     assert phash_render_exclude_for(None) == RENDER_SCORE_EXCLUDE_MIN  # NULL -> apartment
     assert phash_render_exclude_for("dum") is None
     assert phash_render_exclude_for("pozemek") is None
+    # the live app_settings value (dedup_render_exclude_min) overrides the default for byt
+    assert phash_render_exclude_for("byt", 0.85) == 0.85
+    assert phash_render_exclude_for("dum", 0.85) is None  # non-byt: still no exclusion
 
 
 def test_render_exclusion_predicate_builds_clause() -> None:
@@ -981,19 +984,19 @@ def test_effective_vision_cap() -> None:
 
     # cache-only: never throttle warm reads
     assert eng._effective_vision_cap(
-        free=False, cache_only=True, free_floor_plan_budget=0, max_vision_calls=300) == 10_000_000
+        free=False, cache_only=True, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
     # free + a positive floor-plan budget -> the cap IS that budget (bounds inline
     # cold floor-plan checks; nothing else consumes vision in free mode)
     assert eng._effective_vision_cap(
-        free=True, cache_only=False, free_floor_plan_budget=120, max_vision_calls=300) == 120
+        free=True, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 120
     # free + budget 0 -> cache-only floor_plan_fn: a large cap so a zero budget can't
     # pre-empt the gate before it reads the warm cache (the cache-only fn never makes a
     # cold call, so it can't overspend)
     assert eng._effective_vision_cap(
-        free=True, cache_only=False, free_floor_plan_budget=0, max_vision_calls=300) == 10_000_000
+        free=True, cache_only=False, floor_plan_budget=0, max_vision_calls=300) == 10_000_000
     # live dispatch: the plain vision budget
     assert eng._effective_vision_cap(
-        free=False, cache_only=False, free_floor_plan_budget=120, max_vision_calls=300) == 300
+        free=False, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 300
 
 
 def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
@@ -1012,8 +1015,16 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     diff = lambda a, b, ia, ib: {"verdict": "different_layout"}  # noqa: E731
     same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
     none = lambda a, b, ia, ib: None                             # noqa: E731 (unwarmed)
+    inconc = lambda a, b, ia, ib: {"verdict": "inconclusive"}    # noqa: E731
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
+    # 'inconclusive' -> manual review by default (toggle on); off -> treat as same -> merge
+    assert eng._floor_plan_gate(
+        None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
+        inconclusive_to_review=True) == "queue"
+    assert eng._floor_plan_gate(
+        None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
+        inconclusive_to_review=False) == "merge"
     # both have plans but can't validate now (no fn / no budget / unwarmed) -> DEFER,
     # NOT the manual queue (the pair is automatable once the batch warms the verdict)
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "defer"
