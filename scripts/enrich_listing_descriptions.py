@@ -22,9 +22,9 @@ LOG = logging.getLogger("enrich_listing_descriptions")
 
 
 def _select_pending(
-    conn: Any, *, source: str, max_age_days: int, limit: int
+    conn: Any, *, source: str, model: str, max_age_days: int, limit: int
 ) -> list[int]:
-    """Active listings of `source` with a description whose latest snapshot isn't enriched.
+    """Active listings of `source` with a description whose latest snapshot isn't enriched BY `model`.
 
     Source-scoped and freshest-first off the existing (source, first_seen_at)
     index; the latest-snapshot check is a per-listing correlated subquery, NOT a
@@ -32,7 +32,10 @@ def _select_pending(
     The old global-CTE form aggregated every listing's history before filtering to
     one source and timed out (21s+); this form lets the planner walk only this
     source's rows and short-circuit at the LIMIT (~0.7s). Re-enriches a listing
-    whose content changed since its last enrichment (its latest snapshot id moved).
+    whose content changed since its last enrichment (its latest snapshot id moved)
+    OR whose latest snapshot was only ever enriched by a DIFFERENT model — so
+    upgrading the model re-attempts every listing (the cache is model-keyed,
+    migration 249), instead of silently reusing an older model's misses.
     """
     freshness = " AND l.last_seen_at > now() - %s::interval" if max_age_days > 0 else ""
     sql = (
@@ -46,6 +49,7 @@ def _select_pending(
         "  AND NOT EXISTS ( "
         "    SELECT 1 FROM listing_description_enrichments e "
         "    WHERE e.sreality_id = l.sreality_id "
+        "      AND e.model = %s "
         "      AND e.snapshot_id = ( "
         "        SELECT MAX(id) FROM listing_snapshots s "
         "        WHERE s.sreality_id = l.sreality_id "
@@ -55,8 +59,8 @@ def _select_pending(
         "LIMIT %s"
     )
     params: tuple[Any, ...] = (
-        (source, f"{max_age_days} days", limit) if max_age_days > 0
-        else (source, limit)
+        (source, f"{max_age_days} days", model, limit) if max_age_days > 0
+        else (source, model, limit)
     )
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -99,7 +103,8 @@ def main() -> int:
 
     with db.connect() as conn:
         ids = _select_pending(
-            conn, source=args.source, max_age_days=args.max_age_days, limit=args.limit,
+            conn, source=args.source, model=model,
+            max_age_days=args.max_age_days, limit=args.limit,
         )
         LOG.info("ENRICH pending=%d", len(ids))
         if args.dry_run:
