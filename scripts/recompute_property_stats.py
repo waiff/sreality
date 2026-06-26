@@ -121,7 +121,12 @@ _RECOMPUTE_BATCH_SQL = """
         l.locality, l.has_balcony, l.has_parking, l.has_lift, l.building_type,
         l.condition, l.ownership, l.furnished, l.terrace, l.cellar, l.garage,
         l.category_sub_cb, l.subtype, l.estate_area, l.usable_area, l.garden_area,
-        l.parking_lots
+        l.parking_lots,
+        -- Browse-filterable columns denormalised onto properties (migration 241)
+        -- so the cohort query filters/sorts on the parent alone (no join probe).
+        l.region_id, l.okres_id, l.obec_id, l.obec, l.okres, l.region,
+        l.building_condition_level, l.apartment_condition_level,
+        l.energy_rating, l.source, l.locality_district_id, l.locality_region_id
       FROM listings l
       JOIN batch b ON b.id = l.property_id
       ORDER BY l.property_id, l.is_active DESC, l.last_seen_at DESC NULLS LAST,
@@ -228,6 +233,18 @@ _RECOMPUTE_BATCH_SQL = """
       usable_area         = r.usable_area,
       garden_area         = r.garden_area,
       parking_lots        = r.parking_lots,
+      region_id                 = r.region_id,
+      okres_id                  = r.okres_id,
+      obec_id                   = r.obec_id,
+      obec                      = r.obec,
+      okres                     = r.okres,
+      region                    = r.region,
+      building_condition_level  = r.building_condition_level,
+      apartment_condition_level = r.apartment_condition_level,
+      energy_rating             = r.energy_rating,
+      source                    = r.source,
+      locality_district_id      = r.locality_district_id,
+      locality_region_id        = r.locality_region_id,
       price_drop_count    = coalesce(ph.drops, 0),
       price_rise_count    = coalesce(ph.rises, 0),
       max_price_drop_pct  = ph.max_drop_pct,
