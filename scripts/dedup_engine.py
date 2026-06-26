@@ -263,6 +263,28 @@ def _proposed_candidate_property_ids(conn: Any) -> set[int]:
     return out
 
 
+# --- real-time dedup queue drain (dedup_dirty_properties, migration 242; the writer-side
+#     enqueue is scraper.db.mark_properties_dedup_dirty_for_images, mirroring dirty_properties)
+def _claim_dedup_dirty(conn: Any, cutoff: Any) -> set[int]:
+    """Property ids dirtied at/before `cutoff` (claim slice). A row re-dirtied AFTER cutoff
+    (marked_at > cutoff via a writer's ON CONFLICT) is neither claimed nor cleared — it
+    survives to the next pass (race-free + terminating, mirrors recompute's dirty drain)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT property_id FROM dedup_dirty_properties WHERE marked_at <= %s",
+                    (cutoff,))
+        return {int(r[0]) for r in cur.fetchall()}
+
+
+def _clear_dedup_dirty(conn: Any, property_ids: set[int], cutoff: Any) -> int:
+    """Delete the claimed ids that have NOT been re-dirtied since the cutoff."""
+    if not property_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM dedup_dirty_properties WHERE property_id = ANY(%s) "
+                    "AND marked_at <= %s", (list(property_ids), cutoff))
+        return cur.rowcount or 0
+
+
 def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str) -> int:
     """Set-based: mark every still-'proposed' candidate for these (lo, hi) pairs as
     `new_status`. A no-op for pairs that have no proposed candidate. Returns rowcount."""
@@ -1081,6 +1103,7 @@ def run_engine(
     dry_run: bool = False,
     deadline: float | None = None,
     restrict_property_ids: set[int] | None = None,
+    only_groups_with_property_ids: set[int] | None = None,
 ) -> dict[str, int]:
     """Run the full pipeline once. classify_fn/compare_fn are injectable for tests.
 
@@ -1108,7 +1131,7 @@ def run_engine(
         "auto_address": 0, "auto_phash": 0, "auto_visual": 0,
         "queued": 0, "vision_calls": 0, "skipped_same_source": 0,
         "auto_dismissed": 0, "reconciled": 0, "skipped_unresolved": 0,
-        "floor_plan_deferred": 0,
+        "floor_plan_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
     })
@@ -1140,12 +1163,21 @@ def run_engine(
         if len(members) > MAX_GROUP_SIZE:
             LOG.info("SKIP large street group key=%s size=%d", street_key, len(members))
             continue
+        # Real-time (dirty) drain: the load is FULL so a dirty property's group still
+        # carries its existing PEERS, but we only resolve groups that actually contain a
+        # dirty/just-ready property — O(dirty) pair-work, no fragile SQL street-key replay.
+        if only_groups_with_property_ids is not None and not any(
+            m.property_id in only_groups_with_property_ids for m in members
+        ):
+            continue
         for i in range(len(members)):
             if ctx.pairs_left <= 0:
+                stats["truncated"] = 1  # pair cap exhausted between groups — also truncation
                 break
             for j in range(i + 1, len(members)):
                 if ctx.pairs_left <= 0:
                     LOG.info("PAIR cap reached; deferring remainder to next run")
+                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
                     return finalize()
                 # Wall-clock budget: per-pair cold vision can outrun the job timeout,
                 # which SIGKILLs the run before it writes results. Stop cleanly so the run
@@ -1156,6 +1188,7 @@ def run_engine(
                         "TIME budget reached; finalizing cleanly at pairs_considered=%d",
                         stats["pairs_considered"],
                     )
+                    stats["truncated"] = 1  # scan did NOT finish — dirty drain keeps its claim
                     return finalize()
                 resolve_pair(conn, members[i], members[j], street_key=street_key, ctx=ctx)
 
@@ -1560,6 +1593,12 @@ def main() -> int:
                              "the manual queue self-clears regardless of where the full scan's "
                              "deadline falls. Composes with --free / --cache-only / the floor-plan "
                              "budget — same decision tree (resolve_pair), scoped work-list.")
+    parser.add_argument("--dirty", action="store_true",
+                        help="Real-time dirty drain: re-decide ONLY the street groups that contain a "
+                             "just-dedup-ready property (dedup_dirty_properties, enqueued when a "
+                             "listing's images get CLIP-tagged), so a new cross-portal listing merges "
+                             "within minutes. Full load (peers present) but O(dirty) pair-work; "
+                             "race-free claim/clear. Composes with --free / the floor-plan budget.")
     parser.add_argument("--floor-plan-budget", type=int, default=None, dest="floor_plan_budget",
                         help="Override app_settings.dedup_floor_plan_budget for this run: the cap on "
                              "inline cold Sonnet floor-plan checks (the only paid call on a free run; "
@@ -1630,6 +1669,22 @@ def main() -> int:
                 auto_merge_enabled, autodismiss, clip["prefer_clip"],
                 clip["cosine_enabled"], args.shadow, args.cache_only, args.free,
             )
+
+            # Real-time dirty drain: claim the dedup-ready properties at/before a cutoff
+            # BEFORE building the (LLM-backed) fns, so an empty queue exits without that work.
+            # The clear after the run is gated on a NON-truncated run, so a deadline-cut run
+            # keeps its whole claim (re-drained next pass) and never loses unprocessed work.
+            only_groups = None
+            dirty_cutoff = None
+            if args.dirty:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT now()")
+                    dirty_cutoff = cur.fetchone()[0]
+                only_groups = _claim_dedup_dirty(conn, dirty_cutoff)
+                LOG.info("DIRTY drain: %d dedup-ready properties claimed", len(only_groups))
+                if not only_groups:
+                    LOG.info("DIRTY drain: queue empty; nothing to do")
+                    return 0
 
             classify_fn = None
             compare_fn = None
@@ -1713,11 +1768,22 @@ def main() -> int:
                 dry_run=args.shadow,
                 deadline=deadline,
                 restrict_property_ids=restrict,
+                only_groups_with_property_ids=only_groups,
             )
             stats["clip_classified"] = clip_counter[0]
             if not args.shadow:
                 _write_run_row(conn, stats)
                 _write_pair_audit(conn, run_at, pair_audit)
+                # Clear the claim ONLY on a run that finished the scan. A truncated run
+                # (deadline / pair-cap) didn't reach every dirty group, so keep the whole
+                # claim — it re-drains next pass; a few already-resolved pairs re-run cheaply
+                # (classify_pair rejects 'already_merged'), but NO unprocessed dirty property
+                # is silently dropped. (Oversized groups are unresolvable everywhere, so a
+                # finished run rightly clears them — the daily full scan handles them if they
+                # shrink below MAX_GROUP_SIZE.)
+                if args.dirty and not stats.get("truncated"):
+                    cleared = _clear_dedup_dirty(conn, only_groups, dirty_cutoff)
+                    LOG.info("DIRTY drain: cleared %d drained properties", cleared)
             LOG.info(
                 "ENGINE %s eligible=%d auto_address=%d auto_phash=%d auto_visual=%d "
                 "auto_dismissed=%d floor_plan_deferred=%d reconciled=%d queued=%d "

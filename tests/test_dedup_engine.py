@@ -999,6 +999,61 @@ def test_effective_vision_cap() -> None:
         free=False, cache_only=False, floor_plan_budget=120, max_vision_calls=300) == 300
 
 
+def test_run_engine_only_groups_skips_untouched(monkeypatch: Any) -> None:
+    """only_groups_with_property_ids (the real-time dirty drain): a street group is
+    resolved ONLY if it contains a target property — full load (peers present), O(dirty)
+    pair-work. The same pHash would-merge pair merges when its group is targeted, and is
+    skipped (no merge) when it isn't."""
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)  # would merge
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])  # neither plan -> merge
+
+    # group of two properties (101, 102); not targeted -> skipped, no merge
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, only_groups_with_property_ids={999}, max_vision_calls=10)
+    assert stats["auto_phash"] == 0
+    assert merges == []
+
+    # same group, now targeted (contains 101) -> resolved, merges
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats2 = eng.run_engine(conn2, only_groups_with_property_ids={101}, max_vision_calls=10)
+    assert stats2["auto_phash"] == 1
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_truncated_flag() -> None:
+    """run_engine sets stats['truncated'] when the deadline cuts the scan early (so the
+    dirty drain keeps its claim and never drops unprocessed work); a finished run = 0."""
+    import time
+
+    import scripts.dedup_engine as eng
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, deadline=time.monotonic() - 1.0, max_vision_calls=0)
+    assert stats["truncated"] == 1
+
+    conn2 = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats2 = eng.run_engine(conn2, max_vision_calls=0)
+    assert stats2["truncated"] == 0
+
+
+def test_mark_dedup_dirty_empty_noop() -> None:
+    """The dedup-ready enqueue is a no-op (no SQL) on an empty image-id list."""
+    from scraper import db
+
+    class _Conn:
+        def cursor(self): raise AssertionError("must not touch the DB for an empty batch")
+
+    assert db.mark_properties_dedup_dirty_for_images(_Conn(), []) == 0
+
+
 def test_proposed_candidate_property_ids() -> None:
     """The candidate-drain work-list = every property in a still-proposed candidate
     (both sides, NULLs skipped, deduped)."""

@@ -23,7 +23,7 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from scraper import image_storage
+from scraper import db, image_storage
 
 LOG = logging.getLogger("clip_tag_backfill")
 
@@ -266,6 +266,10 @@ def main() -> int:
                 if emb_params:
                     cur.executemany(_UPSERT_EMB_SQL, emb_params)
                 cur.execute(_MARK_SQL, (mark_ids,))  # drop from the needs-clip partial index
+            if tag_params:
+                # Wave 4c: these images are now CLIP-tagged -> their listings are dedup-ready;
+                # enqueue their properties so the dedup --dirty drain merges them in minutes.
+                db.mark_properties_dedup_dirty_for_images(conn, [p[0] for p in tag_params])
             written += len(tag_params)
             embedded += len(emb_params)
             LOG.info("CLIP_TAG progress=%d/%d embedded=%d errors=%d terminal=%d",
