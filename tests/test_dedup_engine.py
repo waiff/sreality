@@ -1688,21 +1688,6 @@ def test_run_engine_reject_dismisses_stale_candidate(monkeypatch: Any) -> None:
     assert (101, 102) in _dismissed_pairs(conn)
 
 
-def test_run_engine_same_source_gate_dismisses_stale_candidate(monkeypatch: Any) -> None:
-    import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "merge_properties", lambda *a, **k: {"data": {"merge_group_id": "g"}})
-    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 0)
-
-    conn = _FakeConn([
-        _row(1, 101, hn=None, source="sreality"),
-        _row(2, 102, hn=None, source="sreality"),
-    ])
-    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, max_vision_calls=10)
-
-    assert stats["skipped_same_source"] == 1
-    assert (101, 102) in _dismissed_pairs(conn)
-
-
 def test_run_engine_visual_high_not_dismissed(monkeypatch: Any) -> None:
     # kitchen High -> merge, never the dismiss path.
     import scripts.dedup_engine as eng

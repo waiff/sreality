@@ -361,13 +361,15 @@ def test_cached_floor_plan_pair_is_not_rewarmed(monkeypatch: Any) -> None:
     assert "floor_plan" not in _rows_by_kind(conn)
 
 
-def test_same_source_candidate_is_gated_out(monkeypatch: Any) -> None:
+def test_same_source_candidate_is_now_warmed(monkeypatch: Any) -> None:
+    # Wave 3 removed the cross-source gate, so the warmer now warms same-source pairs too
+    # (the engine visually compares them — the warmer must pre-warm the same verdicts).
     conn = _run(
         monkeypatch,
         keys=[_key(1, 101, source="sreality"), _key(2, 102, source="sreality")],
         classifications={1: ("classified", {"kitchen": [1]}), 2: ("classified", {"kitchen": [2]})},
     )
-    assert conn.inserted_requests == []  # cross-source gate
+    assert conn.inserted_requests != []  # no longer gated out
 
 
 def test_exact_address_pair_is_not_warmed(monkeypatch: Any) -> None:
