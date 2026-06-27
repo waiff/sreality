@@ -108,6 +108,19 @@ _AGENCY_ID_RE = re.compile(r'data-fk_rk="(\d+)"')
 _IMG_RE = re.compile(r'https://st\.realitymix\.cz/i/\d+/\d+/nab_\d+\.(?:jpe?g|png|webp)', re.IGNORECASE)
 # A trailing house number on the data-address street segment ("Luční 1793/3").
 _HOUSE_NO_RE = re.compile(r"\s(\d{1,4}(?:/\d{1,4})?[a-z]?)$", re.IGNORECASE)
+# The detail slug encodes "{prodej|pronajem}-{family}-…": a robust category
+# fallback for the minority of pages whose BreadcrumbList is truncated to the
+# home crumb (e.g. room rentals "pronajem-pokoje-…").
+_SLUG_SALE_RE = re.compile(r"/(prodej|pronajem)-([a-zěščřžýáíéúůóťďň]+)", re.IGNORECASE)
+_SLUG_FAMILY_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("dum", ("dum", "domy", "rodinn", "vila", "chat", "chalup")),
+    ("byt", ("byt", "pokoj", "garsonk", "mezonet", "atypick")),
+    ("pozemek", ("pozem", "parcel")),
+    ("komercni", ("komer", "kancelar", "sklad", "nebytov", "obchod", "restaur")),
+)
+# A street mined from the slug's "…-ul-{street}-{id}.html" tail — recovers the
+# street for listings realitymix renders without a #print-map (no data-address).
+_SLUG_STREET_RE = re.compile(r"-ul-([a-z][a-z-]*?)-\d{4,}\.html", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -304,6 +317,41 @@ def category_from_breadcrumb(html: str) -> tuple[str | None, str | None]:
     return CATEGORY_MAIN.get(family or ""), SALE_TYPE.get(sale or "")
 
 
+def _category_from_slug(source_url: str) -> tuple[str | None, str | None]:
+    """(category_main, category_type) from the detail slug — the breadcrumb
+    fallback. Sale type is the slug's leading prodej-/pronajem- token; the family
+    is the token after it, prefix-matched onto the canonical category_main."""
+    m = _SLUG_SALE_RE.search(source_url or "")
+    if not m:
+        return None, None
+    ct = SALE_TYPE.get(m.group(1).lower())
+    token = _strip_diacritics(m.group(2)).lower()
+    cm = next(
+        (canon for canon, prefixes in _SLUG_FAMILY_PREFIXES
+         if any(token.startswith(p) for p in prefixes)),
+        None,
+    )
+    return cm, ct
+
+
+def resolve_category(html: str, source_url: str) -> tuple[str | None, str | None]:
+    """category (main, type): the BreadcrumbList JSON-LD, with the URL slug
+    filling whichever half a truncated breadcrumb left None."""
+    cm, ct = category_from_breadcrumb(html)
+    if cm is not None and ct is not None:
+        return cm, ct
+    slug_cm, slug_ct = _category_from_slug(source_url)
+    return cm or slug_cm, ct or slug_ct
+
+
+def _slug_street(source_url: str) -> str | None:
+    m = _SLUG_STREET_RE.search(source_url or "")
+    if not m:
+        return None
+    s = m.group(1).replace("-", " ").strip()       # ASCII-folded; the dedup key folds anyway
+    return (s[:1].upper() + s[1:]) if s else None   # capitalize for display
+
+
 def _detail_params(tree: HTMLParser) -> dict[str, str]:
     """Map the spec list's labels (lowercased, colon-stripped) to their values.
     Each row is `<li class="detail-information__data-item"><span>Label:</span>
@@ -451,7 +499,7 @@ def _card_price(card: Node) -> str | None:
 def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     tree = HTMLParser(html)
     source_id = _id_from_href(source_url) or ""
-    category_main, category_type = category_from_breadcrumb(html)
+    category_main, category_type = resolve_category(html, source_url)
     params = _detail_params(tree)
 
     title = _text(tree.css_first("h1")) or ""
@@ -466,6 +514,12 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
     street_name, house_number = _street_fields(
         street_raw, geo_names=[obec, okres, region], lat=lat, lon=lon,
     )
+    if street_name is None:
+        # No #print-map street (the ~28% of listings realitymix renders without a
+        # map) -> recover it from the slug's "-ul-{street}-{id}" tail.
+        street_name, house_number = _street_fields(
+            _slug_street(source_url), geo_names=[obec, okres, region], lat=lat, lon=lon,
+        )
     locality = full_address or obec
 
     area_m2 = _parse_area(

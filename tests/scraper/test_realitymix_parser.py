@@ -9,6 +9,7 @@ broker anchor + data-fk_rk agency id, and the st.realitymix.cz/i/…/nab_ galler
 from __future__ import annotations
 
 from scraper.realitymix_parser import (
+    _category_from_slug,
     _norm_building_type,
     _norm_condition,
     _norm_ownership,
@@ -16,6 +17,7 @@ from scraper.realitymix_parser import (
     index_price,
     parse_detail,
     parse_index,
+    resolve_category,
 )
 
 _BYT_URL = (
@@ -235,6 +237,74 @@ def test_parse_detail_price_on_request_is_none_for_rent():
     assert listing.disposition == "2+kk"
     assert listing.lat is None and listing.lon is None   # no coords on the page
     assert listing.raw["broker"] is None                 # no broker block on the page
+
+
+# A truncated BreadcrumbList (only the home crumb) — realitymix serves this for
+# some atypical listings (e.g. room rentals); category must fall back to the slug.
+TRUNCATED_BREADCRUMB_HTML = """
+<!DOCTYPE html><html><head>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[
+ {"@type":"ListItem","position":1,"item":{"@id":"https://realitymix.cz/","name":"RealityMix"}}
+]}
+</script>
+</head><body>
+<h1>Pronájem pokoje 24 m²</h1>
+<div id="print-map" data-gps-lon="15.90" data-gps-lat="50.20" data-address="Praskačka, okres Hradec Králové"></div>
+<ul class="detail-information">
+  <li class="detail-information__data-item"><span>Celková podlahová plocha:</span><span>24 m²</span></li>
+</ul>
+</body></html>
+"""
+
+# A listing realitymix renders WITHOUT a #print-map (no coords / no data-address):
+# the street is recovered from the slug's "-ul-{street}-{id}.html" tail.
+NO_MAP_SLUG_STREET_URL = (
+    "https://realitymix.cz/detail/ostrava/pronajem-bytu-2-kk-74-m-ostrava-ul-lidicka-8429105.html"
+)
+NO_MAP_HTML = """
+<!DOCTYPE html><html><head>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[
+ {"@type":"ListItem","position":2,"item":{"@id":"https://realitymix.cz/reality/byty","name":"Byty"}},
+ {"@type":"ListItem","position":3,"item":{"@id":"https://realitymix.cz/reality/byty/pronajem","name":"Pronájem"}}
+]}
+</script>
+</head><body>
+<h1>Pronájem bytu 2+kk 74 m²</h1>
+<ul class="detail-information">
+  <li class="detail-information__data-item"><span>Dispozice bytu:</span><span>2+kk</span></li>
+  <li class="detail-information__data-item"><span>Celková podlahová plocha:</span><span>74 m²</span></li>
+</ul>
+</body></html>
+"""
+
+
+def test_category_from_slug_fallback():
+    assert _category_from_slug("https://realitymix.cz/detail/x/pronajem-pokoje-24-m-8560665.html") == ("byt", "pronajem")
+    assert _category_from_slug("https://realitymix.cz/detail/x/prodej-domy-rodinny-214-m2-9.html") == ("dum", "prodej")
+    assert _category_from_slug("https://realitymix.cz/detail/x/prodej-pozemku-800-m2-9.html") == ("pozemek", "prodej")
+    assert _category_from_slug("https://realitymix.cz/detail/x/pronajem-komercni-prostory-9.html") == ("komercni", "pronajem")
+
+
+def test_resolve_category_falls_back_when_breadcrumb_truncated():
+    # Breadcrumb alone yields nothing (only the home crumb); the slug fills both.
+    assert category_from_breadcrumb(TRUNCATED_BREADCRUMB_HTML) == (None, None)
+    listing = parse_detail(
+        TRUNCATED_BREADCRUMB_HTML,
+        source_url="https://realitymix.cz/detail/praskacka/pronajem-pokoje-24-m-8560665.html",
+    )
+    assert listing.category_main == "byt"
+    assert listing.category_type == "pronajem"
+    assert resolve_category(BYT_HTML, _BYT_URL) == ("byt", "prodej")   # breadcrumb still wins when present
+
+
+def test_street_recovered_from_slug_when_no_map():
+    listing = parse_detail(NO_MAP_HTML, source_url=NO_MAP_SLUG_STREET_URL)
+    assert listing.lat is None and listing.lon is None   # no #print-map on the page
+    assert listing.street == "Lidicka"                   # mined from the -ul-lidicka- slug
+    assert listing.disposition == "2+kk"
+    assert listing.area_m2 == 74.0
 
 
 def test_enum_normalization_aligned_to_sreality_vocabulary():
