@@ -1,13 +1,16 @@
--- 240_properties_public_real_latlng.sql
+-- 252_properties_public_denorm_filters.sql
 --
--- Repoint properties_public.lat/lng at the real columns added in migration 239
--- (was st_y(geom::geometry) / st_x(geom::geometry)). Output column names and
--- types are unchanged (double precision), so this is a transparent
--- CREATE OR REPLACE VIEW: existing anon SELECT grants and column order are
--- preserved, and the deployed frontend's scalar .gte/.lte('lat'/'lng')
--- predicates now hit indexable columns with real statistics. Apply AFTER the
--- 239 backfill so the columns are populated. Everything else is byte-identical
--- to the prior definition.
+-- Repoint properties_public's FILTERABLE columns at the denormalised properties
+-- columns from migration 251 (were l.* from the listings join). The view keeps
+-- the LEFT JOIN only for DISPLAY-only columns (price_unit, floor, total_floors,
+-- broker_*, description, and the street fallback) — those are materialised just
+-- for the rows a query actually returns, so the join no longer blocks
+-- filtering/sorting. With every WHERE/ORDER BY column on `properties`, a
+-- district-filtered cohort query stops paying the per-row join probe (15.8s ->
+-- sub-second). place_search_text becomes join-free (p.street + p.locality;
+-- p.street is the group-best street recompute already maintains, migration 183).
+-- Builds on migration 250 (p.lat/p.lng). Output column names/types/order are
+-- unchanged, so this is a transparent CREATE OR REPLACE VIEW (grants preserved).
 
 CREATE OR REPLACE VIEW properties_public AS
  SELECT p.id AS property_id,
@@ -23,8 +26,8 @@ CREATE OR REPLACE VIEW properties_public AS
     p.disposition,
     p.locality,
     p.district,
-    l.locality_district_id,
-    l.locality_region_id,
+    p.locality_district_id,
+    p.locality_region_id,
     p.lat,
     p.lng,
     l.floor,
@@ -34,7 +37,7 @@ CREATE OR REPLACE VIEW properties_public AS
     p.has_lift,
     p.building_type,
     p.condition,
-    l.energy_rating,
+    p.energy_rating,
     p.estate_area,
     p.usable_area,
     p.garden_area,
@@ -56,8 +59,8 @@ CREATE OR REPLACE VIEW properties_public AS
             WHEN p.area_m2 IS NOT NULL AND p.area_m2 > 0::numeric AND p.current_price_czk IS NOT NULL THEN round(p.current_price_czk::numeric / p.area_m2, 2)
             ELSE NULL::numeric
         END AS price_per_m2,
-    l.building_condition_level,
-    l.apartment_condition_level,
+    p.building_condition_level,
+    p.apartment_condition_level,
     l.description,
     p.source_count,
     p.distinct_site_count,
@@ -65,13 +68,13 @@ CREATE OR REPLACE VIEW properties_public AS
     p.price_rise_count,
     p.max_price_drop_pct,
     p.stats_computed_at,
-    l.source,
+    p.source,
     COALESCE(p.street, l.street) AS street,
     p.mf_reference_rent_czk,
     p.mf_gross_yield_pct,
-    l.obec,
-    l.okres,
-    l.region,
+    p.obec,
+    p.okres,
+    p.region,
     p.home_obec_pop,
     p.near_pop_5km,
     p.near_pop_15km,
@@ -83,15 +86,15 @@ CREATE OR REPLACE VIEW properties_public AS
     p.near_overall_15km,
     p.subtype,
     p.last_change_at,
-    l.obec_id,
-    l.okres_id,
-    l.region_id,
+    p.obec_id,
+    p.okres_id,
+    p.region_id,
     p.price_change_count,
     p.price_change_count_30d,
     p.price_change_count_90d,
     p.price_change_count_365d,
     p.total_price_change_pct,
-    concat_ws(', '::text, COALESCE(p.street, l.street), p.locality) AS place_search_text,
+    concat_ws(', '::text, p.street, p.locality) AS place_search_text,
     p.asset_id
    FROM properties p
      LEFT JOIN listings l ON l.sreality_id = p.repr_listing_id

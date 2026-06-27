@@ -1,4 +1,4 @@
--- 241_properties_denormalize_filter_columns.sql
+-- 251_properties_denormalize_filter_columns.sql
 --
 -- Browse filters on several columns that live ONLY on `listings`, but Browse
 -- reads the `properties_public` view (properties p LEFT JOIN listings l). The
@@ -7,18 +7,20 @@
 -- properties -> listings and test the filter once per candidate row. Live proof
 -- for the "Domy, Praha" preset (834-row cohort): 11,640 nested-loop join probes,
 -- 15,852 ms, over the anon 3s statement_timeout -> "Count may be stale" + an
--- empty list. (Distinct from migration 239's functional-lat/lng cause.)
+-- empty list. (Distinct from migration 250's functional-lat/lng cause.)
 --
 -- Fix: denormalise every Browse-FILTERABLE listings column onto `properties`,
 -- maintained by recompute_property_stats (it already copies the representative
 -- listing's columns onto the parent -- migration 095 pattern; this extends that
 -- SET list). The view then filters/sorts on `properties` alone; the join remains
 -- only for DISPLAY-only columns (floor, broker, description, price_unit), which
--- are cheap to materialise for the 24 returned rows. This is the foundation for
--- the browse_cohort RPC (filter-first BitmapAnd over these columns).
+-- are cheap to materialise for the 24 returned rows. Putting the district ids on
+-- `properties` is also what makes the district+price covering index (migration
+-- 253, completing PR #627) usable -- that index is what fixes the price-sorted
+-- district case (see 253).
 --
 -- Types mirror the listings source columns exactly so the CREATE OR REPLACE VIEW
--- in migration 242 keeps every output column's type unchanged.
+-- in migration 252 keeps every output column's type unchanged.
 
 ALTER TABLE properties
   ADD COLUMN IF NOT EXISTS region_id                 bigint,

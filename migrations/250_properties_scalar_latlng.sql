@@ -1,4 +1,4 @@
--- 239_properties_scalar_latlng.sql
+-- 250_properties_scalar_latlng.sql
 --
 -- Browse's map-area filter sends scalar lat/lng range predicates
 -- (.gte('lat',…).lte('lat',…).gte('lng',…).lte('lng',…)), but
