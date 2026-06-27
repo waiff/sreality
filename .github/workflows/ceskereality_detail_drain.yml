@@ -18,9 +18,10 @@ name: "Scraping: Českéreality detail drain"
 # gone detail (404 / redirect off the .html path) flips that listing inactive +
 # dequeues it.
 #
-# Hourly cron. Polite defaults (2 workers, 0.7 req/s, honest UA) — the site disallows
-# generic bots in robots.txt. Coordinates come from the page, so no MAPY_CZ_API_KEY
-# is needed. Required secret: SUPABASE_DB_URL.
+# Hourly cron. Defaults tuned toward the other portals (6 workers, 3.0 req/s); the
+# shared RateLimiter backs off on a Cloudflare 429/403, so they are ceilings.
+# Coordinates come from the page, so no MAPY_CZ_API_KEY is needed. Required secret:
+# SUPABASE_DB_URL.
 
 on:
   schedule:
@@ -38,12 +39,12 @@ on:
         default: ""
         type: string
       workers:
-        description: concurrent detail-fetch workers (blank = 2)
+        description: concurrent detail-fetch workers (blank = 6)
         required: false
         default: ""
         type: string
       rate:
-        description: global detail-fetch rate cap, req/s (blank = 0.7, polite)
+        description: global detail-fetch rate cap, req/s (blank = 3.0)
         required: false
         default: ""
         type: string
@@ -73,8 +74,8 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
           MAX_DETAIL: ${{ inputs.max_detail }}
-          WORKERS: ${{ inputs.workers || '2' }}
-          RATE: ${{ inputs.rate || '0.7' }}
+          WORKERS: ${{ inputs.workers || '6' }}
+          RATE: ${{ inputs.rate || '3.0' }}
         run: |
           ARGS="--drain-only --max-seconds $MAX_SECONDS --workers $WORKERS --rate $RATE"
           if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi

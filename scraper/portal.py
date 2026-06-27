@@ -289,13 +289,12 @@ _DEFAULTS: dict[str, PortalConfig] = {
     ),
     "ceskereality": PortalConfig(
         source="ceskereality",
-        # Per-category HTML search pages (/{sale}/{category}/), each carrying a
-        # result total in its meta description ("Máme tady N…") and no deep-
-        # pagination cap, so a per-category walk is provable-complete → the
-        # completeness-gated mark_inactive runs (source-scoped). The detail URL
-        # carries the category, so the drain re-derives each listing's category
-        # from its own URL. POLITE rates — the site disallows generic bots in
-        # robots.txt, so we crawl slowly with an honest UA (ceskereality_client).
+        # Per-category HTML search pages (/{sale}/{category}/) carrying a result
+        # total in the meta description ("Máme tady N…"); the walk drives ?strana
+        # straight to ceil(total/page) (ceskereality_main) rather than the pager's
+        # "next" arrow, which the site's Cloudflare edge drops on a throttled page.
+        # The detail URL carries the category, so the drain re-derives each
+        # listing's category from its own URL.
         supports_complete_walk=True,
         categories=[
             {"sale_type": "prodej",   "category": "byty"},
@@ -312,9 +311,11 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"sale_type": "pronajem", "category": "ostatni"},
         ],
         split_threshold=None,
+        # Throughput tuned toward the other portals (the index walk now drives the
+        # full ~2 500 pages, the drain the full ~68k details). The shared
+        # RateLimiter still backs off on a Cloudflare 429/403, so these are ceilings.
         limits=PortalLimits(
-            index_rate=0.7, detail_workers=2, detail_rate=0.7,
-            max_detail_per_run=1500,
+            index_rate=1.5, detail_workers=6, detail_rate=3.0,
         ),
     ),
 }
