@@ -16,13 +16,13 @@ name: "Scraping: RealityMix index walk"
 # category early (the lesson from ceskereality's reverted #637). Coordinates come
 # from the page, so no MAPY_CZ_API_KEY is needed. Required secret: SUPABASE_DB_URL.
 #
-# DISPATCH-ONLY until a validation run confirms GitHub-runner egress IPs aren't
-# anti-bot-blocked (mmreality is Cloudflare-403-blocked on GH runners; realitymix is
-# nginx, expected fine). Once green, uncomment the schedule below to go live (6h).
+# LIVE: a validation dispatch (PR #639) confirmed GitHub-runner egress IPs are NOT
+# anti-bot-blocked (nginx, no 403/penalize; 472 enqueued, clean data), so the 6h
+# cron is enabled.
 
 on:
-  # schedule:
-  #   - cron: "20 */6 * * *"
+  schedule:
+    - cron: "20 */6 * * *"
   workflow_dispatch:
     inputs:
       max_pages:

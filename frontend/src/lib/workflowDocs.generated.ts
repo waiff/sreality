@@ -2265,7 +2265,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "The slow half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Claims a bounded slice of listing_detail_queue (source='realitymix', enqueued by realitymix_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing category is read from the page's BreadcrumbList JSON-LD. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
     "portal": "realitymix",
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "40 * * * *",
+        "human": "Every hour at :40"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
@@ -2319,7 +2324,12 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "description": "The fast half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='realitymix'). No detail fetch — the drain (realitymix_detail_drain.yml) consumes the queue. Records run_type='index'.",
     "portal": "realitymix",
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "20 */6 * * *",
+        "human": "Every 6 hours at :20"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
