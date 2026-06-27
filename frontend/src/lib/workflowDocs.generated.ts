@@ -560,7 +560,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "workers",
-        "description": "concurrent detail-fetch workers (blank = 6)",
+        "description": "concurrent detail-fetch workers (blank = 2)",
         "required": false,
         "type": "string",
         "default": "",
@@ -568,7 +568,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "rate",
-        "description": "global detail-fetch rate cap, req/s (blank = 3.0)",
+        "description": "global detail-fetch rate cap, req/s (blank = 0.7, polite)",
         "required": false,
         "type": "string",
         "default": "",

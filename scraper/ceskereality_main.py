@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import time
 from typing import Any
 
 from scraper import db, portal_runner
@@ -52,24 +51,6 @@ SOURCE = "ceskereality"
 # The framework standard (rule #3, matches idnes); the 24h min_unseen_hours rail
 # in db.mark_inactive is the real safety against a tolerated walk-miss.
 INDEX_MIN_COMPLETENESS = 0.995
-
-# Paging is driven by the page-reported total, NOT the pager's "next" arrow.
-# ceskereality is Cloudflare-fronted: under load it serves a throttled/degraded
-# page (HTTP 200, no listing cards, and crucially NO "next" arrow), which the old
-# arrow-following loop misread as "end of category" — so large walks stopped at
-# ~12 pages (240 listings) regardless of an 8 000+ total. Instead we increment
-# ?strana straight to ceil(total / PER_PAGE) and treat a barren page (empty, or all
-# already-seen ids from a clamped/degraded response) as TRANSIENT: back off and
-# re-fetch the same page a few times before concluding the category genuinely ended.
-_PER_PAGE = 20                  # observed search-page size (stable)
-_PAGE_EMPTY_RETRIES = 3         # re-fetches of a barren page before giving up on it
-_PAGE_RETRY_BACKOFF_S = 5.0     # × attempt — lets Cloudflare's throttle cool down
-
-
-def _last_page(total: int | None) -> int | None:
-    if not total or total <= 0:
-        return None
-    return (total + _PER_PAGE - 1) // _PER_PAGE
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
@@ -119,20 +100,13 @@ class CeskerealityPortal:
         ref_map: dict[str, str] = {}
         total: int | None = None
         pages = 0
-        page_num = 1                  # 1 = the bare first page; ?strana=N for N>=2
-        empty_retries = 0
+        page: int | None = None       # None = the bare first page (?strana paging)
         while True:
-            page_arg = None if page_num == 1 else page_num
-            html, _ = client.fetch_index(sale_type, cat, page_arg)
+            html, _ = client.fetch_index(sale_type, cat, page)
             parsed = parse_index(html)
             pages += 1
-            if parsed.total is not None:
-                total = parsed.total
-            last = _last_page(total)
-            LOG.info(
-                "INDEX page=%d items=%d new_total=%s last_page=%s",
-                page_num, len(parsed.items), total, last,
-            )
+            total = parsed.total if parsed.total is not None else total
+            LOG.info("INDEX page=%s items=%d total=%s", page, len(parsed.items), total)
             # Index/search-page HTML is NOT staged — like every other HTML portal
             # it was write-only dead weight (nothing reads page_kind='index') and
             # the per-page TOAST write dominates the index-walk cost. Only detail
@@ -145,34 +119,13 @@ class CeskerealityPortal:
                     new_on_page += 1
                 ref_map[nid] = detail_url(item.detail_path)
                 price_map[nid] = index_price(item.price_text)
-
             if self._max_pages and pages >= self._max_pages:
                 break
-
-            # A barren page (no items, or every id already seen) is the
-            # Cloudflare-degraded / clamped response when the total says more pages
-            # exist — DON'T trust it: back off and re-fetch the SAME page a few
-            # times, only then concluding the category ended.
-            barren = (not parsed.items) or (new_on_page == 0 and page_num > 1)
-            if barren:
-                if last is not None and page_num < last and empty_retries < _PAGE_EMPTY_RETRIES:
-                    empty_retries += 1
-                    LOG.info(
-                        "INDEX barren page=%d (retry %d/%d, more expected to page %d)",
-                        page_num, empty_retries, _PAGE_EMPTY_RETRIES, last,
-                    )
-                    time.sleep(_PAGE_RETRY_BACKOFF_S * empty_retries)
-                    continue
+            # Stop on an empty page, no "next" link, or a page that added nothing
+            # new (a clamped out-of-range ?strana would otherwise loop forever).
+            if not parsed.items or parsed.next_offset is None or new_on_page == 0:
                 break
-            empty_retries = 0
-
-            # Walked the whole category (the total-derived last page).
-            if last is not None and page_num >= last:
-                break
-            # No total to bound the walk -> fall back to following the pager arrow.
-            if last is None and parsed.next_offset is None:
-                break
-            page_num += 1
+            page = parsed.next_offset
 
         seen = set(native_ids)
         existing = (
