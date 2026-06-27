@@ -46,7 +46,7 @@ LOG = logging.getLogger(__name__)
 
 SourceKind = Literal[
     "sreality", "bezrealitky", "idnes_reality", "remax", "ceskereality",
-    "unsupported",
+    "realitymix", "unsupported",
 ]
 
 
@@ -56,6 +56,7 @@ _KIND_SUFFIXES: dict[SourceKind, tuple[str, ...]] = {
     "idnes_reality": ("reality.idnes.cz",),
     "remax": ("remax-czech.cz",),
     "ceskereality": ("ceskereality.cz",),
+    "realitymix": ("realitymix.cz",),
 }
 
 _PARSER_MODULE_BY_KIND: dict[SourceKind, str] = {
@@ -63,6 +64,7 @@ _PARSER_MODULE_BY_KIND: dict[SourceKind, str] = {
     "idnes_reality": "scraper.source_parsers.idnes_reality",
     "remax": "scraper.source_parsers.remax",
     "ceskereality": "scraper.source_parsers.ceskereality",
+    "realitymix": "scraper.source_parsers.realitymix",
     "unsupported": "scraper.source_parsers.generic",
 }
 
