@@ -3,11 +3,13 @@
   "note": "CLIP zero-shot anchors. The trial's site_plan miss (37%) was one overloaded prompt: 'site_plan' bundled situation drawings + cadastral maps + aerial plot photos into one anchor that biased to line-art, so photo/aerial site plans leaked to garden/exterior. Fix: give each visual sub-style its OWN coherent anchor, then COLLAPSE back to the engine's logical labels (toolkit.image_classification.ROOM_TYPES) via `collapse`. CLIP picks argmax over `prompts`; metrics + the engine use the collapsed logical tag. This also unlocks the untagged non-apartment categories (dum/pozemek/komercni, ~166k listings, zero classified today) where plot/cadastral drawings are the property identity.",
   "prompts": {
     "kitchen": "a photo of a kitchen with cabinets and a countertop",
-    "bathroom": "a photo of a bathroom with a shower or bathtub",
-    "toilet": "a photo of a separate toilet or WC",
+    "bathroom": "a photo of a bathroom (koupelna) with a shower, a bathtub, or a washbasin",
+    "toilet": "a photo of a small separate toilet room (WC) containing only a toilet bowl, with no shower, bathtub or washbasin",
     "living_room": "a photo of a living room with a sofa",
     "bedroom": "a photo of a bedroom with a bed",
-    "hallway": "a photo of a hallway, corridor or entrance hall",
+    "hallway": "a photo of a flat's own hallway, corridor or entrance hall",
+    "staircase_interior": "a photo of an interior staircase or stairwell inside a building, with steps and a handrail",
+    "staircase_exterior": "a photo of an outdoor exterior staircase or steps on the outside of a building",
     "exterior_facade": "a photo of the outside facade of a residential building",
     "balcony_terrace": "a photo taken on a balcony or terrace",
     "garden": "a photo of a garden, yard or outdoor green space",
@@ -16,6 +18,8 @@
     "cadastral_map": "a cadastral or land-registry map showing numbered land parcels and property boundaries",
     "aerial_plot": "an aerial or satellite photograph of a plot of land or property seen from above",
     "location_map": "a road or location map showing streets and a place marker",
+    "energy_certificate": "an energy performance certificate document with coloured A-to-G efficiency bars and text",
+    "document_text": "a scanned document, contract, price list or table of text and numbers",
     "other": "a photograph of something else"
   },
   "collapse": {
@@ -25,6 +29,8 @@
     "living_room": "living_room",
     "bedroom": "bedroom",
     "hallway": "hallway",
+    "staircase_interior": "staircase_interior",
+    "staircase_exterior": "staircase_exterior",
     "exterior_facade": "exterior_facade",
     "balcony_terrace": "balcony_terrace",
     "garden": "garden",
@@ -33,6 +39,21 @@
     "cadastral_map": "site_plan",
     "aerial_plot": "site_plan",
     "location_map": "other",
+    "energy_certificate": "property_document",
+    "document_text": "property_document",
     "other": "other"
-  }
+  },
+  "render_note": "An ORTHOGONAL axis to the room argmax above (a render IS a kitchen-render): render_score = softmax over render_anchors + photo_anchors, summed over the render side. Validated on the 'Rezidence Na Bradle' development (renders 0.55-0.99) vs a bazos amateur-photo control (0.05-0.20) — a clean split. Used to exclude shared development RENDERS from the byt pHash/cosine merge signal (the 'vizualizace' caption is absent on those units, so the IMAGE is the signal).",
+  "render_anchors": [
+    "a 3D architectural rendering of an interior",
+    "a computer-generated interior visualization",
+    "a CGI rendered apartment room",
+    "an architectural visualization, not a real photograph"
+  ],
+  "photo_anchors": [
+    "a real photograph of an interior taken with a camera",
+    "an amateur smartphone photo of a room",
+    "a real-estate listing photograph of an apartment",
+    "a real photo of a room with natural lighting and imperfections"
+  ]
 }

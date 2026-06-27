@@ -295,6 +295,44 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
   },
   {
+    "filename": "backfill_render_score.yml",
+    "name": "Backfill image render_score (one-shot, from stored embeddings)",
+    "description": "One-shot corrective for migration 239: the clip_tag backfill skips already-tagged images, so images tagged before the render axis shipped have render_score NULL (the listing-detail render badge is hidden and the byt render exclusion is inert on them). This re-scores the render-vs-photo axis from each image's STORED CLIP embedding — no R2 download, no image re-inference — so it is fast (vector dot products). Horizontally sharded into 4 jobs (image_id %% 4). Resumable + idempotent (a scored row drops out of the render_score-IS-NULL partial index, migration 240). Dispatch-only. Secret: SUPABASE_DB_URL (no R2 needed). NOT a portal ingest (portal: null).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "Per-shard wall-clock budget",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Per-shard cap (0 = until time budget)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_render_score.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_render_score.yml"
+  },
+  {
     "filename": "bazos_detail_drain.yml",
     "name": "Scraping: Bazos detail drain",
     "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
@@ -487,6 +525,151 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/build-extension.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/build-extension.yml"
+  },
+  {
+    "filename": "ceskereality_detail_drain.yml",
+    "name": "Scraping: Českéreality detail drain",
+    "description": "The slow half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='ceskereality', enqueued by ceskereality_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing category is derived from its detail URL. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+    "portal": "ceskereality",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "50 * * * *",
+        "human": "Every hour at :50"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "hard cap on listings claimed this run (blank = none; the time budget governs)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "concurrent detail-fetch workers (blank = 2)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "global detail-fetch rate cap, req/s (blank = 0.7, polite)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "ceskereality-detail-drain",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/ceskereality_detail_drain.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ceskereality_detail_drain.yml"
+  },
+  {
+    "filename": "ceskereality_index_walk.yml",
+    "name": "Scraping: Českéreality index walk",
+    "description": "The fast half of the ceskereality cadence split (architectural rule #19, like sreality/idnes). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='ceskereality'). No detail fetch — the drain (ceskereality_detail_drain.yml) consumes the queue. Records run_type='index'.",
+    "portal": "ceskereality",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "25 */6 * * *",
+        "human": "Every 6 hours at :25"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "ceskereality-index-walk",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/ceskereality_index_walk.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/ceskereality_index_walk.yml"
+  },
+  {
+    "filename": "clip_retag.yml",
+    "name": "Dedup — CLIP re-tag from stored embeddings (sharded)",
+    "description": "Re-runs the CLIP zero-shot tagging over ALREADY-tagged images from their STORED embeddings (image_clip_embeddings) — NO R2 download, NO image re-inference, just the taxonomy's text anchors dotted with each stored vector. How a TAXONOMY change (new logical tags, sharpened anchors) reaches the back catalogue cheaply; new / not-yet-tagged images go through clip_tag.yml, which loads the same live taxonomy.",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 * * * *",
+        "human": "Every hour at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "Per-shard wall-clock budget",
+        "required": false,
+        "type": "string",
+        "default": "3000",
+        "options": null
+      },
+      {
+        "name": "limit",
+        "description": "Per-shard cap (0 = until time budget)",
+        "required": false,
+        "type": "string",
+        "default": "0",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "clip-retag",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/clip_retag.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/clip_retag.yml"
   },
   {
     "filename": "clip_tag.yml",
@@ -998,6 +1181,14 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "0 */6 * * *",
         "human": "Every 6 hours"
+      },
+      {
+        "cron": "30 */2 * * *",
+        "human": "Every 2 hours at :30"
+      },
+      {
+        "cron": "45 * * * *",
+        "human": "Every hour at :45"
       }
     ],
     "onPush": false,
@@ -1071,7 +1262,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "free",
-        "description": "FREE mode ($0) — pHash + rule merges + reconcile only, no vision, no placeholders",
+        "description": "FREE mode — pHash + rule merges + reconcile + bounded inline floor-plan gate only",
         "required": false,
         "type": "choice",
         "default": "false",
@@ -1079,6 +1270,36 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
           "false",
           "true"
         ]
+      },
+      {
+        "name": "candidates",
+        "description": "Candidate-priority drain — re-decide ONLY the queued /dedup candidates (O(queue), not a full scan)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "dirty",
+        "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "floor_plan_budget",
+        "description": "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
@@ -1236,6 +1457,56 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/discover_condition_markers.yml"
   },
   {
+    "filename": "embedding_ab.yml",
+    "name": "Dedup — embedding A/B (DINOv2 vs CLIP)",
+    "description": "One-shot OFFLINE analysis (read-only, no merges/writes): does a candidate instance-biased embedding (DINOv2) separate same-property from different-unit-same-development where CLIP's semantic embedding collapsed (negatives cosine >= positives)? Reports max same-room cosine percentiles by is_same for DINOv2 vs the stored CLIP, on the labelled same-disposition set (floor-plan-confirmed different units as negatives). The gate before any re-embed commitment. Dispatch-only. Secrets: SUPABASE_DB_URL + R2_* (downloads image bytes). NOT a portal ingest.",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "model",
+        "description": "HF image model id (DINOv2 CLS embedding)",
+        "required": false,
+        "type": "string",
+        "default": "facebook/dinov2-small",
+        "options": null
+      },
+      {
+        "name": "npos",
+        "description": "Positive (same-property) pairs sampled",
+        "required": false,
+        "type": "string",
+        "default": "400",
+        "options": null
+      },
+      {
+        "name": "nneg",
+        "description": "Negative (different-unit) pairs sampled",
+        "required": false,
+        "type": "string",
+        "default": "400",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "R2_ACCESS_KEY_ID",
+      "R2_ACCOUNT_ID",
+      "R2_BUCKET_NAME",
+      "R2_SECRET_ACCESS_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": null,
+    "cancelInProgress": null,
+    "timeoutMinutes": 30,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/embedding_ab.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/embedding_ab.yml"
+  },
+  {
     "filename": "enrich_bazos.yml",
     "name": "Scraping: Bazos description enrichment (LLM, every 6h + manual)",
     "description": "Decoupled enrichment job. bazos listings carry no structured floor / amenities / condition / building_type / energy — only price, area, disposition, coords, and the seller's free text. This reads the description of active listings whose latest snapshot isn't yet enriched, extracts those typed fields with a cheap model (Haiku 4.5), caches the extraction in listing_description_enrichments, and fills ONLY the currently-NULL listings columns (the deterministic HTML-parsed price/area/disposition are never overwritten). Resumable: enriched snapshots drop out of the next selection.",
@@ -1261,10 +1532,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "limit",
-        "description": "Maximum number of listings to enrich in this run",
+        "description": "Max listings selected this run (the wall-clock budget usually stops it first)",
         "required": true,
         "type": "string",
-        "default": "1000",
+        "default": "3000",
         "options": null
       },
       {
@@ -1272,7 +1543,15 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "description": "Stop early when this run's LLM cost exceeds this cap (USD)",
         "required": true,
         "type": "string",
-        "default": "10",
+        "default": "20",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget; finalize cleanly when reached (keep below timeout-minutes)",
+        "required": true,
+        "type": "string",
+        "default": "3000",
         "options": null
       },
       {

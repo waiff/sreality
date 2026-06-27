@@ -21,9 +21,10 @@ that runs OFF the scrape hot path. Three modes:
     raw_json). Run in Actions after merge — local has no psycopg, and a raw_json
     scan over the pooler times out, so it is keyset-batched here.
 
-Attribution is the only source-specific step (sreality reads raw_json->'user');
-everything downstream (firms, singletons, rollups, grouping, merges) is source-
-agnostic, so a future portal adds an attribution step and reuses the rest (rule #21).
+Attribution is the only source-specific step (sreality reads raw_json->'user';
+idnes + ceskereality read raw_json->'broker'); everything downstream (firms,
+singletons, rollups, grouping, merges) is source-agnostic, so a future portal adds
+an attribution step and reuses the rest (rule #21).
 
 Identity keystone: cross-source merges only via contacts personal on BOTH sides
 (frequency==1 each source), corroborated (toolkit.broker_resolver). With only
@@ -213,6 +214,69 @@ FROM broker_identities bi
 WHERE bi.source = 'idnes' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'account_oid')
   AND l.source = 'idnes' AND l.raw_json ? 'broker'
   AND (l.raw_json->'broker'->>'account_oid') IS NOT NULL
+  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
+"""
+
+# --- ceskereality attribution (from raw_json->'broker'; broker_id is the stable
+#     /realitni-makleri/…-{id}/ profile key, name from the contact heading). Same
+#     shape as idnes but PHONE-ONLY (the site hides broker email behind a form), so
+#     there is no email upsert: no email -> no email_domain -> no firm linkage (an
+#     accepted gap; the singleton broker + phone contact still resolve, and the
+#     phone feeds cross-source bridges). Phone is 420-normalised to match sreality's
+#     contact format (idnes stores bare digits — a pre-existing divergence). ---
+
+_CESKEREALITY_IDENTITIES_UPSERT = """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'broker_id')       AS uid,
+    nullif(l.raw_json->'broker'->>'name', '')   AS name,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'ceskereality' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (SELECT DISTINCT ON (uid) uid, name FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'ceskereality', a.uid, lt.name, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+"""
+
+_CESKEREALITY_CONTACTS_PHONE_UPSERT = """
+WITH chunk AS MATERIALIZED (
+  SELECT (l.raw_json->'broker'->>'broker_id') AS uid,
+         regexp_replace(l.raw_json->'broker'->>'phone', '[^0-9]', '', 'g') AS digits,
+         l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'ceskereality' AND l.raw_json ? 'broker'
+    AND length(regexp_replace(coalesce(l.raw_json->'broker'->>'phone', ''), '[^0-9]', '', 'g')) >= 9
+    AND {sel}
+)
+INSERT INTO broker_identity_contacts (broker_identity_id, source, kind, value, first_seen_at, last_seen_at)
+SELECT bi.id, 'ceskereality', 'phone',
+       CASE WHEN length(c.digits) = 9 THEN '420' || c.digits ELSE c.digits END,
+       min(c.first_seen_at), max(c.last_seen_at)
+FROM chunk c
+JOIN broker_identities bi ON bi.source = 'ceskereality' AND bi.source_broker_id_native = c.uid
+GROUP BY bi.id, CASE WHEN length(c.digits) = 9 THEN '420' || c.digits ELSE c.digits END
+ON CONFLICT (broker_identity_id, kind, value) DO UPDATE SET
+  last_seen_at = greatest(broker_identity_contacts.last_seen_at, EXCLUDED.last_seen_at)
+"""
+
+_CESKEREALITY_LINK_LISTINGS_IDENTITY = """
+UPDATE listings l SET broker_identity_id = bi.id
+FROM broker_identities bi
+WHERE bi.source = 'ceskereality' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'broker_id')
+  AND l.source = 'ceskereality' AND l.raw_json ? 'broker'
+  AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
   AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
 """
 
@@ -479,7 +543,8 @@ def _release_lock(conn: Any, holder: str) -> None:
 
 
 def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
-    """Run per-source attribution (sreality raw_json.user + idnes raw_json.broker)."""
+    """Run per-source attribution (sreality raw_json.user + idnes/ceskereality
+    raw_json.broker)."""
     with conn.cursor() as cur:
         cur.execute(_IDENTITIES_UPSERT.format(sel=sel), params)
         cur.execute(_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
@@ -489,6 +554,9 @@ def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
         cur.execute(_IDNES_CONTACTS_EMAIL_UPSERT.format(sel=sel), params)
         cur.execute(_IDNES_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
         cur.execute(_IDNES_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
+        cur.execute(_CESKEREALITY_IDENTITIES_UPSERT.format(sel=sel), params)
+        cur.execute(_CESKEREALITY_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
+        cur.execute(_CESKEREALITY_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
 
 
 def _resolve_firms(conn: Any, free: list[str], franchise: list[str]) -> None:
@@ -717,7 +785,8 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     # scan fetches every id; attribution then runs per id-chunk, source-filtered inside.
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sreality_id FROM listings WHERE source IN ('sreality', 'idnes') "
+            "SELECT sreality_id FROM listings "
+            "WHERE source IN ('sreality', 'idnes', 'ceskereality') "
             "ORDER BY sreality_id"
         )
         all_ids = [int(r[0]) for r in cur.fetchall()]

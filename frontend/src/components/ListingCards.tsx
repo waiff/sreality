@@ -33,6 +33,17 @@ import type { ListingEstimate } from '@/lib/types';
 import { runSurfaceUrl } from '@/lib/runLinks';
 import { listingPath } from '@/lib/listingUrl';
 
+/* The card grid is CONTAINER-intrinsic, not viewport-keyed: columns flow to
+ * fit the cards COLUMN's own width via `auto-fill`, each at least --card-min
+ * wide. So the cards never crush to unreadable when the map panel is open (the
+ * column is only ~half the viewport) or on a smaller screen — and they reflow
+ * to more columns automatically when the map is collapsed away and the column
+ * spans the full width. One tuning knob: the 11.5rem minimum card width
+ * (auto-fill keeps trailing empty tracks, so a short final row keeps the same
+ * card size instead of stretching). Shared by the live grid and the skeleton
+ * so the two can never drift. */
+const CARD_GRID_CLASS = 'grid gap-2 grid-cols-[repeat(auto-fill,minmax(11.5rem,1fr))]';
+
 interface Props {
   rows: CardRow[] | null;
   total: number | null;
@@ -163,7 +174,7 @@ export default function ListingCards({
         )}
         {!showSkeleton && rows && rows.length > 0 && (
           <>
-            <ul className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
+            <ul className={CARD_GRID_CLASS}>
               {rows.map((r) => (
                 <li key={r.sreality_id}>
                   <Card
@@ -868,7 +879,7 @@ function SortDropdown({
 
 function SkeletonGrid() {
   return (
-    <ul className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2">
+    <ul className={CARD_GRID_CLASS}>
       {Array.from({ length: 8 }).map((_, i) => (
         <li
           key={i}

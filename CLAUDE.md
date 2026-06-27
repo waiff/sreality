@@ -160,6 +160,31 @@ remax ALSO has an on-demand URL parser (`scraper/source_parsers/remax.py`, LLM,
 unchanged by the scheduled scraper, routed by domain in `source_dispatcher`
 independent of the `portals` row's `kind`.
 
+**Data source (ceskereality.cz).** A scheduled scraper (`scraper/ceskereality_client.py`,
+`ceskereality_parser.py`, `ceskereality_main.py`) tagged `source='ceskereality'`. It is large
+(~49k listings), so — like sreality/idnes — it is **cadence-split**: `ceskereality_index_walk.yml`
+(every 6h, full complete-walk + mark_inactive + enqueue) feeds the hourly bounded
+`ceskereality_detail_drain.yml` (`--max-seconds` budget). ceskereality is a STRUCTURED HTML portal
+like idnes: each detail page carries a `schema.org` `individualProduct` JSON-LD block (clean price +
+broker), an `i-info` spec list, **precise per-listing coordinates** in `data-coord-lat/lng` (and a
+Google-Maps `?q=` link) so there is **no geocoding step**, and an `img.ceskereality.cz/foto/` gallery.
+Typed fields are normalised to the SAME canonical labels sreality emits (verified against the live
+sreality vocabulary: `Zděná→cihla`, `Bezvadný→velmi_dobry`, `K rekonstrukci→pred_rekonstrukci`,
+`soukromé→osobni`). **Street** is taken from the JSON-LD `streetAddress` when present, else mined from
+the SEO detail-URL slug (`…-{street}-{id}.html`) — the broker's `offeredby.address` (the agency office)
+is deliberately never used; both route through the shared `scraper/street.py` guard. **Broker** carries
+a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
+`raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and `resolve_brokers` has a
+per-source attribution block (phone-only; no email → no firm). Per-category search pages carry a result
+total ("Máme tady N…") with no deep-pagination cap, so a per-category walk is provable-complete
+(`supports_complete_walk=true`; the runner marks delistings inactive under the completeness guard,
+source-scoped). The detail URL carries the category, so the drain derives each listing's category from
+its own URL — one config (the `portals` row, migration 249) walks all 12 (cm × offer-type) descriptors.
+The client uses an honest identifying `User-Agent` at a polite rate (the site disallows generic bots in
+robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-demand URL parser
+(`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
+preview — a separate entry point unchanged by the scheduled scraper.
+
 ## Territories
 
 The repo is split into **three** top-level territories with deliberately different
@@ -546,9 +571,15 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     is only complete if a listing taken down on one portal — or delisted then relisted under a
     new id — can still merge into the surviving group. The merge chokepoint gates on the
     *property* `status='active'` and an inactive listing keeps its own active singleton property,
-    so it stays matchable; gating the scan on `is_active` would orphan that history. **(B)** same street + house
-    number + disposition + floor → auto-merge, with a 5% area guard that demotes
-    mismatched-area pairs to visual. **(C)** same street + disposition → visual candidate unless
+    so it stays matchable; gating the scan on `is_active` would orphan that history. **(B) RETIRED
+    (2026-06): exact address (street + house_number + disposition + floor) is no longer an
+    auto-merge.** It was the ONLY merge path that produced false merges — 6.7% of `address_exact`
+    merges were later unmerged (two DIFFERENT units at the same address+floor) vs **0%** for pHash
+    (0/23.6k) and visual (0/753), because address alone is not unit-conclusive. `classify_pair` now
+    returns an exact-address pair as a normal rule-C **candidate** (the `address_exact` reason is kept
+    for provenance), so it flows through the pHash fast-path → forensic visual → floor-plan gate (the
+    0%-reversal paths) like any street+disposition pair. The rare same-address-different-photos-no-
+    matching-room pair queues for the operator instead of auto-merging. **(C)** same street + disposition → visual candidate unless
     an **area-gap** / house-number / **floor-gap-≥2** contradiction rejects it; nothing is ever compared
     that doesn't share street + disposition, AND no **same-development guard** fires. The area-gap
     reject is **unified at 10%** for every category (`MatchProfile.candidate_area_max_pct`). It is
@@ -572,9 +603,8 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     for the operator (never auto-merges, never auto-rejects — the conservative choice).
     **pHash fast-path (FREE, runs FIRST — before classify, all sources).** `_phash_identical_pairs`:
     ≥2 near-identical image pairs (`PHASH_MIN_IDENTICAL_PAIRS`, Hamming ≤6) → auto-merge
-    with NO LLM. Runs before the cross-source gate, so identical-photo re-posts merge for free —
-    including SAME-source ones the gate would otherwise drop (a price-history/recall win) — and
-    cross-posted cross-source pairs skip classify AND compare. The **count** is the
+    with NO LLM. Identical-photo re-posts (same- OR cross-source) merge for free here, skipping
+    classify AND compare. The **count** is the
     safety bar (a development sharing one stock facade/plan gives 1 match; an actual re-post shares
     many) — validated: only 0.34% of operator-dismissed pairs reach ≥2. **A single near-identical
     DISTINCTIVE-room match overrides the count** (`_phash_distinctive_match` →
@@ -595,34 +625,94 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     pHash resolves a minority; the forensic compare below is still needed for the rest. (pHash
     coverage on the `images` table must keep up — `compute_image_phash.yml` — or the fast-path
     under-fires.)
-    **Cross-source gate (cost):** the paid visual layer (D) runs only on CROSS-source pairs —
-    same-portal pairs that pHash didn't resolve are skipped (no classify, no compare, no queue),
-    since dedup's payoff is matching one portal against another (73/74 historical visual auto-merges
-    were cross-source). Rule B above still auto-merges exact same-source relists for free. This
-    cut ~36% of candidate pairs off the LLM stage at ~1.4% recall cost.
-    **(D)** forensic visual confirmation (cross-source, the pair reached here only because pHash did
+    **Cross-source gate — REMOVED in Wave 3 (recall).** It previously ran the paid visual layer (D)
+    only on CROSS-source pairs, skipping same-portal non-exact pairs (73/74 historical visual
+    auto-merges were cross-source) — which cut ~36% of pairs off the LLM stage but cost ~1.4% recall
+    (a same-portal relist with changed photos, or two cross-posts on one portal, were dropped). Now
+    ALL rule-C candidates reach the visual stage; the forensic **High** verdict + the floor/site-plan
+    gates remain the precision guards, so recall rises without false merges (pHash still auto-merges
+    identical-photo same-source relists for free, above). The trade-off is more pairs at the (paid)
+    visual stage — the per-run vision budget + the batch warmer (which now warms same-source pairs too)
+    bound the cost.
+    **(D)** forensic visual confirmation (the pair reached here only because pHash did
     NOT resolve it): classify both listings, run the site-plan development guard, then a room-aware
     forensic comparison (operator prompt, `app_settings.llm_visual_match_prompt`) on like rooms in
     priority order (`rooms_in_priority(common, category_main)` → `room_priority_for`), stop at the
-    first **High** verdict → auto-merge. **For byt the compared rooms — and the CLIP cosine tier
-    below — are INTERIOR only** (`BYT_ROOM_PRIORITY`: kitchen, bathroom, toilet, living_room, bedroom,
-    hallway); exterior_facade / balcony_terrace / garden are dropped, so a shared facade render can't
-    produce the auto-merging High verdict. Other categories keep the full `ROOM_PRIORITY`. **(E)**
-    everything else queues on the operator's `/dedup` review page.
+    first **High** verdict → auto-merge. The compare order is **per-family** (`room_priority_for`):
+    **byt** compares INTERIOR rooms only (`BYT_ROOM_PRIORITY`: kitchen, bathroom, toilet, living_room,
+    bedroom, hallway) — exterior_facade / balcony_terrace / garden are dropped (a shared facade render
+    can't produce the auto-merging High verdict), and the CLIP cosine tier below is interior-only too;
+    **dum / komercni / ostatni** lead with the **FACADE** (`HOUSE_PRIORITY` — the building's identity)
+    then interiors; **pozemek** leads with the **SITE PLAN** (`LAND_PRIORITY` — the plot's identity).
+    The byt-only **distinctive single-match override** (one near-identical kitchen/bathroom pHash =
+    merge, `distinctive_rooms_for`) is empty for non-byt: a facade/site-plan is development-shared, so
+    they always need the ≥2-match count. These per-family orders are **operator-editable** (Stage 2):
+    `default_priority_for_family` is the coded default + the valid tag set, and the Settings page's
+    "Dedup comparison priority" draggable lists reorder them per family into
+    `app_settings.dedup_tag_priorities` (JSON). `toolkit/dedup_priorities` loads + validates the blob
+    (`normalize_priority` completes any omission from the default, so a list never silently drops a
+    room); the engine threads it via `_RunContext.tag_overrides` → `rooms_in_priority`, and the batch
+    warmer (`submit_dedup_batch`) loads the same overrides so both lanes order rooms identically.
+    Absent / partial → the coded default, so a fresh deploy is unchanged. **(E)** everything else queues
+    on the operator's `/dedup` review page.
     **Floor-plan validation gate (migration 234).** Whenever the engine WOULD merge a pair — via the
     pHash fast-path OR a visual High — `_floor_plan_gate` runs a Sonnet floor-plan check (the
     `DOCUMENT_MAX_EDGE=1568` tier; pHash conflates line-art plans and CLIP cosine can't read layout,
-    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (CLIP tag OR
-    classifier room_type) → `compare_listing_floor_plans` (operator prompt
+    so vision is the only tool). It ONLY adds conservatism: BOTH sides carry a floor plan (a CLIP tag
+    **at or above `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`** OR an LLM classifier room_type — the floor is
+    CLIP-only because only `image_clip_tags.confidence` is numeric; the LLM `image_room_classifications`
+    confidence is a coarse high/medium/low enum, left unfiltered. A low-confidence CLIP floor_plan tag
+    is a likely false positive, e.g. an idnes location map mis-tagged at 0.36, and 95% of real CLIP plan
+    tags score ≥ 0.52, so the floor drops the phantom-plan "one-sided" read while keeping genuine plans)
+    → `compare_listing_floor_plans` (operator prompt
     `app_settings.llm_floor_plan_match_prompt`, cache `listing_floor_plan_matches`, write-allowed rule
     #5; verdict same_layout / different_layout / inconclusive + per-plan OCR in `extracted`, used
     plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
     auto-dismiss** (the visual model stays the sole thing that can dismiss); same_layout / inconclusive
-    → the merge proceeds; a both-plan pair we can't validate (no fn / no budget / error) → queue rather
-    than merge unchecked. Exactly ONE side has a plan → **queue** (can't compare plan-to-plan). Neither
-    → the existing path is untouched. It applies to pHash + visual merges, NOT rule-B exact-address.
-    The `dedup_batches` lane warms the floor-plan verdicts (`_warm_floor_plan` → `floor_plan` request
-    kind) so the cache-only daily engine consumes them for free, like the other vision caches.
+    → the merge proceeds. **N×N over multiple plans (migration 243):** a listing can carry several
+    floor/site plans (a multi-unit building, a multi-floor home); the one vision call sends EVERY
+    labelled plan of both listings and the prompt matches the cross-product — `same_layout` if ANY
+    A-plan matches ANY B-plan, `different_layout` only if NONE do (and `compare_listing_site_plans`
+    the same: `same_unit` if any pair shares a unit). So a matching plan among several is never missed
+    into a wrong dismiss. No schema / cost change — one call, the model reasons over all pairs; the
+    payload labels each plan ("Listing A plan 2") so the rationale can cite the matching pair. The
+    prompt update is `updated_by`-guarded so an operator-customised prompt is never clobbered.
+    **2D-plan-aware dismiss (migration 245).** The gate was wrongly dismissing legit same-property
+    pairs whose "floor plans" are 3D perspective RENDERS (a 3+1 flat misread as a "two-level duplex").
+    `render_score` can't separate a 2D plan from a 3D render (its anchors are about *interiors*, so a
+    drawing's score is noise — empirically a flat 0..1 spread), so the distinction is made by the
+    **vision model that sees the images**: the prompt judges layout ONLY from flat 2D floor plans,
+    treats 3D renders as unreliable, and returns `inconclusive` when neither side has a usable 2D plan
+    (only 3D renders) — which the gate routes to the operator queue, NEVER an auto-dismiss. So
+    `different_layout` (→ dismiss) fires only on a confirmed 2D-plan mismatch (the "dismiss only on
+    reliable 2D plans" posture). Migration 245 also SWEPT the cache (deleted every `different_layout`
+    verdict, ~242) so the stale pre-N×N + the 3D-render misreads re-evaluate under the 2D-aware prompt.
+    The gate distinguishes **"a human must decide" (queue)** from **"validate it
+    later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run (budget exhausted /
+    cache-miss in the $0 escape hatch) → **`defer`** — skip, re-try next run, never the manual queue
+    (the pair is automatable, not a human call); exactly ONE side has a plan → **`queue`** (genuinely a
+    human call — no plan-to-plan compare possible); neither → the existing path is untouched. It applies
+    to pHash + visual merges, NOT rule-B exact-address. **The floor-plan check runs autonomously on the
+    SCHEDULED free run (the operator-chosen posture, Option C):** even though the free run skips the
+    expensive all-rooms classify/compare, it gets the LIVE `_build_floor_plan_fn` with a bounded budget
+    `app_settings.dedup_floor_plan_budget` (registry default 10000; `--floor-plan-budget` overrides for an
+    ad-hoc run) — the ONE paid call on a free run, firing only on the SMALL set of would-merge both-plan
+    pairs, so they auto-confirm / auto-dismiss inline instead of piling onto the manual queue. (The budget
+    is the count of PAID calls — "free" is the run MODE, not the cost.) An **`inconclusive`** floor-plan
+    verdict routes to manual review when `dedup_floor_plan_inconclusive_to_review` (default on); off →
+    treat as `same_layout` and merge. Beyond the budget, pairs DEFER to the next run; budget 0 is a $0
+    escape hatch (`_build_cache_only_floor_plan_fn` — consume only warmed verdicts, defer the rest). The
+    cap is wired through the pure `_effective_vision_cap` (free → the floor-plan budget; cache-only →
+    unthrottled; else → `max_vision_calls`). The cache-only fn AND the live fn resolve the model via the
+    SAME `LLMClient.resolve_model("llm_floor_plan_match_model")` the batch warm-up uses, so the model-keyed
+    verdict cache never silently misses. A raised `floor_plan_budget` on a `free=true` dispatch is a
+    **compare-free floor-plan sweep** (floor-plan checks only, no all-rooms compare spend) — how the
+    initial 379-pair backlog was cleared. The per-run `dedup_engine_runs.floor_plan_deferred` counter
+    (migration 241, on the `/dedup` dashboard's stat grid) is the silent-stall guard: it should trend to
+    ~0; a persistently high value means the free run's floor-plan budget is too small for the inflow (or,
+    if budget 0, that the disabled `dedup_batches` warmer isn't filling the cache). (`dedup_batches`'s
+    `_warm_floor_plan` → `floor_plan` request kind still warms the cache when that lane is enabled; it is
+    `disabled_manually` today, which is why the free run pays inline rather than consuming warm verdicts.)
     **Self-hosted CLIP tier (v2, migrations 225/226 — settings-gated, default OFF).** A free
     zero-shot CLIP model (`scraper/clip_tagger.py`, ViT-B/32, run on GitHub Actions by
     `clip_tag.yml`/`scripts/clip_tag_backfill.py`) tags every image — room/plot type into
@@ -642,7 +732,64 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (PRs around the trial): pozemek 77% → plot/site family, coarse room agreement 87%, same-property
     tag consistency 86%, cosine AUC 0.80. Both knobs ship OFF; flip via `app_settings` after a
     `--shadow` merge-diff confirms merges hold. Run counters: `dedup_engine_runs.clip_classified` /
-    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`.
+    `clip_cosine_calls` / `routed_haiku` / `routed_sonnet`. (3) **Tagging-readiness gate (2026-06,
+    DEFAULT whenever CLIP is the tagger).** A pair is DEFERRED — before pHash, the floor-plan gate, or
+    visual — if EITHER listing has any stored image still pending the tagger
+    (`resolve_pair._clip_incomplete`: a `storage_path` image with `clip_tagged_at IS NULL`; a
+    processed-but-untaggable image is terminal so it never blocks forever). Reason: an
+    incompletely-tagged listing's floor-plan / room images may still be in the tag queue, so the
+    floor-plan gate would mis-read a pending plan as ABSENT (the false `floor_plan_review` "one-sided"
+    queue — 77% of the old review backlog) and the visual flow would under-pair rooms. The engine never
+    decides on partial tag data: it DEFERS and waits — no re-queue (a pending image already has
+    `clip_tagged_at IS NULL`, so `clip_tag.yml` will tag it; re-queuing would only cycle a
+    terminally-undecodable image — the `_trigger_clip_tagging` call was removed for that reason). The
+    **trigger half** of the same invariant: `scraper.db.mark_properties_dedup_dirty_for_images` (called
+    by `clip_tag.yml` after each tag batch) enqueues a property into `dedup_dirty_properties` ONLY when
+    the just-tagged listing is now FULLY tagged (`NOT EXISTS` a pending image) — NOT on a partial batch
+    (the old bug that shoved a 1-of-N-tagged listing into the `--dirty` drain). So the hourly `--dirty`
+    drain re-decides a pair only once BOTH sides are complete → a real two-sided floor-plan compare
+    merges on MATCHING plans (the correct, transparent path). The readiness gate is **always on** when
+    CLIP is the tagger (the old `dedup_clip_only` opt-in setting + its dead plumbing were REMOVED — every
+    pair reaching the visual stage is fully CLIP-tagged, so the Haiku fallback is never needed).
+    `clip_deferred` counts deferrals per run.
+    **Render detection (migration 239).** The CLIP tagger ALSO scores an orthogonal
+    render-vs-photo axis per image — `image_clip_tags.render_score` (0..1), softmax over the
+    `render_anchors` / `photo_anchors` in `data/clip_taxonomy.json` (a render IS a kitchen-render,
+    so it is NOT part of the room argmax). **The axis is only meaningful for ROOM/photo images** —
+    its anchors are about *interiors*, so it scores a DRAWING (floor/site plan) or DOCUMENT arbitrarily
+    (a flat 0..1 spread). So `render_score` is **left NULL for the plan/document logical tags**
+    (`floor_plan` / `site_plan` / `property_document` — `clip_tagger._DRAWING_LOGICAL_TAGS`, kept ==
+    the `plan` family; the backfill skips them; migration 246 NULLed the ~445k existing). The UI render
+    badge self-hides on a NULL score, so "RENDER" no longer appears on a `půdorys`. The new
+    **`property_document`** logical tag (energy certificates, contracts, spec tables) is added to the
+    taxonomy + `ROOM_TYPES` + the room-classifier CHECK (migration 246). Two **`staircase_interior` /
+    `staircase_exterior`** tags (migration 247) sit in a new **`common`** family — a shared building
+    stairwell is the same for every unit, so like the exterior/plan families it's excluded from the byt
+    unit-match signal (`NON_INTERIOR_TAGS` = exterior + common + plan). The `toilet` (WC) anchor was
+    sharpened to exclude shower/bathtub so CLIP stops confusing it with `bathroom`. **Applying a taxonomy
+    change to the back catalogue** is `scripts/retag_from_embeddings` + `clip_retag.yml`: it re-runs the
+    zero-shot over each image's STORED embedding (no R2 download / re-inference — text-anchor dot
+    products), driven by `app_settings.clip_taxonomy_retag_after` (set it to `now()` to start a campaign;
+    re-tagged rows stamp `tagged_at=now()` and self-drain; once caught up the scheduled run pre-checks and
+    no-ops). New / not-yet-tagged images go through `clip_tag.yml`, which loads the live taxonomy. For **byt**, an image scoring >=
+    `app_settings.dedup_render_exclude_min` (registry default **0.95**; `RENDER_SCORE_EXCLUDE_MIN` is the
+    code fallback) is a shared development RENDER and is dropped from the pHash
+    count, the distinctive single-match override, AND the forensic room compare
+    (`phash_render_exclude_for` / `_render_exclusion_predicate` / `_high_render_image_ids`) — closing
+    the same-area dev-unit case area + room-type couldn't (Na Bradle's two 99 m² units share a kitchen
+    render). The "vizualizace" caption is NOT used (verified absent on those units) — the IMAGE is the
+    signal. Validated (`scripts/validate_render_detection.py`): Na Bradle renders 0.55-0.99 vs a bazos
+    amateur-photo control 0.05-0.20. Exposed on `images_public.clip_render_score`; the listing-detail
+    gallery + carousels show a Render/Foto badge with the score (`ImageRenderBadge`) so the operator
+    can eyeball the detector. Untagged/not-yet-scored images are never excluded (recall holds as the
+    CLIP backfill ramps). **One-shot `render_score` backfill (migration 240 + `backfill_render_score.yml`):**
+    `clip_tag_backfill` SKIPS already-tagged images (`clip_tagged_at IS NOT NULL`), so every image tagged
+    BEFORE the render axis shipped has `render_score` NULL — the badge stays hidden and the byt exclusion
+    is inert on it. `scripts/backfill_render_score.py` re-scores the render axis from each image's STORED
+    CLIP embedding (`image_clip_embeddings` — NO R2 download, NO re-inference; just the
+    `Tagger.render_scores_from_emb` text-anchor dot product), so it is fast and resumable (a partial
+    index on `render_score IS NULL`, migration 240, self-empties as it completes). Dispatch-only, sharded
+    4× (`image_id %% 4`), `SUPABASE_DB_URL` only.
     **Self-healing queue (migration 198):** the engine doesn't only ADD to the review queue — each
     run it RESOLVES stale proposed candidates so they don't pile up. Recall-neutral dismissals: a
     pair the current rules now hard-reject, one the cross-source gate skips, or a candidate pointing
@@ -650,7 +797,7 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (e.g. exact-address pairs queued while the toggle was off) auto-merge. The one calibration-gated
     dismissal: a confident visual **"different"** — `decide_visual_dismiss` auto-dismisses when NO
     room reached High and a DISTINCTIVE room (kitchen/bathroom) is Low (operator toggle
-    `app_settings.dedup_visual_autodismiss_enabled`, default on; `--no-autodismiss` /
+    `app_settings.dedup_forensics_autodismiss_enabled`, default on; `--no-autodismiss` /
     `--shadow` CLI overrides). Calibrated safe: the verdict is ~binary (High/Low), the High OR-gate
     already rescues any same-property pair with one matching room, and 0/273 operator-merged pairs
     carried a Low. Per-run counts land in `dedup_engine_runs.auto_dismissed`. The visual layer's cached
@@ -658,6 +805,31 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (migration 129), and `compare_listing_site_plans` (migration 171,
     `listing_site_plan_matches`) — are write-allowed exceptions (toolkit rule #5). A
     `dedup_engine_runs` row (migration 130) per run powers the `/dedup` automation dashboard.
+    **Decision feedback + auditability (migration 248).** Every decision is FULLY auditable from
+    the `/dedup` Decision-history feed AND the Needs-review queue, and the operator can FLAG a
+    wrong one: `dedup_decision_feedback` is a **PROPERTY-pair-keyed** ("this merge/dismissal was
+    wrong" + `expected_outcome` should_merge/should_dismiss/unsure + free note) operator-state
+    table — keyed on the canonical `(left_property_id < right_property_id)` pair, NOT an audit-row id
+    and NOT the listing pair, so ONE flag attaches to whichever surface shows that pair and persists
+    across the pair's lifecycle (a queued candidate flagged "should dismiss" stays flagged once it
+    becomes a terminal decision — the merge/dismiss audit row carries the SAME two property_ids).
+    **Property-grain, not the listing (sreality) pair, is deliberate:** a property's representative
+    listing (`repr_listing_id`) DRIFTS when `recompute_property_stats` re-picks it, so a listing-pair
+    key would silently orphan the flag off the Needs-review card after a recompute; the audit row
+    SNAPSHOTS its `left/right_property_id` at decision time (immutable) and a candidate's property
+    pair is stable while pending, so the property pair is the stable identity on BOTH surfaces.
+    It is a labelled corpus for improving the engine; the feed filters to flagged-only. Writes via
+    the bearer-gated `POST/DELETE /dedup/feedback`; anon never reads it. **Auditability is computed,
+    not stored:** `toolkit/dedup_audit.build_audit_breakdown(detail)` is a PURE function turning a
+    decision's stored factor `detail` into rungs (each signal — pHash / cosine / forensic verdict /
+    floor-plan / address — with its measured value vs the bar it was judged on, met/unmet/info, and
+    the app_settings key(s) that govern it), so it renders identically on the history feed
+    (`list_pair_audit`) and the queue (`list_candidates`) and works on every historical row. The
+    rungs deep-link to the exact Settings knob via `settingAnchorId` (the Settings rows carry stable
+    `id="setting-<key>"` anchors + a hash-scroll/force-open). The SPECIFIC pictures a decision turned
+    on are resolved at READ time by `decision_evidence` (the pHash near-identical PAIRS recomputed
+    from stored phashes with the engine's category exclusions, the compared plans, or the deciding
+    room) — no decision-time `detail` bloat, faithful for any old row.
     **Vision is batch-pre-warmed (cost):** `dedup_batches.yml` (migration 197 — `dedup_batches`
     / `dedup_batch_requests`) runs the engine's FREE funnel and submits the surviving cross-source
     pairs' classify/compare/site_plan vision through the Anthropic Message Batches API (50% off,
@@ -665,6 +837,37 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     (`scripts/submit_dedup_batch.py` + `ingest_dedup_batch.py`). The daily engine run then REPLAYS
     unchanged over the warm caches → identical merges for free (a cache miss falls back to a sync
     call). The lane NEVER merges; merging stays the engine's job.
+    **Category compatibility** is enforced at every classify site AND the `merge_properties`
+    chokepoint via the single `room_taxonomy.category_main_compatible` helper: a sale ≠ a rental
+    (`category_type`), and a flat ≠ a house — **except** the ONE sanctioned cross-type **dum ↔
+    komercni** (the same building listed as a house on one portal, commercial on another, is one
+    real-world property — irrespective of sub-type). A cross-type pair takes the FIRST listing's
+    `MatchProfile` / priority order (no special-case logic). **The geo strong-signal auto-merge gates
+    on BOTH families** (`profile.geo_auto_merge_allowed and profile_for(b).geo_auto_merge_allowed`), so
+    a cross-type pair never geo-auto-merges on a weak proximity signal alone (komercni isn't
+    geo-auto-merge-validated) — it queues, symmetrically regardless of order, and still merges via the
+    exact-address / pHash / visual paths or operator review. This is distinct from the **asset-link**
+    grain (migration 224), which links genuinely *different* units in one building (a `byt` + its
+    ground-floor `komercni`, a `dum` + its `pozemek`) WITHOUT collapsing them.
+    **Geo path (single-dwelling: house / land / commercial), default OFF.** Apartments key on
+    street + disposition; houses/land/commercial have no usable disposition, so they are matched by
+    **geo-proximity** instead — but through the EXACT SAME `resolve_pair` brain (pHash → CLIP cosine
+    → forensic compare → floor/site-plan gate), not a separate deterministic path. `run_engine(geo=True)`
+    swaps only: the loader (`_load_geo_eligible`), the candidate FILTER (`classify_geo_pair`, keyed on
+    `geo_cell_key` = obec + rounded coord + category bucket + offering; `geo_category_bucket` collapses
+    dum+komercni into one cell so the cross-type co-locates), the area tolerance
+    (`dedup_geo_area_max_pct`, default ±20% — wider than the street 10% because the visual flow still
+    confirms), and the queue tier (`'geo'`). The geo classify maps its deterministic `auto_merge` →
+    `candidate`, so a geo signal NEVER merges on its own — the free-first visual flow (with FACADE /
+    SITE-PLAN priority via `room_priority_for`, rule #15 PR-1) is the sole merge gate. The geo path
+    also does NOT apply the **cross-source gate** (`_RunContext.cross_source_only=False`): that gate is
+    justified only where rule B auto-merges same-source exact-address relists for free (the street
+    path), and geo has no rule B — so a same-portal house re-post still reaches the visual stage. Gated by the
+    `dedup_geo_enabled` setting: when on, the scheduled FULL-SCAN + CANDIDATE-DRAIN runs also run the
+    geo pass (after the street pass, sharing the `--max-seconds` budget); the real-time DIRTY drain
+    skips it (geo isn't dirty-scoped). `--geo` / `--geo-only` force it ad-hoc. Each geo pass writes its
+    own `dedup_engine_runs` row. (Stage 2 will make the per-family tag priorities operator-editable;
+    geo real-time + auto-merge calibration are later.)
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so
@@ -1318,8 +1521,20 @@ locally. The dedup/properties track adds
 `property_maintenance.yml` (**dirty-set incremental, cron `*/5`** — attaches new stragglers as
 singletons + recomputes only changed properties; rule #20),
 `recompute_property_stats.yml` (the **daily full-sweep reconcile** at 04:15 — recomputes every
-property + clears the dirty queue), `dedup_engine.yml` (daily street+disposition dedup engine +
-auto-merge; rule #15), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
+property + clears the dirty queue), `dedup_engine.yml` (street+disposition dedup engine +
+auto-merge; rule #15 — THREE scheduled modes, ONE `resolve_pair` decision tree (the brain),
+three work-lists: a **FULL SCAN** every 6h that DISCOVERS new dups across the market; a
+**CANDIDATE DRAIN** every 2h (`--candidates`) that re-decides ONLY the properties in
+still-proposed `/dedup` candidates so the queue **self-clears in O(queue)** regardless of the
+full scan's deadline frontier; and a **DIRTY DRAIN** hourly at :45 (`--dirty`, Wave 4c) that
+re-decides ONLY the street groups touching a just-dedup-ready property
+(`dedup_dirty_properties`, migration 242 — enqueued by the hourly CLIP tag job when a listing's
+images get tagged, i.e. pHash+CLIP done) so a **new cross-portal listing merges within ~minutes**
+instead of waiting hours (the watchdog-grain goal). The dirty drain does a FULL eligible load
+(so a dirty property's group still carries its existing peers) but only resolves the dirty groups
+(`only_groups_with_property_ids`) — O(dirty) pair-work, no fragile SQL street-key replay; race-free
+claim/clear like `dirty_properties` (rule #20). All three drains compose with `--free` + the
+floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and
 `compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor

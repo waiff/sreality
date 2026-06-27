@@ -396,7 +396,7 @@ def upsert_listing_with_property(
 # to daily-sweep-only attribution rather than breaking. sreality flows through
 # write_detail_batch (which enqueues directly), not this path, but is listed for
 # completeness so the set reads as the full broker-attributed source list.
-BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes"})
+BROKER_ATTRIBUTED_SOURCES = frozenset({"sreality", "idnes", "ceskereality"})
 
 
 def ingest_scraped_listing(
@@ -1688,6 +1688,38 @@ _BATCH_DIRTY_FROM_SIDS_SQL = """
     WHERE sreality_id = ANY(%s) AND property_id IS NOT NULL
     ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
 """
+
+# Wave 4c: a listing becomes DEDUP-ready once ALL its images are CLIP-tagged (pHash runs just
+# before). The clip_tag job calls this after each batch of tags; we enqueue the owning property
+# ONLY when the listing whose image was just tagged has NO remaining un-tagged stored image —
+# i.e. it is now FULLY tagged. Enqueuing on a PARTIAL batch (the old behaviour) shoved a listing
+# into the real-time --dirty drain at 1-of-N images tagged, so the floor-plan gate mis-read its
+# still-pending plan as absent (the false floor_plan_review queue). The dedup engine ALSO defers
+# any incompletely-tagged pair (resolve_pair `_clip_incomplete` gate), so this is the trigger
+# half of one invariant: the engine only ever decides a pair when both sides are fully tagged.
+# Same append-and-bump-marked_at discipline as dirty_properties (rule #20).
+_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL = """
+    INSERT INTO dedup_dirty_properties (property_id)
+    SELECT DISTINCT l.property_id FROM listings l JOIN images i ON i.sreality_id = l.sreality_id
+    WHERE i.id = ANY(%s) AND l.property_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM images i2
+        WHERE i2.sreality_id = l.sreality_id
+          AND i2.storage_path IS NOT NULL AND i2.clip_tagged_at IS NULL
+      )
+    ON CONFLICT (property_id) DO UPDATE SET marked_at = now()
+"""
+
+
+def mark_properties_dedup_dirty_for_images(conn: "psycopg.Connection",
+                                           image_ids: list[int]) -> int:
+    """Enqueue the properties owning these just-CLIP-tagged images into
+    dedup_dirty_properties (dedup-ready). Set-based + idempotent; returns rows touched."""
+    if not image_ids:
+        return 0
+    with conn.cursor() as cur:
+        cur.execute(_DEDUP_DIRTY_FROM_IMAGE_IDS_SQL, (list(image_ids),))
+        return cur.rowcount or 0
 
 # Broker intelligence (phase 1): a content change can alter a listing's broker
 # block (it is part of the content hash), so enqueue the changed listings for

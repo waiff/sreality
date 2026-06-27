@@ -70,6 +70,26 @@ def test_deterministic_fields_are_not_mapped():
     assert columns_from_extraction(extraction, dict(_EMPTY)) == {}
 
 
+def test_floor_plausibility_guard():
+    # floor above the building's total (both from this extraction) -> dropped,
+    # total kept.
+    out = columns_from_extraction(
+        {"floor": _env(8), "total_floors": _env(5)}, dict(_EMPTY)
+    )
+    assert out == {"total_floors": 5}
+    # total from the already-stored column (e.g. the deterministic parser) guards
+    # an LLM floor too.
+    out = columns_from_extraction({"floor": _env(9)}, dict(_EMPTY, total_floors=4))
+    assert out == {}
+    # an out-of-band floor is dropped.
+    assert columns_from_extraction({"floor": _env(99)}, dict(_EMPTY)) == {}
+    # a plausible floor under the total is kept.
+    out = columns_from_extraction(
+        {"floor": _env(3), "total_floors": _env(6)}, dict(_EMPTY)
+    )
+    assert out == {"floor": 3, "total_floors": 6}
+
+
 def test_normalizers():
     assert _norm_condition("Po rekonstrukci") == "po_rekonstrukci"
     assert _norm_condition("velmi dobrý stav") == "velmi_dobry"
@@ -109,13 +129,28 @@ def test_select_pending_sql_invariants():
             return self.cur
 
     conn = _Conn()
-    out = m._select_pending(conn, source="bazos", max_age_days=0, limit=500)
+    out = m._select_pending(conn, source="bazos", model="claude-haiku-4-5", max_age_days=0, limit=500)
     assert out == [1, 2]
     sql = conn.cur.sql
     assert "l.source = %s" in sql
     assert "l.description IS NOT NULL" in sql
-    assert "LEFT JOIN listing_description_enrichments e" in sql
-    assert "e.id IS NULL" in sql
-    assert "ORDER BY l.last_seen_at DESC" in sql
+    assert "NOT EXISTS (" in sql
+    assert "listing_description_enrichments e" in sql
+    # The fix: the latest-snapshot check is a per-listing correlated subquery, so
+    # there must be NO global `MAX(id) ... GROUP BY` over the whole snapshots table
+    # (that form aggregated every listing's history and timed out).
+    assert "GROUP BY" not in sql
+    assert "MAX(id)" in sql
+    # Model-keyed (migration 249): a model upgrade re-attempts every listing.
+    assert "e.model = %s" in sql
+    # Source-scoped + freshest-first reuses the existing (source, first_seen_at) index.
+    assert "ORDER BY l.first_seen_at DESC" in sql
     assert "LIMIT %s" in sql
-    assert conn.cur.params == ("bazos", 500)  # no freshness param when max_age_days=0
+    # (source, model, limit) — no freshness param when max_age_days=0.
+    assert conn.cur.params == ("bazos", "claude-haiku-4-5", 500)
+
+    # max_age_days>0 adds the freshness clause and threads (source, interval, model, limit).
+    conn2 = _Conn()
+    m._select_pending(conn2, source="bazos", model="m2", max_age_days=7, limit=500)
+    assert "last_seen_at > now() - %s::interval" in conn2.cur.sql
+    assert conn2.cur.params == ("bazos", "7 days", "m2", 500)

@@ -31,6 +31,7 @@ import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from typing import Any
 
 from toolkit.comparables import _DISPOSITION_LOOSE
 # Single-source image-tag taxonomy + family grouping (interior / exterior / plan) and the
@@ -39,8 +40,11 @@ from toolkit.comparables import _DISPOSITION_LOOSE
 from toolkit.room_taxonomy import (
     DISTINCTIVE_ROOMS,
     FULL_PRIORITY as ROOM_PRIORITY,
+    HOUSE_PRIORITY,
     INTERIOR_PRIORITY as BYT_ROOM_PRIORITY,
+    LAND_PRIORITY,
     NON_INTERIOR_TAGS,
+    category_main_compatible,
 )
 
 # Rule B: exact-address merge is blocked when areas disagree by more than this.
@@ -139,10 +143,59 @@ def profile_for(category_main: str | None) -> MatchProfile:
     return _PROFILES.get(category_main or "", _BYT_PROFILE)
 
 
-def room_priority_for(category_main: str | None) -> tuple[str, ...]:
-    """Comparison room order for a category's image layers. Apartments (the byt profile,
-    incl. NULL/unknown) use INTERIOR rooms only; other categories may use exterior."""
-    return BYT_ROOM_PRIORITY if profile_for(category_main).family == "byt" else ROOM_PRIORITY
+# The families that carry their own comparison-priority order. dum/komercni/ostatni share
+# the HOUSE default but are listed separately so the operator can tune each independently.
+TAG_PRIORITY_FAMILIES: tuple[str, ...] = ("byt", "dum", "komercni", "ostatni", "pozemek")
+
+
+def default_priority_for_family(family: str | None) -> tuple[str, ...]:
+    """The coded default comparison-tag order for a family — also the full set of VALID tags
+    for it (the operator can only reorder these). byt → interior rooms; pozemek → site plan
+    first; dum/komercni/ostatni → facade first."""
+    if family == "byt":
+        return BYT_ROOM_PRIORITY
+    if family == "pozemek":
+        return LAND_PRIORITY
+    return HOUSE_PRIORITY
+
+
+def normalize_priority(order: list[str] | tuple[str, ...], default: tuple[str, ...]) -> tuple[str, ...]:
+    """Coerce an operator-supplied order into a COMPLETE, VALID priority for a family: keep
+    only known tags (the default's set) in the operator's order, drop duplicates, then append
+    any default tags the operator omitted (so no room is silently dropped from comparison)."""
+    valid = set(default)
+    seen: set[str] = set()
+    out: list[str] = []
+    for tag in order:
+        if tag in valid and tag not in seen:
+            out.append(tag)
+            seen.add(tag)
+    out.extend(t for t in default if t not in seen)
+    return tuple(out)
+
+
+def room_priority_for(
+    category_main: str | None, overrides: dict[str, list[str]] | None = None
+) -> tuple[str, ...]:
+    """Comparison tag order for a category's perceptual + forensic image layers — the
+    PRIORITY that leads (stop-at-first-High). byt → interior rooms (wet rooms first);
+    pozemek → SITE PLAN first (the plot's identity); dum/komercni/ostatni → FACADE first
+    (the building's identity), then interiors. `overrides` (operator-editable, keyed by
+    family) reorders within the family's valid tag set; an absent / partial entry falls
+    back to (or is completed from) the coded default via `normalize_priority`."""
+    fam = profile_for(category_main).family
+    default = default_priority_for_family(fam)
+    if overrides and fam in overrides and overrides[fam]:
+        return normalize_priority(overrides[fam], default)
+    return default
+
+
+def distinctive_rooms_for(category_main: str | None) -> frozenset[str]:
+    """The tags where a SINGLE near-identical pHash match auto-merges (the count-of-1
+    override). byt → kitchen/bathroom (wet rooms are unit-specific). Non-apartments →
+    EMPTY: a facade / site plan is shared across a development's units (like a render), so
+    one match there is NOT conclusive — they require the >=2-match count instead."""
+    return DISTINCTIVE_ROOMS if profile_for(category_main).family == "byt" else frozenset()
 
 
 def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
@@ -150,6 +203,49 @@ def phash_excluded_tags_for(category_main: str | None) -> tuple[str, ...]:
     KNOWN-exterior / shared-marketing images (NON_INTERIOR_TAGS); other categories
     exclude nothing (any image can carry a house/plot's identity)."""
     return NON_INTERIOR_TAGS if profile_for(category_main).family == "byt" else ()
+
+
+# A byt image scoring >= this on the CLIP render axis (image_clip_tags.render_score,
+# migration 239) is a shared development RENDER, not a real photo of THE unit, so it
+# never feeds the byt pHash/cosine merge signal. The LIVE value is the operator-tunable
+# app_setting `dedup_render_exclude_min` (registry default 0.95); this constant is only
+# the fallback when no threshold is passed. 0.95 keeps only the most certain renders
+# excluded — at 0.65 the [0.85,0.95) band over-excluded real photos and suppressed
+# legitimate pHash matches (a false EXCLUSION costs recall, the harm we now minimise).
+RENDER_SCORE_EXCLUDE_MIN = 0.95
+
+
+def phash_render_exclude_for(
+    category_main: str | None, threshold: float = RENDER_SCORE_EXCLUDE_MIN
+) -> float | None:
+    """The render_score threshold above which an image is excluded from this category's
+    pHash / cosine merge signal. Apartments only (the validated case); None = no exclusion
+    (untagged / not-yet-scored images are never excluded — recall holds as coverage ramps).
+    `threshold` is the live `dedup_render_exclude_min` setting (the caller reads it once)."""
+    return threshold if profile_for(category_main).family == "byt" else None
+
+
+def render_exclusion_clause(
+    params: dict[str, Any], alias: str,
+    excluded_tags: tuple[str, ...], render_exclude_min: float | None,
+) -> str:
+    """A `AND NOT EXISTS (... image_clip_tags ...)` SQL fragment excluding an image (by
+    `alias`) that is a KNOWN-exterior/shared tag OR scores >= render_exclude_min on the
+    render axis — the ONE source of the pHash exclusion predicate, shared by the engine's
+    pHash count (`_phash_identical_pairs`) and the /dedup evidence reader
+    (`_phash_pair_evidence`), so the two never drift. Empty when neither filter applies;
+    mutates `params` with the bound values (`%(excl)s` / `%(rmin)s`)."""
+    conds: list[str] = []
+    if excluded_tags:
+        conds.append("t.logical_tag = ANY(%(excl)s)")
+        params["excl"] = list(excluded_tags)
+    if render_exclude_min is not None:
+        conds.append("t.render_score >= %(rmin)s")
+        params["rmin"] = render_exclude_min
+    if not conds:
+        return ""
+    return (f" AND NOT EXISTS (SELECT 1 FROM image_clip_tags t "
+            f"WHERE t.image_id = {alias}.id AND ({' OR '.join(conds)}))")
 
 
 @dataclass(frozen=True)
@@ -395,14 +491,13 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
         and a.category_type != b.category_type
     ):
         return PairDecision("reject", None, "category_type_contradiction")
-    if (
-        a.category_main is not None and b.category_main is not None
-        and a.category_main != b.category_main
-    ):
+    if not category_main_compatible(a.category_main, b.category_main):
         return PairDecision("reject", None, "category_main_contradiction")
-    # Category drives the matching policy. The pair shares a category_main here (the
-    # contradiction above rejected mismatches), so either side's family is the profile;
-    # a NULL/unknown category falls back to the byt profile (unchanged behavior).
+    # Category drives the matching policy. The pair's categories are COMPATIBLE here
+    # (equal, or the one sanctioned dum<->komercni cross-type), so the FIRST listing's
+    # family is the profile (operator policy: no special cross-type logic — the side that
+    # reached the engine first sets the priorities); a NULL/unknown category falls back to
+    # the byt profile (unchanged behavior).
     profile = profile_for(a.category_main if a.category_main is not None else b.category_main)
     # Disposition is mandatory for apartments; for single-dwelling families it's absent,
     # so only enforce compatibility when the profile requires it OR both rows carry one.
@@ -439,9 +534,12 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
     if _unit_markers_contradict(a.description, b.description):
         return PairDecision("reject", None, "unit_marker_contradiction")
 
-    # Rule B: exact address (street + house number + disposition + floor), with
-    # the 5% area guard. house_number must be present + equal on both, floor
-    # present + equal on both, disposition exactly equal (not just loose).
+    # Rule B (exact address) is RETIRED (2026-06): exact street+house_number+disposition+floor
+    # was the ONLY auto-merge path that produced false merges (6.7% later unmerged — two
+    # different units at the same address+floor — vs 0% for pHash + visual). Exact address is
+    # not unit-conclusive, so it is now just a (strong) rule-C CANDIDATE: the pair flows
+    # through the pHash fast-path → forensic visual → floor-plan gate (the 0%-reversal paths)
+    # like any street+disposition pair. The `address_exact` reason is kept for provenance.
     exact_address = (
         a.house_number is not None and b.house_number is not None
         and a.house_number.strip().lower() == b.house_number.strip().lower()
@@ -450,10 +548,10 @@ def classify_pair(a: ListingKey, b: ListingKey) -> PairDecision:
     )
     if exact_address:
         if area_diff is not None and area_diff > profile.address_area_guard_pct:
-            # Same address+floor+disposition but materially different area: most
-            # likely two distinct units — let vision settle it.
+            # Same address+floor+disposition but materially different area: likely two distinct
+            # units — a candidate the visual flow settles (was already demoted pre-retirement).
             return PairDecision("candidate", "area_guard")
-        return PairDecision("auto_merge", "address_exact")
+        return PairDecision("candidate", "address_exact")
 
     # Rule C: shares street + disposition, no contradiction — a visual candidate.
     return PairDecision("candidate", None)
@@ -480,17 +578,27 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * r * math.asin(math.sqrt(h))
 
 
+def geo_category_bucket(category_main: str | None) -> str | None:
+    """The geo-cell category token. dum and komercni collapse to ONE bucket so the
+    sanctioned cross-type co-locates in the same cell (and reaches classify_geo_pair);
+    every other category buckets to itself (a flat never shares a house's cell)."""
+    return "dum|komercni" if category_main in ("dum", "komercni") else category_main
+
+
 def geo_cell_key(
     obec_id: int | None, lat: float | None, lng: float | None,
     category_main: str | None, category_type: str | None, *, precision: int = 4,
 ) -> str | None:
     """Blocking key for the geo path: one municipality + a rounded coordinate + the
     offering. Scoping by obec_id keeps a coordinate collision across towns apart, and
-    by (category_main, category_type) keeps a sale flat and a rental house out of one
-    cell. None when the coordinate / municipality is missing (the row can't geo-block)."""
+    by (category bucket, category_type) keeps a sale flat and a rental house out of one
+    cell — while dum and komercni share a bucket (geo_category_bucket) so the one
+    sanctioned cross-type can pair. None when the coordinate / municipality is missing
+    (the row can't geo-block)."""
     if obec_id is None or lat is None or lng is None:
         return None
-    return f"geo:{obec_id}:{round(lat, precision)}:{round(lng, precision)}:{category_main}:{category_type}"
+    bucket = geo_category_bucket(category_main)
+    return f"geo:{obec_id}:{round(lat, precision)}:{round(lng, precision)}:{bucket}:{category_type}"
 
 
 def _price_match(a: int | None, b: int | None, pct: float = GEO_PRICE_MATCH_PCT) -> bool:
@@ -501,15 +609,17 @@ def _price_match(a: int | None, b: int | None, pct: float = GEO_PRICE_MATCH_PCT)
 
 def classify_geo_pair(
     a: ListingKey, b: ListingKey, profile: MatchProfile, *, max_coord_m: float = GEO_MAX_COORD_M,
+    max_area_pct: float | None = None,
 ) -> PairDecision:
     """Decide two co-located single-dwelling listings (same geo cell). Pure, no images.
 
     'reject' on a hard contradiction (coordinate too far, different house number, area
-    gap > the profile's max, or a same-development unit-marker clash); 'auto_merge' only
-    for a STRONG house signal (near-identical area AND matching price-or-house-number)
-    when the profile permits it; otherwise 'candidate'. The orchestrator decides whether
-    to honour an auto_merge (P1 keeps every family queue-only until the golden set
-    calibrates the threshold)."""
+    gap > `max_area_pct` (defaults to the profile's), or a same-development unit-marker
+    clash); 'auto_merge' only for a STRONG house signal (near-identical area AND matching
+    price-or-house-number) when the profile permits it; otherwise 'candidate'. The
+    orchestrator decides whether to honour an auto_merge — in the unified geo path it maps
+    auto_merge → candidate, so the free-first visual flow is the sole merge gate."""
+    area_max_pct = profile.candidate_area_max_pct if max_area_pct is None else max_area_pct
     if a.sreality_id == b.sreality_id:
         return PairDecision("reject", None, "same_listing")
     if a.property_id is not None and a.property_id == b.property_id:
@@ -519,10 +629,7 @@ def classify_geo_pair(
         and a.category_type != b.category_type
     ):
         return PairDecision("reject", None, "category_type_contradiction")
-    if (
-        a.category_main is not None and b.category_main is not None
-        and a.category_main != b.category_main
-    ):
+    if not category_main_compatible(a.category_main, b.category_main):
         return PairDecision("reject", None, "category_main_contradiction")
     if (
         a.lat is not None and a.lng is not None and b.lat is not None and b.lng is not None
@@ -532,7 +639,7 @@ def classify_geo_pair(
     if _house_numbers_contradict(a.house_number, b.house_number):
         return PairDecision("reject", None, "house_number_contradiction")
     area_diff = _area_pct_diff(a.area_m2, b.area_m2)
-    if area_diff is not None and area_diff > profile.candidate_area_max_pct:
+    if area_diff is not None and area_diff > area_max_pct:
         return PairDecision("reject", None, "area_contradiction")
     # Same-development text guard (a new estate names "dům 3A" vs "5C", "pozemek č.3"
     # vs "č.4"): distinct units, never the same property — reuse the street path's check.
@@ -547,7 +654,17 @@ def classify_geo_pair(
         area_diff is not None and area_diff <= GEO_STRONG_AREA_PCT
         and (_price_match(a.price_czk, b.price_czk) or house_no_match)
     )
-    if strong and profile.geo_auto_merge_allowed:
+    # Geo-auto-merge gates on BOTH families, not just `a`'s. For a same-type pair this is
+    # exactly `profile.geo_auto_merge_allowed` (one family). For the dum<->komercni cross-type
+    # it is the SYMMETRIC, conservative choice: komercni isn't geo-auto-merge-validated, so the
+    # pair QUEUES regardless of which side arrived first — it never auto-merges on a geo signal
+    # alone (it still merges via the exact-address / pHash / visual paths, or operator review).
+    # Without this, (dum, komercni) and (komercni, dum) would decide differently by order.
+    both_allow_auto_merge = (
+        profile.geo_auto_merge_allowed
+        and profile_for(b.category_main).geo_auto_merge_allowed
+    )
+    if strong and both_allow_auto_merge:
         return PairDecision("auto_merge", "geo_exact")
     return PairDecision("candidate", "geo_strong" if strong else "geo_weak")
 
@@ -576,11 +693,14 @@ def decide_phash_fastpath(
     return identical_image_pairs >= PHASH_MIN_IDENTICAL_PAIRS or distinctive_match
 
 
-def rooms_in_priority(common_rooms: set[str], category_main: str | None = None) -> list[str]:
+def rooms_in_priority(
+    common_rooms: set[str], category_main: str | None = None,
+    overrides: dict[str, list[str]] | None = None,
+) -> list[str]:
     """The room types present in BOTH listings, in comparison priority order for the
-    category. Apartments (default / NULL) compare INTERIOR rooms only; other categories
-    may compare exterior rooms too."""
-    return [r for r in room_priority_for(category_main) if r in common_rooms]
+    category (operator `overrides` honoured per family). Apartments (default / NULL) compare
+    INTERIOR rooms only; other categories may compare exterior rooms too."""
+    return [r for r in room_priority_for(category_main, overrides) if r in common_rooms]
 
 
 def verdict_is_merge(verdict: str | None) -> bool:

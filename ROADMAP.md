@@ -6,6 +6,106 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup follow-ups — floor-plan confidence floor + dead-code cleanup
+
+Post-merge follow-ups to the fully-tagged-before-decide PR.
+
+- **Floor-plan confidence floor** (`scripts/dedup_engine._floor_plan_image_ids`,
+  `FLOOR_PLAN_MIN_CONFIDENCE = 0.50`): a CLIP `floor_plan` tag below 0.50 is dropped from the
+  gate's plan set. Data-validated on the live distribution (95% of CLIP floor_plan tags ≥ 0.52,
+  false positives like an idnes location-map mis-tagged at 0.36 concentrate < 0.50), so a phantom
+  plan no longer creates a false "one-sided" read that queues an otherwise-mergeable pair. CLIP-only
+  because only `image_clip_tags.confidence` is numeric — the LLM `image_room_classifications`
+  confidence is a coarse high/medium/low text enum (a numeric floor there is a type error), left
+  unfiltered.
+- **Dead-code cleanup**: removed the inert `dedup_clip_only` setting + its plumbing (superseded by
+  the always-on readiness gate) and the always-zero "By address" dashboard stat (rule B retired →
+  no address auto-merges). Backend `auto_address` counter kept (writes 0, accurate).
+
+### 2026-06: Bazos enrichment — model-keyed cache (sticky-miss fix, PR3 of the enrichment fix)
+
+The description-enrichment cache `listing_description_enrichments` was UNIQUE(sreality_id,
+snapshot_id): a MISS (LLM returned null / low-confidence) still wrote a row, so the listing's
+latest snapshot was retired from selection FOREVER — even after a model upgrade that would now
+extract the field. For stable classified ads (rare new snapshots) ~80% of cache rows had floor
+still NULL, never retried. Migration 249 widens the key to `(sreality_id, snapshot_id, model)`
+(mirrors `read_floor_plan` / `building_attachment_analyses`): a model upgrade re-attempts every
+listing; a same-model re-run stays a no-op (no re-bill). `_select_pending`'s correlated NOT EXISTS
++ the enricher's cache-check are scoped to the current model; the INSERT uses a **targetless
+`ON CONFLICT DO NOTHING`** (the cache key is the only conflictable constraint, `id` is GENERATED
+ALWAYS) so the code is tolerant of the constraint swap regardless of apply-vs-deploy order.
+
+- **Considered + rejected:** re-selecting still-NULL gap fields at the SAME model — re-bills the
+  same model on the same text for marginal gain (the #606 deterministic regex already catches the
+  high-precision floor cases) and risks infinite re-bill on truly text-less ads. Re-enrichment is
+  the explicit, bounded model-upgrade lever instead.
+- This closes the enrichment-reliability arc (PR1 #603 selection+budget, PR2 #606 shared floor,
+  PR3 model-keyed cache).
+
+### 2026-06: Dedup — fully-tagged-before-decide invariant + rule B retired
+
+Cross-portal duplicates (near-identical photos) sat unmerged in the `/dedup` queue as false
+`floor_plan_review` "one-sided" cases (77% of the backlog). Root cause: the engine decided pairs
+before their images finished CLIP-tagging, so a still-pending floor plan looked absent.
+
+- **Trigger fix** (`scraper/db.py mark_properties_dedup_dirty_for_images`): mark a property
+  dedup-ready ONLY when the just-tagged listing is FULLY tagged (`NOT EXISTS` a pending stored
+  image) — not after each partial batch (the bug).
+- **Readiness gate** (`scripts/dedup_engine.py resolve_pair._clip_incomplete`): DEFAULT defer (when
+  CLIP is the tagger) of any pair with a not-fully-tagged listing — up front, before pHash/visual —
+  so the engine never decides on partial tag data. The `--dirty` drain re-decides once both sides are
+  complete → a real two-sided floor-plan compare merges on MATCHING plans. Supersedes `dedup_clip_only`.
+- **Rule B retired** (`toolkit/dedup_engine.classify_pair`): exact-address auto-merge removed — it was
+  the only path with false merges (6.7% unmerged vs 0% for pHash/visual). Exact address is now a
+  rule-C candidate flowing through pHash → visual (the `address_exact` reason kept for provenance).
+
+### 2026-06: Bazos floor — shared `normalize_floor` + deterministic miner (PR2 of the enrichment fix)
+
+bazos apartment `floor` coverage was 0.0% (2/13,976) vs 94–99.9% on every other portal —
+the deterministic `bazos_parser` extracted area/disposition but no floor, leaving the whole
+field to the (de-facto-dead) LLM enrichment. New shared `scraper/floor.py` mirrors
+`scraper/street.py`: one canonical Czech-floor grammar `normalize_floor()` (ground=0:
+přízemí=0, 1.patro=1, 1.NP=0, suterén=−1 — the idnes + LLM-rubric convention; sreality's
+ground=1/NP stays the rule-#15 clash, converting it is a follow-up) plus a HIGH-PRECISION
+free-text miner `floor_from_text()` wired into `bazos_parser.parse_detail` as a deterministic
+first pass (like area/disposition). The miner fires only on explicit numeric cues and
+guards the building-total trap (unit-floor NOUN '6. patře' captured; adjectival
+'šestipodlažní' / 'z celkových N pater' read only as `total_floors`); the ambiguous tail
+(word ordinals, mezonet, bare 'suterén') is left to the LLM. Validated on real data:
+16/16 clauses correct, 0 false positives, ~50% recall at 100% precision. A shared
+`is_plausible_floor()` (reject floor>total_floors / out-of-band) guards BOTH the miner and
+the LLM fill (`columns_from_extraction`), and the enrichment prompt now states floor is the
+unit's storey, never the building total. The LLM enrichment still fills the residual + the
+other 7 gap fields (`floor` stays NULL-guarded → the deterministic value always wins).
+
+- **Next:** route idnes/maxima's extracted floor values through `normalize_floor()` to
+  retire their duplicated regexes; then tighten the dedup engine's `abs(floor diff) ≥ 2`
+  convention tolerance to exact equality once sreality's ground=1 floors are converted +
+  backfilled (its own PR — touches merge behaviour). Sticky-miss cache fix is the next PR.
+
+### 2026-06: Dedup decision feedback + full auditability (`/dedup`)
+
+The operator can now FLAG any dedup decision as incorrect and audit exactly why the engine
+decided it — a labelled corpus for improving the flow, with every threshold and picture
+traceable.
+
+- **migration 248** — `dedup_decision_feedback`, **property-pair-keyed** (canonical
+  `left_property_id < right_property_id`, not an audit-row id and not the drifting repr-listing
+  pair) so one flag spans the Decision-history feed AND the Needs-review queue and persists across
+  the pair's lifecycle without orphaning on a recompute.
+  Carries `is_incorrect` + `expected_outcome` (should_merge / should_dismiss / unsure) + a free
+  note. Writes via bearer-gated `POST/DELETE /dedup/feedback`; the feed gains a `flagged`-only
+  filter. Shared `<DecisionFeedbackControl>` on both surfaces.
+- **`toolkit/dedup_audit.build_audit_breakdown(detail)`** — a pure decision→rungs mapping
+  (pHash / cosine / forensic verdict / floor-plan / address, each measured-vs-threshold,
+  met/unmet/info), computed server-side from the stored factor `detail` so it renders identically
+  on `list_pair_audit` + `list_candidates` and on historical rows. Each rung deep-links to the exact
+  Settings knob (`settingAnchorId` → `/settings#setting-<key>`; the Settings rows carry stable
+  anchors + a hash-scroll/force-open).
+- **`decision_evidence`** (`GET /dedup/decision-evidence`) — the SPECIFIC pictures, resolved at
+  READ time: the pHash near-identical pairs (recomputed from stored phashes with the engine's
+  category exclusions), the compared plans, or the deciding room. No decision-time `detail` bloat.
+
 ### 2026-06: Property identity — category-aware dedup (P0 foundation, landed dark)
 
 The dedup engine keys on `street + disposition`, but `disposition` is an apartment-shaped
@@ -165,7 +265,6 @@ lands paired with live Resend provisioning rather than blind.
 via `ChannelClient`, gated to start only when a transport is configured) + `compose_notification_message`
 + recipient resolution + `SPA_BASE_URL` + the Delivery UI; operator provisions Resend
 (`RESEND_API_KEY`/`EMAIL_FROM` + SPF/DKIM/DMARC DNS). Then PR 4 Telegram, PR 5 outreach unification.
->>>>>>> origin/main
 
 ### 2026-06: Notification channel-delivery foundation (Sprint N PR 1 — ships dark)
 

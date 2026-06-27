@@ -5,7 +5,8 @@ condition / building_type / energy — only price, area, disposition, coords, an
 the seller's text. This reuses the per-source-parser `RECORD_LISTING_TOOL` to
 extract those typed fields from the description with a cheap model (Haiku),
 caches the extraction in `listing_description_enrichments` (keyed
-`(sreality_id, snapshot_id)` so a new snapshot auto-invalidates), and fills ONLY
+`(sreality_id, snapshot_id, model)` so a new snapshot OR a model upgrade
+auto-invalidates), and fills ONLY
 the listings columns that are currently NULL — the deterministic HTML-parsed
 fields (price / area / disposition) are authoritative and never overwritten.
 
@@ -21,6 +22,7 @@ import re
 from typing import TYPE_CHECKING, Any, Callable
 from unicodedata import combining, normalize
 
+from scraper.floor import is_plausible_floor
 from scraper.source_parsers.common import RECORD_LISTING_TOOL
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -40,7 +42,9 @@ _SYSTEM = (
     "statements, 'medium' for strong implications, 'low' for guesses. Do not "
     "invent values. Czech terms: výtah=lift, balkón/lodžie/terasa=balcony, "
     "garáž/parkování/stání=parking, cihla/panel=building material, "
-    "po rekonstrukci/novostavba/před rekonstrukcí=condition."
+    "po rekonstrukci/novostavba/před rekonstrukcí=condition. floor is the "
+    "APARTMENT's own storey (e.g. 've 3. patře', '3. NP'), NEVER the building's "
+    "total number of floors ('třípodlažní dům' / 'z celkových 5 pater')."
 )
 
 
@@ -122,6 +126,16 @@ def columns_from_extraction(
         transformed = transform(value)
         if transformed is not None:
             out[col] = transformed
+    # Plausibility: an apartment's storey can't exceed the building's total and
+    # lives in a sane band — drop a floor that violates either (usually a misread
+    # building-total number). The total may come from this same extraction or the
+    # already-stored column. One shared guard with the deterministic miner.
+    if "floor" in out:
+        total = out.get("total_floors")
+        if total is None:
+            total = current.get("total_floors")
+        if not is_plausible_floor(out["floor"], total):
+            del out["floor"]
     return out
 
 
@@ -152,7 +166,9 @@ def enrich_listing_description(
     """Extract typed attributes from one listing's description and fill gaps.
 
     Returns a status dict. No-op (no LLM cost) when the listing has no
-    description or its latest snapshot is already enriched.
+    description or its latest snapshot is already enriched by this `model`
+    (the cache is keyed `(sreality_id, snapshot_id, model)`, migration 249, so a
+    model upgrade re-attempts every listing rather than reusing an older miss).
     """
     model = model or DEFAULT_MODEL
     with conn.cursor() as cur:
@@ -168,8 +184,8 @@ def enrich_listing_description(
     with conn.cursor() as cur:
         cur.execute(
             "SELECT 1 FROM listing_description_enrichments "
-            "WHERE sreality_id = %s AND snapshot_id = %s",
-            (sreality_id, snapshot_id),
+            "WHERE sreality_id = %s AND snapshot_id = %s AND model = %s",
+            (sreality_id, snapshot_id, model),
         )
         if cur.fetchone() is not None:
             return {"status": "cached", "sreality_id": sreality_id}
@@ -196,7 +212,11 @@ def enrich_listing_description(
             "INSERT INTO listing_description_enrichments "
             "(sreality_id, snapshot_id, extracted, filled, model, llm_call_id, cost_usd) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (sreality_id, snapshot_id) DO NOTHING",
+            # Targetless (not `(sid, snapshot, model)`): the only conflictable
+            # constraint is the cache key (id is GENERATED ALWAYS), so this is
+            # equivalent AND survives migration 249's constraint swap regardless of
+            # apply-vs-deploy order — no fragile lockstep.
+            "ON CONFLICT DO NOTHING",
             (sreality_id, snapshot_id, json.dumps(extraction), json.dumps(columns),
              model, resp.llm_call_id, resp.cost_usd),
         )

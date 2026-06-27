@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ImagePublic } from '@/lib/types';
 import { imageSrc } from '@/lib/imageUrl';
 import ImageTagBadge from '@/components/ImageTagBadge';
+import ImageRenderBadge from '@/components/ImageRenderBadge';
 
 interface Props {
   images: ImagePublic[];
@@ -77,6 +78,10 @@ function Thumbnail({
             tag={image.clip_fine_tag}
             confidence={image.clip_confidence}
             className="absolute bottom-1 left-1 max-w-[calc(100%-0.5rem)] truncate"
+          />
+          <ImageRenderBadge
+            renderScore={image.clip_render_score}
+            className="absolute bottom-1 right-1"
           />
         </>
       )}
@@ -217,6 +222,10 @@ function Lightbox({
               tag={current.clip_fine_tag}
               confidence={current.clip_confidence}
               className="absolute bottom-2 left-2 text-[0.7rem]"
+            />
+            <ImageRenderBadge
+              renderScore={current.clip_render_score}
+              className="absolute bottom-2 right-2 text-[0.7rem]"
             />
           </>
         )}

@@ -23,17 +23,22 @@ export const IMAGE_TAG_LABELS: Record<string, string> = {
   living_room: 'obývací pokoj',
   bedroom: 'ložnice',
   hallway: 'chodba',
+  staircase_interior: 'schodiště interiér',
+  staircase_exterior: 'schodiště exteriér',
   exterior_facade: 'fasáda',
   balcony_terrace: 'balkon/terasa',
   garden: 'zahrada',
   floor_plan: 'půdorys',
   site_plan: 'situační plán',
+  property_document: 'dokument',
   other: 'ostatní',
   // CLIP fine sub-styles (data/clip_taxonomy.json) that collapse into the above.
   situation_plan: 'situační plán',
   cadastral_map: 'katastrální mapa',
   aerial_plot: 'letecký snímek',
   location_map: 'mapa lokality',
+  energy_certificate: 'energetický průkaz',
+  document_text: 'dokument',
 };
 
 /** Czech display label for a CLIP/room tag; falls back to the raw tag, null for none. */
@@ -49,4 +54,6 @@ export interface TaggedImageUrl {
   tag: string | null;
   /** CLIP softmax confidence 0..1 of the winning anchor, for the tooltip. */
   confidence: number | null;
+  /** CLIP render-vs-photo score 0..1 (migration 239); null until scored. */
+  renderScore: number | null;
 }

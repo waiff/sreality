@@ -137,6 +137,21 @@ def test_merge_rejects_byt_vs_dum_at_chokepoint():
         )
 
 
+def test_merge_allows_dum_komercni_cross_type_at_chokepoint():
+    # The ONE sanctioned cross-type (a house on one portal, commercial on another, same
+    # building) must NOT be refused — the merge proceeds normally past the category guard.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "dum"), (20, "active", "prodej", "komercni")]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,), (2,)]),
+    ])
+    result = merge_properties(
+        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+    )
+    assert result["data"]["survivor_id"] == 10
+    assert _find(conn.executed, "UPDATE listings SET property_id =") is not None
+
+
 def test_merge_rejects_self_merge():
     conn = _FakeConn([])
     with pytest.raises(MergeError):

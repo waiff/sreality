@@ -14,13 +14,16 @@ name: "Scraping: Bazos description enrichment (LLM, every 6h + manual)"
 #     driver, decoupled from the scrape so the LLM phase never slows it.
 #   * workflow_dispatch — manual backfill / re-run with overrides.
 #
-# Cost-capped via max_cost_usd; reach the cap mid-run and the script logs an
-# "ENRICH cost cap reached" line and exits 0 with the rows done so far kept.
-# The selection is portal-generic (predicate over listings/listing_snapshots) —
-# point --source at another description-only portal to reuse it.
+# Bounded two ways, whichever comes first: max_cost_usd (LLM spend) and
+# max_seconds (wall clock). On either cap the script logs the reason and exits 0
+# with the rows done so far kept; the next cron tick resumes from where it left
+# off (the selection skips already-enriched snapshots). max_seconds is set below
+# the job timeout-minutes so a run FINALIZES CLEANLY instead of being cancelled
+# mid-flight at the timeout. The selection is portal-generic (predicate over
+# listings/listing_snapshots) — point --source at another description-only portal.
 #
-# Concurrency group bazos-enrichment, cancel-in-progress=false: a long run is
-# never killed mid-enrichment; the next tick queues behind it.
+# Concurrency group bazos-enrichment, cancel-in-progress=false: the next tick
+# queues behind a still-running one rather than killing it.
 #
 # Required GitHub secrets:
 #   SUPABASE_DB_URL   — same one used by every other workflow
@@ -37,14 +40,19 @@ on:
         default: "bazos"
         type: string
       limit:
-        description: Maximum number of listings to enrich in this run
+        description: Max listings selected this run (the wall-clock budget usually stops it first)
         required: true
-        default: "1000"
+        default: "3000"
         type: string
       max_cost_usd:
         description: Stop early when this run's LLM cost exceeds this cap (USD)
         required: true
-        default: "10"
+        default: "20"
+        type: string
+      max_seconds:
+        description: Wall-clock budget; finalize cleanly when reached (keep below timeout-minutes)
+        required: true
+        default: "3000"
         type: string
       model:
         description: Anthropic model id (blank = claude-haiku-4-5)
@@ -90,10 +98,12 @@ jobs:
           SOURCE='${{ inputs.source }}'
           if [ -z "$SOURCE" ]; then SOURCE="bazos"; fi
           LIMIT='${{ inputs.limit }}'
-          if [ -z "$LIMIT" ]; then LIMIT="1000"; fi
+          if [ -z "$LIMIT" ]; then LIMIT="3000"; fi
           COST='${{ inputs.max_cost_usd }}'
-          if [ -z "$COST" ]; then COST="10"; fi
-          ARGS="--source $SOURCE --limit $LIMIT --max-cost-usd $COST"
+          if [ -z "$COST" ]; then COST="20"; fi
+          SECS='${{ inputs.max_seconds }}'
+          if [ -z "$SECS" ]; then SECS="3000"; fi
+          ARGS="--source $SOURCE --limit $LIMIT --max-cost-usd $COST --max-seconds $SECS"
           if [ -n "${{ inputs.model }}" ]; then ARGS="$ARGS --model ${{ inputs.model }}"; fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           echo "Running with: $ARGS"

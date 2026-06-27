@@ -41,6 +41,11 @@ _FLOOR_PLAN_MODEL_KEY = "llm_floor_plan_match_model"
 _FLOOR_PLAN_CALLED_FOR = "compare_listing_floor_plans"
 _FLOOR_PLAN_VERDICTS = ("same_layout", "different_layout", "inconclusive")
 
+# N×N plan gate: cap plans per side sent to one vision call. Real listings carry 1-3 plans;
+# this only guards a pathological count from blowing the token limit (20 downscaled plans ≈
+# 32k tokens, well under the 200k cap), and is generous enough to never drop a real plan.
+_MAX_PLANS_PER_SIDE = 20
+
 # The forensic compare is the only call whose verdict auto-merges, so its resolution
 # is gated: it stays at the (quality-neutral) document tier until the Haiku+768 A/B
 # (scripts/validate_vision_models) confirms 768px reproduces every historical High.
@@ -262,6 +267,19 @@ def _blocks(r2: Any, keys: list[str], max_edge: int) -> list[dict[str, Any]]:
     return [image_block(r2, key, max_edge) for key in keys]
 
 
+def _labelled_plan_blocks(
+    r2: Any, keys: list[str], label_prefix: str, max_edge: int
+) -> list[dict[str, Any]]:
+    """One labelled image block per plan ("<prefix> plan k:" then the image) so the N×N
+    plan gate can reference a specific plan ("A plan 2 matches B plan 1") and the model
+    treats each as a distinct candidate rather than one blurred set."""
+    out: list[dict[str, Any]] = []
+    for i, key in enumerate(keys, 1):
+        out.append({"type": "text", "text": f"{label_prefix} plan {i}:"})
+        out.append(image_block(r2, key, max_edge))
+    return out
+
+
 def _extract(tool_calls: list[dict[str, Any]]) -> tuple[str, str]:
     matching = [tc for tc in tool_calls if tc.get("name") == "record_visual_match"]
     if not matching:
@@ -440,21 +458,23 @@ def _build_site_plan_content(
     if not image_storage.is_configured():
         raise VisualMatchError("R2 is not configured; cannot fetch image bytes for vision")
 
-    keys_a = _storage_paths(conn, keys_a_ids)
-    keys_b = _storage_paths(conn, keys_b_ids)
+    keys_a = _storage_paths(conn, keys_a_ids)[:_MAX_PLANS_PER_SIDE]
+    keys_b = _storage_paths(conn, keys_b_ids)[:_MAX_PLANS_PER_SIDE]
     if not keys_a or not keys_b:
         raise VisualMatchError("missing site-plan images for one side")
 
     r2 = image_storage.R2Client.from_env()
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": f"Listing A — site/situation plan(s) ({len(keys_a)}):"}
+        {"type": "text", "text": f"Listing A — {len(keys_a)} site/situation plan(s):"}
     ]
-    content.extend(_blocks(r2, keys_a, DOCUMENT_MAX_EDGE))
-    content.append({"type": "text", "text": f"Listing B — site/situation plan(s) ({len(keys_b)}):"})
-    content.extend(_blocks(r2, keys_b, DOCUMENT_MAX_EDGE))
+    content.extend(_labelled_plan_blocks(r2, keys_a, "Listing A", DOCUMENT_MAX_EDGE))
+    content.append({"type": "text", "text": f"Listing B — {len(keys_b)} site/situation plan(s):"})
+    content.extend(_labelled_plan_blocks(r2, keys_b, "Listing B", DOCUMENT_MAX_EDGE))
     content.append({
         "type": "text",
-        "text": "Decide same_unit vs different_unit, then call record_site_plan_match once.",
+        "text": "Identify the unit each listing highlights across its plans, then compare A vs B. "
+                "same_unit if ANY pair shares a unit; different_unit only if NO pair does. "
+                "Call record_site_plan_match once.",
     })
     return content
 
@@ -708,21 +728,22 @@ def _build_floor_plan_content(
     if not image_storage.is_configured():
         raise VisualMatchError("R2 is not configured; cannot fetch image bytes for vision")
 
-    keys_a = _storage_paths(conn, keys_a_ids)
-    keys_b = _storage_paths(conn, keys_b_ids)
+    keys_a = _storage_paths(conn, keys_a_ids)[:_MAX_PLANS_PER_SIDE]
+    keys_b = _storage_paths(conn, keys_b_ids)[:_MAX_PLANS_PER_SIDE]
     if not keys_a or not keys_b:
         raise VisualMatchError("missing floor-plan images for one side")
 
     r2 = image_storage.R2Client.from_env()
     content: list[dict[str, Any]] = [
-        {"type": "text", "text": f"Listing A — floor plan(s) ({len(keys_a)}):"}
+        {"type": "text", "text": f"Listing A — {len(keys_a)} floor plan(s):"}
     ]
-    content.extend(_blocks(r2, keys_a, DOCUMENT_MAX_EDGE))
-    content.append({"type": "text", "text": f"Listing B — floor plan(s) ({len(keys_b)}):"})
-    content.extend(_blocks(r2, keys_b, DOCUMENT_MAX_EDGE))
+    content.extend(_labelled_plan_blocks(r2, keys_a, "Listing A", DOCUMENT_MAX_EDGE))
+    content.append({"type": "text", "text": f"Listing B — {len(keys_b)} floor plan(s):"})
+    content.extend(_labelled_plan_blocks(r2, keys_b, "Listing B", DOCUMENT_MAX_EDGE))
     content.append({
         "type": "text",
-        "text": "Decide same_layout vs different_layout, then call record_floor_plan_match once.",
+        "text": "Compare EVERY plan of A against EVERY plan of B (N×N). same_layout if ANY pair "
+                "matches; different_layout only if NO pair matches. Call record_floor_plan_match once.",
     })
     return content
 

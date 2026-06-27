@@ -287,6 +287,36 @@ _DEFAULTS: dict[str, PortalConfig] = {
             index_rate=1.0, detail_workers=8, detail_rate=1.0,
         ),
     ),
+    "ceskereality": PortalConfig(
+        source="ceskereality",
+        # Per-category HTML search pages (/{sale}/{category}/), each carrying a
+        # result total in its meta description ("Máme tady N…") and no deep-
+        # pagination cap, so a per-category walk is provable-complete → the
+        # completeness-gated mark_inactive runs (source-scoped). The detail URL
+        # carries the category, so the drain re-derives each listing's category
+        # from its own URL. POLITE rates — the site disallows generic bots in
+        # robots.txt, so we crawl slowly with an honest UA (ceskereality_client).
+        supports_complete_walk=True,
+        categories=[
+            {"sale_type": "prodej",   "category": "byty"},
+            {"sale_type": "pronajem", "category": "byty"},
+            {"sale_type": "prodej",   "category": "rodinne-domy"},
+            {"sale_type": "pronajem", "category": "rodinne-domy"},
+            {"sale_type": "prodej",   "category": "chaty-chalupy"},
+            {"sale_type": "pronajem", "category": "chaty-chalupy"},
+            {"sale_type": "prodej",   "category": "pozemky"},
+            {"sale_type": "pronajem", "category": "pozemky"},
+            {"sale_type": "prodej",   "category": "komercni-prostory"},
+            {"sale_type": "pronajem", "category": "komercni-prostory"},
+            {"sale_type": "prodej",   "category": "ostatni"},
+            {"sale_type": "pronajem", "category": "ostatni"},
+        ],
+        split_threshold=None,
+        limits=PortalLimits(
+            index_rate=0.7, detail_workers=2, detail_rate=0.7,
+            max_detail_per_run=1500,
+        ),
+    ),
 }
 
 

@@ -13,6 +13,8 @@ from __future__ import annotations
 # Every logical_tag the CLIP tagger / LLM classifier can emit, grouped into a FAMILY:
 #   interior — a unit's own rooms; the strongest same-flat signal (used ALONE for byt).
 #   exterior — facade / outdoor shots a whole development reuses across its units.
+#   common   — SHARED building circulation (stairwells): every unit in a building shows the
+#              same one, so it's never a unit identifier — excluded like exterior/plan.
 #   plan     — floor / site plans; shared templates, never a perceptual-match signal.
 #   other    — unclassifiable content; treated as unknown (counts, never excluded).
 ROOM_FAMILIES: dict[str, str] = {
@@ -25,8 +27,11 @@ ROOM_FAMILIES: dict[str, str] = {
     "exterior_facade": "exterior",
     "balcony_terrace": "exterior",
     "garden": "exterior",
+    "staircase_interior": "common",
+    "staircase_exterior": "common",
     "floor_plan": "plan",
     "site_plan": "plan",
+    "property_document": "plan",
     "other": "other",
 }
 
@@ -48,11 +53,24 @@ FULL_PRIORITY: tuple[str, ...] = (
     "balcony_terrace", "garden", "exterior_facade", "bedroom",
 )
 
-# Tags excluded from a byt perceptual / cosine MERGE signal: the exterior + plan
-# families (a development reuses these across distinct units). 'other' / untagged are
+# House / commercial: the FACADE is the building's identity, so it leads the perceptual +
+# forensic order; then the interior rooms, then the rest.
+HOUSE_PRIORITY: tuple[str, ...] = (
+    "exterior_facade", "kitchen", "bathroom", "living_room", "toilet",
+    "garden", "balcony_terrace", "hallway", "bedroom",
+)
+
+# Land / plot: the SITE PLAN is the plot's identity (the site-plan development guard reads
+# it), then outdoor views. Plots rarely have interior rooms.
+LAND_PRIORITY: tuple[str, ...] = (
+    "site_plan", "exterior_facade", "garden", "floor_plan",
+)
+
+# Tags excluded from a byt perceptual / cosine MERGE signal: the exterior + common + plan
+# families (a development/building reuses these across distinct units). 'other' / untagged are
 # deliberately NOT excluded — only KNOWN-shared images are dropped.
 NON_INTERIOR_TAGS: tuple[str, ...] = tuple(
-    t for t, fam in ROOM_FAMILIES.items() if fam in ("exterior", "plan")
+    t for t, fam in ROOM_FAMILIES.items() if fam in ("exterior", "common", "plan")
 )
 
 # The most distinctive rooms: a SINGLE near-identical pHash match on one of these is
@@ -61,6 +79,22 @@ DISTINCTIVE_ROOMS: frozenset[str] = frozenset({"kitchen", "bathroom"})
 
 SITE_PLAN_ROOM_TYPE = "site_plan"
 FLOOR_PLAN_ROOM_TYPE = "floor_plan"
+
+# Cross-category merge compatibility. A sale ≠ a rental and (by default) a flat ≠ a house,
+# so the dedup classifiers AND the merge_properties chokepoint hard-reject a category_main
+# mismatch. The ONE sanctioned cross-type is dum <-> komercni (a building listed as a house
+# on one portal and commercial on another is the same real-world property) — irrespective
+# of sub-type. Lives here (pure, no heavy imports) so dedup_engine AND property_identity can
+# share it without an import cycle.
+_CROSS_TYPE_OK: frozenset[frozenset[str]] = frozenset({frozenset({"dum", "komercni"})})
+
+
+def category_main_compatible(a_cat: str | None, b_cat: str | None) -> bool:
+    """True if two category_main values may be the same property. Equal (or either NULL =
+    unknown) is compatible; the only allowed cross-type is dum <-> komercni."""
+    if a_cat is None or b_cat is None or a_cat == b_cat:
+        return True
+    return frozenset({a_cat, b_cat}) in _CROSS_TYPE_OK
 
 
 def family_of(tag: str | None) -> str | None:

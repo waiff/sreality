@@ -13,25 +13,35 @@ name: Dedup engine (street + disposition)
 # Every auto-merge is reversible (property_merge_events ledger + one-click Undo).
 # A per-run dedup_engine_runs row powers the /dedup automation dashboard.
 #
-# Cadence: every 6h. The SCHEDULED run is FREE (--free, $0, no LLM): pHash +
-# exact-address merges + reconcile + reject/gate dismissals only; un-vision'd
+# Cadence: every 6h. The SCHEDULED run is FREE-mostly (--free): pHash +
+# exact-address merges + reconcile + reject/gate dismissals; un-vision'd
 # cross-source pairs are skipped (not queued as placeholders). It captures every
 # dup that SHARES a photo (pHash, whose coverage keeps growing) plus all free
-# cleanup, for $0 — the operator-chosen cost posture. Different-photo dups are
-# left un-found until vision is explicitly enabled.
+# cleanup. The ONE bounded paid call is the floor-plan validation gate, capped by
+# app_settings.dedup_floor_plan_budget (default 10000): a single Sonnet floor-plan
+# check on the SMALL set of pairs the engine WOULD merge (pHash matches / visual
+# Highs), so both-plan duplicates auto-confirm / auto-dismiss instead of piling onto
+# the manual queue (the all-rooms compare/classify stays off; that's the expensive
+# part). Beyond the budget, both-plan pairs DEFER to the next run. Different-photo
+# dups still need the dispatch forensic compare below.
 #
-# Paid VISION is dispatch-only: workflow_dispatch with max_vision_calls>0 runs the
-# forensic compare (stop-at-first-High; warm cache hits are free via the cold-only
-# budget), cache_only=true does a $0 consume of already-warmed verdicts, shadow=true
-# previews with no writes. (The dedup_batches warmer is disabled — for stop-at-
-# first-High dedup the engine's own sync is cheaper than all-rooms batch warming.)
+# Paid all-rooms VISION is dispatch-only: workflow_dispatch with max_vision_calls>0
+# runs the forensic compare (stop-at-first-High; warm cache hits are free via the
+# cold-only budget), cache_only=true does a $0 consume of already-warmed verdicts,
+# shadow=true previews with no writes, free=true + a raised floor_plan_budget is
+# a compare-free floor-plan sweep. (The dedup_batches warmer is gated by
+# app_settings.dedup_batch_warmer_enabled — for stop-at-first-High dedup the engine's
+# own sync is cheaper than all-rooms batch
+# warming.)
 #
 # Required GitHub secret: SUPABASE_DB_URL; paid vision additionally needs
 # ANTHROPIC_API_KEY + R2_* for image bytes.
 
 on:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"    # FULL SCAN (free) — discover new dups across the market
+    - cron: "30 */2 * * *"   # CANDIDATE DRAIN (free) — re-decide only the queued candidates
+    - cron: "45 * * * *"     # DIRTY DRAIN (free) — real-time, just after the hourly CLIP tag job
   workflow_dispatch:
     inputs:
       max_pairs:
@@ -79,13 +89,34 @@ on:
           - "false"
           - "true"
       free:
-        description: FREE mode ($0) — pHash + rule merges + reconcile only, no vision, no placeholders
+        description: FREE mode — pHash + rule merges + reconcile + bounded inline floor-plan gate only
         required: false
         default: "false"
         type: choice
         options:
           - "false"
           - "true"
+      candidates:
+        description: Candidate-priority drain — re-decide ONLY the queued /dedup candidates (O(queue), not a full scan)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      dirty:
+        description: Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      floor_plan_budget:
+        description: "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000)."
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: dedup-engine
@@ -119,20 +150,37 @@ jobs:
 
       - name: Run dedup engine
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            # SCHEDULED = FREE ($0): pHash + rule merges + reconcile, no vision,
-            # no placeholders. The operator-chosen cost posture.
+          if [ "${{ github.event.schedule }}" = "45 * * * *" ]; then
+            # SCHEDULED DIRTY DRAIN (free, real-time): re-decide ONLY the street groups
+            # touching a just-dedup-ready property (dedup_dirty_properties, filled by the
+            # hourly CLIP tag job), so a new cross-portal listing merges within ~minutes of
+            # being tagged. Empty queue -> fast no-op. Bounded floor-plan vision (300).
+            ARGS="--free --dirty --max-pairs 200000 --max-seconds 1200 --floor-plan-budget 300"
+          elif [ "${{ github.event.schedule }}" = "30 */2 * * *" ]; then
+            # SCHEDULED CANDIDATE DRAIN (free): re-decide ONLY the properties in the
+            # still-proposed /dedup queue (O(queue), not a market scan), so the queue
+            # self-clears regardless of where the 6h full scan's deadline falls. Bounded
+            # floor-plan vision (300 cold checks); warm verdicts replay free.
+            ARGS="--free --candidates --max-pairs 200000 --max-seconds 2400 --floor-plan-budget 300"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            # SCHEDULED FULL SCAN = FREE: pHash + rule merges + reconcile, NO paid all-rooms
+            # compare/classify, no placeholders. The ONE bounded paid exception is the
+            # floor-plan validation gate, capped by app_settings.dedup_floor_plan_budget
+            # (default 10000) — a targeted Sonnet check only on would-merge both-plan pairs.
             ARGS="--free --max-pairs 200000 --max-seconds 4800"
           else
-            # Dispatch: paid vision / cache-only / free / shadow per inputs.
+            # Dispatch: paid vision / cache-only / free / shadow / candidates per inputs.
             ARGS="--max-pairs ${{ inputs.max_pairs || '20000' }}"
             ARGS="$ARGS --max-vision-calls ${{ inputs.max_vision_calls || '300' }}"
             ARGS="$ARGS --max-room-attempts ${{ inputs.max_room_attempts || '4' }}"
             ARGS="$ARGS --max-seconds ${{ inputs.max_seconds || '4800' }}"
+            if [ -n "${{ inputs.floor_plan_budget }}" ]; then ARGS="$ARGS --floor-plan-budget ${{ inputs.floor_plan_budget }}"; fi
             if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
             if [ "${{ inputs.shadow }}" = "true" ]; then ARGS="$ARGS --shadow"; fi
             if [ "${{ inputs.cache_only }}" = "true" ]; then ARGS="$ARGS --cache-only"; fi
             if [ "${{ inputs.free }}" = "true" ]; then ARGS="$ARGS --free"; fi
+            if [ "${{ inputs.candidates }}" = "true" ]; then ARGS="$ARGS --candidates"; fi
+            if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty"; fi
           fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS

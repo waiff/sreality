@@ -24,6 +24,7 @@ from scraper.geocoding import GeocodeResult, GeocodingError
     ("https://bezrealitky.com/x", "bezrealitky"),
     ("https://reality.idnes.cz/detail/pronajem/123", "idnes_reality"),
     ("https://www.remax-czech.cz/reality/byty/123", "remax"),
+    ("https://www.ceskereality.cz/prodej/byty/x/y-3754200.html", "ceskereality"),
     ("https://example.com/listing", "unsupported"),
     ("not a url", "unsupported"),
     ("", "unsupported"),

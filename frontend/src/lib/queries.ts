@@ -829,6 +829,7 @@ export const fetchListingsForCards = async (
         url: imageSrc(im),
         tag: im.clip_fine_tag,
         confidence: im.clip_confidence,
+        renderScore: im.clip_render_score,
       })),
     };
   });
@@ -1120,7 +1121,7 @@ export const fetchListingsByIds = async (
  * (clip_fine_tag / clip_logical_tag / clip_confidence, migration 236) so every
  * photo surface can render its bottom-left tag badge from the same read. */
 const IMAGE_PUBLIC_COLS =
-  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence';
+  'id,sreality_id,sequence,sreality_url,storage_path,clip_fine_tag,clip_logical_tag,clip_confidence,clip_render_score';
 
 export const fetchImagesByListingIds = async (
   ids: ReadonlyArray<number>,
@@ -1678,6 +1679,8 @@ export interface DedupEngineRun {
   vision_calls: number;
   cost_usd: number;
   auto_dismissed: number;
+  floor_plan_deferred: number;
+  clip_deferred: number;
 }
 
 /* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
@@ -1691,7 +1694,7 @@ export const fetchDedupEngineRuns = async (
     .select(
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
-        'vision_calls,cost_usd,auto_dismissed',
+        'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred,clip_deferred',
     )
     .order('started_at', { ascending: false })
     .limit(limit);

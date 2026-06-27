@@ -42,6 +42,7 @@ import DedupAuditHistory from '@/components/DedupAuditHistory';
 import DedupBackfillProgress from '@/components/DedupBackfillProgress';
 import DedupCandidateReset from '@/components/DedupCandidateReset';
 import DedupFactors from '@/components/DedupFactors';
+import DecisionFeedbackControl from '@/components/DecisionFeedbackControl';
 import DedupPipelineOverview from '@/components/DedupPipelineOverview';
 import { listingPath } from '@/lib/listingUrl';
 import type {
@@ -307,9 +308,7 @@ function AutomationDashboard({
   loading: boolean;
 }) {
   const latest = runs[0] ?? null;
-  const autoTotal = latest
-    ? latest.auto_address + latest.auto_phash + latest.auto_visual
-    : 0;
+  const autoTotal = latest ? latest.auto_phash + latest.auto_visual : 0;
   return (
     <CollapsibleSection id="automation" eyebrow="Automation" title="Engine activity">
       {latest == null ? (
@@ -324,11 +323,12 @@ function AutomationDashboard({
             <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
-          <div className="mt-2 grid grid-cols-2 sm:grid-cols-5 gap-2">
-            <Stat label="By address" value={latest.auto_address} small />
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-6 gap-2">
             <Stat label="By photos" value={latest.auto_phash} small />
             <Stat label="By visual" value={latest.auto_visual} small />
             <Stat label="Auto-dismissed" value={latest.auto_dismissed ?? 0} small />
+            <Stat label="Plan deferred" value={latest.floor_plan_deferred ?? 0} small />
+            <Stat label="CLIP deferred" value={latest.clip_deferred ?? 0} small />
             <Stat label="Queued" value={latest.queued} small />
           </div>
           {runs.length > 1 ? <RunTrend runs={runs} /> : null}
@@ -376,11 +376,11 @@ function Stat({
 /* A tiny sparkline-ish bar row: auto-merges per recent run, newest on the right. */
 function RunTrend({ runs }: { runs: DedupEngineRun[] }) {
   const ordered = [...runs].reverse();
-  const max = Math.max(1, ...ordered.map((r) => r.auto_address + r.auto_phash + r.auto_visual));
+  const max = Math.max(1, ...ordered.map((r) => r.auto_phash + r.auto_visual));
   return (
     <div className="mt-3 flex items-end gap-1 h-12" title="Auto-merges per recent run">
       {ordered.map((r) => {
-        const total = r.auto_address + r.auto_phash + r.auto_visual;
+        const total = r.auto_phash + r.auto_visual;
         const h = Math.round((total / max) * 100);
         return (
           <div
@@ -891,6 +891,7 @@ function imagesFor(side: DedupPropertySide, imagesMap: ImagesMap): TaggedImageUr
     url: imageSrc(im),
     tag: im.clip_fine_tag,
     confidence: im.clip_confidence,
+    renderScore: im.clip_render_score,
   }));
 }
 
@@ -1023,7 +1024,7 @@ function ClusterCard({
           </tbody>
         </table>
       </div>
-      {cluster.markers || cluster.visual ? (
+      {cluster.markers || cluster.visual || n === 2 ? (
         <div className="mt-3 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-2.5">
           <p className="mb-1.5 text-[0.62rem] tracking-[0.12em] uppercase text-[var(--color-ink-4)]">
             Proč ve frontě
@@ -1039,9 +1040,21 @@ function ClusterCard({
                   }
                 : null)
             }
+            breakdown={cluster.audit_breakdown}
             leftSrealityId={members[0]?.sreality_id ?? null}
             rightSrealityId={members[1]?.sreality_id ?? null}
+            categoryMain={members[0]?.category_main ?? null}
           />
+          {n === 2 && (
+            <div className="mt-2 border-t border-[var(--color-rule-soft)] pt-2">
+              <DecisionFeedbackControl
+                leftPropertyId={members[0]?.property_id ?? null}
+                rightPropertyId={members[1]?.property_id ?? null}
+                categoryMain={members[0]?.category_main ?? null}
+                feedback={cluster.feedback}
+              />
+            </div>
+          )}
         </div>
       ) : null}
     </div>
