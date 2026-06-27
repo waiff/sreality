@@ -65,12 +65,6 @@ class BasePortalClient:
     """
 
     ACCEPT: str = "*/*"
-    # An optional honest/identifying override of the shared browser User-Agent,
-    # set by a subclass that crawls a site we want to identify ourselves to
-    # (ceskereality, whose robots.txt allow-lists named bots). None = the shared
-    # browser UA. Symmetric with ACCEPT — a per-portal fetcher concern, not a
-    # shared default.
-    USER_AGENT: str | None = None
 
     def __init__(
         self,
@@ -88,10 +82,7 @@ class BasePortalClient:
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self._session = requests.Session()
-        headers = {**_BASE_HEADERS, "Accept": self.ACCEPT}
-        if self.USER_AGENT is not None:
-            headers["User-Agent"] = self.USER_AGENT
-        self._session.headers.update(headers)
+        self._session.headers.update({**_BASE_HEADERS, "Accept": self.ACCEPT})
         self._last_at = 0.0
 
     def _pace(self) -> None:

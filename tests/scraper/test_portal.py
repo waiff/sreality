@@ -115,7 +115,7 @@ def test_default_config_ceskereality():
     assert all("sale_type" in c and "category" in c for c in cfg.categories)
     # houses + land (the categories the original branch config omitted) are present
     assert {"rodinne-domy", "pozemky"} <= {c["category"] for c in cfg.categories}
-    assert cfg.limits.index_rate == 0.7         # polite (robots disallows generic bots)
+    assert cfg.limits.detail_workers == 6       # throughput tuned toward other portals
 
 
 def test_default_config_unknown_raises():

@@ -5,11 +5,13 @@ ceskereality.cz is a server-rendered listing site (no public JSON API — its
 feed), so this returns raw HTML for `scraper.ceskereality_parser`. The shared
 retry/backoff + adaptive throttle (`RateLimiter` + `penalize()` on 429/403) +
 `ListingGoneError` on a 404/410 all live in `scraper.portal_base.BasePortalClient`;
-this client adds only the HTML `Accept` header, an honest identifying
-`User-Agent` (ceskereality's robots.txt allow-lists named bots; we crawl slowly
-and identify ourselves rather than impersonate one), the ceskereality URL
-builders (`?strana=N` paging), and the removed-listing signals (a redirect off
-the `.html` detail path, or a deleted-listing body marker on a 200).
+this client adds only the HTML `Accept` header, the ceskereality URL builders
+(`?strana=N` paging), and the removed-listing signals (a redirect off the `.html`
+detail path, or a deleted-listing body marker on a 200). It uses the shared
+browser User-Agent like every other portal: ceskereality is Cloudflare-fronted and
+throttles an identifying bot UA (429/403) into degraded pages, so an honest custom
+UA both got blocked AND broke deep paging — the operator's "match the other sites"
+call.
 """
 
 from __future__ import annotations
@@ -49,10 +51,6 @@ def detail_url(path_or_url: str) -> str:
 
 class CeskerealityClient(BasePortalClient):
     ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    # Honest, identifying UA — we crawl politely + slowly rather than pretend to
-    # be a browser. If the site's anti-bot edge blocks this (the mmreality
-    # posture), the validation run surfaces it and the operator decides.
-    USER_AGENT = "LimenRealityBot/1.0 (+https://www.ceskereality.cz/robots.txt)"
 
     def fetch_index(
         self, sale_type: str, category: str, page: int | None = None
