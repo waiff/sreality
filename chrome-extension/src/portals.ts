@@ -100,6 +100,14 @@ export const PORTALS: Portal[] = [
     detailId: (p) => firstMatch(/-(\d{6,})\.html\b/, p),
     saleApartmentHint: pathCategoryHint,
   },
+  {
+    // /detail/{obec}/{slug}-{id}.html — id is the trailing run of digits before
+    // ".html" (mirrors the scraper's _ID_RE). The detail URL does NOT encode the
+    // category, so no saleApartmentHint (the /listings/lookup row gates instead).
+    source: 'realitymix',
+    hosts: ['www.realitymix.cz', 'realitymix.cz'],
+    detailId: (p) => firstMatch(/-(\d{6,})\.html\b/, p),
+  },
 ];
 
 const BY_HOST: Map<string, Portal> = (() => {
