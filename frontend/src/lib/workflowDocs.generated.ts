@@ -620,7 +620,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "region",
-        "description": "limit the walk to ONE region subdomain (e.g. stredo.ceskereality.cz) for a proxy test. Blank = all 7.",
+        "description": "limit the walk to these okres/facet slugs (e.g. praha-hlavni-mesto) for an ad-hoc partial test. Blank = the full okres split.",
         "required": false,
         "type": "string",
         "default": "",
