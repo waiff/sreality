@@ -1375,6 +1375,64 @@ def test_load_eligible_restrict_scopes() -> None:
     assert any("l.property_id = ANY" in s for s in conn2.executed)
 
 
+def test_load_eligible_street_group_scope() -> None:
+    """The --dirty scoped load filters to the claimed street groups: street_id ANY OR
+    (coalesce(obec,-1), street_name_key) IN — obec-bounded so the group's peers load too.
+    An EMPTY (set, set) STILL applies the filter (loads nothing, never a full scan)."""
+    import scripts.dedup_engine as eng
+
+    captured: dict[str, Any] = {}
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None):
+            captured["sql"] = " ".join(sql.split()); captured["params"] = params
+        def fetchall(self):  # one eligible row (13 cols) -> exercises ListingKey build
+            return [(1, 101, "sreality", "Hlavní", None, "2+kk", "10", 3, 60.0,
+                     "desc", "prodej", "byt", 42)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    keys = eng._load_eligible(
+        _Conn(), restrict_street_groups=({5, 7}, {(42, "hlavni"), (-1, "maj")}))
+    sql, params = captured["sql"], captured["params"]
+    assert "l.street_id = ANY(%(sids)s" in sql
+    assert "(coalesce(l.obec_id, -1), l.street_name_key) IN" in sql
+    assert "l.property_id = ANY" not in sql            # the property-id arm is NOT used here
+    assert sorted(params["sids"]) == [5, 7]
+    assert dict(zip(params["obecs"], params["keys"])) == {42: "hlavni", -1: "maj"}
+    assert keys and keys[0].sreality_id == 1
+
+    captured.clear()
+    eng._load_eligible(_Conn(), restrict_street_groups=(set(), set()))
+    assert "(coalesce(l.obec_id, -1), l.street_name_key) IN" in captured["sql"]
+    assert captured["params"]["sids"] == [] and captured["params"]["keys"] == []
+
+
+def test_claimed_street_groups() -> None:
+    """The dirty work-list: positive street_ids + (coalesce(obec,-1), key) name-keys of the
+    claimed properties' eligible listings; street_id<=0 and NULL keys are dropped, and an
+    empty property set short-circuits without touching the DB."""
+    import scripts.dedup_engine as eng
+
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+        def execute(self, sql, params=None): self.sql = sql
+        def fetchall(self):  # SELECT DISTINCT street_id, coalesce(obec,-1), street_name_key
+            return [(5, 42, "hlavni"), (0, 42, "hlavni"), (None, -1, "maj"), (7, 10, None)]
+
+    class _Conn:
+        def cursor(self): return _C()
+
+    street_ids, name_keys = eng._claimed_street_groups(_Conn(), {101, 102})
+    assert street_ids == {5, 7}                          # 0 dropped (not a real portal id)
+    assert name_keys == {(42, "hlavni"), (-1, "maj")}    # NULL key row contributes only its id
+    assert eng._claimed_street_groups(_Conn(), set()) == (set(), set())
+
+
 def test_resolve_pair_seam_standalone() -> None:
     """resolve_pair is callable standalone with a hand-built _RunContext — the exact seam
     the candidate-priority drain + the real-time per-listing path reuse (one decision tree,

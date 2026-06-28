@@ -39,7 +39,7 @@ import time
 from typing import Any
 
 from scraper import db
-from scraper.street import clean_street, street_from_locality
+from scraper.street import clean_street, street_from_locality, street_name_key
 
 LOG = logging.getLogger("backfill_portal_streets")
 
@@ -87,18 +87,23 @@ _CURSOR_MIN = -(10 ** 18)
 # town-only row (street -> NULL) keeps NULL and a re-clean never nulls out a
 # value the cleaner couldn't parse. geom untouched -> no admin-geo re-derive, no
 # snapshot. The marker stamps every processed row so it leaves the selection.
-# Set-based: one statement per chunk (unnest join on the PK) instead of a
-# per-row round-trip, so a 40k-source run is minutes, not hours.
+# street_name_key (migration 256) is re-derived in lockstep with street — when a
+# new street lands so does its key, else both keep their existing value — so this
+# backfill can never leave the dedup street-key stale (the same single-source
+# invariant scraper.db enforces at ingest). Set-based: one statement per chunk
+# (unnest join on the PK) instead of a per-row round-trip, so a 40k-source run is
+# minutes, not hours.
 _UPDATE_SQL = """
     UPDATE listings l
-    SET street       = COALESCE(d.street, l.street),
-        house_number = COALESCE(d.house_number, l.house_number),
-        zip          = COALESCE(d.zip, l.zip),
-        raw_json     = l.raw_json || '{"portal_street_backfill": true}'::jsonb
+    SET street          = COALESCE(d.street, l.street),
+        street_name_key = COALESCE(d.street_name_key, l.street_name_key),
+        house_number    = COALESCE(d.house_number, l.house_number),
+        zip             = COALESCE(d.zip, l.zip),
+        raw_json        = l.raw_json || '{"portal_street_backfill": true}'::jsonb
     FROM (SELECT * FROM unnest(
-            %(ids)s::bigint[], %(streets)s::text[],
+            %(ids)s::bigint[], %(streets)s::text[], %(name_keys)s::text[],
             %(house_numbers)s::text[], %(zips)s::text[]
-          ) AS t(id, street, house_number, zip)) d
+          ) AS t(id, street, street_name_key, house_number, zip)) d
     WHERE l.sreality_id = d.id
 """
 
@@ -158,6 +163,7 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None) -
         cursor = rows[-1]["sreality_id"]
         ids: list[int] = []
         streets: list[str | None] = []
+        name_keys: list[str | None] = []
         house_numbers: list[str | None] = []
         zips: list[str | None] = []
         dirty: list[int] = []
@@ -165,6 +171,7 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None) -
             street, hn, zp, improved = derive(source, row)
             ids.append(row["sreality_id"])
             streets.append(street)
+            name_keys.append(street_name_key(street))
             house_numbers.append(hn)
             zips.append(zp)
             if improved:
@@ -175,7 +182,7 @@ def process_source(conn: Any, source: str, limit: int, deadline: float | None) -
                 skipped += 1
         with conn.cursor() as cur:
             cur.execute(_UPDATE_SQL, {
-                "ids": ids, "streets": streets,
+                "ids": ids, "streets": streets, "name_keys": name_keys,
                 "house_numbers": house_numbers, "zips": zips,
             })
         if dirty:

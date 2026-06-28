@@ -1530,10 +1530,22 @@ full scan's deadline frontier; and a **DIRTY DRAIN** hourly at :45 (`--dirty`, W
 re-decides ONLY the street groups touching a just-dedup-ready property
 (`dedup_dirty_properties`, migration 242 — enqueued by the hourly CLIP tag job when a listing's
 images get tagged, i.e. pHash+CLIP done) so a **new cross-portal listing merges within ~minutes**
-instead of waiting hours (the watchdog-grain goal). The dirty drain does a FULL eligible load
-(so a dirty property's group still carries its existing peers) but only resolves the dirty groups
-(`only_groups_with_property_ids`) — O(dirty) pair-work, no fragile SQL street-key replay; race-free
-claim/clear like `dirty_properties` (rule #20). The claim is **FIFO-BOUNDED** (`--max-dirty`,
+instead of waiting hours (the watchdog-grain goal). The dirty drain's eligible LOAD is **SCOPED to
+the claimed properties' street groups** (`restrict_street_groups`) — not a full-market scan — via the
+**stored `listings.street_name_key`** (migration 256): `_claimed_street_groups` reads the dirty
+properties' `street_id` + `(coalesce(obec_id,-1), street_name_key)`, and the load filters
+`street_id = ANY(...) OR (coalesce(obec_id,-1), street_name_key) IN (...)`. Street groups are
+obec-bounded (the name key is obec-scoped; a `street_id` is one physical street), so the scoped load
+is **complete** — it carries each dirty property's existing peers, so a dirty property still
+re-decides against its whole group, while staying **O(dirty)** in BOTH load and pair-work. The
+`only_groups_with_property_ids` filter still gates the RESOLVE to dirty-containing groups, so the
+scoped load is a pure perf optimization layered under that correctness gate (no fragile SQL
+street-key replay); race-free claim/clear like `dirty_properties` (rule #20). `street_name_key` is
+THE single source `scraper.street.street_name_key` (also what the engine groups on live via
+`street_group_keys`), stamped at every street-write path (`scraper.db` + the street backfills),
+out of the content hash, backfilled by `scripts.backfill_street_name_key`, parity-guarded
+(stored == recomputed) so it can never drift; the 6h full scan (which recomputes the key live) is
+the backstop if a key ever goes stale. The claim is **FIFO-BOUNDED** (`--max-dirty`,
 default 10000): like every sibling drain it must cap its per-run work, because a tagging backlog
 (a new portal, a retag campaign) can enqueue most of the market at once — an unbounded claim then
 resolves O(market) groups per hourly run, never completes within the time budget, never clears, and
@@ -1544,11 +1556,7 @@ dirty run records `dedup_engine_runs.dirty_queue_depth` (the backlog at run star
 `/dedup` dashboard shows a "Dirty queue" stat + a stall banner, and the Health page raises an amber
 (deep + draining = transient flood) / red (high + NOT draining across recent runs = the drain is
 failing/out-paced) banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`)
-is the single source of that status for both surfaces. (KNOWN
-LIMITATION, not yet addressed: the eligible LOAD is still O(market) every run — the per-run pair-work
-is bounded but the full load is not; obec-scoping it doesn't help (the backlog concentrates in big
-cities) and a tight street-key scope needs the Python street normalizer stored as a column. Fine at
-today's ~100K eligible rows; revisit with a stored street-group key if the market grows much larger.)
+is the single source of that status for both surfaces.
 All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and
@@ -1759,15 +1767,20 @@ it rather than duplicating a list here.
   it rejects foreign coords/countries, "Town - Quarter" forms, "okres X" qualifiers, and any candidate
   equal to the row's own geo-derived obec/okres/region; a wrong street is worse than NULL (it poisons
   the dedup street-key and Browse). Stored values are bare/human-readable for display; the SEPARATE
-  match-time grouping key is `toolkit.dedup_engine.street_group_keys` (don't confuse the two): a row
-  dual-keys into `id:<street_id>` (sreality/bezrealitky) AND `name:<obec_id>:<_street_name_key>`. The
-  NAME key is **obec-scoped** — a common name like "Žižkova" has 100+ active listings across dozens of
-  towns; one nationwide group blows `MAX_GROUP_SIZE=40` and gets the whole group SKIPPED, so the
+  match-time grouping NAME key is **`scraper.street.street_name_key`** (the single home for street
+  string logic; consumed live by `toolkit.dedup_engine.street_group_keys` AND stored on
+  `listings.street_name_key`, migration 256 — don't confuse the human-readable `street` with the key):
+  a row dual-keys into `id:<street_id>` (sreality/bezrealitky) AND `name:<obec_id>:<street_name_key>`.
+  The NAME key is **obec-scoped** — a common name like "Žižkova" has 100+ active listings across dozens
+  of towns; one nationwide group blows `MAX_GROUP_SIZE=40` and gets the whole group SKIPPED, so the
   cross-portal pairs there (HTML portals have no street_id → name group is the only place they meet a
   sreality row) were never compared. obec-scoping keeps each town's street its own small group AND
-  blocks cross-town false merges (classify_pair has no geo check). `street` /
-  `house_number` / `zip` are OUT of the content hash, so backfilling them never churns snapshots
-  (`scripts/backfill_portal_streets.py` re-derives from already-stored data — no re-fetch). Browse
+  blocks cross-town false merges (classify_pair has no geo check). The STORED `street_name_key` (stamped
+  at write time, parity-guarded against the function, out of the content hash like `street`) is what
+  lets the dedup `--dirty` drain scope its eligible load to the dirty street groups in SQL (rule #19).
+  `street` / `house_number` / `zip` / `street_name_key` are OUT of the content hash, so backfilling
+  them never churns snapshots (`scripts/backfill_portal_streets.py` +
+  `scripts/backfill_street_name_key.py` re-derive from already-stored data — no re-fetch). Browse
   street picks ILIKE `properties_public.place_search_text`, which is a **group-best** street
   (`coalesce(p.street, l.street)`, migration 183) denormalized onto `properties` by
   `recompute_property_stats` — so a multi-portal property matches a street even when its representative

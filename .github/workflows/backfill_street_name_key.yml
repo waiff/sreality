@@ -1,0 +1,76 @@
+name: Backfill street_name_key
+
+# One-off, dispatch-only backfill. Fills listings.street_name_key (migration 256 —
+# the dedup street-group NAME key) on existing rows by re-deriving it from the stored
+# `street` via the shared scraper.street.street_name_key helper — NO re-fetch, NO LLM,
+# NO Mapy spend. street_name_key is out of the content hash so NO snapshot is written.
+# Idempotent + resumable (keyset over the still-NULL tail, backed by the migration 256
+# partial index); rerun until "pending=none". Going forward the column is stamped at
+# every street-write path (scraper.db), so this is the one-time fill for old rows. NOT a
+# portal ingest workflow, so it carries no `# portal:` tag, and its OWN concurrency
+# group (a shared group would let another job starve it).
+#
+# Required GitHub secret: SUPABASE_DB_URL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      all:
+        description: Re-derive every street-bearing row (default = only NULL keys)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      limit:
+        description: Max rows processed this run (blank = all)
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: Wall-clock budget in seconds (blank = no budget)
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: Report whether rows are pending and exit
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+concurrency:
+  group: backfill-street-name-key
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Backfill street_name_key
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.limit }}" ]; then ARGS="$ARGS --limit ${{ inputs.limit }}"; fi
+          if [ -n "${{ inputs.max_seconds }}" ]; then ARGS="$ARGS --max-seconds ${{ inputs.max_seconds }}"; fi
+          if [ "${{ inputs.all }}" = "true" ]; then ARGS="$ARGS --all"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m scripts.backfill_street_name_key $ARGS

@@ -109,22 +109,44 @@ _ELIGIBLE_SQL = """
 """
 
 
-def _load_eligible(conn: Any,
-                   restrict_property_ids: set[int] | None = None) -> list[ListingKey]:
+def _load_eligible(
+    conn: Any,
+    restrict_property_ids: set[int] | None = None,
+    restrict_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None,
+) -> list[ListingKey]:
     """One ListingKey per (listing, grouping key): a row with both a canonical
     street_id and a street name is dual-keyed into its 'id:' and 'name:' groups
     so cross-portal rows keyed differently can still meet (run_engine dedups
     the listing pairs that surface in both groups).
 
-    `restrict_property_ids` scopes the load to those properties' listings — the
-    candidate-priority drain (O(queue) not O(market)): the two properties of a
-    queued candidate share a street+disposition, so they still land in one street
-    group and get re-decided by the SAME resolve_pair, without scanning the world."""
+    Two MUTUALLY-EXCLUSIVE scoping modes keep the load O(work), not O(market):
+    - `restrict_property_ids` scopes to those properties' OWN listings — the
+      candidate-priority drain: the two properties of a queued candidate share a
+      street+disposition, so they still land in one street group and get re-decided
+      by the SAME resolve_pair, without scanning the world.
+    - `restrict_street_groups` = (street_ids, name_keys) loads every eligible
+      listing in those GROUPS (peers included) — the real-time --dirty drain: the
+      claimed dirty properties' groups, computed from the STORED street_name_key
+      (_claimed_street_groups), so a dirty property's group still carries its
+      existing peers for re-decision. obec-bounded ⇒ complete; the load filter folds
+      a NULL obec to -1 to mirror _claimed_street_groups. (None on both = full scan.)"""
     params: dict[str, Any] = {}
     flt = ""
     if restrict_property_ids is not None:  # an EMPTY set restricts to nothing (not all)
         flt = "AND l.property_id = ANY(%(pids)s)"
         params["pids"] = list(restrict_property_ids)
+    elif restrict_street_groups is not None:
+        # An empty (street_ids, name_keys) restricts to nothing: ANY('{}') is false
+        # and IN (empty) is false, so the OR yields no rows (not all).
+        street_ids, name_keys = restrict_street_groups
+        flt = (
+            "AND (l.street_id = ANY(%(sids)s::bigint[]) "
+            "OR (coalesce(l.obec_id, -1), l.street_name_key) IN "
+            "(SELECT o, k FROM unnest(%(obecs)s::bigint[], %(keys)s::text[]) AS t(o, k)))"
+        )
+        params["sids"] = list(street_ids)
+        params["obecs"] = [o for o, _ in name_keys]
+        params["keys"] = [k for _, k in name_keys]
     with conn.cursor() as cur:
         cur.execute(_ELIGIBLE_SQL.format(filter=flt), params)
         rows = cur.fetchall()
@@ -294,6 +316,47 @@ def _clear_dedup_dirty(conn: Any, property_ids: set[int], cutoff: Any) -> int:
         cur.execute("DELETE FROM dedup_dirty_properties WHERE property_id = ANY(%s) "
                     "AND marked_at <= %s", (list(property_ids), cutoff))
         return cur.rowcount or 0
+
+
+def _claimed_street_groups(
+    conn: Any, property_ids: set[int]
+) -> tuple[set[int], set[tuple[int, str]]]:
+    """The street GROUPS the claimed dirty properties' ELIGIBLE listings belong to —
+    the work-list the --dirty scoped load (_load_eligible restrict_street_groups)
+    expands into full groups, peers included, instead of scanning the whole market.
+
+    Returns (street_ids, name_keys): `street_ids` are the positive portal street ids
+    (the 'id:' groups); `name_keys` are (coalesce(obec_id,-1), street_name_key) pairs
+    — the SAME obec-scoped 'name:' grouping the engine keys on (street_group_keys),
+    with a NULL obec folded to -1 so the ~0.4% of eligible rows lacking a CZ obec
+    (which group as `name:None:<key>`) stay matchable. Reading the STORED
+    street_name_key is what lets this be a cheap SQL filter rather than recomputing
+    the key for the market in Python. Loading every listing matching either set is
+    COMPLETE: a group containing a claimed property is keyed by one of these, and
+    street groups are obec-bounded. Empty sets => the claimed properties carry no
+    eligible (street+disposition) listing — the scoped load then returns nothing."""
+    if not property_ids:
+        return set(), set()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT l.street_id, coalesce(l.obec_id, -1) AS obec,
+                            l.street_name_key
+            FROM listings l
+            WHERE l.property_id = ANY(%s)
+              AND l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL
+            """,
+            (list(property_ids),),
+        )
+        rows = cur.fetchall()
+    street_ids: set[int] = set()
+    name_keys: set[tuple[int, str]] = set()
+    for sid, obec, key in rows:
+        if sid is not None and int(sid) > 0:
+            street_ids.add(int(sid))
+        if key is not None:
+            name_keys.add((int(obec), key))
+    return street_ids, name_keys
 
 
 def _resolve_candidates(conn: Any, pairs: set[tuple[int, int]], new_status: str) -> int:
@@ -1184,6 +1247,7 @@ def run_engine(
     dry_run: bool = False,
     deadline: float | None = None,
     restrict_property_ids: set[int] | None = None,
+    restrict_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None,
     only_groups_with_property_ids: set[int] | None = None,
     geo: bool = False,
     geo_area_max_pct: float | None = None,
@@ -1226,7 +1290,9 @@ def run_engine(
             "flagged_location": 0, "flagged_disposition": 0,
         }
     else:
-        keys = _load_eligible(conn, restrict_property_ids=restrict_property_ids)
+        keys = _load_eligible(
+            conn, restrict_property_ids=restrict_property_ids,
+            restrict_street_groups=restrict_street_groups)
         stats = _eligibility_counts(conn)
     stats.update({
         "pairs_considered": 0, "rejected": 0,
@@ -1276,9 +1342,12 @@ def run_engine(
         if len(members) > max_group_size:
             LOG.info("SKIP large group key=%s size=%d", street_key, len(members))
             continue
-        # Real-time (dirty) drain: the load is FULL so a dirty property's group still
-        # carries its existing PEERS, but we only resolve groups that actually contain a
-        # dirty/just-ready property — O(dirty) pair-work, no fragile SQL street-key replay.
+        # Real-time (dirty) drain: the load is SCOPED to the dirty properties' street
+        # groups (restrict_street_groups), so it carries each dirty property's existing
+        # PEERS while staying O(dirty); this filter then resolves only groups that
+        # actually contain a dirty/just-ready property — the correctness gate under the
+        # scoped load (a group reaches here only if its key was claimed, so this is a
+        # safety re-assertion, not the primary scope). No fragile SQL street-key replay.
         if only_groups_with_property_ids is not None and not any(
             m.property_id in only_groups_with_property_ids for m in members
         ):
@@ -1619,7 +1688,7 @@ def main() -> int:
                         help="Real-time dirty drain: re-decide ONLY the street groups that contain a "
                              "just-dedup-ready property (dedup_dirty_properties, enqueued when a "
                              "listing's images get CLIP-tagged), so a new cross-portal listing merges "
-                             "within minutes. Full load (peers present) but O(dirty) pair-work; "
+                             "within minutes. Scoped load (peers present) + O(dirty) pair-work; "
                              "race-free claim/clear. Composes with --free / the floor-plan budget.")
     parser.add_argument("--max-dirty", type=int, default=10000, dest="max_dirty",
                         help="Bound the --dirty claim to the N OLDEST dedup-ready properties (FIFO). "
@@ -1716,6 +1785,7 @@ def main() -> int:
         # The clear after the run is gated on a NON-truncated run, so a deadline-cut run
         # keeps its whole claim (re-drained next pass) and never loses unprocessed work.
         only_groups = None
+        dirty_street_groups: tuple[set[int], set[tuple[int, str]]] | None = None
         dirty_cutoff = None
         if args.dirty:
             with conn.cursor() as cur:
@@ -1730,6 +1800,15 @@ def main() -> int:
             if not only_groups:
                 LOG.info("DIRTY drain: queue empty; nothing to do")
                 return 0
+            # Scope the eligible LOAD to the claimed properties' street groups
+            # (O(dirty), not O(market)) via the STORED street_name_key. The peers in
+            # those groups are loaded too, so a dirty property still re-decides
+            # against its existing group; only_groups (below) keeps the RESOLVE
+            # filtered to dirty-containing groups, so the scoped load is a pure perf
+            # optimization layered under that correctness gate.
+            dirty_street_groups = _claimed_street_groups(conn, only_groups)
+            LOG.info("DIRTY drain: scoped load to %d street-id + %d name groups",
+                     len(dirty_street_groups[0]), len(dirty_street_groups[1]))
 
         classify_fn = None
         compare_fn = None
@@ -1814,7 +1893,8 @@ def main() -> int:
             pair_audit: list[dict[str, Any]] = []
             stats = run_engine(
                 conn, audit=pair_audit, max_pairs=args.max_pairs,
-                only_groups_with_property_ids=only_groups, **engine_kw,
+                only_groups_with_property_ids=only_groups,
+                restrict_street_groups=dirty_street_groups, **engine_kw,
             )
             stats["clip_classified"] = clip_counter[0]
             if args.dirty:

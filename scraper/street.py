@@ -16,8 +16,12 @@ village last-segment) poisons the dedup street-key and Browse worse than a NULL
 does. So every extractor routes through the ONE don't-fabricate guard here
 (`reject_as_town`) rather than re-implementing it five times. `clean_street` is
 the matching ONE cleaner. The stored value stays human-readable (Browse displays
-it); `toolkit.dedup_engine._street_name_key` owns the separate match-time
-grouping key.
+it); `street_name_key` (below) is the SEPARATE match-time grouping key — the bare,
+diacritics-folded, decoration-stripped form the dedup engine groups on. It lives
+here, the single home for all street string logic, and is imported by both the
+write path (`scraper.db` stores it on `listings.street_name_key`) and the matcher
+(`toolkit.dedup_engine.street_group_keys`), so the stored column can never drift
+from what the engine computes (a parity test guards it).
 """
 
 from __future__ import annotations
@@ -127,6 +131,57 @@ def clean_street(raw: str | None) -> str | None:
         tokens.pop()
     s = " ".join(tokens).strip(" ,.;:")
     return s or None
+
+
+# --- match-time grouping key -------------------------------------------------
+# Decorative words that name a street's TYPE without identifying it ("ul. Hlavní"
+# and "Hlavní" are one street; "Vinohradská třída" ~ "Vinohradská"). Diacritics-
+# folded forms incl. the inflections bazos' extractor emits. Stripped token-wise
+# (a trailing dot tolerated) from both ends, so "Třebízského" is never touched.
+# This is the GROUPING set — distinct in purpose from `_STREET_KEYWORDS` (which
+# POSITIVELY identifies a street for morphology); keep them separate.
+_KEY_STREET_WORDS: frozenset[str] = frozenset({
+    "ul", "ulice", "ulici",
+    "nam", "namesti",
+    "tr", "trida", "tride", "tridu", "tridy",
+    "nabr", "nabrezi",
+    "sidliste", "sidlisti",
+})
+# A trailing house-number token: 12, 12a, 123/45, 160/26b. Bounded at 4 digits;
+# "679 61" (PSČ) strips as two successive tokens.
+_KEY_HOUSE_NO_RE = re.compile(r"\d{1,4}[a-z]?(?:/\d{1,4}[a-z]?)?")
+
+
+def street_name_key(street: str | None) -> str | None:
+    """Grouping form of a street NAME: diacritics-stripped lowercase with street
+    words and trailing house-number tokens removed. Portals disagree on
+    decoration (sreality stores the bare canonical name; bazos mines "ul.
+    Koterovská 12"-style strings from free text), so the key must not. Falls back
+    to the undecorated-folded form rather than going empty (a street literally
+    named "Náměstí" keeps a usable key).
+
+    THE single source of the dedup street-group name key: stored on
+    `listings.street_name_key` at write time (scraper.db) and consumed live by
+    `toolkit.dedup_engine.street_group_keys` — so the stored column and the
+    engine's grouping never diverge (a parity test asserts it)."""
+    collapsed = _fold(street)  # NFKD + diacritics-strip + lowercase + whitespace-collapse
+    if not collapsed:
+        return None
+    tokens = collapsed.split()
+    changed = True
+    while changed and tokens:
+        changed = False
+        if tokens[0].rstrip(".") in _KEY_STREET_WORDS:
+            tokens.pop(0)
+            changed = True
+        if tokens and tokens[-1].rstrip(".") in _KEY_STREET_WORDS:
+            tokens.pop()
+            changed = True
+        if tokens and _KEY_HOUSE_NO_RE.fullmatch(tokens[-1]):
+            tokens.pop()
+            changed = True
+    stripped = " ".join(tokens)
+    return stripped or collapsed
 
 
 def looks_like_czech_street(name: str | None) -> bool:
