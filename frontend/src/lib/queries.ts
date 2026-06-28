@@ -706,19 +706,27 @@ export interface CohortCount {
 }
 
 /* The ONE cohort total — header, tab badge, and the infinite-scroll progress
- * labels. Exact-when-affordable with a planner-estimate floor: an exact head
- * count is attempted under a client budget kept inside the anon 3s
- * statement_timeout; for large/heavy cohorts an exact count must heap-scan
- * every matching row (O(matches)) and can't finish, so we fall back to
- * PostgREST's planner estimate (`count=planned`, O(1)) and flag the value
- * approximate. Result: exact for the vast majority of cohorts, an honest "~N"
- * for the rest, and NEVER a timeout — the industry-standard hybrid for a
- * filtered count over a large table. (`count=estimated` is NOT used: Supabase's
- * threshold still runs an exact count for mid-size cohorts, so it times out
- * cold exactly like `exact`.) Shares the exact filter chain
- * (resolveBrowsePrefilters + applyFilters) with the Map/Table/Cards fetchers,
- * so the total can never disagree with the listed rows. */
+ * labels. PLANNER-ESTIMATE FIRST, then confirm exact only when affordable: the
+ * planner estimate (`count=planned`) is O(1) — it reads NO rows, so it never
+ * times out and never contends with the list/map queries. An exact count, by
+ * contrast, must heap-scan every matching row of the (churned, cache-cold on
+ * this instance) properties table; for a broad cohort that scan can't finish
+ * under the anon 3s budget AND it saturates I/O, pushing the parallel list+map
+ * queries over the limit too. So we take the estimate first and only run an
+ * exact count when the estimate is small enough that the scan is cheap. Result:
+ * exact for small/filtered cohorts (where a precise number matters and is
+ * affordable), an honest "~N" for broad ones, NEVER a wasted big scan — the
+ * industry-standard hybrid. (`count=estimated` is NOT used: Supabase's threshold
+ * still runs an exact count for mid-size cohorts, so it times out cold like
+ * `exact`.) Shares the exact filter chain (resolveBrowsePrefilters +
+ * applyFilters) with the Map/Table/Cards fetchers, so the total can never
+ * disagree with the listed rows. */
 const EXACT_COUNT_BUDGET_MS = 2500;
+/* Above this planner estimate an exact count is skipped: the scan would be too
+ * heavy to finish under budget on this cache-constrained instance, and "~N" is
+ * the honest answer for a broad cohort anyway. Below it the scan is cheap, so we
+ * confirm the precise figure. */
+const EXACT_COUNT_MAX = 5_000;
 export const fetchBrowseCount = async (
   f: ListingFilters,
 ): Promise<CohortCount> => {
@@ -738,17 +746,24 @@ export const fetchBrowseCount = async (
       ),
       pre,
     ) as unknown as CountQuery;
-  try {
-    const { count, error } = await build('exact').abortSignal(
-      AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
-    );
-    if (error) throw error;
-    return { value: count ?? 0, precise: true };
-  } catch {
-    const { count, error } = await build('planned');
-    if (error) throw error;
-    return { value: count ?? 0, precise: false };
+  // Estimate first — instant, no scan, no contention.
+  const planned = await build('planned');
+  if (planned.error) throw planned.error;
+  const estimate = planned.count ?? 0;
+  // Confirm the precise count only for small cohorts where the scan is cheap.
+  if (estimate > 0 && estimate <= EXACT_COUNT_MAX) {
+    try {
+      const { count, error } = await build('exact').abortSignal(
+        AbortSignal.timeout(EXACT_COUNT_BUDGET_MS),
+      );
+      if (error) throw error;
+      return { value: count ?? estimate, precise: true };
+    } catch {
+      // Estimate was off / the scan didn't finish — fall back to the estimate.
+    }
   }
+  // estimate === 0 is treated as a settled "0"; any other estimate is "~N".
+  return { value: estimate, precise: estimate === 0 };
 };
 
 /* -------------------------------------------------------------------------- */

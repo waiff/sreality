@@ -2531,13 +2531,13 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "refresh_map_mv.yml",
     "name": "Jobs: refresh Browse map view",
-    "description": "Refresh properties_map_mv (migration 254) -- the cold-robust materialized source for the Browse map feed. The map ships up to 50k points for client-side clustering; reading that off the churned live `properties` table tripped the anon 3s statement_timeout cold, so the map reads this clean, all-visible copy instead. It only reflects new/changed/delisted listings when refreshed, so a scheduled REFRESH (CONCURRENTLY, non-blocking) keeps the map a few minutes fresh. Source-agnostic maintenance job (no portal tag).",
+    "description": "Refresh properties_map_mv (migration 254) -- the cold-robust materialized source for the Browse map feed. The map ships up to 50k points for client-side clustering; reading that off the churned live `properties` table tripped the anon 3s statement_timeout cold, so the map reads this clean, all-visible copy instead. It only reflects new/changed/delisted listings when refreshed, so a scheduled rebuild keeps the map fresh. The rebuild is BLUE-GREEN + CLUSTERED (build a fresh clustered copy off to the side, atomic-swap) because on this cache-constrained instance the map source must stay physically clustered to read fast cold -- see scripts/refresh_map_mv.py. A full clustered rebuild is heavier than a concurrent refresh, so it runs every 30 min (the map can be a few minutes stale). Source-agnostic maintenance job (no portal tag).",
     "portal": null,
     "manual": true,
     "schedules": [
       {
-        "cron": "*/15 * * * *",
-        "human": "Every 15 minutes"
+        "cron": "*/30 * * * *",
+        "human": "Every 30 minutes"
       }
     ],
     "onPush": false,
