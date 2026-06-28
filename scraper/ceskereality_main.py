@@ -248,18 +248,28 @@ class CeskerealityPortal:
         segs = node_path.split("/")
         already_stacked = len(segs) >= 2
         geo = segs[-1]
-        if not already_stacked:
-            disp: list[str] = []
-            forms = [geo] + (["praha"] if geo == _PRAHA_SLUG else [])
-            for form in forms:
-                disp += extract_disposition_paths(html, sale_type, cat, form)
-            if disp:                        # complete partition -> prefer it
-                return disp
         prefix = f"{segs[0]}/" if already_stacked else ""
-        return [
-            prefix + s for s in extract_facet_slugs(html, sale_type, cat)
-            if s.startswith(("obec-", "cast-", "mc-")) and s != geo
-        ]
+        children: list[str] = []
+        seen: set[str] = set()
+
+        def _add(path: str) -> None:
+            if path not in seen:
+                seen.add(path)
+                children.append(path)
+
+        # finer geography (preserve any disposition prefix); mc- = Prague's complete
+        # 22-district partition, cast-/obec- the quarter/municipality facets.
+        for s in extract_facet_slugs(html, sale_type, cat):
+            if s.startswith(("obec-", "cast-", "mc-")) and s != geo:
+                _add(prefix + s)
+        # disposition axis (only for a not-yet-stacked geo node) — UNIONED with the
+        # geography above, since BOTH facet lists are sometimes truncated and each
+        # catches what the other misses (validated: geo alone 1782, disp alone 1400,
+        # union ~complete).
+        if not already_stacked:
+            for path in extract_disposition_paths(html, sale_type, cat):
+                _add(path)
+        return children
 
     def _walk_okres(
         self, client: CeskerealityClient, sale_type: str, cat: str, slug: str,

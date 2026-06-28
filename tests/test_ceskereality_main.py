@@ -23,29 +23,32 @@ class _StubClient:
         return self._html, 200
 
 
-def test_extract_disposition_paths_keeps_only_matching_geo():
+def test_extract_disposition_paths_auto_discovers_dominant_geo():
+    # the node's own geo dominates its facet list (the capital's stacked form is "praha",
+    # auto-discovered with no per-city special-case); a cross-link geo appears once.
     html = (
         '<a href="/prodej/byty/byty-2-kk/praha/">x</a>'
-        '<a href="/prodej/byty/byty-3-1/praha/">x</a>'
-        '<a href="/prodej/byty/byty-2-kk/kladno/">other geo -> ignored</a>'
+        '<a href="/prodej/byty/byty-3-1/praha/">x</a>'        # praha: 2 (dominant)
+        '<a href="/prodej/byty/byty-2-kk/kladno/">cross-link -> 1, not dominant</a>'
         '<a href="/prodej/byty/byty-2-kk/">nationwide 1-seg -> ignored</a>'
         '<a href="/prodej/byty/praha/">geo-only 1-seg -> ignored</a>'
     )
-    assert extract_disposition_paths(html, "prodej", "byty", "praha") == [
+    assert extract_disposition_paths(html, "prodej", "byty") == [
         "byty-2-kk/praha", "byty-3-1/praha"]
-    assert extract_disposition_paths(html, "prodej", "byty", "kladno") == ["byty-2-kk/kladno"]
 
 
-def test_child_subpaths_prefers_disposition_axis_with_praha_form():
-    # the capital's stacked geo is "praha", not the standalone "praha-hlavni-mesto"
+def test_child_subpaths_unions_geo_and_disposition():
+    # both axes are unioned (each facet list is sometimes truncated); the capital's
+    # stacked geo "praha" is auto-discovered, mc- adds the complete 22-district partition.
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     client = _StubClient(
         '<a href="/prodej/byty/byty-2-kk/praha/">x</a>'
         '<a href="/prodej/byty/byty-3-1/praha/">x</a>'
-        '<a href="/prodej/byty/cast-praha-zizkov/">geo (not used when disp exists)</a>'
+        '<a href="/prodej/byty/cast-praha-zizkov/">x</a>'
+        '<a href="/prodej/byty/mc-praha-3/">x</a>'
     )
-    assert portal._child_subpaths(client, "prodej", "byty", "praha-hlavni-mesto") == [
-        "byty-2-kk/praha", "byty-3-1/praha"]
+    subs = portal._child_subpaths(client, "prodej", "byty", "praha-hlavni-mesto")
+    assert {"cast-praha-zizkov", "mc-praha-3", "byty-2-kk/praha", "byty-3-1/praha"} <= set(subs)
 
 
 def test_child_subpaths_geo_axis_when_no_disposition():
