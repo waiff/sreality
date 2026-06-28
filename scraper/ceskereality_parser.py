@@ -332,6 +332,28 @@ def extract_facet_slugs(html: str, sale_type: str, category: str) -> list[str]:
     return out
 
 
+def extract_disposition_paths(
+    html: str, sale_type: str, category: str, geo_slug: str,
+) -> list[str]:
+    """The disposition-stacked sub-paths `/{sale}/{category}/{disp}/{geo_slug}/` a node
+    page links — the disposition axis (e.g. `byty-2-kk/cast-praha-zizkov`). For byty/dum
+    every listing has a disposition, so this is a COMPLETE partition of the node and
+    drills a dense node whose geography is exhausted (verified: /{sale}/byty/{disp}/{quarter}/
+    returns the disposition×quarter slice). Returns `{disp}/{geo_slug}` sub-paths usable as
+    a search_url sub_slug."""
+    pat = re.compile(
+        rf'href="/{re.escape(sale_type)}/{re.escape(category)}/'
+        rf'([a-z][a-z0-9-]+)/{re.escape(geo_slug)}/"')
+    out: list[str] = []
+    seen: set[str] = set()
+    for disp in pat.findall(html):
+        if disp in _FACET_EXCLUDE or disp == geo_slug or disp in seen:
+            continue
+        seen.add(disp)
+        out.append(f"{disp}/{geo_slug}")
+    return out
+
+
 def _jsonld_product(html: str) -> dict[str, Any]:
     """The schema.org product JSON-LD block (price + broker + address), or {}.
     Picks the block whose `offers` carries a numeric price."""

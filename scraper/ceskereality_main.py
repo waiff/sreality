@@ -39,6 +39,7 @@ from scraper.ceskereality_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
     category_from_url,
+    extract_disposition_paths,
     extract_facet_slugs,
     index_price,
     parse_detail,
@@ -67,10 +68,11 @@ INDEX_MIN_COMPLETENESS = 0.995
 _CAP_PAGES = 12
 _PER_PAGE = 20
 
-# How deep the okres recursion drills: okres -> obec/quarter (1) -> sub-area (2). A
-# dense Prague quarter that itself caps (> 240) needs the second level; beyond that
-# the residual is tiny and the node is left incomplete (mark_inactive stays suppressed).
-_MAX_RECURSION_DEPTH = 2
+# How deep the recursion drills: okres -> disposition or obec/quarter (1) -> finer geo
+# (2) -> sub-area (3). byty/dum split by disposition first (a complete partition), so a
+# dense okres usually resolves at depth 1-2; beyond depth 3 the residual is tiny and the
+# node is left incomplete (mark_inactive stays suppressed).
+_MAX_RECURSION_DEPTH = 3
 
 # Detail + search are always fetched on the canonical host; the okres slug is the
 # locality filter (`/{sale}/{cat}/{okres}/`), so one host covers every district.
@@ -226,23 +228,38 @@ class CeskerealityPortal:
         self._okres_cache = slugs
         return slugs
 
-    def _sublocality_slugs(
-        self, client: CeskerealityClient, sale_type: str, cat: str, okres_slug: str,
+    def _child_subpaths(
+        self, client: CeskerealityClient, sale_type: str, cat: str, node_path: str,
     ) -> list[str]:
-        """The municipality / city-part facets an okres page links — `obec-{town}`
-        (e.g. obec-slany) and `cast-{city}-{quarter}` (e.g. cast-praha-zizkov). Each
-        is a single-facet `/{sale}/{cat}/{slug}/` sub-partition of the okres, so a
-        dense okres that caps recurses into them. Category-agnostic (every listing
-        sits in an obec), so it works for pozemky/komercni too — they have no
-        disposition to split on."""
+        """Narrowing sub-facets of a capped node, as search_url sub_slugs (possibly
+        multi-segment). TWO axes:
+          - DISPOSITION (byty/dum): `/{disp}/{geo}/` — a COMPLETE partition (every flat
+            has a disposition) preferred for a not-yet-disposition-stacked node, since
+            ~7 slices cover the node vs ~57 quarters. (The capital's stacked geo is
+            `praha`, not the standalone `praha-hlavni-mesto` okres slug.)
+          - GEOGRAPHY: finer `obec-`/`cast-`/`mc-` units (mc- = Prague's COMPLETE 22
+            -district partition, vs the truncated cast- quarter list); the node's
+            disposition prefix is preserved so a capped `{disp}/{geo}` drills to
+            `{disp}/{finer-geo}`. The only axis for pozemky/komercni (no disposition)."""
         try:
-            html, _ = client.fetch_search(search_url(sale_type, cat, sub_slug=okres_slug))
-            return [
-                s for s in extract_facet_slugs(html, sale_type, cat)
-                if s.startswith(("obec-", "cast-"))
-            ]
+            html, _ = client.fetch_search(search_url(sale_type, cat, sub_slug=node_path))
         except Exception:                   # noqa: BLE001
             return []
+        segs = node_path.split("/")
+        already_stacked = len(segs) >= 2
+        geo = segs[-1]
+        if not already_stacked:
+            disp: list[str] = []
+            forms = [geo] + (["praha"] if geo == _PRAHA_SLUG else [])
+            for form in forms:
+                disp += extract_disposition_paths(html, sale_type, cat, form)
+            if disp:                        # complete partition -> prefer it
+                return disp
+        prefix = f"{segs[0]}/" if already_stacked else ""
+        return [
+            prefix + s for s in extract_facet_slugs(html, sale_type, cat)
+            if s.startswith(("obec-", "cast-", "mc-")) and s != geo
+        ]
 
     def _walk_okres(
         self, client: CeskerealityClient, sale_type: str, cat: str, slug: str,
@@ -257,7 +274,7 @@ class CeskerealityPortal:
             client, _WWW, sale_type, cat, slug)
         if complete or self._max_pages or depth >= _MAX_RECURSION_DEPTH:
             return rows, pages, total, complete
-        sub = self._sublocality_slugs(client, sale_type, cat, slug)
+        sub = self._child_subpaths(client, sale_type, cat, slug)
         if not sub:
             return rows, pages, total, False   # nothing to drill into -> incomplete
         collected = {nid for nid, _, _ in rows}

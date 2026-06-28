@@ -9,8 +9,62 @@ import re
 
 from scraper import ceskereality_main as m
 from scraper.ceskereality_client import CeskerealityClient
-from scraper.ceskereality_parser import extract_facet_slugs
+from scraper.ceskereality_parser import extract_disposition_paths, extract_facet_slugs
 from scraper.portal import default_config
+
+
+class _StubClient:
+    """Returns a fixed HTML body for every fetch_search (for _child_subpaths tests)."""
+
+    def __init__(self, html: str) -> None:
+        self._html = html
+
+    def fetch_search(self, url):  # noqa: ANN001
+        return self._html, 200
+
+
+def test_extract_disposition_paths_keeps_only_matching_geo():
+    html = (
+        '<a href="/prodej/byty/byty-2-kk/praha/">x</a>'
+        '<a href="/prodej/byty/byty-3-1/praha/">x</a>'
+        '<a href="/prodej/byty/byty-2-kk/kladno/">other geo -> ignored</a>'
+        '<a href="/prodej/byty/byty-2-kk/">nationwide 1-seg -> ignored</a>'
+        '<a href="/prodej/byty/praha/">geo-only 1-seg -> ignored</a>'
+    )
+    assert extract_disposition_paths(html, "prodej", "byty", "praha") == [
+        "byty-2-kk/praha", "byty-3-1/praha"]
+    assert extract_disposition_paths(html, "prodej", "byty", "kladno") == ["byty-2-kk/kladno"]
+
+
+def test_child_subpaths_prefers_disposition_axis_with_praha_form():
+    # the capital's stacked geo is "praha", not the standalone "praha-hlavni-mesto"
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    client = _StubClient(
+        '<a href="/prodej/byty/byty-2-kk/praha/">x</a>'
+        '<a href="/prodej/byty/byty-3-1/praha/">x</a>'
+        '<a href="/prodej/byty/cast-praha-zizkov/">geo (not used when disp exists)</a>'
+    )
+    assert portal._child_subpaths(client, "prodej", "byty", "praha-hlavni-mesto") == [
+        "byty-2-kk/praha", "byty-3-1/praha"]
+
+
+def test_child_subpaths_geo_axis_when_no_disposition():
+    # pozemky/komercni have no disposition -> finer geography only (incl. mc-)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    client = _StubClient(
+        '<a href="/prodej/pozemky/obec-slany/">x</a>'
+        '<a href="/prodej/pozemky/mc-praha-3/">x</a>'
+    )
+    assert set(portal._child_subpaths(client, "prodej", "pozemky", "kladno")) == {
+        "obec-slany", "mc-praha-3"}
+
+
+def test_child_subpaths_preserves_disposition_when_drilling_geo():
+    # a capped disposition node drills geography KEEPING its disposition prefix
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    client = _StubClient('<a href="/prodej/byty/cast-praha-zizkov/">x</a>')
+    assert portal._child_subpaths(client, "prodej", "byty", "byty-2-kk/praha") == [
+        "byty-2-kk/cast-praha-zizkov"]
 
 
 def _page_html(
