@@ -207,14 +207,51 @@ class CeskerealityPortal:
         self._okres_cache = slugs
         return slugs
 
-    def _page_facets(self, client: CeskerealityClient, sale_type: str, cat: str) -> list[str]:
-        """The disposition/type facets the www category page links — unioned with the
-        okres partition so a listing reachable only by disposition is still caught."""
+    def _sublocality_slugs(
+        self, client: CeskerealityClient, sale_type: str, cat: str, okres_slug: str,
+    ) -> list[str]:
+        """The municipality / city-part facets an okres page links — `obec-{town}`
+        (e.g. obec-slany) and `cast-{city}-{quarter}` (e.g. cast-praha-zizkov). Each
+        is a single-facet `/{sale}/{cat}/{slug}/` sub-partition of the okres, so a
+        dense okres that caps recurses into them. Category-agnostic (every listing
+        sits in an obec), so it works for pozemky/komercni too — they have no
+        disposition to split on."""
         try:
-            html, _ = client.fetch_search(search_url(sale_type, cat))
-            return extract_facet_slugs(html, sale_type, cat)
+            html, _ = client.fetch_search(search_url(sale_type, cat, sub_slug=okres_slug))
+            return [
+                s for s in extract_facet_slugs(html, sale_type, cat)
+                if s.startswith(("obec-", "cast-"))
+            ]
         except Exception:                   # noqa: BLE001
             return []
+
+    def _walk_okres(
+        self, client: CeskerealityClient, sale_type: str, cat: str, okres_slug: str,
+    ) -> tuple[list[tuple[str, str, int | None]], int, int | None, bool]:
+        """Walk one okres; if it still caps (a dense district > 240), recurse into its
+        obce / city-parts so every leaf stays under the 12-page cap. Complete iff the
+        okres walk didn't cap OR the recursion collected ~all of the okres total."""
+        rows, pages, total, complete = self._walk_slice(
+            client, _WWW, sale_type, cat, okres_slug)
+        if complete or self._max_pages:
+            return rows, pages, total, complete
+        sub = self._sublocality_slugs(client, sale_type, cat, okres_slug)
+        if not sub:
+            return rows, pages, total, False   # nothing to drill into -> incomplete
+        collected = {nid for nid, _, _ in rows}
+        all_rows = list(rows)
+        for child in sub:
+            crows, cpages, _ct, _cc = self._walk_slice(
+                client, _WWW, sale_type, cat, child)
+            pages += cpages
+            for r in crows:
+                if r[0] not in collected:
+                    collected.add(r[0])
+                    all_rows.append(r)
+        # Complete iff the okres + its sub-localities reached the okres's own total
+        # (a truncated obec facet leaves it short -> stays incomplete, suppressing
+        # mark_inactive for the category, which is the conservative correct choice).
+        return all_rows, pages, total, _walk_complete(len(collected), total)
 
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
@@ -223,38 +260,23 @@ class CeskerealityPortal:
         client = CeskerealityClient(limiter=limiter)
         # Geographic axis = the COMPLETE okres partition (admin_boundaries), NOT the
         # site's truncated district facet (it only links its top ~9 districts per
-        # region). Union the page's own disposition/type facets so a disposition-only
-        # listing is caught too. `--region` (self._regions) restricts to a slug subset
-        # for an ad-hoc test and, being partial, suppresses mark_inactive.
+        # region). Every CZ listing sits in exactly one okres, so the union covers the
+        # whole country; a dense okres that still caps recurses into its obce/city-
+        # parts (_walk_okres). `--region` (self._regions) restricts to a slug subset
+        # for an ad-hoc partial test and, being partial, suppresses mark_inactive.
         scoped = self._regions
-        candidates = self._okres_slugs(conn) + self._page_facets(client, sale_type, cat)
-        slugs: list[str] = []
-        seen_slug: set[str] = set()
-        for s in candidates:
-            if scoped and s not in scoped:
-                continue
-            if s not in seen_slug:
-                seen_slug.add(s)
-                slugs.append(s)
-        # None = the bare www page (a top-240 backstop) — only on a full walk; on a
-        # scoped ad-hoc test it's noise.
-        walk_slugs: list[str | None] = ([None] if not scoped else []) + list(slugs)
+        okres_slugs = [
+            s for s in self._okres_slugs(conn) if not scoped or s in scoped
+        ]
 
         native_ids: list[str] = []
         price_map: dict[str, int | None] = {}
         ref_map: dict[str, str] = {}
         seen_ids: set[str] = set()
         pages = 0
-        incomplete_slices = 0
-        for slug in walk_slugs:
-            rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
-                client, _WWW, sale_type, cat, slug)
-            pages += slice_pages
-            # A capped okres/disposition slice (a dense district still > 240) is
-            # genuine incompleteness that suppresses mark_inactive; the bare-page
-            # backstop (slug=None) is expected to cap, so it doesn't count.
-            if slug is not None and not slice_complete:
-                incomplete_slices += 1
+        incomplete_okresy = 0
+
+        def _absorb(rows: list[tuple[str, str, int | None]]) -> None:
             for nid, ref, price in rows:
                 if nid not in seen_ids:
                     seen_ids.add(nid)
@@ -262,12 +284,28 @@ class CeskerealityPortal:
                 ref_map[nid] = ref
                 price_map[nid] = price
 
+        # The bare www page (top-240) — cheap insurance for any okres-less listing;
+        # only on a full walk (noise under a scoped ad-hoc test).
+        if not scoped:
+            rows, slice_pages, _t, _c = self._walk_slice(
+                client, _WWW, sale_type, cat, None)
+            pages += slice_pages
+            _absorb(rows)
+
+        for okres in okres_slugs:
+            rows, okres_pages, _t, okres_complete = self._walk_okres(
+                client, sale_type, cat, okres)
+            pages += okres_pages
+            if not okres_complete:
+                incomplete_okresy += 1
+            _absorb(rows)
+
         total = self._nationwide_total(client, sale_type, cat)
         LOG.info(
-            "SPLIT cm=%s ct=%s slices=%d collected=%d total=%s "
-            "incomplete_slices=%d pages=%d",
-            cat, sale_type, len(walk_slugs), len(seen_ids), total,
-            incomplete_slices, pages,
+            "SPLIT cm=%s ct=%s okresy=%d collected=%d total=%s "
+            "incomplete_okresy=%d pages=%d",
+            cat, sale_type, len(okres_slugs), len(seen_ids), total,
+            incomplete_okresy, pages,
         )
 
         seen = set(native_ids)
@@ -303,11 +341,12 @@ class CeskerealityPortal:
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
         # mark_inactive is safe only on a FULL, uncapped walk: every okres walked
-        # (not --region scoped), no slice hit the 12-page cap, and we collected ~all
-        # of the nationwide total. Any capped slice (a dense district still > 240)
-        # leaves the walk incomplete, so we suppress the sweep (rule #3).
+        # (not --region scoped), no okres left incomplete after its recursion, and we
+        # collected ~all of the nationwide total. Any okres whose obce facet truncated
+        # (recursion fell short of its total) leaves the walk incomplete, so we
+        # suppress the sweep (rule #3).
         complete = (
-            not self._max_pages and not self._regions and incomplete_slices == 0
+            not self._max_pages and not self._regions and incomplete_okresy == 0
             and _walk_complete(len(seen), total)
         )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete

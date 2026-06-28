@@ -97,8 +97,8 @@ def test_okres_slugs_without_conn_falls_back_to_praha_only():
 
 
 class _FacetClient:
-    """The bare www page advertises two disposition facets; each okres/facet slice
-    returns its own listings on the www host. Unique ids per page-1 fetch."""
+    """Every okres slice (and the bare-page backstop) returns its own listings on the
+    www host; none cap, so no recursion. Unique ids per page-1 fetch."""
 
     def __init__(self) -> None:
         self.urls: list[str] = []
@@ -114,16 +114,14 @@ class _FacetClient:
             return _page_html(50, []), 200            # page 2 -> empty, slice ends
         if "/praha-hlavni-mesto/" in url:
             return _page_html(50, [self._nid(), self._nid()]), 200
-        if "/byty-3-1/" in url:
-            return _page_html(50, [self._nid()]), 200
-        # the bare www page: advertises a disposition facet + one backstop listing
-        return _page_html(50, [self._nid()], facets=("byty-3-1",)), 200
+        # the bare www page (None backstop) + any other okres: one listing each
+        return _page_html(50, [self._nid()]), 200
 
     def fetch_index(self, sale_type, cat, page):  # nationwide total  # noqa: ANN001
         return _page_html(50, ["9000001"]), 200
 
 
-def test_walk_category_walks_okres_partition_and_facets(monkeypatch):
+def test_walk_category_walks_okres_partition(monkeypatch):
     fake = _FacetClient()
     monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
     portal = m.CeskerealityPortal(default_config("ceskereality"))
@@ -135,12 +133,11 @@ def test_walk_category_walks_okres_partition_and_facets(monkeypatch):
 
     # every slice is fetched on the canonical www host (no region subdomains)
     assert all("www.ceskereality.cz" in u for u in fake.urls)
-    # the okres axis (praha, conn=None -> praha-only) AND the page's disposition facet
-    # were both walked
+    # the okres axis (conn=None -> praha-only) + the bare-page backstop were walked
     assert any("/prodej/byty/praha-hlavni-mesto/" in u for u in fake.urls)
-    assert any("/prodej/byty/byty-3-1/" in u for u in fake.urls)
-    # union: 1 bare-page backstop + 2 praha + 1 disposition = 4 distinct listings
-    assert len(seen) == 4
+    assert any(u.rstrip("/").endswith("/prodej/byty") for u in fake.urls)
+    # union: 1 bare-page backstop + 2 praha = 3 distinct listings (no disposition fan-out)
+    assert len(seen) == 3
 
 
 def test_walk_category_uses_admin_okres_list(monkeypatch):
@@ -158,6 +155,54 @@ def test_walk_category_uses_admin_okres_list(monkeypatch):
     # the admin-supplied okresy are walked as slices on www
     assert any("/prodej/byty/kladno/" in u for u in fake.urls)
     assert any("/prodej/byty/brno-mesto/" in u for u in fake.urls)
+
+
+class _RecursingClient:
+    """A dense okres caps (12 full pages, total 300) and its page-1 advertises
+    obec-/cast- sub-locality facets; the recursion drills into each (small, complete).
+    A 2-segment disposition facet must NOT be taken as a sub-locality."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self._n = 0
+
+    def _nid(self) -> str:
+        self._n += 1
+        return str(6_000_000 + self._n)
+
+    def fetch_search(self, url):  # noqa: ANN001
+        self.urls.append(url)
+        pg = _page_num(url)
+        if "/cast-praha-" in url or "/obec-" in url:
+            return _page_html(40, [] if pg > 1 else [self._nid(), self._nid()]), 200
+        if "/praha-hlavni-mesto/" in url:
+            ids = [str(7_000_000 + pg * 100 + k) for k in range(20)]
+            # page 1 carries the sub-locality facets (+ a stacked disposition decoy)
+            facets = (
+                ("cast-praha-zizkov", "obec-x", "byty-3-1") if pg == 1 else ()
+            )
+            return _page_html(300, ids, facets=facets, next_page=pg + 1), 200
+        return _page_html(50, [] if pg > 1 else [self._nid()]), 200
+
+    def fetch_index(self, sale_type, cat, page):  # noqa: ANN001
+        return _page_html(50, ["9000001"]), 200
+
+
+def test_walk_okres_recurses_into_sublocalities_when_capped():
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    fake = _RecursingClient()
+    rows, _pages, total, _complete = portal._walk_okres(
+        fake, "prodej", "byty", "praha-hlavni-mesto")
+    # the okres capped at 12 pages, then drilled into its obec-/cast- sub-localities
+    praha_pages = [_page_num(u) for u in fake.urls if "praha-hlavni-mesto" in u]
+    assert max(praha_pages) == 12       # never requested the 404 page 13
+    assert any("/prodej/byty/cast-praha-zizkov/" in u for u in fake.urls)
+    assert any("/prodej/byty/obec-x/" in u for u in fake.urls)
+    assert total == 300
+    # the disposition facet (treated as a sub-locality) is NOT walked
+    assert not any(u.rstrip("/").endswith("/byty-3-1") for u in fake.urls)
+    # the okres's 240 + the two sub-locality listings were collected
+    assert len(rows) == 12 * 20 + 4
 
 
 class _CappedClient:
