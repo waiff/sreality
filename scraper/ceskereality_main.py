@@ -30,7 +30,6 @@ from typing import Any
 from scraper import db, portal_runner
 from scraper.ceskereality_client import (
     REGION_HOSTS,
-    SUB_SLUGS,
     CeskerealityClient,
     detail_url,
     search_url,
@@ -39,6 +38,7 @@ from scraper.ceskereality_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
     category_from_url,
+    extract_facet_slugs,
     index_price,
     parse_detail,
     parse_index,
@@ -164,13 +164,25 @@ class CeskerealityPortal:
         except Exception:                   # noqa: BLE001
             return None
 
+    def _region_facets(
+        self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
+    ) -> list[str]:
+        """The narrowing-facet slugs (districts + dispositions + types) a region's
+        category page links — discovered live so a new district/type is never
+        missed. District is a complete partition, so walking the union covers
+        ~all of a region's inventory under the 12-page cap."""
+        try:
+            html, _ = client.fetch_search(search_url(sale_type, cat, host=host))
+            return extract_facet_slugs(html, sale_type, cat)
+        except Exception:                   # noqa: BLE001
+            return []
+
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = CeskerealityClient(limiter=limiter)
         hosts = self._regions or REGION_HOSTS
-        slugs: tuple[str | None, ...] = SUB_SLUGS.get(cat) or (None,)
 
         native_ids: list[str] = []
         price_map: dict[str, int | None] = {}
@@ -178,12 +190,20 @@ class CeskerealityPortal:
         seen_ids: set[str] = set()
         pages = 0
         incomplete_slices = 0
+        slices = 0
         for host in hosts:
-            for slug in slugs:
+            facets = self._region_facets(client, host, sale_type, cat)
+            # None = the region-wide page (a backstop for its top ~240); then every
+            # discovered facet slice (each ~<=240 -> fully walked).
+            for slug in (None, *facets):
+                slices += 1
                 rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
                     client, host, sale_type, cat, slug)
                 pages += slice_pages
-                if not slice_complete:
+                # The region-wide backstop (slug=None) is EXPECTED to cap for a big
+                # region — only a capped FACET slice (a dense district still > 240)
+                # is genuine incompleteness that suppresses mark_inactive.
+                if slug is not None and not slice_complete:
                     incomplete_slices += 1
                 for nid, ref, price in rows:
                     if nid not in seen_ids:
@@ -194,9 +214,9 @@ class CeskerealityPortal:
 
         total = self._nationwide_total(client, sale_type, cat)
         LOG.info(
-            "SPLIT cm=%s ct=%s regions=%d slugs=%d collected=%d total=%s "
+            "SPLIT cm=%s ct=%s regions=%d slices=%d collected=%d total=%s "
             "incomplete_slices=%d pages=%d",
-            cat, sale_type, len(hosts), len(slugs), len(seen_ids), total,
+            cat, sale_type, len(hosts), slices, len(seen_ids), total,
             incomplete_slices, pages,
         )
 
