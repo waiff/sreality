@@ -608,8 +608,15 @@ export const fetchListingsForMap = async (
 ): Promise<MapResult> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], total: 0, capped: false };
+  /* The map reads `properties_map_mv` (migration 254), NOT `properties_public`.
+   * Shipping up to MAP_CAP points off the live, churned `properties` table was
+   * cold-fragile (>3s, the anon statement_timeout) — the matview is a clean,
+   * all-visible, cached copy of the same columns, so the identical scan stays
+   * robust cold (~200ms). It carries properties_public's full FILTERABLE surface,
+   * so applyFilters / applyPrefilters are a drop-in (only the source differs).
+   * The matview is map-fresh within the refresh_map_mv cadence (~15 min). */
   const base = supabase
-    .from('properties_public')
+    .from('properties_map_mv')
     .select(MAP_COLS)
     .not('lat', 'is', null)
     .not('lng', 'is', null);
