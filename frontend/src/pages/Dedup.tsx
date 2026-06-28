@@ -323,8 +323,8 @@ function AutomationDashboard({
             <div
               className={`mb-3 rounded-[var(--radius-md)] border px-3 py-2 text-sm ${
                 dq.status === 'fail'
-                  ? 'border-[var(--color-brick)] text-[var(--color-brick)]'
-                  : 'border-[var(--color-copper)] text-[var(--color-copper)]'
+                  ? 'border-[var(--color-brick)]/40 bg-[var(--color-brick-soft)] text-[var(--color-brick)]'
+                  : 'border-[var(--color-ochre)]/40 bg-[var(--color-ochre-soft)] text-[var(--color-ochre)]'
               }`}
             >
               <strong className="font-medium">
