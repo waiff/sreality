@@ -1,12 +1,14 @@
-"""The ceskereality region × dynamic-facet split (the cap beater) + the opt-in
-residential proxy."""
+"""The ceskereality www × okres-partition split (the cap beater) + the opt-in
+residential proxy. The geographic axis is the COMPLETE okres list from
+admin_boundaries (not the site's truncated district facet), unioned with the page's
+disposition facets, every slice fetched on www and capped at 12 pages."""
 
 from __future__ import annotations
 
 import re
 
 from scraper import ceskereality_main as m
-from scraper.ceskereality_client import REGION_HOSTS, CeskerealityClient
+from scraper.ceskereality_client import CeskerealityClient
 from scraper.ceskereality_parser import extract_facet_slugs
 from scraper.portal import default_config
 
@@ -35,6 +37,29 @@ def _page_num(url: str) -> int:
     return int(mm.group(1)) if mm else 1
 
 
+class _OkresConn:
+    """A stand-in DB connection: `_okres_slugs` queries admin_boundaries for the
+    okres names through `conn.cursor()`."""
+
+    def __init__(self, names: list[str]) -> None:
+        self._names = names
+
+    def cursor(self):  # used as `with conn.cursor() as cur:`
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):  # noqa: ANN002
+        return False
+
+    def execute(self, sql, params=None):  # noqa: ANN001
+        pass
+
+    def fetchall(self):
+        return [(n,) for n in self._names]
+
+
 def test_extract_facet_slugs_drops_pure_filters():
     html = (
         '<a href="/prodej/byty/byty-3-1/">x</a>'
@@ -47,9 +72,33 @@ def test_extract_facet_slugs_drops_pure_filters():
     assert extract_facet_slugs(html, "prodej", "byty") == ["byty-3-1", "kladno"]
 
 
+def test_slugify_folds_diacritics_and_spaces():
+    assert m._slugify("Mladá Boleslav") == "mlada-boleslav"
+    assert m._slugify("Brno-město") == "brno-mesto"
+    assert m._slugify("Ústí nad Labem") == "usti-nad-labem"
+    assert m._slugify("Praha-východ") == "praha-vychod"
+    assert m._slugify("Žďár nad Sázavou") == "zdar-nad-sazavou"
+
+
+def test_okres_slugs_complete_partition_with_praha_special_case():
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    conn = _OkresConn(["Kladno", "Mladá Boleslav", "Brno-město"])
+    slugs = portal._okres_slugs(conn)
+    # the capital is mapped explicitly (its admin name doesn't fold to the slug)
+    assert slugs[0] == "praha-hlavni-mesto"
+    assert {"kladno", "mlada-boleslav", "brno-mesto"} <= set(slugs)
+    # cached: a second call doesn't re-query
+    assert portal._okres_slugs(_OkresConn(["other"])) == slugs
+
+
+def test_okres_slugs_without_conn_falls_back_to_praha_only():
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    assert portal._okres_slugs(None) == ["praha-hlavni-mesto"]
+
+
 class _FacetClient:
-    """A region's bare page advertises two district facets (kladno, beroun); each
-    district slice returns its own listings. Unique ids per page-1 fetch."""
+    """The bare www page advertises two disposition facets; each okres/facet slice
+    returns its own listings on the www host. Unique ids per page-1 fetch."""
 
     def __init__(self) -> None:
         self.urls: list[str] = []
@@ -63,33 +112,52 @@ class _FacetClient:
         self.urls.append(url)
         if "strana=" in url:
             return _page_html(50, []), 200            # page 2 -> empty, slice ends
-        if "/kladno/" in url:
+        if "/praha-hlavni-mesto/" in url:
             return _page_html(50, [self._nid(), self._nid()]), 200
-        if "/beroun/" in url:
+        if "/byty-3-1/" in url:
             return _page_html(50, [self._nid()]), 200
-        # the bare region page: advertises the facets + one region-wide listing
-        return _page_html(50, [self._nid()], facets=("kladno", "beroun")), 200
+        # the bare www page: advertises a disposition facet + one backstop listing
+        return _page_html(50, [self._nid()], facets=("byty-3-1",)), 200
 
     def fetch_index(self, sale_type, cat, page):  # nationwide total  # noqa: ANN001
         return _page_html(50, ["9000001"]), 200
 
 
-def test_walk_category_discovers_and_walks_facets(monkeypatch):
+def test_walk_category_walks_okres_partition_and_facets(monkeypatch):
     fake = _FacetClient()
     monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
-    portal = m.CeskerealityPortal(
-        default_config("ceskereality"), regions=("stredo.ceskereality.cz",))
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
 
     seen, _counts, _total, _pages, _complete = portal.walk_category(
         {"sale_type": "prodej", "category": "byty"},
         conn=None, dry_run=True, limiter=None,
     )
 
-    # both advertised districts were walked, on the region subdomain
-    assert any("stredo.ceskereality.cz/prodej/byty/kladno/" in u for u in fake.urls)
-    assert any("stredo.ceskereality.cz/prodej/byty/beroun/" in u for u in fake.urls)
-    # union: 1 region-wide backstop + 2 kladno + 1 beroun = 4 distinct listings
+    # every slice is fetched on the canonical www host (no region subdomains)
+    assert all("www.ceskereality.cz" in u for u in fake.urls)
+    # the okres axis (praha, conn=None -> praha-only) AND the page's disposition facet
+    # were both walked
+    assert any("/prodej/byty/praha-hlavni-mesto/" in u for u in fake.urls)
+    assert any("/prodej/byty/byty-3-1/" in u for u in fake.urls)
+    # union: 1 bare-page backstop + 2 praha + 1 disposition = 4 distinct listings
     assert len(seen) == 4
+
+
+def test_walk_category_uses_admin_okres_list(monkeypatch):
+    fake = _FacetClient()
+    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
+    monkeypatch.setattr(m.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(m.db, "enqueue_detail", lambda *a, **k: 0)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    conn = _OkresConn(["Kladno", "Brno-město"])
+
+    portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"},
+        conn=conn, dry_run=True, limiter=None,
+    )
+    # the admin-supplied okresy are walked as slices on www
+    assert any("/prodej/byty/kladno/" in u for u in fake.urls)
+    assert any("/prodej/byty/brno-mesto/" in u for u in fake.urls)
 
 
 class _CappedClient:
@@ -110,35 +178,23 @@ def test_walk_slice_caps_at_12_pages_never_requests_404_page13():
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     fake = _CappedClient()
     rows, _pages, total, complete = portal._walk_slice(
-        fake, "stredo.ceskereality.cz", "prodej", "byty", "kladno")
+        fake, "www.ceskereality.cz", "prodej", "byty", "praha-hlavni-mesto")
     assert max(fake.pages) == 12        # page 13 (the 404) is NEVER requested
     assert total == 300
     assert complete is False            # capped -> suppresses mark_inactive
     assert len(rows) == 12 * 20
 
 
-def test_region_scope_suppresses_completeness(monkeypatch):
+def test_scope_suppresses_completeness(monkeypatch):
     fake = _FacetClient()
     monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
     portal = m.CeskerealityPortal(
-        default_config("ceskereality"), regions=("stredo.ceskereality.cz",))
+        default_config("ceskereality"), regions=("praha-hlavni-mesto",))
     _seen, _counts, _total, _pages, complete = portal.walk_category(
         {"sale_type": "prodej", "category": "byty"},
         conn=None, dry_run=True, limiter=None,
     )
-    assert complete is False            # a one-region test is never a full walk
-
-
-def test_full_walk_visits_all_seven_regions(monkeypatch):
-    fake = _FacetClient()
-    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
-    portal = m.CeskerealityPortal(default_config("ceskereality"))   # no region scope
-    portal.walk_category(
-        {"sale_type": "prodej", "category": "byty"},
-        conn=None, dry_run=True, limiter=None,
-    )
-    for host in REGION_HOSTS:
-        assert any(host in u for u in fake.urls), f"{host} not walked"
+    assert complete is False            # a scoped partial test is never a full walk
 
 
 def test_client_routes_through_proxy_when_env_set(monkeypatch):

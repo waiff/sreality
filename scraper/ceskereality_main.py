@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
+import unicodedata
 from typing import Any
 
 from scraper import db, portal_runner
 from scraper.ceskereality_client import (
-    REGION_HOSTS,
     CeskerealityClient,
     detail_url,
     search_url,
@@ -59,11 +60,29 @@ SOURCE = "ceskereality"
 INDEX_MIN_COMPLETENESS = 0.995
 
 # Anonymous search hard-caps at 12 pages (~240 results); ?strana=13 returns 404.
-# So the walk NEVER requests page 13 — it slices each category by REGION SUBDOMAIN
-# × disposition/type facet (ceskereality_client) to keep every query under the cap,
-# and marks a slice that still exceeds it as incomplete (suppressing mark_inactive).
+# So the walk NEVER requests page 13 — it slices each category by the COMPLETE okres
+# (district) partition (admin_boundaries) × the page's disposition facets to keep
+# every query under the cap, and marks a slice that still exceeds it as incomplete
+# (suppressing mark_inactive).
 _CAP_PAGES = 12
 _PER_PAGE = 20
+
+# Detail + search are always fetched on the canonical host; the okres slug is the
+# locality filter (`/{sale}/{cat}/{okres}/`), so one host covers every district.
+_WWW = "www.ceskereality.cz"
+
+# The capital's admin name ("území Hlavního města Prahy") doesn't fold to
+# ceskereality's slug for Prague, so it's mapped explicitly; every other okres folds
+# its name -> slug directly (e.g. "Mladá Boleslav" -> mlada-boleslav, "Brno-město" ->
+# brno-mesto, "Ústí nad Labem" -> usti-nad-labem).
+_PRAHA_OKRES_ID = 9999
+_PRAHA_SLUG = "praha-hlavni-mesto"
+
+
+def _slugify(name: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", name.strip().lower())
+    ascii_text = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
 
 
 def _walk_complete(collected: int, total: int | None) -> bool:
@@ -90,8 +109,10 @@ class CeskerealityPortal:
         self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
-        # A region subset to walk (for an ad-hoc one-region test); None = all 7.
-        # When set, the walk is partial so mark_inactive is suppressed.
+        self._okres_cache: list[str] | None = None
+        # An okres/facet slug subset to walk (for an ad-hoc partial test); None =
+        # the full okres split. When set, the walk is partial so mark_inactive is
+        # suppressed.
         self._regions = regions
         self.index_rate = config.limits.index_rate
 
@@ -164,15 +185,33 @@ class CeskerealityPortal:
         except Exception:                   # noqa: BLE001
             return None
 
-    def _region_facets(
-        self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
-    ) -> list[str]:
-        """The narrowing-facet slugs (districts + dispositions + types) a region's
-        category page links — discovered live so a new district/type is never
-        missed. District is a complete partition, so walking the union covers
-        ~all of a region's inventory under the 12-page cap."""
+    def _okres_slugs(self, conn: Any) -> list[str]:
+        """The COMPLETE okres (district) partition from admin_boundaries — the
+        geographic axis of the cap-beating split. Every listing sits in exactly one
+        okres, so walking all 77 covers the whole country, unlike the site's facet
+        which only links its top ~9 districts per region."""
+        if self._okres_cache is not None:
+            return self._okres_cache
+        slugs = [_PRAHA_SLUG]
+        if conn is not None:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT name FROM admin_boundaries "
+                        "WHERE level = 'okres' AND id <> %s",
+                        (_PRAHA_OKRES_ID,),
+                    )
+                    slugs += [s for (name,) in cur.fetchall() if (s := _slugify(name))]
+            except Exception as exc:        # noqa: BLE001
+                LOG.warning("okres slug load failed: %s", exc)
+        self._okres_cache = slugs
+        return slugs
+
+    def _page_facets(self, client: CeskerealityClient, sale_type: str, cat: str) -> list[str]:
+        """The disposition/type facets the www category page links — unioned with the
+        okres partition so a listing reachable only by disposition is still caught."""
         try:
-            html, _ = client.fetch_search(search_url(sale_type, cat, host=host))
+            html, _ = client.fetch_search(search_url(sale_type, cat))
             return extract_facet_slugs(html, sale_type, cat)
         except Exception:                   # noqa: BLE001
             return []
@@ -182,7 +221,24 @@ class CeskerealityPortal:
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = CeskerealityClient(limiter=limiter)
-        hosts = self._regions or REGION_HOSTS
+        # Geographic axis = the COMPLETE okres partition (admin_boundaries), NOT the
+        # site's truncated district facet (it only links its top ~9 districts per
+        # region). Union the page's own disposition/type facets so a disposition-only
+        # listing is caught too. `--region` (self._regions) restricts to a slug subset
+        # for an ad-hoc test and, being partial, suppresses mark_inactive.
+        scoped = self._regions
+        candidates = self._okres_slugs(conn) + self._page_facets(client, sale_type, cat)
+        slugs: list[str] = []
+        seen_slug: set[str] = set()
+        for s in candidates:
+            if scoped and s not in scoped:
+                continue
+            if s not in seen_slug:
+                seen_slug.add(s)
+                slugs.append(s)
+        # None = the bare www page (a top-240 backstop) — only on a full walk; on a
+        # scoped ad-hoc test it's noise.
+        walk_slugs: list[str | None] = ([None] if not scoped else []) + list(slugs)
 
         native_ids: list[str] = []
         price_map: dict[str, int | None] = {}
@@ -190,33 +246,27 @@ class CeskerealityPortal:
         seen_ids: set[str] = set()
         pages = 0
         incomplete_slices = 0
-        slices = 0
-        for host in hosts:
-            facets = self._region_facets(client, host, sale_type, cat)
-            # None = the region-wide page (a backstop for its top ~240); then every
-            # discovered facet slice (each ~<=240 -> fully walked).
-            for slug in (None, *facets):
-                slices += 1
-                rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
-                    client, host, sale_type, cat, slug)
-                pages += slice_pages
-                # The region-wide backstop (slug=None) is EXPECTED to cap for a big
-                # region — only a capped FACET slice (a dense district still > 240)
-                # is genuine incompleteness that suppresses mark_inactive.
-                if slug is not None and not slice_complete:
-                    incomplete_slices += 1
-                for nid, ref, price in rows:
-                    if nid not in seen_ids:
-                        seen_ids.add(nid)
-                        native_ids.append(nid)
-                    ref_map[nid] = ref
-                    price_map[nid] = price
+        for slug in walk_slugs:
+            rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
+                client, _WWW, sale_type, cat, slug)
+            pages += slice_pages
+            # A capped okres/disposition slice (a dense district still > 240) is
+            # genuine incompleteness that suppresses mark_inactive; the bare-page
+            # backstop (slug=None) is expected to cap, so it doesn't count.
+            if slug is not None and not slice_complete:
+                incomplete_slices += 1
+            for nid, ref, price in rows:
+                if nid not in seen_ids:
+                    seen_ids.add(nid)
+                    native_ids.append(nid)
+                ref_map[nid] = ref
+                price_map[nid] = price
 
         total = self._nationwide_total(client, sale_type, cat)
         LOG.info(
-            "SPLIT cm=%s ct=%s regions=%d slices=%d collected=%d total=%s "
+            "SPLIT cm=%s ct=%s slices=%d collected=%d total=%s "
             "incomplete_slices=%d pages=%d",
-            cat, sale_type, len(hosts), slices, len(seen_ids), total,
+            cat, sale_type, len(walk_slugs), len(seen_ids), total,
             incomplete_slices, pages,
         )
 
@@ -252,9 +302,9 @@ class CeskerealityPortal:
             "ENQUEUE source=ceskereality new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        # mark_inactive is safe only on a FULL, uncapped walk: every region walked
+        # mark_inactive is safe only on a FULL, uncapped walk: every okres walked
         # (not --region scoped), no slice hit the 12-page cap, and we collected ~all
-        # of the nationwide total. Any capped slice (a dense disposition still > 240)
+        # of the nationwide total. Any capped slice (a dense district still > 240)
         # leaves the walk incomplete, so we suppress the sweep (rule #3).
         complete = (
             not self._max_pages and not self._regions and incomplete_slices == 0
@@ -459,9 +509,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--region", action="append", default=None,
-        help="limit the index walk to this region subdomain (repeatable; e.g. "
-             "stredo.ceskereality.cz) for a one-region proxy test. Suppresses "
-             "mark_inactive. Omit = all 7 regions.",
+        help="limit the index walk to these okres/facet slugs (repeatable; e.g. "
+             "praha-hlavni-mesto) for an ad-hoc partial proxy test. Suppresses "
+             "mark_inactive. Omit = the full okres split.",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

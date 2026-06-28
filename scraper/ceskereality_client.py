@@ -12,11 +12,12 @@ Two ceskereality specifics live here:
     through the residential proxy in `SCRAPER_PROXY_URL`. With a residential exit IP
     we use the shared BROWSER User-Agent (most natural; the honest-bot UA both got
     throttled and is moot once we're proxied).
-  - **The region/facet search URLs**: anonymous search hard-caps at 12 pages
-    (~240 results; `?strana=13` = 404), so the walk slices each category by the 7
-    REGIONAL SUBDOMAINS × a per-category disposition/type facet to keep every query
-    under the cap (`search_url`). Detail pages are always fetched on the canonical
-    www host.
+  - **The facet search URLs**: anonymous search hard-caps at 12 pages (~240 results;
+    `?strana=13` = 404), so the walk slices each category by the COMPLETE okres
+    (district) partition × a per-category disposition facet (`search_url` takes a
+    `sub_slug`) to keep every query under the cap. The okres list is the
+    cap-beater's geographic axis (`ceskereality_main`); both search + detail are
+    fetched on the canonical www host.
 """
 
 from __future__ import annotations
@@ -28,19 +29,6 @@ from scraper.portal_base import BasePortalClient, ListingGoneError
 LOG = logging.getLogger(__name__)
 
 BASE_URL = "https://www.ceskereality.cz"
-
-# The 7 regional subdomains that PARTITION the country (each lists only its
-# region's inventory, so they're disjoint). Walking per-region keeps each query
-# ~7x smaller — the first axis of the cap-beating split.
-REGION_HOSTS: tuple[str, ...] = (
-    "stredo.ceskereality.cz",
-    "jiho.ceskereality.cz",
-    "severo.ceskereality.cz",
-    "vychodo.ceskereality.cz",
-    "zapado.ceskereality.cz",
-    "jiho.moravskereality.cz",
-    "severo.moravskereality.cz",
-)
 
 # Substrings ceskereality serves (HTTP 200) for a listing no longer offered.
 _GONE_MARKERS: tuple[str, ...] = (
