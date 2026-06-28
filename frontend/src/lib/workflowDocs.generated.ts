@@ -2479,6 +2479,32 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"
   },
   {
+    "filename": "refresh_map_mv.yml",
+    "name": "Jobs: refresh Browse map view",
+    "description": "Refresh properties_map_mv (migration 254) -- the cold-robust materialized source for the Browse map feed. The map ships up to 50k points for client-side clustering; reading that off the churned live `properties` table tripped the anon 3s statement_timeout cold, so the map reads this clean, all-visible copy instead. It only reflects new/changed/delisted listings when refreshed, so a scheduled REFRESH (CONCURRENTLY, non-blocking) keeps the map a few minutes fresh. Source-agnostic maintenance job (no portal tag).",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/15 * * * *",
+        "human": "Every 15 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "refresh-map-mv",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/refresh_map_mv.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_map_mv.yml"
+  },
+  {
     "filename": "refresh_population.yml",
     "name": "Data: refresh city populations (Wikidata)",
     "description": "FALLBACK SOURCE. The preferred population source is now the official ČSÚ DataStat export \"Počet obyvatel v obcích k 1. 1.\" — download the JSON from https://data.csu.gov.cz/datastat/data/VYBER/OBY02AT02, commit it to data/csu_population.json, and run \"Data: seed curated cities\" (which ingests the JSON directly). Use this Wikidata fetcher only when you can't get the official file.",

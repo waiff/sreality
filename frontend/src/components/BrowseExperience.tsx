@@ -591,11 +591,17 @@ export default function BrowseExperience({
     { key: 'stats', label: 'Stats' },
   ];
 
+  /* The listings PANEL's error drives the page banner. On the map tab that's the
+   * cards list (cards.error) — a MAP-query failure is surfaced locally over the
+   * map (mapError below), never blanking the listings: the two are independent
+   * surfaces, and the robust map source (properties_map_mv) makes a map failure
+   * rare anyway. */
   const activeError =
-    tab === 'map' ? (mapVisible ? mapQuery.error ?? cards.error : cards.error) :
+    tab === 'map' ? cards.error :
     tab === 'table' ? table.error :
     tab === 'stats' ? statsQuery.error :
     null;
+  const mapError = mapVisible ? mapQuery.error : null;
 
   return (
     <div className={`flex${isModal ? ' h-full' : ''}`} ref={outerRef}>
@@ -731,7 +737,8 @@ export default function BrowseExperience({
                 onReset={mapSplit.reset}
                 className="hidden lg:flex h-full"
               />
-              <div className="min-h-0 h-full">
+              <div className="min-h-0 h-full relative">
+                {mapError && <MapErrorOverlay error={mapError} />}
                 <Suspense fallback={<MapSkeleton />}>
                   <ListingMap
                     rows={mapQuery.data?.rows ?? []}
@@ -1121,10 +1128,47 @@ function MergeModeBar({
   );
 }
 
+/* Map-local failure notice. The map is its own surface — a map error shows here,
+ * floating over the map, and never blanks the listings list (which loads fine on
+ * its own keyset query). With the robust map source (properties_map_mv) this is
+ * rare; the timeout copy stays as a graceful guide for an exceptionally broad area. */
+function MapErrorOverlay({ error }: { error: Error }) {
+  const isTimeout = /statement timeout|57014/i.test(error.message);
+  return (
+    <div className="absolute inset-x-0 top-0 z-10 m-3 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)] shadow-sm">
+      {isTimeout ? (
+        <>
+          <strong className="font-medium">This area is too broad to map.</strong>{' '}
+          Zoom in or add a filter — the listings list is unaffected.
+        </>
+      ) : (
+        <>
+          <strong className="font-medium">Map failed to load:</strong> {error.message}
+        </>
+      )}
+    </div>
+  );
+}
+
 function ErrorBanner({ error }: { error: Error }) {
+  /* A statement-timeout means the current cohort was too broad to page under
+   * the anon 3s budget (e.g. a country-wide map area combined with a sort that
+   * has no serving index, such as price/m²). The data-model fixes (migrations
+   * 250-254) make this rare, but the guard keeps the failure graceful — actionable
+   * guidance instead of the raw Postgres error. */
+  const isTimeout = /statement timeout|57014/i.test(error.message);
   return (
     <div className="mt-4 p-3 rounded-[var(--radius-sm)] border border-[var(--color-brick)]/30 bg-[var(--color-brick-soft)] text-sm text-[var(--color-brick)]">
-      <strong className="font-medium">Query failed:</strong> {error.message}
+      {isTimeout ? (
+        <>
+          <strong className="font-medium">This area is too broad to list.</strong>{' '}
+          Zoom the map in or add a filter to narrow the results.
+        </>
+      ) : (
+        <>
+          <strong className="font-medium">Query failed:</strong> {error.message}
+        </>
+      )}
     </div>
   );
 }

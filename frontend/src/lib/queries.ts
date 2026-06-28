@@ -608,19 +608,32 @@ export const fetchListingsForMap = async (
 ): Promise<MapResult> => {
   const pre = await resolveBrowsePrefilters(f);
   if (pre.empty) return { rows: [], total: 0, capped: false };
+  /* The map reads `properties_map_mv` (migration 254), NOT `properties_public`.
+   * Shipping up to MAP_CAP points off the live, churned `properties` table was
+   * cold-fragile (>3s, the anon statement_timeout) — the matview is a clean,
+   * all-visible, cached copy of the same columns, so the identical scan stays
+   * robust cold (~200ms). It carries properties_public's full FILTERABLE surface,
+   * so applyFilters / applyPrefilters are a drop-in (only the source differs).
+   * The matview is map-fresh within the refresh_map_mv cadence (~15 min). */
   const base = supabase
-    .from('properties_public')
-    .select(MAP_COLS, { count: 'exact' })
+    .from('properties_map_mv')
+    .select(MAP_COLS)
     .not('lat', 'is', null)
     .not('lng', 'is', null);
   const scoped = applyPrefilters(applyFilters(base, f), pre);
-  const { data, count, error } = await scoped.limit(MAP_CAP);
+  const { data, error } = await scoped.limit(MAP_CAP);
   if (error) throw error;
   const rows = (data ?? []) as unknown as MapRow[];
+  /* The cohort total (which also counts coordinate-less listings) comes from
+   * fetchBrowseCount; the map only needs how many points it actually plotted
+   * and whether it hit the cap. Counting the whole cohort here too was a
+   * redundant O(cohort) exact count — the heaviest part of the map fetch,
+   * left over from before fetchBrowseCount existed. `total` is now the
+   * plotted-point count; `capped` is whether more points exist than shown. */
   return {
     rows,
-    total: count ?? null,
-    capped: count != null && count > MAP_CAP,
+    total: rows.length,
+    capped: rows.length >= MAP_CAP,
   };
 };
 
