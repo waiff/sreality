@@ -121,6 +121,8 @@ _SLUG_FAMILY_PREFIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
 # A street mined from the slug's "…-ul-{street}-{id}.html" tail — recovers the
 # street for listings realitymix renders without a #print-map (no data-address).
 _SLUG_STREET_RE = re.compile(r"-ul-([a-z][a-z-]*?)-\d{4,}\.html", re.IGNORECASE)
+# The obec slug in the detail path /detail/{town}/… (always present).
+_URL_TOWN_RE = re.compile(r"/detail/([^/?#]+)/")
 
 
 @dataclass(frozen=True)
@@ -352,6 +354,24 @@ def _slug_street(source_url: str) -> str | None:
     return (s[:1].upper() + s[1:]) if s else None   # capitalize for display
 
 
+def _town_from_url(source_url: str) -> str | None:
+    """The obec slug from the detail path /detail/{town}/… — present on EVERY
+    realitymix detail URL, so the ~28% of listings with no #print-map still have
+    a town to anchor a geocode/display locality on."""
+    m = _URL_TOWN_RE.search(source_url or "")
+    if not m:
+        return None
+    town = m.group(1).replace("-", " ").strip()
+    return town.title() if town else None
+
+
+def _fallback_locality(source_url: str, street_name: str | None) -> str | None:
+    """A display + geocode locality for map-less listings (no data-address):
+    "{street}, {town}" when the slug gave a street, else just "{town}"."""
+    town = _town_from_url(source_url)
+    return ", ".join(p for p in (street_name, town) if p) or None
+
+
 def _detail_params(tree: HTMLParser) -> dict[str, str]:
     """Map the spec list's labels (lowercased, colon-stripped) to their values.
     Each row is `<li class="detail-information__data-item"><span>Label:</span>
@@ -520,7 +540,10 @@ def parse_detail(html: str, *, source_url: str) -> ScrapedListing:
         street_name, house_number = _street_fields(
             _slug_street(source_url), geo_names=[obec, okres, region], lat=lat, lon=lon,
         )
-    locality = full_address or obec
+    # Map-bearing rows keep the rich data-address; map-less rows fall back to a
+    # locality built from the URL town (+ slug street) so the detail-drain can
+    # geocode them (the ~28% no-#print-map case) and so they have a display label.
+    locality = full_address or obec or _fallback_locality(source_url, street_name)
 
     area_m2 = _parse_area(
         params.get("celková podlahová plocha")

@@ -303,8 +303,27 @@ def test_street_recovered_from_slug_when_no_map():
     listing = parse_detail(NO_MAP_HTML, source_url=NO_MAP_SLUG_STREET_URL)
     assert listing.lat is None and listing.lon is None   # no #print-map on the page
     assert listing.street == "Lidicka"                   # mined from the -ul-lidicka- slug
+    # No data-address -> locality is rebuilt from the URL town (+ slug street) so the
+    # detail-drain can geocode it; also the display label.
+    assert listing.locality == "Lidicka, Ostrava"
     assert listing.disposition == "2+kk"
     assert listing.area_m2 == 74.0
+
+
+def test_fallback_locality_built_from_url():
+    from scraper.realitymix_parser import _fallback_locality, _town_from_url
+    assert _town_from_url("https://realitymix.cz/detail/velke-mezirici/pronajem-1.html") == "Velke Mezirici"
+    assert _fallback_locality(
+        "https://realitymix.cz/detail/ostrava/x-ul-lidicka-8429105.html", "Lidicka"
+    ) == "Lidicka, Ostrava"
+    assert _fallback_locality("https://realitymix.cz/detail/ostrava/x-1.html", None) == "Ostrava"
+    assert _fallback_locality("", None) is None
+
+
+def test_mapbearing_listing_keeps_rich_data_address_locality():
+    # A page WITH #print-map keeps the full data-address, not the URL fallback.
+    listing = parse_detail(BYT_HTML, source_url=_BYT_URL)
+    assert listing.locality == "Luční, Nupaky, okres Praha-východ"
 
 
 def test_enum_normalization_aligned_to_sreality_vocabulary():
