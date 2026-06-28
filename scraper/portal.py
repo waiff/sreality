@@ -312,9 +312,11 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"sale_type": "pronajem", "category": "ostatni"},
         ],
         split_threshold=None,
+        # Routed through a residential proxy (ceskereality_client.USE_PROXY), so the
+        # datacenter-IP throttle is gone and we crawl at normal speed. The region ×
+        # facet split means ~thousands of small index queries — the proxy absorbs them.
         limits=PortalLimits(
-            index_rate=0.7, detail_workers=2, detail_rate=0.7,
-            max_detail_per_run=1500,
+            index_rate=2.0, detail_workers=4, detail_rate=2.0,
         ),
     ),
     "realitymix": PortalConfig(
