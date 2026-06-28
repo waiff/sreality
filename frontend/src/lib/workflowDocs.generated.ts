@@ -3023,28 +3023,33 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "scrape_mmreality.yml",
     "name": "Scraping: M&M Reality scraper (pilot)",
-    "description": "Manual (dispatch-only) scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price- changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "description": "Scheduled scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
     "portal": "mmreality",
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "50 */6 * * *",
+        "human": "Every 6 hours at :50"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
     "inputs": [
       {
         "name": "max_pages",
-        "description": "cap index pages walked (pilot safety). Blank = full walk.",
+        "description": "cap index pages walked (ad-hoc partial). Blank = full walk.",
         "required": false,
         "type": "string",
-        "default": "20",
+        "default": "",
         "options": null
       },
       {
         "name": "max_detail",
-        "description": "cap detail-drain claims this run",
+        "description": "cap detail-drain claims this run (raise for a one-time backfill)",
         "required": false,
         "type": "string",
-        "default": "2000",
+        "default": "4000",
         "options": null
       },
       {
@@ -3062,14 +3067,23 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "4",
         "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "detail-drain wall-clock budget; it finalizes cleanly before this. Blank = 2400 (40 min).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
+      "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "mmreality-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 60,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_mmreality.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_mmreality.yml"

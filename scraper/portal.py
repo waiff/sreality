@@ -195,8 +195,12 @@ _DEFAULTS: dict[str, PortalConfig] = {
         supports_complete_walk=False,
         categories=[{"index": "nemovitosti"}],
         split_threshold=None,
+        # Routed through a residential proxy (mmreality_client.USE_PROXY = True),
+        # so the Cloudflare datacenter-IP block is gone and we crawl at normal
+        # speed (index_rate 1.0 -> 2.0, matching ceskereality's post-proxy rates).
+        # Kept in sync with the live registry row (migration 252).
         limits=PortalLimits(
-            index_rate=1.0, detail_workers=4, detail_rate=2.0,
+            index_rate=2.0, detail_workers=4, detail_rate=2.0,
         ),
     ),
     "maxima": PortalConfig(

@@ -1,47 +1,55 @@
 name: "Scraping: M&M Reality scraper (pilot)"
 
 # portal: mmreality
-# Manual (dispatch-only) scraper for mmreality.cz on the shared portal
-# framework. M&M Reality is a server-rendered HTML portal whose detail pages
-# embed a complete structured estate object (a Vue `:property` prop): the index
-# walk pages the mixed-category /nemovitosti/ results and enqueues new/price-
-# changed ids into listing_detail_queue, then the detail drain fetches each
-# listing page, decodes its :property JSON to a ScrapedListing, and ingests
-# through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property
-# matching).
+# Scheduled scraper for mmreality.cz on the shared portal framework. M&M Reality
+# is a server-rendered HTML portal whose detail pages embed a complete structured
+# estate object (a Vue `:property` prop): the index walk pages the mixed-category
+# /nemovitosti/ results and enqueues new/price-changed ids into
+# listing_detail_queue, then the detail drain fetches each listing page, decodes
+# its :property JSON to a ScrapedListing, and ingests through
+# db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).
 #
-# The index is a single MIXED-category feed, so it can't be gated per-category
-# the way source-scoped mark_inactive needs: the portal is supports_complete_walk
-# =false (registry row, migration 117), so the runner never flips its listings
-# inactive from index absence (architectural rule #3) — delistings still surface
-# via a gone detail fetch + the "active = seen within 7 days" rule. Coordinates
-# come straight from the estate JSON, so no MAPY_CZ_API_KEY is needed.
+# RESIDENTIAL EGRESS: mmreality's Cloudflare edge HARD-403s our datacenter
+# (GitHub-Actions) IP on the first request — it ingested ZERO listings across its
+# first 101 (blocked) runs. So every request routes through the residential proxy
+# in SCRAPER_PROXY_URL (MmRealityClient.USE_PROXY), the same egress the sister
+# CF-blocked portal (ceskereality) uses. With a residential exit IP the site
+# returns 200. Required secrets: SUPABASE_DB_URL, SCRAPER_PROXY_URL.
 #
-# Writes 'index' + 'detail' scrape_runs rows under source='mmreality' (its own
-# Health-page lane; does not touch sreality liveness / reconciliation).
+# The index is a single MIXED-category feed (no per-category slice) AND exposes no
+# result-total, so it can't be gated per-category the way source-scoped
+# mark_inactive needs: the portal stays supports_complete_walk=false (registry
+# row, migration 117), so the runner never flips its listings inactive from index
+# absence (architectural rule #3) — delistings still surface via a gone detail
+# fetch (immediate per-listing flip) + the "active = seen within 7 days" rule.
+# Coordinates come straight from the estate JSON, so no MAPY_CZ_API_KEY is needed.
 #
-# Required secret: SUPABASE_DB_URL.
-#
-# The index is large, so a run is bounded by --max-pages; the detail drain is
-# bounded by --max-detail and the queue persists across runs, so a bounded run
-# never loses work.
+# WHY combined (not cadence-split like sreality/idnes/ceskereality): mmreality is
+# a modest catalogue (~6-12k listings) with no deep-pagination/page cap, so a full
+# mixed-index walk is ~8 min — the index+detail run fits one job. It is the
+# size-appropriate posture (remax/bezrealitky/maxima). The scheduled run walks the
+# FULL index (no --max-pages) then drains under a --max-seconds budget that
+# finalizes cleanly inside the timeout; the queue persists across runs, so the
+# initial backfill drains over a few ticks (or a wider ad-hoc dispatch). Writes
+# 'index' + 'detail' scrape_runs rows under source='mmreality' (its own Health
+# lane; does not touch sreality liveness / reconciliation).
 
-# Cron removed: Cloudflare 403-blocks GitHub-hosted runner IPs (datacenter
-# egress), so every scheduled run produced zero listings while staying green.
-# workflow_dispatch is kept for a future retry; re-enable the schedule only
-# with non-datacenter egress (self-hosted runner / proxy).
 on:
+  # Offset from ceskereality's index walk (25 */6) so the two CF-blocked portals
+  # don't hammer the shared residential proxy at the same minute.
+  schedule:
+    - cron: "50 */6 * * *"
   workflow_dispatch:
     inputs:
       max_pages:
-        description: cap index pages walked (pilot safety). Blank = full walk.
+        description: cap index pages walked (ad-hoc partial). Blank = full walk.
         required: false
-        default: "20"
+        default: ""
         type: string
       max_detail:
-        description: cap detail-drain claims this run
+        description: cap detail-drain claims this run (raise for a one-time backfill)
         required: false
-        default: "2000"
+        default: "4000"
         type: string
       rate:
         description: detail-fetch requests/second ceiling
@@ -53,6 +61,11 @@ on:
         required: false
         default: "4"
         type: string
+      max_seconds:
+        description: detail-drain wall-clock budget; it finalizes cleanly before this. Blank = 2400 (40 min).
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: mmreality-scrape
@@ -61,7 +74,10 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Full index (~8 min) + a --max-seconds-bounded drain (default 40 min) finalize
+    # well inside this generous backstop; the clean-stop budget governs, not the
+    # timeout — don't re-tune the timeout to the catalogue size.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -77,12 +93,14 @@ jobs:
       - name: Run mmreality scrape
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          MAX_PAGES: ${{ inputs.max_pages || '20' }}
-          MAX_DETAIL: ${{ inputs.max_detail || '2000' }}
+          SCRAPER_PROXY_URL: ${{ secrets.SCRAPER_PROXY_URL }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_DETAIL: ${{ inputs.max_detail || '4000' }}
           RATE: ${{ inputs.rate || '2.0' }}
           WORKERS: ${{ inputs.workers || '4' }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
         run: |
-          ARGS="--max-detail $MAX_DETAIL --rate $RATE --workers $WORKERS"
+          ARGS="--max-detail $MAX_DETAIL --rate $RATE --workers $WORKERS --max-seconds $MAX_SECONDS"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
           echo "python -m scraper.mmreality_main $ARGS"
           eval "python -m scraper.mmreality_main $ARGS"
