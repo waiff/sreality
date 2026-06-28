@@ -32,13 +32,14 @@ on:
         type: boolean
 
 concurrency:
-  # Share the detail-drain group: the backfill and the drain must NOT run at once.
-  # A drain preloads native_ids_with_geom once at start; if the backfill placed a
-  # row AFTER that preload, that drain's refetch wouldn't carry the new geom forward
-  # and (on a same-moment geocode miss) could transiently null it. Serialising the
-  # two on one group eliminates the window; the one-off backfill just queues behind
-  # an in-flight hourly drain (and vice versa).
-  group: realitymix-detail-drain
+  # OWN group (NOT the drain's): the backfill targets STABLE geom-NULL rows while the
+  # hourly drain processes the new/price-changed QUEUE — largely disjoint sets — and the
+  # drain's carry-forward (connect_drain preloads native_ids_with_geom; _fill_coords
+  # re-geocodes a still-missing row) makes any rare overlap SELF-HEALING. Sharing the
+  # drain's group instead starved this one-off pass behind back-to-back 40-min drains
+  # during the multi-day initial backlog walk, for no real safety gain. Best practice if
+  # you want zero overlap: dispatch right after a drain finishes.
+  group: realitymix-coords-backfill
   cancel-in-progress: false
 
 jobs:
