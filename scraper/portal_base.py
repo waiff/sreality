@@ -16,6 +16,7 @@ in CLAUDE.md.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -66,11 +67,16 @@ class BasePortalClient:
 
     ACCEPT: str = "*/*"
     # An optional honest/identifying override of the shared browser User-Agent,
-    # set by a subclass that crawls a site we want to identify ourselves to
-    # (ceskereality, whose robots.txt allow-lists named bots). None = the shared
-    # browser UA. Symmetric with ACCEPT — a per-portal fetcher concern, not a
-    # shared default.
+    # set by a subclass that crawls a site we want to identify ourselves to.
+    # None = the shared browser UA. A per-portal fetcher concern, not a default.
     USER_AGENT: str | None = None
+    # Opt-in: route every request through the residential proxy in the
+    # SCRAPER_PROXY_URL env var. For portals fronted by an anti-bot edge that
+    # throttles our datacenter (GitHub-Actions) IP — ceskereality, mmreality.
+    # Unset env or False = direct (our IP), so the default for every other portal
+    # is unchanged and free.
+    USE_PROXY: bool = False
+    PROXY_ENV = "SCRAPER_PROXY_URL"
 
     def __init__(
         self,
@@ -92,6 +98,15 @@ class BasePortalClient:
         if self.USER_AGENT is not None:
             headers["User-Agent"] = self.USER_AGENT
         self._session.headers.update(headers)
+        if self.USE_PROXY:
+            proxy = os.environ.get(self.PROXY_ENV)
+            if proxy:
+                self._session.proxies = {"http": proxy, "https": proxy}
+                LOG.info("PROXY enabled (residential egress via %s)", self.PROXY_ENV)
+            else:
+                LOG.warning(
+                    "USE_PROXY set but %s is empty — falling back to the direct "
+                    "(datacenter) IP; expect anti-bot throttling.", self.PROXY_ENV)
         self._last_at = 0.0
 
     def _pace(self) -> None:

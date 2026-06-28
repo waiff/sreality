@@ -28,7 +28,13 @@ import logging
 from typing import Any
 
 from scraper import db, portal_runner
-from scraper.ceskereality_client import CeskerealityClient, detail_url
+from scraper.ceskereality_client import (
+    REGION_HOSTS,
+    SUB_SLUGS,
+    CeskerealityClient,
+    detail_url,
+    search_url,
+)
 from scraper.ceskereality_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
@@ -52,6 +58,13 @@ SOURCE = "ceskereality"
 # in db.mark_inactive is the real safety against a tolerated walk-miss.
 INDEX_MIN_COMPLETENESS = 0.995
 
+# Anonymous search hard-caps at 12 pages (~240 results); ?strana=13 returns 404.
+# So the walk NEVER requests page 13 — it slices each category by REGION SUBDOMAIN
+# × disposition/type facet (ceskereality_client) to keep every query under the cap,
+# and marks a slice that still exceeds it as incomplete (suppressing mark_inactive).
+_CAP_PAGES = 12
+_PER_PAGE = 20
+
 
 def _walk_complete(collected: int, total: int | None) -> bool:
     if not total or total <= 0:
@@ -67,10 +80,19 @@ class CeskerealityPortal:
     source = SOURCE
     index_rate = 0.7
 
-    def __init__(self, config: PortalConfig, *, max_pages: int | None = None) -> None:
+    def __init__(
+        self,
+        config: PortalConfig,
+        *,
+        max_pages: int | None = None,
+        regions: tuple[str, ...] | None = None,
+    ) -> None:
         self.supports_complete_walk = config.supports_complete_walk
         self._categories = config.categories
         self._max_pages = max_pages
+        # A region subset to walk (for an ad-hoc one-region test); None = all 7.
+        # When set, the walk is partial so mark_inactive is suppressed.
+        self._regions = regions
         self.index_rate = config.limits.index_rate
 
     # --- index-walk seams ---
@@ -89,43 +111,94 @@ class CeskerealityPortal:
     def connect_drain(self) -> Any:
         return db.connect()
 
+    def _walk_slice(
+        self, client: CeskerealityClient, host: str, sale_type: str, cat: str,
+        sub_slug: str | None,
+    ) -> tuple[list[tuple[str, str, int | None]], int, int | None, bool]:
+        """Walk one region×facet slice, ≤12 pages — NEVER requesting page 13 (it
+        404s). Returns (rows, pages_fetched, slice_total, complete); complete=False
+        if the slice still exceeds the cap (we could only take its top ~240)."""
+        rows: list[tuple[str, str, int | None]] = []
+        total: int | None = None
+        page = 1
+        page_cap = min(_CAP_PAGES, self._max_pages or _CAP_PAGES)
+        while page <= page_cap:
+            url = search_url(
+                sale_type, cat, host=host, sub_slug=sub_slug,
+                page=page if page > 1 else None,
+            )
+            try:
+                html, _ = client.fetch_search(url)
+            except ListingGoneError:
+                break                       # past the cap / empty slice -> end
+            except Exception as exc:        # noqa: BLE001 - one slice must not kill the walk
+                LOG.warning("SLICE error host=%s slug=%s page=%d: %s",
+                            host, sub_slug, page, exc)
+                break
+            parsed = parse_index(html)
+            if parsed.total is not None:
+                total = parsed.total
+            if not parsed.items:
+                break
+            for item in parsed.items:
+                rows.append((
+                    item.source_id_native,
+                    detail_url(item.detail_path),
+                    index_price(item.price_text),
+                ))
+            last_page = (total + _PER_PAGE - 1) // _PER_PAGE if total else None
+            if parsed.next_offset is None:
+                break
+            if last_page is not None and page >= last_page:
+                break
+            page += 1
+        capped = bool(total and total > _CAP_PAGES * _PER_PAGE and page >= _CAP_PAGES)
+        return rows, page, total, (not capped and not self._max_pages)
+
+    def _nationwide_total(self, client: CeskerealityClient, sale_type: str, cat: str) -> int | None:
+        """The www result total — the portal-reported count for the RECONCILE +
+        completeness gate (the per-region slices only report their own subset)."""
+        try:
+            html, _ = client.fetch_index(sale_type, cat, None)
+            return parse_index(html).total
+        except Exception:                   # noqa: BLE001
+            return None
+
     def walk_category(
         self, category: dict[str, Any], conn: Any, dry_run: bool, limiter: RateLimiter,
     ) -> tuple[set[str], dict[str, int], int | None, int, bool]:
         sale_type, cat = category["sale_type"], category["category"]
         client = CeskerealityClient(limiter=limiter)
+        hosts = self._regions or REGION_HOSTS
+        slugs: tuple[str | None, ...] = SUB_SLUGS.get(cat) or (None,)
 
         native_ids: list[str] = []
         price_map: dict[str, int | None] = {}
         ref_map: dict[str, str] = {}
-        total: int | None = None
+        seen_ids: set[str] = set()
         pages = 0
-        page: int | None = None       # None = the bare first page (?strana paging)
-        while True:
-            html, _ = client.fetch_index(sale_type, cat, page)
-            parsed = parse_index(html)
-            pages += 1
-            total = parsed.total if parsed.total is not None else total
-            LOG.info("INDEX page=%s items=%d total=%s", page, len(parsed.items), total)
-            # Index/search-page HTML is NOT staged — like every other HTML portal
-            # it was write-only dead weight (nothing reads page_kind='index') and
-            # the per-page TOAST write dominates the index-walk cost. Only detail
-            # pages are staged (in write_details).
-            new_on_page = 0
-            for item in parsed.items:
-                nid = item.source_id_native
-                if nid not in ref_map:
-                    native_ids.append(nid)
-                    new_on_page += 1
-                ref_map[nid] = detail_url(item.detail_path)
-                price_map[nid] = index_price(item.price_text)
-            if self._max_pages and pages >= self._max_pages:
-                break
-            # Stop on an empty page, no "next" link, or a page that added nothing
-            # new (a clamped out-of-range ?strana would otherwise loop forever).
-            if not parsed.items or parsed.next_offset is None or new_on_page == 0:
-                break
-            page = parsed.next_offset
+        incomplete_slices = 0
+        for host in hosts:
+            for slug in slugs:
+                rows, slice_pages, _slice_total, slice_complete = self._walk_slice(
+                    client, host, sale_type, cat, slug)
+                pages += slice_pages
+                if not slice_complete:
+                    incomplete_slices += 1
+                for nid, ref, price in rows:
+                    if nid not in seen_ids:
+                        seen_ids.add(nid)
+                        native_ids.append(nid)
+                    ref_map[nid] = ref
+                    price_map[nid] = price
+
+        total = self._nationwide_total(client, sale_type, cat)
+        LOG.info(
+            "SPLIT cm=%s ct=%s regions=%d slugs=%d collected=%d total=%s "
+            "incomplete_slices=%d pages=%d",
+            cat, sale_type, len(hosts), len(slugs), len(seen_ids), total,
+            incomplete_slices, pages,
+        )
 
         seen = set(native_ids)
         existing = (
@@ -159,7 +232,14 @@ class CeskerealityPortal:
             "ENQUEUE source=ceskereality new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        complete = (not self._max_pages) and _walk_complete(len(seen), total)
+        # mark_inactive is safe only on a FULL, uncapped walk: every region walked
+        # (not --region scoped), no slice hit the 12-page cap, and we collected ~all
+        # of the nationwide total. Any capped slice (a dense disposition still > 240)
+        # leaves the walk incomplete, so we suppress the sweep (rule #3).
+        complete = (
+            not self._max_pages and not self._regions and incomplete_slices == 0
+            and _walk_complete(len(seen), total)
+        )
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
@@ -299,7 +379,8 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging(args.verbose)
 
     config = _load_config(args.dry_run)
-    portal = CeskerealityPortal(config, max_pages=args.max_pages)
+    regions = tuple(args.region) if args.region else None
+    portal = CeskerealityPortal(config, max_pages=args.max_pages, regions=regions)
 
     # Resolve operational limits: CLI override > per-portal DB config > default.
     workers = args.workers if args.workers is not None else config.limits.detail_workers
@@ -355,6 +436,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--drain-only", action="store_true",
         help="drain the detail queue only (no index walk)",
+    )
+    p.add_argument(
+        "--region", action="append", default=None,
+        help="limit the index walk to this region subdomain (repeatable; e.g. "
+             "stredo.ceskereality.cz) for a one-region proxy test. Suppresses "
+             "mark_inactive. Omit = all 7 regions.",
     )
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--verbose", action="store_true")

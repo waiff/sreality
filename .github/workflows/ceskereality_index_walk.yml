@@ -37,6 +37,11 @@ on:
         required: false
         default: ""
         type: string
+      region:
+        description: limit the walk to ONE region subdomain (e.g. stredo.ceskereality.cz) for a proxy test. Blank = all 7.
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: ceskereality-index-walk
@@ -65,10 +70,13 @@ jobs:
       - name: Run ceskereality index walk
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SCRAPER_PROXY_URL: ${{ secrets.SCRAPER_PROXY_URL }}
           MAX_PAGES: ${{ inputs.max_pages }}
           MAX_SECONDS: ${{ inputs.max_seconds || '9000' }}
+          REGION: ${{ inputs.region }}
         run: |
           ARGS="--index-only --max-seconds $MAX_SECONDS"
           if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          if [ -n "$REGION" ]; then ARGS="$ARGS --region $REGION"; fi
           echo "python -m scraper.ceskereality_main $ARGS"
           eval "python -m scraper.ceskereality_main $ARGS"

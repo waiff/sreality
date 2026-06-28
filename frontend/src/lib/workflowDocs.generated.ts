@@ -576,6 +576,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "ceskereality-detail-drain",
@@ -616,9 +617,18 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "",
         "options": null
+      },
+      {
+        "name": "region",
+        "description": "limit the walk to ONE region subdomain (e.g. stredo.ceskereality.cz) for a proxy test. Blank = all 7.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
+      "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "ceskereality-index-walk",
