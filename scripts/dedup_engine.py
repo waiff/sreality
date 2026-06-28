@@ -265,13 +265,24 @@ def _proposed_candidate_property_ids(conn: Any) -> set[int]:
 
 # --- real-time dedup queue drain (dedup_dirty_properties, migration 242; the writer-side
 #     enqueue is scraper.db.mark_properties_dedup_dirty_for_images, mirroring dirty_properties)
-def _claim_dedup_dirty(conn: Any, cutoff: Any) -> set[int]:
+def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[int]:
     """Property ids dirtied at/before `cutoff` (claim slice). A row re-dirtied AFTER cutoff
     (marked_at > cutoff via a writer's ON CONFLICT) is neither claimed nor cleared — it
-    survives to the next pass (race-free + terminating, mirrors recompute's dirty drain)."""
+    survives to the next pass (race-free + terminating, mirrors recompute's dirty drain).
+
+    `limit` bounds the slice to the N OLDEST dirty properties (FIFO). The drain MUST be
+    bounded like every sibling drain: a tagging backlog (a new portal, a retag campaign) can
+    enqueue most of the market at once, and an unbounded claim then resolves O(market) groups
+    per hourly run — it never completes within the time budget, so it never clears, so the queue
+    only grows (and the huge claim + full load can drop the pooled connection mid-run). With a
+    bound each run completes-and-clears its slice and the backlog drains over successive runs."""
+    sql = "SELECT property_id FROM dedup_dirty_properties WHERE marked_at <= %s ORDER BY marked_at"
+    params: list[Any] = [cutoff]
+    if limit is not None:
+        sql += " LIMIT %s"
+        params.append(limit)
     with conn.cursor() as cur:
-        cur.execute("SELECT property_id FROM dedup_dirty_properties WHERE marked_at <= %s",
-                    (cutoff,))
+        cur.execute(sql, params)
         return {int(r[0]) for r in cur.fetchall()}
 
 
@@ -1607,6 +1618,12 @@ def main() -> int:
                              "listing's images get CLIP-tagged), so a new cross-portal listing merges "
                              "within minutes. Full load (peers present) but O(dirty) pair-work; "
                              "race-free claim/clear. Composes with --free / the floor-plan budget.")
+    parser.add_argument("--max-dirty", type=int, default=10000, dest="max_dirty",
+                        help="Bound the --dirty claim to the N OLDEST dedup-ready properties (FIFO). "
+                             "Keeps each hourly run complete-and-clearing so a tagging backlog (new "
+                             "portal / retag campaign) that enqueues most of the market drains over "
+                             "successive runs instead of an unbounded claim that never completes. "
+                             "Raise it for a one-off backlog blitz dispatch.")
     parser.add_argument("--floor-plan-budget", type=int, default=None, dest="floor_plan_budget",
                         help="Override app_settings.dedup_floor_plan_budget for this run: the cap on "
                              "inline cold Sonnet floor-plan checks (the only paid call on a free run; "
@@ -1701,8 +1718,12 @@ def main() -> int:
             with conn.cursor() as cur:
                 cur.execute("SELECT now()")
                 dirty_cutoff = cur.fetchone()[0]
-            only_groups = _claim_dedup_dirty(conn, dirty_cutoff)
-            LOG.info("DIRTY drain: %d dedup-ready properties claimed", len(only_groups))
+            only_groups = _claim_dedup_dirty(conn, dirty_cutoff, limit=args.max_dirty)
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM dedup_dirty_properties")
+                queue_depth = int(cur.fetchone()[0])
+            LOG.info("DIRTY drain: %d claimed (cap=%d, queue depth=%d)",
+                     len(only_groups), args.max_dirty, queue_depth)
             if not only_groups:
                 LOG.info("DIRTY drain: queue empty; nothing to do")
                 return 0

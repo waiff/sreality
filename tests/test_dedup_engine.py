@@ -1317,6 +1317,33 @@ def test_mark_dedup_dirty_empty_noop() -> None:
     assert db.mark_properties_dedup_dirty_for_images(_Conn(), []) == 0
 
 
+def test_claim_dedup_dirty_is_bounded_fifo() -> None:
+    """The --dirty claim must be FIFO-bounded when a limit is passed (and unbounded only when
+    not), so a tagging-backlog flood can't make an hourly run claim the whole market."""
+    import scripts.dedup_engine as eng
+
+    captured: list[tuple[str, list[Any]]] = []
+
+    class _Cur:
+        def __enter__(self): return self
+        def __exit__(self, *exc): return None
+        def execute(self, sql, params=None): captured.append((sql, list(params or [])))
+        def fetchall(self): return [(1,), (2,)]
+
+    class _Conn:
+        def cursor(self): return _Cur()
+
+    eng._claim_dedup_dirty(_Conn(), "CUTOFF", limit=5000)
+    sql, params = captured[-1]
+    assert "ORDER BY marked_at" in sql and "LIMIT %s" in sql
+    assert params == ["CUTOFF", 5000]
+
+    captured.clear()
+    eng._claim_dedup_dirty(_Conn(), "CUTOFF")  # unbounded (full sweep / reconcile use)
+    sql, params = captured[-1]
+    assert "LIMIT" not in sql and params == ["CUTOFF"]
+
+
 def test_proposed_candidate_property_ids() -> None:
     """The candidate-drain work-list = every property in a still-proposed candidate
     (both sides, NULLs skipped, deduped)."""

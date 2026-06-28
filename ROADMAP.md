@@ -6,6 +6,23 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup dirty-drain FIFO bound (crash fix)
+
+The hourly `--dirty` drain was crashing (`SSL connection closed`) and the `dedup_dirty_properties`
+queue had grown to 165K (44% of all properties) and wouldn't clear. Root cause: a large new-portal
+image-tagging backlog (ceskereality/realitymix/mmreality) enqueued most of the market as dedup-ready,
+and the dirty claim was **unbounded** — it claimed all 165K, ran a full-market load + tried to resolve
+every group, never finished within the time budget, never cleared, so the queue only grew (and the
+huge claim + full load dropped the pooled connection mid-run). Fix: `_claim_dedup_dirty` now claims the
+**N oldest** dedup-ready properties FIFO (`--max-dirty`, default 10000) — aligning the dirty drain with
+every sibling drain (recompute dirty-drain, candidate drain, detail drain all bound their per-run work).
+Each bounded run completes-and-clears its slice, so a flood drains over successive runs.
+
+- **Known limitation (follow-up):** the eligible LOAD is still O(market) per dirty run — bounded now is
+  the pair-work, not the load. Fine at ~100K eligible rows; the foundational fix (a stored normalized
+  street-group key column enabling a scoped load) is deferred — obec-scoping doesn't tighten it (the
+  backlog concentrates in big cities) and replicating the Python street normalizer in SQL is fragile.
+
 ### 2026-06: RealityMix.cz — new full scraper portal (pilot)
 
 realitymix.cz (a Centrum.cz agency-feed AGGREGATOR, ~48k listings) added as the 5th
