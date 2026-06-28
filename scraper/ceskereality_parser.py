@@ -308,6 +308,30 @@ def _detail_params(tree: HTMLParser) -> dict[str, str]:
     return rows
 
 
+# Pure search filters that don't PARTITION the inventory by an attribute (so the
+# split must skip them). Everything else `/{sale}/{category}/{slug}/` link on a
+# search page is a real narrowing facet — a district (okres), disposition, or type.
+_FACET_EXCLUDE: frozenset[str] = frozenset({"pouze-rk", "bez-realitky"})
+
+
+def extract_facet_slugs(html: str, sale_type: str, category: str) -> list[str]:
+    """The distinct `/{sale}/{category}/{slug}/` narrowing-facet slugs a search page
+    links to (districts + dispositions + types), in page order, minus pure filters.
+    The split walks the union of these per region to stay under the 12-page cap;
+    district is a complete partition (every listing has one), so the union covers
+    nearly all of a region's inventory."""
+    pat = re.compile(
+        rf'href="/{re.escape(sale_type)}/{re.escape(category)}/([a-z][a-z0-9-]+)/"')
+    out: list[str] = []
+    seen: set[str] = set()
+    for slug in pat.findall(html):
+        if slug in _FACET_EXCLUDE or slug in seen:
+            continue
+        seen.add(slug)
+        out.append(slug)
+    return out
+
+
 def _jsonld_product(html: str) -> dict[str, Any]:
     """The schema.org product JSON-LD block (price + broker + address), or {}.
     Picks the block whose `offers` carries a numeric price."""

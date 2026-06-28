@@ -42,27 +42,6 @@ REGION_HOSTS: tuple[str, ...] = (
     "severo.moravskereality.cz",
 )
 
-# Per-category disposition/type facet slugs (the 2nd split axis). Walking
-# {region}/{sale}/{category}/{slug}/ keeps each query under the 12-page cap.
-# Empty = no facet (walk the bare category per region). Hand-curated from the
-# site's "Dispozice"/"Druh" filters; a missing/new slug just means that slice
-# isn't split finer (it caps at 240, surfaced as an incomplete-slice count).
-SUB_SLUGS: dict[str, tuple[str, ...]] = {
-    "byty": ("byty-1-kk", "byty-1-1", "byty-2-kk", "byty-2-1", "byty-3-kk",
-             "byty-3-1", "byty-4-kk", "byty-4-1", "byty-5-kk", "byty-5-1-vetsi"),
-    "rodinne-domy": ("rodinne-domy", "vily", "chalupy", "chaty", "cinzovni-domy",
-                     "dvougeneracni-domy", "historicke-objekty",
-                     "zemedelske-usedlosti", "na-klic", "ostatni-rd"),
-    "chaty-chalupy": (),
-    "pozemky": ("stavebni-parcely", "zahrady", "lesy", "louky", "orna-puda",
-                "vodni-plochy", "komercni", "ostatni-pozemky"),
-    "komercni-prostory": ("kancelare", "obchody", "restaurace", "sklady", "hotely",
-                          "ordinace", "apartman", "vyrobni-objekty",
-                          "zemedelske-objekty", "ostatni-komercni-prostory"),
-    "ostatni": ("garaze", "garazova-stani", "pudni-prostor", "vinny-sklep",
-                "ostatni-ostatni"),
-}
-
 # Substrings ceskereality serves (HTTP 200) for a listing no longer offered.
 _GONE_MARKERS: tuple[str, ...] = (
     "nemovitost nebyla nalezena",
