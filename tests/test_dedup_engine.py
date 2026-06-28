@@ -1376,9 +1376,10 @@ def test_load_eligible_restrict_scopes() -> None:
 
 
 def test_load_eligible_street_group_scope() -> None:
-    """The --dirty scoped load filters to the claimed street groups: street_id ANY OR
-    (coalesce(obec,-1), street_name_key) IN — obec-bounded so the group's peers load too.
-    An EMPTY (set, set) STILL applies the filter (loads nothing, never a full scan)."""
+    """The --dirty scoped load uses the targeted-seek CTE (unnest-JOINs per claimed key,
+    NOT an OR that scans all eligible): a street_id arm + an obec-scoped name-key arm,
+    UNION'd. An EMPTY (set, set) STILL takes the scoped SQL (empty unnests load nothing,
+    never a full scan)."""
     import scripts.dedup_engine as eng
 
     captured: dict[str, Any] = {}
@@ -1398,8 +1399,9 @@ def test_load_eligible_street_group_scope() -> None:
     keys = eng._load_eligible(
         _Conn(), restrict_street_groups=({5, 7}, {(42, "hlavni"), (-1, "maj")}))
     sql, params = captured["sql"], captured["params"]
-    assert "l.street_id = ANY(%(sids)s" in sql
-    assert "(coalesce(l.obec_id, -1), l.street_name_key) IN" in sql
+    assert "WITH claimed AS" in sql
+    assert "JOIN listings l ON l.street_id = s.id" in sql
+    assert "coalesce(l.obec_id, -1) = g.o AND l.street_name_key = g.k" in sql
     assert "l.property_id = ANY" not in sql            # the property-id arm is NOT used here
     assert sorted(params["sids"]) == [5, 7]
     assert dict(zip(params["obecs"], params["keys"])) == {42: "hlavni", -1: "maj"}
@@ -1407,7 +1409,7 @@ def test_load_eligible_street_group_scope() -> None:
 
     captured.clear()
     eng._load_eligible(_Conn(), restrict_street_groups=(set(), set()))
-    assert "(coalesce(l.obec_id, -1), l.street_name_key) IN" in captured["sql"]
+    assert "WITH claimed AS" in captured["sql"]
     assert captured["params"]["sids"] == [] and captured["params"]["keys"] == []
 
 

@@ -10,13 +10,15 @@
 -- scraper.street.street_name_key) and not stored, so the load could not be
 -- filtered in SQL. A tagging flood (a new portal's CLIP backfill) enqueues most of
 -- the market, and the unbounded full load then drops the pooled connection mid-run.
--- This column stores that key so the --dirty load can be scoped:
---   WHERE <eligibility>
---     AND ( street_id = ANY(:claimed_street_ids)
---           OR (coalesce(obec_id,-1), street_name_key) IN (:claimed_name_keys) )
--- Street groups are obec-bounded (the name key is scoped by obec_id; a street_id
--- is one physical street), so that scoped load is COMPLETE — every member of a
--- group that contains a claimed-dirty property is loaded, peers included.
+-- This column stores that key so the --dirty load can be scoped via TARGETED index
+-- seeks (per claimed key), not a full eligible scan: the load UNION-joins the claimed
+-- street_ids and the claimed (coalesce(obec_id,-1), street_name_key) name-keys against
+-- listings, each arm an unnest-JOIN the planner index-seeks. (An OR of street_id=ANY +
+-- a row-comparison IN was validated to collapse to one full-eligible bitmap scan, so the
+-- engine uses the seek form — see scripts/dedup_engine._ELIGIBLE_SCOPED_SQL.) Street
+-- groups are obec-bounded (the name key is scoped by obec_id; a street_id is one physical
+-- street), so the scoped load is COMPLETE — every member of a group that contains a
+-- claimed-dirty property is loaded, peers included.
 --
 -- It is a PYTHON-derived column (the normalization folds diacritics + strips
 -- street-words + trailing house-number tokens — not faithfully reproducible in

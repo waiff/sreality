@@ -94,18 +94,50 @@ MAX_GEO_GROUP_SIZE = 25
 # relisted under a new id — can still merge into the surviving group; gating on is_active
 # would orphan that history. The properties JOIN already excludes merged-away groups, and
 # an inactive listing keeps its own active singleton property, so it stays matchable.
-_ELIGIBLE_SQL = """
-    SELECT
+_ELIGIBLE_COLS = """
       l.sreality_id, l.property_id, l.source,
       l.street, l.street_id, l.disposition, l.house_number, l.floor, l.area_m2,
       left(l.description, 600) AS description,
-      l.category_type, l.category_main, l.obec_id
+      l.category_type, l.category_main, l.obec_id"""
+_ELIGIBILITY = "l.street IS NOT NULL AND l.street <> '' AND l.disposition IS NOT NULL"
+_ELIGIBLE_ORDER = (
+    "ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition"
+)
+
+_ELIGIBLE_SQL = f"""
+    SELECT {_ELIGIBLE_COLS}
     FROM listings l
     JOIN properties p ON p.id = l.property_id AND p.status = 'active'
-    WHERE l.street IS NOT NULL AND l.street <> ''
-      AND l.disposition IS NOT NULL
-      {filter}
-    ORDER BY l.obec_id NULLS LAST, l.street_id NULLS LAST, lower(l.street), l.disposition
+    WHERE {_ELIGIBILITY}
+      {{filter}}
+    {_ELIGIBLE_ORDER}
+"""
+
+# --dirty scoped load: gather the listing ids in the claimed street groups via TARGETED
+# index seeks (NOT a full eligible scan), then fetch their rows + active-property join by
+# PK. Each arm is an unnest-JOIN so the planner index-seeks PER claimed key — the street_id
+# arm via migration 127's listings_dedup_eligible_idx, the obec-scoped name key via
+# listings_dedup_name_key_idx (migration 256). UNION dedups a listing matching both arms.
+# This is O(dirty), validated by EXPLAIN — an OR of (street_id ANY) + a row-comparison IN
+# collapsed to a single full-eligible bitmap scan + filter, defeating the scope. An empty
+# claimed set yields empty unnests -> no rows (loads nothing, never a full scan).
+_ELIGIBLE_SCOPED_SQL = f"""
+    WITH claimed AS (
+        SELECT l.sreality_id
+        FROM unnest(%(sids)s::bigint[]) AS s(id)
+        JOIN listings l ON l.street_id = s.id
+        WHERE {_ELIGIBILITY}
+      UNION
+        SELECT l.sreality_id
+        FROM unnest(%(obecs)s::bigint[], %(keys)s::text[]) AS g(o, k)
+        JOIN listings l ON coalesce(l.obec_id, -1) = g.o AND l.street_name_key = g.k
+        WHERE {_ELIGIBILITY}
+    )
+    SELECT {_ELIGIBLE_COLS}
+    FROM claimed c
+    JOIN listings l ON l.sreality_id = c.sreality_id
+    JOIN properties p ON p.id = l.property_id AND p.status = 'active'
+    {_ELIGIBLE_ORDER}
 """
 
 
@@ -127,28 +159,27 @@ def _load_eligible(
     - `restrict_street_groups` = (street_ids, name_keys) loads every eligible
       listing in those GROUPS (peers included) — the real-time --dirty drain: the
       claimed dirty properties' groups, computed from the STORED street_name_key
-      (_claimed_street_groups), so a dirty property's group still carries its
-      existing peers for re-decision. obec-bounded ⇒ complete; the load filter folds
-      a NULL obec to -1 to mirror _claimed_street_groups. (None on both = full scan.)"""
+      (_claimed_street_groups), via the targeted-seek _ELIGIBLE_SCOPED_SQL so a
+      dirty property re-decides against its whole group while staying O(dirty).
+      obec-bounded ⇒ complete; the load folds a NULL obec to -1 to mirror
+      _claimed_street_groups. (None on both = full scan.)"""
     params: dict[str, Any] = {}
-    flt = ""
-    if restrict_property_ids is not None:  # an EMPTY set restricts to nothing (not all)
-        flt = "AND l.property_id = ANY(%(pids)s)"
-        params["pids"] = list(restrict_property_ids)
-    elif restrict_street_groups is not None:
-        # An empty (street_ids, name_keys) restricts to nothing: ANY('{}') is false
-        # and IN (empty) is false, so the OR yields no rows (not all).
+    if restrict_street_groups is not None:
+        # Targeted index-seek CTE (NOT the {filter} OR form, which scanned all eligible).
+        # An EMPTY (set, set) -> empty unnests -> no rows (loads nothing, not a full scan).
         street_ids, name_keys = restrict_street_groups
-        flt = (
-            "AND (l.street_id = ANY(%(sids)s::bigint[]) "
-            "OR (coalesce(l.obec_id, -1), l.street_name_key) IN "
-            "(SELECT o, k FROM unnest(%(obecs)s::bigint[], %(keys)s::text[]) AS t(o, k)))"
-        )
         params["sids"] = list(street_ids)
         params["obecs"] = [o for o, _ in name_keys]
         params["keys"] = [k for _, k in name_keys]
+        sql = _ELIGIBLE_SCOPED_SQL
+    else:
+        flt = ""
+        if restrict_property_ids is not None:  # an EMPTY set restricts to nothing (not all)
+            flt = "AND l.property_id = ANY(%(pids)s)"
+            params["pids"] = list(restrict_property_ids)
+        sql = _ELIGIBLE_SQL.format(filter=flt)
     with conn.cursor() as cur:
-        cur.execute(_ELIGIBLE_SQL.format(filter=flt), params)
+        cur.execute(sql, params)
         rows = cur.fetchall()
     keys: list[ListingKey] = []
     for r in rows:

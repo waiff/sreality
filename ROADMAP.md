@@ -20,12 +20,14 @@ it is **scoped to the claimed properties' street groups**:
   Out of the content hash (no snapshot churn); a partial `(coalesce(obec_id,-1), street_name_key)`
   expression index backs the scoped lookup, with a one-shot NULL-key index for the backfill.
 - **`_claimed_street_groups` + `restrict_street_groups`**: the drain reads the dirty properties'
-  `street_id` + `(coalesce(obec_id,-1), street_name_key)` and loads
-  `street_id = ANY(...) OR (coalesce(obec_id,-1), street_name_key) IN (...)`. Street groups are
-  obec-bounded (the `coalesce(.,-1)` folds the 0.4% NULL-obec rows in, so it's complete with no
-  asterisk), so the scoped load carries each dirty property's existing peers while staying O(dirty)
-  in BOTH load and pair-work. `only_groups_with_property_ids` still gates the RESOLVE, so the
-  scoped load is a pure perf optimization under that correctness gate.
+  `street_id` + `(coalesce(obec_id,-1), street_name_key)` and the load (`_ELIGIBLE_SCOPED_SQL`)
+  UNION-joins those claimed keys against `listings` as unnest-JOINs the planner **index-seeks per
+  claimed key** (EXPLAIN-validated: cost ~25 vs a 100K-row scan — an `OR` of `street_id=ANY` + a
+  row-comparison `IN` collapsed to one full-eligible bitmap scan, so the seek form is used instead).
+  Street groups are obec-bounded (the `coalesce(.,-1)` folds the 0.4% NULL-obec rows in, so it's
+  complete with no asterisk), so the scoped load carries each dirty property's existing peers while
+  staying O(dirty) in BOTH load and pair-work. `only_groups_with_property_ids` still gates the
+  RESOLVE, so the scoped load is a pure perf optimization under that correctness gate.
 - **Single-source + parity-guarded**: one Python normalizer (NOT replicated in SQL), so the stored
   key can't drift from what the engine groups on; a parity test + golden-case regression guard it,
   and the 6h full scan (recomputes the key live) is the backstop.

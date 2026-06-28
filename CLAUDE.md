@@ -1533,10 +1533,13 @@ images get tagged, i.e. pHash+CLIP done) so a **new cross-portal listing merges 
 instead of waiting hours (the watchdog-grain goal). The dirty drain's eligible LOAD is **SCOPED to
 the claimed properties' street groups** (`restrict_street_groups`) — not a full-market scan — via the
 **stored `listings.street_name_key`** (migration 256): `_claimed_street_groups` reads the dirty
-properties' `street_id` + `(coalesce(obec_id,-1), street_name_key)`, and the load filters
-`street_id = ANY(...) OR (coalesce(obec_id,-1), street_name_key) IN (...)`. Street groups are
-obec-bounded (the name key is obec-scoped; a `street_id` is one physical street), so the scoped load
-is **complete** — it carries each dirty property's existing peers, so a dirty property still
+properties' `street_id` + `(coalesce(obec_id,-1), street_name_key)`, and the load (`_ELIGIBLE_SCOPED_SQL`)
+UNION-joins those claimed keys against `listings` as **unnest-JOINs the planner index-seeks PER claimed
+key** (the street_id arm via migration 127's index, the name-key arm via 256's
+`(coalesce(obec_id,-1), street_name_key)` partial expression index) — NOT an `OR` (validated to collapse
+to one full-eligible bitmap scan). Street groups are obec-bounded (the name key is obec-scoped; a
+`street_id` is one physical street), so the scoped load is **complete** — it carries each dirty
+property's existing peers, so a dirty property still
 re-decides against its whole group, while staying **O(dirty)** in BOTH load and pair-work. The
 `only_groups_with_property_ids` filter still gates the RESOLVE to dirty-containing groups, so the
 scoped load is a pure perf optimization layered under that correctness gate (no fragile SQL
