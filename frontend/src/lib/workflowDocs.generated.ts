@@ -335,7 +335,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "realitymix-coords-backfill",
+    "concurrencyGroup": "realitymix-detail-drain",
     "cancelInProgress": false,
     "timeoutMinutes": 60,
     "permissions": null,

@@ -156,6 +156,14 @@ def test_geocode_fallback_rejects_coarse_centroid(monkeypatch):
     assert out.lat is None                    # a country centroid is worse than NULL
 
 
+def test_geocode_fallback_rejects_outside_cz_bbox(monkeypatch):
+    # A foreign mis-match for an ambiguous locality (Spain) -> rejected, like the backfill.
+    monkeypatch.setattr(realitymix_main, "geocode",
+                        lambda q, **k: FakeGeo(40.4, 3.7, "high", "regional.address"))
+    out = _geocode_fallback(_listing(locality="Madrid"))
+    assert out.lat is None and out.lon is None
+
+
 def test_geocode_fallback_swallows_errors(monkeypatch):
     def boom(q, **k):
         raise RuntimeError("no MAPY key / Mapy down")
@@ -174,9 +182,11 @@ def test_fill_coords_page_wins_then_carry_forward_then_geocode(monkeypatch):
     page = _listing(source_id_native="1", lat=49.9, lon=14.1, locality="X")
     assert portal._fill_coords("1", page) is page
 
-    # 2. carry-forward — stored geom used, NO geocode (the footgun gate)
+    # 2. carry-forward — stored geom used, NO geocode (the footgun gate), and the
+    #    provenance is stamped 'carry_forward' (stable across refetches, not None).
     carried = portal._fill_coords("77", _listing(source_id_native="77", locality="X"))
     assert (carried.lat, carried.lon) == (48.5, 16.2)
+    assert carried.raw["coords"] == {"source": "carry_forward"}
     assert geo_calls == []
 
     # 3. genuinely new + map-less — geocode once

@@ -32,7 +32,13 @@ on:
         type: boolean
 
 concurrency:
-  group: realitymix-coords-backfill
+  # Share the detail-drain group: the backfill and the drain must NOT run at once.
+  # A drain preloads native_ids_with_geom once at start; if the backfill placed a
+  # row AFTER that preload, that drain's refetch wouldn't carry the new geom forward
+  # and (on a same-moment geocode miss) could transiently null it. Serialising the
+  # two on one group eliminates the window; the one-off backfill just queues behind
+  # an in-flight hourly drain (and vice versa).
+  group: realitymix-detail-drain
   cancel-in-progress: false
 
 jobs:

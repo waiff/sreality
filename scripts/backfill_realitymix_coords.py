@@ -12,8 +12,12 @@ region/country centroid; a municipality centroid is kept, recovering obec/okres 
 the admin-geo trigger).
 
 This deliberately writes NO snapshot (architectural rule #2 governs source-content
-changes; geom + locality are OUT of the content hash, so the UPDATE never appends a
-snapshot — same posture as the bazos coords backfill).
+changes): it UPDATEs the columns via raw SQL, BYPASSING upsert_listing — the only path
+that computes a content hash and conditionally appends a snapshot — so no snapshot is
+written regardless of which columns change (same posture as the bazos coords backfill).
+The `locality` it writes equals the value the parser already produces from the same
+source_url + street, so the next drain reparse computes the SAME content hash and is a
+no-op (`unchanged`) — no churn.
 
 Idempotent + resumable: every processed row is stamped (`coords.geocode_backfill=true`)
 so it drops out of the next selection whether or not it moved; writes commit per row.
@@ -75,8 +79,9 @@ _STAMP_SQL = """
 """
 
 # A placed row: set geom (the admin-geo trigger re-derives obec/okres/region), set the
-# display locality, and record the geocode provenance. geom + locality are out of the
-# content hash, so no snapshot is appended.
+# display locality, and record the geocode provenance. Raw SQL bypasses upsert_listing
+# (the only snapshot path), so no snapshot is appended; the locality matches what the
+# parser produces, so the next drain reparse is `unchanged`.
 _UPDATE_SQL = """
     UPDATE listings
     SET geom = ST_SetSRID(ST_MakePoint(%(lon)s, %(lat)s), 4326)::geography,

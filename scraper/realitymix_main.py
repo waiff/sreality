@@ -43,6 +43,7 @@ from scraper.realitymix_client import RealitymixClient, detail_url
 from scraper.realitymix_parser import (
     CATEGORY_MAIN,
     SALE_TYPE,
+    _in_cz_bbox,
     index_price,
     parse_detail,
     parse_index,
@@ -86,7 +87,10 @@ def _geocode_fallback(listing: Any) -> Any:
         result = geocode(listing.locality, timeout_s=5.0, max_retries=1)
     except Exception:  # noqa: BLE001 - geocoding (incl. unset key) must never fail the fetch
         return listing
-    if result.matched_type in _GEOCODE_SKIP_TYPES:
+    # Too coarse (region/country centroid) or outside the CZ bbox (a foreign
+    # mis-match for an ambiguous locality) -> worse than NULL. The bbox guard
+    # matches the backfill so the drain and the one-off pass agree.
+    if result.matched_type in _GEOCODE_SKIP_TYPES or not _in_cz_bbox(result.lat, result.lng):
         return listing
     raw = {**listing.raw, "coords": {"source": "geocode", "confidence": result.confidence,
                                      "matched_type": result.matched_type}}
@@ -150,7 +154,12 @@ class RealitymixPortal:
             return listing
         stored = (self._have_geom or {}).get(native_id)
         if stored is not None:
-            return replace(listing, lat=stored[0], lon=stored[1])
+            # Mark the carried coord so provenance is stable across refetches (a
+            # geocoded row's raw.coords would otherwise flip back to {source:None}
+            # on the next map-less refetch). Stable 'carry_forward' keeps the
+            # geocode/Mapy-sourced rows attributable (source != 'page').
+            raw = {**listing.raw, "coords": {"source": "carry_forward"}}
+            return replace(listing, lat=stored[0], lon=stored[1], raw=raw)
         return _geocode_fallback(listing)
 
     def walk_category(
