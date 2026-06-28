@@ -295,6 +295,54 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
   },
   {
+    "filename": "backfill_realitymix_coords.yml",
+    "name": "Jobs: backfill RealityMix coordinates (geocode the map-less tail)",
+    "description": "One-off, DISPATCH-ONLY backfill. ~28% of realitymix listings render without a #print-map and landed with geom=NULL; the detail-drain now geocodes such rows going forward, but an already-stored row only re-geocodes on its next refetch (maybe never). This re-places the existing backlog from STORED data (source_url town + slug street — NO page re-fetch) via a cached Mapy.cz, updating geom + locality in place (no snapshot: both are out of the content hash). Idempotent + resumable (each row is stamped); re-run until pending=0. Run only AFTER the carry-forward fix is deployed, else the next drain refetch wipes the backfilled geom.",
+    "portal": "realitymix",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "max listings processed this run (blank = 20000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; stops claiming + exits cleanly (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "report the pending count and exit without writing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "realitymix-detail-drain",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_realitymix_coords.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_realitymix_coords.yml"
+  },
+  {
     "filename": "backfill_render_score.yml",
     "name": "Backfill image render_score (one-shot, from stored embeddings)",
     "description": "One-shot corrective for migration 239: the clip_tag backfill skips already-tagged images, so images tagged before the render axis shipped have render_score NULL (the listing-detail render badge is hidden and the byt render exclusion is inert on them). This re-scores the render-vs-photo axis from each image's STORED CLIP embedding — no R2 download, no image re-inference — so it is fast (vector dot products). Horizontally sharded into 4 jobs (image_id %% 4). Resumable + idempotent (a scored row drops out of the render_score-IS-NULL partial index, migration 240). Dispatch-only. Secret: SUPABASE_DB_URL (no R2 needed). NOT a portal ingest (portal: null).",
@@ -2319,6 +2367,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "realitymix-detail-drain",
