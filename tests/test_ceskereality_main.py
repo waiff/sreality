@@ -242,6 +242,65 @@ def test_scope_suppresses_completeness(monkeypatch):
     assert complete is False            # a scoped partial test is never a full walk
 
 
+def test_dum_has_two_contributing_walk_categories():
+    # rodinne-domy AND chaty-chalupy both map to cm='dum' — the conflation that made
+    # the complete chaty walk falsely delist rodinne-domy rows.
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    assert portal._cmct_contributors[("dum", "prodej")] == 2
+    assert portal._cmct_contributors[("dum", "pronajem")] == 2
+    assert portal._cmct_contributors[("byt", "prodej")] == 1   # single-contributor unchanged
+
+
+def test_dum_conflation_no_flip_until_all_contributors_complete(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(m.db, "index_summary_native",
+                        lambda conn, src, ids: {i: {"sreality_id": int(i)} for i in ids})
+    monkeypatch.setattr(m.db, "mark_inactive",
+                        lambda conn, cm, ct, pks, source: calls.append((cm, ct, len(pks))) or len(pks))
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    dum_p = ("dum", "prodej")
+    rodinne = {"category": "rodinne-domy", "sale_type": "prodej"}
+    chaty = {"category": "chaty-chalupy", "sale_type": "prodej"}
+
+    # contributor 1: rodinne-domy walked but INCOMPLETE (a dense okres capped)
+    portal._cmct_seen.setdefault(dum_p, set()).update({"1", "2"})
+    portal._cmct_complete[dum_p] = False
+    portal._cmct_walked[dum_p] = 1
+    assert portal.mark_inactive(None, rodinne, {"1", "2"}) == 0
+    assert calls == []                       # only 1/2 contributors walked -> no flip
+
+    # contributor 2: chaty-chalupy walked COMPLETE — but dum is still NOT all-complete
+    portal._cmct_seen[dum_p].update({"3"})
+    portal._cmct_walked[dum_p] = 2
+    assert portal.mark_inactive(None, chaty, {"3"}) == 0
+    assert calls == []                       # all walked, NOT all complete -> still no flip
+
+
+def test_dum_conflation_flips_once_with_union_when_all_complete(monkeypatch):
+    calls: list = []
+    monkeypatch.setattr(m.db, "index_summary_native",
+                        lambda conn, src, ids: {i: {"sreality_id": int(i)} for i in ids})
+    monkeypatch.setattr(m.db, "mark_inactive",
+                        lambda conn, cm, ct, pks, source: calls.append(sorted(pks)) or len(pks))
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    dum_p = ("dum", "prodej")
+    rodinne = {"category": "rodinne-domy", "sale_type": "prodej"}
+    chaty = {"category": "chaty-chalupy", "sale_type": "prodej"}
+
+    portal._cmct_seen[dum_p] = {"1", "2", "3"}
+    portal._cmct_complete[dum_p] = True
+    portal._cmct_walked[dum_p] = 1
+    assert portal.mark_inactive(None, rodinne, {"1", "2"}) == 0   # waits for the sibling
+    assert calls == []
+
+    portal._cmct_walked[dum_p] = 2
+    portal.mark_inactive(None, chaty, {"3"})
+    assert calls == [[1, 2, 3]]              # ONE flip, over the UNION of both walks
+    # idempotent: the already-flipped scope never double-flips
+    portal.mark_inactive(None, chaty, {"3"})
+    assert calls == [[1, 2, 3]]
+
+
 def test_client_routes_through_proxy_when_env_set(monkeypatch):
     monkeypatch.setenv("SCRAPER_PROXY_URL", "http://u:p@gw.example.com:823")
     c = CeskerealityClient()

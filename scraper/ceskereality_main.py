@@ -115,6 +115,20 @@ class CeskerealityPortal:
         # suppressed.
         self._regions = regions
         self.index_rate = config.limits.index_rate
+        # A (category_main, category_type) can be covered by MORE THAN ONE walk-
+        # category — rodinne-domy AND chaty-chalupy both map to cm='dum'. mark_inactive
+        # is scoped by (cm, ct, source), so a single complete sub-walk would flip the
+        # SIBLING sub-walk's uncollected listings as falsely delisted. So accumulate
+        # the seen ids + completeness across all contributors and flip ONCE, with the
+        # union, only when EVERY contributor walked completely (rule #3).
+        self._cmct_contributors: dict[tuple[str | None, str | None], int] = {}
+        for c in self._categories:
+            key = self.category_labels(c)
+            self._cmct_contributors[key] = self._cmct_contributors.get(key, 0) + 1
+        self._cmct_seen: dict[tuple[str | None, str | None], set[str]] = {}
+        self._cmct_complete: dict[tuple[str | None, str | None], bool] = {}
+        self._cmct_walked: dict[tuple[str | None, str | None], int] = {}
+        self._cmct_flipped: set[tuple[str | None, str | None]] = set()
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -349,13 +363,32 @@ class CeskerealityPortal:
             not self._max_pages and not self._regions and incomplete_okresy == 0
             and _walk_complete(len(seen), total)
         )
+        # Accumulate this walk into its (cm, ct) bucket so mark_inactive can flip the
+        # shared scope ONCE, with the union of every contributing sub-walk's seen ids,
+        # and only when ALL are complete (the rodinne-domy/chaty-chalupy -> dum case).
+        key = self.category_labels(category)
+        self._cmct_seen.setdefault(key, set()).update(seen)
+        self._cmct_complete[key] = self._cmct_complete.get(key, True) and complete
+        self._cmct_walked[key] = self._cmct_walked.get(key, 0) + 1
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
     def mark_inactive(self, conn: Any, category: dict[str, Any], seen: set[str]) -> int:
         cm, ct = self.category_labels(category)
         if cm is None or ct is None:
             return 0
-        existing = db.index_summary_native(conn, SOURCE, list(seen))
+        key = (cm, ct)
+        # Wait until every walk-category contributing to this (cm, ct) has been walked,
+        # then flip ONCE with the union of their seen ids — and only if ALL were
+        # complete. A sibling sub-walk being incomplete (e.g. rodinne-domy's dense
+        # okres capped) keeps the whole dum scope from flipping, so the complete
+        # chaty-chalupy walk can't falsely delist uncollected rodinne-domy rows.
+        if self._cmct_walked.get(key, 0) < self._cmct_contributors.get(key, 1):
+            return 0
+        if key in self._cmct_flipped or not self._cmct_complete.get(key, False):
+            return 0
+        self._cmct_flipped.add(key)
+        union = self._cmct_seen.get(key) or set(seen)
+        existing = db.index_summary_native(conn, SOURCE, list(union))
         pks = {v["sreality_id"] for v in existing.values()}
         return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
 
