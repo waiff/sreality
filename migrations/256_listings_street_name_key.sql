@@ -22,13 +22,16 @@
 --
 -- It is a PYTHON-derived column (the normalization folds diacritics + strips
 -- street-words + trailing house-number tokens — not faithfully reproducible in
--- SQL without drift), populated at every street-write path
--- (scraper.db.upsert_listing / write_detail_batch + the street backfills) and by
+-- SQL without drift), populated at EVERY listings.street write path via the one
+-- scraper.street.street_name_key function (scraper.db.upsert_listing /
+-- write_detail_batch at ingest + all three bulk street backfills) and by
 -- scripts.backfill_street_name_key for the existing rows. A plain nullable column,
 -- so ADD COLUMN is metadata-only (no table rewrite). OUT of the content hash (like
--- street / house_number / zip), so backfilling it never writes a snapshot. A
--- parity test asserts stored == recomputed; the 6h full scan (which recomputes the
--- key live) is the backstop if a key ever goes stale.
+-- street / house_number / zip), so backfilling it never writes a snapshot. Guards:
+-- a golden-case regression test on the function + a write-path test that every
+-- backfill's UPDATE stamps the column; the ultimate backstop is that the 6h full
+-- scan recomputes the key LIVE from street (never reads this column), so a stale or
+-- missed stored key only delays a dirty-drain merge, never loses one.
 
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS street_name_key text;
 

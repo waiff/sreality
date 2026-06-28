@@ -1545,10 +1545,14 @@ re-decides against its whole group, while staying **O(dirty)** in BOTH load and 
 scoped load is a pure perf optimization layered under that correctness gate (no fragile SQL
 street-key replay); race-free claim/clear like `dirty_properties` (rule #20). `street_name_key` is
 THE single source `scraper.street.street_name_key` (also what the engine groups on live via
-`street_group_keys`), stamped at every street-write path (`scraper.db` + the street backfills),
-out of the content hash, backfilled by `scripts.backfill_street_name_key`, parity-guarded
-(stored == recomputed) so it can never drift; the 6h full scan (which recomputes the key live) is
-the backstop if a key ever goes stale. The claim is **FIFO-BOUNDED** (`--max-dirty`,
+`street_group_keys`), stamped at every `listings.street` write path via that ONE function
+(`scraper.db._set_street_name_key` at ingest + ALL the bulk street backfills: `backfill_portal_streets`
+/ `backfill_bazos_street_locality` / `backfill_address_point_streets` — the weekly coord→street
+resolver), out of the content hash, backfilled by `scripts.backfill_street_name_key`. A golden-case
+regression test pins the function and a write-path test asserts every backfill's UPDATE stamps the
+column; the ultimate drift guard is that the 6h full scan recomputes the key LIVE from `street` (never
+reads the stored column), so a stale/missed stored key only delays a dirty-drain merge to the next full
+scan (latency, never a wrong or lost merge). The claim is **FIFO-BOUNDED** (`--max-dirty`,
 default 10000): like every sibling drain it must cap its per-run work, because a tagging backlog
 (a new portal, a retag campaign) can enqueue most of the market at once — an unbounded claim then
 resolves O(market) groups per hourly run, never completes within the time budget, never clears, and
@@ -1779,8 +1783,9 @@ it rather than duplicating a list here.
   cross-portal pairs there (HTML portals have no street_id → name group is the only place they meet a
   sreality row) were never compared. obec-scoping keeps each town's street its own small group AND
   blocks cross-town false merges (classify_pair has no geo check). The STORED `street_name_key` (stamped
-  at write time, parity-guarded against the function, out of the content hash like `street`) is what
-  lets the dedup `--dirty` drain scope its eligible load to the dirty street groups in SQL (rule #19).
+  at EVERY `listings.street` write path via the one function, out of the content hash like `street`) is
+  what lets the dedup `--dirty` drain scope its eligible load to the dirty street groups in SQL (rule
+  #19); the 6h full scan recomputes it live, so a stale stored key only delays, never breaks, a merge.
   `street` / `house_number` / `zip` / `street_name_key` are OUT of the content hash, so backfilling
   them never churns snapshots (`scripts/backfill_portal_streets.py` +
   `scripts/backfill_street_name_key.py` re-derive from already-stored data — no re-fetch). Browse

@@ -28,9 +28,12 @@ it is **scoped to the claimed properties' street groups**:
   complete with no asterisk), so the scoped load carries each dirty property's existing peers while
   staying O(dirty) in BOTH load and pair-work. `only_groups_with_property_ids` still gates the
   RESOLVE, so the scoped load is a pure perf optimization under that correctness gate.
-- **Single-source + parity-guarded**: one Python normalizer (NOT replicated in SQL), so the stored
-  key can't drift from what the engine groups on; a parity test + golden-case regression guard it,
-  and the 6h full scan (recomputes the key live) is the backstop.
+- **Single-source + drift-guarded**: one Python normalizer (NOT replicated in SQL), stamped at EVERY
+  `listings.street` write path — ingest + all three bulk backfills incl. the weekly coord→street
+  resolver (`backfill_address_point_streets`). A golden-case regression test pins the function + a
+  write-path test asserts each backfill's UPDATE stamps the column; the ultimate backstop is the 6h
+  full scan recomputing the key live (never reads the column), so a stale/missed key only delays a
+  dirty-drain merge, never loses one.
 - **Backfill**: `scripts/backfill_street_name_key.py` (+ `backfill_street_name_key.yml`) re-derives
   the key for existing rows from the stored `street` — no re-fetch, bulk set-based UPDATE, resumable.
 
