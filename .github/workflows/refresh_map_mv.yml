@@ -1,0 +1,48 @@
+name: "Jobs: refresh Browse map view"
+
+# Refresh properties_map_mv (migration 254) -- the cold-robust materialized
+# source for the Browse map feed. The map ships up to 50k points for client-side
+# clustering; reading that off the churned live `properties` table tripped the
+# anon 3s statement_timeout cold, so the map reads this clean, all-visible copy
+# instead. It only reflects new/changed/delisted listings when refreshed, so a
+# scheduled rebuild keeps the map fresh. The rebuild is BLUE-GREEN + CLUSTERED
+# (build a fresh clustered copy off to the side, atomic-swap) because on this
+# cache-constrained instance the map source must stay physically clustered to
+# read fast cold -- see scripts/refresh_map_mv.py. A full clustered rebuild is
+# heavier than a concurrent refresh, so it runs every 30 min (the map can be a
+# few minutes stale). Source-agnostic maintenance job (no portal tag).
+#
+# Required GitHub secret:
+#   SUPABASE_DB_URL  -- same one used by every other workflow.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: refresh-map-mv
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Refresh map view
+        run: python -m scripts.refresh_map_mv

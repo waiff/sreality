@@ -68,6 +68,21 @@ OWNERSHIP: dict[str, str] = {
     "obecni": "statni",
 }
 
+# Canonical typed-enum vocabularies — the value space the Browse filters, dedup,
+# condition scoring and the MF-yield SQL key on. mmreality's free-text enums are
+# mapped INTO these and anything outside is dropped to None — the same
+# canonical-or-None discipline as _ownership. The lever: mmreality uses the
+# placeholder "neuvedeno" ("not specified") as its sentinel (seen live on
+# `construction`, near-certain on `condition`); the old free-text passthrough
+# leaked it into the typed columns, where it matches no filter option.
+_BUILDING_TYPE_CANON: frozenset[str] = frozenset(BUILDING_TYPE.values())
+# The sreality "Stav objektu" value space (the cross-portal condition vocabulary,
+# verified against the live distribution of listings.condition).
+_CONDITION_CANON: frozenset[str] = frozenset({
+    "novostavba", "velmi_dobry", "dobry", "po_rekonstrukci", "pred_rekonstrukci",
+    "ve_vystavbe", "projekt", "v_rekonstrukci", "spatny", "k_demolici",
+})
+
 # Czech-bbox guard: a coordinate outside it (a swapped lat/lon or a foreign
 # point) is dropped rather than stored as geom.
 _CZ_LAT_MIN, _CZ_LAT_MAX = 48.0, 51.5
@@ -179,14 +194,20 @@ def _building_type(obj: dict[str, Any]) -> str | None:
     key = _norm_key((obj.get("construction") or {}).get("name"))
     if not key:
         return None
-    return BUILDING_TYPE.get(key, key)
+    # Real values are nouns (Cihla/Panel/Smíšená) that already equal a canonical
+    # code, so .get falls through; the canonical guard then drops "neuvedeno" and
+    # any other non-canonical label instead of leaking it.
+    cand = BUILDING_TYPE.get(key, key)
+    return cand if cand in _BUILDING_TYPE_CANON else None
 
 
 def _condition(obj: dict[str, Any]) -> str | None:
     key = _norm_key((obj.get("condition") or {}).get("name"))
     if not key:
         return None
-    return re.sub(r"\s+", "_", key)
+    key = re.sub(r"\s+stav$", "", key)   # defensive: match idnes's "… stav" stripping
+    cand = re.sub(r"\s+", "_", key)
+    return cand if cand in _CONDITION_CANON else None
 
 
 def _ownership(obj: dict[str, Any]) -> str | None:

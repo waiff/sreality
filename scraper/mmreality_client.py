@@ -46,6 +46,14 @@ def detail_url(id_or_path: str) -> str:
 
 class MmRealityClient(BasePortalClient):
     ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    # Route every request through the residential proxy in SCRAPER_PROXY_URL.
+    # mmreality's Cloudflare edge HARD-403s our datacenter (GitHub-Actions) IP on
+    # the first request (verified — the portal ingested 0 listings across 101
+    # blocked runs); a residential exit IP returns 200. Same opt-in the sister
+    # CF-blocked portal (ceskereality) uses; the shared browser UA is most natural
+    # once proxied, so no USER_AGENT override. Unset env = direct IP (logs a warn,
+    # then 403s) — a misconfigured deploy fails loudly, never silently green.
+    USE_PROXY = True
 
     def fetch_index(self, page: int | None = None) -> tuple[str, int]:
         response = self._request(index_url(page))

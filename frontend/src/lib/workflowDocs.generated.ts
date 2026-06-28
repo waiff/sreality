@@ -295,6 +295,54 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_portal_streets.yml"
   },
   {
+    "filename": "backfill_realitymix_coords.yml",
+    "name": "Jobs: backfill RealityMix coordinates (geocode the map-less tail)",
+    "description": "One-off, DISPATCH-ONLY backfill. ~28% of realitymix listings render without a #print-map and landed with geom=NULL; the detail-drain now geocodes such rows going forward, but an already-stored row only re-geocodes on its next refetch (maybe never). This re-places the existing backlog from STORED data (source_url town + slug street — NO page re-fetch) via a cached Mapy.cz, updating geom + locality in place (no snapshot: both are out of the content hash). Idempotent + resumable (each row is stamped); re-run until pending=0. Run only AFTER the carry-forward fix is deployed, else the next drain refetch wipes the backfilled geom.",
+    "portal": "realitymix",
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "limit",
+        "description": "max listings processed this run (blank = 20000)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; stops claiming + exits cleanly (blank = none)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "report the pending count and exit without writing",
+        "required": false,
+        "type": "boolean",
+        "default": "false",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "realitymix-coords-backfill",
+    "cancelInProgress": false,
+    "timeoutMinutes": 60,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_realitymix_coords.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_realitymix_coords.yml"
+  },
+  {
     "filename": "backfill_render_score.yml",
     "name": "Backfill image render_score (one-shot, from stored embeddings)",
     "description": "One-shot corrective for migration 239: the clip_tag backfill skips already-tagged images, so images tagged before the render axis shipped have render_score NULL (the listing-detail render badge is hidden and the byt render exclusion is inert on them). This re-scores the render-vs-photo axis from each image's STORED CLIP embedding — no R2 download, no image re-inference — so it is fast (vector dot products). Horizontally sharded into 4 jobs (image_id %% 4). Resumable + idempotent (a scored row drops out of the render_score-IS-NULL partial index, migration 240). Dispatch-only. Secret: SUPABASE_DB_URL (no R2 needed). NOT a portal ingest (portal: null).",
@@ -2319,6 +2367,8 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "MAPY2_CZ_API_KEY",
+      "MAPY_CZ_API_KEY",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "realitymix-detail-drain",
@@ -2477,6 +2527,32 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/recompute_property_stats.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/recompute_property_stats.yml"
+  },
+  {
+    "filename": "refresh_map_mv.yml",
+    "name": "Jobs: refresh Browse map view",
+    "description": "Refresh properties_map_mv (migration 254) -- the cold-robust materialized source for the Browse map feed. The map ships up to 50k points for client-side clustering; reading that off the churned live `properties` table tripped the anon 3s statement_timeout cold, so the map reads this clean, all-visible copy instead. It only reflects new/changed/delisted listings when refreshed, so a scheduled rebuild keeps the map fresh. The rebuild is BLUE-GREEN + CLUSTERED (build a fresh clustered copy off to the side, atomic-swap) because on this cache-constrained instance the map source must stay physically clustered to read fast cold -- see scripts/refresh_map_mv.py. A full clustered rebuild is heavier than a concurrent refresh, so it runs every 30 min (the map can be a few minutes stale). Source-agnostic maintenance job (no portal tag).",
+    "portal": null,
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "*/30 * * * *",
+        "human": "Every 30 minutes"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "refresh-map-mv",
+    "cancelInProgress": false,
+    "timeoutMinutes": 15,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/refresh_map_mv.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/refresh_map_mv.yml"
   },
   {
     "filename": "refresh_population.yml",
@@ -3023,28 +3099,33 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
   {
     "filename": "scrape_mmreality.yml",
     "name": "Scraping: M&M Reality scraper (pilot)",
-    "description": "Manual (dispatch-only) scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price- changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
+    "description": "Scheduled scraper for mmreality.cz on the shared portal framework. M&M Reality is a server-rendered HTML portal whose detail pages embed a complete structured estate object (a Vue `:property` prop): the index walk pages the mixed-category /nemovitosti/ results and enqueues new/price-changed ids into listing_detail_queue, then the detail drain fetches each listing page, decodes its :property JSON to a ScrapedListing, and ingests through db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching).",
     "portal": "mmreality",
     "manual": true,
-    "schedules": [],
+    "schedules": [
+      {
+        "cron": "50 */6 * * *",
+        "human": "Every 6 hours at :50"
+      }
+    ],
     "onPush": false,
     "onPullRequest": false,
     "paths": null,
     "inputs": [
       {
         "name": "max_pages",
-        "description": "cap index pages walked (pilot safety). Blank = full walk.",
+        "description": "cap index pages walked (ad-hoc partial). Blank = full walk.",
         "required": false,
         "type": "string",
-        "default": "20",
+        "default": "",
         "options": null
       },
       {
         "name": "max_detail",
-        "description": "cap detail-drain claims this run",
+        "description": "cap detail-drain claims this run (raise for a one-time backfill)",
         "required": false,
         "type": "string",
-        "default": "2000",
+        "default": "4000",
         "options": null
       },
       {
@@ -3062,14 +3143,23 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "4",
         "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "detail-drain wall-clock budget; it finalizes cleanly before this. Blank = 2400 (40 min).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
+      "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "mmreality-scrape",
     "cancelInProgress": false,
-    "timeoutMinutes": 30,
+    "timeoutMinutes": 60,
     "permissions": null,
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/scrape_mmreality.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/scrape_mmreality.yml"

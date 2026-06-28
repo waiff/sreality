@@ -15,8 +15,12 @@ name: "Scraping: RealityMix detail drain"
 # records ended_at rather than being SIGKILLed mid-flight. The queue persists across
 # runs, so the first ~1-2 days drain the initial ~48k backlog at the polite rate, then
 # it idles when empty. A gone detail (404 / redirect off the /detail/ path) flips that
-# listing inactive + dequeues it. Coordinates come from the page, so no MAPY_CZ_API_KEY.
-# Required secret: SUPABASE_DB_URL.
+# listing inactive + dequeues it. Coordinates come from the page for ~72% of listings;
+# the ~28% with no #print-map are geocoded from their locality via Mapy.cz (idnes
+# pattern: skip-if-geom + carry stored coords forward, so a listing is geocoded at most
+# once — never the every-refetch runaway that exhausted the Mapy key on idnes).
+# Required secret: SUPABASE_DB_URL. Optional: MAPY_CZ_API_KEY (+ MAPY2 backup) — unset
+# just leaves the map-less rows without coords (graceful no-op, never breaks the drain).
 #
 # LIVE: the index-walk validation (PR #639) was green and a drain dispatch wrote 80
 # listings + 1165 image URLs with 0 errors, so the hourly cron is enabled.
@@ -70,6 +74,8 @@ jobs:
       - name: Run realitymix detail drain
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+          MAPY2_CZ_API_KEY: ${{ secrets.MAPY2_CZ_API_KEY }}
           MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
           MAX_DETAIL: ${{ inputs.max_detail }}
           WORKERS: ${{ inputs.workers || '4' }}

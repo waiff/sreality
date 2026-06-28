@@ -14,6 +14,8 @@ import json
 from typing import Any
 
 from scraper.mmreality_parser import (
+    _building_type,
+    _condition,
     _ownership,
     index_price,
     parse_detail,
@@ -29,6 +31,27 @@ def test_ownership_canonical_only():
     assert _ownership({"ownership": {"name": "Jiné"}}) is None
     assert _ownership({"ownership": {"name": "Ostatní"}}) is None
     assert _ownership({}) is None
+
+
+def test_building_type_canonical_only():
+    # Real mmreality values are nouns that already equal a canonical code.
+    assert _building_type({"construction": {"name": "Cihla"}}) == "cihla"
+    assert _building_type({"construction": {"name": "Panel"}}) == "panel"
+    assert _building_type({"construction": {"name": "Smíšená"}}) == "smisena"
+    # The "neuvedeno" ("not specified") placeholder must NOT leak into the column.
+    assert _building_type({"construction": {"name": "neuvedeno"}}) is None
+    assert _building_type({}) is None
+
+
+def test_condition_canonical_only():
+    assert _condition({"condition": {"name": "novostavba"}}) == "novostavba"
+    assert _condition({"condition": {"name": "velmi dobrý"}}) == "velmi_dobry"
+    assert _condition({"condition": {"name": "dobrý"}}) == "dobry"
+    # Defensive "… stav" stripping (idnes form) still lands on the canonical value.
+    assert _condition({"condition": {"name": "Velmi dobrý stav"}}) == "velmi_dobry"
+    # Placeholder / unknown labels collapse to None instead of leaking.
+    assert _condition({"condition": {"name": "neuvedeno"}}) is None
+    assert _condition({}) is None
 
 INDEX_HTML = """
 <!DOCTYPE html><html lang="cs"><head>

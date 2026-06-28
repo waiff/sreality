@@ -1,0 +1,75 @@
+name: "Jobs: backfill RealityMix coordinates (geocode the map-less tail)"
+
+# portal: realitymix
+# One-off, DISPATCH-ONLY backfill. ~28% of realitymix listings render without a
+# #print-map and landed with geom=NULL; the detail-drain now geocodes such rows going
+# forward, but an already-stored row only re-geocodes on its next refetch (maybe never).
+# This re-places the existing backlog from STORED data (source_url town + slug street —
+# NO page re-fetch) via a cached Mapy.cz, updating geom + locality in place (no snapshot:
+# both are out of the content hash). Idempotent + resumable (each row is stamped); re-run
+# until pending=0. Run only AFTER the carry-forward fix is deployed, else the next drain
+# refetch wipes the backfilled geom.
+#
+# Required secrets: SUPABASE_DB_URL + MAPY_CZ_API_KEY (+ MAPY2 backup). No Mapy key -> no-op.
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: max listings processed this run (blank = 20000)
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: wall-clock budget; stops claiming + exits cleanly (blank = none)
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "report the pending count and exit without writing"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  # OWN group (NOT the drain's): the backfill targets STABLE geom-NULL rows while the
+  # hourly drain processes the new/price-changed QUEUE — largely disjoint sets — and the
+  # drain's carry-forward (connect_drain preloads native_ids_with_geom; _fill_coords
+  # re-geocodes a still-missing row) makes any rare overlap SELF-HEALING. Sharing the
+  # drain's group instead starved this one-off pass behind back-to-back 40-min drains
+  # during the multi-day initial backlog walk, for no real safety gain. Best practice if
+  # you want zero overlap: dispatch right after a drain finishes.
+  group: realitymix-coords-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run realitymix coords backfill
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAPY_CZ_API_KEY: ${{ secrets.MAPY_CZ_API_KEY }}
+          MAPY2_CZ_API_KEY: ${{ secrets.MAPY2_CZ_API_KEY }}
+          LIMIT: ${{ inputs.limit }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          ARGS=""
+          if [ -n "$LIMIT" ]; then ARGS="$ARGS --limit $LIMIT"; fi
+          if [ -n "$MAX_SECONDS" ]; then ARGS="$ARGS --max-seconds $MAX_SECONDS"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "python -m scripts.backfill_realitymix_coords $ARGS"
+          eval "python -m scripts.backfill_realitymix_coords $ARGS"
