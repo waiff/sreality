@@ -1533,8 +1533,17 @@ images get tagged, i.e. pHash+CLIP done) so a **new cross-portal listing merges 
 instead of waiting hours (the watchdog-grain goal). The dirty drain does a FULL eligible load
 (so a dirty property's group still carries its existing peers) but only resolves the dirty groups
 (`only_groups_with_property_ids`) — O(dirty) pair-work, no fragile SQL street-key replay; race-free
-claim/clear like `dirty_properties` (rule #20). All three drains compose with `--free` + the
-floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
+claim/clear like `dirty_properties` (rule #20). The claim is **FIFO-BOUNDED** (`--max-dirty`,
+default 10000): like every sibling drain it must cap its per-run work, because a tagging backlog
+(a new portal, a retag campaign) can enqueue most of the market at once — an unbounded claim then
+resolves O(market) groups per hourly run, never completes within the time budget, never clears, and
+the queue only grows (the huge claim + full load can also drop the pooled connection mid-run). Each
+bounded run completes-and-clears its oldest-N slice, so a flood drains over successive runs. (KNOWN
+LIMITATION, not yet addressed: the eligible LOAD is still O(market) every run — the per-run pair-work
+is bounded but the full load is not; obec-scoping it doesn't help (the backlog concentrates in big
+cities) and a tight street-key scope needs the Python street normalizer stored as a column. Fine at
+today's ~100K eligible rows; revisit with a stored street-group key if the market grows much larger.)
+All three drains compose with `--free` + the floor-plan budget), `dedup_batches.yml` ("Dedup engine (vision batch warm-up)", submit every
 6h + ingest hourly — pre-warms the engine's vision caches via the Anthropic Batches API at 50%
 off so the daily engine run merges over warm cache for free; rule #15), and
 `compute_image_phash.yml` (hourly pHash backfill, active-listing images first). Two monitor
