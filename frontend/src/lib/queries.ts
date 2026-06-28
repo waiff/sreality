@@ -1703,6 +1703,10 @@ export interface DedupEngineRun {
   auto_dismissed: number;
   floor_plan_deferred: number;
   clip_deferred: number;
+  /* --dirty runs only (NULL on full scan / candidate / geo): the dedup-ready queue depth
+   * at run start + how many this run claimed. Lets the dashboards see the backlog drain. */
+  dirty_queue_depth: number | null;
+  dirty_claimed: number | null;
 }
 
 /* Recent dedup-engine runs for the /dedup automation dashboard. Reads the anon
@@ -1716,7 +1720,8 @@ export const fetchDedupEngineRuns = async (
     .select(
       'id,started_at,ended_at,eligible,flagged_location,flagged_disposition,' +
         'pairs_considered,rejected,auto_address,auto_phash,auto_visual,queued,' +
-        'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred,clip_deferred',
+        'vision_calls,cost_usd,auto_dismissed,floor_plan_deferred,clip_deferred,' +
+        'dirty_queue_depth,dirty_claimed',
     )
     .order('started_at', { ascending: false })
     .limit(limit);

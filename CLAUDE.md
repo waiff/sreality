@@ -1538,7 +1538,13 @@ default 10000): like every sibling drain it must cap its per-run work, because a
 (a new portal, a retag campaign) can enqueue most of the market at once — an unbounded claim then
 resolves O(market) groups per hourly run, never completes within the time budget, never clears, and
 the queue only grows (the huge claim + full load can also drop the pooled connection mid-run). Each
-bounded run completes-and-clears its oldest-N slice, so a flood drains over successive runs. (KNOWN
+bounded run completes-and-clears its oldest-N slice, so a flood drains over successive runs. **Each
+dirty run records `dedup_engine_runs.dirty_queue_depth` (the backlog at run start) + `dirty_claimed`
+(its slice)** (migration 255, NULL on other run modes) so a non-draining queue is VISIBLE — the
+`/dedup` dashboard shows a "Dirty queue" stat + a stall banner, and the Health page raises an amber
+(deep + draining = transient flood) / red (high + NOT draining across recent runs = the drain is
+failing/out-paced) banner. The shared, unit-tested `assessDirtyQueue` (`frontend/src/lib/dedupQueueHealth.ts`)
+is the single source of that status for both surfaces. (KNOWN
 LIMITATION, not yet addressed: the eligible LOAD is still O(market) every run — the per-run pair-work
 is bounded but the full load is not; obec-scoping it doesn't help (the backlog concentrates in big
 cities) and a tight street-key scope needs the Python street normalizer stored as a column. Fine at

@@ -1236,6 +1236,8 @@ def run_engine(
         "floor_plan_deferred": 0, "clip_deferred": 0, "truncated": 0,
         "clip_classified": 0, "clip_cosine_calls": 0,
         "routed_haiku": 0, "routed_sonnet": 0,
+        # Observability: the --dirty path stamps these post-claim (NULL on other run modes).
+        "dirty_queue_depth": None, "dirty_claimed": None,
     })
 
     if not geo:
@@ -1563,13 +1565,14 @@ def _write_run_row(conn: Any, stats: dict[str, int]) -> None:
                 ended_at, eligible, flagged_location, flagged_disposition,
                 pairs_considered, rejected, auto_address, auto_phash, auto_visual,
                 queued, vision_calls, auto_dismissed, floor_plan_deferred, clip_deferred,
-                clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet
+                clip_classified, clip_cosine_calls, routed_haiku, routed_sonnet,
+                dirty_queue_depth, dirty_claimed
             ) VALUES (now(), %(eligible)s, %(flagged_location)s, %(flagged_disposition)s,
                 %(pairs_considered)s, %(rejected)s, %(auto_address)s, %(auto_phash)s,
                 %(auto_visual)s, %(queued)s, %(vision_calls)s, %(auto_dismissed)s,
                 %(floor_plan_deferred)s, %(clip_deferred)s,
                 %(clip_classified)s, %(clip_cosine_calls)s, %(routed_haiku)s,
-                %(routed_sonnet)s)
+                %(routed_sonnet)s, %(dirty_queue_depth)s, %(dirty_claimed)s)
             """,
             stats,
         )
@@ -1814,6 +1817,12 @@ def main() -> int:
                 only_groups_with_property_ids=only_groups, **engine_kw,
             )
             stats["clip_classified"] = clip_counter[0]
+            if args.dirty:
+                # Record the queue depth at run start + this run's slice, so the /dedup +
+                # Health dashboards can see whether the backlog is draining (a stall that
+                # otherwise stays invisible — see migration 255).
+                stats["dirty_queue_depth"] = queue_depth
+                stats["dirty_claimed"] = len(only_groups)
             if not args.shadow:
                 _write_run_row(conn, stats)
                 _write_pair_audit(conn, run_at, pair_audit)
