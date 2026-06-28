@@ -34,6 +34,7 @@ import {
   type ListingDetailLite,
 } from '@/lib/dedupDiff';
 import { imageSrc } from '@/lib/imageUrl';
+import { assessDirtyQueue } from '@/lib/dedupQueueHealth';
 import { type TaggedImageUrl } from '@/lib/imageTags';
 import { portalListingUrl, portalShort } from '@/lib/portals';
 import { fmtArea, fmtCount, fmtCzk, fmtRelative } from '@/lib/format';
@@ -309,6 +310,7 @@ function AutomationDashboard({
 }) {
   const latest = runs[0] ?? null;
   const autoTotal = latest ? latest.auto_phash + latest.auto_visual : 0;
+  const dq = assessDirtyQueue(runs);
   return (
     <CollapsibleSection id="automation" eyebrow="Automation" title="Engine activity">
       {latest == null ? (
@@ -317,13 +319,36 @@ function AutomationDashboard({
         </div>
       ) : (
         <>
+          {(dq.status === 'warn' || dq.status === 'fail') && dq.depth != null ? (
+            <div
+              className={`mb-3 rounded-[var(--radius-md)] border px-3 py-2 text-sm ${
+                dq.status === 'fail'
+                  ? 'border-[var(--color-brick)] text-[var(--color-brick)]'
+                  : 'border-[var(--color-copper)] text-[var(--color-copper)]'
+              }`}
+            >
+              <strong className="font-medium">
+                Dirty queue {dq.status === 'fail' ? 'stalled' : 'deep'}:
+              </strong>{' '}
+              {fmtCount(dq.depth)} dedup-ready properties waiting.{' '}
+              {dq.draining === false
+                ? 'Not draining across recent runs — the --dirty drain may be failing or out-paced; check the dedup_engine.yml runs.'
+                : 'Draining through the bounded drain (a transient tagging flood).'}
+            </div>
+          ) : null}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
             <Stat label="Eligible" value={latest.eligible} hint="street + disposition" />
             <Stat label="Loc. unclear" value={latest.flagged_location} hint="no street" muted />
             <Stat label="Disp. unclear" value={latest.flagged_disposition} hint="no disposition" muted />
             <Stat label="Auto-merged" value={autoTotal} hint="this run" accent />
           </div>
-          <div className="mt-2 grid grid-cols-2 sm:grid-cols-6 gap-2">
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-7 gap-2">
+            <Stat
+              label="Dirty queue"
+              value={dq.depth ?? 0}
+              small
+              hint={dq.depth == null ? 'no dirty run' : dq.draining === false ? 'not draining' : dq.draining ? 'draining' : 'backlog'}
+            />
             <Stat label="By photos" value={latest.auto_phash} small />
             <Stat label="By visual" value={latest.auto_visual} small />
             <Stat label="Auto-dismissed" value={latest.auto_dismissed ?? 0} small />

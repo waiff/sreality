@@ -6,6 +6,16 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup dirty-queue observability + stall alert
+
+The 165K dirty-queue backlog (which crashed the drain) ran ~2 days unseen — there was no gauge.
+Now every `--dirty` run records `dedup_engine_runs.dirty_queue_depth` + `dirty_claimed`
+(migration 255, NULL on other run modes), and a single shared `assessDirtyQueue` helper
+(`frontend/src/lib/dedupQueueHealth.ts`, unit-tested) drives both surfaces: the `/dedup` dashboard
+gets a "Dirty queue" stat + a stall banner, and the Health page raises an amber (deep but draining =
+transient flood) / red (high + NOT draining across recent runs = drain failing or out-paced) banner.
+This is the gauge that also tells us WHEN the deferred O(market)-load fix becomes necessary.
+
 ### 2026-06: Dedup dirty-drain FIFO bound (crash fix)
 
 The hourly `--dirty` drain was crashing (`SSL connection closed`) and the `dedup_dirty_properties`
