@@ -67,6 +67,11 @@ INDEX_MIN_COMPLETENESS = 0.995
 _CAP_PAGES = 12
 _PER_PAGE = 20
 
+# How deep the okres recursion drills: okres -> obec/quarter (1) -> sub-area (2). A
+# dense Prague quarter that itself caps (> 240) needs the second level; beyond that
+# the residual is tiny and the node is left incomplete (mark_inactive stays suppressed).
+_MAX_RECURSION_DEPTH = 2
+
 # Detail + search are always fetched on the canonical host; the okres slug is the
 # locality filter (`/{sale}/{cat}/{okres}/`), so one host covers every district.
 _WWW = "www.ceskereality.cz"
@@ -240,29 +245,32 @@ class CeskerealityPortal:
             return []
 
     def _walk_okres(
-        self, client: CeskerealityClient, sale_type: str, cat: str, okres_slug: str,
+        self, client: CeskerealityClient, sale_type: str, cat: str, slug: str,
+        depth: int = 0,
     ) -> tuple[list[tuple[str, str, int | None]], int, int | None, bool]:
-        """Walk one okres; if it still caps (a dense district > 240), recurse into its
-        obce / city-parts so every leaf stays under the 12-page cap. Complete iff the
-        okres walk didn't cap OR the recursion collected ~all of the okres total."""
+        """Walk one node (okres at depth 0); if it still caps, recurse into its obce /
+        city-parts so every leaf stays under the 12-page cap. A capped sub-node
+        recurses one level further (a dense Prague quarter > 240 -> its own sub-areas),
+        bounded by _MAX_RECURSION_DEPTH. Complete iff the node didn't cap OR the
+        recursion collected ~all of the node's own total."""
         rows, pages, total, complete = self._walk_slice(
-            client, _WWW, sale_type, cat, okres_slug)
-        if complete or self._max_pages:
+            client, _WWW, sale_type, cat, slug)
+        if complete or self._max_pages or depth >= _MAX_RECURSION_DEPTH:
             return rows, pages, total, complete
-        sub = self._sublocality_slugs(client, sale_type, cat, okres_slug)
+        sub = self._sublocality_slugs(client, sale_type, cat, slug)
         if not sub:
             return rows, pages, total, False   # nothing to drill into -> incomplete
         collected = {nid for nid, _, _ in rows}
         all_rows = list(rows)
         for child in sub:
-            crows, cpages, _ct, _cc = self._walk_slice(
-                client, _WWW, sale_type, cat, child)
+            crows, cpages, _ct, _cc = self._walk_okres(
+                client, sale_type, cat, child, depth + 1)
             pages += cpages
             for r in crows:
                 if r[0] not in collected:
                     collected.add(r[0])
                     all_rows.append(r)
-        # Complete iff the okres + its sub-localities reached the okres's own total
+        # Complete iff the node + its sub-localities reached the node's own total
         # (a truncated obec facet leaves it short -> stays incomplete, suppressing
         # mark_inactive for the category, which is the conservative correct choice).
         return all_rows, pages, total, _walk_complete(len(collected), total)
