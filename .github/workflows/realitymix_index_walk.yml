@@ -1,0 +1,71 @@
+name: "Scraping: RealityMix index walk"
+
+# portal: realitymix
+# The fast half of the realitymix cadence split (architectural rule #19, like
+# sreality/idnes/ceskereality). Walks the ENTIRE index of every configured category
+# (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive
+# flips delisted ones under the completeness guard (source-scoped), and
+# new/price-changed ids are enqueued into listing_detail_queue (source='realitymix').
+# No detail fetch — the drain (realitymix_detail_drain.yml) consumes the queue.
+# Records run_type='index'.
+#
+# WHY split: realitymix is large (~48k listings across 12 (category × offer-type)
+# walks, ~2400 index pages), so a full index walk takes most of a job's window — a
+# combined index+detail run starves the drain. The walk drives ?stranka by the
+# page-reported total (not a pager arrow), so a throttled/degraded page can't end a
+# category early (the lesson from ceskereality's reverted #637). Coordinates come
+# from the page, so no MAPY_CZ_API_KEY is needed. Required secret: SUPABASE_DB_URL.
+#
+# LIVE: a validation dispatch (PR #639) confirmed GitHub-runner egress IPs are NOT
+# anti-bot-blocked (nginx, no 403/penalize; 472 enqueued, clean data), so the 6h
+# cron is enabled.
+
+on:
+  schedule:
+    - cron: "20 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.
+        required: false
+        default: ""
+        type: string
+      max_seconds:
+        description: wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: realitymix-index-walk
+  cancel-in-progress: false
+
+jobs:
+  index-walk:
+    runs-on: ubuntu-latest
+    # The full walk completes well inside the --max-seconds budget (9000 = 150 min);
+    # the budget makes it finalize CLEANLY on a slow/grown day instead of being
+    # SIGKILLed, and this timeout is the generous outer backstop.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run realitymix index walk
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_PAGES: ${{ inputs.max_pages }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '9000' }}
+        run: |
+          ARGS="--index-only --max-seconds $MAX_SECONDS"
+          if [ -n "$MAX_PAGES" ]; then ARGS="$ARGS --max-pages $MAX_PAGES"; fi
+          echo "python -m scraper.realitymix_main $ARGS"
+          eval "python -m scraper.realitymix_main $ARGS"

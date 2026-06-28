@@ -280,6 +280,48 @@ WHERE bi.source = 'ceskereality' AND bi.source_broker_id_native = (l.raw_json->'
   AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
 """
 
+# --- realitymix attribution (from raw_json->'broker'; broker_id is the stable
+#     /profil-realitniho-maklere/…-{id} profile key, name best-effort). IDENTITY-
+#     ONLY: realitymix hides the broker phone behind a /trackredir click and the
+#     email behind a form, so there is no contact upsert here — no email -> no
+#     email_domain -> no firm linkage (accepted gap; the singleton broker + the
+#     agency_id still resolve the listing to a stable identity). Same shape as
+#     ceskereality otherwise. ---
+
+_REALITYMIX_IDENTITIES_UPSERT = """
+WITH src AS (
+  SELECT
+    (l.raw_json->'broker'->>'broker_id')       AS uid,
+    nullif(l.raw_json->'broker'->>'name', '')   AS name,
+    l.first_seen_at, l.last_seen_at
+  FROM listings l
+  WHERE l.source = 'realitymix' AND l.raw_json ? 'broker'
+    AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+    AND {sel}
+),
+agg AS (SELECT uid, min(first_seen_at) AS fseen, max(last_seen_at) AS lseen FROM src GROUP BY uid),
+latest AS (SELECT DISTINCT ON (uid) uid, name FROM src ORDER BY uid, last_seen_at DESC NULLS LAST)
+INSERT INTO broker_identities
+  (source, source_broker_id_native, display_name, first_seen_at, last_seen_at, attrs_computed_at)
+SELECT 'realitymix', a.uid, lt.name, a.fseen, a.lseen, now()
+FROM agg a JOIN latest lt USING (uid)
+ON CONFLICT (source, source_broker_id_native) DO UPDATE SET
+  display_name = CASE WHEN EXCLUDED.last_seen_at >= broker_identities.last_seen_at
+                      THEN EXCLUDED.display_name ELSE broker_identities.display_name END,
+  first_seen_at = least(broker_identities.first_seen_at, EXCLUDED.first_seen_at),
+  last_seen_at  = greatest(broker_identities.last_seen_at, EXCLUDED.last_seen_at),
+  attrs_computed_at = now()
+"""
+
+_REALITYMIX_LINK_LISTINGS_IDENTITY = """
+UPDATE listings l SET broker_identity_id = bi.id
+FROM broker_identities bi
+WHERE bi.source = 'realitymix' AND bi.source_broker_id_native = (l.raw_json->'broker'->>'broker_id')
+  AND l.source = 'realitymix' AND l.raw_json ? 'broker'
+  AND (l.raw_json->'broker'->>'broker_id') IS NOT NULL
+  AND l.broker_identity_id IS DISTINCT FROM bi.id AND {sel}
+"""
+
 # --- Firm resolution (global; %(free)s / %(franchise)s are text[] params). ---
 
 _FIRMS_UPSERT = """
@@ -557,6 +599,8 @@ def _attribute(conn: Any, sel: str, params: dict[str, Any]) -> None:
         cur.execute(_CESKEREALITY_IDENTITIES_UPSERT.format(sel=sel), params)
         cur.execute(_CESKEREALITY_CONTACTS_PHONE_UPSERT.format(sel=sel), params)
         cur.execute(_CESKEREALITY_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
+        cur.execute(_REALITYMIX_IDENTITIES_UPSERT.format(sel=sel), params)
+        cur.execute(_REALITYMIX_LINK_LISTINGS_IDENTITY.format(sel=sel), params)
 
 
 def _resolve_firms(conn: Any, free: list[str], franchise: list[str]) -> None:
@@ -786,7 +830,7 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     with conn.cursor() as cur:
         cur.execute(
             "SELECT sreality_id FROM listings "
-            "WHERE source IN ('sreality', 'idnes', 'ceskereality') "
+            "WHERE source IN ('sreality', 'idnes', 'ceskereality', 'realitymix') "
             "ORDER BY sreality_id"
         )
         all_ids = [int(r[0]) for r in cur.fetchall()]

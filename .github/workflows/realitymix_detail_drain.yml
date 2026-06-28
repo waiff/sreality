@@ -1,0 +1,81 @@
+name: "Scraping: RealityMix detail drain"
+
+# portal: realitymix
+# The slow half of the realitymix cadence split (architectural rule #19, like
+# sreality/idnes/ceskereality). Claims a bounded slice of listing_detail_queue
+# (source='realitymix', enqueued by realitymix_index_walk.yml), fetches each listing
+# page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via
+# db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing
+# category is read from the page's BreadcrumbList JSON-LD. Records run_type='detail'
+# (index_pages=0). The drain records image-URL rows; the shared images.yml job
+# downloads the bytes to R2.
+#
+# Bounded by a wall-clock budget (--max-seconds, default 2400 = 40 min, safely under
+# the 50-min job timeout) so the run always FINALIZES cleanly — it stops claiming and
+# records ended_at rather than being SIGKILLed mid-flight. The queue persists across
+# runs, so the first ~1-2 days drain the initial ~48k backlog at the polite rate, then
+# it idles when empty. A gone detail (404 / redirect off the /detail/ path) flips that
+# listing inactive + dequeues it. Coordinates come from the page, so no MAPY_CZ_API_KEY.
+# Required secret: SUPABASE_DB_URL.
+#
+# LIVE: the index-walk validation (PR #639) was green and a drain dispatch wrote 80
+# listings + 1165 image URLs with 0 errors, so the hourly cron is enabled.
+
+on:
+  schedule:
+    - cron: "40 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_seconds:
+        description: wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)
+        required: false
+        default: ""
+        type: string
+      max_detail:
+        description: hard cap on listings claimed this run (blank = none; the time budget governs)
+        required: false
+        default: ""
+        type: string
+      workers:
+        description: concurrent detail-fetch workers (blank = 4)
+        required: false
+        default: ""
+        type: string
+      rate:
+        description: global detail-fetch rate cap, req/s (blank = 1.5)
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: realitymix-detail-drain
+  cancel-in-progress: false
+
+jobs:
+  detail-drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Run realitymix detail drain
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '2400' }}
+          MAX_DETAIL: ${{ inputs.max_detail }}
+          WORKERS: ${{ inputs.workers || '4' }}
+          RATE: ${{ inputs.rate || '1.5' }}
+        run: |
+          ARGS="--drain-only --max-seconds $MAX_SECONDS --workers $WORKERS --rate $RATE"
+          if [ -n "$MAX_DETAIL" ]; then ARGS="$ARGS --max-detail $MAX_DETAIL"; fi
+          echo "python -m scraper.realitymix_main $ARGS"
+          eval "python -m scraper.realitymix_main $ARGS"

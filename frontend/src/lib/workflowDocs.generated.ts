@@ -576,6 +576,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       }
     ],
     "secrets": [
+      "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "ceskereality-detail-drain",
@@ -616,9 +617,18 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
         "type": "string",
         "default": "",
         "options": null
+      },
+      {
+        "name": "region",
+        "description": "limit the walk to ONE region subdomain (e.g. stredo.ceskereality.cz) for a proxy test. Blank = all 7.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
       }
     ],
     "secrets": [
+      "SCRAPER_PROXY_URL",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "ceskereality-index-walk",
@@ -2258,6 +2268,108 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/property_maintenance.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/property_maintenance.yml"
+  },
+  {
+    "filename": "realitymix_detail_drain.yml",
+    "name": "Scraping: RealityMix detail drain",
+    "description": "The slow half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Claims a bounded slice of listing_detail_queue (source='realitymix', enqueued by realitymix_index_walk.yml), fetches each listing page on a rate-limited worker pool, parses it to a ScrapedListing, and ingests via db.ingest_scraped_listing (Tier-0 idempotency + property singleton). The per-listing category is read from the page's BreadcrumbList JSON-LD. Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",
+    "portal": "realitymix",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "40 * * * *",
+        "human": "Every hour at :40"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_seconds",
+        "description": "wall-clock drain budget, finalizes cleanly before timeout (blank = 2400 = 40 min)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_detail",
+        "description": "hard cap on listings claimed this run (blank = none; the time budget governs)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "workers",
+        "description": "concurrent detail-fetch workers (blank = 4)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "rate",
+        "description": "global detail-fetch rate cap, req/s (blank = 1.5)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "realitymix-detail-drain",
+    "cancelInProgress": false,
+    "timeoutMinutes": 50,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/realitymix_detail_drain.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/realitymix_detail_drain.yml"
+  },
+  {
+    "filename": "realitymix_index_walk.yml",
+    "name": "Scraping: RealityMix index walk",
+    "description": "The fast half of the realitymix cadence split (architectural rule #19, like sreality/idnes/ceskereality). Walks the ENTIRE index of every configured category (no --max-pages), touch_listings bumps last_seen on still-listed ids, mark_inactive flips delisted ones under the completeness guard (source-scoped), and new/price-changed ids are enqueued into listing_detail_queue (source='realitymix'). No detail fetch — the drain (realitymix_detail_drain.yml) consumes the queue. Records run_type='index'.",
+    "portal": "realitymix",
+    "manual": true,
+    "schedules": [
+      {
+        "cron": "20 */6 * * *",
+        "human": "Every 6 hours at :20"
+      }
+    ],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "max_pages",
+        "description": "cap index pages per category (ad-hoc partial; suppresses mark_inactive). Blank = full walk.",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "wall-clock budget; the walk finalizes cleanly before this (blank = 9000 = 150 min).",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "realitymix-index-walk",
+    "cancelInProgress": false,
+    "timeoutMinutes": 180,
+    "permissions": null,
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/realitymix_index_walk.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/realitymix_index_walk.yml"
   },
   {
     "filename": "recompute_city_proximity.yml",

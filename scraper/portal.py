@@ -312,9 +312,42 @@ _DEFAULTS: dict[str, PortalConfig] = {
             {"sale_type": "pronajem", "category": "ostatni"},
         ],
         split_threshold=None,
+        # Routed through a residential proxy (ceskereality_client.USE_PROXY), so the
+        # datacenter-IP throttle is gone and we crawl at normal speed. The region ×
+        # facet split means ~thousands of small index queries — the proxy absorbs them.
         limits=PortalLimits(
-            index_rate=0.7, detail_workers=2, detail_rate=0.7,
-            max_detail_per_run=1500,
+            index_rate=2.0, detail_workers=4, detail_rate=2.0,
+        ),
+    ),
+    "realitymix": PortalConfig(
+        source="realitymix",
+        # Per-category HTML search pages (/reality/{family}/{sale}), each carrying
+        # a result total ("z celkem N nalezených") with offset paging (?stranka=N)
+        # and NO deep-pagination cap, so a per-category walk is provable-complete →
+        # the completeness-gated mark_inactive runs (source-scoped). The detail URL
+        # does NOT encode the category, so the drain reads it from the page's
+        # BreadcrumbList JSON-LD (realitymix_parser.category_from_breadcrumb).
+        # realitymix is a Centrum.cz agency-feed AGGREGATOR (~48k listings), so it
+        # overlaps heavily with sreality/idnes — the dedup engine merges it.
+        supports_complete_walk=True,
+        categories=[
+            {"sale_type": "prodej",   "category": "byty"},
+            {"sale_type": "pronajem", "category": "byty"},
+            {"sale_type": "prodej",   "category": "domy"},
+            {"sale_type": "pronajem", "category": "domy"},
+            {"sale_type": "prodej",   "category": "chaty"},
+            {"sale_type": "pronajem", "category": "chaty"},
+            {"sale_type": "prodej",   "category": "pozemky"},
+            {"sale_type": "pronajem", "category": "pozemky"},
+            {"sale_type": "prodej",   "category": "komerce"},
+            {"sale_type": "pronajem", "category": "komerce"},
+            {"sale_type": "prodej",   "category": "ostatni"},
+            {"sale_type": "pronajem", "category": "ostatni"},
+        ],
+        split_threshold=None,
+        limits=PortalLimits(
+            index_rate=1.0, detail_workers=4, detail_rate=1.5,
+            max_detail_per_run=2000,
         ),
     ),
 }

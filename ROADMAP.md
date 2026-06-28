@@ -6,6 +6,26 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: RealityMix.cz — new full scraper portal (pilot)
+
+realitymix.cz (a Centrum.cz agency-feed AGGREGATOR, ~48k listings) added as the 5th
+structured-HTML portal on the Phase-4 framework — a per-portal fetcher + parser + config,
+no foundation changes. `scraper/realitymix_{client,parser,main}.py` + `portal.py` default
++ migration 250 (the `portals` row). STRUCTURED HTML like idnes/ceskereality: category from
+the detail BreadcrumbList JSON-LD (the URL doesn't encode it), spec from the
+`detail-information__data-item` list, precise coords + a structured street from `#print-map`
+(no geocode), `supports_complete_walk=true` (per-category total, no deep-pagination cap).
+`walk_category` drives `?stranka` by the page-reported total (not a pager arrow — the lesson
+from ceskereality's reverted #637) with a barren-page retry. Cadence-split workflows
+(index 6h + drain hourly), **dispatch-only until a GH-runner validation run is green**, then
+the crons go live. Full parity: Chrome-extension overlay (`portals.ts`), on-demand URL parser
+(`source_parsers/realitymix.py` + dispatcher), and broker attribution (agency/per-broker
+identity from `data-fk_rk` + `/profil-realitniho-maklere/…-{id}`; `resolve_brokers` block,
+identity-only — phone/email are behind a trackredir). Validated on live HTML: streets correctly
+kept ("Luční"/"Hornická") vs rejected ("Jindřichov" místní část, via the morphology gate),
+price NULL on "Cena na vyžádání"/"Rezervováno". The dedup engine merges the heavy sreality/idnes
+overlap with no new wiring.
+
 ### 2026-06: Dedup follow-ups — floor-plan confidence floor + dead-code cleanup
 
 Post-merge follow-ups to the fully-tagged-before-decide PR.
