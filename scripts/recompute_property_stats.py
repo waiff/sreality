@@ -76,6 +76,9 @@ _ATTACH_INSERT_SQL = """
         has_balcony, has_parking, has_lift, building_type, condition,
         ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
         estate_area, usable_area, garden_area, parking_lots,
+        ku_id, obec_id, okres_id, region_id, obec, okres, region,
+        locality_district_id, locality_region_id, source, energy_rating,
+        building_condition_level, apartment_condition_level,
         is_active, first_seen_at, last_seen_at, last_change_at,
         source_count, distinct_site_count
     )
@@ -85,6 +88,9 @@ _ATTACH_INSERT_SQL = """
         l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
         l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
         l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
+        l.ku_id, l.obec_id, l.okres_id, l.region_id, l.obec, l.okres, l.region,
+        l.locality_district_id, l.locality_region_id, l.source, l.energy_rating,
+        l.building_condition_level, l.apartment_condition_level,
         l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1
     FROM listings l
     WHERE l.property_id IS NULL
@@ -102,6 +108,27 @@ _RECOMPUTE_BATCH_SQL = """
     WITH batch AS (
       SELECT id FROM properties WHERE id >= %(lo)s AND id < %(hi)s
     ),
+    -- Every child of the batch's properties, tagged with a per-source TRUST rank
+    -- (lower = more reliable). The golden-record CTEs below pick the best value
+    -- per field in this trust order, the same spirit as best_street's
+    -- sreality-preferred ordering (migration 183), generalised to all fields.
+    kids AS (
+      SELECT l.*,
+        CASE l.source
+          WHEN 'sreality'     THEN 1
+          WHEN 'bezrealitky'  THEN 2
+          WHEN 'idnes'        THEN 3
+          WHEN 'mmreality'    THEN 4
+          WHEN 'remax'        THEN 5
+          WHEN 'maxima'       THEN 6
+          WHEN 'ceskereality' THEN 7
+          WHEN 'realitymix'   THEN 8
+          WHEN 'bazos'        THEN 9
+          ELSE 10
+        END AS src_rank
+      FROM listings l
+      JOIN batch b ON b.id = l.property_id
+    ),
     child_agg AS (
       SELECT
         l.property_id              AS pid,
@@ -114,19 +141,78 @@ _RECOMPUTE_BATCH_SQL = """
       JOIN batch b ON b.id = l.property_id
       GROUP BY l.property_id
     ),
+    -- GOLDEN RECORD (field-level survivorship). Amenity booleans use bool_or =
+    -- three-valued OR-union (any reliable TRUE wins; else any explicit FALSE; else
+    -- NULL) — the right rule because a portal that simply doesn't parse an amenity
+    -- leaves it NULL, which the MF calc reads as "absent"; presence-wins recovers
+    -- it from a sibling that did parse it (validated: of cross-child lift
+    -- disagreements only ~2% are true-vs-false, the rest NULL-vs-known). Scalars
+    -- take the best NON-NULL value in source-trust order via
+    -- (array_agg(x ORDER BY rank) FILTER (WHERE x IS NOT NULL))[1].
+    golden AS (
+      SELECT
+        k.property_id AS pid,
+        bool_or(k.has_lift)     AS has_lift,
+        bool_or(k.has_balcony)  AS has_balcony,
+        bool_or(k.has_parking)  AS has_parking,
+        bool_or(k.terrace)      AS terrace,
+        bool_or(k.garage)       AS garage,
+        bool_or(k.cellar)       AS cellar,
+        (array_agg(k.area_m2 ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.area_m2 IS NOT NULL))[1]      AS area_m2,
+        (array_agg(k.usable_area ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.usable_area IS NOT NULL))[1]  AS usable_area,
+        (array_agg(k.estate_area ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.estate_area IS NOT NULL))[1]  AS estate_area,
+        (array_agg(k.garden_area ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.garden_area IS NOT NULL))[1]  AS garden_area,
+        (array_agg(k.parking_lots ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.parking_lots IS NOT NULL))[1] AS parking_lots,
+        (array_agg(k.building_type ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.building_type IS NOT NULL))[1] AS building_type,
+        (array_agg(k.condition ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.condition IS NOT NULL))[1]    AS condition,
+        (array_agg(k.ownership ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.ownership IS NOT NULL))[1]    AS ownership,
+        (array_agg(k.furnished ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.furnished IS NOT NULL))[1]    AS furnished,
+        (array_agg(k.energy_rating ORDER BY k.src_rank, k.is_active DESC,
+            k.last_seen_at DESC NULLS LAST, k.sreality_id DESC)
+            FILTER (WHERE k.energy_rating IS NOT NULL))[1] AS energy_rating
+      FROM kids k
+      GROUP BY k.property_id
+    ),
+    -- Geom + admin territory (incl. the MF rent-map join key ku_id) from the best
+    -- CZ-located child: a child WITH a Czech territory (obec_id NOT NULL) wins over
+    -- a foreign/uncoded one, then by source trust + recency. Keeps geom and every
+    -- territory field consistent (one child), and prefers a CZ coordinate so a
+    -- merged property whose repr happens to carry an off/foreign point still
+    -- resolves its MF territory. Falls back to the best child overall (NULL
+    -- territory) for a genuinely foreign property.
+    best_geo AS (
+      SELECT DISTINCT ON (k.property_id)
+        k.property_id AS pid, k.geom, k.locality, k.district,
+        k.ku_id, k.obec_id, k.okres_id, k.region_id, k.obec, k.okres, k.region,
+        k.locality_district_id, k.locality_region_id
+      FROM kids k
+      ORDER BY k.property_id, (k.obec_id IS NOT NULL) DESC, k.src_rank,
+               k.is_active DESC, k.last_seen_at DESC NULLS LAST, k.sreality_id DESC
+    ),
     repr AS (
       SELECT DISTINCT ON (l.property_id)
         l.property_id AS pid, l.sreality_id, l.category_main, l.category_type,
-        l.disposition, l.area_m2, l.district, l.geom, l.price_czk,
-        l.locality, l.has_balcony, l.has_parking, l.has_lift, l.building_type,
-        l.condition, l.ownership, l.furnished, l.terrace, l.cellar, l.garage,
-        l.category_sub_cb, l.subtype, l.estate_area, l.usable_area, l.garden_area,
-        l.parking_lots,
-        -- Browse-filterable columns denormalised onto properties (migration 251)
-        -- so the cohort query filters/sorts on the parent alone (no join probe).
-        l.region_id, l.okres_id, l.obec_id, l.obec, l.okres, l.region,
-        l.building_condition_level, l.apartment_condition_level,
-        l.energy_rating, l.source, l.locality_district_id, l.locality_region_id
+        l.disposition, l.price_czk,
+        l.category_sub_cb, l.subtype,
+        l.building_condition_level, l.apartment_condition_level, l.source
       FROM listings l
       JOIN batch b ON b.id = l.property_id
       ORDER BY l.property_id, l.is_active DESC, l.last_seen_at DESC NULLS LAST,
@@ -211,40 +297,41 @@ _RECOMPUTE_BATCH_SQL = """
       category_main       = r.category_main,
       category_type       = r.category_type,
       disposition         = r.disposition,
-      area_m2             = r.area_m2,
-      district            = r.district,
-      geom                = r.geom,
+      area_m2             = g.area_m2,
+      district            = bg.district,
+      geom                = bg.geom,
       current_price_czk   = r.price_czk,
-      locality            = r.locality,
+      locality            = bg.locality,
       street              = bs.street,
-      has_balcony         = r.has_balcony,
-      has_parking         = r.has_parking,
-      has_lift            = r.has_lift,
-      building_type       = r.building_type,
-      condition           = r.condition,
-      ownership           = r.ownership,
-      furnished           = r.furnished,
-      terrace             = r.terrace,
-      cellar              = r.cellar,
-      garage              = r.garage,
+      has_balcony         = g.has_balcony,
+      has_parking         = g.has_parking,
+      has_lift            = g.has_lift,
+      building_type       = g.building_type,
+      condition           = g.condition,
+      ownership           = g.ownership,
+      furnished           = g.furnished,
+      terrace             = g.terrace,
+      cellar              = g.cellar,
+      garage              = g.garage,
       category_sub_cb     = r.category_sub_cb,
       subtype             = r.subtype,
-      estate_area         = r.estate_area,
-      usable_area         = r.usable_area,
-      garden_area         = r.garden_area,
-      parking_lots        = r.parking_lots,
-      region_id                 = r.region_id,
-      okres_id                  = r.okres_id,
-      obec_id                   = r.obec_id,
-      obec                      = r.obec,
-      okres                     = r.okres,
-      region                    = r.region,
+      estate_area         = g.estate_area,
+      usable_area         = g.usable_area,
+      garden_area         = g.garden_area,
+      parking_lots        = g.parking_lots,
+      ku_id                     = bg.ku_id,
+      region_id                 = bg.region_id,
+      okres_id                  = bg.okres_id,
+      obec_id                   = bg.obec_id,
+      obec                      = bg.obec,
+      okres                     = bg.okres,
+      region                    = bg.region,
       building_condition_level  = r.building_condition_level,
       apartment_condition_level = r.apartment_condition_level,
-      energy_rating             = r.energy_rating,
+      energy_rating             = g.energy_rating,
       source                    = r.source,
-      locality_district_id      = r.locality_district_id,
-      locality_region_id        = r.locality_region_id,
+      locality_district_id      = bg.locality_district_id,
+      locality_region_id        = bg.locality_region_id,
       price_drop_count    = coalesce(ph.drops, 0),
       price_rise_count    = coalesce(ph.rises, 0),
       max_price_drop_pct  = ph.max_drop_pct,
@@ -260,6 +347,8 @@ _RECOMPUTE_BATCH_SQL = """
       stats_computed_at   = now()
     FROM child_agg ca
     JOIN repr r ON r.pid = ca.pid
+    JOIN golden g ON g.pid = ca.pid
+    JOIN best_geo bg ON bg.pid = ca.pid
     LEFT JOIN best_street bs ON bs.pid = ca.pid
     LEFT JOIN price_hist ph ON ph.pid = ca.pid
     LEFT JOIN changes ch ON ch.pid = ca.pid
@@ -326,6 +415,20 @@ def recompute_one(conn: Any, property_id: int) -> None:
     """
     with conn.cursor() as cur:
         cur.execute(_RECOMPUTE_ONE_SQL, {"pid": property_id})
+
+
+def recompute_mf_one(conn: Any, property_id: int) -> None:
+    """Refresh ONE property's MF reference rent/yield from its golden record.
+
+    Pairs with recompute_one: rebuild the golden columns, then recompute MF on
+    them so a merge/unmerge survivor is never one mf-recompute cycle stale.
+    Calls the same recompute_property_mf() DB function the hourly job uses.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT public.recompute_property_mf(ARRAY[%s]::bigint[])",
+            (property_id,),
+        )
 
 
 def _reconcile_childless(conn: Any) -> int:

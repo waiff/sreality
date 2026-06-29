@@ -99,6 +99,23 @@ def test_merge_repoints_retires_logs_and_recomputes():
     assert _find(conn.executed, "WITH batch AS") is not None
 
 
+def test_merge_refreshes_survivor_mf_inline():
+    # The survivor's property-grain MF is recomputed from the golden record in
+    # the same transaction, so a merge is never one mf-recompute cycle stale.
+    conn = _FakeConn([
+        (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
+         [(10, "active", "prodej", "byt"), (20, "active", "prodej", "byt")]),
+        (lambda s: "INSERT INTO property_merge_events" in s, [(1,)]),
+    ])
+
+    merge_properties(
+        conn, survivor_id=10, retired_id=20, reason="manual", source="operator",
+    )
+
+    mf = _find(conn.executed, "recompute_property_mf")
+    assert mf is not None and mf[1] == (10,)
+
+
 def test_merge_rejects_when_retired_not_active():
     conn = _FakeConn([
         (lambda s: "SELECT id, status, category_type, category_main FROM properties WHERE id IN" in s,
