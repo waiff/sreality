@@ -1317,6 +1317,22 @@ def test_mark_dedup_dirty_empty_noop() -> None:
     assert db.mark_properties_dedup_dirty_for_images(_Conn(), []) == 0
 
 
+def test_should_run_geo_only_on_explicit_flag() -> None:
+    """Geo runs ONLY on an explicit flag — never auto-bolted onto the street full-scan /
+    candidate runs (where it was deadline-starved / apartment-restricted and produced nothing)."""
+    from scripts.dedup_engine import _should_run_geo
+
+    # The dedicated --geo-only scheduled cron: gated by the dedup_geo_enabled master switch.
+    assert _should_run_geo(geo=False, geo_only=True, geo_enabled=True, dirty=False) is True
+    assert _should_run_geo(geo=False, geo_only=True, geo_enabled=False, dirty=False) is False
+    # The street full-scan / candidate drain (no geo flag) NEVER auto-runs geo, even when enabled.
+    assert _should_run_geo(geo=False, geo_only=False, geo_enabled=True, dirty=False) is False
+    # --geo forces it onto any non-dirty run ad-hoc, ignoring the setting (debug).
+    assert _should_run_geo(geo=True, geo_only=False, geo_enabled=False, dirty=False) is True
+    # Never on the real-time dirty drain, whatever the flags.
+    assert _should_run_geo(geo=True, geo_only=True, geo_enabled=True, dirty=True) is False
+
+
 def test_claim_dedup_dirty_is_bounded_fifo() -> None:
     """The --dirty claim must be FIFO-bounded when a limit is passed (and unbounded only when
     not), so a tagging-backlog flood can't make an hourly run claim the whole market."""

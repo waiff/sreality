@@ -1307,6 +1307,10 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "cron": "45 * * * *",
         "human": "Every hour at :45"
+      },
+      {
+        "cron": "0 3,9,15,21 * * *",
+        "human": "0 3,9,15,21 * * *"
       }
     ],
     "onPush": false,
@@ -1403,6 +1407,17 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       {
         "name": "dirty",
         "description": "Real-time dirty drain — re-decide ONLY street groups touching a just-dedup-ready property",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "geo_only",
+        "description": "GEO scan — single-dwelling (house/land/commercial) only, the geo-proximity path (pair with shadow=true for a volume preview)",
         "required": false,
         "type": "choice",
         "default": "false",

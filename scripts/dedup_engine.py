@@ -339,6 +339,15 @@ def _claim_dedup_dirty(conn: Any, cutoff: Any, limit: int | None = None) -> set[
         return {int(r[0]) for r in cur.fetchall()}
 
 
+def _should_run_geo(*, geo: bool, geo_only: bool, geo_enabled: bool, dirty: bool) -> bool:
+    """Whether to run the geo (single-dwelling) pass. Geo runs ONLY on an explicit flag — it is
+    NEVER auto-bolted onto the street full-scan / candidate-drain (where it was deadline-starved /
+    inherited the apartment restrict and produced nothing). `--geo-only` (the dedicated scheduled
+    cron) is gated by the `dedup_geo_enabled` master switch; `--geo` forces it ad-hoc (ignores the
+    setting, for debugging). Never on the real-time dirty drain (geo isn't dirty-scoped)."""
+    return (geo or (geo_only and geo_enabled)) and not dirty
+
+
 def _clear_dedup_dirty(conn: Any, property_ids: set[int], cutoff: Any) -> int:
     """Delete the claimed ids that have NOT been re-dirtied since the cutoff."""
     if not property_ids:
@@ -1777,13 +1786,22 @@ def main() -> int:
         deadline = time.monotonic() + args.max_seconds if args.max_seconds > 0 else None
 
         from toolkit.dedup_settings import read_setting
-        # Geo path (houses/land/commercial): the scheduled run includes it when the operator
-        # flips dedup_geo_enabled; --geo / --geo-only force it ad-hoc. Default off. It runs on
-        # the FULL scan + the (bounded, candidate-scoped) candidate drain, but NOT the
-        # real-time dirty drain — geo isn't dirty-scoped, so running it there would do a full
-        # unscoped scan every :45 tick. Geo real-time is a later enhancement.
+        # Geo path (houses/land/commercial) is its OWN scheduled pass — the dedicated --geo-only
+        # cron with a full budget — NOT bolted onto the street full-scan / candidate-drain. It used
+        # to auto-append there whenever dedup_geo_enabled was on, and produced ZERO candidates/merges
+        # because it was (a) DEADLINE-STARVED on the full scan: it ran *after* the street pass on the
+        # shared --max-seconds, which the ~100K-eligible street scan exhausted; and (b) a NO-OP on the
+        # candidate drain: it inherited the street pass's apartment `restrict`, so
+        # _load_geo_eligible(restrict=apartment candidates) loaded no single-dwelling rows. So geo runs
+        # ONLY on an explicit flag now: --geo-only (the scheduled cron, gated by the dedup_geo_enabled
+        # master switch) runs geo ALONE with its own budget; --geo forces it onto any non-dirty run
+        # ad-hoc (ignores the setting, for debugging). NEVER on the real-time dirty drain.
         geo_enabled = bool(read_setting(conn, "dedup_geo_enabled"))
-        run_geo = (args.geo or args.geo_only or geo_enabled) and not args.dirty
+        run_geo = _should_run_geo(
+            geo=args.geo, geo_only=args.geo_only, geo_enabled=geo_enabled, dirty=args.dirty)
+        if args.geo_only and not run_geo:
+            LOG.info("GEO-only run but dedup_geo_enabled is off — nothing to do.")
+            return 0
         geo_area_max_pct = float(read_setting(conn, "dedup_geo_area_max_pct"))
 
         # ----- Shared setup (settings + vision fns + caps) — used by BOTH the street and

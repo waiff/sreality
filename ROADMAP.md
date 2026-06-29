@@ -6,6 +6,25 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup geo path — dedicated, paid scheduled run (single-dwelling dedup unblocked)
+
+Houses/land/commercial (no disposition → invisible to the street engine; 229,948 active properties,
+~64% of inventory) are matched by the geo path — which, though `dedup_geo_enabled=true`, had produced
+**ZERO** candidates/merges in its entire history. Root cause: geo was bolted onto the street runs and
+never effectively executed — on the 6h full-scan it ran *after* the street pass on the shared
+`--max-seconds` (deadline-starved by the ~100K-eligible street scan), and on the candidate-drain it
+inherited the street pass's apartment `restrict` (`_load_geo_eligible(restrict=apartment candidates)`
+→ no single-dwelling rows). Fix: **geo is now its own scheduled run** (`dedup_engine.yml` cron
+`0 3,9,15,21`, `--geo-only`, gated by `dedup_geo_enabled`) with its own budget, run **paid**
+(`--max-vision-calls 300`, not `--free`) so the forensic FACADE compare auto-merges confident
+cross-portal houses (different photos → pHash can't) and enqueues the ambiguous (`tier='geo'`). A
+`--free` geo run would surface nothing — `--free` skips the compare AND suppresses the general
+unresolved→queue enqueue.
+
+- **Follow-ups:** extend the `dedup_batches` warmer to the geo funnel (street's 50%-off warm-cache cost
+  model); a geo candidate-drain mode (O(queue)); the cross-portal coord-divergence cell-miss (a same
+  house geocoded ~270 m apart on two portals lands in different geo cells — a coarser cell / radius match).
+
 ### 2026-06: Dedup dirty-drain scoped load (O(market) → O(dirty))
 
 Closes the FIFO-bound's known follow-up: the `--dirty` drain's eligible LOAD was still

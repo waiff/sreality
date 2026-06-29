@@ -865,12 +865,23 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     SITE-PLAN priority via `room_priority_for`, rule #15 PR-1) is the sole merge gate. The geo path
     also does NOT apply the **cross-source gate** (`_RunContext.cross_source_only=False`): that gate is
     justified only where rule B auto-merges same-source exact-address relists for free (the street
-    path), and geo has no rule B — so a same-portal house re-post still reaches the visual stage. Gated by the
-    `dedup_geo_enabled` setting: when on, the scheduled FULL-SCAN + CANDIDATE-DRAIN runs also run the
-    geo pass (after the street pass, sharing the `--max-seconds` budget); the real-time DIRTY drain
-    skips it (geo isn't dirty-scoped). `--geo` / `--geo-only` force it ad-hoc. Each geo pass writes its
-    own `dedup_engine_runs` row. (Stage 2 will make the per-family tag priorities operator-editable;
-    geo real-time + auto-merge calibration are later.)
+    path), and geo has no rule B — so a same-portal house re-post still reaches the visual stage.
+    **Geo is its OWN scheduled run** (`dedup_engine.yml` cron `0 3,9,15,21`, `--geo-only`), gated by the
+    `dedup_geo_enabled` master switch. It is **NOT** bolted onto the street full-scan / candidate-drain
+    anymore: doing so produced ZERO geo candidates/merges because it (a) ran AFTER the street pass on the
+    shared `--max-seconds` (deadline-starved by the ~100K-eligible street scan) and (b) on the candidate
+    drain inherited the street pass's APARTMENT `restrict` (`_load_geo_eligible(restrict=apartment
+    candidates)` → no single-dwelling rows). The dedicated geo run is **PAID, not `--free`** (bounded by
+    `--max-vision-calls`): single-dwelling cross-portal pairs have DIFFERENT photos (pHash can't), so the
+    forensic FACADE compare is the only thing that resolves them — it auto-merges the confident ones and
+    enqueues the ambiguous (`tier='geo'`) for review. (A `--free` geo run would skip the compare AND, since
+    `--free` suppresses the general unresolved→queue enqueue, surface NOTHING — so geo MUST run paid.)
+    `--geo` forces it onto any non-dirty run ad-hoc (ignores the setting); the real-time DIRTY drain never
+    runs geo. The geo pass writes NO separate `dedup_engine_runs` row (the dashboard reads the latest single
+    row); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: extend
+    the `dedup_batches` warmer to the geo funnel so geo gets street's 50%-off warm-cache cost model; a geo
+    candidate-drain mode; the cross-portal coord-divergence cell-miss — a same house geocoded ~270m apart on
+    two portals falls in different geo cells.)
     Merges are **reversible**:
     `toolkit/property_identity.py` re-points `listings.property_id` onto the survivor + soft-retires
     the loser (`properties.status='merged_away'`) and logs `property_merge_events` so
