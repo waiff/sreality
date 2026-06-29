@@ -133,9 +133,15 @@ class CeskerealityPortal:
             key = self.category_labels(c)
             self._cmct_contributors[key] = self._cmct_contributors.get(key, 0) + 1
         self._cmct_seen: dict[tuple[str | None, str | None], set[str]] = {}
-        self._cmct_complete: dict[tuple[str | None, str | None], bool] = {}
         self._cmct_walked: dict[tuple[str | None, str | None], int] = {}
         self._cmct_flipped: set[tuple[str | None, str | None]] = set()
+        # PER-OKRES completeness: a category's dense district (Praha) can stay <99.5%
+        # while every other okres is complete. So track completeness per (cm, ct,
+        # okres_id) — AND across the sibling walks — and flip mark_inactive ONLY for the
+        # completely-walked okresy (db okres_ids filter), giving history on ~all of the
+        # market while never delisting a still-incomplete district's stragglers.
+        self._okres_id_by_slug: dict[str, int] = {}
+        self._okres_complete: dict[tuple[str | None, str | None], dict[int, bool]] = {}
 
     # --- index-walk seams ---
     def categories(self) -> list[dict[str, Any]]:
@@ -214,15 +220,19 @@ class CeskerealityPortal:
         if self._okres_cache is not None:
             return self._okres_cache
         slugs = [_PRAHA_SLUG]
+        self._okres_id_by_slug = {_PRAHA_SLUG: _PRAHA_OKRES_ID}
         if conn is not None:
             try:
                 with conn.cursor() as cur:
                     cur.execute(
-                        "SELECT name FROM admin_boundaries "
+                        "SELECT id, name FROM admin_boundaries "
                         "WHERE level = 'okres' AND id <> %s",
                         (_PRAHA_OKRES_ID,),
                     )
-                    slugs += [s for (name,) in cur.fetchall() if (s := _slugify(name))]
+                    for oid, name in cur.fetchall():
+                        if (s := _slugify(name)):
+                            slugs.append(s)
+                            self._okres_id_by_slug[s] = oid
             except Exception as exc:        # noqa: BLE001
                 LOG.warning("okres slug load failed: %s", exc)
         self._okres_cache = slugs
@@ -341,12 +351,20 @@ class CeskerealityPortal:
             pages += slice_pages
             _absorb(rows)
 
+        key = self.category_labels(category)
+        oc_map = self._okres_complete.setdefault(key, {})
         for okres in okres_slugs:
             rows, okres_pages, _t, okres_complete = self._walk_okres(
                 client, sale_type, cat, okres)
             pages += okres_pages
             if not okres_complete:
                 incomplete_okresy += 1
+            # AND the okres's completeness across the sibling walks of this (cm, ct)
+            # (rodinne-domy + chaty -> dum): the district is dum-complete only if BOTH
+            # walked it completely.
+            okres_id = self._okres_id_by_slug.get(okres)
+            if okres_id is not None:
+                oc_map[okres_id] = oc_map.get(okres_id, True) and okres_complete
             _absorb(rows)
 
         total = self._nationwide_total(client, sale_type, cat)
@@ -389,21 +407,17 @@ class CeskerealityPortal:
             "ENQUEUE source=ceskereality new=%d changed=%d unchanged=%d enqueued=%d",
             len(new_ids), len(changed), len(unchanged_pks), enqueued,
         )
-        # mark_inactive is safe only on a FULL, uncapped walk: every okres walked
-        # (not --region scoped), no okres left incomplete after its recursion, and we
-        # collected ~all of the nationwide total. Any okres whose obce facet truncated
-        # (recursion fell short of its total) leaves the walk incomplete, so we
-        # suppress the sweep (rule #3).
-        complete = (
-            not self._max_pages and not self._regions and incomplete_okresy == 0
-            and _walk_complete(len(seen), total)
-        )
-        # Accumulate this walk into its (cm, ct) bucket so mark_inactive can flip the
-        # shared scope ONCE, with the union of every contributing sub-walk's seen ids,
-        # and only when ALL are complete (the rodinne-domy/chaty-chalupy -> dum case).
+        # A FULL walk was attempted (not --region scoped, not --max-pages capped), so
+        # mark_inactive may run — but it flips PER-OKRES (only the completely-walked
+        # districts, see mark_inactive), so a still-incomplete dense okres never delists
+        # its stragglers. `incomplete_okresy` is logged above for observability.
+        complete = not self._max_pages and not self._regions
+        # Accumulate this walk's seen ids into its (cm, ct) bucket so the shared scope
+        # flips ONCE, with the union of every contributing sub-walk's ids (the
+        # rodinne-domy/chaty-chalupy -> dum case); per-okres completeness is recorded in
+        # the walk loop above.
         key = self.category_labels(category)
         self._cmct_seen.setdefault(key, set()).update(seen)
-        self._cmct_complete[key] = self._cmct_complete.get(key, True) and complete
         self._cmct_walked[key] = self._cmct_walked.get(key, 0) + 1
         return seen, {"found_new": len(new_ids), "enqueued": enqueued}, total, pages, complete
 
@@ -412,20 +426,30 @@ class CeskerealityPortal:
         if cm is None or ct is None:
             return 0
         key = (cm, ct)
-        # Wait until every walk-category contributing to this (cm, ct) has been walked,
-        # then flip ONCE with the union of their seen ids — and only if ALL were
-        # complete. A sibling sub-walk being incomplete (e.g. rodinne-domy's dense
-        # okres capped) keeps the whole dum scope from flipping, so the complete
-        # chaty-chalupy walk can't falsely delist uncollected rodinne-domy rows.
+        # Wait until every walk-category contributing to this (cm, ct) has been walked
+        # (rodinne-domy + chaty -> dum), then flip ONCE.
         if self._cmct_walked.get(key, 0) < self._cmct_contributors.get(key, 1):
             return 0
-        if key in self._cmct_flipped or not self._cmct_complete.get(key, False):
+        if key in self._cmct_flipped:
+            return 0
+        # Flip ONLY the completely-walked okresy: a dense district still < 99.5% keeps
+        # its own stragglers active (per-okres history). The seen set is the GLOBAL union
+        # across the sibling walks, so a boundary listing collected under a neighbouring
+        # district's slug is protected even while its okres_id is swept. The 24h
+        # min_unseen rail is the framework's standard guard (rule #3).
+        complete_okres_ids = [
+            oid for oid, ok in self._okres_complete.get(key, {}).items() if ok
+        ]
+        if not complete_okres_ids:
             return 0
         self._cmct_flipped.add(key)
         union = self._cmct_seen.get(key) or set(seen)
         existing = db.index_summary_native(conn, SOURCE, list(union))
         pks = {v["sreality_id"] for v in existing.values()}
-        return db.mark_inactive(conn, cm, ct, pks, source=SOURCE)
+        return db.mark_inactive(
+            conn, cm, ct, pks, source=SOURCE,
+            okres_ids=complete_okres_ids, min_unseen_hours=24,
+        )
 
     def active_count(self, conn: Any, category: dict[str, Any]) -> int | None:
         cm, ct = self.category_labels(category)

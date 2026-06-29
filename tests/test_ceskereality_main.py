@@ -95,11 +95,11 @@ def _page_num(url: str) -> int:
 
 
 class _OkresConn:
-    """A stand-in DB connection: `_okres_slugs` queries admin_boundaries for the
-    okres names through `conn.cursor()`."""
+    """A stand-in DB connection: `_okres_slugs` queries admin_boundaries for the okres
+    (id, name) pairs through `conn.cursor()`; synthetic ids 3000+ per name."""
 
     def __init__(self, names: list[str]) -> None:
-        self._names = names
+        self._rows = [(3000 + i, n) for i, n in enumerate(names)]
 
     def cursor(self):  # used as `with conn.cursor() as cur:`
         return self
@@ -114,7 +114,7 @@ class _OkresConn:
         pass
 
     def fetchall(self):
-        return [(n,) for n in self._names]
+        return list(self._rows)
 
 
 def test_extract_facet_slugs_drops_pure_filters():
@@ -144,6 +144,9 @@ def test_okres_slugs_complete_partition_with_praha_special_case():
     # the capital is mapped explicitly (its admin name doesn't fold to the slug)
     assert slugs[0] == "praha-hlavni-mesto"
     assert {"kladno", "mlada-boleslav", "brno-mesto"} <= set(slugs)
+    # the okres-id join key is captured (for the per-okres mark_inactive flip)
+    assert portal._okres_id_by_slug["praha-hlavni-mesto"] == m._PRAHA_OKRES_ID
+    assert portal._okres_id_by_slug["kladno"] == 3000
     # cached: a second call doesn't re-query
     assert portal._okres_slugs(_OkresConn(["other"])) == slugs
 
@@ -212,6 +215,22 @@ def test_walk_category_uses_admin_okres_list(monkeypatch):
     # the admin-supplied okresy are walked as slices on www
     assert any("/prodej/byty/kladno/" in u for u in fake.urls)
     assert any("/prodej/byty/brno-mesto/" in u for u in fake.urls)
+
+
+def test_walk_category_records_per_okres_completeness(monkeypatch):
+    fake = _FacetClient()                    # nothing caps -> every okres complete
+    monkeypatch.setattr(m, "CeskerealityClient", lambda **kw: fake)
+    monkeypatch.setattr(m.db, "index_summary_native", lambda *a, **k: {})
+    monkeypatch.setattr(m.db, "enqueue_detail", lambda *a, **k: 0)
+    portal = m.CeskerealityPortal(default_config("ceskereality"))
+    portal.walk_category(
+        {"sale_type": "prodej", "category": "byty"},
+        conn=_OkresConn(["Kladno"]), dry_run=True, limiter=None,
+    )
+    # completeness is keyed by the admin okres_id (praha 9999 + kladno's synthetic 3000)
+    oc = portal._okres_complete[("byt", "prodej")]
+    assert oc[m._PRAHA_OKRES_ID] is True
+    assert oc[3000] is True
 
 
 class _RecursingClient:
@@ -308,54 +327,63 @@ def test_dum_has_two_contributing_walk_categories():
     assert portal._cmct_contributors[("byt", "prodej")] == 1   # single-contributor unchanged
 
 
-def test_dum_conflation_no_flip_until_all_contributors_complete(monkeypatch):
+def _stub_mark_inactive(calls: list):
+    def _fn(conn, cm, ct, pks, source, okres_ids=None, min_unseen_hours=None):  # noqa: ANN001
+        calls.append({"pks": sorted(pks), "okres_ids": sorted(okres_ids or []),
+                      "min_unseen_hours": min_unseen_hours})
+        return len(okres_ids or [])
+    return _fn
+
+
+def test_dum_per_okres_incomplete_sibling_holds_back_only_that_okres(monkeypatch):
+    # An incomplete sibling (rodinne-domy's dense okres) no longer suppresses the WHOLE
+    # dum scope — only that one okres is spared; every other okres still flips.
     calls: list = []
     monkeypatch.setattr(m.db, "index_summary_native",
                         lambda conn, src, ids: {i: {"sreality_id": int(i)} for i in ids})
-    monkeypatch.setattr(m.db, "mark_inactive",
-                        lambda conn, cm, ct, pks, source: calls.append((cm, ct, len(pks))) or len(pks))
+    monkeypatch.setattr(m.db, "mark_inactive", _stub_mark_inactive(calls))
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     dum_p = ("dum", "prodej")
     rodinne = {"category": "rodinne-domy", "sale_type": "prodej"}
     chaty = {"category": "chaty-chalupy", "sale_type": "prodej"}
 
-    # contributor 1: rodinne-domy walked but INCOMPLETE (a dense okres capped)
-    portal._cmct_seen.setdefault(dum_p, set()).update({"1", "2"})
-    portal._cmct_complete[dum_p] = False
+    # okres 10 complete in BOTH walks; okres 20 incomplete (rodinne-domy's dense okres)
+    portal._cmct_seen[dum_p] = {"1"}
+    portal._okres_complete[dum_p] = {10: True, 20: False}
     portal._cmct_walked[dum_p] = 1
-    assert portal.mark_inactive(None, rodinne, {"1", "2"}) == 0
-    assert calls == []                       # only 1/2 contributors walked -> no flip
+    assert portal.mark_inactive(None, rodinne, {"1"}) == 0   # waits for the sibling
+    assert calls == []
 
-    # contributor 2: chaty-chalupy walked COMPLETE — but dum is still NOT all-complete
-    portal._cmct_seen[dum_p].update({"3"})
     portal._cmct_walked[dum_p] = 2
-    assert portal.mark_inactive(None, chaty, {"3"}) == 0
-    assert calls == []                       # all walked, NOT all complete -> still no flip
+    portal.mark_inactive(None, chaty, {"1"})
+    # flips ONLY okres 10; okres 20's stragglers stay active (rule #3)
+    assert len(calls) == 1
+    assert calls[0]["okres_ids"] == [10]
 
 
-def test_dum_conflation_flips_once_with_union_when_all_complete(monkeypatch):
+def test_dum_per_okres_flips_complete_okresy_with_union_seen_and_rail(monkeypatch):
     calls: list = []
     monkeypatch.setattr(m.db, "index_summary_native",
                         lambda conn, src, ids: {i: {"sreality_id": int(i)} for i in ids})
-    monkeypatch.setattr(m.db, "mark_inactive",
-                        lambda conn, cm, ct, pks, source: calls.append(sorted(pks)) or len(pks))
+    monkeypatch.setattr(m.db, "mark_inactive", _stub_mark_inactive(calls))
     portal = m.CeskerealityPortal(default_config("ceskereality"))
     dum_p = ("dum", "prodej")
     rodinne = {"category": "rodinne-domy", "sale_type": "prodej"}
     chaty = {"category": "chaty-chalupy", "sale_type": "prodej"}
 
     portal._cmct_seen[dum_p] = {"1", "2", "3"}
-    portal._cmct_complete[dum_p] = True
+    portal._okres_complete[dum_p] = {10: True, 11: True}
     portal._cmct_walked[dum_p] = 1
     assert portal.mark_inactive(None, rodinne, {"1", "2"}) == 0   # waits for the sibling
     assert calls == []
 
     portal._cmct_walked[dum_p] = 2
     portal.mark_inactive(None, chaty, {"3"})
-    assert calls == [[1, 2, 3]]              # ONE flip, over the UNION of both walks
+    # ONE flip: the UNION seen {1,2,3}, the complete okresy [10,11], the 24h rail
+    assert calls == [{"pks": [1, 2, 3], "okres_ids": [10, 11], "min_unseen_hours": 24}]
     # idempotent: the already-flipped scope never double-flips
     portal.mark_inactive(None, chaty, {"3"})
-    assert calls == [[1, 2, 3]]
+    assert len(calls) == 1
 
 
 def test_client_routes_through_proxy_when_env_set(monkeypatch):
