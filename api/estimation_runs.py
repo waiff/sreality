@@ -1037,13 +1037,29 @@ def _match_listing_by_id(
     """Build a target spec from an already-scraped `listings` row by internal id,
     so a Browse card can estimate a known listing with no URL parse / LLM.
     Mirrors `_match_listing_by_url`; coordinates are required (the comparables
-    search is spatial). Returns None when the row is missing or has no geom."""
+    search is spatial). Returns None when the row is missing or has no geom.
+
+    Subject facts (coords / area / disposition / price / category_type) are
+    sourced from the listing's PROPERTY golden record (migration 257) when it
+    belongs to an active property, so an estimation launched from ANY portal's
+    advert of the same flat resolves the SAME subject — the deterministic
+    counterpart of the property-grain MF. `floor` stays per-advert (not a golden
+    column). For a singleton property the golden record equals the listing, so
+    this is a no-op there. price = the property's canonical current_price_czk
+    (the most-recently-seen active ask)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT sreality_id, "
-            "ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lng, "
-            "area_m2, disposition, floor, price_czk, category_type "
-            "FROM listings WHERE sreality_id = %(id)s LIMIT 1",
+            "SELECT l.sreality_id, "
+            "ST_Y(COALESCE(p.geom, l.geom)::geometry) AS lat, "
+            "ST_X(COALESCE(p.geom, l.geom)::geometry) AS lng, "
+            "COALESCE(p.area_m2, l.area_m2) AS area_m2, "
+            "COALESCE(p.disposition, l.disposition) AS disposition, "
+            "l.floor, "
+            "COALESCE(p.current_price_czk, l.price_czk) AS price_czk, "
+            "COALESCE(p.category_type, l.category_type) AS category_type "
+            "FROM listings l "
+            "LEFT JOIN properties p ON p.id = l.property_id AND p.status = 'active' "
+            "WHERE l.sreality_id = %(id)s LIMIT 1",
             {"id": int(sreality_id)},
         )
         row = cur.fetchone()
@@ -1381,10 +1397,22 @@ _STANDARD_MATERIALS = frozenset({"panel", "cihla"})
 def _load_subject_amenities(
     conn: "psycopg.Connection", sreality_id: int,
 ) -> dict[str, Any] | None:
+    """Amenity flags + condition/building_type for the reference-rent calc,
+    sourced from the listing's PROPERTY golden record (migration 257) when it
+    belongs to an active property — so the run's MF reference rent uses the same
+    OR-unioned amenities as the property-grain MF (a portal that under-parsed an
+    amenity no longer under-states the estimate). COALESCE keeps the listing's
+    own value for a singleton / pre-attach row (where they are equal)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT has_balcony, terrace, furnished, garage, has_lift, "
-            "building_type, condition FROM listings WHERE sreality_id = %s",
+            "SELECT COALESCE(p.has_balcony, l.has_balcony), "
+            "COALESCE(p.terrace, l.terrace), COALESCE(p.furnished, l.furnished), "
+            "COALESCE(p.garage, l.garage), COALESCE(p.has_lift, l.has_lift), "
+            "COALESCE(p.building_type, l.building_type), "
+            "COALESCE(p.condition, l.condition) "
+            "FROM listings l "
+            "LEFT JOIN properties p ON p.id = l.property_id AND p.status = 'active' "
+            "WHERE l.sreality_id = %s",
             (sreality_id,),
         )
         row = cur.fetchone()
