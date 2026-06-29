@@ -1059,6 +1059,10 @@ export const fetchPropertyReprId = async (
 export interface PropertyMf {
   mf_reference_rent: MfReferenceRent | null;
   mf_gross_yield_pct: number | null;
+  /* The property's canonical asking price (current_price_czk = most-recently-seen
+   * active ask) — the price the golden-record estimate/yield is built on, so the
+   * UI can flag any active sibling advertised at a different number. */
+  price_czk: number | null;
 }
 
 export const fetchPropertyMf = async (
@@ -1066,7 +1070,7 @@ export const fetchPropertyMf = async (
 ): Promise<PropertyMf | null> => {
   const { data, error } = await supabase
     .from('properties_public')
-    .select('mf_reference_rent, mf_gross_yield_pct')
+    .select('mf_reference_rent, mf_gross_yield_pct, price_czk')
     .eq('property_id', property_id)
     .maybeSingle();
   if (error) throw error;
