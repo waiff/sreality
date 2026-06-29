@@ -13,9 +13,11 @@ import {
   fetchListingById,
   fetchPropertyReprId,
   fetchPropertySources,
+  fetchPropertyMf,
   fetchSnapshotsForListings,
   fetchFreshnessChecksByListing,
   fetchImagesByListing,
+  type PropertyMf,
 } from '@/lib/queries';
 import { fetchListingBroker } from '@/lib/brokers';
 import {
@@ -99,6 +101,17 @@ export default function ListingDetail() {
     queryKey: ['property-sources', sid],
     queryFn: () => fetchPropertySources(sid as number),
     enabled: sid != null && !!listingQ.data,
+    staleTime: 60_000,
+  });
+
+  // PROPERTY-grain MF (the golden record): the one figure for the real-world
+  // property, so the header shows the same MF whichever portal's advert opened
+  // it — not the subject listing's possibly-under-stated per-advert parse.
+  const propPid = sourcesQ.data?.property_id ?? null;
+  const propertyMfQ = useQuery<PropertyMf | null, Error>({
+    queryKey: ['property-mf', propPid],
+    queryFn: () => fetchPropertyMf(propPid as number),
+    enabled: propPid != null,
     staleTime: 60_000,
   });
 
@@ -276,6 +289,7 @@ export default function ListingDetail() {
             <EstimationsBlock
               listing={listing}
               listingIds={childIds.length > 0 ? childIds : [listing.sreality_id]}
+              propertyMf={propertyMfQ.data ?? null}
               prefill={newEstimationPrefill}
             />
           </Suspense>

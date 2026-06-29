@@ -40,17 +40,24 @@ import type {
   EstimationListResponse,
   EstimationRun,
   ListingPublic,
+  MfReferenceRent,
 } from '@/lib/types';
 
 export default function EstimationsBlock({
   listing,
   listingIds,
+  propertyMf,
   prefill,
 }: {
   listing: ListingPublic;
   /* Every child listing of the property (falls back to just this listing
    * until property sources load) — runs are fetched property-grain. */
   listingIds: number[];
+  /* The PROPERTY-grain MF (golden record, migration 257). Preferred over the
+   * subject advert's per-listing mf_* so every portal's advert of one flat
+   * shows the SAME MF; null until the property row loads (then the listing's
+   * own value is the fallback). */
+  propertyMf?: { mf_reference_rent: MfReferenceRent | null; mf_gross_yield_pct: number | null } | null;
   prefill?: NewEstimationPrefill;
 }) {
   const ids = useMemo(
@@ -118,12 +125,23 @@ export default function EstimationsBlock({
     return () => cancelAnimationFrame(raf);
   }, [wantsScroll, runsQ.isLoading]);
 
-  const mfRef = listing.mf_reference_rent ?? selected?.reference_rent ?? null;
+  // Prefer the property-grain golden MF; fall back to the subject advert's own
+  // value (and finally the selected run's reference_rent for orphan runs). The
+  // yield % must track WHICHEVER reference rent we show, so it pairs with the
+  // same source.
+  const colMfRef = propertyMf?.mf_reference_rent ?? listing.mf_reference_rent ?? null;
+  const colMfYield =
+    propertyMf?.mf_reference_rent != null
+      ? propertyMf.mf_gross_yield_pct
+      : listing.mf_reference_rent != null
+        ? listing.mf_gross_yield_pct
+        : null;
+  const mfRef = colMfRef ?? selected?.reference_rent ?? null;
 
   // Nothing to say: no MF reference, no runs. The section disappears
   // entirely (e.g. land parcels) rather than rendering an empty shell.
   if (!mfRef && runs.length === 0 && !runsQ.isLoading) return null;
-  if (runs.length === 0 && runsQ.isLoading && !listing.mf_reference_rent) return null;
+  if (runs.length === 0 && runsQ.isLoading && !colMfRef) return null;
 
   const openedViaFeedbackHash =
     location.hash === '#feedback'
@@ -150,11 +168,7 @@ export default function EstimationsBlock({
           {mfRef ? (
             <MfReferenceCard
               refRent={mfRef}
-              yieldPct={
-                listing.mf_reference_rent != null
-                  ? listing.mf_gross_yield_pct
-                  : null
-              }
+              yieldPct={colMfRef != null ? colMfYield : null}
             />
           ) : (
             <EmptyCard label="Odhad nájmu · cenová mapa MF">

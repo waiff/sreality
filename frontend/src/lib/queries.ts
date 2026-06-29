@@ -33,6 +33,7 @@ import type {
   ListingFreshnessCheckPublic,
   ListingPublic,
   ListingSnapshotPublic,
+  MfReferenceRent,
   PortalHealth,
   PropertySource,
   Ppm2Box,
@@ -1048,6 +1049,28 @@ export const fetchPropertyReprId = async (
   if (error) throw error;
   const row = data as unknown as { sreality_id: number | null } | null;
   return row?.sreality_id ?? null;
+};
+
+/* The PROPERTY-grain MF reference rent/yield (the golden record, migration 257):
+ * one figure per real-world property, so every portal's advert of the same flat
+ * shows the same MF. The listing-detail header reads THIS, not the subject
+ * advert's per-listing listings.mf_* (which could be one portal's under-stated
+ * parse). */
+export interface PropertyMf {
+  mf_reference_rent: MfReferenceRent | null;
+  mf_gross_yield_pct: number | null;
+}
+
+export const fetchPropertyMf = async (
+  property_id: number,
+): Promise<PropertyMf | null> => {
+  const { data, error } = await supabase
+    .from('properties_public')
+    .select('mf_reference_rent, mf_gross_yield_pct')
+    .eq('property_id', property_id)
+    .maybeSingle();
+  if (error) throw error;
+  return (data as unknown as PropertyMf | null) ?? null;
 };
 
 export const fetchSnapshotsByListing = async (
