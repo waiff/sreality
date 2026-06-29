@@ -24,6 +24,7 @@ from psycopg.types.json import Jsonb, set_json_dumps
 
 from scraper import media
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import street_name_key
 
 LOG = logging.getLogger(__name__)
 
@@ -93,6 +94,12 @@ LISTING_COLUMNS: tuple[str, ...] = (
     "house_number",
     "zip",
     "street_id",
+    # Derived (NOT parsed): the dedup street-group name key, a pure function of
+    # `street` (scraper.street.street_name_key). Stamped from `street` at every
+    # write path by _set_street_name_key — never read from the parsed row. Out of
+    # the content hash (the hash covers raw_json, not derived columns), so
+    # populating it never churns a snapshot.
+    "street_name_key",
 )
 
 # Postgres type for each LISTING_COLUMN, used to build the jsonb_to_recordset
@@ -137,10 +144,22 @@ _LISTING_COLUMN_PGTYPE: dict[str, str] = {
     "house_number": "text",
     "zip": "text",
     "street_id": "integer",
+    "street_name_key": "text",
 }
 assert set(_LISTING_COLUMN_PGTYPE) == set(LISTING_COLUMNS), (
     "_LISTING_COLUMN_PGTYPE drifted from LISTING_COLUMNS"
 )
+
+
+def _set_street_name_key(d: dict[str, Any]) -> None:
+    """Derive `street_name_key` from the row's `street`, in place. The single
+    write-time derivation, called by every street-writing chokepoint
+    (upsert_listing, write_detail_batch) so the stored key is always consistent
+    with the stored street — the load-scoping invariant the dedup --dirty drain
+    relies on. Pure function of `street` (scraper.street.street_name_key); a
+    parsed value the row may already carry under this key is ignored."""
+    d["street_name_key"] = street_name_key(d.get("street"))
+
 
 # No real Czech property is priced anywhere near a billion crowns; a value this
 # large is a data-entry placeholder (e.g. a seller typing 2147483647) or a parse
@@ -332,6 +351,7 @@ def upsert_listing(
         params[col] = row.get(col)
     params["price_czk"] = sane_price_czk(params["price_czk"])
     sane_listing_numerics(params)
+    _set_street_name_key(params)
 
     with conn.transaction(), conn.cursor() as cur:
         cur.execute(upsert_sql, params)
@@ -1781,6 +1801,7 @@ def write_detail_batch(
         obj: dict[str, Any] = {c: row.get(c) for c in LISTING_COLUMNS}
         obj["price_czk"] = price_czk
         sane_listing_numerics(obj)
+        _set_street_name_key(obj)
         obj["sreality_id"] = sid
         obj["lon"] = row.get("lon")
         obj["lat"] = row.get("lat")

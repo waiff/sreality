@@ -42,6 +42,7 @@ from typing import Any
 from scraper import db
 from scraper.bazos_parser import parse_detail
 from scraper.scraped_listing import ScrapedListing
+from scraper.street import street_name_key
 
 LOG = logging.getLogger("backfill_bazos_street_locality")
 
@@ -94,6 +95,7 @@ _UPDATE_SQL = """
     UPDATE listings
     SET locality = COALESCE(%(locality)s, locality),
         street = COALESCE(%(street)s, street),
+        street_name_key = COALESCE(%(street_name_key)s, street_name_key),
         district = COALESCE(%(district)s, district),
         raw_json = raw_json || '{"street_locality_backfill": true}'::jsonb
     WHERE sreality_id = %(id)s
@@ -117,6 +119,9 @@ def plan_update(
     params: dict[str, Any] = {
         "locality": listing.locality,
         "street": listing.street,
+        # Re-derive the dedup street-key in lockstep with street (migration 256), so this
+        # backfill never leaves it stale — same single-source invariant scraper.db enforces.
+        "street_name_key": street_name_key(listing.street),
         "district": listing.district,
     }
     improved = (
@@ -173,7 +178,8 @@ def main() -> int:
             if html_row is None:
                 with conn.cursor() as cur:
                     cur.execute(_UPDATE_SQL, {
-                        "id": sid, "locality": None, "street": None, "district": None,
+                        "id": sid, "locality": None, "street": None,
+                        "street_name_key": None, "district": None,
                     })
                 skipped += 1
                 continue
@@ -188,7 +194,8 @@ def main() -> int:
                 LOG.warning("BACKFILL parse error id=%d: %s", sid, exc)
                 with conn.cursor() as cur:
                     cur.execute(_UPDATE_SQL, {
-                        "id": sid, "locality": None, "street": None, "district": None,
+                        "id": sid, "locality": None, "street": None,
+                        "street_name_key": None, "district": None,
                     })
                 errors += 1
                 continue

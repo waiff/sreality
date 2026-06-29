@@ -33,6 +33,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from scraper.street import street_name_key as _street_name_key
 from toolkit.comparables import _DISPOSITION_LOOSE
 # Single-source image-tag taxonomy + family grouping (interior / exterior / plan) and the
 # comparison priority orders. See toolkit/room_taxonomy.py — one place defines which tag
@@ -361,51 +362,10 @@ class PairDecision:
     detail: str | None = None
 
 
-# Street words that decorate a name without identifying it ("ul. Hlavní" and
-# "Hlavní" are one street; "Vinohradská třída" ~ "Vinohradská"). Diacritics-
-# folded forms incl. the inflections bazos' extract_street emits. Compared
-# token-wise with a trailing dot stripped, so "Třebízského" is never touched.
-_STREET_WORDS = frozenset({
-    "ul", "ulice", "ulici",
-    "nam", "namesti",
-    "tr", "trida", "tride", "tridu", "tridy",
-    "nabr", "nabrezi",
-    "sidliste", "sidlisti",
-})
-# A trailing house-number token: 12, 12a, 123/45, 160/26b. Bounded at 4 digits
-# like the bazos extractor; "679 61" (PSČ) strips as two successive tokens.
-_HOUSE_NO_TOKEN_RE = re.compile(r"\d{1,4}[a-z]?(?:/\d{1,4}[a-z]?)?")
-
-
-def _street_name_key(street: str | None) -> str | None:
-    """Grouping form of a street NAME: diacritics-stripped lowercase with
-    street words and trailing house-number tokens removed. Portals disagree on
-    decoration (sreality stores the bare canonical name; bazos mines "ul.
-    Koterovská 12"-style strings from free text), so the key must not. Falls
-    back to the undecorated-stripped form rather than going empty (a street
-    literally named "Náměstí" keeps a usable key)."""
-    if not street or not street.strip():
-        return None
-    decomposed = unicodedata.normalize("NFKD", street.strip().lower())
-    ascii_name = "".join(c for c in decomposed if not unicodedata.combining(c))
-    collapsed = " ".join(ascii_name.split())
-    if not collapsed:
-        return None
-    tokens = collapsed.split()
-    changed = True
-    while changed and tokens:
-        changed = False
-        if tokens[0].rstrip(".") in _STREET_WORDS:
-            tokens.pop(0)
-            changed = True
-        if tokens and tokens[-1].rstrip(".") in _STREET_WORDS:
-            tokens.pop()
-            changed = True
-        if tokens and _HOUSE_NO_TOKEN_RE.fullmatch(tokens[-1]):
-            tokens.pop()
-            changed = True
-    stripped = " ".join(tokens)
-    return stripped or collapsed
+# The street-NAME grouping key (`_street_name_key`) lives in `scraper.street` — the
+# single home for all street string logic — and is imported above. It is stored on
+# `listings.street_name_key` at write time AND recomputed here for grouping, so the
+# stored column never drifts from the engine (parity-tested). See street_group_keys.
 
 
 def normalize_street(street: str | None, street_id: int | None) -> str | None:

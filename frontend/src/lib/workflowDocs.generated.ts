@@ -381,6 +381,66 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_render_score.yml"
   },
   {
+    "filename": "backfill_street_name_key.yml",
+    "name": "Backfill street_name_key",
+    "description": "One-off, dispatch-only backfill. Fills listings.street_name_key (migration 256 — the dedup street-group NAME key) on existing rows by re-deriving it from the stored `street` via the shared scraper.street.street_name_key helper — NO re-fetch, NO LLM, NO Mapy spend. street_name_key is out of the content hash so NO snapshot is written. Idempotent + resumable (keyset over the still-NULL tail, backed by the migration 256 partial index); rerun until \"pending=none\". Going forward the column is stamped at every street-write path (scraper.db), so this is the one-time fill for old rows. NOT a portal ingest workflow, so it carries no `# portal:` tag, and its OWN concurrency group (a shared group would let another job starve it).",
+    "portal": null,
+    "manual": true,
+    "schedules": [],
+    "onPush": false,
+    "onPullRequest": false,
+    "paths": null,
+    "inputs": [
+      {
+        "name": "all",
+        "description": "Re-derive every street-bearing row (default = only NULL keys)",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      },
+      {
+        "name": "limit",
+        "description": "Max rows processed this run (blank = all)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "max_seconds",
+        "description": "Wall-clock budget in seconds (blank = no budget)",
+        "required": false,
+        "type": "string",
+        "default": "",
+        "options": null
+      },
+      {
+        "name": "dry_run",
+        "description": "Report whether rows are pending and exit",
+        "required": false,
+        "type": "choice",
+        "default": "false",
+        "options": [
+          "false",
+          "true"
+        ]
+      }
+    ],
+    "secrets": [
+      "SUPABASE_DB_URL"
+    ],
+    "concurrencyGroup": "backfill-street-name-key",
+    "cancelInProgress": false,
+    "timeoutMinutes": 90,
+    "permissions": "contents: read",
+    "runsUrl": "https://github.com/waiff/sreality/actions/workflows/backfill_street_name_key.yml",
+    "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/backfill_street_name_key.yml"
+  },
+  {
     "filename": "bazos_detail_drain.yml",
     "name": "Scraping: Bazos detail drain",
     "description": "The slow half of the bazos cadence split (architectural rule #19, like sreality/idnes). Claims a bounded slice of listing_detail_queue (source='bazos', enqueued by bazos_index_walk.yml), fetches each ad's detail page on a rate-limited worker pool, parses it (the real category comes off the page breadcrumb), and ingests via db.ingest_scraped_listing (Tier-0 idempotency + Tier-1 property matching). Records run_type='detail' (index_pages=0). The drain records image-URL rows; the shared images.yml job downloads the bytes to R2.",

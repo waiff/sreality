@@ -22,7 +22,12 @@ def test_fills_null_locality_and_street():
         current_locality=None, current_street=None, current_district=None,
     )
     assert improved
-    assert params == {"locality": "Plzeň", "street": "ul. Koterovská", "district": None}
+    # street_name_key is re-derived from street in lockstep (migration 256), so the
+    # backfill keeps the dedup key consistent with the street it writes.
+    assert params == {
+        "locality": "Plzeň", "street": "ul. Koterovská",
+        "street_name_key": "koterovska", "district": None,
+    }
 
 
 def test_nothing_parsed_is_a_stamp_only_skip():
@@ -31,7 +36,9 @@ def test_nothing_parsed_is_a_stamp_only_skip():
         current_locality=None, current_street=None, current_district=None,
     )
     assert not improved
-    assert params == {"locality": None, "street": None, "district": None}
+    assert params == {
+        "locality": None, "street": None, "street_name_key": None, "district": None,
+    }
 
 
 def test_never_offers_a_null_over_an_existing_value():

@@ -62,6 +62,7 @@ from typing import Any, Callable
 import psycopg
 
 from scraper import db
+from scraper.street import street_name_key
 
 LOG = logging.getLogger("backfill_address_point_streets")
 
@@ -133,15 +134,21 @@ _MATCH_SQL = """
 """
 
 # Matched rows: set street + house + the attempt stamp, return property_id so the
-# caller enqueues the parent dirty in the SAME transaction.
+# caller enqueues the parent dirty in the SAME transaction. street_name_key is set in
+# lockstep with street (migration 256) — this resolver is a live street-write path, so it
+# must keep the dedup street-key consistent or the --dirty scoped load would silently omit
+# these rows as peers (rule #19); a resolved row always gets a definite street, so a plain
+# assignment is correct.
 _UPDATE_SQL = """
     UPDATE listings l
     SET street = d.street,
+        street_name_key = d.street_name_key,
         house_number = COALESCE(l.house_number, d.house_number),
         coord_street_attempt_version = %(version)s,
         raw_json = l.raw_json || '{"coord_street_resolved": true}'::jsonb
     FROM (SELECT * FROM unnest(%(ids)s::bigint[], %(streets)s::text[],
-                              %(houses)s::text[]) AS t(id, street, house_number)) d
+                              %(name_keys)s::text[], %(houses)s::text[])
+          AS t(id, street, street_name_key, house_number)) d
     WHERE l.sreality_id = d.id
     RETURNING l.property_id
 """
@@ -250,12 +257,14 @@ def _execute_with_retry(conn: Any, run: Callable[[Any], Any], what: str, id_rang
 def _apply_matches(conn: Any, updates: list[tuple[int, str, str | None]], version: int) -> None:
     ids = [u[0] for u in updates]
     streets = [u[1] for u in updates]
+    name_keys = [street_name_key(u[1]) for u in updates]
     houses = [u[2] for u in updates]
 
     def run(c: Any) -> None:
         with c.cursor() as cur:
             cur.execute(_UPDATE_SQL, {"ids": ids, "streets": streets,
-                                      "houses": houses, "version": version})
+                                      "name_keys": name_keys, "houses": houses,
+                                      "version": version})
             prop_ids = [r[0] for r in cur.fetchall() if r[0] is not None]
         if prop_ids:
             db.mark_properties_dirty(c, prop_ids)

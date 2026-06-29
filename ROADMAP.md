@@ -6,6 +6,37 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-06: Dedup dirty-drain scoped load (O(market) → O(dirty))
+
+Closes the FIFO-bound's known follow-up: the `--dirty` drain's eligible LOAD was still
+`_load_eligible(restrict=None)` — ~100K rows scanned every hourly run — because the street
+NAME key was computed in Python and not stored, so the load couldn't be filtered in SQL. Now
+it is **scoped to the claimed properties' street groups**:
+
+- **`listings.street_name_key`** (migration 256) stores `scraper.street.street_name_key(street)` —
+  the dedup street-group NAME key, relocated to `scraper.street` as the SINGLE home for street
+  string logic (consumed live by `toolkit.dedup_engine.street_group_keys`, stamped at every
+  street-write path: `scraper.db.upsert_listing`/`write_detail_batch` + the street backfills).
+  Out of the content hash (no snapshot churn); a partial `(coalesce(obec_id,-1), street_name_key)`
+  expression index backs the scoped lookup, with a one-shot NULL-key index for the backfill.
+- **`_claimed_street_groups` + `restrict_street_groups`**: the drain reads the dirty properties'
+  `street_id` + `(coalesce(obec_id,-1), street_name_key)` and the load (`_ELIGIBLE_SCOPED_SQL`)
+  UNION-joins those claimed keys against `listings` as unnest-JOINs the planner **index-seeks per
+  claimed key** (EXPLAIN-validated: cost ~25 vs a 100K-row scan — an `OR` of `street_id=ANY` + a
+  row-comparison `IN` collapsed to one full-eligible bitmap scan, so the seek form is used instead).
+  Street groups are obec-bounded (the `coalesce(.,-1)` folds the 0.4% NULL-obec rows in, so it's
+  complete with no asterisk), so the scoped load carries each dirty property's existing peers while
+  staying O(dirty) in BOTH load and pair-work. `only_groups_with_property_ids` still gates the
+  RESOLVE, so the scoped load is a pure perf optimization under that correctness gate.
+- **Single-source + drift-guarded**: one Python normalizer (NOT replicated in SQL), stamped at EVERY
+  `listings.street` write path — ingest + all three bulk backfills incl. the weekly coord→street
+  resolver (`backfill_address_point_streets`). A golden-case regression test pins the function + a
+  write-path test asserts each backfill's UPDATE stamps the column; the ultimate backstop is the 6h
+  full scan recomputing the key live (never reads the column), so a stale/missed key only delays a
+  dirty-drain merge, never loses one.
+- **Backfill**: `scripts/backfill_street_name_key.py` (+ `backfill_street_name_key.yml`) re-derives
+  the key for existing rows from the stored `street` — no re-fetch, bulk set-based UPDATE, resumable.
+
 ### 2026-06: Dedup dirty-queue observability + stall alert
 
 The 165K dirty-queue backlog (which crashed the drain) ran ~2 days unseen — there was no gauge.
@@ -28,10 +59,8 @@ huge claim + full load dropped the pooled connection mid-run). Fix: `_claim_dedu
 every sibling drain (recompute dirty-drain, candidate drain, detail drain all bound their per-run work).
 Each bounded run completes-and-clears its slice, so a flood drains over successive runs.
 
-- **Known limitation (follow-up):** the eligible LOAD is still O(market) per dirty run — bounded now is
-  the pair-work, not the load. Fine at ~100K eligible rows; the foundational fix (a stored normalized
-  street-group key column enabling a scoped load) is deferred — obec-scoping doesn't tighten it (the
-  backlog concentrates in big cities) and replicating the Python street normalizer in SQL is fragile.
+- **Follow-up (DONE):** the eligible LOAD was still O(market) per dirty run — the FIFO bound capped only
+  the pair-work, not the load. Closed by the stored-`street_name_key` scoped load above (migration 256).
 
 ### 2026-06: RealityMix.cz — new full scraper portal (pilot)
 
