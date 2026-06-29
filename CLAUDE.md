@@ -874,8 +874,12 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     candidates)` → no single-dwelling rows). The dedicated geo run is **PAID, not `--free`** (bounded by
     `--max-vision-calls`): single-dwelling cross-portal pairs have DIFFERENT photos (pHash can't), so the
     forensic FACADE compare is the only thing that resolves them — it auto-merges the confident ones and
-    enqueues the ambiguous (`tier='geo'`) for review. (A `--free` geo run would skip the compare AND, since
-    `--free` suppresses the general unresolved→queue enqueue, surface NOTHING — so geo MUST run paid.)
+    enqueues the ambiguous (`tier='geo'`) for review. **Geo ALWAYS enqueues its unresolved pairs** (rule
+    #15 (E): a geo signal never auto-merges on proximity alone, so everything else queues) — the geo pass
+    overrides `--free`'s general enqueue suppression (that suppression is a STREET optimization; geo has no
+    warmer and cross-portal houses share no photos, so the queue is geo's only surfacing mechanism). So the
+    scheduled PAID run auto-merges the confident ones + queues the rest, and an ad-hoc `--geo-only --free`
+    still surfaces the co-located candidates (just without the auto-merge) instead of silently dropping them.
     `--geo` forces it onto any non-dirty run ad-hoc (ignores the setting); the real-time DIRTY drain never
     runs geo. The geo pass writes NO separate `dedup_engine_runs` row (the dashboard reads the latest single
     row); its decisions land in `dedup_pair_audit` + the `tier='geo'` candidate queue. (Follow-up: extend

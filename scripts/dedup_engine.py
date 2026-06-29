@@ -343,8 +343,10 @@ def _should_run_geo(*, geo: bool, geo_only: bool, geo_enabled: bool, dirty: bool
     """Whether to run the geo (single-dwelling) pass. Geo runs ONLY on an explicit flag — it is
     NEVER auto-bolted onto the street full-scan / candidate-drain (where it was deadline-starved /
     inherited the apartment restrict and produced nothing). `--geo-only` (the dedicated scheduled
-    cron) is gated by the `dedup_geo_enabled` master switch; `--geo` forces it ad-hoc (ignores the
-    setting, for debugging). Never on the real-time dirty drain (geo isn't dirty-scoped)."""
+    cron) is gated by the `dedup_geo_enabled` master switch — when it's passed but the setting is
+    off this returns False, and the caller logs "GEO-only run but dedup_geo_enabled is off" and
+    exits (no work). `--geo` forces it ad-hoc (ignores the setting, for debugging). Never on the
+    real-time dirty drain (geo isn't dirty-scoped)."""
     return (geo or (geo_only and geo_enabled)) and not dirty
 
 
@@ -1988,9 +1990,18 @@ def main() -> int:
             # auto_address=0) would hide the street pass's headline. Geo decisions still land
             # in dedup_pair_audit (decision history) + the tier='geo' candidate queue.
             geo_audit: list[dict[str, Any]] = []
+            # Geo ALWAYS enqueues its unresolved pairs (rule #15 (E): single-dwelling geo signals
+            # never auto-merge on proximity alone, so "everything else queues for review"),
+            # independent of --free. The street path's --free enqueue suppression (don't inflate
+            # the queue with un-vision'd cross-source pairs that the warmer/pHash will resolve)
+            # does NOT apply to geo: geo has no warmer and cross-portal houses share no photos, so
+            # the queue is geo's ONLY surfacing mechanism — suppressing it would silently drop every
+            # geo dup. The scheduled run is paid (auto-merges the confident ones via the facade
+            # compare first); an ad-hoc --geo-only --free still surfaces the co-located candidates.
+            geo_kw = {**engine_kw, "enqueue_unresolved": True}
             geo_stats = run_engine(
                 conn, audit=geo_audit, max_pairs=args.geo_max_pairs,
-                geo=True, geo_area_max_pct=geo_area_max_pct, **engine_kw,
+                geo=True, geo_area_max_pct=geo_area_max_pct, **geo_kw,
             )
             if not args.shadow:
                 _write_pair_audit(conn, run_at, geo_audit)

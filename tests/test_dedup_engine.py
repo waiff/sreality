@@ -1333,6 +1333,22 @@ def test_should_run_geo_only_on_explicit_flag() -> None:
     assert _should_run_geo(geo=True, geo_only=True, geo_enabled=True, dirty=True) is False
 
 
+def test_dedup_geo_cron_matches_its_args_branch() -> None:
+    """The geo cron string must be IDENTICAL in the schedule list AND the run-step match that
+    selects --geo-only. If they drift, the cron fires but the elif chain falls through to the
+    catch-all free full-scan — silently producing ZERO geo candidates again (the bug we fixed)."""
+    import pathlib
+
+    wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "dedup_engine.yml"
+    text = wf.read_text()
+    cron = "0 3,9,15,21 * * *"
+    assert text.count(cron) >= 2, "geo cron must appear in the schedule list AND the run-step match"
+    branch = text.split(f'"{cron}" ]', 1)[1].split("elif", 1)[0]
+    args = [ln for ln in branch.splitlines() if "ARGS=" in ln]
+    assert any("--geo-only" in ln for ln in args), "the geo cron branch must set --geo-only"
+    assert not any("--free" in ln for ln in args), "the geo cron branch must NOT be --free"
+
+
 def test_claim_dedup_dirty_is_bounded_fifo() -> None:
     """The --dirty claim must be FIFO-bounded when a limit is passed (and unbounded only when
     not), so a tagging-backlog flood can't make an hourly run claim the whole market."""
