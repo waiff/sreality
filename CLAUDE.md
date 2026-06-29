@@ -240,9 +240,12 @@ rules. Identify which one a task belongs to before you start.
 **Chrome-extension territory** (`chrome-extension/`):
 - Manifest v3 browser extension that overlays MF rent/yield + an estimate panel on portal
   listing pages. The content script matches **every scraped portal's host** (sreality,
-  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality) — widen `matches`
-  (and the registry in `src/portals.ts`) as new portals come online; `host_permissions`
-  stays broad `https://*/*` for the background fetch. **Detail pages** get a floating
+  bazos, bezrealitky, idnes, maxima, remax, mmreality, ceskereality, realitymix) — widen
+  BOTH `manifest.json` `content_scripts.matches` (so the script INJECTS there — a registry
+  entry without a match is dead) AND the registry in `src/portals.ts` (host→portal +
+  detail-URL→native-id) as new portals come online; `host_permissions` stays broad
+  `https://*/*` for the background fetch. Match patterns are exact-host, so an apex-canonical
+  portal (e.g. `realitymix.cz`) needs its apex pattern, not just `www.`. **Detail pages** get a floating
   panel (closed shadow root). For ANY listing we have it shows a **"Přidat do pipeline"**
   deal-pipeline control (bookmark; once in, change stage via a native `<select>` + remove)
   + a monitoring/collection toggle (rule #18) + **operator notes** (list existing + add a new

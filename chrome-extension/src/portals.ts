@@ -86,27 +86,31 @@ export const PORTALS: Portal[] = [
     detailId: (p) => firstMatch(/\/reality\/detail\/(\d+)/, p),
   },
   {
-    // UNVERIFIED extractor (no live rows yet) — refine once mmreality has data.
-    // A wrong id just yields found:false, never a bad badge.
+    // /nemovitosti/{id}/ — id is the digit segment after /nemovitosti/. (maxima
+    // shares this path on a different host; host-routing disambiguates, and maxima
+    // ids carry a letter prefix.) Verified against live source_id_native.
     source: 'mmreality',
     hosts: ['www.mmreality.cz', 'mmreality.cz'],
-    detailId: (p) => firstMatch(/\/(?:detail|zakazka)\/[^?#]*?(\d{6,})(?:[/?#]|$)/, p),
+    detailId: (p) => firstMatch(/\/nemovitosti\/(\d{6,})(?:[/?#]|$)/, p),
   },
   {
     // /{sale}/{cat}/{disp}/{town}/{slug}-{id}.html — id is the trailing run of
-    // digits before ".html" (mirrors the scraper's _ID_RE). Verified on live URLs.
+    // digits before ".html" (any length: live ids run 4–7 digits). The "-…\.html"
+    // anchor isolates it from slug decoys (the area in "...-330-m2-{id}.html").
+    // Verified against 100% of live source_id_native.
     source: 'ceskereality',
     hosts: ['www.ceskereality.cz', 'ceskereality.cz'],
-    detailId: (p) => firstMatch(/-(\d{6,})\.html\b/, p),
+    detailId: (p) => firstMatch(/-(\d+)\.html\b/, p),
     saleApartmentHint: pathCategoryHint,
   },
   {
-    // /detail/{obec}/{slug}-{id}.html — id is the trailing run of digits before
-    // ".html" (mirrors the scraper's _ID_RE). The detail URL does NOT encode the
-    // category, so no saleApartmentHint (the /listings/lookup row gates instead).
+    // /detail/{obec}/{slug}-{id}.html — same "-{id}.html" scheme as ceskereality
+    // (the "-…\.html" anchor isolates the id from a slug area decoy like
+    // "pole-253870-m-…-{id}.html"). The detail URL does NOT encode the category,
+    // so no saleApartmentHint (the /listings/lookup row gates instead).
     source: 'realitymix',
     hosts: ['www.realitymix.cz', 'realitymix.cz'],
-    detailId: (p) => firstMatch(/-(\d{6,})\.html\b/, p),
+    detailId: (p) => firstMatch(/-(\d+)\.html\b/, p),
   },
 ];
 
