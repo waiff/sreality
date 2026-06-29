@@ -13,9 +13,11 @@ import {
   fetchListingById,
   fetchPropertyReprId,
   fetchPropertySources,
+  fetchPropertyMf,
   fetchSnapshotsForListings,
   fetchFreshnessChecksByListing,
   fetchImagesByListing,
+  type PropertyMf,
 } from '@/lib/queries';
 import { fetchListingBroker } from '@/lib/brokers';
 import {
@@ -99,6 +101,17 @@ export default function ListingDetail() {
     queryKey: ['property-sources', sid],
     queryFn: () => fetchPropertySources(sid as number),
     enabled: sid != null && !!listingQ.data,
+    staleTime: 60_000,
+  });
+
+  // PROPERTY-grain MF (the golden record): the one figure for the real-world
+  // property, so the header shows the same MF whichever portal's advert opened
+  // it — not the subject listing's possibly-under-stated per-advert parse.
+  const propPid = sourcesQ.data?.property_id ?? null;
+  const propertyMfQ = useQuery<PropertyMf | null, Error>({
+    queryKey: ['property-mf', propPid],
+    queryFn: () => fetchPropertyMf(propPid as number),
+    enabled: propPid != null,
     staleTime: 60_000,
   });
 
@@ -233,6 +246,27 @@ export default function ListingDetail() {
   const images = imagesQ.data ?? [];
   const sources = sourcesQ.data?.sources ?? [];
 
+  // Property-grain figures (MF / estimate) are built on the canonical asking
+  // price; flag any ACTIVE sibling advert listed at a different number so the
+  // operator knows the same flat is on the market at >1 price.
+  const goldenPrice = propertyMfQ.data?.price_czk ?? null;
+  const priceDivergentSiblings =
+    goldenPrice != null
+      ? sources.filter(
+          (s) => s.is_active && s.price_czk != null && s.price_czk !== goldenPrice,
+        )
+      : [];
+  const priceDivergence =
+    goldenPrice != null && priceDivergentSiblings.length > 0
+      ? {
+          usedPrice: goldenPrice,
+          siblings: priceDivergentSiblings.map((s) => ({
+            source: s.source,
+            price_czk: s.price_czk as number,
+          })),
+        }
+      : null;
+
   return (
     <Page>
       <div className="flex items-center justify-between gap-3">
@@ -276,6 +310,8 @@ export default function ListingDetail() {
             <EstimationsBlock
               listing={listing}
               listingIds={childIds.length > 0 ? childIds : [listing.sreality_id]}
+              propertyMf={propertyMfQ.data ?? null}
+              priceDivergence={priceDivergence}
               prefill={newEstimationPrefill}
             />
           </Suspense>
