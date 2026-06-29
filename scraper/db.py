@@ -789,6 +789,7 @@ def mark_inactive(
     *,
     source: str = "sreality",
     min_unseen_hours: int | None = None,
+    okres_ids: list[int] | None = None,
 ) -> int:
     """Mark listings of this category not in seen_ids as is_active=false.
 
@@ -801,14 +802,25 @@ def mark_inactive(
     `min_unseen_hours` additionally restricts the flip to rows whose
     last_seen_at is older than that many hours — the staleness rail that keeps
     a single walk's index hiccup from delisting a row touched by a recent walk.
+
+    `okres_ids` (when given) restricts the flip to listings whose geo-derived
+    `okres_id` is in that set — so a portal that proves completeness per OKRES
+    (ceskereality) flips only the completely-walked districts, leaving a dense
+    incomplete district's stragglers active. `seen_ids` stays the GLOBAL collected
+    set, so a boundary listing collected under a neighbouring district's slug is
+    still protected (it's in seen_ids regardless of which okres_id it resolves to).
     """
-    if not seen_ids:
+    if not seen_ids or okres_ids == []:
         return 0
     stale_clause = (
         "\n              AND last_seen_at < now() - make_interval(hours => %s)"
         if min_unseen_hours is not None else ""
     )
     params: list[Any] = [source, category_main, category_type]
+    okres_clause = ""
+    if okres_ids:
+        okres_clause = "\n              AND okres_id = ANY(%s)"
+        params.append(list(okres_ids))
     if min_unseen_hours is not None:
         params.append(min_unseen_hours)
     params.append(list(seen_ids))
@@ -820,7 +832,7 @@ def mark_inactive(
             WHERE is_active = true
               AND source = %s
               AND category_main = %s
-              AND category_type = %s{stale_clause}
+              AND category_type = %s{okres_clause}{stale_clause}
               AND sreality_id <> ALL(%s)
             RETURNING property_id
             """,

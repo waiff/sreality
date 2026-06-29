@@ -608,7 +608,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "workers",
-        "description": "concurrent detail-fetch workers (blank = 2)",
+        "description": "concurrent detail-fetch workers (blank = 6)",
         "required": false,
         "type": "string",
         "default": "",
@@ -616,7 +616,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "rate",
-        "description": "global detail-fetch rate cap, req/s (blank = 0.7, polite)",
+        "description": "global detail-fetch rate cap, req/s (blank = 2 — the proxy cleared the throttle)",
         "required": false,
         "type": "string",
         "default": "",
@@ -625,6 +625,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "secrets": [
       "SCRAPER_PROXY_URL",
+      "SCRAPE_CHAIN_TOKEN",
       "SUPABASE_DB_URL"
     ],
     "concurrencyGroup": "ceskereality-detail-drain",
@@ -668,7 +669,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       },
       {
         "name": "region",
-        "description": "limit the walk to ONE region subdomain (e.g. stredo.ceskereality.cz) for a proxy test. Blank = all 7.",
+        "description": "limit the walk to these okres/facet slugs (e.g. praha-hlavni-mesto) for an ad-hoc partial test. Blank = the full okres split.",
         "required": false,
         "type": "string",
         "default": "",

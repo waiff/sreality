@@ -332,6 +332,31 @@ def extract_facet_slugs(html: str, sale_type: str, category: str) -> list[str]:
     return out
 
 
+def extract_disposition_paths(html: str, sale_type: str, category: str) -> list[str]:
+    """The disposition-stacked sub-paths `/{sale}/{category}/{disp}/{geo}/` for the node's
+    OWN geo — the geo appearing in the MOST disposition hrefs (a node page lists all its
+    own dispositions; cross-link geos appear once or twice). Auto-discovers the stacked
+    geo form, so there is no per-city special-case (the capital is `praha`, Brno
+    `brno-mesto`/`brno`, a quarter `cast-praha-zizkov`). Verified: /{sale}/byty/{disp}/{geo}/
+    returns the disposition×geo slice. Returns `{disp}/{geo}` sub-paths usable as a
+    search_url sub_slug. (One axis of the recursion — unioned with finer geography, since
+    the disposition facet list is itself sometimes truncated.)"""
+    pat = re.compile(
+        rf'href="/{re.escape(sale_type)}/{re.escape(category)}/'
+        rf'([a-z][a-z0-9-]+)/([a-z][a-z0-9-]+)/"')
+    by_geo: dict[str, list[str]] = {}
+    for disp, geo in pat.findall(html):
+        if disp in _FACET_EXCLUDE or disp == geo:
+            continue
+        paths = by_geo.setdefault(geo, [])
+        path = f"{disp}/{geo}"
+        if path not in paths:
+            paths.append(path)
+    if not by_geo:
+        return []
+    return max(by_geo.values(), key=len)   # the node's own geo dominates its facet list
+
+
 def _jsonld_product(html: str) -> dict[str, Any]:
     """The schema.org product JSON-LD block (price + broker + address), or {}.
     Picks the block whose `offers` carries a numeric price."""

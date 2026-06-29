@@ -175,13 +175,23 @@ the SEO detail-URL slug (`…-{street}-{id}.html`) — the broker's `offeredby.a
 is deliberately never used; both route through the shared `scraper/street.py` guard. **Broker** carries
 a stable identity — the `/realitni-makleri/{slug}-{id}/` profile id — stored idnes-shaped in
 `raw["broker"]`, so ceskereality is in `BROKER_ATTRIBUTED_SOURCES` and `resolve_brokers` has a
-per-source attribution block (phone-only; no email → no firm). Per-category search pages carry a result
-total ("Máme tady N…") with no deep-pagination cap, so a per-category walk is provable-complete
-(`supports_complete_walk=true`; the runner marks delistings inactive under the completeness guard,
-source-scoped). The detail URL carries the category, so the drain derives each listing's category from
-its own URL — one config (the `portals` row, migration 249) walks all 12 (cm × offer-type) descriptors.
-The client uses an honest identifying `User-Agent` at a polite rate (the site disallows generic bots in
-robots.txt — an operator-owned posture). NOTE: ceskereality ALSO has an on-demand URL parser
+per-source attribution block (phone-only; no email → no firm). **Anonymous search hard-caps at 12 pages
+(~240 results; `?strana=13`=404) AND Cloudflare throttles datacenter (GitHub-Actions) IPs**, so the
+index walk (1) routes through a **residential proxy** (`SCRAPER_PROXY_URL`, opt-in
+`BasePortalClient.USE_PROXY`, browser UA) to clear the throttle, and (2) beats the page cap by slicing
+each category by the **COMPLETE okres partition** — all 77 districts slugified from `admin_boundaries`
+(the capital mapped explicitly to `praha-hlavni-mesto`), walked on www since `/{sale}/{cat}/{okres}/`
+filters district-wide. A dense okres that still caps recurses into its `obec-{town}` /
+`cast-{city}-{quarter}` sub-facets (`_walk_okres`, depth ≤ `_MAX_RECURSION_DEPTH`). Each per-okres walk
+reports the okres's own total; a category is `complete` (→ mark_inactive) only when every okres reached
+~99.5%, so a still-capping dense Prague quarter holds the category back conservatively (rule #3).
+`supports_complete_walk=true`; coverage ~98% (the densest urban categories — komercni pronájem, byty in
+central Prague — hit the site's facet-granularity floor and lean on the 7-day / gone-detail delisting
+instead). **rodinne-domy AND chaty-chalupy both map to `category_main='dum'`**, so mark_inactive for the
+shared scope flips ONCE with the UNION of both sub-walks' seen ids and only when BOTH are complete (else
+a complete chaty walk would falsely delist rodinne-domy's uncollected rows). The detail URL carries the
+category, so the drain derives each listing's category from its own URL — one config (the `portals` row,
+migration 249) walks all 12 (cm × offer-type) descriptors. NOTE: ceskereality ALSO has an on-demand URL parser
 (`scraper/source_parsers/ceskereality.py`, LLM, `source_kind='ceskereality'`) used by the estimation
 preview — a separate entry point unchanged by the scheduled scraper.
 
