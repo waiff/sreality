@@ -524,6 +524,9 @@ def _create_singleton_property(
                 has_balcony, has_parking, has_lift, building_type, condition,
                 ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
                 estate_area, usable_area, garden_area, parking_lots,
+                ku_id, obec_id, okres_id, region_id, obec, okres, region,
+                locality_district_id, locality_region_id, source, energy_rating,
+                building_condition_level, apartment_condition_level,
                 is_active, first_seen_at, last_seen_at,
                 source_count, distinct_site_count
             )
@@ -533,6 +536,9 @@ def _create_singleton_property(
                 has_balcony, has_parking, has_lift, building_type, condition,
                 ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
                 estate_area, usable_area, garden_area, parking_lots,
+                ku_id, obec_id, okres_id, region_id, obec, okres, region,
+                locality_district_id, locality_region_id, source, energy_rating,
+                building_condition_level, apartment_condition_level,
                 is_active, first_seen_at, last_seen_at, 1, 1
             FROM listings WHERE sreality_id = %s
             RETURNING id
@@ -584,7 +590,20 @@ def _cheap_property_rollup(conn: psycopg.Connection, listing_pk: int) -> None:
                 estate_area         = CASE WHEN agg.cnt = 1 THEN l.estate_area     ELSE p.estate_area END,
                 usable_area         = CASE WHEN agg.cnt = 1 THEN l.usable_area     ELSE p.usable_area END,
                 garden_area         = CASE WHEN agg.cnt = 1 THEN l.garden_area     ELSE p.garden_area END,
-                parking_lots        = CASE WHEN agg.cnt = 1 THEN l.parking_lots    ELSE p.parking_lots END
+                parking_lots        = CASE WHEN agg.cnt = 1 THEN l.parking_lots    ELSE p.parking_lots END,
+                ku_id               = CASE WHEN agg.cnt = 1 THEN l.ku_id           ELSE p.ku_id END,
+                obec_id             = CASE WHEN agg.cnt = 1 THEN l.obec_id         ELSE p.obec_id END,
+                okres_id            = CASE WHEN agg.cnt = 1 THEN l.okres_id        ELSE p.okres_id END,
+                region_id           = CASE WHEN agg.cnt = 1 THEN l.region_id       ELSE p.region_id END,
+                obec                = CASE WHEN agg.cnt = 1 THEN l.obec            ELSE p.obec END,
+                okres               = CASE WHEN agg.cnt = 1 THEN l.okres           ELSE p.okres END,
+                region              = CASE WHEN agg.cnt = 1 THEN l.region          ELSE p.region END,
+                locality_district_id = CASE WHEN agg.cnt = 1 THEN l.locality_district_id ELSE p.locality_district_id END,
+                locality_region_id  = CASE WHEN agg.cnt = 1 THEN l.locality_region_id    ELSE p.locality_region_id END,
+                source              = CASE WHEN agg.cnt = 1 THEN l.source          ELSE p.source END,
+                energy_rating       = CASE WHEN agg.cnt = 1 THEN l.energy_rating   ELSE p.energy_rating END,
+                building_condition_level  = CASE WHEN agg.cnt = 1 THEN l.building_condition_level  ELSE p.building_condition_level END,
+                apartment_condition_level = CASE WHEN agg.cnt = 1 THEN l.apartment_condition_level ELSE p.apartment_condition_level END
             FROM listings l
             JOIN LATERAL (
                 SELECT count(*) AS cnt, count(DISTINCT source) AS dcnt,

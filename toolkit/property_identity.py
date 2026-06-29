@@ -21,7 +21,7 @@ from typing import Any, Literal
 import psycopg
 from psycopg.types.json import Jsonb
 
-from scripts.recompute_property_stats import recompute_one
+from scripts.recompute_property_stats import recompute_mf_one, recompute_one
 from toolkit.operator_state import carry_operator_state_on_merge
 from toolkit.pipeline_identity import (
     reconcile_pipeline_on_merge,
@@ -157,6 +157,7 @@ def merge_properties(
             )
 
         recompute_one(conn, survivor_id)
+        recompute_mf_one(conn, survivor_id)
 
     return {
         "data": {
@@ -185,6 +186,9 @@ _SPLIT_INSERT_ONE_SQL = """
         has_balcony, has_parking, has_lift, building_type, condition,
         ownership, furnished, terrace, cellar, garage, category_sub_cb, subtype,
         estate_area, usable_area, garden_area, parking_lots,
+        ku_id, obec_id, okres_id, region_id, obec, okres, region,
+        locality_district_id, locality_region_id, source, energy_rating,
+        building_condition_level, apartment_condition_level,
         is_active, first_seen_at, last_seen_at, last_change_at,
         source_count, distinct_site_count
     )
@@ -194,6 +198,9 @@ _SPLIT_INSERT_ONE_SQL = """
         l.has_balcony, l.has_parking, l.has_lift, l.building_type, l.condition,
         l.ownership, l.furnished, l.terrace, l.cellar, l.garage, l.category_sub_cb, l.subtype,
         l.estate_area, l.usable_area, l.garden_area, l.parking_lots,
+        l.ku_id, l.obec_id, l.okres_id, l.region_id, l.obec, l.okres, l.region,
+        l.locality_district_id, l.locality_region_id, l.source, l.energy_rating,
+        l.building_condition_level, l.apartment_condition_level,
         l.is_active, l.first_seen_at, l.last_seen_at, l.first_seen_at, 1, 1
     FROM listings l
     WHERE l.sreality_id = %(sid)s
@@ -266,6 +273,9 @@ def split_property_to_singletons(
                 new_ids.append(new_id)
 
         recompute_one(conn, property_id)
+        recompute_mf_one(conn, property_id)
+        for nid in new_ids:
+            recompute_mf_one(conn, nid)
 
     return {
         "data": {
@@ -361,8 +371,10 @@ def unmerge_group(
             )
 
         recompute_one(conn, survivor_id)
+        recompute_mf_one(conn, survivor_id)
         for rid in retired_ids:
             recompute_one(conn, rid)
+            recompute_mf_one(conn, rid)
 
     return {
         "data": {
