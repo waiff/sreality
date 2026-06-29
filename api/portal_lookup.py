@@ -59,7 +59,12 @@ SELECT
     l.sreality_id, l.property_id,
     l.category_main, l.category_type, l.area_m2, l.price_czk, l.disposition, l.subtype,
     l.district, l.locality, l.is_active, l.last_seen_at,
-    l.mf_reference_rent_czk, l.mf_gross_yield_pct,
+    -- MF figures are PROPERTY-grain (the golden record), so every portal's advert
+    -- of one flat shows the SAME number. coalesce to the listing's own value only
+    -- for the brief pre-attach window (property_id NULL ~5 min) — a fresh listing
+    -- is a singleton, whose golden record already equals its own per-listing value.
+    coalesce(pr.mf_reference_rent_czk, l.mf_reference_rent_czk) AS mf_reference_rent_czk,
+    coalesce(pr.mf_gross_yield_pct,    l.mf_gross_yield_pct)    AS mf_gross_yield_pct,
     e.id AS estimation_id, e.estimate_kind AS estimation_kind,
     e.gross_yield_pct AS estimation_yield,
     (pp.property_id IS NOT NULL) AS in_pipeline,
@@ -72,6 +77,7 @@ SELECT
 FROM req
 LEFT JOIN listings l
     ON l.source = req.source AND l.source_id_native = req.source_id
+LEFT JOIN properties      pr ON pr.id = l.property_id
 LEFT JOIN property_pipeline pp ON pp.property_id = l.property_id
 LEFT JOIN pipeline_stages   ps ON ps.id = pp.stage_id
 LEFT JOIN LATERAL (
