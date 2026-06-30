@@ -146,7 +146,10 @@ _RECOMPUTE_BATCH_SQL = """
     -- NULL) — the right rule because a portal that simply doesn't parse an amenity
     -- leaves it NULL, which the MF calc reads as "absent"; presence-wins recovers
     -- it from a sibling that did parse it (validated: of cross-child lift
-    -- disagreements only ~2% are true-vs-false, the rest NULL-vs-known). Scalars
+    -- disagreements only ~2 percent are true-vs-false, the rest NULL-vs-known).
+    -- (Keep a literal percent sign out of this comment: psycopg parses the whole
+    -- query string for placeholders on every parameterized execute, so a stray
+    -- one raises ProgrammingError — see tests/test_sql_placeholders.py.) Scalars
     -- take the best NON-NULL value in source-trust order via
     -- (array_agg(x ORDER BY rank) FILTER (WHERE x IS NOT NULL))[1].
     golden AS (

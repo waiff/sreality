@@ -1,12 +1,16 @@
 """Tests for scripts.recompute_property_stats pure helpers.
 
-Hermetic: only the id-batching arithmetic is exercised; the SQL and DB I/O
-are verified out-of-band via the Supabase MCP after the migrations apply.
+Hermetic: the id-batching arithmetic, the fake-conn execution order, and the
+static validity of every SQL constant's `%`-placeholders are exercised here; the
+SQL's runtime semantics + DB I/O are verified out-of-band via the Supabase MCP
+after the migrations apply.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+import pytest
 
 from scripts.recompute_property_stats import (
     _attach_stragglers,
@@ -175,3 +179,24 @@ def test_drain_dirty_empty_queue_is_noop():
     assert _drain_dirty(conn, 100, "C") == 0
     assert conn.recomputed == []
     assert conn.deleted == []
+
+
+def test_every_resolved_sql_constant_has_valid_placeholders():
+    """All `*_SQL` attributes — including the `.replace()`-derived executors —
+    must pass psycopg's placeholder parser.
+
+    The fakes above record SQL without parsing it (which is why a prose `~2%` in
+    `_RECOMPUTE_BATCH_SQL` once shipped green and broke property maintenance +
+    every merge). This module is uniquely exposed: `_RECOMPUTE_ONE_SQL` and
+    `_RECOMPUTE_SCOPED_SQL` are derived from `_RECOMPUTE_BATCH_SQL` at import
+    time, so they can't be statically inspected — only validated after they
+    resolve. The repo-wide AST guard (tests/test_sql_placeholders.py) covers the
+    base constants; this covers the derived family that actually executes.
+    """
+    import scripts.recompute_property_stats as rps
+
+    split = pytest.importorskip("psycopg._queries")._split_query
+    names = [n for n in dir(rps) if n.endswith("_SQL") and isinstance(getattr(rps, n), str)]
+    assert {"_RECOMPUTE_BATCH_SQL", "_RECOMPUTE_ONE_SQL", "_RECOMPUTE_SCOPED_SQL"} <= set(names)
+    for name in names:
+        split(getattr(rps, name).encode())  # raises ProgrammingError on a bad `%`
