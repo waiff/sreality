@@ -899,25 +899,29 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     LOG.info("RESOLVE full merge done auto=%d queued=%d elapsed=%.1fs",
              auto_merges, queued, time.monotonic() - t0)
 
-    # Rollups batched by our dense serial ids (broker_identity.id / broker.id) so
-    # each batch commits independently (crash-safe) and the lock heartbeats between
-    # batches. The id-batch bounds MEMORY + lock granularity, NOT runtime: each
-    # batch still aggregates the cold listings corpus (the broker rollup joins
-    # listings ~3x for DISTINCT property/active counts), so a single batch's
-    # optimal-plan scan can legitimately exceed the 2-min pooler statement timeout
-    # once the corpus is large — that timeout is an app-query guardrail, wrong for
-    # this serialized once-daily reconcile. Lift it per batch, exactly as the firm
-    # rollup / matview / merge below already do; the job's real bounds are the
-    # advisory lock + the 60-min job timeout. (Shrinking the batch to dodge the 2-min
-    # wall would just move the wall — the cost is per-listing-read, not per-broker.)
-    for lo in range(1, _max_id(conn, "broker_identities") + 1, batch_size):
-        if holder:
-            _heartbeat_lock(conn, holder)
-        with conn.transaction(), conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout = 0")
-            cur.execute(_IDENTITY_ROLLUP.format(
-                extra="AND broker_identity_id >= %(lo)s AND broker_identity_id < %(hi)s"),
-                {"lo": lo, "hi": lo + batch_size})
+    # Identity rollup: ONE global timeout-lifted statement, like the firm rollup
+    # below. broker_identities.id is NOT a dense serial — every full-sweep upsert
+    # burns a sequence value on ON CONFLICT, so max(id) runs ~2.5M for ~35k live
+    # rows (~1.4% of the span) and grows ~35k/sweep. Id-range batching it therefore
+    # did ~500 mostly-EMPTY batches per sweep (each a round-trip), climbing forever.
+    # The global form is a single seq-scan + hashaggregate over the linked corpus
+    # (no join blow-up), so it does NOT need the broker rollup's per-batch granularity.
+    if holder:
+        _heartbeat_lock(conn, holder)
+    with conn.transaction(), conn.cursor() as cur:
+        cur.execute("SET LOCAL statement_timeout = 0")
+        cur.execute(_IDENTITY_ROLLUP.format(extra=""))
+    # Broker rollup + membership: batched by brokers.id, which IS dense (~7 batches),
+    # so each batch commits independently (crash-safe) and the lock heartbeats between
+    # batches. The id-batch bounds MEMORY + lock granularity, NOT runtime: each batch
+    # still aggregates the cold listings corpus (the broker rollup joins listings ~3x
+    # for DISTINCT property/active counts), so a single batch's optimal-plan scan can
+    # legitimately exceed the 2-min pooler statement timeout once the corpus is large
+    # — that timeout is an app-query guardrail, wrong for this serialized once-daily
+    # reconcile. Lift it per batch, exactly as the firm rollup / matview / merge below
+    # already do; the job's real bounds are the advisory lock + the job timeout.
+    # (Shrinking the batch to dodge the 2-min wall would just move the wall — the cost
+    # is per-listing-read, not per-broker.)
     for lo in range(1, _max_id(conn, "brokers") + 1, batch_size):
         if holder:
             _heartbeat_lock(conn, holder)
