@@ -32,10 +32,12 @@ import argparse
 import logging
 import os
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -207,6 +209,11 @@ def main(argv: list[str] | None = None) -> int:
         args.max_image_downloads if args.max_image_downloads is not None
         else limits.max_image_downloads
     )
+    image_max_concurrency_per_host = (
+        args.image_max_concurrency_per_host
+        if args.image_max_concurrency_per_host is not None
+        else limits.image_max_concurrency_per_host
+    )
 
     # Open a scrape_runs row for any non-dry-run invocation that actually
     # scrapes the index. The image-only backfill (images.yml) is NOT a
@@ -281,13 +288,17 @@ def main(argv: list[str] | None = None) -> int:
                 active_only=args.images_active_only,
                 shard=_parse_shard(args.image_shard),
                 sources=_parse_sources(args.image_sources),
+                max_concurrency_per_host=image_max_concurrency_per_host,
             )
-            if image_agg.get("stopped_suspicious"):
-                # Exit non-zero so the cron-scheduled backfill workflow
-                # re-schedules immediately on its next tick (every 2h).
-                # Don't crash the nightly scrape itself — the scrape's
-                # other side effects already landed.
-                rc = max(rc, 75)
+            # A suspicious-stop is a deliberate, healthy backoff (one CDN
+            # throttling us), NOT a run failure: the phase still stored every
+            # image it could from the healthy hosts, and the per-host
+            # concurrency cap + quarantine localize a struggling CDN without
+            # touching the others. So we exit 0 (green). The "IMAGES STOP
+            # suspicious" log marker — emitted only when the remaining queue is
+            # ALL quarantined — is what the fresh lane's self-chain greps to
+            # avoid immediately re-hammering the same CDN; cron restarts it on
+            # its own cadence regardless of exit code.
 
         if (
             rc == 0
@@ -470,6 +481,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "restrict the image phase to these listing.source values "
             "(comma-separated, e.g. 'idnes' or 'bazos,bezrealitky'). "
             "Default: all sources."
+        ),
+    )
+    p.add_argument(
+        "--image-max-concurrency-per-host",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "cap simultaneous download connections to ONE CDN host "
+            "(default: per-portal config, 8). Bounds the pile-up that makes a "
+            "small portal CDN time out under the full worker pool; a fast CDN "
+            "is unaffected. 0 disables the cap."
         ),
     )
     p.add_argument(
@@ -1417,6 +1440,7 @@ def _run_image_downloads(
     *,
     shard: tuple[int, int] | None = None,
     sources: tuple[str, ...] | None = None,
+    max_concurrency_per_host: int = 8,
 ) -> dict[str, Any]:
     """Drain pending image downloads. Returns aggregates for scrape_runs.
 
@@ -1426,10 +1450,19 @@ def _run_image_downloads(
     pure selection predicates passed through to `pending_image_downloads`.
 
     Loops in batches until either (a) the pending queue is empty,
-    (b) the per-run cap is reached (if max_downloads > 0), or (c) the
-    transient-failure rate over the last SUSPICIOUS_STOP_WINDOW
-    outcomes exceeds SUSPICIOUS_STOP_THRESHOLD — the operator's
-    "if other failures get suspicious, stop and try again in 2h" rule.
+    (b) the per-run cap is reached (if max_downloads > 0), or (c) every
+    CDN host still left in the queue has been quarantined.
+
+    Two per-host guards localize a struggling CDN so one slow portal can't
+    starve the others (the image stream is multi-portal): a concurrency cap
+    (`max_concurrency_per_host` simultaneous connections per hostname — the
+    actual fix for the read-timeout dogpile, where the newest-first fresh lane
+    is dominated by one portal and the full worker pool would otherwise open
+    `workers` connections to a single small CDN and time it out) and a
+    suspicious-stop breaker that quarantines a host whose transient-failure
+    rate over its last SUSPICIOUS_STOP_WINDOW outcomes exceeds
+    SUSPICIOUS_STOP_THRESHOLD, skipping it for the rest of the run while the
+    healthy hosts keep draining.
 
     `max_downloads=0` means "no cap": drain the queue. The nightly
     `scrape.yml` uses this; the backfill workflow uses a finite cap as
@@ -1450,7 +1483,7 @@ def _run_image_downloads(
         LOG.info("IMAGES skipped (R2 env vars not set)")
         return {"images_stored": 0, "by_category": {}, "stopped_suspicious": False}
 
-    from collections import deque
+    from collections import defaultdict, deque
 
     from scraper.sreality_client import SrealityClient
 
@@ -1464,8 +1497,35 @@ def _run_image_downloads(
     # freshness_check more than once per gone listing.
     gone_listings: set[int] = set()
     alive_listings: set[int] = set()
-    outcome_window: deque[str] = deque(maxlen=SUSPICIOUS_STOP_WINDOW)
+    # Per-CDN-host outcome windows + quarantine set: the suspicious-stop is
+    # scoped per host so one throttling CDN can't abort the whole multi-portal
+    # drain. A host is quarantined for the rest of the run once its window trips.
+    host_windows: dict[str, "deque[str]"] = defaultdict(
+        lambda: deque(maxlen=SUSPICIOUS_STOP_WINDOW)
+    )
+    quarantined: set[str] = set()
     stopped_suspicious = False
+    # One BoundedSemaphore per host caps SIMULTANEOUS download connections to
+    # that CDN (created lazily, lock-guarded). Structural fix for the dogpile:
+    # when the newest-first fresh lane is dominated by one portal, the full
+    # worker pool would otherwise open `workers` connections to a single CDN and
+    # time it out. It bounds concurrency, not throughput — a fast CDN is
+    # unaffected. <=0 disables the cap.
+    host_semaphores: dict[str, threading.BoundedSemaphore] = {}
+    host_semaphores_lock = threading.Lock()
+
+    def _semaphore_for(host: str) -> "threading.BoundedSemaphore | None":
+        if max_concurrency_per_host <= 0:
+            return None
+        sem = host_semaphores.get(host)
+        if sem is not None:
+            return sem
+        with host_semaphores_lock:
+            sem = host_semaphores.get(host)
+            if sem is None:
+                sem = threading.BoundedSemaphore(max_concurrency_per_host)
+                host_semaphores[host] = sem
+            return sem
     # One reusable client; SrealityClient is stateless beyond its
     # category settings, and freshness_check ignores category.
     freshness_client = SrealityClient(category_main=1, category_type=2)
@@ -1481,9 +1541,12 @@ def _run_image_downloads(
 
     with db.connect() as conn:
         LOG.info(
-            "IMAGES start cap=%s workers=%d active_only=%s shard=%s sources=%s",
+            "IMAGES start cap=%s workers=%d per_host=%s active_only=%s "
+            "shard=%s sources=%s",
             "unlimited" if max_downloads <= 0 else max_downloads,
-            workers, active_only,
+            workers,
+            "off" if max_concurrency_per_host <= 0 else max_concurrency_per_host,
+            active_only,
             f"{shard[0]}/{shard[1]}" if shard else "none",
             ",".join(sources) if sources else "all",
         )
@@ -1506,37 +1569,58 @@ def _run_image_downloads(
 
             cat_lookup: dict[int, tuple[str | None, str | None]] = {}
             sid_by_image: dict[int, int] = {}
+            host_by_image: dict[int, str] = {}
 
-            # Skip images whose parent listing is already known gone
-            # — we'd just re-mark them and waste an HTTP call.
+            # Skip images whose parent listing is already known gone (we'd just
+            # re-mark them) AND images on a quarantined host (its transient rate
+            # crossed the bar this run — leave them pending for the next run).
             filtered_pending: list[tuple[Any, ...]] = []
             for image_id, sid, seq, url, cm, ct in pending:
                 if sid in gone_listings:
                     continue
+                host = _image_host(url)
+                if host in quarantined:
+                    continue
                 cat_lookup[image_id] = (cm, ct)
                 sid_by_image[image_id] = sid
+                host_by_image[image_id] = host
                 filtered_pending.append((image_id, sid, seq, url, cm, ct))
 
             if not filtered_pending:
-                continue
+                # Nothing fetchable in this slice: every row is a known-gone
+                # listing (already marked out of the queue) or sits on a
+                # quarantined host (those rows stay pending and would re-appear
+                # in every query, so we must stop rather than spin). If a host
+                # was quarantined, flag it so the fresh lane's self-chain doesn't
+                # immediately re-hammer the same struggling CDN.
+                if quarantined:
+                    stopped_suspicious = True
+                    LOG.warning(
+                        "IMAGES STOP suspicious — no fetchable images left; "
+                        "quarantined host(s): %s. Cron will retry.",
+                        ",".join(sorted(quarantined)),
+                    )
+                break
 
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 future_to_id = {
                     pool.submit(
-                        _fetch_one_image, sid, seq, url, r2
+                        _fetch_one_image, sid, seq, url, r2,
+                        _semaphore_for(host_by_image[image_id]),
                     ): image_id
                     for image_id, sid, seq, url, _cm, _ct in filtered_pending
                 }
                 for future in as_completed(future_to_id):
                     image_id = future_to_id[future]
                     sid = sid_by_image[image_id]
+                    host = host_by_image[image_id]
                     key, error = future.result()
                     counts["attempted"] += 1
 
                     if error is None:
                         db.mark_image_stored(conn, image_id, key)
                         counts["downloaded"] += 1
-                        outcome_window.append("ok")
+                        host_windows[host].append("ok")
                         cat_key = cat_lookup.get(image_id, (None, None))
                         by_cat[cat_key] = by_cat.get(cat_key, 0) + 1
                     else:
@@ -1548,7 +1632,7 @@ def _run_image_downloads(
                         if kind == "taken_down":
                             n = db.mark_image_listing_taken_down(conn, sid)
                             counts["taken_down"] += n
-                            outcome_window.append("taken_down")
+                            host_windows[host].append("taken_down")
                             LOG.info(
                                 "IMAGE listing_taken_down sid=%d marked=%d",
                                 sid, n,
@@ -1562,7 +1646,7 @@ def _run_image_downloads(
                                 error=str(error),
                             )
                             counts["source_unavailable"] += 1
-                            outcome_window.append("source_unavailable")
+                            host_windows[host].append("source_unavailable")
                             LOG.info(
                                 "IMAGE source_unavailable id=%d", image_id
                             )
@@ -1575,42 +1659,47 @@ def _run_image_downloads(
                                 error=str(error),
                             )
                             counts["not_an_image"] += 1
-                            outcome_window.append("not_an_image")
+                            host_windows[host].append("not_an_image")
                             LOG.info("IMAGE not_an_image id=%d", image_id)
                         else:
                             db.mark_image_attempt(conn, image_id, error=str(error))
                             counts["errors"] += 1
-                            outcome_window.append("transient")
+                            host_windows[host].append("transient")
                             LOG.warning("IMAGE id=%d error: %s", image_id, error)
+
+                    # Per-host quarantine: a host whose transient rate crosses
+                    # the bar is skipped for the rest of THIS run. We do NOT
+                    # break — in-flight futures (incl. healthy hosts) finish, and
+                    # the next batch filters this host out. The run only reports
+                    # `stopped_suspicious` when the queue has NOTHING left but
+                    # quarantined hosts (handled at the filtered-empty break).
+                    if host and host not in quarantined and _suspicious_stop(
+                        host_windows[host]
+                    ):
+                        quarantined.add(host)
+                        LOG.warning(
+                            "IMAGES QUARANTINE host=%s — transient-failure rate "
+                            "over its last %d outcomes exceeded %.0f%%; skipping "
+                            "it for the rest of this run.",
+                            host, SUSPICIOUS_STOP_WINDOW,
+                            SUSPICIOUS_STOP_THRESHOLD * 100,
+                        )
 
                     if counts["attempted"] % 50 == 0:
                         LOG.info(
                             "IMAGES progress=%d downloaded=%d errors=%d "
-                            "taken_down=%d source_unavailable=%d",
+                            "taken_down=%d source_unavailable=%d quarantined=%d",
                             counts["attempted"], counts["downloaded"],
                             counts["errors"], counts["taken_down"],
-                            counts["source_unavailable"],
+                            counts["source_unavailable"], len(quarantined),
                         )
-
-                    if _suspicious_stop(outcome_window):
-                        stopped_suspicious = True
-                        break
-
-            if stopped_suspicious:
-                LOG.warning(
-                    "IMAGES STOP suspicious — transient-failure rate over "
-                    "last %d outcomes exceeded %.0f%%. Cron will retry.",
-                    SUSPICIOUS_STOP_WINDOW,
-                    SUSPICIOUS_STOP_THRESHOLD * 100,
-                )
-                break
 
     LOG.info(
         "IMAGES done downloaded=%d errors=%d taken_down=%d "
-        "source_unavailable=%d not_an_image=%d attempted=%d",
+        "source_unavailable=%d not_an_image=%d quarantined=%d attempted=%d",
         counts["downloaded"], counts["errors"],
         counts["taken_down"], counts["source_unavailable"],
-        counts["not_an_image"], counts["attempted"],
+        counts["not_an_image"], len(quarantined), counts["attempted"],
     )
     return {
         "images_stored": counts["downloaded"],
@@ -1713,6 +1802,16 @@ def _is_dead_url_image_error(error: Exception) -> bool:
     return False
 
 
+def _image_host(url: str) -> str:
+    """Lowercased CDN hostname of an image URL ('' if unparseable). The per-host
+    concurrency cap and the suspicious-stop breaker both key on this, so one
+    portal's CDN throttling never abandons another portal's image drain."""
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except Exception:  # noqa: BLE001 - a malformed URL must not crash the drain
+        return ""
+
+
 def client_freshness_check(conn: Any, client: "Any", sreality_id: int) -> str:
     """Thin wrapper so tests can monkeypatch one symbol."""
     from scraper.freshness import freshness_check
@@ -1726,6 +1825,7 @@ def _fetch_one_image(
     sequence: int | None,
     url: str,
     r2: image_storage.R2Client,
+    semaphore: "threading.BoundedSemaphore | None" = None,
 ) -> tuple[str, Exception | None]:
     """Worker: download from the portal CDN, validate, upload to R2. Returns (key, error).
 
@@ -1734,10 +1834,18 @@ def _fetch_one_image(
     stored as a fake JPEG and fed to the LLM-vision / pHash consumers. The real
     content-type is stored so the browser decodes it (the old hardcoded image/jpeg
     is why an MP4 rendered blank).
+
+    `semaphore` (per CDN host) bounds simultaneous connections to ONE host. It
+    wraps only the CDN download — the R2 upload (a different host) runs
+    unbounded — so a small portal CDN isn't dogpiled by the full worker pool.
     """
     key = image_storage.image_key(sreality_id, sequence)
     try:
-        data = image_storage.download_image(url)
+        if semaphore is not None:
+            with semaphore:
+                data = image_storage.download_image(url)
+        else:
+            data = image_storage.download_image(url)
         content_type = media.is_image_bytes(data)
         if content_type is None:
             raise image_storage.NotAnImageError(

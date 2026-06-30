@@ -13,7 +13,9 @@ Three concerns:
 
 from __future__ import annotations
 
+import threading
 from collections import deque
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -405,3 +407,173 @@ def test_record_images_dedupes_duplicate_sequence():
     assert seqs.count(None) == 2  # nulls preserved
     assert "//a/1.jpg" in captured["params"]       # first of the dup kept
     assert "//a/1b.jpg" not in captured["params"]  # second dropped
+
+
+# ---- _image_host -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://img.ceskereality.cz/a/b.jpg", "img.ceskereality.cz"),
+        ("https://IMG.CESKEREALITY.CZ/X", "img.ceskereality.cz"),  # lowercased
+        ("//d18-a.sdn.cz/foo.jpg", "d18-a.sdn.cz"),                # protocol-relative
+        ("https://host:8443/x.jpg", "host"),                      # port stripped
+        ("not a url", ""),                                         # unparseable
+        ("", ""),
+    ],
+)
+def test_image_host_parses_cdn_hostname(url, expected):
+    assert scraper_main._image_host(url) == expected
+
+
+# ---- _fetch_one_image per-host semaphore -----------------------------------
+
+
+def test_fetch_one_image_success_with_semaphore(monkeypatch):
+    """A download wrapped in a per-host semaphore stores normally and releases
+    the slot afterwards."""
+    sem = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(
+        scraper_main.image_storage, "download_image", lambda url, **kw: b"\xff\xd8\xff"
+    )
+    monkeypatch.setattr(scraper_main.media, "is_image_bytes", lambda data: "image/jpeg")
+
+    class _R2:
+        def upload_bytes(self, key, data, content_type="image/jpeg"):
+            return None
+
+    key, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), sem)
+    assert err is None
+    assert key == scraper_main.image_storage.image_key(7, 0)
+    assert sem.acquire(blocking=False)  # slot was released
+    sem.release()
+
+
+def test_fetch_one_image_releases_semaphore_on_error(monkeypatch):
+    """A failed download must still release the per-host slot (the `with`
+    contract) so one bad image can't permanently leak host capacity."""
+    sem = threading.BoundedSemaphore(2)
+
+    def _boom(url, **kw):
+        raise requests.ConnectionError("read timed out")
+
+    monkeypatch.setattr(scraper_main.image_storage, "download_image", _boom)
+    key, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", object(), sem)
+    assert err is not None
+    # Both slots are free again (none leaked).
+    assert sem.acquire(blocking=False) and sem.acquire(blocking=False)
+    sem.release()
+    sem.release()
+
+
+def test_fetch_one_image_works_without_semaphore(monkeypatch):
+    """semaphore=None (cap disabled) is a valid path — no wrapping, still stores."""
+    monkeypatch.setattr(
+        scraper_main.image_storage, "download_image", lambda url, **kw: b"\xff\xd8\xff"
+    )
+    monkeypatch.setattr(scraper_main.media, "is_image_bytes", lambda data: "image/jpeg")
+
+    class _R2:
+        def upload_bytes(self, key, data, content_type="image/jpeg"):
+            return None
+
+    key, err = scraper_main._fetch_one_image(7, 0, "https://h/x.jpg", _R2(), None)
+    assert err is None
+
+
+# ---- _run_image_downloads per-host quarantine (loop integration) -----------
+
+
+@contextmanager
+def _fake_connect():
+    yield object()
+
+
+def _drive_image_loop(monkeypatch, batches, fetch_result):
+    """Run _run_image_downloads with a scripted pending queue + fake fetcher.
+
+    `batches` is a list of row-lists (each row: image_id, sid, seq, url, cm, ct)
+    returned by successive `pending_image_downloads` calls; an exhausted script
+    returns [] (empty queue → terminate). `fetch_result(url)` returns the
+    Exception (transient) or None (success) the fake fetcher yields for that URL.
+    Returns (aggregate_dict, list_of_stored_image_ids).
+    """
+    monkeypatch.setattr(scraper_main.image_storage, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        scraper_main.image_storage.R2Client, "from_env", lambda **kw: object()
+    )
+    monkeypatch.setattr(scraper_main.db, "connect", _fake_connect)
+
+    script = list(batches)
+
+    def _fake_pending(conn, **kw):
+        return script.pop(0) if script else []
+
+    stored: list[int] = []
+    monkeypatch.setattr(scraper_main.db, "pending_image_downloads", _fake_pending)
+    monkeypatch.setattr(
+        scraper_main.db, "mark_image_stored",
+        lambda conn, iid, key: stored.append(iid),
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "mark_image_attempt", lambda conn, iid, error=None: None
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "mark_image_unavailable", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        scraper_main.db, "mark_image_listing_taken_down", lambda conn, sid: 0
+    )
+
+    def _fake_fetch(sid, seq, url, r2, semaphore=None):
+        return (scraper_main.image_storage.image_key(sid, seq), fetch_result(url))
+
+    monkeypatch.setattr(scraper_main, "_fetch_one_image", _fake_fetch)
+
+    out = scraper_main._run_image_downloads(max_downloads=0, workers=4)
+    return out, stored
+
+
+def _rows(url, start_id, n, sid_base):
+    return [(start_id + i, sid_base + i, 0, url, "byt", "prodej") for i in range(n)]
+
+
+def _timeout_for_bad(url):
+    return RuntimeError("read timed out") if "bad.cz" in url else None
+
+
+def test_quarantine_localizes_one_host_run_stays_green(monkeypatch):
+    """A host that crosses the transient bar is quarantined, but the healthy
+    host keeps draining to the end of the queue and the run is NOT a failure
+    (stopped_suspicious False) — this is the multi-portal isolation guarantee."""
+    monkeypatch.setattr(scraper_main, "SUSPICIOUS_STOP_WINDOW", 4)
+    bad = "https://img.bad.cz/x.jpg"
+    good = "https://img.good.cz/x.jpg"
+    # Batch 1: 4 bad (all time out → quarantine bad.cz) + 4 good (stored).
+    # Batch 2: 4 more good (healthy work remains → keeps draining).
+    batch1 = _rows(bad, 0, 4, 1000) + _rows(good, 100, 4, 2000)
+    batch2 = _rows(good, 200, 4, 3000)
+    out, stored = _drive_image_loop(monkeypatch, [batch1, batch2], _timeout_for_bad)
+
+    assert out["images_stored"] == 8
+    assert len(stored) == 8  # every good image stored; no bad image stored
+    assert all(iid >= 100 for iid in stored)  # the bad-host ids (0..3) never stored
+    assert out["stopped_suspicious"] is False  # green — one bad host doesn't fail the run
+
+
+def test_run_stops_suspicious_when_only_quarantined_host_remains(monkeypatch):
+    """When the ONLY work left in the queue is a quarantined host, the run stops
+    and flags stopped_suspicious (gates the self-chain) — and it TERMINATES
+    rather than re-querying the same pending rows forever."""
+    monkeypatch.setattr(scraper_main, "SUSPICIOUS_STOP_WINDOW", 4)
+    bad = "https://img.bad.cz/x.jpg"
+    good = "https://img.good.cz/x.jpg"
+    # Batch 1: 4 bad (→ quarantine) + 2 good (stored).
+    # Batch 2: the 4 bad rows re-appear (still pending) → nothing fetchable → stop.
+    batch1 = _rows(bad, 0, 4, 1000) + _rows(good, 100, 2, 2000)
+    batch2 = _rows(bad, 0, 4, 1000)
+    out, stored = _drive_image_loop(monkeypatch, [batch1, batch2], _timeout_for_bad)
+
+    assert len(stored) == 2  # only the good images
+    assert out["stopped_suspicious"] is True
