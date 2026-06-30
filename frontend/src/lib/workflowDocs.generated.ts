@@ -2769,7 +2769,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
     ],
     "concurrencyGroup": "broker-resolution-full",
     "cancelInProgress": false,
-    "timeoutMinutes": 60,
+    "timeoutMinutes": 90,
     "permissions": "contents: read",
     "runsUrl": "https://github.com/waiff/sreality/actions/workflows/resolve_brokers_full.yml",
     "sourceUrl": "https://github.com/waiff/sreality/blob/main/.github/workflows/resolve_brokers_full.yml"
