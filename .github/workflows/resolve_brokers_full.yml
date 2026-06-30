@@ -42,7 +42,11 @@ concurrency:
 jobs:
   resolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Headroom for the worst case: the attribution scan can use its full
+    # --max-seconds 3000 (50 min) budget AND the rollup/merge/matview tail
+    # (~15-20 min over the full corpus) still finishes. The job is serialized by
+    # the DB advisory lock and idempotent, so extra wall-clock has no downside.
+    timeout-minutes: 90
     permissions:
       contents: read
     env:
