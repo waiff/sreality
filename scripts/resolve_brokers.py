@@ -52,6 +52,11 @@ _FREE_KEY = "broker_free_email_domains"
 _FRANCHISE_KEY = "broker_franchise_domains"
 _AUTO_MERGE_KEY = "broker_auto_merge_sources"
 
+# Sources whose listings carry a broker block (one attribution path each in
+# _attribute). The full sweep enumerates exactly these for re-attribution; add a
+# source here when its attribution lands so the daily sweep reconciles it.
+_BROKER_SOURCES = ("sreality", "idnes", "ceskereality", "realitymix")
+
 # --- Attribution (sreality, set-based from raw_json). {sel} = a listings selector. ---
 
 _IDENTITIES_UPSERT = """
@@ -813,6 +818,41 @@ def _generate_merge_candidates(conn: Any) -> int:
     return proposed
 
 
+def _broker_bearing_ids(conn: Any, page_size: int) -> list[int]:
+    """Every broker-bearing listing id, ascending, fetched in bounded keyset pages.
+
+    Keyset — never one unbounded `ORDER BY` scan: the corpus crossed the pooler
+    statement timeout (2 min) once four portals were attributed, so the single
+    SELECT that loaded all ids timed out (#639 era). Each page is `... AND
+    sreality_id > :last ... LIMIT :n`, so no statement is unbounded. Keyset also
+    skips the sparse negative-id gaps a numeric-range loop would walk (sreality_id
+    spans [-287k, 4.29B]) — the property the load-all-ids approach existed for,
+    kept here while adding the per-statement bound it lacked."""
+    ids: list[int] = []
+    last: int | None = None
+    srcs = list(_BROKER_SOURCES)
+    with conn.cursor() as cur:
+        while True:
+            if last is None:
+                cur.execute(
+                    "SELECT sreality_id FROM listings WHERE source = ANY(%(srcs)s) "
+                    "ORDER BY sreality_id LIMIT %(lim)s",
+                    {"srcs": srcs, "lim": page_size})
+            else:
+                cur.execute(
+                    "SELECT sreality_id FROM listings WHERE source = ANY(%(srcs)s) "
+                    "AND sreality_id > %(last)s ORDER BY sreality_id LIMIT %(lim)s",
+                    {"srcs": srcs, "last": last, "lim": page_size})
+            page = [int(r[0]) for r in cur.fetchall()]
+            if not page:
+                break
+            ids.extend(page)
+            last = page[-1]
+            if len(page) < page_size:
+                break
+    return ids
+
+
 def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
               batch_size: int, deadline: float | None, holder: str = "") -> dict[str, int]:
     with conn.cursor() as cur:
@@ -825,15 +865,10 @@ def _run_full(conn: Any, free: list[str], franchise: list[str], auto: list[str],
     t0 = time.monotonic()
 
     # Chunk the ACTUAL listing ids of every broker-bearing source (sreality_id is the
-    # sparse PK — a numeric-range loop would walk huge empty gaps). One cheap PK-only
-    # scan fetches every id; attribution then runs per id-chunk, source-filtered inside.
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT sreality_id FROM listings "
-            "WHERE source IN ('sreality', 'idnes', 'ceskereality', 'realitymix') "
-            "ORDER BY sreality_id"
-        )
-        all_ids = [int(r[0]) for r in cur.fetchall()]
+    # sparse PK — a numeric-range loop would walk huge empty gaps). Keyset-paginated
+    # in bounded pages so no single statement is unbounded; attribution then runs per
+    # id-chunk, source-filtered inside.
+    all_ids = _broker_bearing_ids(conn, batch_size)
     for i in range(0, len(all_ids), batch_size):
         if holder:
             _heartbeat_lock(conn, holder)
