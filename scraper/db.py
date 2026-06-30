@@ -291,21 +291,26 @@ def connect_session(url: str | None = None) -> psycopg.Connection:
 
 _T = TypeVar("_T")
 
-# Bounded retry budget for a transient DB error on a long-held connection (the
-# detail drain / index walk hold one for the whole --max-seconds budget). Four
-# attempts with exponential backoff (0.5/1/2 s, +jitter) ride out a pooler
-# recycle, a deadlock victim, or a brief network blip; a genuine outage still
-# reds the run after the budget, exactly as before this guard existed.
+# Bounded retry budget for a transient DB error on the detail drain's long-held
+# connection (held for the whole --max-seconds budget, idle during the
+# rate-limited fetch waits). Four attempts with exponential backoff (0.5/1/2 s,
+# +jitter) ride out a pooler recycle, a deadlock victim, or a brief network blip;
+# a genuine outage still reds the run after the budget, exactly as before this
+# guard existed. (The index walk holds a connection too but is NOT wired through
+# here — its per-category autocommit work self-recovers on the next cron tick.)
 _RESILIENT_ATTEMPTS = 4
 _RESILIENT_BASE_DELAY = 0.5
 
 
 def is_transient_db_error(exc: BaseException) -> bool:
-    """True for a DB error worth retrying: a dropped/reset connection (SSL EOF,
-    pooler recycle, admin shutdown, idle-session timeout) OR a deadlock /
-    serialization rollback. Every one of these is a psycopg.OperationalError
-    subclass; a real bug (IntegrityError, ProgrammingError, DataError) is not and
-    must fail loud rather than spin.
+    """True for a DB error worth retrying. We treat EVERY psycopg.OperationalError
+    as transient — connection drops (SSL EOF, pooler recycle, admin shutdown,
+    idle-session timeout), deadlock / serialization rollbacks, and even the
+    bounded resource/timeout classes (a statement-timeout or pool saturation is
+    usually a passing lock/pooler condition in this drain's small per-batch ops,
+    and the worst case is ~3.5 s of backoff before the run reds anyway). A real
+    bug (IntegrityError, ProgrammingError, DataError) is NOT an OperationalError,
+    so it fails loud immediately rather than spinning.
     """
     return isinstance(exc, psycopg.OperationalError)
 
@@ -333,8 +338,23 @@ def run_resilient(
     bug, not an outage) and after `attempts` are exhausted (a real outage -> the
     run reds, same as before). The caller's op() MUST be idempotent — it is
     re-run from the top on every retry (the drain's batch writes are: latest-wins
-    upserts + snapshot-on-change + Tier-0 ids, so a replay re-commits identically).
+    upserts + snapshot-on-change + Tier-0 ids, so a replay re-commits identically;
+    the one non-idempotent pair, the failure-counter bumps, is wrapped in a single
+    transaction by its caller so a replay re-applies it exactly once).
     """
+    original = conn
+
+    def _discard_created() -> None:
+        # On a raise, close a connection run_resilient itself opened — the caller
+        # never received it (we only hand it back via the success return), so
+        # nobody else will. Never touch the caller's `original`: its own teardown
+        # owns that one.
+        if conn is not None and conn is not original:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001 - best-effort
+                pass
+
     last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
@@ -343,6 +363,7 @@ def run_resilient(
             return op(conn), conn
         except Exception as exc:  # noqa: BLE001 - re-raised below unless transient
             if not is_transient_db_error(exc):
+                _discard_created()
                 raise
             last_exc = exc
             if attempt >= attempts:
@@ -372,6 +393,7 @@ def run_resilient(
                 except Exception:  # noqa: BLE001
                     pass
             time.sleep(min(base_delay * 2 ** (attempt - 1), 8.0) + random.random() * base_delay)
+    _discard_created()
     assert last_exc is not None
     raise last_exc
 

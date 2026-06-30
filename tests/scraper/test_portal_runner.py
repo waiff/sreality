@@ -6,6 +6,7 @@ are monkeypatched.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -465,3 +466,66 @@ def test_detail_drain_gone_path_survives_transient_drop(monkeypatch):
     assert agg["listings_inactive"] == 1
     assert cap["complete"] == [["9"]]          # dequeued after the reconnect retry
     assert p.connect_drain_calls == 2          # reconnected for the gone op
+
+
+def test_drain_record_failure_drop_on_queue_bump_does_not_replay_ledger(monkeypatch):
+    # The failure path bumps TWO non-idempotent counters: record_failure
+    # (listing_fetch_failures.attempts+1) then fail_detail (queue attempts+1). They
+    # are SPLIT into two run_resilient calls so a transient drop on the queue bump
+    # retries ONLY fail_detail — it must never replay (double-advance) the already-
+    # committed ledger bump, which would retire a still-retryable listing early.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    record_calls = {"n": 0}
+    fail_calls = {"n": 0}
+
+    def _record_failure(_c, _nid, _msg):
+        record_calls["n"] += 1
+
+    def _fail_detail(c, _src, _ids, _msg, **k):
+        fail_calls["n"] += 1
+        if fail_calls["n"] == 1:          # the queue bump drops the first time
+            c.broken = True
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(portal_runner.db, "fail_detail", _fail_detail)
+    conns: list[_Conn] = []
+
+    def _reconnect() -> _Conn:
+        c = _Conn()
+        conns.append(c)
+        return c
+
+    portal = SimpleNamespace(source="fake", record_failure=_record_failure)
+    conn0 = _Conn()
+    out = portal_runner._drain_record_failure(portal, conn0, "55", "boom", _reconnect)
+
+    assert record_calls["n"] == 1     # ledger bump applied EXACTLY once (not replayed)
+    assert fail_calls["n"] == 2       # queue bump retried after the drop
+    assert conn0.broken and conn0.closed
+    assert out is conns[-1]           # returned the reconnected conn
+
+
+def test_run_resilient_closes_self_opened_conn_on_exhaustion(monkeypatch):
+    # On the give-up path run_resilient must close a connection IT opened (the
+    # caller never received it), but never the caller's original.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    opened: list[_Conn] = []
+
+    def _reconnect() -> _Conn:
+        c = _Conn()
+        c.broken = True          # every reconnect yields an already-doomed socket
+        opened.append(c)
+        return c
+
+    original = _Conn()
+    original.broken = True
+
+    def _always_drops(_c):
+        raise psycopg.OperationalError("connection refused")
+
+    with pytest.raises(psycopg.OperationalError):
+        portal_runner.db.run_resilient(
+            original, _always_drops, reconnect=_reconnect, attempts=3, base_delay=0)
+
+    assert original.closed                         # broken original closed in-loop
+    assert opened and all(c.closed for c in opened)  # every self-opened conn closed
