@@ -217,22 +217,84 @@ def _flush_drain_batch(
     buffer: list[DrainItem],
     counts: dict[str, int],
     dry_run: bool,
-) -> None:
+    reconnect: Any,
+) -> Any:
+    """Write one batch + dequeue it, surviving a transient pooler drop/deadlock by
+    retrying (and reconnecting if the socket died). Returns the live connection —
+    possibly a fresh one — so the caller must rebind. write_details and
+    complete_detail are idempotent, so a retry that replays a partially-committed
+    batch never corrupts data and the counts delta is applied once (after the
+    write op's final success, not per attempt). One benign residue: for the
+    per-item-write portals (everyone but sreality, whose write_detail_batch is one
+    atomic transaction) a replay re-reads the pre-drop committed items as
+    'unchanged', so the run's scrape_runs new/updated/images counters can
+    slightly UNDERCOUNT on the rare reconnect path — bookkeeping only, never the
+    listing data, and Health reads listings.first_seen_at not these counters."""
     if not buffer:
-        return
+        return conn
     if dry_run:
         for it in buffer:
             LOG.info("DRY-RUN id=%s", it.native_id)
-        return
-    res = portal.write_details(conn, buffer)
+        return conn
+    ids = [it.native_id for it in buffer]
+    res, conn = db.run_resilient(
+        conn, lambda c: portal.write_details(c, buffer),
+        reconnect=reconnect, label="drain.write",
+    )
     for k in ("new", "updated", "unchanged", "images_discovered"):
         counts[k] = counts.get(k, 0) + res.get(k, 0)
-    db.complete_detail(conn, portal.source, [it.native_id for it in buffer])
+    _, conn = db.run_resilient(
+        conn, lambda c: db.complete_detail(c, portal.source, ids),
+        reconnect=reconnect, label="drain.complete",
+    )
     LOG.info(
         "DRAIN flush size=%d new=%d updated=%d unchanged=%d images=%d",
         len(buffer), res.get("new", 0), res.get("updated", 0),
         res.get("unchanged", 0), res.get("images_discovered", 0),
     )
+    return conn
+
+
+def _drain_mark_gone(portal: Portal, conn: Any, native_id: str, reconnect: Any) -> Any:
+    """Flip a gone listing inactive + dequeue it, transient-drop resilient.
+    Returns the live connection. mark_gone's own bookkeeping errors stay tolerated
+    (one listing must not red the run); a dropped connection reconnects + retries."""
+    def _op(c: Any) -> None:
+        try:
+            portal.mark_gone(c, native_id)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping; tolerated like before
+            LOG.warning("could not mark id=%s inactive: %s", native_id, exc)
+        db.complete_detail(c, portal.source, [native_id])
+
+    _, conn = db.run_resilient(conn, _op, reconnect=reconnect, label="drain.gone")
+    return conn
+
+
+def _drain_record_failure(
+    portal: Portal, conn: Any, native_id: str, message: str, reconnect: Any,
+) -> Any:
+    """Record a failed fetch (bump the queue + failure-ledger attempts),
+    transient-drop resilient. Returns the live connection.
+
+    Unlike the flush's write+complete, BOTH writes here are NON-idempotent counter
+    bumps — record_failure -> listing_fetch_failures.attempts+1 (sreality; a no-op
+    on the other portals) and fail_detail -> listing_detail_queue.attempts+1, each
+    gating give_up = attempts+1 >= 5. So they must NOT share one retried op: a drop
+    after the first committed would replay it and double-advance the give-up
+    counter, retiring a still-retryable listing early. Split them into two separate
+    run_resilient calls (the same shape as the flush path's write/complete split),
+    so a drop on the queue bump never re-runs the ledger bump — each advances at
+    most once per logical failure (bar each op's own irreducible commit-ack
+    ambiguity, the property every wrapped drain op already carries)."""
+    _, conn = db.run_resilient(
+        conn, lambda c: portal.record_failure(c, native_id, message),
+        reconnect=reconnect, label="drain.fail.record",
+    )
+    _, conn = db.run_resilient(
+        conn, lambda c: db.fail_detail(c, portal.source, [native_id], message),
+        reconnect=reconnect, label="drain.fail.queue",
+    )
+    return conn
 
 
 def run_detail_drain(
@@ -307,7 +369,10 @@ def run_detail_drain(
         last_bumped.update(counts)
 
     try:
-        reclaimed = db.reclaim_stale_claims(conn, portal.source)
+        reclaimed, conn = db.run_resilient(
+            conn, lambda c: db.reclaim_stale_claims(c, portal.source),
+            reconnect=portal.connect_drain, label="drain.reclaim",
+        )
         if reclaimed:
             LOG.info("DRAIN reclaimed stale claims=%d", reclaimed)
         LOG.info(
@@ -324,7 +389,10 @@ def run_detail_drain(
             chunk = claim_chunk
             if max_claims is not None:
                 chunk = min(chunk, max_claims - total_claimed)
-            claimed = db.claim_detail_batch(conn, portal.source, chunk)
+            claimed, conn = db.run_resilient(
+                conn, lambda c: db.claim_detail_batch(c, portal.source, chunk),
+                reconnect=portal.connect_drain, label="drain.claim",
+            )
             if not claimed:
                 break
             total_claimed += len(claimed)
@@ -338,22 +406,19 @@ def run_detail_drain(
                     if item.kind == "ok":
                         buffer.append(item)
                         if len(buffer) >= DETAIL_BATCH_SIZE:
-                            _flush_drain_batch(portal, conn, buffer, counts, dry_run)
+                            conn = _flush_drain_batch(
+                                portal, conn, buffer, counts, dry_run, portal.connect_drain)
                             buffer = []
                     elif item.kind == "gone":
                         LOG.info("DETAIL id=%s gone (is_active=false)", item.native_id)
-                        try:
-                            portal.mark_gone(conn, item.native_id)
-                        except Exception as exc:
-                            LOG.warning(
-                                "could not mark id=%s inactive: %s", item.native_id, exc
-                            )
-                        db.complete_detail(conn, portal.source, [item.native_id])
+                        conn = _drain_mark_gone(
+                            portal, conn, item.native_id, portal.connect_drain)
                         counts["gone"] += 1
                     else:  # error: keep the queue row, bump attempts, log failure
                         LOG.error("DETAIL id=%s error: %s", item.native_id, item.error)
-                        portal.record_failure(conn, item.native_id, item.error or "error")
-                        db.fail_detail(conn, portal.source, [item.native_id], item.error or "error")
+                        conn = _drain_record_failure(
+                            portal, conn, item.native_id, item.error or "error",
+                            portal.connect_drain)
                         counts["errors"] += 1
             LOG.info(
                 "DRAIN progress claimed=%d new=%d updated=%d unchanged=%d "
@@ -362,14 +427,18 @@ def run_detail_drain(
                 counts["unchanged"], counts["gone"], counts["errors"], len(buffer),
             )
             _persist_counts()
-        _flush_drain_batch(portal, conn, buffer, counts, dry_run)
+        conn = _flush_drain_batch(
+            portal, conn, buffer, counts, dry_run, portal.connect_drain)
         _persist_counts()
     finally:
-        # Teardown must never red an otherwise-successful drain. The pooler can
-        # silently drop the long-held drain connection during the rate-limited
-        # fetch waits; closing the reset socket then raises OperationalError —
-        # which previously propagated to a non-zero exit even though every batch
-        # had committed and the caller had finalized the scrape_run cleanly
+        # Every DB op above goes through db.run_resilient, which retries a
+        # transient pooler drop / deadlock and reconnects when the socket dies —
+        # so a mid-run blip no longer reds the whole drain (it used to: SSL-EOF on
+        # a flush, a deadlock victim on the batch upsert). This teardown is the
+        # last line of defense: the pooler can still drop the connection between
+        # the final op and here, and closing a reset socket raises
+        # OperationalError, which must NOT propagate to a non-zero exit — every
+        # batch already committed and the caller finalizes the scrape_run cleanly
         # (errors=0, ended_at set) on its own connection. Any claim not yet
         # written stays claimed and is recovered by the next run's
         # reclaim_stale_claims, so swallowing a close failure loses nothing.

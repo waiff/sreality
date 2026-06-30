@@ -6,7 +6,11 @@ are monkeypatched.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
+
+import psycopg
+import pytest
 
 from scraper import portal_runner
 from scraper.portal_runner import DrainItem
@@ -15,6 +19,8 @@ from scraper.portal_runner import DrainItem
 class _Conn:
     def __init__(self, close_error: Exception | None = None) -> None:
         self.closed = False
+        self.broken = False
+        self.rolled_back = 0
         self._close_error = close_error
 
     def __enter__(self) -> "_Conn":
@@ -23,10 +29,21 @@ class _Conn:
     def __exit__(self, *a: Any) -> None:
         return None
 
+    def rollback(self) -> None:
+        self.rolled_back += 1
+
     def close(self) -> None:
         self.closed = True
         if self._close_error is not None:
             raise self._close_error
+
+
+def _is_drop(exc: BaseException) -> bool:
+    """A connection-drop style OperationalError (vs a deadlock/serialization
+    rollback, which leaves the socket usable)."""
+    return isinstance(exc, psycopg.OperationalError) and not isinstance(
+        exc, (psycopg.errors.DeadlockDetected, psycopg.errors.SerializationFailure)
+    )
 
 
 class _FakePortal:
@@ -34,13 +51,20 @@ class _FakePortal:
     index_rate = 1.0
 
     def __init__(self, *, supports_complete_walk=True, categories=None, complete=True,
-                 fetch_kinds=None, walk_fails=None, conn_close_error=None) -> None:
+                 fetch_kinds=None, walk_fails=None, conn_close_error=None,
+                 write_errors=None, reconnect_conns=False) -> None:
         self.supports_complete_walk = supports_complete_walk
         self._categories = categories if categories is not None else ["A", "B"]
         self._complete = complete
         self._fetch_kinds = fetch_kinds or {}
         self._walk_fails = walk_fails or set()
+        # Successive exceptions raised by write_details (None = let it succeed),
+        # used to simulate a transient drop/deadlock on a flush.
+        self._write_errors = list(write_errors or [])
+        self._reconnect_conns = reconnect_conns
         self.conn = _Conn(close_error=conn_close_error)
+        self.conns = [self.conn]            # every connection handed out, in order
+        self.connect_drain_calls = 0
         self.calls: dict[str, list] = {
             "walk": [], "mark_inactive": [], "active_count": [],
             "write": [], "gone": [], "failure": [],
@@ -56,6 +80,11 @@ class _FakePortal:
         return self.conn
 
     def connect_drain(self):
+        self.connect_drain_calls += 1
+        if self._reconnect_conns and self.connect_drain_calls > 1:
+            c = _Conn()
+            self.conns.append(c)
+            return c
         return self.conn
 
     def walk_category(self, c, conn, dry_run, limiter):
@@ -84,6 +113,12 @@ class _FakePortal:
 
     def write_details(self, conn, items):
         self.calls["write"].append([it.native_id for it in items])
+        if self._write_errors:
+            exc = self._write_errors.pop(0)
+            if exc is not None:
+                if _is_drop(exc):
+                    conn.broken = True   # a drop kills the socket -> reconnect
+                raise exc
         return {"new": len(items), "updated": 0, "unchanged": 0, "images_discovered": 0}
 
     def mark_gone(self, conn, native_id):
@@ -353,3 +388,144 @@ def test_detail_drain_swallows_counts_bump_failure(monkeypatch):
     assert rc == 0                            # bump failure swallowed
     assert p.calls["write"] == [["1"]]        # data still committed
     assert agg["listings_scraped_new"] == 1
+
+
+# --- transient-DB resilience (db.run_resilient on the drain's hot path) ------
+
+
+def test_detail_drain_retries_flush_deadlock_on_same_conn(monkeypatch):
+    # A deadlock victim on the batch upsert (sreality's historical ~1% red): the
+    # flush is retried on the SAME connection (no reconnect) and the run stays
+    # green. The batch write is idempotent, so the replay re-commits identically.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    cap = _patch_queue(monkeypatch, [[("1", None, None), ("2", None, None)]])
+    p = _FakePortal(write_errors=[psycopg.errors.DeadlockDetected("deadlock detected"), None])
+    rc, agg = portal_runner.run_detail_drain(
+        p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert p.calls["write"] == [["1", "2"], ["1", "2"]]  # attempted twice (retry)
+    assert cap["complete"] == [["1", "2"]]               # dequeued once, after success
+    assert agg["listings_scraped_new"] == 2              # counts applied once, not doubled
+    assert p.connect_drain_calls == 1                    # NO reconnect for a deadlock
+    assert p.conn.rolled_back == 1                        # aborted txn cleared before retry
+
+
+def test_detail_drain_reconnects_on_dropped_flush(monkeypatch):
+    # The pooler drops the long-held connection mid-flush (realitymix's observed
+    # 'SSL error: unexpected eof while reading'): run_resilient reconnects and
+    # retries on a fresh connection, and the run stays green instead of reding.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    cap = _patch_queue(monkeypatch, [[("1", None, None), ("2", None, None)]])
+    drop = psycopg.OperationalError("SSL error: unexpected eof while reading")
+    p = _FakePortal(write_errors=[drop, None], reconnect_conns=True)
+    rc, agg = portal_runner.run_detail_drain(
+        p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert p.calls["write"] == [["1", "2"], ["1", "2"]]
+    assert cap["complete"] == [["1", "2"]]
+    assert agg["listings_scraped_new"] == 2
+    assert p.connect_drain_calls == 2          # reconnected after the drop
+    assert p.conns[0].closed                   # the broken connection was closed
+
+
+def test_detail_drain_reds_on_persistent_db_outage(monkeypatch):
+    # A genuine sustained outage must still surface (not spin forever): the flush
+    # exhausts its retry budget and the exception propagates -> the run reds.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    _patch_queue(monkeypatch, [[("1", None, None)]])
+    drop = psycopg.OperationalError("connection refused")
+    p = _FakePortal(write_errors=[drop] * 8, reconnect_conns=True)
+    with pytest.raises(psycopg.OperationalError):
+        portal_runner.run_detail_drain(p, None, False, detail_workers=1, detail_rate=1.0)
+    assert len(p.calls["write"]) == portal_runner.db._RESILIENT_ATTEMPTS  # bounded, then give up
+
+
+def test_detail_drain_gone_path_survives_transient_drop(monkeypatch):
+    # The per-item gone bookkeeping (mark inactive + dequeue) is resilient too: a
+    # drop while completing a gone listing reconnects rather than reding the run.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    cap = {"complete": [], "calls": 0}
+    monkeypatch.setattr(
+        portal_runner.db, "reclaim_stale_claims", lambda *a, **k: 0)
+    batches = iter([[("9", None, None)], []])
+    monkeypatch.setattr(
+        portal_runner.db, "claim_detail_batch", lambda *a, **k: next(batches, []))
+
+    def _complete(_c, _src, ids):
+        cap["calls"] += 1
+        if cap["calls"] == 1:
+            _c.broken = True
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+        cap["complete"].append(sorted(ids))
+
+    monkeypatch.setattr(portal_runner.db, "complete_detail", _complete)
+    p = _FakePortal(fetch_kinds={"9": "gone"}, reconnect_conns=True)
+    rc, agg = portal_runner.run_detail_drain(
+        p, None, False, detail_workers=1, detail_rate=1.0)
+    assert rc == 0
+    assert agg["listings_inactive"] == 1
+    assert cap["complete"] == [["9"]]          # dequeued after the reconnect retry
+    assert p.connect_drain_calls == 2          # reconnected for the gone op
+
+
+def test_drain_record_failure_drop_on_queue_bump_does_not_replay_ledger(monkeypatch):
+    # The failure path bumps TWO non-idempotent counters: record_failure
+    # (listing_fetch_failures.attempts+1) then fail_detail (queue attempts+1). They
+    # are SPLIT into two run_resilient calls so a transient drop on the queue bump
+    # retries ONLY fail_detail — it must never replay (double-advance) the already-
+    # committed ledger bump, which would retire a still-retryable listing early.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    record_calls = {"n": 0}
+    fail_calls = {"n": 0}
+
+    def _record_failure(_c, _nid, _msg):
+        record_calls["n"] += 1
+
+    def _fail_detail(c, _src, _ids, _msg, **k):
+        fail_calls["n"] += 1
+        if fail_calls["n"] == 1:          # the queue bump drops the first time
+            c.broken = True
+            raise psycopg.OperationalError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(portal_runner.db, "fail_detail", _fail_detail)
+    conns: list[_Conn] = []
+
+    def _reconnect() -> _Conn:
+        c = _Conn()
+        conns.append(c)
+        return c
+
+    portal = SimpleNamespace(source="fake", record_failure=_record_failure)
+    conn0 = _Conn()
+    out = portal_runner._drain_record_failure(portal, conn0, "55", "boom", _reconnect)
+
+    assert record_calls["n"] == 1     # ledger bump applied EXACTLY once (not replayed)
+    assert fail_calls["n"] == 2       # queue bump retried after the drop
+    assert conn0.broken and conn0.closed
+    assert out is conns[-1]           # returned the reconnected conn
+
+
+def test_run_resilient_closes_self_opened_conn_on_exhaustion(monkeypatch):
+    # On the give-up path run_resilient must close a connection IT opened (the
+    # caller never received it), but never the caller's original.
+    monkeypatch.setattr(portal_runner.db.time, "sleep", lambda *a, **k: None)
+    opened: list[_Conn] = []
+
+    def _reconnect() -> _Conn:
+        c = _Conn()
+        c.broken = True          # every reconnect yields an already-doomed socket
+        opened.append(c)
+        return c
+
+    original = _Conn()
+    original.broken = True
+
+    def _always_drops(_c):
+        raise psycopg.OperationalError("connection refused")
+
+    with pytest.raises(psycopg.OperationalError):
+        portal_runner.db.run_resilient(
+            original, _always_drops, reconnect=_reconnect, attempts=3, base_delay=0)
+
+    assert original.closed                         # broken original closed in-loop
+    assert opened and all(c.closed for c in opened)  # every self-opened conn closed
