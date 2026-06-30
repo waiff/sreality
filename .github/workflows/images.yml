@@ -18,9 +18,12 @@ name: "Scraping: image backlog drain (sharded)"
 #     110-min timeout (so scrape_run finalize runs, no orphaned/stuck rows)
 #     rather than being SIGKILLed. Per-image commits mean progress is never lost;
 #     the next 2-hourly tick continues the drain. Override to 0 to drain-to-empty.
-#   * Each shard has its OWN suspicious-stop circuit-breaker (transient-failure
-#     rate > 30% over its last 100 outcomes) and its own runner IP, so per-IP
-#     request rate stays at today's proven level — only aggregate load rises.
+#   * Per-CDN-host politeness: a concurrency cap (default 8 simultaneous
+#     connections per image-URL host) keeps a small portal CDN from being
+#     dogpiled by the worker pool, and a PER-HOST suspicious-stop quarantines a
+#     host whose transient-failure rate > 30% over its last 100 outcomes while
+#     the other hosts keep draining. A throttle event exits 0 (it's a healthy
+#     backoff, not a failure), so a shard no longer goes incidentally red on it.
 #   * Per-shard concurrency group with cancel-in-progress false: a still-draining
 #     shard is never killed mid-run; the next tick queues behind it.
 #

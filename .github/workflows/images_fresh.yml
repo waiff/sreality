@@ -69,20 +69,31 @@ jobs:
           if [ -z "$WORKERS" ]; then WORKERS="32"; fi
           ARGS="--images-only --images-active-only --max-image-downloads $MAX_IMG --image-workers $WORKERS"
           echo "Running with: $ARGS"
-          # Capture python's own exit code through the tee pipe, record how many
-          # images this unit attempted (drives the chain decision), then exit
-          # with python's code so suspicious-stop (rc 75) / failures don't chain.
+          # Capture python's own exit code through the tee pipe. The image phase
+          # now exits 0 even when a CDN is throttling us — a per-host quarantine
+          # is a deliberate, healthy backoff, not a failure — so a non-zero RC
+          # means a REAL crash and correctly fails the job (instead of the old
+          # exit-75 that painted every throttle event red on the Health page).
+          # We still gate the self-chain on the 'IMAGES STOP suspicious' marker
+          # (emitted only when the WHOLE remaining queue is one struggling CDN)
+          # so we don't immediately re-hammer it; cron restarts the chain in 15m.
           set +e
           python -m scraper.main $ARGS 2>&1 | tee /tmp/img_fresh.log
           RC=${PIPESTATUS[0]}
           set -e
           ATTEMPTED=$(grep -oE 'attempted=[0-9]+' /tmp/img_fresh.log | tail -1 | cut -d= -f2 || true)
           echo "attempted=${ATTEMPTED:-0}" >> "$GITHUB_OUTPUT"
+          if grep -q 'IMAGES STOP suspicious' /tmp/img_fresh.log; then
+            echo "suspicious=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "suspicious=false" >> "$GITHUB_OUTPUT"
+          fi
           exit $RC
 
-      # Re-dispatch for back-to-back cadence only when there was work to do.
+      # Re-dispatch for back-to-back cadence only when there was work to do AND
+      # the run didn't stop on an all-hosts-quarantined backoff.
       - name: Chain next run (near-continuous)
-        if: ${{ success() && steps.drain.outputs.attempted != '0' && steps.drain.outputs.attempted != '' }}
+        if: ${{ success() && steps.drain.outputs.attempted != '0' && steps.drain.outputs.attempted != '' && steps.drain.outputs.suspicious != 'true' }}
         env:
           CHAIN_TOKEN: ${{ secrets.SCRAPE_CHAIN_TOKEN }}
         run: |

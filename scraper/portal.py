@@ -39,6 +39,7 @@ _LIMIT_COERCERS: dict[str, Any] = {
     "max_detail_per_category": _as_opt_int,
     "image_workers": int,
     "max_image_downloads": _as_opt_int,
+    "image_max_concurrency_per_host": int,
     "suspicious_stop_window": int,
     "suspicious_stop_threshold": float,
 }
@@ -58,6 +59,13 @@ class PortalLimits:
     max_detail_per_category: int | None = None
     image_workers: int = 32
     max_image_downloads: int | None = 1000
+    # Max simultaneous image-download connections to ONE CDN host (keyed on the
+    # image URL's hostname). Bounds the pile-up that makes a small portal CDN
+    # shed load via read-timeouts when all `image_workers` happen to target the
+    # same host (the newest-first fresh lane is one-portal-dominated). It caps
+    # concurrency, not throughput: a fast CDN serving its N parallel requests
+    # quickly is unaffected; only the dogpile is bounded. <=0 disables the cap.
+    image_max_concurrency_per_host: int = 8
     suspicious_stop_window: int = 100
     suspicious_stop_threshold: float = 0.30
 
