@@ -760,42 +760,20 @@ def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
     assert stats["pairs_considered"] == 0
 
 
-def test_run_engine_geo_phash_floor_plan_defer_enqueues(monkeypatch: Any) -> None:
-    """A pHash would-merge GEO pair whose floor-plan verdict isn't warmed must be ENQUEUED
-    as a tier='geo' candidate (geo always surfaces), NOT silently deferred: the discovery
-    cursor advances past its window, so the paid geo candidate drain must be able to pick
-    it up. (On the STREET path the same defer stays a defer — the 6h full scan re-tries.)"""
-    import scripts.dedup_engine as eng
-    monkeypatch.setattr(eng, "_load_geo_eligible", lambda conn, **k: [
-        _gk(1, 101, source="sreality"), _gk(2, 102, source="idnes"),
-    ])
-    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)  # would merge
-    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
-    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [1])  # BOTH have a plan
-    monkeypatch.setattr(eng, "merge_properties",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("defer must not merge")))
-    enq: list[dict[str, Any]] = []
-    monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda conn, x, y, markers, **kw: enq.append(markers))
-    # floor_plan_fn=None (default) -> the gate returns 'defer' (both plans, no verdict fn).
-    stats = eng.run_engine(_FakeConn([]), classify_fn=None, compare_fn=None,
-                           max_vision_calls=10, geo=True, geo_area_max_pct=0.20)
-    assert stats["queued"] == 1
-    assert stats["floor_plan_deferred"] == 0           # enqueued, not silently deferred
-    assert stats["auto_phash"] == 0
-    assert enq and enq[0]["tier"] == "geo" and enq[0]["reason"] == "floor_plan_pending"
-
-
-def test_run_engine_street_phash_floor_plan_defer_stays_deferred(monkeypatch: Any) -> None:
-    """The mirror of the above for STREET: a would-merge street pair with an unwarmed
-    floor-plan verdict DEFERS (re-tried by the next 6h full scan), it is NOT enqueued —
-    the geo-only enqueue must not leak into the street path."""
+def test_run_engine_phash_floor_plan_defer_stays_deferred(monkeypatch: Any) -> None:
+    """A pHash would-merge pair whose floor-plan verdict isn't warmed DEFERS (re-tried next
+    run once the batch/live gate warms it) — it is NOT enqueued or merged. This holds for the
+    per-pair GEO candidate drain too: a geo candidate reaching a defer is already proposed, so
+    a defer leaves it proposed for the next drain tick (market DISCOVERY is set-based, not this
+    per-pair loop, so it never reaches this branch)."""
     import scripts.dedup_engine as eng
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [1])  # both plans
     monkeypatch.setattr(eng, "_enqueue_candidate",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("street defer must not enqueue")))
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("defer must not enqueue")))
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("defer must not merge")))
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
     stats = eng.run_engine(conn, max_vision_calls=10)  # floor_plan_fn=None -> defer
     assert stats["floor_plan_deferred"] == 1
@@ -1471,37 +1449,120 @@ def test_read_geo_cursor_defaults_zero() -> None:
     assert _read_geo_cursor(empty) == 0
 
 
-def test_load_geo_eligible_scopes_by_obec_window() -> None:
-    """The obec window adds `obec_id > lo AND obec_id <= hi` to the load with the bounds bound
-    as params — so the discovery run reads only its window (index range scan), not the market."""
+def test_load_geo_eligible_drain_restrict_and_full_scan() -> None:
+    """The per-pair geo loader (the candidate DRAIN) scopes to restrict_property_ids; with none
+    it's the whole market. It has NO obec-window clause — market DISCOVERY is set-based, not this
+    loader."""
     from scripts.dedup_engine import _load_geo_eligible
 
     conn = _WindowConn(window_rows=[])
-    _load_geo_eligible(conn, obec_window=(500011, 520000))
+    _load_geo_eligible(conn, restrict_property_ids={101, 102})
     assert conn.geo_load_sql is not None
-    assert "l.obec_id > %(obec_lo)s AND l.obec_id <= %(obec_hi)s" in conn.geo_load_sql
-    assert conn.geo_load_params["obec_lo"] == 500011
-    assert conn.geo_load_params["obec_hi"] == 520000
-    # No restrict clause when only the window is given.
-    assert "l.property_id = ANY" not in conn.geo_load_sql
-
-
-def test_load_geo_eligible_full_scan_has_no_window_clause() -> None:
-    """No window + no restrict = the whole-market geo scan (budget-0 ad-hoc): no obec bounds."""
-    from scripts.dedup_engine import _load_geo_eligible
-
-    conn = _WindowConn(window_rows=[])
-    _load_geo_eligible(conn)
-    assert conn.geo_load_sql is not None
+    assert "l.property_id = ANY(%(pids)s)" in conn.geo_load_sql
     assert "l.obec_id >" not in conn.geo_load_sql
-    assert "l.property_id = ANY" not in conn.geo_load_sql
+
+    conn2 = _WindowConn(window_rows=[])
+    _load_geo_eligible(conn2)
+    assert "l.property_id = ANY" not in conn2.geo_load_sql
+    assert "l.obec_id >" not in conn2.geo_load_sql
+
+
+class _DiscoveryCur:
+    def __init__(self, conn: "_DiscoveryConn") -> None:
+        self._conn = conn
+        self._row: tuple[Any, ...] | None = None
+        self.rowcount = 0
+
+    def __enter__(self) -> "_DiscoveryCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        s = " ".join(sql.split())
+        self._conn.executed.append(s)
+        if "SET LOCAL statement_timeout" in s:
+            self._row = None
+        elif "INSERT INTO property_identity_candidates" in s and "WITH geo_e" in s:
+            self._conn.insert_sql, self._conn.insert_params = s, params
+            self.rowcount = self._conn.insert_rowcount
+            self._row = None
+        elif "SELECT count(*) FROM pairs" in s:
+            self._conn.count_sql, self._conn.count_params = s, params
+            self._row = (self._conn.count_val,)
+        else:
+            self._row = None
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._row
+
+
+class _DiscoveryConn:
+    def __init__(self, count_val: int = 0, insert_rowcount: int = 0) -> None:
+        self.count_val = count_val
+        self.insert_rowcount = insert_rowcount
+        self.executed: list[str] = []
+        self.count_sql: str | None = None
+        self.insert_sql: str | None = None
+        self.count_params: Any = None
+        self.insert_params: Any = None
+
+    def cursor(self) -> _DiscoveryCur:
+        return _DiscoveryCur(self)
+
+    def transaction(self) -> _Ctx:
+        return _Ctx()
+
+
+def test_discover_geo_candidates_shadow_counts() -> None:
+    """shadow=True runs the COUNT (no INSERT, no writes) and returns the co-located pair count,
+    with the window bounds + geo thresholds bound as params."""
+    from scripts.dedup_engine import _discover_geo_candidates
+
+    conn = _DiscoveryConn(count_val=1234)
+    n = _discover_geo_candidates(
+        conn, obec_window=(554781, 558010), area_pct=0.15, max_cell=25, coord_m=35.0, shadow=True)
+    assert n == 1234
+    assert conn.insert_sql is None                       # shadow writes nothing
+    assert conn.count_sql is not None
+    assert "l.obec_id > %(obec_lo)s AND l.obec_id <= %(obec_hi)s" in conn.count_sql
+    assert conn.count_params["obec_lo"] == 554781 and conn.count_params["obec_hi"] == 558010
+    assert conn.count_params["max_cell"] == 25 and conn.count_params["coord_m"] == 35.0
+    assert conn.count_params["area_pct"] == 0.15
+
+
+def test_discover_geo_candidates_live_inserts() -> None:
+    """A live run runs SET LOCAL statement_timeout then the INSERT (ON CONFLICT DO NOTHING) and
+    returns the number of NEW candidates (rowcount)."""
+    from scripts.dedup_engine import _discover_geo_candidates
+
+    conn = _DiscoveryConn(insert_rowcount=57)
+    n = _discover_geo_candidates(
+        conn, obec_window=(0, 520000), area_pct=0.2, max_cell=25, coord_m=35.0, shadow=False)
+    assert n == 57
+    assert conn.insert_sql is not None and conn.count_sql is None
+    assert "ON CONFLICT (left_property_id, right_property_id) DO NOTHING" in conn.insert_sql
+    assert "tier" in conn.insert_sql and "'geo'" in conn.insert_sql
+    assert any("SET LOCAL statement_timeout" in s for s in conn.executed)
+
+
+def test_discover_geo_candidates_market_scan_has_no_window() -> None:
+    """obec_window=None (budget 0 / ad-hoc) = a whole-market scan: no obec bounds in the SQL."""
+    from scripts.dedup_engine import _discover_geo_candidates
+
+    conn = _DiscoveryConn(count_val=9)
+    _discover_geo_candidates(
+        conn, obec_window=None, area_pct=0.15, max_cell=25, coord_m=35.0, shadow=True)
+    assert conn.count_sql is not None and "l.obec_id >" not in conn.count_sql
+    assert "obec_lo" not in (conn.count_params or {})
 
 
 def test_dedup_geo_crons_match_their_args_branches() -> None:
-    """Both geo crons must map to their intended branch: DISCOVERY is --free + obec-windowed
-    (fast, queues co-located pairs); the CANDIDATE DRAIN is paid (--candidates, vision on) so
-    the facade compare confirms them. A drift falls through to the street free full-scan → ZERO
-    geo work again (the bug the dedicated cron fixed)."""
+    """Both geo crons must map to their intended branch: DISCOVERY is --free (set-based, no paid
+    vision fns — it just enqueues the window's co-located pairs); the CANDIDATE DRAIN is paid
+    (--candidates, vision on) so the facade compare confirms them. A drift falls through to the
+    street free full-scan → ZERO geo work again (the bug the dedicated cron fixed)."""
     import pathlib
 
     wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "dedup_engine.yml"

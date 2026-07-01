@@ -6,7 +6,7 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
-### 2026-07: Progressive geo dedup coverage — obec-cursor discovery + paid candidate-drain
+### 2026-07: Progressive geo dedup coverage — set-based discovery + paid candidate-drain
 
 The dedicated paid geo run (below) PLATEAUED: it was ONE monolithic paid full scan, so its slow
 forensic facade compares burned `--max-seconds` on the FRONT of the obec range every run (obec ids
@@ -15,28 +15,40 @@ Olomouc, obec 500496 near the front) and it re-STARTED from `obec_id` order ever
 reached Praha (obec 554782, ~16.3K single-dwelling listings, ~9.7K un-surfaced co-located cross-source
 pairs). The geo-eligible universe (~194K listings, 5,690 obce) is too big for one scan.
 
-Fix — mirror the street path's proven **free-discovery + bounded-paid-drain** shape:
-- **GEO DISCOVERY** (`dedup_engine.yml` cron `0 3,9,15,21`, now `--geo-only --free`) walks the market in
-  a **persistent obec-cursor window** (`dedup_geo_scan_state`, migration 258; `dedup_geo_scan_budget`,
-  default 30 000 listings): each run scans one budget-sized window of WHOLE obce beyond the cursor (cells
-  stay intact — geo cells are obec-bounded), queues every co-located pair, then advances the cursor,
-  wrapping to 0 at the end. Successive runs cover Olomouc → … → Praha → wrap (Praha = window #3 of ~7,
-  covered day 1; full cycle ~2 days). The cursor advances only after a window that FINISHED (a truncated
-  run keeps its cursor and re-scans over a warm cache — the `--dirty` claim-clear discipline).
+**A per-pair `--free` discovery loop was built first, then VALIDATION KILLED IT:** the per-pair path
+runs at only ~2.5 pairs/sec (sequential DB round-trips at the runner→DB latency), so a live shadow of a
+30K-listing window burned its 1200s budget resolving ~3.5K of ~18K pairs and NEVER finished — a big obec
+(Praha) would stick the cursor permanently. The fix is a **set-based discovery** (the same window
+computes in ~15s; the whole market in ~9.5s → ~111K co-located pairs):
+
+- **GEO DISCOVERY** (`dedup_engine.yml` cron `0 3,9,15,21`, `--geo-only --free`) is now a single
+  SQL self-join (`_discover_geo_candidates` / `_GEO_DISCOVERY_INSERT`) that enqueues a window's co-located
+  pairs as `tier='geo'` proposed candidates in seconds, applying only the SQL-expressible guards (same geo
+  cell + `ST_DWithin` + area tolerance + cell-size ≤ `MAX_GEO_GROUP_SIZE`; `ON CONFLICT DO NOTHING` respects
+  prior decisions). It walks the market in a **persistent obec-cursor window** (`dedup_geo_scan_state`,
+  migration 258; `dedup_geo_scan_budget`, default 30 000 listings) that PACES the queue growth and advances
+  the cursor Olomouc → … → Praha → wrap. The cursor advances after the window's INSERT COMMITs (a
+  statement-timeout rolls back + leaves the cursor un-advanced → retry, no skipped obec).
 - **GEO CANDIDATE DRAIN** (new cron `15 5,17`, `--geo-only --candidates --max-vision-calls N`, PAID)
-  re-decides ONLY the queued `tier='geo'` candidates (O(queue), same `_load_geo_eligible(restrict=…)`
-  path as the street candidate drain) and runs the forensic FACADE compare — the only thing that resolves
-  cross-portal houses (different photos → pHash can't) — auto-merging the confident, dismissing/queuing the rest.
-- `--geo-cursor C` (+ `--shadow`) previews a specific window without touching the state; `--geo-scan-budget 0`
-  is an ad-hoc whole-market scan. Empirically validated: the fix surfaces Praha's ~9.7K un-surfaced pairs
-  (the 6 reported never-candidate pairs are a sliver); Olomouc's queue is genuine co-location (100% within
-  15 m, 65% cross-source) — NOT a geocoding artifact, so the fix is right to advance past it, not filter it.
+  re-decides ONLY the queued `tier='geo'` candidates (O(queue), same `_load_geo_eligible(restrict=…)` path
+  as the street candidate drain) through the shared `resolve_pair` brain — pHash → forensic FACADE compare
+  (the only thing that resolves cross-portal houses; different photos → pHash can't) → floor/site-plan gate
+  — auto-merging the confident, auto-dismissing the confident-different + the deterministic `classify_geo`
+  rejects (house-number / unit-marker contradictions the permissive discovery couldn't express), queuing
+  the ambiguous. So discovery over-enqueues permissively and the drain resolves precisely.
+- **Queue volume:** market-wide ~111K co-located pairs → a LARGE `tier='geo'` queue that drains
+  progressively as the paid drain + auto-merge/auto-dismiss chew through it (the accepted self-healing
+  model — same as the street queue; the drain also DEFERS a candidate until its listings are CLIP-tagged,
+  so geo resolution ramps with CLIP coverage).
+- `--geo-cursor C` (+ `--shadow`) COUNTS a specific window without touching the state; `--geo-scan-budget 0`
+  is an ad-hoc whole-market INSERT. Empirically validated on prod: Praha window ≈ 17.8K new candidates in
+  ~15s; whole market ≈ 111K pairs in ~9.5s. Olomouc's queue is genuine co-location (100% within 15 m, 65%
+  cross-source) — NOT a geocoding artifact, so the fix is right to advance past it, not filter it.
 
 - **Follow-ups:** a geo DIRTY drain (real-time coverage of NEW single-dwelling listings, the next layer —
   as `--dirty` is for street); surface geo discovery progress on `/dedup` (`dedup_geo_scan_state` cursor +
   `updated_at` + the `tier='geo'` proposed count — a stalled cursor is otherwise only visible in Actions
-  logs; the discovery run WARNs on a truncated cursor-held window); extend the `dedup_batches` warmer to
-  the geo funnel; the cross-portal coord-divergence cell-miss (a same house geocoded ~270 m apart lands in
+  logs); the cross-portal coord-divergence cell-miss (a same house geocoded ~270 m apart lands in
   different geo cells).
 
 ### 2026-06: Dedup geo path — dedicated, paid scheduled run (single-dwelling dedup unblocked)

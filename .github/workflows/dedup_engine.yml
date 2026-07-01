@@ -183,18 +183,18 @@ jobs:
             # floor-plan vision (300 cold checks); warm verdicts replay free.
             ARGS="--free --candidates --max-pairs 200000 --max-seconds 2400 --floor-plan-budget 300"
           elif [ "${{ github.event.schedule }}" = "0 3,9,15,21 * * *" ]; then
-            # SCHEDULED GEO DISCOVERY (free, obec-cursor windowed): single-dwelling families
+            # SCHEDULED GEO DISCOVERY (set-based, obec-cursor windowed): single-dwelling families
             # (house / land / commercial) have NO disposition, so the street+disposition engine
-            # can't touch them — geo-proximity is their path. DISCOVERY is --free (fast, no vision
-            # bottleneck): it queues every co-located pair (geo always enqueues, rule #15 (E)). A
-            # single PAID full scan burned its budget on the FRONT of the obec range every run
-            # (obec_id ASC → all Olomouc) and never reached Praha; instead this walks the market in
+            # can't touch them — geo-proximity is their path. DISCOVERY is a single SQL self-join
+            # that ENQUEUES the window's co-located pairs in ~seconds (the old per-pair loop was
+            # ~2.5 pairs/sec and NEVER finished a big obec, so the cursor never advanced). A single
+            # PAID full scan also burned its budget on the FRONT of the obec range every run
+            # (obec_id ASC → all Olomouc) and never reached Praha. This walks the market in
             # persistent obec-cursor WINDOWS (dedup_geo_scan_budget, migration 258), advancing the
-            # cursor each run → Olomouc → … → Praha → wrap, full market every ~2 days. The bounded
-            # floor-plan gate (300) still auto-confirms/dismisses would-merge both-plan pairs. The
-            # PAID facade confirm happens in the separate geo candidate drain below. dedup_geo_enabled-gated.
-            ARGS="--geo-only --free --max-pairs 200000 --geo-max-pairs 200000"
-            ARGS="$ARGS --max-seconds 2400 --floor-plan-budget 300"
+            # cursor each run → Olomouc → … → Praha → wrap. The PAID facade confirm of the queued
+            # candidates happens in the separate geo candidate drain below. --free = no paid vision
+            # fns built (discovery is pure SQL). dedup_geo_enabled-gated.
+            ARGS="--geo-only --free"
           elif [ "${{ github.event.schedule }}" = "15 5,17 * * *" ]; then
             # SCHEDULED GEO CANDIDATE DRAIN (paid, bounded): re-decide ONLY the properties in the
             # still-proposed tier='geo' queue (O(queue), --candidates), running the PAID forensic
