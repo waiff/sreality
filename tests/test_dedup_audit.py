@@ -23,6 +23,22 @@ def test_empty_detail_yields_no_rungs() -> None:
     assert build_audit_breakdown({}) == []
 
 
+def test_geo_colocated_candidate_shows_a_geo_rung() -> None:
+    # A set-based geo discovery candidate (markers_matched reason='geo_colocated') must render a
+    # 'geo' rung surfacing distance + area gap, linked to the geo area-tolerance knob — else the
+    # /dedup card would have no auditable explanation for why the pair is proposed.
+    r = _by_key({"reason": "geo_colocated", "stage": "geo",
+                 "distance_m": 4.0, "area_pct": 0.08})["geo"]
+    assert r["status"] == "info"
+    assert "4 m" in r["value"] and "8 %" in r["value"]
+    assert r["settings_keys"] == ["dedup_geo_area_max_pct"]
+
+
+def test_geo_rung_not_shown_for_non_geo_reasons() -> None:
+    # The geo rung fires only on the discovery reason, not on a forensic/terminal decision.
+    assert "geo" not in _by_key({"stage": "phash", "reason": "image_phash", "phash_pairs": 2})
+
+
 def test_phash_met_when_pairs_reach_threshold() -> None:
     r = _by_key({"stage": "phash", "reason": "image_phash",
                  "phash_pairs": 2, "phash_min_pairs": 2, "phash_threshold": 6})["phash"]

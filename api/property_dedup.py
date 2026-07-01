@@ -297,7 +297,12 @@ def summary(conn: psycopg.Connection, *, status: str = "proposed") -> dict[str, 
             for r in cur.fetchall()
         ]
         # Per-tier facet for the review rail: each family's pending count + the
-        # bulk-approvable STRONG subset (geo matches with concordant area+price/house#).
+        # bulk-approvable STRONG subset. This counts the LEGACY per-pair geo reasons
+        # ('geo_exact'/'geo_strong', concordant area+price/house#); the current set-based geo
+        # DISCOVERY writes reason='geo_colocated' (a PERMISSIVE co-location signal that is
+        # deliberately NOT bulk-approvable — single-dwelling geo never auto-merges on proximity;
+        # the paid drain's forensic facade compare is the merge gate), so those are excluded and
+        # the geo 'strong' subset trends to 0 (BulkApproveBar hides on count===0). Intentional.
         cur.execute(
             """
             SELECT c.tier, count(*) AS n,

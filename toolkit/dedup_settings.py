@@ -125,6 +125,17 @@ REGISTRY: tuple[DedupSetting, ...] = (
         "this controls RECALL into that flow, not the merge itself.",
         0.0, 1.0,
     ),
+    DedupSetting(
+        "dedup_geo_scan_budget", "float", 30000,
+        "Geo discovery window size (listings)", "Geo",
+        "The free geo DISCOVERY run walks the market in obec-cursor windows so it "
+        "covers everywhere over time instead of re-scanning the front. Each run scans "
+        "this many listings of WHOLE obce beyond the cursor (dedup_geo_scan_state), "
+        "queues the co-located pairs, and advances the cursor (wrapping at the end). "
+        "Bigger = fewer, larger windows (a full market cycle in fewer runs); smaller = "
+        "lighter per-run work. The paid geo candidate-drain then confirms the queue.",
+        5000, 200000,
+    ),
     # --- Vision models ---
     DedupSetting(
         "llm_visual_match_model", "model", "claude-sonnet-4-5",

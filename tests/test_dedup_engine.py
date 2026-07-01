@@ -760,6 +760,27 @@ def test_run_engine_geo_skips_oversized_cell(monkeypatch: Any) -> None:
     assert stats["pairs_considered"] == 0
 
 
+def test_run_engine_phash_floor_plan_defer_stays_deferred(monkeypatch: Any) -> None:
+    """A pHash would-merge pair whose floor-plan verdict isn't warmed DEFERS (re-tried next
+    run once the batch/live gate warms it) — it is NOT enqueued or merged. This holds for the
+    per-pair GEO candidate drain too: a geo candidate reaching a defer is already proposed, so
+    a defer leaves it proposed for the next drain tick (market DISCOVERY is set-based, not this
+    per-pair loop, so it never reaches this branch)."""
+    import scripts.dedup_engine as eng
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [1])  # both plans
+    monkeypatch.setattr(eng, "_enqueue_candidate",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("defer must not enqueue")))
+    monkeypatch.setattr(eng, "merge_properties",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("defer must not merge")))
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None)])
+    stats = eng.run_engine(conn, max_vision_calls=10)  # floor_plan_fn=None -> defer
+    assert stats["floor_plan_deferred"] == 1
+    assert stats["queued"] == 0
+    assert stats["auto_phash"] == 0
+
+
 # --- rule D helpers ---------------------------------------------------------
 
 def test_phash_fastpath_needs_two_identical_pairs() -> None:
@@ -1333,20 +1354,266 @@ def test_should_run_geo_only_on_explicit_flag() -> None:
     assert _should_run_geo(geo=True, geo_only=True, geo_enabled=True, dirty=True) is False
 
 
-def test_dedup_geo_cron_matches_its_args_branch() -> None:
-    """The geo cron string must be IDENTICAL in the schedule list AND the run-step match that
-    selects --geo-only. If they drift, the cron fires but the elif chain falls through to the
-    catch-all free full-scan — silently producing ZERO geo candidates again (the bug we fixed)."""
+def _geo_cron_branch_args(text: str, cron: str) -> str:
+    """The ARGS= lines under the run-step elif for `cron`, joined — for the cron-drift guard.
+    A cron whose string doesn't match its elif falls through to the catch-all free full-scan,
+    silently producing ZERO geo work (the original bug)."""
+    assert text.count(cron) >= 2, f"{cron!r} must appear in the schedule list AND the run-step match"
+    branch = text.split(f'"{cron}" ]', 1)[1].split("elif", 1)[0]
+    return " ".join(ln for ln in branch.splitlines() if "ARGS=" in ln)
+
+
+class _WindowCur:
+    def __init__(self, conn: "_WindowConn") -> None:
+        self._conn = conn
+        self._row: tuple[Any, ...] | None = None
+
+    def __enter__(self) -> "_WindowCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        s = " ".join(sql.split())
+        self._conn.executed.append((s, params))
+        if "WITH oc AS" in s:                      # _GEO_WINDOW_SQL -> (upper, ahead)
+            self._row = self._conn.window_rows.pop(0)
+        elif "cursor_obec_id FROM dedup_geo_scan_state" in s:
+            self._row = (self._conn.cursor_val,)
+        elif "UPDATE dedup_geo_scan_state" in s:
+            self._conn.advanced = params[0]
+            self._row = None
+        elif "FROM listings l" in s and "ST_Y(l.geom" in s:  # _GEO_ELIGIBLE_SQL
+            self._conn.geo_load_sql = s
+            self._conn.geo_load_params = params
+            self._row = None
+        else:
+            self._row = None
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._row
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return []
+
+
+class _WindowConn:
+    def __init__(self, window_rows: list[tuple[Any, ...]], cursor: int = 0) -> None:
+        self.window_rows = list(window_rows)
+        self.cursor_val = cursor
+        self.executed: list[tuple[str, Any]] = []
+        self.advanced: int | None = None
+        self.geo_load_sql: str | None = None
+        self.geo_load_params: Any = None
+
+    def cursor(self) -> _WindowCur:
+        return _WindowCur(self)
+
+
+def test_geo_scan_window_advances_within_budget() -> None:
+    """A window with obce ahead returns (cursor, upper, wrapped=False) — the caller advances
+    the cursor to `upper`, so the next run continues past it."""
+    from scripts.dedup_engine import _geo_scan_window
+
+    conn = _WindowConn(window_rows=[(520000, 40)])  # upper=520000, 40 obce ahead
+    assert _geo_scan_window(conn, cursor=500011, budget=30000) == (500011, 520000, False)
+
+
+def test_geo_scan_window_wraps_at_market_end() -> None:
+    """When no obec lies beyond the cursor (tail consumed), wrap to the start: recompute from 0
+    and return (0, first_upper, wrapped=True) so the wrap tick still does work."""
+    from scripts.dedup_engine import _geo_scan_window
+
+    # 1st call (from cursor) -> nothing ahead; 2nd call (from 0) -> the first window.
+    conn = _WindowConn(window_rows=[(None, 0), (515000, 30)])
+    assert _geo_scan_window(conn, cursor=599999, budget=30000) == (0, 515000, True)
+
+
+def test_geo_scan_window_empty_market_is_noop() -> None:
+    """An empty eligible market (nothing ahead of the cursor OR from 0) yields a zero-width
+    window (cursor, cursor, False) → the load matches nothing, no crash, no false advance."""
+    from scripts.dedup_engine import _geo_scan_window
+
+    conn = _WindowConn(window_rows=[(None, 0), (None, 0)])
+    assert _geo_scan_window(conn, cursor=540000, budget=30000) == (540000, 540000, False)
+
+
+def test_read_geo_cursor_defaults_zero() -> None:
+    from scripts.dedup_engine import _read_geo_cursor
+
+    assert _read_geo_cursor(_WindowConn(window_rows=[], cursor=554782)) == 554782
+    # Missing row (fresh table before seed) reads as 0.
+    empty = _WindowConn(window_rows=[])
+    empty.cursor_val = None  # type: ignore[assignment]
+    assert _read_geo_cursor(empty) == 0
+
+
+def test_load_geo_eligible_drain_restrict_and_full_scan() -> None:
+    """The per-pair geo loader (the candidate DRAIN) scopes to restrict_property_ids; with none
+    it's the whole market. It has NO obec-window clause — market DISCOVERY is set-based, not this
+    loader."""
+    from scripts.dedup_engine import _load_geo_eligible
+
+    conn = _WindowConn(window_rows=[])
+    _load_geo_eligible(conn, restrict_property_ids={101, 102})
+    assert conn.geo_load_sql is not None
+    assert "l.property_id = ANY(%(pids)s)" in conn.geo_load_sql
+    assert "l.obec_id >" not in conn.geo_load_sql
+
+    conn2 = _WindowConn(window_rows=[])
+    _load_geo_eligible(conn2)
+    assert "l.property_id = ANY" not in conn2.geo_load_sql
+    assert "l.obec_id >" not in conn2.geo_load_sql
+
+
+class _DiscoveryCur:
+    def __init__(self, conn: "_DiscoveryConn") -> None:
+        self._conn = conn
+        self._row: tuple[Any, ...] | None = None
+        self.rowcount = 0
+
+    def __enter__(self) -> "_DiscoveryCur":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        s = " ".join(sql.split())
+        self._conn.executed.append(s)
+        if "SET LOCAL statement_timeout" in s:
+            self._row = None
+        elif "INSERT INTO property_identity_candidates" in s and "WITH geo_e" in s:
+            self._conn.insert_sql, self._conn.insert_params = s, params
+            self.rowcount = self._conn.insert_rowcount
+            self._row = None
+        elif "SELECT count(*) FROM pairs" in s:
+            self._conn.count_sql, self._conn.count_params = s, params
+            self._row = (self._conn.count_val,)
+        else:
+            self._row = None
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._row
+
+
+class _DiscoveryConn:
+    def __init__(self, count_val: int = 0, insert_rowcount: int = 0) -> None:
+        self.count_val = count_val
+        self.insert_rowcount = insert_rowcount
+        self.executed: list[str] = []
+        self.count_sql: str | None = None
+        self.insert_sql: str | None = None
+        self.count_params: Any = None
+        self.insert_params: Any = None
+
+    def cursor(self) -> _DiscoveryCur:
+        return _DiscoveryCur(self)
+
+    def transaction(self) -> _Ctx:
+        return _Ctx()
+
+
+def test_discover_geo_candidates_shadow_counts() -> None:
+    """shadow=True runs the COUNT (no INSERT, no writes) and returns the co-located pair count,
+    with the window bounds + geo thresholds bound as params."""
+    from scripts.dedup_engine import _discover_geo_candidates
+
+    conn = _DiscoveryConn(count_val=1234)
+    n = _discover_geo_candidates(
+        conn, obec_window=(554781, 558010), area_pct=0.15, max_cell=25, coord_m=35.0, shadow=True)
+    assert n == 1234
+    assert conn.insert_sql is None                       # shadow writes nothing
+    assert conn.count_sql is not None
+    assert "l.obec_id > %(obec_lo)s AND l.obec_id <= %(obec_hi)s" in conn.count_sql
+    assert conn.count_params["obec_lo"] == 554781 and conn.count_params["obec_hi"] == 558010
+    assert conn.count_params["max_cell"] == 25 and conn.count_params["coord_m"] == 35.0
+    assert conn.count_params["area_pct"] == 0.15
+
+
+def test_discover_geo_candidates_live_inserts() -> None:
+    """A live run runs SET LOCAL statement_timeout then the INSERT (ON CONFLICT DO NOTHING) and
+    returns the number of NEW candidates (rowcount)."""
+    from scripts.dedup_engine import _discover_geo_candidates
+
+    conn = _DiscoveryConn(insert_rowcount=57)
+    n = _discover_geo_candidates(
+        conn, obec_window=(0, 520000), area_pct=0.2, max_cell=25, coord_m=35.0, shadow=False)
+    assert n == 57
+    assert conn.insert_sql is not None and conn.count_sql is None
+    assert "ON CONFLICT (left_property_id, right_property_id) DO NOTHING" in conn.insert_sql
+    assert "tier" in conn.insert_sql and "'geo'" in conn.insert_sql
+    assert any("SET LOCAL statement_timeout" in s for s in conn.executed)
+
+
+def test_discover_geo_candidates_market_scan_has_no_window() -> None:
+    """obec_window=None (budget 0 / ad-hoc) = a whole-market scan: no obec bounds in the SQL."""
+    from scripts.dedup_engine import _discover_geo_candidates
+
+    conn = _DiscoveryConn(count_val=9)
+    _discover_geo_candidates(
+        conn, obec_window=None, area_pct=0.15, max_cell=25, coord_m=35.0, shadow=True)
+    assert conn.count_sql is not None and "l.obec_id >" not in conn.count_sql
+    assert "obec_lo" not in (conn.count_params or {})
+
+
+def test_geo_eligibility_includes_inactive_like_street() -> None:
+    """Rule #15: inactive single-dwelling listings MUST participate (a delisted/relisted house
+    still merges into its group; and gating on is_active would permanently strand a proposed geo
+    candidate whose one side later goes inactive). The geo predicate must NOT filter is_active —
+    matching the street path + classify_geo (which has no activity check)."""
+    from scripts.dedup_engine import _GEO_ELIGIBILITY
+
+    assert "is_active" not in _GEO_ELIGIBILITY
+
+
+def test_geo_discovery_and_drain_round_the_cell_identically() -> None:
+    """The set-based DISCOVERY and the per-pair DRAIN loader must round the cell coordinate with
+    the IDENTICAL SQL expression — else Postgres (half-away) vs Python round(float,4) (banker's)
+    disagree at a 4dp half-boundary and a discovery-enqueued pair never re-forms in the drain
+    (stuck 'proposed' forever). Pinned structurally so the two can't drift."""
+    from scripts.dedup_engine import _GEO_DISCOVERY_SQL, _GEO_ELIGIBLE_SQL
+
+    for expr in ("round(ST_Y(l.geom::geometry)::numeric, 4)",
+                 "round(ST_X(l.geom::geometry)::numeric, 4)"):
+        assert expr in _GEO_DISCOVERY_SQL, "discovery must SQL-round the cell coord"
+        assert expr in _GEO_ELIGIBLE_SQL, "the drain loader must SQL-round the cell coord identically"
+
+
+def test_geo_discovery_guards_zero_area_division() -> None:
+    """Eligibility requires area IS NOT NULL, not > 0. A 0-area co-located pair would divide by
+    zero in the self-join and abort the INSERT, rolling back the whole window + stalling the
+    cursor. The denominator must be NULLIF-guarded (+ greatest>0 drops the degenerate pair)."""
+    from scripts.dedup_engine import _GEO_DISCOVERY_SQL
+
+    assert "abs(a.area - b.area) / greatest(a.area, b.area)" not in _GEO_DISCOVERY_SQL
+    assert "NULLIF(greatest(a.area, b.area), 0)" in _GEO_DISCOVERY_SQL
+    assert "greatest(a.area, b.area) > 0" in _GEO_DISCOVERY_SQL
+
+
+def test_dedup_geo_crons_match_their_args_branches() -> None:
+    """Both geo crons must map to their intended branch: DISCOVERY is --free (set-based, no paid
+    vision fns — it just enqueues the window's co-located pairs); the CANDIDATE DRAIN is paid
+    (--candidates, vision on) so the facade compare confirms them. A drift falls through to the
+    street free full-scan → ZERO geo work again (the bug the dedicated cron fixed)."""
     import pathlib
 
     wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "dedup_engine.yml"
     text = wf.read_text()
-    cron = "0 3,9,15,21 * * *"
-    assert text.count(cron) >= 2, "geo cron must appear in the schedule list AND the run-step match"
-    branch = text.split(f'"{cron}" ]', 1)[1].split("elif", 1)[0]
-    args = [ln for ln in branch.splitlines() if "ARGS=" in ln]
-    assert any("--geo-only" in ln for ln in args), "the geo cron branch must set --geo-only"
-    assert not any("--free" in ln for ln in args), "the geo cron branch must NOT be --free"
+
+    # Geo DISCOVERY (free, windowed): the persistent-cursor scan.
+    disc = _geo_cron_branch_args(text, "0 3,9,15,21 * * *")
+    assert "--geo-only" in disc, "the geo discovery branch must set --geo-only"
+    assert "--free" in disc, "the geo discovery branch must be --free (fast, no vision bottleneck)"
+    assert "--candidates" not in disc, "the geo discovery branch is a full scan, not a candidate drain"
+
+    # Geo CANDIDATE DRAIN (paid): confirm the queued tier='geo' candidates via the facade compare.
+    drain = _geo_cron_branch_args(text, "15 5,17 * * *")
+    assert "--geo-only" in drain and "--candidates" in drain, \
+        "the geo candidate-drain branch must set --geo-only --candidates"
+    assert "--free" not in drain, "the geo candidate-drain must be PAID (not --free)"
+    assert "--max-vision-calls" in drain, "the geo candidate-drain must run paid vision"
 
 
 def test_claim_dedup_dirty_is_bounded_fifo() -> None:

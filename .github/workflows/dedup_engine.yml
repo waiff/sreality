@@ -42,7 +42,8 @@ on:
     - cron: "0 */6 * * *"    # FULL SCAN (free) — discover new dups across the market
     - cron: "30 */2 * * *"   # CANDIDATE DRAIN (free) — re-decide only the queued candidates
     - cron: "45 * * * *"     # DIRTY DRAIN (free) — real-time, just after the hourly CLIP tag job
-    - cron: "0 3,9,15,21 * * *"  # GEO SCAN — single-dwelling (houses/land/commercial), own budget
+    - cron: "0 3,9,15,21 * * *"  # GEO DISCOVERY (free) — single-dwelling, obec-cursor windowed
+    - cron: "15 5,17 * * *"      # GEO CANDIDATE DRAIN (paid) — confirm queued tier='geo' candidates
   workflow_dispatch:
     inputs:
       max_pairs:
@@ -121,6 +122,16 @@ on:
         options:
           - "false"
           - "true"
+      geo_scan_budget:
+        description: "[geo] Progressive discovery window size (whole-obec listing count) beyond the cursor. 0 = whole-market scan. Empty = the dedup_geo_scan_budget setting (default 30000)."
+        required: false
+        default: ""
+        type: string
+      geo_cursor:
+        description: "[geo] Preview the discovery window beyond THIS obec_id without reading/advancing the persistent cursor (validation/debug; pair with shadow=true, e.g. 554781 to preview Praha)."
+        required: false
+        default: ""
+        type: string
       floor_plan_budget:
         description: "[free] Override the dedup_floor_plan_budget setting for this run: inline cold Sonnet floor-plan checks allowed (0 = cache-only $0). Empty = use the setting (default 10000)."
         required: false
@@ -172,16 +183,27 @@ jobs:
             # floor-plan vision (300 cold checks); warm verdicts replay free.
             ARGS="--free --candidates --max-pairs 200000 --max-seconds 2400 --floor-plan-budget 300"
           elif [ "${{ github.event.schedule }}" = "0 3,9,15,21 * * *" ]; then
-            # SCHEDULED GEO SCAN (paid, bounded): single-dwelling families (house / land /
-            # commercial) have NO disposition, so the street+disposition engine can't touch them
-            # — geo-proximity + the forensic FACADE compare is their ONLY path. This is geo's OWN
-            # run with its own budget (it was previously bolted onto the street full-scan, where it
-            # was deadline-starved, and the candidate drain, where it inherited the apartment
-            # restrict → it produced ZERO). NOT --free: the paid facade compare auto-merges confident
-            # cross-portal houses (different photos → pHash can't) + enqueues the ambiguous for
-            # review, bounded by --max-vision-calls. Gated by the dedup_geo_enabled master switch.
-            ARGS="--geo-only --max-pairs 200000 --geo-max-pairs 20000"
-            ARGS="$ARGS --max-vision-calls 300 --max-room-attempts 4 --max-seconds 4800 --floor-plan-budget 300"
+            # SCHEDULED GEO DISCOVERY (set-based, obec-cursor windowed): single-dwelling families
+            # (house / land / commercial) have NO disposition, so the street+disposition engine
+            # can't touch them — geo-proximity is their path. DISCOVERY is a single SQL self-join
+            # that ENQUEUES the window's co-located pairs in ~seconds (the old per-pair loop was
+            # ~2.5 pairs/sec and NEVER finished a big obec, so the cursor never advanced). A single
+            # PAID full scan also burned its budget on the FRONT of the obec range every run
+            # (obec_id ASC → all Olomouc) and never reached Praha. This walks the market in
+            # persistent obec-cursor WINDOWS (dedup_geo_scan_budget, migration 258), advancing the
+            # cursor each run → Olomouc → … → Praha → wrap. The PAID facade confirm of the queued
+            # candidates happens in the separate geo candidate drain below. --free = no paid vision
+            # fns built (discovery is pure SQL). dedup_geo_enabled-gated.
+            ARGS="--geo-only --free"
+          elif [ "${{ github.event.schedule }}" = "15 5,17 * * *" ]; then
+            # SCHEDULED GEO CANDIDATE DRAIN (paid, bounded): re-decide ONLY the properties in the
+            # still-proposed tier='geo' queue (O(queue), --candidates), running the PAID forensic
+            # FACADE compare — the ONLY thing that resolves cross-portal houses (different photos →
+            # pHash can't). It auto-merges the confident facades + auto-dismisses/queues the rest,
+            # bounded by --max-vision-calls. Not --free, not windowed. Mirrors the street candidate
+            # drain; --geo-only skips the street engine so it drains ONLY geo candidates.
+            ARGS="--geo-only --candidates --max-pairs 200000 --geo-max-pairs 200000"
+            ARGS="$ARGS --max-vision-calls 300 --max-room-attempts 4 --max-seconds 2400 --floor-plan-budget 300"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
             # SCHEDULED FULL SCAN = FREE: pHash + rule merges + reconcile, NO paid all-rooms
             # compare/classify, no placeholders. The ONE bounded paid exception is the
@@ -202,6 +224,8 @@ jobs:
             if [ "${{ inputs.candidates }}" = "true" ]; then ARGS="$ARGS --candidates"; fi
             if [ "${{ inputs.dirty }}" = "true" ]; then ARGS="$ARGS --dirty"; fi
             if [ "${{ inputs.geo_only }}" = "true" ]; then ARGS="$ARGS --geo-only"; fi
+            if [ -n "${{ inputs.geo_scan_budget }}" ]; then ARGS="$ARGS --geo-scan-budget ${{ inputs.geo_scan_budget }}"; fi
+            if [ -n "${{ inputs.geo_cursor }}" ]; then ARGS="$ARGS --geo-cursor ${{ inputs.geo_cursor }}"; fi
           fi
           echo "python -m scripts.dedup_engine $ARGS"
           python -m scripts.dedup_engine $ARGS
