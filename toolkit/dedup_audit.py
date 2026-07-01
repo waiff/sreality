@@ -128,8 +128,10 @@ def build_audit_breakdown(detail: dict[str, Any] | None) -> list[dict[str, Any]]
             value, status = "různé dispozice", "unmet"
             note = "Validace půdorysu zamítla sloučení: dispozice se neshodují."
         elif reason == "floor_plan_review":
-            value, status = "jednostranný plán", "info"
-            note = "Půdorys jen na jedné straně — odesláno k ruční kontrole."
+            value, status = "nejednoznačný 2D plán", "info"
+            note = ("Obě strany mají použitelný 2D půdorys, ale porovnání je nejednoznačné "
+                    "— odesláno k ruční kontrole. (Chybějící / jen 3D vizualizace už blokem "
+                    "není — sloučení proběhne podle fotek.)")
         else:
             value, status = "čeká na ověření", "info"
             note = "Verdikt půdorysu zatím nedostupný — odloženo na další běh."

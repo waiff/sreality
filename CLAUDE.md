@@ -669,10 +669,10 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     tags score ≥ 0.52, so the floor drops the phantom-plan "one-sided" read while keeping genuine plans)
     → `compare_listing_floor_plans` (operator prompt
     `app_settings.llm_floor_plan_match_prompt`, cache `listing_floor_plan_matches`, write-allowed rule
-    #5; verdict same_layout / different_layout / inconclusive + per-plan OCR in `extracted`, used
-    plan-to-plan only never to overwrite listing data) → `different_layout` is the **only new
-    auto-dismiss** (the visual model stays the sole thing that can dismiss); same_layout / inconclusive
-    → the merge proceeds. **N×N over multiple plans (migration 243):** a listing can carry several
+    #5; verdict same_layout / different_layout / inconclusive / no_2d_plan (migration 260) + per-plan
+    OCR in `extracted`, used plan-to-plan only never to overwrite listing data) → `different_layout`
+    is the **only new auto-dismiss** (the visual model stays the sole thing that can dismiss);
+    same_layout / no_2d_plan → the merge proceeds. **N×N over multiple plans (migration 243):** a listing can carry several
     floor/site plans (a multi-unit building, a multi-floor home); the one vision call sends EVERY
     labelled plan of both listings and the prompt matches the cross-product — `same_layout` if ANY
     A-plan matches ANY B-plan, `different_layout` only if NONE do (and `compare_listing_site_plans`
@@ -684,17 +684,25 @@ follow-up commit. (A large ROADMAP restructure is its own PR — see the Git wor
     pairs whose "floor plans" are 3D perspective RENDERS (a 3+1 flat misread as a "two-level duplex").
     `render_score` can't separate a 2D plan from a 3D render (its anchors are about *interiors*, so a
     drawing's score is noise — empirically a flat 0..1 spread), so the distinction is made by the
-    **vision model that sees the images**: the prompt judges layout ONLY from flat 2D floor plans,
-    treats 3D renders as unreliable, and returns `inconclusive` when neither side has a usable 2D plan
-    (only 3D renders) — which the gate routes to the operator queue, NEVER an auto-dismiss. So
-    `different_layout` (→ dismiss) fires only on a confirmed 2D-plan mismatch (the "dismiss only on
-    reliable 2D plans" posture). Migration 245 also SWEPT the cache (deleted every `different_layout`
+    **vision model that sees the images**: the prompt judges layout ONLY from flat 2D floor plans and
+    treats 3D renders as unreliable. Migration 245 also SWEPT the cache (deleted every `different_layout`
     verdict, ~242) so the stale pre-N×N + the 3D-render misreads re-evaluate under the 2D-aware prompt.
-    The gate distinguishes **"a human must decide" (queue)** from **"validate it
-    later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run (budget exhausted /
-    cache-miss in the $0 escape hatch) → **`defer`** — skip, re-try next run, never the manual queue
-    (the pair is automatable, not a human call); exactly ONE side has a plan → **`queue`** (genuinely a
-    human call — no plan-to-plan compare possible); neither → the existing path is untouched. It applies
+    **Contradiction-veto + the `no_2d_plan` verdict (migration 260).** Migration 245 returned
+    `inconclusive` for "no usable 2D plan (only 3D renders)" and routed it to the manual queue — which
+    VETOED ~600 obvious pHash/visual merges (cross-portal re-posts whose "plans" are 3D renders) over an
+    un-readable image. The gate is now a pure **contradiction veto**: the ONLY things it may do beyond
+    letting the merge proceed are DISMISS on a proven `different_layout`, or QUEUE the one genuinely-human
+    case. To separate them the compare gained a 4th verdict: **`no_2d_plan`** = ≥1 side has no usable 2D
+    plan (only 3D renders / illegible) → a 2D compare is impossible → **merge** (trust the primary pHash/
+    visual signal); **`inconclusive`** now means BOTH sides HAVE usable 2D plans but the model still can't
+    decide → **queue** (operator-gated by `dedup_floor_plan_inconclusive_to_review`, default on — the
+    operator's carve-out: a real both-2D ambiguity is a human call). Migration 260 rewrote the prompt to
+    emit the split (`updated_by`-guarded) and SWEPT the stale `inconclusive` cache so old render-verdicts
+    re-run and reclassify. The gate distinguishes **"a human must decide" (queue: both-2D inconclusive)**
+    from **"validate it later" (defer)**: a both-plan pair whose Sonnet verdict isn't available this run
+    (budget exhausted / cache-miss) → **`defer`** — re-try next run, never the manual queue (automatable);
+    and **exactly ONE side / neither side has a plan → `merge`** (no plan-to-plan compare possible → the
+    gate can't contradict, so the primary signal stands — no more one-sided queue). It applies
     to pHash + visual merges, NOT rule-B exact-address. **The floor-plan check runs autonomously on the
     SCHEDULED free run (the operator-chosen posture, Option C):** even though the free run skips the
     expensive all-rooms classify/compare, it gets the LIVE `_build_floor_plan_fn` with a bounded budget
