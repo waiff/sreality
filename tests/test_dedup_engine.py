@@ -1349,6 +1349,23 @@ def test_dedup_geo_cron_matches_its_args_branch() -> None:
     assert not any("--free" in ln for ln in args), "the geo cron branch must NOT be --free"
 
 
+def test_dirty_cron_gets_its_own_concurrency_group() -> None:
+    """The real-time DIRTY drain (:45) must run in a SEPARATE concurrency group from the slow
+    batch runs, or the shared group starves/cancels it (killing the 'merge in minutes' SLO).
+    The group expression keys off the SAME dirty cron string the run-step branch matches."""
+    import pathlib
+
+    wf = pathlib.Path(__file__).resolve().parents[1] / ".github" / "workflows" / "dedup_engine.yml"
+    text = wf.read_text()
+    dirty_cron = "45 * * * *"
+    group_line = next(
+        (ln for ln in text.splitlines() if ln.strip().startswith("group:") and "dedup-engine" in ln),
+        "",
+    )
+    assert dirty_cron in group_line, "the concurrency group must branch on the dirty cron string"
+    assert "-dirty" in group_line, "the dirty run must get its own '-dirty' concurrency group"
+
+
 def test_claim_dedup_dirty_is_bounded_newest_first() -> None:
     """The --dirty claim is NEWEST-first + bounded: a real-time lane must serve the freshest
     dedup-ready listing first (the "merge in minutes" SLO holds under backlog), and stay bounded

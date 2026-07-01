@@ -1444,7 +1444,7 @@ export const WORKFLOW_DOCS: WorkflowDoc[] = [
       "R2_SECRET_ACCESS_KEY",
       "SUPABASE_DB_URL"
     ],
-    "concurrencyGroup": "dedup-engine",
+    "concurrencyGroup": "dedup-engine${{ github.event.schedule == '45 * * * *' && '-dirty' || '' }}",
     "cancelInProgress": false,
     "timeoutMinutes": 90,
     "permissions": "contents: read",

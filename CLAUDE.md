@@ -1589,7 +1589,13 @@ for a latency SLO; the full scan is the tail's backstop.) The **dirty cron runs
 `--floor-plan-budget 0`**: the real-time lane pays NO inline floor-plan vision (a cold call
 downloads plan images from R2 + Sonnet ~15s each; a batch of them blew the wall-clock budget →
 truncate → never clear), consuming only warm verdicts and DEFERRING the rest to the 6h full scan /
-the batch warmer — keeping the hot path fast so it always finishes-and-clears. **Each dirty run
+the batch warmer — keeping the hot path fast so it always finishes-and-clears. **The dirty cron
+runs in its OWN concurrency group** (`group: dedup-engine${{ ... '-dirty' }}`) so the slow batch
+runs (full scan / candidate / geo, all in `dedup-engine`) can never starve or cancel it; safe to
+run concurrently because `merge_properties` row-locks both properties `FOR UPDATE` + gates on
+`status='active'` (the same lock safety that lets dedup run concurrently with property-maintenance),
+so concurrent merges serialize per-property and a redundant re-decide is an `already_merged` no-op.
+**Each dirty run
 records `dedup_engine_runs.dirty_queue_depth` (backlog at run start) + `dirty_claimed` (its slice)**
 (migration 255) **plus `dirty_cleared` + `dirty_truncated`** (migration 258, NULL on other run
 modes) — `cleared==0` while `dirty_queue_depth` stays high across runs is the silent-livelock guard
