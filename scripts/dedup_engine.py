@@ -678,22 +678,25 @@ def _floor_plan_gate(
     inconclusive_to_review: bool = True,
 ) -> str:
     """The floor-plan validation on a pair the engine WOULD merge (pHash or visual).
-    Returns 'merge' | 'dismiss' | 'queue' | 'defer'. It only adds conservatism, and
-    crucially distinguishes "a human must decide" (queue) from "validate it later"
-    (defer):
-      * both sides carry a floor plan + a Sonnet verdict is available -> the verdict
-        decides: 'different_layout' -> 'dismiss'; 'inconclusive' -> 'queue' when
-        `inconclusive_to_review` (default on, app_settings.dedup_floor_plan_inconclusive_to_review),
-        else 'merge'; 'same_layout' -> 'merge' (auto-confirm — the verdict weighs layout +
-        the OCR'd unit/area/floor labels). When a side carries SEVERAL plans the verdict is
-        N×N (migration 243): one call sees every labelled plan of both, 'same_layout' if ANY
-        A-plan matches ANY B-plan, 'different_layout' only if NONE do — so a matching plan
-        among several can never be missed into a wrong dismiss;
+    Returns 'merge' | 'dismiss' | 'queue' | 'defer'. It is a CONTRADICTION VETO layered on a
+    strong primary signal (pHash >=2 / visual High): the ONLY thing it may do beyond letting the
+    merge proceed is DISMISS on a proven `different_layout`, or QUEUE the one genuinely-human case
+    (both sides have real 2D plans yet the compare is inconclusive). Whenever it CANNOT do a
+    2D-plan-to-2D-plan comparison it is a no-op → the primary signal MERGES (it never queues a
+    would-merge pair just because a plan can't be read — that produced ~600 false-queues of obvious
+    cross-portal re-posts whose "plans" were 3D renders).
+      * both sides carry a plan-tagged image + a Sonnet verdict is available -> the verdict decides:
+        'different_layout' -> 'dismiss'; 'no_2d_plan' (>=1 side has only 3D renders / illegible, so
+        no reliable 2D compare) -> 'merge'; 'inconclusive' (BOTH have usable 2D plans but the model
+        still can't decide) -> 'queue' when `inconclusive_to_review`
+        (app_settings.dedup_floor_plan_inconclusive_to_review, default on), else 'merge';
+        'same_layout' -> 'merge'. N×N over multiple plans (migration 243): 'same_layout' if ANY
+        A-plan matches ANY B-plan, 'different_layout' only if NONE do;
       * both sides carry a plan but the verdict isn't available yet (no fn / no budget /
         cache-miss) -> 'defer': skip this run and re-try next, once the batch lane warms
         the verdict — NOT the operator queue (this pair is automatable, not a human call);
-      * exactly ONE side has a plan -> 'queue' (manual review: no plan-to-plan compare);
-      * neither side has a plan -> 'merge' (existing path unchanged).
+      * exactly ONE side / neither side has a plan-tagged image -> 'merge' (no plan-to-plan
+        compare is possible, so the gate learned nothing — the primary signal stands).
     """
     ids_a = _floor_plan_image_ids(conn, a_id)
     ids_b = _floor_plan_image_ids(conn, b_id)
@@ -708,11 +711,11 @@ def _floor_plan_gate(
         verdict = res.get("verdict")
         if verdict == "different_layout":
             return "dismiss"
+        if verdict == "no_2d_plan":
+            return "merge"
         if verdict == "inconclusive" and inconclusive_to_review:
             return "queue"
         return "merge"
-    if ids_a or ids_b:
-        return "queue"
     return "merge"
 
 
@@ -871,10 +874,11 @@ def _resolve_visual(
         room_rationales[room] = last_rationale
         room_cos[room] = cos
         if verdict_is_merge(last_verdict):
-            # Floor-plan validation gate (migration 234): a different floor plan overrides
-            # even a High forensic verdict (dismiss); a one-sided plan -> manual queue; an
-            # unwarmed both-plan verdict -> defer (re-try next run once the batch warms it,
-            # NOT queue). same/inconclusive/none -> the auto-merge stands.
+            # Floor-plan validation gate (migration 234): a different 2D floor plan overrides
+            # even a High forensic verdict (dismiss); a both-2D INCONCLUSIVE verdict -> manual
+            # queue; an unwarmed both-plan verdict -> defer (re-try next run once the batch warms
+            # it, NOT queue). same_layout / no_2d_plan (renders) / one-sided / none -> the
+            # auto-merge stands (the gate can't contradict, so it doesn't block).
             fp = _floor_plan_gate(
                 conn, a.sreality_id, b.sreality_id,
                 floor_plan_fn=floor_plan_fn, vision_budget=vision_budget,
@@ -1160,10 +1164,10 @@ def resolve_pair(conn: Any, a: ListingKey, b: ListingKey, *, street_key: str,
                     "reason": "auto_merge_off:image_phash", "confidence": 0.97})
             stats["queued"] += 1
             return
-        # Floor-plan validation gate (migration 234): a different floor plan DISMISSES, a
-        # one-sided plan goes to MANUAL queue, an unwarmed both-plan verdict DEFERS (skip,
-        # re-try next run once the batch warms it — never the manual queue); otherwise the
-        # pHash merge proceeds.
+        # Floor-plan validation gate (migration 234): a different 2D floor plan DISMISSES, a
+        # both-2D INCONCLUSIVE verdict goes to MANUAL queue, an unwarmed both-plan verdict DEFERS
+        # (skip, re-try next run once the batch warms it — never the manual queue); a no_2d_plan
+        # (renders) / one-sided / same_layout verdict lets the pHash merge proceed.
         fp = _floor_plan_gate(
             conn, a.sreality_id, b.sreality_id,
             floor_plan_fn=ctx.floor_plan_fn, vision_budget=ctx.vision_budget,

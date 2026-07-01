@@ -1561,9 +1561,10 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [])
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
 
-    # exactly one side has a plan -> queue (can't compare plan-to-plan)
+    # exactly one side has a plan -> MERGE (contradiction-veto: no plan-to-plan compare is
+    # possible, so the gate can't contradict the primary pHash/visual signal — it never queues).
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9] if sid == 1 else [])
-    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "queue"
+    assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=None, vision_budget=[5]) == "merge"
 
     # both have plans + a verdict available -> confirm/dismiss
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [9])
@@ -1571,9 +1572,15 @@ def test_floor_plan_gate_branches(monkeypatch: Any) -> None:
     same = lambda a, b, ia, ib: {"verdict": "same_layout"}       # noqa: E731
     none = lambda a, b, ia, ib: None                             # noqa: E731 (unwarmed)
     inconc = lambda a, b, ia, ib: {"verdict": "inconclusive"}    # noqa: E731
+    no2d = lambda a, b, ia, ib: {"verdict": "no_2d_plan"}        # noqa: E731 (only 3D renders)
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=diff, vision_budget=[5]) == "dismiss"
     assert eng._floor_plan_gate(None, 1, 2, floor_plan_fn=same, vision_budget=[5]) == "merge"
-    # 'inconclusive' -> manual review by default (toggle on); off -> treat as same -> merge
+    # 'no_2d_plan' (>=1 side only 3D renders / illegible) -> MERGE, NEVER queue, regardless of the
+    # inconclusive toggle: the plan check is moot, so the primary signal stands (the 3D-render fix).
+    assert eng._floor_plan_gate(
+        None, 1, 2, floor_plan_fn=no2d, vision_budget=[5], inconclusive_to_review=True) == "merge"
+    # 'inconclusive' (BOTH sides HAVE usable 2D plans, still ambiguous) -> manual review by default
+    # (toggle on); off -> treat as no-contradiction -> merge.
     assert eng._floor_plan_gate(
         None, 1, 2, floor_plan_fn=inconc, vision_budget=[5],
         inconclusive_to_review=True) == "queue"
@@ -1634,10 +1641,17 @@ def test_run_engine_phash_floor_plan_same_merges(monkeypatch: Any) -> None:
     assert merges == ["image_phash"]
 
 
-def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
-    # pHash would merge, but only ONE side has a floor plan -> operator queue.
+def test_run_engine_phash_floor_plan_one_sided_merges(monkeypatch: Any) -> None:
+    # pHash would merge and only ONE side has a floor plan -> the gate can't do a plan-to-plan
+    # compare, so it doesn't contradict: the pHash merge PROCEEDS (contradiction-veto, migration
+    # 260; was a manual queue before, which vetoed obvious cross-portal re-posts).
     import scripts.dedup_engine as eng
 
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
     monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
     monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
     monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid] if sid == 1 else [])
@@ -1645,8 +1659,32 @@ def test_run_engine_phash_floor_plan_one_sided_queues(monkeypatch: Any) -> None:
     conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
     stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=None, max_vision_calls=10)
 
-    assert stats["auto_phash"] == 0
-    assert stats["queued"] >= 1
+    assert stats["auto_phash"] == 1
+    assert stats["queued"] == 0
+    assert merges == ["image_phash"]
+
+
+def test_run_engine_phash_floor_plan_no_2d_plan_merges(monkeypatch: Any) -> None:
+    # Both sides carry a plan-tagged image, but the compare says no_2d_plan (only 3D renders /
+    # illegible) -> the check is moot, so the pHash merge PROCEEDS (the 3D-render fix, migration 260).
+    import scripts.dedup_engine as eng
+
+    merges: list[str] = []
+    monkeypatch.setattr(
+        eng, "merge_properties",
+        lambda conn, *, survivor_id, retired_id, reason, **kw: merges.append(reason) or {"data": {"merge_group_id": "g"}},
+    )
+    monkeypatch.setattr(eng, "_phash_identical_pairs", lambda *a, **k: 3)
+    monkeypatch.setattr(eng, "_both_have_site_plan", lambda *a, **k: False)
+    monkeypatch.setattr(eng, "_floor_plan_image_ids", lambda conn, sid: [sid])  # both have a plan-tag
+    fp = lambda a, b, ia, ib: {"verdict": "no_2d_plan"}  # noqa: E731
+
+    conn = _FakeConn([_row(1, 101, hn=None), _row(2, 102, hn=None, source="bazos")])
+    stats = eng.run_engine(conn, classify_fn=None, compare_fn=None, floor_plan_fn=fp, max_vision_calls=10)
+
+    assert stats["auto_phash"] == 1
+    assert stats["queued"] == 0
+    assert merges == ["image_phash"]
 
 
 def test_run_engine_phash_floor_plan_unwarmed_defers(monkeypatch: Any) -> None:

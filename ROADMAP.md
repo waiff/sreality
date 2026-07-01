@@ -6,6 +6,36 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: Floor-plan gate → contradiction veto (stop queuing ~600 obvious merges over 3D-render "plans")
+
+Cross-portal apartment groups with 6–7 identical interior photos (pHash) were stuck in manual review
+labelled "one-sided floor plan" even though both listings had plans. Root cause: the floor-plan
+validation gate ran `compare_listing_floor_plans`, which correctly returns `inconclusive` when the
+"plans" are 3D perspective RENDERS (not true 2D drawings, migration 245) — and
+`dedup_floor_plan_inconclusive_to_review` (default on, and the setting row didn't even exist) routed
+`inconclusive` to the queue, vetoing the strong pHash/visual merge over an un-readable render. 607
+would-merge pairs were queued this way (198 inconclusive + 386 genuinely one-sided + 23 edge); the
+`/dedup` audit also **mislabelled** every one as "one-sided" (the reason `floor_plan_review` was
+rendered "jednostranný plán" regardless of the real verdict).
+
+The gate is now a pure **contradiction veto** — it only DISMISSES on a proven `different_layout`, and
+QUEUES exactly one genuinely-human case; everything it can't 2D-compare MERGES on the primary signal:
+
+- **New `no_2d_plan` verdict** (migration 260): the compare distinguishes "≥1 side has no usable 2D
+  plan (only 3D renders / illegible)" → **merge** (moot check, trust pHash/visual) from
+  **`inconclusive`** = "BOTH sides HAVE usable 2D plans but still ambiguous" → **queue** (the
+  operator's carve-out; a real both-2D ambiguity is a human call). Prompt rewritten (`updated_by`-
+  guarded) + verdict CHECK extended + stale `inconclusive` cache swept so old render-verdicts re-run.
+- **One-sided → merge** (was queue): no plan-to-plan compare is possible, so the gate can't
+  contradict — the primary signal stands. `different_layout` still dismisses; unwarmed both-plan
+  still defers.
+- **Audit truthful**: `floor_plan_review` now reads "nejednoznačný 2D plán — k ruční kontrole" (both
+  sides have 2D plans, comparison ambiguous), not "one-sided".
+
+Backstop unchanged: `different_layout` (the only auto-dismiss) still protects dev-unit false merges;
+all merges reversible/flaggable. The candidate drain re-decides the ~584 non-genuine-ambiguous queued
+pairs → auto-merge.
+
 ### 2026-07: Dedup dirty lane gets its own concurrency group (real-time SLO no longer starved)
 
 Follow-up to the real-time drain redesign: the `--dirty` lane shared ONE `dedup-engine` concurrency
