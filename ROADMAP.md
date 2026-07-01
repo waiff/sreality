@@ -6,6 +6,21 @@ source for active rules; ROADMAP is for sequencing.
 
 ## Done
 
+### 2026-07: LLM-liveness observability — record provider FAILURES; alarm on credit exhaustion
+
+The Anthropic account ran out of credit and every paid LLM path (dedup vision, condition scoring,
+estimations, summaries) 400-ed for ~8h — while the `llm_health` monitor stayed **green**. Two gaps:
+`llm_calls` recorded only SUCCESSFUL calls (a failure left zero trace), and the check only alarmed
+when condition-scoring work was pending (it was quiet, so nothing fired).
+
+- **`llm_calls.error`** (migration 259): `LLMClient.call` now records a best-effort failure row
+  (zero usage/cost, `error` set) on every provider exception, then re-raises unchanged — so an
+  outage is auditable. Partial index `WHERE error IS NOT NULL` for the health probe.
+- **`check_llm_health`** gains a THIRD probe, independent of pending work: a credit-balance error in
+  the window alarms immediately; `>= --min-failures` generic failures alarms too. Keeps working with
+  no Anthropic key of its own (queries the DB). Wildcard bound in the value, not the SQL (psycopg
+  `%`-safe).
+
 ### 2026-06: Dedup geo path — dedicated, paid scheduled run (single-dwelling dedup unblocked)
 
 Houses/land/commercial (no disposition → invisible to the street engine; 229,948 active properties,
