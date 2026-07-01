@@ -1447,6 +1447,88 @@ def test_run_engine_stats_carry_dirty_observability_keys() -> None:
     assert "dirty_queue_depth" in stats and "dirty_claimed" in stats
 
 
+def _stub_resolve_pair(conn: Any, a: Any, b: Any, *, street_key: str, ctx: Any) -> None:
+    # Mirrors only resolve_pair's budget accounting — the per-group clear tracks group
+    # completion, not pair outcomes, so a decide-nothing stub is enough.
+    ctx.pairs_left -= 1
+    ctx.stats["pairs_considered"] += 1
+
+
+def test_run_engine_incremental_resolve_full_run(monkeypatch: Any) -> None:
+    """A run that scans every group resolves ALL claimed properties — including a claimed
+    property with NO eligible listing left (zero groups), which resolves immediately."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+    ])
+    claimed = {101, 102, 103, 104, 999}  # 999 = enqueued but no eligible listing anymore
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=claimed, resolved_property_ids=resolved,
+        max_pairs=100, max_vision_calls=0)
+    assert stats["truncated"] == 0
+    assert resolved >= claimed
+
+
+def test_run_engine_incremental_resolve_truncated_partial(monkeypatch: Any) -> None:
+    """A pair-cap/deadline-truncated run resolves EXACTLY the fully-scanned groups'
+    properties — the incremental clear's contract: monotonic progress, unfinished groups
+    keep their claim. (Budget 2 over two 1-pair groups: group Alfa completes; the budget
+    hits zero at Beta's boundary, so Beta counts as unfinished — conservative by design.)"""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 101, street="Alfa", street_id=None, hn=None),
+        _row(2, 102, street="Alfa", street_id=None, hn=None, source="bazos"),
+        _row(3, 103, street="Beta", street_id=None, hn=None),
+        _row(4, 104, street="Beta", street_id=None, hn=None, source="bazos"),
+    ])
+    claimed = {101, 102, 103, 104}
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=claimed, resolved_property_ids=resolved,
+        max_pairs=2, max_vision_calls=0)
+    assert stats["truncated"] == 1
+    assert resolved == {101, 102}
+
+
+def test_run_engine_incremental_resolve_dual_key_guard(monkeypatch: Any) -> None:
+    """A property dual-keys into its 'id:' AND 'name:' street groups; it must resolve only
+    when BOTH are scanned. Truncating after the id-group leaves it unresolved (its name-group
+    pairs were never re-decided), so its claim survives to the next run."""
+    import scripts.dedup_engine as eng
+
+    monkeypatch.setattr(eng, "resolve_pair", _stub_resolve_pair)
+    conn = _FakeConn([
+        _row(1, 201, street="Gama", street_id=77, hn=None),
+        _row(2, 202, street="Gama", street_id=77, hn=None, source="bazos"),
+    ])
+    claimed = {201, 202}
+    resolved: set[int] = set()
+    stats = eng.run_engine(
+        conn, only_groups_with_property_ids=claimed, resolved_property_ids=resolved,
+        max_pairs=2, max_vision_calls=0)  # id-group's pair exhausts the budget at the boundary
+    assert stats["truncated"] == 1
+    assert resolved == set()  # id-group alone is NOT enough
+
+    resolved2: set[int] = set()
+    stats2 = eng.run_engine(
+        _FakeConn([
+            _row(1, 201, street="Gama", street_id=77, hn=None),
+            _row(2, 202, street="Gama", street_id=77, hn=None, source="bazos"),
+        ]),
+        only_groups_with_property_ids=claimed, resolved_property_ids=resolved2,
+        max_pairs=100, max_vision_calls=0)
+    assert stats2["truncated"] == 0
+    assert resolved2 >= claimed  # both groups scanned -> resolved
+
+
 def test_proposed_candidate_property_ids() -> None:
     """The candidate-drain work-list = every property in a still-proposed candidate
     (both sides, NULLs skipped, deduped)."""
